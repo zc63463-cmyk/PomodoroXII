@@ -1,6 +1,6 @@
 """SQLAlchemy model for notes (lightweight knowledge base with category/search)."""
 
-from sqlalchemy import String, Integer, CheckConstraint
+from sqlalchemy import CheckConstraint, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

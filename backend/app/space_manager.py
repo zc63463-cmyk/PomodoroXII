@@ -149,7 +149,7 @@ class SpaceEngineManager:
         thread and does not block the event loop.  Meta tables (``spaces``,
         ``meta_settings``) are excluded — they belong only in the meta DB.
         """
-        from app.db.models.meta import Space, MetaSetting
+        from app.db.models.meta import MetaSetting, Space
 
         _meta_tables = {Space.__table__, MetaSetting.__table__}
         space_tables = [

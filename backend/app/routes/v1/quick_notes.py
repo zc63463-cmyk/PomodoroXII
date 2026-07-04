@@ -11,9 +11,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_space_db, get_space_context
+from app.deps import get_space_context, get_space_db
 from app.schemas.common import PaginatedResponse
-from app.schemas.quick_note import QuickNoteCreate, QuickNoteUpdate, QuickNoteResponse
+from app.schemas.quick_note import QuickNoteCreate, QuickNoteResponse, QuickNoteUpdate
 from app.services.quick_note import QuickNoteService
 
 router = APIRouter()

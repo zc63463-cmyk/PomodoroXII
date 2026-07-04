@@ -19,16 +19,16 @@ from nanoid import generate
 from slugify import slugify
 
 from app.file_system.interfaces import (
+    NoteLevel,
     NoteMeta,
     NoteStatus,
-    NoteLevel,
 )
 from app.file_system.schema import (
-    init_database,
     FTS5_CREATE_SQL,
+    FTS5_TRIGGER_DELETE,
     FTS5_TRIGGER_INSERT,
     FTS5_TRIGGER_UPDATE,
-    FTS5_TRIGGER_DELETE,
+    init_database,
 )
 
 

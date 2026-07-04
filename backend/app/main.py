@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,8 +25,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("PomodoroXII API starting up (env=%s)", settings.environment)
 
     # --- Startup ---
-    from app.db.meta_session import init_meta_db, close_meta_db
-    from app.space_manager import get_space_engine_manager, dispose_space_engine_manager
+    from app.db.meta_session import close_meta_db, init_meta_db
+    from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
 
     try:
         await init_meta_db()

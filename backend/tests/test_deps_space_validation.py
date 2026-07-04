@@ -12,8 +12,8 @@ async def test_get_space_context_rejects_nonexistent_space_id(client):
     actually points to an existing Space row. Forged tokens (or tokens
     pointing at deleted spaces) must be rejected with AuthenticationError.
     """
-    from app.errors import AuthenticationError
     from app.deps import get_space_context
+    from app.errors import AuthenticationError
 
     # Forge a space token payload with a non-existent space_id.
     fake_user = {
@@ -28,7 +28,7 @@ async def test_get_space_context_rejects_nonexistent_space_id(client):
 @pytest.mark.asyncio
 async def test_get_space_context_accepts_existing_space_id(client):
     """A space token pointing at an existing space should be accepted."""
-    from app.deps import get_space_context, get_current_user
+    from app.deps import get_current_user, get_space_context
 
     # Issue a real space token via the API.
     resp = await client.post(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.file_system.interfaces import NoteMeta, NoteStatus, NoteLevel
+from app.file_system.interfaces import NoteLevel, NoteMeta, NoteStatus
 
 
 class TestCreateNote:

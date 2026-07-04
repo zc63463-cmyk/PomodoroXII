@@ -159,9 +159,9 @@ async def test_update_metadata_updates_db_only(space_session, tmp_path):
 @pytest.mark.asyncio
 async def test_delete_removes_both_and_tombstone(space_session, tmp_path):
     """delete() should remove DB row, soft-delete .md, and write tombstone."""
+    from app.errors import NotFoundError
     from app.services.note import NoteService
     from app.services.tombstone import TombstoneService
-    from app.errors import NotFoundError
 
     fs = await _make_fs(tmp_path)
     svc = NoteService(space_session, fs)
@@ -214,9 +214,10 @@ async def test_delete_idempotent(space_session, tmp_path):
 @pytest.mark.asyncio
 async def test_create_db_failure_compensates_fs_delete(space_session, tmp_path):
     """If DB flush fails after FS write, the .md file should be deleted."""
-    from app.services.note import NoteService
-    from unittest.mock import patch, AsyncMock
+    from unittest.mock import AsyncMock, patch
+
     from app.services.base import BaseService
+    from app.services.note import NoteService
 
     fs = await _make_fs(tmp_path)
     svc = NoteService(space_session, fs)
@@ -234,8 +235,9 @@ async def test_create_db_failure_compensates_fs_delete(space_session, tmp_path):
 @pytest.mark.asyncio
 async def test_update_content_db_failure_restores_old_content(space_session, tmp_path):
     """If DB flush fails after FS rewrite, old .md content should be restored."""
-    from app.services.note import NoteService
     from unittest.mock import AsyncMock
+
+    from app.services.note import NoteService
 
     fs = await _make_fs(tmp_path)
     svc = NoteService(space_session, fs)
@@ -265,8 +267,8 @@ async def test_update_content_db_failure_restores_old_content(space_session, tmp
 @pytest.mark.asyncio
 async def test_savepoint_create_rollback_does_not_break_outer(space_session, tmp_path):
     """NoteService.create inside a SAVEPOINT rolled back should not break the outer session."""
-    from app.services.note import NoteService
     from app.models.task import Task
+    from app.services.note import NoteService
 
     fs = await _make_fs(tmp_path)
     svc = NoteService(space_session, fs)
@@ -304,8 +306,8 @@ async def test_savepoint_update_content_rollback_restores_fs(space_session, tmp_
     the DB row reverts but the .md file may keep the new content. C6
     (sync_mode) will address this; C5 documents the current behavior.
     """
-    from app.services.note import NoteService
     from app.models.note import Note
+    from app.services.note import NoteService
 
     fs = await _make_fs(tmp_path)
     svc = NoteService(space_session, fs)
@@ -333,8 +335,8 @@ async def test_savepoint_update_content_rollback_restores_fs(space_session, tmp_
 @pytest.mark.asyncio
 async def test_savepoint_delete_rollback_keeps_db_row(space_session, tmp_path):
     """delete inside a rolled-back SAVEPOINT should leave the DB row intact."""
-    from app.services.note import NoteService
     from app.models.note import Note
+    from app.services.note import NoteService
 
     fs = await _make_fs(tmp_path)
     svc = NoteService(space_session, fs)
@@ -373,8 +375,9 @@ async def test_delete_db_first_then_fs(space_session, tmp_path):
     await svc.delete(note_id)
 
     # DB row should be gone.
-    from app.models.note import Note
     from sqlalchemy import select
+
+    from app.models.note import Note
     res = await space_session.execute(select(Note).where(Note.id == note_id))
     assert res.scalar_one_or_none() is None
     # Tombstone should exist.
@@ -387,8 +390,9 @@ async def test_delete_db_first_then_fs(space_session, tmp_path):
 @pytest.mark.asyncio
 async def test_delete_db_failure_preserves_fs(space_session, tmp_path):
     """If DB delete fails, .md file should be preserved (not yet deleted)."""
-    from app.services.note import NoteService
     from unittest.mock import AsyncMock
+
+    from app.services.note import NoteService
 
     fs = await _make_fs(tmp_path)
     svc = NoteService(space_session, fs)
@@ -459,3 +463,77 @@ async def test_create_update_delete_end_to_end(space_session, tmp_path):
     # Delete
     await svc.delete(note.id)
     assert await TombstoneService(space_session).exists("note", note.id) is not None
+
+
+# --------------------------------------------------------------------------- #
+# P1-3: updated_at / version bump behavior for normal vs sync paths
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_update_metadata_bumps_updated_at_and_version(space_session, tmp_path):
+    """Normal REST/service update_metadata() must bump updated_at and version."""
+    from app.services.note import NoteService
+
+    fs = await _make_fs(tmp_path)
+    svc = NoteService(space_session, fs)
+
+    note = await svc.create({"title": "Original", "content": "body"})
+    original_updated_at = note.updated_at
+    original_version = note.version
+
+    # Small sleep to ensure timestamp changes (updated_at is seconds-precision).
+    import asyncio
+    await asyncio.sleep(1)
+
+    updated = await svc.update_metadata(note.id, {"title": "Updated Title"})
+
+    assert updated.title == "Updated Title"
+    assert updated.version == original_version + 1
+    assert updated.updated_at != original_updated_at
+    assert updated.updated_at.endswith("Z")
+
+
+@pytest.mark.asyncio
+async def test_update_metadata_only_bumps_updated_at_and_version(space_session, tmp_path):
+    """Normal NoteService.update() with metadata-only payload must bump updated_at/version."""
+    from app.services.note import NoteService
+
+    fs = await _make_fs(tmp_path)
+    svc = NoteService(space_session, fs)
+
+    note = await svc.create({"title": "Original", "content": "body"})
+    original_updated_at = note.updated_at
+    original_version = note.version
+
+    import asyncio
+    await asyncio.sleep(1)
+
+    updated = await svc.update(note.id, {"title": "Updated via update()", "category": "work"})
+
+    assert updated.title == "Updated via update()"
+    assert updated.category == "work"
+    assert updated.version == original_version + 1
+    assert updated.updated_at != original_updated_at
+
+
+@pytest.mark.asyncio
+async def test_update_metadata_sync_mode_preserves_client_updated_at(space_session, tmp_path):
+    """Sync path with updated_at_override must preserve client timestamp and not bump version."""
+    from app.services.note import NoteService
+
+    fs = await _make_fs(tmp_path)
+    svc = NoteService(space_session, fs)
+
+    note = await svc.create({"title": "Original", "content": "body"})
+    original_version = note.version
+    client_ts = "2026-07-04T12:00:00.000Z"
+
+    updated = await svc.update_metadata(
+        note.id,
+        {"title": "Sync Title"},
+        updated_at_override=client_ts,
+    )
+
+    assert updated.title == "Sync Title"
+    assert updated.updated_at == client_ts
+    assert updated.version == original_version

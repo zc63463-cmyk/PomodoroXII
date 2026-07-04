@@ -1,11 +1,10 @@
 """SQLAlchemy model for application settings."""
 
-from app.services.time import utc_now_iso
-
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+from app.services.time import utc_now_iso
 
 
 class Setting(Base):

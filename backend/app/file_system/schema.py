@@ -9,7 +9,12 @@ import sqlite3
 from pathlib import Path
 
 from sqlalchemy import (
-    String, Integer, ForeignKey, UniqueConstraint, Index, create_engine,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.schema import CreateTable

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # --------------------------------------------------------------------------- #
 # Seconds-precision DB rows vs millisecond cursor
 # --------------------------------------------------------------------------- #

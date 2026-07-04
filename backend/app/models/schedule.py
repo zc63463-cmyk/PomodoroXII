@@ -1,6 +1,6 @@
 """SQLAlchemy model for schedules (calendar events with completion status)."""
 
-from sqlalchemy import String, Boolean, CheckConstraint
+from sqlalchemy import Boolean, CheckConstraint, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

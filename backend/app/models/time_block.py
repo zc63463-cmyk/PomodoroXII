@@ -1,6 +1,6 @@
 """SQLAlchemy model for time blocks (time blocking feature)."""
 
-from sqlalchemy import String, Integer, CheckConstraint
+from sqlalchemy import CheckConstraint, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

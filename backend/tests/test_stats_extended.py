@@ -23,12 +23,13 @@ async def test_habit_summary_returns_empty_when_no_habits(space_session):
 @pytest.mark.asyncio
 async def test_habit_summary_returns_check_in_stats(space_session):
     """habit_summary should return check-in counts, streaks, completion rate."""
-    from app.services.stats import StatsService
-    from app.services.habit import HabitService
-    from app.services.base import BaseService
-    from app.models.habit_check_in import HabitCheckIn
-    from app.services.time import utc_now
     from datetime import timedelta
+
+    from app.models.habit_check_in import HabitCheckIn
+    from app.services.base import BaseService
+    from app.services.habit import HabitService
+    from app.services.stats import StatsService
+    from app.services.time import utc_now
 
     # Create a habit.
     habit_svc = HabitService(space_session)
@@ -67,15 +68,15 @@ async def test_habit_summary_returns_check_in_stats(space_session):
 @pytest.mark.asyncio
 async def test_habit_summary_excludes_archived_habits(space_session):
     """habit_summary should only include non-archived habits."""
-    from app.services.stats import StatsService
     from app.services.habit import HabitService
+    from app.services.stats import StatsService
 
     habit_svc = HabitService(space_session)
     await habit_svc.create({
         "id": uuid.uuid4().hex,
         "title": "Active Habit",
     })
-    archived = await habit_svc.create({
+    await habit_svc.create({
         "id": uuid.uuid4().hex,
         "title": "Archived Habit",
         "archived": True,
@@ -104,10 +105,11 @@ async def test_schedule_summary_returns_empty_when_no_schedules(space_session):
 @pytest.mark.asyncio
 async def test_schedule_summary_counts_completion_status(space_session):
     """schedule_summary should correctly count completed/pending/overdue."""
-    from app.services.stats import StatsService
-    from app.services.schedule import ScheduleService
-    from app.services.time import utc_now
     from datetime import timedelta
+
+    from app.services.schedule import ScheduleService
+    from app.services.stats import StatsService
+    from app.services.time import utc_now
 
     svc = ScheduleService(space_session)
     now = utc_now()
@@ -147,9 +149,9 @@ async def test_schedule_summary_counts_completion_status(space_session):
 @pytest.mark.asyncio
 async def test_note_summary_returns_counts(space_session):
     """note_summary should return note/folder counts (active + trashed)."""
-    from app.services.stats import StatsService
-    from app.models.note import Note
     from app.models.folder import Folder
+    from app.models.note import Note
+    from app.services.stats import StatsService
 
     # Create notes.
     for i in range(3):

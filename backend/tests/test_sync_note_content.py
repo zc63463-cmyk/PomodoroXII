@@ -38,8 +38,8 @@ async def _make_fs_for_sync(tmp_path):
 @pytest.mark.asyncio
 async def test_pull_note_includes_content_from_filesystem(space_session, tmp_path):
     """pull() should include note content read from the filesystem."""
-    from app.services.sync import SyncService
     from app.services.note import NoteService
+    from app.services.sync import SyncService
 
     fs = await _make_fs_for_sync(tmp_path)
     note_svc = NoteService(space_session, fs)
@@ -62,8 +62,8 @@ async def test_pull_note_includes_content_from_filesystem(space_session, tmp_pat
 @pytest.mark.asyncio
 async def test_pull_note_content_missing_when_fs_none(space_session):
     """pull() with fs=None should mark content_missing=True and content=''."""
-    from app.services.sync import SyncService
     from app.models.note import Note
+    from app.services.sync import SyncService
 
     # Insert a Note row directly bypassing fs (so no .md file exists).
     note = Note(
@@ -89,8 +89,8 @@ async def test_pull_note_content_missing_when_fs_none(space_session):
 async def test_pull_note_content_missing_when_file_deleted(space_session, tmp_path):
     """pull() should mark content_missing=True when the .md file was deleted
     out-of-band (fs returns None for that note id)."""
-    from app.services.sync import SyncService
     from app.services.note import NoteService
+    from app.services.sync import SyncService
 
     fs = await _make_fs_for_sync(tmp_path)
     note_svc = NoteService(space_session, fs)
@@ -117,8 +117,8 @@ async def test_pull_note_content_missing_when_file_deleted(space_session, tmp_pa
 async def test_pull_multiple_notes_uses_batch_read(space_session, tmp_path, monkeypatch):
     """pull() should call fs.read_notes_batch exactly once for N notes
     (not N times read_note)."""
-    from app.services.sync import SyncService
     from app.services.note import NoteService
+    from app.services.sync import SyncService
 
     fs = await _make_fs_for_sync(tmp_path)
     note_svc = NoteService(space_session, fs)
@@ -151,8 +151,8 @@ async def test_pull_multiple_notes_uses_batch_read(space_session, tmp_path, monk
 @pytest.mark.asyncio
 async def test_full_includes_note_content(space_session, tmp_path):
     """full() should also include note content (delegates to pull)."""
-    from app.services.sync import SyncService
     from app.services.note import NoteService
+    from app.services.sync import SyncService
 
     fs = await _make_fs_for_sync(tmp_path)
     note_svc = NoteService(space_session, fs)

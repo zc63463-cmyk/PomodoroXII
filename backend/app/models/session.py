@@ -1,6 +1,6 @@
 """SQLAlchemy model for pomodoro sessions."""
 
-from sqlalchemy import String, Integer, Float, Boolean, CheckConstraint
+from sqlalchemy import Boolean, CheckConstraint, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

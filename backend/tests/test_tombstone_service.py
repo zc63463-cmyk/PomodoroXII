@@ -14,8 +14,8 @@ import pytest
 @pytest.mark.asyncio
 async def test_create_writes_tombstone_with_entity_type_and_id(space_session):
     """create() should insert a tombstone row with the given type and id."""
-    from app.services.tombstone import TombstoneService
     from app.models.tombstone import Tombstone
+    from app.services.tombstone import TombstoneService
 
     svc = TombstoneService(space_session)
     entity_id = uuid.uuid4().hex
@@ -29,8 +29,8 @@ async def test_create_writes_tombstone_with_entity_type_and_id(space_session):
 @pytest.mark.asyncio
 async def test_create_is_idempotent_duplicate_does_not_raise(space_session):
     """create() on the same (type, id) should return existing, not raise."""
-    from app.services.tombstone import TombstoneService
     from app.models.tombstone import Tombstone
+    from app.services.tombstone import TombstoneService
 
     svc = TombstoneService(space_session)
     entity_id = uuid.uuid4().hex
@@ -66,10 +66,11 @@ async def test_exists_returns_false_for_unknown_entity(space_session):
 @pytest.mark.asyncio
 async def test_cleanup_expired_removes_old_tombstones_returns_count(space_session):
     """cleanup_expired() should remove tombstones older than TTL and return count."""
-    from app.services.tombstone import TombstoneService
+    from datetime import timedelta
+
     from app.models.tombstone import Tombstone
     from app.services.time import utc_now
-    from datetime import timedelta
+    from app.services.tombstone import TombstoneService
 
     svc = TombstoneService(space_session)
     # Insert a tombstone with deleted_at 100 days ago.

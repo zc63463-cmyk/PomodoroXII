@@ -39,7 +39,7 @@ async def test_lru_eviction_disposes_oldest(tmp_path):
     manager = SpaceEngineManager(max_size=2)
 
     e1 = await manager.get_engine("spc_1", db_path=tmp_path / "1.db")
-    e2 = await manager.get_engine("spc_2", db_path=tmp_path / "2.db")
+    await manager.get_engine("spc_2", db_path=tmp_path / "2.db")
     # Touch spc_1 so spc_2 becomes LRU.
     await manager.get_engine("spc_1", db_path=tmp_path / "1.db")
     # Insert a third -> evicts spc_2.

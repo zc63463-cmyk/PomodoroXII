@@ -12,8 +12,8 @@ exposes helper methods to compute per-space paths deterministically.
 from __future__ import annotations
 
 import os
-from typing import Annotated
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict

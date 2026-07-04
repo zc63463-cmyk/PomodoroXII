@@ -12,7 +12,6 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
-
 # All 14 sync entities (table_name, expected_index_name).
 SYNC_ENTITY_TABLES = [
     ("tasks", "ix_tasks_updated_at"),

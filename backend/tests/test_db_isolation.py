@@ -12,8 +12,9 @@ import pytest
 @pytest.mark.asyncio
 async def test_meta_db_has_only_2_tables(_isolate_env):
     """Meta DB should only contain spaces + meta_settings."""
-    from app.db.meta_session import init_meta_db
     from sqlalchemy import inspect
+
+    from app.db.meta_session import init_meta_db
 
     engine = await init_meta_db()
     async with engine.connect() as conn:
@@ -28,9 +29,10 @@ async def test_meta_db_has_only_2_tables(_isolate_env):
 @pytest.mark.asyncio
 async def test_space_db_excludes_meta_tables(_isolate_env):
     """Space DB should not contain spaces or meta_settings tables."""
-    from app.space_manager import get_space_engine_manager
-    from app.db.meta_session import init_meta_db
     from sqlalchemy import inspect
+
+    from app.db.meta_session import init_meta_db
+    from app.space_manager import get_space_engine_manager
 
     await init_meta_db()
     manager = get_space_engine_manager()
@@ -48,9 +50,10 @@ async def test_space_db_excludes_meta_tables(_isolate_env):
 @pytest.mark.asyncio
 async def test_space_db_has_all_business_tables(_isolate_env):
     """Space DB should contain all 18 business tables."""
-    from app.space_manager import get_space_engine_manager
-    from app.db.meta_session import init_meta_db
     from sqlalchemy import inspect
+
+    from app.db.meta_session import init_meta_db
+    from app.space_manager import get_space_engine_manager
 
     await init_meta_db()
     manager = get_space_engine_manager()

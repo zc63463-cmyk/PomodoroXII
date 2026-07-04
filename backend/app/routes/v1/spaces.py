@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import create_space_token
 from app.db.models.meta import Space
-from app.deps import require_master_token, get_meta_db
+from app.deps import get_meta_db, require_master_token
 from app.errors import NotFoundError
 from app.settings import settings
 

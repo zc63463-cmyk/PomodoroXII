@@ -15,14 +15,15 @@
 from __future__ import annotations
 
 from app.file_system.interfaces import FileSystem
+
 from .base import StorageBase
-from .note_ops import NoteOpsMixin
+from .consistency_ops import ConsistencyOpsMixin
+from .export_ops import ExportOpsMixin
 from .folder_ops import FolderOpsMixin
+from .note_ops import NoteOpsMixin
 from .search_ops import SearchOpsMixin
 from .trash_ops import TrashOpsMixin
 from .version_ops import VersionOpsMixin
-from .export_ops import ExportOpsMixin
-from .consistency_ops import ConsistencyOpsMixin
 
 
 class FileSystemStorage(

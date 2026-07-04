@@ -53,7 +53,7 @@ async def test_get_space_context_returns_space_id_and_user_id():
     row in the meta DB before calling get_space_context with a token that
     references it.
     """
-    from app.db.meta_session import init_meta_db, close_meta_db
+    from app.db.meta_session import close_meta_db, init_meta_db
     from app.db.models.meta import Space
 
     await init_meta_db()
@@ -92,7 +92,7 @@ async def test_get_space_context_returns_space_id_and_user_id():
 @pytest.mark.asyncio
 async def test_get_meta_db_yields_session():
     """get_meta_db should yield an AsyncSession bound to the meta database."""
-    from app.db.meta_session import init_meta_db, close_meta_db
+    from app.db.meta_session import close_meta_db, init_meta_db
 
     await init_meta_db()
     try:
@@ -111,8 +111,8 @@ async def test_get_meta_db_yields_session():
 @pytest.mark.asyncio
 async def test_get_space_db_yields_session():
     """get_space_db should yield an AsyncSession bound to the space's database."""
-    from app.db.meta_session import init_meta_db, close_meta_db
-    from app.space_manager import get_space_engine_manager, dispose_space_engine_manager
+    from app.db.meta_session import close_meta_db, init_meta_db
+    from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
 
     await init_meta_db()
     try:

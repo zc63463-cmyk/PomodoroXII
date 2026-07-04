@@ -14,8 +14,8 @@ import pytest
 @pytest.mark.asyncio
 async def test_overview_counts_completed_work_sessions(space_session):
     """overview() should count completed work sessions only."""
-    from app.services.stats import StatsService
     from app.models.session import Session as PomodoroSession
+    from app.services.stats import StatsService
     from app.services.time import utc_now_iso
 
     svc = StatsService(space_session)
@@ -46,8 +46,8 @@ async def test_overview_counts_completed_work_sessions(space_session):
 @pytest.mark.asyncio
 async def test_overview_sums_durations(space_session):
     """overview() should sum durations of completed work sessions."""
-    from app.services.stats import StatsService
     from app.models.session import Session as PomodoroSession
+    from app.services.stats import StatsService
     from app.services.time import utc_now_iso
 
     svc = StatsService(space_session)
@@ -69,8 +69,8 @@ async def test_overview_sums_durations(space_session):
 @pytest.mark.asyncio
 async def test_focus_trend_fills_missing_dates(space_session):
     """focus_trend() should fill missing dates with zero counts."""
-    from app.services.stats import StatsService
     from app.models.session import Session as PomodoroSession
+    from app.services.stats import StatsService
     from app.services.time import utc_now, utc_now_iso
 
     svc = StatsService(space_session)
@@ -99,8 +99,8 @@ async def test_focus_trend_fills_missing_dates(space_session):
 @pytest.mark.asyncio
 async def test_task_distribution_by_status_and_priority(space_session):
     """task_distribution() should group tasks by status and priority."""
-    from app.services.stats import StatsService
     from app.models.task import Task
+    from app.services.stats import StatsService
 
     svc = StatsService(space_session)
 
@@ -128,8 +128,8 @@ async def test_task_distribution_by_status_and_priority(space_session):
 @pytest.mark.asyncio
 async def test_daily_detail_for_specific_date(space_session):
     """daily_detail() should return count and duration for a specific date."""
-    from app.services.stats import StatsService
     from app.models.session import Session as PomodoroSession
+    from app.services.stats import StatsService
     from app.services.time import utc_now, utc_now_iso
 
     svc = StatsService(space_session)
