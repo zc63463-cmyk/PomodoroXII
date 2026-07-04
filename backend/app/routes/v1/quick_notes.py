@@ -27,6 +27,7 @@ class QuickNoteService(BaseService):
     """Thin service for QuickNote — tags serialisation, trashed exclusion, pin ordering."""
 
     model = QuickNote
+    entity_type = "quickNote"
 
     async def create(self, data: dict) -> object:
         data = dict(data)

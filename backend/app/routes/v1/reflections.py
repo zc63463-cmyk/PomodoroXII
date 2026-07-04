@@ -37,6 +37,7 @@ class ReflectionService(BaseService):
     """Thin service for Reflection — JSON list / bool serialisation, date ordering."""
 
     model = Reflection
+    entity_type = "reflection"
 
     async def create(self, data: dict) -> object:
         data = dict(data)

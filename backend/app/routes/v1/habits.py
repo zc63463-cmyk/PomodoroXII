@@ -33,6 +33,7 @@ class HabitService(BaseService):
     """Thin service for Habit — rest_days serialisation, sort_order ordering."""
 
     model = Habit
+    entity_type = "habit"
 
     async def create(self, data: dict) -> object:
         data = dict(data)
@@ -65,6 +66,7 @@ class HabitCheckInService(BaseService):
     """Thin service for HabitCheckIn — orders check-ins by date descending."""
 
     model = HabitCheckIn
+    entity_type = "habitCheckIn"
 
     async def list(
         self,

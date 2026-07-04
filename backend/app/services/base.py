@@ -24,9 +24,15 @@ class BaseService:
     Subclasses set ``model`` to the ORM class.  All write methods
     ``flush()`` only — the caller (typically a route) is responsible
     for ``commit()``.
+
+    M1: Subclasses that participate in sync should set ``entity_type``
+    to the sync entity type string (e.g. ``"task"``, ``"session"``).
+    When set, ``delete()`` automatically creates a tombstone so that
+    deletions propagate correctly to other devices via sync pull.
     """
 
     model: type
+    entity_type: str | None = None
 
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
@@ -78,8 +84,26 @@ class BaseService:
         await self.db.refresh(obj)
         return obj
 
+    async def _ensure_tombstone(self, id: str) -> None:
+        """Create a tombstone for this entity if ``entity_type`` is set.
+
+        M1: Centralised tombstone creation so all sync entities record
+        deletions consistently.  Subclasses with custom ``delete()``
+        methods should call this instead of importing TombstoneService
+        directly.
+        """
+        if self.entity_type:
+            from app.services.tombstone import TombstoneService
+
+            await TombstoneService(self.db).create(self.entity_type, id)
+
     async def delete(self, id: str) -> None:
-        """Delete the row with *id*.  Raise NotFoundError if missing."""
+        """Delete the row with *id*.  Raise NotFoundError if missing.
+
+        M1: Creates a tombstone when ``entity_type`` is set so that
+        sync pull can propagate the deletion to other devices.
+        """
         obj = await self.get(id)
         await self.db.delete(obj)
         await self.db.flush()
+        await self._ensure_tombstone(id)

@@ -45,7 +45,9 @@ class TombstoneService:
             return tomb
         except IntegrityError:
             # Race: another concurrent request inserted the same tombstone.
-            await self.db.rollback()
+            # Expunge the failed pending row instead of session.rollback(),
+            # which inside a SAVEPOINT would undo prior deletes in the same event.
+            self.db.expunge(tomb)
             existing = await self.exists(entity_type, entity_id)
             if existing is not None:
                 return existing

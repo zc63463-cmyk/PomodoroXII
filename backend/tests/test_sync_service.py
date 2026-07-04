@@ -107,10 +107,11 @@ async def test_push_update_event_modifies_row(space_session):
 
 
 @pytest.mark.asyncio
-async def test_push_delete_event_removes_row(space_session):
-    """push() with action=delete should remove the row."""
+async def test_push_delete_event_removes_row_and_writes_tombstone(space_session):
+    """push() with action=delete should remove the row and write a tombstone."""
     from app.services.sync import SyncService
     from app.models.task import Task
+    from app.services.tombstone import TombstoneService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
@@ -130,6 +131,160 @@ async def test_push_delete_event_removes_row(space_session):
     assert len(result["applied"]) == 1
     row = await space_session.get(Task, eid)
     assert row is None
+    tomb = await TombstoneService(space_session).exists("task", eid)
+    assert tomb is not None
+
+
+@pytest.mark.asyncio
+async def test_push_delete_idempotent_when_row_already_gone(space_session):
+    """push() delete on missing row should still write tombstone."""
+    from app.services.sync import SyncService
+    from app.services.tombstone import TombstoneService
+
+    svc = SyncService(space_session)
+    eid = uuid.uuid4().hex
+    result = await svc.push([_make_event(
+        entity_id=eid,
+        action="delete",
+        payload={},
+    )])
+    assert len(result["applied"]) == 1
+    assert await TombstoneService(space_session).exists("task", eid) is not None
+
+
+@pytest.mark.asyncio
+async def test_push_tombstone_blocks_create_resurrection(space_session):
+    """C1: create after REST delete should conflict with tombstone."""
+    from app.services.sync import SyncService
+    from app.models.session import Session
+    from app.routes.v1.sessions import SessionService
+
+    svc = SyncService(space_session)
+    eid = uuid.uuid4().hex
+    await SessionService(space_session).create({
+        "id": eid,
+        "type": "work",
+        "duration": 25,
+        "completed": True,
+        "started_at": "2026-07-04T10:00:00Z",
+    })
+    await SessionService(space_session).delete(eid)
+    result = await svc.push([_make_event(
+        entity_type="session",
+        entity_id=eid,
+        action="create",
+        payload={
+            "type": "work",
+            "duration": 30,
+            "completed": False,
+            "started_at": "2026-07-04T11:00:00Z",
+        },
+    )])
+    assert any(c.get("resolution") == "tombstone" for c in result["conflicts"])
+    assert await space_session.get(Session, eid) is None
+
+
+@pytest.mark.asyncio
+async def test_push_tombstone_blocks_update_upsert(space_session):
+    """C1: update upsert on tombstoned id should not recreate the row."""
+    from app.services.sync import SyncService
+    from app.models.task import Task
+    from app.services.task import TaskService
+
+    svc = SyncService(space_session)
+    eid = uuid.uuid4().hex
+    await TaskService(space_session).create({
+        "id": eid,
+        "title": "Gone",
+        "status": "todo",
+        "priority": "medium",
+        "tags": "[]",
+    })
+    await TaskService(space_session).delete(eid)
+    result = await svc.push([_make_event(
+        entity_id=eid,
+        action="update",
+        payload={"title": "Resurrected"},
+        client_updated_at="2026-07-04T12:00:00.000Z",
+    )])
+    assert any(c.get("resolution") == "tombstone" for c in result["conflicts"])
+    assert await space_session.get(Task, eid) is None
+
+
+@pytest.mark.asyncio
+async def test_push_folder_create_rejects_self_parent(space_session):
+    """C3: folder create with parent_id == entity_id should conflict."""
+    from app.services.sync import SyncService
+
+    svc = SyncService(space_session)
+    fid = uuid.uuid4().hex
+    result = await svc.push([_make_event(
+        entity_type="folder",
+        entity_id=fid,
+        action="create",
+        payload={"name": "Self", "parent_id": fid},
+    )])
+    assert any(c.get("resolution") == "circular_ref" for c in result["conflicts"])
+
+
+@pytest.mark.asyncio
+async def test_push_folder_update_rejects_circular_parent(space_session):
+    """C3: folder update parent_id that closes a cycle should conflict."""
+    from app.services.sync import SyncService
+
+    svc = SyncService(space_session)
+    a, b = uuid.uuid4().hex, uuid.uuid4().hex
+    await svc.push([_make_event(
+        entity_type="folder",
+        entity_id=a,
+        action="create",
+        payload={"name": "A", "parent_id": None},
+    )])
+    await svc.push([_make_event(
+        entity_type="folder",
+        entity_id=b,
+        action="create",
+        payload={"name": "B", "parent_id": a},
+    )])
+    result = await svc.push([_make_event(
+        entity_type="folder",
+        entity_id=a,
+        action="update",
+        payload={"parent_id": b},
+        client_updated_at="2026-07-04T12:00:00.000Z",
+    )])
+    assert any(c.get("resolution") == "circular_ref" for c in result["conflicts"])
+
+
+@pytest.mark.asyncio
+async def test_push_strips_client_fields_from_payload(space_session):
+    """C2: push should ignore client-only and protected fields."""
+    from app.services.sync import SyncService
+    from app.models.task import Task
+
+    svc = SyncService(space_session)
+    eid = uuid.uuid4().hex
+    await svc.push([_make_event(
+        entity_id=eid,
+        action="create",
+        payload={
+            "id": eid,
+            "title": "Clean",
+            "status": "todo",
+            "priority": "medium",
+            "tags": "[]",
+            "synced": True,
+            "_dirty": True,
+            "actual_pomodoros": 99,
+            "created_at": "2020-01-01T00:00:00.000Z",
+            "version": 999,
+        },
+    )])
+    row = await space_session.get(Task, eid)
+    assert row is not None
+    assert row.title == "Clean"
+    assert not hasattr(row, "synced") or getattr(row, "synced", None) is None
+    assert row.version != 999
 
 
 @pytest.mark.asyncio

@@ -163,3 +163,87 @@ async def test_check_lww_conflict_returns_remote_when_remote_newer(space_session
     )
     decision = check_lww_conflict(local, "2026-07-04T12:00:00.000Z")
     assert decision == "remote"
+
+
+# --------------------------------------------------------------------------- #
+# strip_client_fields (C2)
+# --------------------------------------------------------------------------- #
+
+def test_strip_client_fields_removes_generic_and_protected():
+    """strip_client_fields should drop synced/_dirty/id/created_at/version."""
+    from app.services.sync_safety import strip_client_fields
+
+    data = {
+        "title": "Keep",
+        "synced": True,
+        "_dirty": True,
+        "_etag": "abc",
+        "id": "client-id",
+        "created_at": "2020-01-01T00:00:00.000Z",
+        "version": 5,
+    }
+    stripped = strip_client_fields(data, "task")
+    assert stripped == {"title": "Keep"}
+    assert data["title"] == "Keep"  # original unchanged
+
+
+def test_strip_client_fields_removes_entity_specific_task_fields():
+    """Task payloads should drop actual_pomodoros."""
+    from app.services.sync_safety import strip_client_fields
+
+    stripped = strip_client_fields(
+        {"title": "T", "actual_pomodoros": 3},
+        "task",
+    )
+    assert stripped == {"title": "T"}
+
+
+def test_strip_client_fields_removes_quick_note_client_fields():
+    """quickNote payloads should drop archive_file_path and migrated_to_note_id."""
+    from app.services.sync_safety import strip_client_fields
+
+    stripped = strip_client_fields(
+        {
+            "content": "memo",
+            "archive_file_path": "/tmp/x",
+            "migrated_to_note_id": "n1",
+        },
+        "quickNote",
+    )
+    assert stripped == {"content": "memo"}
+
+
+# --------------------------------------------------------------------------- #
+# check_folder_circular_ref (C3)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_check_folder_circular_ref_self_parent(space_session):
+    """Setting parent_id to self should be circular."""
+    from app.services.sync_safety import check_folder_circular_ref
+
+    fid = "folder-self"
+    assert await check_folder_circular_ref(space_session, fid, fid) is True
+
+
+@pytest.mark.asyncio
+async def test_check_folder_circular_ref_detects_cycle_in_chain(space_session):
+    """Traversing parent chain should detect when folder becomes ancestor."""
+    from app.models.folder import Folder
+    from app.services.sync_safety import check_folder_circular_ref
+
+    a = Folder(id="fa", name="A", parent_id=None)
+    b = Folder(id="fb", name="B", parent_id="fa")
+    space_session.add_all([a, b])
+    await space_session.flush()
+
+    assert await check_folder_circular_ref(space_session, "fa", "fb") is True
+    assert await check_folder_circular_ref(space_session, "fc", "fb") is False
+
+
+@pytest.mark.asyncio
+async def test_check_folder_circular_ref_none_parent_is_safe(space_session):
+    """parent_id=None should never be circular."""
+    from app.services.sync_safety import check_folder_circular_ref
+
+    assert await check_folder_circular_ref(space_session, "any", None) is False

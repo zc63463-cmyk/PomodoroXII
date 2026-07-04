@@ -24,6 +24,7 @@ class TimeBlockService(BaseService):
     """Thin service for TimeBlock — date filtering, start_time/sort_order ordering."""
 
     model = TimeBlock
+    entity_type = "timeBlock"
 
     async def list(
         self,

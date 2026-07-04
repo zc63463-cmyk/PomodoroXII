@@ -173,6 +173,34 @@ async def test_sync_roundtrip_delete_via_task_route_creates_tombstone(client):
 
 
 @pytest.mark.asyncio
+async def test_sync_roundtrip_delete_via_push_writes_tombstone(client):
+    """Create task via push → delete via push → pull returns tombstone."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    eid = uuid.uuid4().hex
+    await _push(client, headers, [
+        _make_event(
+            entity_id=eid, action="create",
+            payload={
+                "id": eid, "title": "Will be deleted", "status": "todo",
+                "priority": "medium", "tags": "[]",
+            },
+        )
+    ])
+    await _push(client, headers, [
+        _make_event(entity_id=eid, action="delete", payload={}),
+    ])
+
+    resp = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
+    data = resp.json()
+    tomb_ids = [t["entity_id"] for t in data["tombstones"]]
+    assert eid in tomb_ids
+    task_ids = [t["id"] for t in data["tasks"]]
+    assert eid not in task_ids
+
+
+@pytest.mark.asyncio
 async def test_sync_status_reflects_pushed_events(client):
     """push 3 tasks → status returns tasks=3."""
     space_token = await _setup_login_and_space_token(client)
