@@ -1,0 +1,134 @@
+"""REST routes for quick notes (rapid capture).
+
+CRUD endpoints for the QuickNote entity.  Uses an inline
+``QuickNoteService(BaseService)`` subclass that serialises the ``tags``
+list to a JSON string (matching the String column), excludes trashed
+items from listings, and orders pinned notes first (then newest).
+Routes commit; the service only flushes.
+"""
+from __future__ import annotations
+
+import json
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.deps import get_space_db, get_space_context
+from app.models.quick_note import QuickNote
+from app.schemas.common import PaginatedResponse
+from app.schemas.quick_note import QuickNoteCreate, QuickNoteUpdate, QuickNoteResponse
+from app.services.base import BaseService
+
+router = APIRouter()
+
+
+class QuickNoteService(BaseService):
+    """Thin service for QuickNote — tags serialisation, trashed exclusion, pin ordering."""
+
+    model = QuickNote
+
+    async def create(self, data: dict) -> object:
+        data = dict(data)
+        if "tags" in data and isinstance(data["tags"], list):
+            data["tags"] = json.dumps(data["tags"])
+        return await super().create(data)
+
+    async def update(self, id: str, data: dict) -> object:
+        data = dict(data)
+        if "tags" in data and isinstance(data["tags"], list):
+            data["tags"] = json.dumps(data["tags"])
+        return await super().update(id, data)
+
+    async def list(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+        filters: dict | None = None,
+    ) -> tuple[list, int]:
+        q = select(self.model)
+        if filters:
+            for k, v in filters.items():
+                q = q.where(getattr(self.model, k) == v)
+        # Exclude trashed quick notes from the regular listing.
+        q = q.where(QuickNote.trashed_at.is_(None))
+        total = (
+            await self.db.execute(select(func.count()).select_from(q.subquery()))
+        ).scalar() or 0
+        # Pinned first, then newest.
+        q = q.order_by(QuickNote.pinned.desc(), QuickNote.created_at.desc())
+        rows = (
+            await self.db.execute(q.offset(offset).limit(limit))
+        ).scalars().all()
+        return rows, total
+
+
+@router.post("", response_model=QuickNoteResponse, status_code=201)
+async def create_quick_note(
+    data: QuickNoteCreate,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Create a new quick note."""
+    obj = await QuickNoteService(db).create(data.model_dump())
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+@router.get("", response_model=PaginatedResponse[QuickNoteResponse])
+async def list_quick_notes(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=100),
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """List non-trashed quick notes (pinned first, then newest)."""
+    items, total = await QuickNoteService(db).list(
+        offset=(page - 1) * per_page,
+        limit=per_page,
+    )
+    return {
+        "items": items,
+        "total": total,
+        "limit": per_page,
+        "offset": (page - 1) * per_page,
+        "has_more": ((page - 1) * per_page + len(items)) < total,
+    }
+
+
+@router.get("/{id}", response_model=QuickNoteResponse)
+async def get_quick_note(
+    id: str,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Return a single quick note by id."""
+    return await QuickNoteService(db).get(id)
+
+
+@router.put("/{id}", response_model=QuickNoteResponse)
+async def update_quick_note(
+    id: str,
+    data: QuickNoteUpdate,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Update an existing quick note (partial update)."""
+    obj = await QuickNoteService(db).update(id, data.model_dump(exclude_unset=True))
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+@router.delete("/{id}")
+async def delete_quick_note(
+    id: str,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Delete a quick note."""
+    await QuickNoteService(db).delete(id)
+    await db.commit()
+    return {"message": "Deleted"}

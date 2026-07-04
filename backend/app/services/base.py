@@ -1,0 +1,85 @@
+"""BaseService — flush-only CRUD foundation for all entity services.
+
+Iron rules:
+- Does NOT import FastAPI (MCP-consumable).
+- Only flushes, never commits (routes commit).
+- Returns ORM instances.
+- Accepts dict params (MCP reservation).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.errors import NotFoundError
+from app.services.time import utc_now_iso
+
+
+class BaseService:
+    """Generic CRUD service bound to a single SQLAlchemy model.
+
+    Subclasses set ``model`` to the ORM class.  All write methods
+    ``flush()`` only — the caller (typically a route) is responsible
+    for ``commit()``.
+    """
+
+    model: type
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def create(self, data: dict[str, Any]) -> Any:
+        """Create a new row from *data* and flush."""
+        obj = self.model(**data)
+        self.db.add(obj)
+        await self.db.flush()
+        await self.db.refresh(obj)
+        return obj
+
+    async def get(self, id: str) -> Any:
+        """Return the row with *id* or raise NotFoundError."""
+        obj = await self.db.get(self.model, id)
+        if obj is None:
+            raise NotFoundError(f"{self.model.__name__} '{id}' not found")
+        return obj
+
+    async def list(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+        filters: dict[str, Any] | None = None,
+    ) -> tuple[list[Any], int]:
+        """Return (items, total) with optional equality filters."""
+        q = select(self.model)
+        if filters:
+            for k, v in filters.items():
+                q = q.where(getattr(self.model, k) == v)
+        total = (
+            await self.db.execute(select(func.count()).select_from(q.subquery()))
+        ).scalar() or 0
+        rows = (
+            await self.db.execute(q.offset(offset).limit(limit))
+        ).scalars().all()
+        return rows, total
+
+    async def update(self, id: str, data: dict[str, Any]) -> Any:
+        """Update fields on the row with *id* and bump updated_at."""
+        obj = await self.get(id)
+        for k, v in data.items():
+            setattr(obj, k, v)
+        obj.updated_at = utc_now_iso()
+        if hasattr(obj, "version"):
+            obj.version = (obj.version or 0) + 1
+        await self.db.flush()
+        await self.db.refresh(obj)
+        return obj
+
+    async def delete(self, id: str) -> None:
+        """Delete the row with *id*.  Raise NotFoundError if missing."""
+        obj = await self.get(id)
+        await self.db.delete(obj)
+        await self.db.flush()

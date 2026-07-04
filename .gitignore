@@ -1,0 +1,135 @@
+# ===================================================================
+# PomodoroXII .gitignore
+# ===================================================================
+
+# -------------------------------------------------------------------
+# Python
+# -------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# -------------------------------------------------------------------
+# Virtual environments
+# -------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# -------------------------------------------------------------------
+# Testing / coverage
+# -------------------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+pyright/
+pytest_*.log
+pytest_run.log
+
+# -------------------------------------------------------------------
+# Project runtime data (must never be committed)
+# -------------------------------------------------------------------
+backend/data/
+backend/data/meta.db
+backend/data/meta.db-journal
+backend/data/spaces/
+backend/data/spaces/**/*.db
+backend/data/spaces/**/*.db-journal
+backend/data/spaces/**/*.db-wal
+backend/data/spaces/**/*.db-shm
+backend/data/notes/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# -------------------------------------------------------------------
+# Secrets / environment
+# -------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+backend/.env
+*.pem
+*.key
+secrets.json
+credentials.json
+
+# -------------------------------------------------------------------
+# IDE / editor
+# -------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -------------------------------------------------------------------
+# Trae / MCP local state (do not commit local agent state)
+# -------------------------------------------------------------------
+.trae/mcp.json.bak
+.trae/mcp.json.before-fix-*
+.trae/mcp.json.fixed
+.trae/cognee-install.log
+
+# NOTE: .trae/documents/ IS committed — these are project design docs.
+# NOTE: backend/.codebase-memory/graph.db.zst IS committed — shared index artifact.
+
+# -------------------------------------------------------------------
+# Archived / legacy projects (kept locally, excluded from VCS)
+# -------------------------------------------------------------------
+PomodoroXII-rebuild/
+pomodoroxii-deep-review/
+
+# -------------------------------------------------------------------
+# Temp / scratch
+# -------------------------------------------------------------------
+temp/
+*.tmp
+*.bak
+*.log
+
+# -------------------------------------------------------------------
+# OS generated
+# -------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db

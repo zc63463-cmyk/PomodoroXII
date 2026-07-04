@@ -1,0 +1,136 @@
+# ===================================================================
+# PomodoroXII CI/CD Pipeline
+# ===================================================================
+# Phase E step 1: continuous integration for the FastAPI backend.
+#
+# Triggers:
+#   - push to main / develop
+#   - pull_request to main
+#
+# Jobs:
+#   1. test   — pytest 361 tests + ruff lint
+#   2. build  — Docker image build (only on main, after test passes)
+# ===================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+    paths:
+      - "backend/**"
+      - ".github/workflows/**"
+      - ".gitignore"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "backend/**"
+      - ".github/workflows/**"
+
+# Cancel in-progress runs of the same ref when a new commit lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  WORKING_DIR: backend
+
+jobs:
+  # -----------------------------------------------------------------
+  # Job 1: Test — pytest + ruff
+  # -----------------------------------------------------------------
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv (fast Python package manager)
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "${{ env.WORKING_DIR }}/uv.lock"
+
+      - name: Sync dependencies (dev extras included)
+        run: uv sync --frozen --extra dev
+
+      - name: Lint with ruff (non-blocking)
+        run: uv run ruff check app tests || true
+
+      - name: Run pytest (361 tests)
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          uv run pytest tests/ \
+            --no-header \
+            -q \
+            --tb=short \
+            --maxfail=10 \
+            -p no:cacheprovider
+
+      - name: Upload test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-${{ github.run_id }}
+          path: |
+            ${{ env.WORKING_DIR }}/.pytest_cache/
+            ${{ env.WORKING_DIR }}/pytest_*.log
+          retention-days: 7
+
+  # -----------------------------------------------------------------
+  # Job 2: Build — Docker image (main only, after test passes)
+  # -----------------------------------------------------------------
+  build:
+    name: Build Docker Image
+    needs: test
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push yet — Phase E step 2 will add registry)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
+          push: false
+          tags: pomodoroxii-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+
+      - name: Smoke-test the image
+        run: |
+          docker run --rm -d -p 8000:8000 \
+            --name smoke \
+            pomodoroxii-backend:${{ github.sha }}
+          sleep 5
+          # Health endpoint should respond 200
+          curl -fsS http://localhost:8000/api/health || (echo "HEALTH_CHECK_FAILED"; docker logs smoke; exit 1)
+          docker stop smoke || true
