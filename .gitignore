@@ -107,8 +107,22 @@ desktop.ini
 .trae/mcp.json.fixed
 .trae/cognee-install.log
 
+.trae/bin/
+.trae/mcp.json
+.trae/cognee-venv/
+
 # NOTE: .trae/documents/ IS committed — these are project design docs.
 # NOTE: backend/.codebase-memory/graph.db.zst IS committed — shared index artifact.
+
+# -------------------------------------------------------------------
+# WorkBuddy local state (agent memory, do not commit)
+# -------------------------------------------------------------------
+.workbuddy/
+
+# -------------------------------------------------------------------
+# Local uploads (runtime data, do not commit)
+# -------------------------------------------------------------------
+.uploads/
 
 # -------------------------------------------------------------------
 # Archived / legacy projects (kept locally, excluded from VCS)

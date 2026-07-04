@@ -36,7 +36,7 @@ class SyncConflictItem(BaseModel):
 
     entity_type: str
     entity_id: str
-    resolution: str  # "local" | "remote"
+    resolution: str  # "local" | "remote" | "tombstone" | "circular_ref"
 
 
 class SyncErrorItem(BaseModel):

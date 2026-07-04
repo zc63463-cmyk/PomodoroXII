@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PomodoroXII 深度审查报告 v2</title>
+<style>
+  :root {
+    --bg: #f8f9fa;
+    --surface: #ffffff;
+    --surface-2: #f1f3f5;
+    --border: #e9ecef;
+    --text: #1a1a2e;
+    --text-2: #6c757d;
+    --text-3: #adb5bd;
+    --green: #0F6E56;
+    --green-bg: #E1F5EE;
+    --green-2: #04342C;
+    --amber: #BA7517;
+    --amber-bg: #FAEEDA;
+    --amber-2: #412402;
+    --red: #A32D2D;
+    --red-bg: #FCEBEB;
+    --red-2: #501313;
+    --blue: #185FA5;
+    --blue-bg: #E6F1FB;
+    --purple: #534AB7;
+    --purple-bg: #EEEDFE;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-lg: 0 10px 30px rgba(0,0,0,0.08), 0 3px 10px rgba(0,0,0,0.04);
+  }
+  [data-theme="dark"] {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-2: #21262d;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-2: #8b949e;
+    --text-3: #484f58;
+    --green-bg: #0d2818;
+    --amber-bg: #2d2008;
+    --red-bg: #2d0808;
+    --blue-bg: #0d1f3a;
+    --purple-bg: #1a1535;
+    --shadow: 0 1px 3px rgba(0,0,0,0.3);
+    --shadow-lg: 0 10px 30px rgba(0,0,0,0.4);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 15px;
+    transition: background 0.3s, color 0.3s;
+  }
+  .container { max-width: 1100px; margin: 0 auto; padding: 0 24px 80px; }
+
+  /* Header */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 40px 0 32px;
+    position: relative;
+    overflow: hidden;
+  }
+  .header::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(135deg, var(--green-bg) 0%, transparent 50%, var(--blue-bg) 100%);
+    opacity: 0.5;
+  }
+  .header-inner { position: relative; max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+  .header h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.5px; }
+  .header .meta { font-size: 14px; color: var(--text-2); display: flex; gap: 20px; flex-wrap: wrap; }
+  .header .meta span { display: flex; align-items: center; gap: 6px; }
+  .theme-toggle {
+    position: absolute;
+    top: 0; right: 24px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text);
+    transition: all 0.2s;
+  }
+  .theme-toggle:hover { border-color: var(--green); color: var(--green); }
+
+  /* TL;DR Banner */
+  .tldr {
+    margin-top: 32px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--green);
+    border-radius: var(--radius);
+    padding: 24px 28px;
+    box-shadow: var(--shadow);
+  }
+  .tldr h2 { font-size: 16px; font-weight: 600; margin-bottom: 10px; color: var(--green); }
+  .tldr p { font-size: 14px; color: var(--text-2); line-height: 1.7; }
+  .tldr strong { color: var(--text); }
+
+  /* Score Grid */
+  .score-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+    margin-top: 32px;
+  }
+  .score-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    text-align: center;
+    box-shadow: var(--shadow);
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+  .score-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+  .score-card .stars { font-size: 18px; letter-spacing: 2px; margin-bottom: 6px; }
+  .score-card .label { font-size: 13px; color: var(--text-2); }
+  .score-card .score-val { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
+  .s5 { color: var(--green); }
+  .s4 { color: var(--blue); }
+  .s3 { color: var(--amber); }
+
+  /* Section */
+  .section { margin-top: 40px; }
+  .section h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--border);
+    letter-spacing: -0.3px;
+  }
+  .section h3 { font-size: 17px; font-weight: 600; margin: 24px 0 12px; }
+
+  /* Stats Row */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-top: 20px;
+  }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 16px 18px;
+    box-shadow: var(--shadow);
+  }
+  .stat .num { font-size: 26px; font-weight: 700; color: var(--text); }
+  .stat .desc { font-size: 13px; color: var(--text-2); margin-top: 2px; }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; margin-top: 16px; border-radius: var(--radius); border: 1px solid var(--border); box-shadow: var(--shadow); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; background: var(--surface); }
+  th { background: var(--surface-2); padding: 12px 14px; text-align: left; font-weight: 600; font-size: 13px; color: var(--text-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 11px 14px; border-bottom: 1px solid var(--border); color: var(--text); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--surface-2); }
+
+  /* Badges */
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .b-pass { background: var(--green-bg); color: var(--green); }
+  .b-fail { background: var(--red-bg); color: var(--red); }
+  .b-partial { background: var(--amber-bg); color: var(--amber); }
+  .b-major { background: var(--amber-bg); color: var(--amber-2); }
+  .b-minor { background: var(--surface-2); color: var(--text-2); }
+  .b-critical { background: var(--red-bg); color: var(--red-2); }
+  .b-ok { background: var(--green-bg); color: var(--green-2); }
+
+  /* Code block */
+  pre {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 12px 0;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    color: var(--text);
+  }
+
+  /* Checklist */
+  .checklist { list-style: none; margin-top: 12px; }
+  .checklist li {
+    padding: 8px 0;
+    padding-left: 28px;
+    position: relative;
+    font-size: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .checklist li::before {
+    content: '✓';
+    position: absolute;
+    left: 0;
+    color: var(--green);
+    font-weight: 700;
+    font-size: 16px;
+  }
+  .checklist li.x::before { content: '✗'; color: var(--red); }
+  .checklist li.warn::before { content: '!'; color: var(--amber); }
+
+  /* Architecture diagram */
+  .arch { margin-top: 16px; }
+  .arch-layer {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 22px;
+    margin-bottom: 12px;
+    box-shadow: var(--shadow);
+  }
+  .arch-layer h4 { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+  .arch-layer .items { display: flex; flex-wrap: wrap; gap: 8px; }
+  .arch-chip {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 12px;
+    font-size: 13px;
+    color: var(--text-2);
+  }
+  .arch-arrow { text-align: center; color: var(--text-3); font-size: 20px; margin: -4px 0; }
+
+  /* Progress bar */
+  .progress { height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; margin-top: 6px; }
+  .progress-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
+
+  /* Action list */
+  .action-list { margin-top: 16px; }
+  .action {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px 18px;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    box-shadow: var(--shadow);
+  }
+  .action .pri {
+    flex-shrink: 0;
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700;
+  }
+  .action .pri.p0 { background: var(--red-bg); color: var(--red); }
+  .action .pri.p1 { background: var(--amber-bg); color: var(--amber); }
+  .action .pri.p2 { background: var(--blue-bg); color: var(--blue); }
+  .action .body { flex: 1; }
+  .action .body .title { font-weight: 600; font-size: 14px; }
+  .action .body .desc { font-size: 13px; color: var(--text-2); margin-top: 2px; }
+
+  /* Footer */
+  .footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--border); text-align: center; font-size: 13px; color: var(--text-3); }
+
+  @media (max-width: 640px) {
+    .header h1 { font-size: 22px; }
+    .score-grid { grid-template-columns: repeat(2, 1fr); }
+    .stats-row { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-inner">
+    <button class="theme-toggle" onclick="toggleTheme()">🌙 深色</button>
+    <h1>PomodoroXII 深度审查报告 v2</h1>
+    <div class="meta">
+      <span>📅 2026-07-04 14:46</span>
+      <span>🔧 Code Dev / Refactoring / Analyzer / Review / zoom-out / AI交叉审查</span>
+      <span>📊 386 tests · 100% pass</span>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- TL;DR -->
+  <div class="tldr">
+    <h2>📌 TL;DR</h2>
+    <p>Phase C 收尾后的第二轮深度审查。相比 v1，<strong>项目状态显著改善</strong>：12 个 Phase C 补全测试已落地，4 项 sync 安全检查全部 PASS 且有回归保障，386 测试全绿。剩余问题从 <strong>"3 CRITICAL + 9 MAJOR"</strong> 降为 <strong>"0 CRITICAL + 5 MAJOR + 8 MINOR"</strong>。<strong>项目可安全推进至 Phase D。</strong></p>
+  </div>
+
+  <!-- Score Cards -->
+  <div class="score-grid">
+    <div class="score-card"><div class="stars s5">★★★★★</div><div class="score-val s5">A+</div><div class="label">架构合规</div></div>
+    <div class="score-card"><div class="stars s5">★★★★★</div><div class="score-val s5">A+</div><div class="label">同步安全</div></div>
+    <div class="score-card"><div class="stars s4">★★★★☆</div><div class="score-val s4">A</div><div class="label">代码质量</div></div>
+    <div class="score-card"><div class="stars s4">★★★★☆</div><div class="score-val s4">A</div><div class="label">删除一致性</div></div>
+    <div class="score-card"><div class="stars s3">★★★☆☆</div><div class="score-val s3">B</div><div class="label">安全防护</div></div>
+    <div class="score-card"><div class="stars s5">★★★★★</div><div class="score-val s5">A+</div><div class="label">测试覆盖</div></div>
+    <div class="score-card"><div class="stars s5">★★★★★</div><div class="score-val s5">A+</div><div class="label">文档完整</div></div>
+  </div>
+
+  <!-- Section: Project Snapshot -->
+  <div class="section">
+    <h2>📊 项目快照</h2>
+    <div class="stats-row">
+      <div class="stat"><div class="num">102</div><div class="desc">源文件 (app/)</div></div>
+      <div class="stat"><div class="num">52</div><div class="desc">测试文件 (tests/)</div></div>
+      <div class="stat"><div class="num">9,118</div><div class="desc">源代码行数</div></div>
+      <div class="stat"><div class="num">8,521</div><div class="desc">测试代码行数</div></div>
+      <div class="stat"><div class="num s5">386</div><div class="desc">测试用例（100% 通过）</div></div>
+      <div class="stat"><div class="num">68</div><div class="desc">API 端点（16 路由组）</div></div>
+      <div class="stat"><div class="num">18</div><div class="desc">ORM 模型</div></div>
+      <div class="stat"><div class="num">0.93:1</div><div class="desc">测试/代码比（优秀）</div></div>
+    </div>
+  </div>
+
+  <!-- Section: Architecture -->
+  <div class="section">
+    <h2>🏛️ 架构合规性 — 三条铁律</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>铁律</th><th>验证方法</th><th>结果</th><th>证据</th></tr></thead>
+        <tbody>
+          <tr><td>Routers commit</td><td>grep <code>await.*commit</code> in services/</td><td><span class="badge b-pass">PASS</span></td><td>33 处 commit 全在 routes/v1/</td></tr>
+          <tr><td>Services flush</td><td>services/ 层 commit 计数</td><td><span class="badge b-pass">PASS</span></td><td>0 处 commit，所有写操作仅 flush()</td></tr>
+          <tr><td>Services 不 import FastAPI</td><td>grep fastapi in services/</td><td><span class="badge b-pass">PASS</span></td><td>13 个 service 文件零依赖</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>分层架构（zoom-out）</h3>
+    <div class="arch">
+      <div class="arch-layer">
+        <h4>FastAPI 应用层 · routes commit</h4>
+        <div class="items">
+          <span class="arch-chip">RequestIdMiddleware</span>
+          <span class="arch-chip">CORS</span>
+          <span class="arch-chip">AppError 异常层级</span>
+          <span class="arch-chip">/api/v1 × 16 路由组</span>
+          <span class="arch-chip">68 端点</span>
+        </div>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-layer">
+        <h4>Services 层 ×13 · flush-only，不导入 FastAPI</h4>
+        <div class="items">
+          <span class="arch-chip">BaseService (CRUD + 墓碑)</span>
+          <span class="arch-chip">SyncService (push/pull/LWW)</span>
+          <span class="arch-chip">NoteService (Saga 双写)</span>
+          <span class="arch-chip">CascadeService (BFS 级联)</span>
+          <span class="arch-chip">RelationService (多对多)</span>
+          <span class="arch-chip">TombstoneService (90d TTL)</span>
+        </div>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-layer">
+        <h4>数据层</h4>
+        <div class="items">
+          <span class="arch-chip">Meta DB · 单 SQLite</span>
+          <span class="arch-chip">Space DB × N · LRU 池</span>
+          <span class="arch-chip">FileSystem · .md + FTS5</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section: Sync Engine -->
+  <div class="section">
+    <h2>🔄 同步引擎 — 5 道安全检查</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>安全检查</th><th>代码实现</th><th>测试覆盖</th><th>状态</th></tr></thead>
+        <tbody>
+          <tr><td>C1</td><td>墓碑防复活</td><td>sync.py:242-245 + 339-342</td><td>6 个测试</td><td><span class="badge b-pass">PASS</span></td></tr>
+          <tr><td>C2</td><td>strip_client_fields</td><td>sync_safety.py:107-118</td><td>4 个测试</td><td><span class="badge b-pass">PASS</span></td></tr>
+          <tr><td>C3</td><td>folder 环检测</td><td>sync.py:248-251 + 283-287</td><td>5 个测试</td><td><span class="badge b-pass">PASS</span></td></tr>
+          <tr><td>M1</td><td>REST 删除墓碑</td><td>base.py:87-98 + 8 实体</td><td>8 个测试</td><td><span class="badge b-pass">PASS</span></td></tr>
+          <tr><td>—</td><td>push delete 墓碑</td><td>sync.py:297-304 + 375-380</td><td>4 个测试</td><td><span class="badge b-pass">PASS</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Section: Problems -->
+  <div class="section">
+    <h2>🚨 问题清单</h2>
+
+    <h3>P0 — CRITICAL</h3>
+    <div class="action">
+      <div class="pri p0">0</div>
+      <div class="body"><div class="title">无 CRITICAL 阻塞项 🎉</div><div class="desc">v1 审查的 3 项 CRITICAL 已全部在工作树修复并通过回归测试验证</div></div>
+    </div>
+
+    <h3>P1 — MAJOR（5 项）</h3>
+    <div class="action-list">
+      <div class="action"><div class="pri p1">1</div><div class="body"><div class="title">4 个关联表实体 unlink 不写墓碑</div><div class="desc">relation.py:79-91 · 设备 A 取消关联 → 设备 B 增量 pull 收不到删除 → 陈旧关联</div></div></div>
+      <div class="action"><div class="pri p1">2</div><div class="body"><div class="title">无认证限流</div><div class="desc">auth.py login · /auth/login 无 IP 级速率限制，暴力破解风险 · 建议 slowapi 5次/分</div></div></div>
+      <div class="action"><div class="pri p1">3</div><div class="body"><div class="title">无安全响应头</div><div class="desc">main.py · 缺 X-Content-Type-Options/X-Frame-Options/HSTS/CSP · XSS/clickjacking 风险</div></div></div>
+      <div class="action"><div class="pri p1">4</div><div class="body"><div class="title">无 YAML frontmatter</div><div class="desc">file_system/note_ops.py · .md 非自描述，脱离 DB 丢元数据 · 可移植性目标未达成</div></div></div>
+      <div class="action"><div class="pri p1">5</div><div class="body"><div class="title">delete_folder TOCTOU 竞态</div><div class="desc">folder_ops.py:240-243 · 锁释放后逐个删 note，并发可能 KeyError 中断递归</div></div></div>
+    </div>
+
+    <h3>P2 — MINOR（8 项）</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>问题</th><th>位置</th><th>建议</th></tr></thead>
+        <tbody>
+          <tr><td>m1</td><td>serialize_entity 重复实现</td><td>serializers.py:13 vs sync_safety.py:65</td><td>合并为一处</td></tr>
+          <tr><td>m2</td><td>_apply_event 与 _push_note_event 重复 ~40 行</td><td>sync.py:216-306 vs 312-382</td><td>抽取共享 helper</td></tr>
+          <tr><td>m3</td><td>8 个内联 Service 未下沉</td><td>sessions/habits/reflections/schedules/...</td><td>迁入 services/ 目录</td></tr>
+          <tr><td>m4</td><td>QuickNote 双软删列</td><td>quick_note.py (trashed_at + archived_at)</td><td>统一为一种语义</td></tr>
+          <tr><td>m5</td><td>Session.mood 缺 DB 级约束</td><td>session.py:23</td><td>补 CheckConstraint</td></tr>
+          <tr><td>m6</td><td>Reflection.is_structured 用 String 存布尔</td><td>reflection.py:22</td><td>改为 Boolean</td></tr>
+          <tr><td>m7</td><td>弱密钥黑名单缺口</td><td>settings.py:76</td><td>长度≥32 + 已知弱值</td></tr>
+          <tr><td>m8</td><td>CI lint 非阻塞</td><td>ci.yml:72 (|| true)</td><td>移除，改为阻塞</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Section: Test Coverage -->
+  <div class="section">
+    <h2>🧪 测试覆盖</h2>
+    <div class="stats-row">
+      <div class="stat"><div class="num s5">386</div><div class="desc">测试用例总数</div></div>
+      <div class="stat"><div class="num s5">100%</div><div class="desc">通过率</div></div>
+      <div class="stat"><div class="num">52</div><div class="desc">测试文件</div></div>
+      <div class="stat"><div class="num">3</div><div class="desc">无直接测试的模块（低频）</div></div>
+    </div>
+    <div style="margin-top:16px;">
+      <div style="font-size:14px; margin-bottom:6px;">测试覆盖进度</div>
+      <div class="progress"><div class="progress-fill" style="width:97%; background:var(--green);"></div></div>
+      <div style="font-size:12px; color:var(--text-2); margin-top:4px;">99/102 模块有测试引用（97%）</div>
+    </div>
+
+    <h3>测试矩阵</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>领域</th><th>测试文件</th><th>评价</th></tr></thead>
+        <tbody>
+          <tr><td>Auth</td><td>test_auth_security.py</td><td><span class="badge b-ok">充分</span></td></tr>
+          <tr><td>BaseService</td><td>test_base_service.py</td><td><span class="badge b-ok">充分（含 entity_type 墓碑）</span></td></tr>
+          <tr><td>SyncService</td><td>test_sync_service.py</td><td><span class="badge b-ok">优秀（C1-C3 + LWW + D-1~D-5）</span></td></tr>
+          <tr><td>Sync 集成</td><td>test_sync_integration.py</td><td><span class="badge b-ok">优秀（HTTP roundtrip）</span></td></tr>
+          <tr><td>Phase C 补全</td><td>test_phase_c_completion.py</td><td><span class="badge b-ok">12 个回归测试</span></td></tr>
+          <tr><td>file_system</td><td>6 个测试文件</td><td><span class="badge b-ok">充分</span></td></tr>
+          <tr><td>架构门禁</td><td>test_architecture.py</td><td><span class="badge b-ok">优秀（AST 扫描）</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Section: Security -->
+  <div class="section">
+    <h2>🔐 安全审查</h2>
+    <h3>安全亮点 ✅</h3>
+    <ul class="checklist">
+      <li>PyJWT + bcrypt 12 rounds + 算法固定防混淆</li>
+      <li>双 token 模型（master 7d / space 8h）+ space_id 实时校验</li>
+      <li>多空间隔离通过独立 SQLite DB 实现</li>
+      <li>FTS5 双引号转义防注入</li>
+      <li>参数化查询贯穿全栈</li>
+      <li>500 错误不泄露堆栈</li>
+      <li>关联表 link 用 IntegrityError 处理 TOCTOU</li>
+      <li>.env 未被 git 跟踪</li>
+    </ul>
+    <h3>安全缺口</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>项</th><th>严重度</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>无认证限流</td><td><span class="badge b-major">MAJOR</span></td><td>/auth/login 无 IP 级速率限制</td></tr>
+          <tr><td>无安全响应头</td><td><span class="badge b-major">MAJOR</span></td><td>缺 X-Content-Type/X-Frame/HSTS/CSP</td></tr>
+          <tr><td>HMAC 密钥 29 字节</td><td><span class="badge b-minor">MINOR</span></td><td>低于 SHA256 推荐 32 字节</td></tr>
+          <tr><td>CORS 开发环境较宽</td><td><span class="badge b-minor">MINOR</span></td><td>allow_credentials=True + 显式列表（非通配，正确）</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Section: Code Quality -->
+  <div class="section">
+    <h2>💻 代码质量</h2>
+    <h3>代码异味</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>类型</th><th>位置</th><th>严重度</th></tr></thead>
+        <tbody>
+          <tr><td>过长函数 push() ~126 行</td><td>sync.py:88-214</td><td><span class="badge b-minor">P2</span></td></tr>
+          <tr><td>过长函数 _apply_event ~90 行</td><td>sync.py:216-306</td><td><span class="badge b-minor">P2</span></td></tr>
+          <tr><td>_apply_event 与 _push_note_event 重复 ~40 行</td><td>sync.py</td><td><span class="badge b-minor">P2</span></td></tr>
+          <tr><td>serialize_entity 重复</td><td>serializers.py:13 vs sync_safety.py:65</td><td><span class="badge b-minor">P2</span></td></tr>
+          <tr><td>stats.py 返回类型 dict 而非 dict[str,Any]</td><td>stats.py:24,67,115,134</td><td><span class="badge b-minor">P3</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>错误处理质量 ✅</h3>
+    <ul class="checklist">
+      <li>0 处 bare except</li>
+      <li>6 处 except Exception 全部有合理处理（Saga 补偿 re-raise / SAVEPOINT 隔离 / 审计 best-effort）</li>
+      <li>3 处 except (KeyError, FileNotFoundError): pass 均有 docstring 说明</li>
+      <li>路由层 0 处 try/except，完全依赖全局异常处理器</li>
+    </ul>
+  </div>
+
+  <!-- Section: Actions -->
+  <div class="section">
+    <h2>🎯 优先行动建议</h2>
+    <h3>立即（本周）</h3>
+    <div class="action-list">
+      <div class="action"><div class="pri p0">!</div><div class="body"><div class="title">提交 18 个未保存文件</div><div class="desc">Phase C 修复 + 新测试 + 文档 — 最高优先级，修复已存在但未入库</div></div></div>
+      <div class="action"><div class="pri p1">1</div><div class="body"><div class="title">修复关联表 unlink 墓碑</div><div class="desc">RelationService.unlink + memoComment 补 TombstoneService.create</div></div></div>
+      <div class="action"><div class="pri p1">2</div><div class="body"><div class="title">添加限流 + 安全头中间件</div><div class="desc">slowapi IP 级限流 + SecurityHeadersMiddleware</div></div></div>
+    </div>
+    <h3>短期（1-2 周）</h3>
+    <div class="action-list">
+      <div class="action"><div class="pri p1">3</div><div class="body"><div class="title">实现 YAML frontmatter</div><div class="desc">.md 文件加 frontmatter，达成可移植性目标</div></div></div>
+      <div class="action"><div class="pri p1">4</div><div class="body"><div class="title">修复 delete_folder TOCTOU</div><div class="desc">file_system 锁内完成全部 note 删除</div></div></div>
+      <div class="action"><div class="pri p2">5</div><div class="body"><div class="title">8 个内联 Service 下沉 + sync.py 拆分</div><div class="desc">迁入 services/ 目录，过长函数拆分 + 去重</div></div></div>
+    </div>
+    <h3>中期（1 个月）</h3>
+    <div class="action-list">
+      <div class="action"><div class="pri p2">6</div><div class="body"><div class="title">启动 Phase D（React 19 前端）</div><div class="desc">后端基础已就绪，可安全推进前端重建</div></div></div>
+      <div class="action"><div class="pri p2">7</div><div class="body"><div class="title">backup/snapshot + APScheduler</div><div class="desc">定时墓碑 TTL 清理 + 数据备份</div></div></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    PomodoroXII 深度审查报告 v2 · 2026-07-04 · 386 tests passed · 0 CRITICAL
+  </div>
+
+</div>
+
+<script>
+function toggleTheme() {
+  const body = document.body;
+  const btn = document.querySelector('.theme-toggle');
+  if (body.getAttribute('data-theme') === 'dark') {
+    body.removeAttribute('data-theme');
+    btn.textContent = '🌙 深色';
+  } else {
+    body.setAttribute('data-theme', 'dark');
+    btn.textContent = '☀️ 浅色';
+  }
+}
+</script>
+
+</body>
+</html>

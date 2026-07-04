@@ -195,8 +195,7 @@ async def test_full_endpoint_returns_all_tombstones_ignoring_since(client):
     headers = {"Authorization": f"Bearer {space_token}"}
 
     # Create a task via task route, then DELETE via task route (which
-    # writes a tombstone). Sync push delete does NOT write a tombstone
-    # (it goes through the generic _apply_event path).
+    # writes a tombstone). Sync push delete also writes a tombstone.
     resp = await client.post(
         "/api/v1/tasks",
         json={"title": "To delete via task route"},

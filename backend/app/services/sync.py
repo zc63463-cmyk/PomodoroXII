@@ -32,11 +32,14 @@ from app.models.task_quick_note import TaskQuickNote
 from app.models.time_block import TimeBlock
 from app.models.tombstone import Tombstone
 from app.services.sync_safety import (
+    check_folder_circular_ref,
     check_lww_conflict,
     normalize_timestamp,
     sanitize_zero_time,
+    strip_client_fields,
 )
 from app.services.time import utc_now_iso
+from app.services.tombstone import TombstoneService
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +132,12 @@ class SyncService:
                                 "entity_id": eid,
                                 "resolution": "remote",
                             })
+                        elif resolution == "conflict_tombstone":
+                            conflicts.append({
+                                "entity_type": etype,
+                                "entity_id": eid,
+                                "resolution": "tombstone",
+                            })
                         applied.append({
                             "entity_type": etype,
                             "entity_id": eid,
@@ -164,6 +173,18 @@ class SyncService:
                             "entity_type": etype,
                             "entity_id": eid,
                             "resolution": "remote",
+                        })
+                    elif resolution == "conflict_tombstone":
+                        conflicts.append({
+                            "entity_type": etype,
+                            "entity_id": eid,
+                            "resolution": "tombstone",
+                        })
+                    elif resolution == "conflict_circular_ref":
+                        conflicts.append({
+                            "entity_type": etype,
+                            "entity_id": eid,
+                            "resolution": "circular_ref",
                         })
                     applied.append({
                         "entity_type": etype,
@@ -204,15 +225,30 @@ class SyncService:
         """Apply a single event inside a SAVEPOINT.
 
         Returns one of:
-            ``"ok"``              — event applied cleanly
-            ``"conflict_local"``  — LWW resolved to local (no-op)
-            ``"conflict_remote"``  — LWW resolved to remote (applied)
+            ``"ok"``                    — event applied cleanly
+            ``"conflict_local"``        — LWW resolved to local (no-op)
+            ``"conflict_remote"``       — LWW resolved to remote (applied)
+            ``"conflict_tombstone"``    — entity is tombstoned, create/update rejected
+            ``"conflict_circular_ref"`` — folder parent_id would create a cycle
         """
         client_ts_n = sanitize_zero_time(
             normalize_timestamp(client_ts), now=utc_now_iso()
         )
 
+        # C2: Strip client-only and protected fields from payload.
+        payload = strip_client_fields(payload, etype)
+
+        # C1: Anti-resurrection — reject create/update for tombstoned entities.
+        if action in ("create", "update"):
+            tomb = await TombstoneService(self.db).exists(etype, eid)
+            if tomb is not None:
+                return "conflict_tombstone"
+
         if action == "create":
+            # C3: Folder circular reference detection on create.
+            if etype == "folder" and payload.get("parent_id"):
+                if await check_folder_circular_ref(self.db, eid, payload["parent_id"]):
+                    return "conflict_circular_ref"
             data = dict(payload)
             data["id"] = eid
             if "updated_at" in data:
@@ -230,7 +266,10 @@ class SyncService:
         if action == "update":
             obj = await self.db.get(model, eid)
             if obj is None:
-                # Treat as create if missing (idempotent upsert).
+                # Idempotent upsert — but never resurrect a tombstoned entity.
+                tomb = await TombstoneService(self.db).exists(etype, eid)
+                if tomb is not None:
+                    return "conflict_tombstone"
                 data = dict(payload)
                 data["id"] = eid
                 data["updated_at"] = client_ts_n
@@ -241,6 +280,11 @@ class SyncService:
             decision = check_lww_conflict(obj, client_ts_n)
             if decision == "local":
                 return "conflict_local"
+            # C3: Folder circular reference detection.
+            if etype == "folder" and "parent_id" in payload:
+                new_parent = payload["parent_id"]
+                if await check_folder_circular_ref(self.db, eid, new_parent):
+                    return "conflict_circular_ref"
             # Apply remote update.
             for k, v in payload.items():
                 setattr(obj, k, v)
@@ -255,6 +299,8 @@ class SyncService:
             if obj is not None:
                 await self.db.delete(obj)
                 await self.db.flush()
+            # M1: Record tombstone so pull/full propagates deletion to peers.
+            await TombstoneService(self.db).create(etype, eid)
             return "ok"
 
         raise ValueError(f"Unknown action: {action}")
@@ -275,15 +321,25 @@ class SyncService:
 
         Routes note events through NoteService so the .md file and DB
         row stay consistent. Returns one of:
-            ``"ok"``               — event applied cleanly
-            ``"conflict_local"``   — LWW resolved to local (no-op)
-            ``"conflict_remote"``  — LWW resolved to remote (applied)
+            ``"ok"``                    — event applied cleanly
+            ``"conflict_local"``        — LWW resolved to local (no-op)
+            ``"conflict_remote"``       — LWW resolved to remote (applied)
+            ``"conflict_tombstone"``    — entity is tombstoned, create/update rejected
         """
         from app.services.note import NoteService
 
         client_ts_n = sanitize_zero_time(
             normalize_timestamp(client_ts), now=utc_now_iso()
         )
+
+        # C2: Strip client-only and protected fields from payload.
+        payload = strip_client_fields(payload, etype)
+
+        # C1: Anti-resurrection — reject create/update for tombstoned entities.
+        if action in ("create", "update"):
+            tomb = await TombstoneService(self.db).exists(etype, eid)
+            if tomb is not None:
+                return "conflict_tombstone"
 
         if action == "create":
             data = dict(payload)
@@ -297,6 +353,9 @@ class SyncService:
             # LWW check before delegating to NoteService.
             existing = await self.db.get(Note, eid)
             if existing is None:
+                tomb = await TombstoneService(self.db).exists(etype, eid)
+                if tomb is not None:
+                    return "conflict_tombstone"
                 # Treat as create (idempotent upsert).
                 data = dict(payload)
                 data["id"] = eid
@@ -316,6 +375,8 @@ class SyncService:
         if action == "delete":
             note_svc = NoteService(self.db, self.fs, sync_mode=True)
             await note_svc.delete(eid)
+            # sync_mode skips tombstone inside NoteService; push delete is authoritative.
+            await TombstoneService(self.db).create(etype, eid)
             return "ok"
 
         raise ValueError(f"Unknown action: {action}")

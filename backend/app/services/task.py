@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.task import Task
 from app.services.base import BaseService
-from app.services.tombstone import TombstoneService
 
 
 class TaskService(BaseService):
@@ -27,6 +26,7 @@ class TaskService(BaseService):
     """
 
     model = Task
+    entity_type = "task"
 
     def __init__(self, db: AsyncSession) -> None:
         super().__init__(db)
@@ -76,12 +76,11 @@ class TaskService(BaseService):
 
         If the row no longer exists this is a no-op for the ORM delete,
         but a tombstone is always ensured (idempotent via
-        TombstoneService).
+        ``_ensure_tombstone`` → ``TombstoneService``).
         """
         obj = await self.db.get(self.model, id)
         if obj is not None:
             await self.db.delete(obj)
             await self.db.flush()
-        # Always ensure a tombstone exists (idempotent).
-        tomb_svc = TombstoneService(self.db)
-        await tomb_svc.create("task", id)
+        # M1: Always ensure a tombstone exists (idempotent).
+        await self._ensure_tombstone(id)

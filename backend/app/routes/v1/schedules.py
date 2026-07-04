@@ -25,6 +25,7 @@ class ScheduleService(BaseService):
     """Thin service for Schedule — lists upcoming items ordered by due_at."""
 
     model = Schedule
+    entity_type = "schedule"
 
     async def list(
         self,

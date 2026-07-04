@@ -1,7 +1,32 @@
 # PomodoroXII Phase C 转接文档
 
-> **用途**: 在新对话中将此文档作为 prompt 发给 agent,让其在目标项目中继续实施 Phase C。  
-> **前置**: Phase A + Phase B 已全部完成（2026-07-02 从 `PomodoroXII-rebuild` 合并入本仓库）。  
+> **状态（2026-07-04 更新）**: Phase C sync 安全项（C1/C2/C3/M1）已全部闭环实现并通过审计。
+> 全量测试 **386 passed**（含 12 个 Phase C 补全测试）。代码层面无 P0 阻塞项。
+>
+> **已完成项**:
+> - C1 墓碑防复活（create/update 均查 TombstoneService.exists）✅
+> - C2 strip_client_fields（剥离 synced/_dirty/_etag/id/created_at/version + 实体专属字段）✅
+> - C3 folder 环检测（create/update 均检测，含 self-parent）✅
+> - M1 REST 删除墓碑（8 实体 entity_type 已设，BaseService._ensure_tombstone 统一）✅
+> - sync push delete 墓碑（非 note 无条件写；note 由 sync 层补写）✅
+> - Note sync_mode delete（NoteService 跳过墓碑，sync push delete 补写）✅
+> - TombstoneService 并发（expunge 替代 rollback，SAVEPOINT 安全）✅
+>
+> **未完成项（后续迭代）**:
+> - 4 个关联表实体（sessionQuickNote/scheduleQuickNote/taskQuickNote/memoComment）unlink 删除不写墓碑
+> - YAML frontmatter 未实现（.md 文件非自描述）
+> - 认证限流 / 安全响应头中间件
+> - MCP Server / backup / snapshot / APScheduler
+>
+> **测试数**: 386 passed（test_phase_c_completion.py 新增 12 个回归测试）
+>
+> **注意**: `pomodoroxii-deep-review-report.md` 中 §2/§3.1 关于 CRITICAL 问题的段落已过时
+> （所列 3 项 CRITICAL 均已在工作树修复）。请参考 `PhaseC审计报告.md` 和 `深度审查报告-独立复核版.md`。
+>
+> ---
+>
+> **用途**: 在新对话中将此文档作为 prompt 发给 agent,让其在目标项目中继续实施 Phase C。
+> **前置**: Phase A + Phase B 已全部完成（2026-07-02 从 `PomodoroXII-rebuild` 合并入本仓库）。
 > **目标**: 实施 Phase C — Sync 引擎 + 双存储桥接（含 06 文档 8 缺陷修正）。
 
 ---

@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.file_system.interfaces import FileSystem
 from app.models.note import Note
 from app.services.base import BaseService
-from app.services.tombstone import TombstoneService
 from app.services.time import utc_now_iso
 
 
@@ -57,6 +56,8 @@ class NoteService(BaseService):
     - ``delete`` removes the DB row and writes a tombstone first, then
       best-effort deletes the .md file.  Idempotent.
     """
+
+    entity_type = "note"
 
     def __init__(
         self,
@@ -186,10 +187,9 @@ class NoteService(BaseService):
         if obj is not None:
             await self.db.delete(obj)
             await self.db.flush()
-        # sync_mode: skip tombstone write — remote tombstone decision preserved.
+        # M1: Create tombstone via BaseService helper (skipped in sync_mode).
         if not self.sync_mode:
-            tomb_svc = TombstoneService(self.db)
-            await tomb_svc.create("note", id)
+            await self._ensure_tombstone(id)
         # FS deletion is best-effort (orphan .md is harmless).
         try:
             await self.fs.delete_note(id)

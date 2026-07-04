@@ -24,6 +24,7 @@ class SessionService(BaseService):
     """Thin service for Session — adds started_at desc ordering to list."""
 
     model = Session
+    entity_type = "session"
 
     async def list(
         self,
