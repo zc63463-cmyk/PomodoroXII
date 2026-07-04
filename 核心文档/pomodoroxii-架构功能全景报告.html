@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PomodoroXII 架构与功能全景报告</title>
+<style>
+:root{
+  --bg:#f8f9fa; --card:#ffffff; --border:#e2e8f0; --text:#1e293b; --muted:#64748b;
+  --blue:#3b82f6; --blue-bg:#eff6ff; --green:#10b981; --green-bg:#ecfdf5;
+  --purple:#8b5cf6; --purple-bg:#f5f3ff; --amber:#f59e0b; --amber-bg:#fffbeb;
+  --red:#ef4444; --red-bg:#fef2f2; --teal:#14b8a6; --teal-bg:#f0fdfa;
+  --radius:12px; --shadow:0 1px 3px rgba(0,0,0,.08);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.7}
+.wrap{max-width:960px;margin:0 auto;padding:24px 20px 60px}
+h1{font-size:28px;font-weight:700;margin-bottom:6px}
+h2{font-size:20px;font-weight:600;margin:32px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h3{font-size:16px;font-weight:600;margin:24px 0 12px}
+.sub{color:var(--muted);font-size:14px;margin-bottom:24px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px 24px;margin-bottom:16px;box-shadow:var(--shadow)}
+.grid{display:grid;gap:12px}
+.grid-2{grid-template-columns:repeat(2,1fr)}
+.grid-3{grid-template-columns:repeat(3,1fr)}
+.grid-4{grid-template-columns:repeat(4,1fr)}
+@media(max-width:680px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}}
+.stat{text-align:center;padding:16px 8px;border-radius:10px}
+.stat .num{font-size:32px;font-weight:700}
+.stat .label{font-size:12px;color:var(--muted);margin-top:4px}
+.badge{display:inline-block;padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500}
+.badge-blue{background:var(--blue-bg);color:var(--blue)}
+.badge-green{background:var(--green-bg);color:var(--green)}
+.badge-purple{background:var(--purple-bg);color:var(--purple)}
+.badge-amber{background:var(--amber-bg);color:var(--amber)}
+.badge-red{background:var(--red-bg);color:var(--red)}
+.badge-teal{background:var(--teal-bg);color:var(--teal)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 12px;background:var(--bg);border-bottom:2px solid var(--border);font-weight:600;white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid var(--border)}
+tr:hover td{background:var(--bg)}
+.pillar{padding:14px 16px;border-radius:10px;border-left:4px solid}
+.flow-box{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0}
+.flow-item{padding:8px 14px;border-radius:8px;font-size:13px;font-weight:500;white-space:nowrap}
+.arrow{color:var(--muted);font-size:16px}
+.tag{font-size:11px;padding:2px 8px;border-radius:4px;margin-right:4px}
+.progress{height:8px;border-radius:4px;background:var(--border);overflow:hidden;margin-top:6px}
+.progress-fill{height:100%;border-radius:4px;transition:width .3s}
+.timeline-item{display:flex;gap:16px;margin-bottom:16px}
+.timeline-dot{width:12px;height:12px;border-radius:50%;margin-top:6px;flex-shrink:0}
+.timeline-content{flex:1}
+.timeline-title{font-weight:600;font-size:15px}
+.timeline-meta{font-size:12px;color:var(--muted)}
+.toc{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px 24px;margin-bottom:24px}
+.toc a{color:var(--blue);text-decoration:none;font-size:14px}
+.toc a:hover{text-decoration:underline}
+.toc ul{list-style:none;display:grid;grid-template-columns:repeat(2,1fr);gap:4px}
+.section-anchor{scroll-margin-top:20px}
+code{background:var(--bg);padding:2px 6px;border-radius:4px;font-size:12px;font-family:'Fira Code',monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>PomodoroXII 架构与功能全景报告</h1>
+<p class="sub">生成时间：2026-07-02 | 基于 12 份核心文档综合 | 项目路径：E:\Development\MyAwesomeApp\PomodoroXII</p>
+
+<div class="toc">
+  <strong>目录</strong>
+  <ul>
+    <li><a href="#overview">1. 项目总览</a></li>
+    <li><a href="#principles">2. 设计理念与三条铁律</a></li>
+    <li><a href="#architecture">3. 三层架构 + 双存储</a></li>
+    <li><a href="#features">4. 11 功能域 60 子功能</a></li>
+    <li><a href="#sync">5. 同步引擎设计</a></li>
+    <li><a href="#metadata">6. 四维元数据产出</a></li>
+    <li><a href="#agent">7. Agent 三路径消费</a></li>
+    <li><a href="#reliability">8. 可靠性保障</a></li>
+    <li><a href="#workspace">9. 多工作空间（隐私空间）</a></li>
+    <li><a href="#techstack">10. 技术栈升级</a></li>
+    <li><a href="#milestones">11. 实施路线图</a></li>
+    <li><a href="#references">12. 参考项目</a></li>
+  </ul>
+</div>
+
+<!-- 1. 项目总览 -->
+<div class="section-anchor" id="overview">
+<h2>1. 项目总览</h2>
+<div class="card">
+  <div class="grid grid-4">
+    <div class="stat" style="background:var(--blue-bg)">
+      <div class="num" style="color:var(--blue)">11</div>
+      <div class="label">功能域</div>
+    </div>
+    <div class="stat" style="background:var(--green-bg)">
+      <div class="num" style="color:var(--green)">60</div>
+      <div class="label">子功能</div>
+    </div>
+    <div class="stat" style="background:var(--purple-bg)">
+      <div class="num" style="color:var(--purple)">14</div>
+      <div class="label">同步实体</div>
+    </div>
+    <div class="stat" style="background:var(--amber-bg)">
+      <div class="num" style="color:var(--amber)">~27</div>
+      <div class="label">开发天数</div>
+    </div>
+  </div>
+  <div style="margin-top:16px;font-size:14px;color:var(--muted)">
+    PomodoroXII 是从 pomodoroxi 架构升级的全新全栈项目，核心定位是<strong>个人状态管理平台</strong>——以番茄钟为核心引擎，产出时间/专注/认知/行为四维元数据，供 Agent 和插件消费分析。
+  </div>
+</div>
+</div>
+
+<!-- 2. 设计理念 -->
+<div class="section-anchor" id="principles">
+<h2>2. 设计理念与三条铁律</h2>
+<div class="card">
+  <div class="grid grid-3">
+    <div class="pillar" style="border-color:var(--green);background:var(--green-bg)">
+      <strong style="color:var(--green)">铁律 1：Routers commit</strong>
+      <p style="font-size:13px;margin-top:6px">事务控制在请求边界。Router 负责调用 <code>db.commit()</code>，Service 只 <code>flush</code>。</p>
+    </div>
+    <div class="pillar" style="border-color:var(--blue);background:var(--blue-bg)">
+      <strong style="color:var(--blue)">铁律 2：Services 不导入 FastAPI</strong>
+      <p style="font-size:13px;margin-top:6px">业务逻辑与 HTTP 解耦，可独立测试，不依赖 Request/Response。</p>
+    </div>
+    <div class="pillar" style="border-color:var(--purple);background:var(--purple-bg)">
+      <strong style="color:var(--purple)">铁律 3：Models 纯数据</strong>
+      <p style="font-size:13px;margin-top:6px">ORM 模型只有字段和约束，无业务方法。SyncMixin 统一元数据。</p>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Vibe Coding 时代的设计原则</h3>
+  <table>
+    <thead><tr><th>原则</th><th>核心思想</th><th>PomodoroXII 对应</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge badge-green">契约先行</span></td><td>接口用 Protocol/ABC 定义，AI 改实现不改签名</td><td>Service 层 + interfaces.py</td></tr>
+      <tr><td><span class="badge badge-blue">子系统自包含</span></td><td>每个子系统能独立放进 AI 上下文窗口</td><td>file_system 15 文件自包含</td></tr>
+      <tr><td><span class="badge badge-purple">测试即规格</span></td><td>测试 = 不变量 = AI 的安全围栏</td><td>每 Service 方法 3+ 测试</td></tr>
+      <tr><td><span class="badge badge-amber">功能隔离</span></td><td>新功能走新路径，用 registry 模式路由</td><td>ENTITY_REGISTRY + sync 双路径</td></tr>
+      <tr><td><span class="badge badge-teal">元数据自描述</span></td><td>AI 能自动理解项目结构和约束</td><td>AGENTS.md + frontmatter</td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<!-- 3. 三层架构 -->
+<div class="section-anchor" id="architecture">
+<h2>3. 三层架构 + 双存储</h2>
+<div class="card">
+  <h3>架构分层</h3>
+  <div class="flow-box">
+    <div class="flow-item" style="background:var(--blue-bg);color:var(--blue)">API Layer (routes/v1)</div>
+    <span class="arrow">→</span>
+    <div class="flow-item" style="background:var(--purple-bg);color:var(--purple)">Service Layer (flush)</div>
+    <span class="arrow">→</span>
+    <div class="flow-item" style="background:var(--green-bg);color:var(--green)">Repository (ORM + Alembic)</div>
+    <span class="arrow">→</span>
+    <div class="flow-item" style="background:var(--teal-bg);color:var(--teal)">SQLite (WAL)</div>
+  </div>
+
+  <h3 style="margin-top:20px">API 层 — 4 类端点</h3>
+  <div class="grid grid-4">
+    <div class="card" style="padding:12px;text-align:center;background:var(--blue-bg);border-color:var(--blue)">
+      <strong style="color:var(--blue)">REST API</strong><br>
+      <span style="font-size:12px;color:var(--muted)">/api/v1/*</span><br>
+      <span style="font-size:11px">CRUD + PATCH 统一</span>
+    </div>
+    <div class="card" style="padding:12px;text-align:center;background:var(--green-bg);border-color:var(--green)">
+      <strong style="color:var(--green)">Sync API</strong><br>
+      <span style="font-size:12px;color:var(--muted)">/api/sync/*</span><br>
+      <span style="font-size:11px">pull/push/full</span>
+    </div>
+    <div class="card" style="padding:12px;text-align:center;background:var(--purple-bg);border-color:var(--purple)">
+      <strong style="color:var(--purple)">Export API</strong><br>
+      <span style="font-size:12px;color:var(--muted)">/api/export/*</span><br>
+      <span style="font-size:11px">JSONL + graph</span>
+    </div>
+    <div class="card" style="padding:12px;text-align:center;background:var(--amber-bg);border-color:var(--amber)">
+      <strong style="color:var(--amber)">MCP Server</strong><br>
+      <span style="font-size:12px;color:var(--muted)">stdio</span><br>
+      <span style="font-size:11px">Claude/Cursor 接入</span>
+    </div>
+  </div>
+
+  <h3 style="margin-top:20px">Service 层 — 核心服务</h3>
+  <table>
+    <thead><tr><th>Service</th><th>职责</th><th>关键设计</th></tr></thead>
+    <tbody>
+      <tr><td><code>TaskService</code></td><td>任务 CRUD</td><td>version 递增</td></tr>
+      <tr><td><code>NoteService</code></td><td>笔记桥接 DB + FS</td><td>Saga 模式</td></tr>
+      <tr><td><code>SyncService</code></td><td>同步 push/pull/full</td><td>SAVEPOINT + 5 道安全检查</td></tr>
+      <tr><td><code>CascadeService</code></td><td>统一级联删除</td><td>REST + sync 共用</td></tr>
+      <tr><td><code>TombstoneService</code></td><td>墓碑创建/检查/清理</td><td>TTL 90d + 防复活</td></tr>
+      <tr><td><code>BackupService</code></td><td>双库自动备份</td><td>每日 3:00</td></tr>
+      <tr><td><code>SnapshotService</code></td><td>定时 JSONL 快照</td><td>每日 3:30</td></tr>
+      <tr><td><code>ConsistencyService</code></td><td>DB ↔ .md 一致性</td><td>每小时检查</td></tr>
+      <tr><td><code>ExportService</code></td><td>导出 _graph + _analysis_hints</td><td>复用 export-v2.ts 格式</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:20px">双存储模型</h3>
+  <div class="grid grid-2">
+    <div class="card" style="background:var(--bg);border-color:var(--border)">
+      <strong>pomodoroxi.db (SQLAlchemy)</strong>
+      <ul style="font-size:13px;margin-top:8px;padding-left:20px">
+        <li>16 表 + SyncMixin (version)</li>
+        <li>元数据 + content_hash</li>
+        <li>Alembic async + WAL 模式</li>
+        <li>双库自动备份</li>
+      </ul>
+    </div>
+    <div class="card" style="background:var(--teal-bg);border-color:var(--teal)">
+      <strong style="color:var(--teal)">file_system 子系统</strong>
+      <ul style="font-size:13px;margin-top:8px;padding-left:20px;color:var(--text)">
+        <li>index.db (7 表 + FTS5 trigram)</li>
+        <li>.md 文件 (正文唯一 SoT)</li>
+        <li>8 Mixin + 三层锁</li>
+        <li>版本历史 + 回收站</li>
+      </ul>
+    </div>
+  </div>
+  <div style="text-align:center;margin:12px 0">
+    <span class="badge badge-red">Saga 模式跨库一致性</span>
+    <span class="badge badge-amber">先 DB flush → 再 FS write → 成功后统一 commit → 失败补偿删除</span>
+  </div>
+</div>
+</div>
+
+<!-- 4. 功能域 -->
+<div class="section-anchor" id="features">
+<h2>4. 11 功能域 60 子功能</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>功能域</th><th>子功能数</th><th>核心子功能</th><th>成熟参考</th><th>优先级</th></tr></thead>
+    <tbody>
+      <tr><td><strong>A. 番茄钟核心</strong></td><td>6</td><td>计时器/事件追踪/上下文/认知标记/音频/快捷键</td><td>Forest, Toggl Track</td><td><span class="badge badge-red">P0</span></td></tr>
+      <tr><td><strong>B. 任务管理</strong></td><td>5</td><td>CRUD/状态机/会话关联/标签/优先级</td><td>Todoist, TickTick</td><td><span class="badge badge-red">P0</span></td></tr>
+      <tr><td><strong>C. 笔记系统</strong></td><td>6</td><td>双存储 CRUD/文件夹树/FTS5 搜索/版本历史/回收站/速记转换</td><td>Obsidian, Joplin</td><td><span class="badge badge-amber">P1</span></td></tr>
+      <tr><td><strong>D. 速记系统</strong></td><td>7</td><td>CRUD/心情/会话关联/任务关联/日程关联/评论/标签树</td><td>Flomo, Google Keep</td><td><span class="badge badge-amber">P1</span></td></tr>
+      <tr><td><strong>E. 复盘系统</strong></td><td>6</td><td>每日复盘/结构化/模板/提示/标签/自动关联</td><td>Day One, Stoic</td><td><span class="badge badge-blue">P2</span></td></tr>
+      <tr><td><strong>F. 统计分析</strong></td><td>7</td><td>统计/专注模式/洞察/日历/日报/报告/导出</td><td>Toggl, RescueTime</td><td><span class="badge badge-blue">P2</span></td></tr>
+      <tr><td><strong>G. 同步引擎</strong></td><td>6</td><td>Outbox/云端同步/门面/冲突解决/墓碑/事务</td><td>PowerSync, Replicache</td><td><span class="badge badge-red">P0</span></td></tr>
+      <tr><td><strong>H. 基础设施</strong></td><td>6</td><td>认证/限流/配置/部署/离线/通知</td><td>FastAPI 官方</td><td><span class="badge badge-red">P0</span></td></tr>
+      <tr><td><strong>I. 日程管理</strong></td><td>4</td><td>CRUD/日历视图/速记关联/优先级</td><td>Google Calendar</td><td><span class="badge badge-amber">P1</span></td></tr>
+      <tr><td><strong>J. 习惯追踪</strong></td><td>4</td><td>CRUD/打卡/连续天数/频率</td><td>Streaks, Habitica</td><td><span class="badge badge-blue">P2</span></td></tr>
+      <tr><td><strong>K. 时间块</strong></td><td>3</td><td>CRUD/类型/状态</td><td>Sunsama, Clockify</td><td><span class="badge badge-blue">P2</span></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>功能优先级矩阵</h3>
+  <table>
+    <thead><tr><th>优先级</th><th>功能</th><th>理由</th><th>Milestone</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge badge-red">P0</span></td><td>计时器 + 任务 CRUD + 同步引擎 + 认证</td><td>核心垂直切片</td><td>M0-M2</td></tr>
+      <tr><td><span class="badge badge-amber">P1</span></td><td>笔记 CRUD + 文件夹 + FTS5 + 速记 + 日程</td><td>差异化能力</td><td>M3</td></tr>
+      <tr><td><span class="badge badge-blue">P2</span></td><td>版本历史 + 回收站 + 转换 + 复盘 + 统计 + 习惯 + 时间块</td><td>增强体验</td><td>M3-M5</td></tr>
+      <tr><td><span class="badge badge-purple">P3</span></td><td>事件追踪 + 上下文 + 认知 + 高级分析</td><td>需数据积累</td><td>M5+</td></tr>
+      <tr><td><span class="badge badge-teal">P4</span></td><td>后端导出 + MCP Server + 通知</td><td>Agent 接入</td><td>M4</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>功能协作关系图</h3>
+  <div style="font-family:monospace;font-size:12px;line-height:1.8;white-space:pre-wrap;background:var(--bg);padding:16px;border-radius:8px;overflow-x:auto">
+用户操作
+    │
+    ├──→ [A1 计时器] ──→ [A2 事件追踪] ──→ [A4 认知标记]
+    │         │
+    │         ├──→ [B3 任务关联] ←── [B1 任务CRUD]
+    │         ├──→ [D3 速记关联] ←── [D1 速记CRUD] ──→ [C6 转换] ──→ [C1 笔记] ──→ [C3 FTS5]
+    │         ├──→ [I1 日程] ──→ [I2 日历]
+    │         ├──→ [J1 习惯] ──→ [J2 打卡] ──→ [J3 连续天数]
+    │         ├──→ [K1 时间块]
+    │         └──→ [E1 复盘] ←── [E6 自动关联]
+    │
+    ├──→ [F1 统计] ←── (A1 + B1 + E1 + J1 + K1)
+    │         └──→ [F7 导出] ←── (全部数据)
+    │
+    └──→ [G1 Outbox] ──→ [G2 同步] ──→ [G4 冲突解决]
+              │              ├── note/folder → NoteFileService (Saga)
+              │              └── 其他 12 种 → ORM 直处理
+              └──→ [G5 墓碑] + [G6 事务]
+  </div>
+</div>
+</div>
+
+<!-- 5. 同步引擎 -->
+<div class="section-anchor" id="sync">
+<h2>5. 同步引擎设计</h2>
+<div class="card">
+  <h3>核心机制</h3>
+  <table>
+    <thead><tr><th>机制</th><th>实现</th><th>来源</th></tr></thead>
+    <tbody>
+      <tr><td>Outbox 合并矩阵</td><td>create+delete→消除, delete+create→update, update+update→取最新</td><td>pomodoroxi 战斗经验</td></tr>
+      <tr><td>LWW + content_hash</td><td>双游标增量：updated_at 检测元数据变化, content_hash 检测正文变化</td><td>本次升级</td></tr>
+      <tr><td>Tombstone 防复活</td><td>TTL 90d + 墓碑检查 + created_at 比较 + TTL 过期保护</td><td>pomodoroxi</td></tr>
+      <tr><td>零点时间戳检测</td><td>识别 00:00:00.000 为陈旧数据，跳过 LWW 冲突</td><td>pomodoroxi</td></tr>
+      <tr><td>SAVEPOINT 隔离</td><td>每事件独立事务，单失败不滚全批</td><td>pomodoroxi</td></tr>
+      <tr><td>Saga 跨库一致性</td><td>先 DB flush → 再 FS write → 统一 commit → 失败补偿</td><td>本次新建</td></tr>
+      <tr><td>5 道安全检查</td><td>墓碑/零点时间戳/字段剥离/循环引用/Tombstone 创建</td><td>提取为 sync_safety.py</td></tr>
+      <tr><td>sync 双路径</td><td>note/folder 走 NoteFileService，其他 12 种走 ORM</td><td>本次设计</td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<!-- 6. 四维元数据 -->
+<div class="section-anchor" id="metadata">
+<h2>6. 四维元数据产出</h2>
+<div class="card">
+  <div class="grid grid-4">
+    <div class="stat" style="background:var(--blue-bg);border:1px solid var(--blue)">
+      <div class="num" style="color:var(--blue);font-size:20px">时间</div>
+      <div style="font-size:12px;margin-top:8px;text-align:left">
+        started_at / ended_at<br>duration / type<br>completed
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">来源：番茄钟会话</div>
+    </div>
+    <div class="stat" style="background:var(--green-bg);border:1px solid var(--green)">
+      <div class="num" style="color:var(--green);font-size:20px">专注</div>
+      <div style="font-size:12px;margin-top:8px;text-align:left">
+        attention_score<br>flow_state<br>distraction_count
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">来源：认知标记</div>
+    </div>
+    <div class="stat" style="background:var(--purple-bg);border:1px solid var(--purple)">
+      <div class="num" style="color:var(--purple);font-size:20px">认知</div>
+      <div style="font-size:12px;margin-top:8px;text-align:left">
+        mood / energy<br>achievements<br>session 快照
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">来源：复盘 + 事件</div>
+    </div>
+    <div class="stat" style="background:var(--amber-bg);border:1px solid var(--amber)">
+      <div class="num" style="color:var(--amber);font-size:20px">行为</div>
+      <div style="font-size:12px;margin-top:8px;text-align:left">
+        task 完成率<br>habit streak<br>时间块分布
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">来源：任务/习惯/时间块</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>元数据质量保障</h3>
+  <table>
+    <thead><tr><th>质量维度</th><th>保障措施</th></tr></thead>
+    <tbody>
+      <tr><td>完整性</td><td>sync_safety.py 5 道安全检查 + 一致性检查定时任务</td></tr>
+      <tr><td>一致性</td><td>Saga 模式跨库一致性 + DB ↔ .md 定时修复</td></tr>
+      <tr><td>可追溯</td><td>sync_events 审计日志 + version 版本号 + .md 版本历史</td></tr>
+      <tr><td>标准化</td><td>时间戳 DB 内无 Z + 导出加 Z + tags 原生 list</td></tr>
+      <tr><td>可消费</td><td>MCP Server + Export API + .md frontmatter 三路径</td></tr>
+      <tr><td>不丢失</td><td>双库自动备份 + Outbox 合并矩阵 + Tombstone 防复活</td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<!-- 7. Agent 三路径 -->
+<div class="section-anchor" id="agent">
+<h2>7. Agent 三路径消费</h2>
+<div class="card">
+  <div class="grid grid-3">
+    <div class="card" style="background:var(--green-bg);border-color:var(--green)">
+      <strong style="color:var(--green)">路径 A：读 .md 文件</strong>
+      <ul style="font-size:13px;margin-top:8px;padding-left:18px">
+        <li>YAML frontmatter 自描述</li>
+        <li>notes/ + reflections/ + AGENTS.md</li>
+        <li>时间戳带 Z 后缀</li>
+        <li>tags 为原生 YAML list</li>
+      </ul>
+      <div style="margin-top:8px"><span class="badge badge-green">离线场景</span></div>
+    </div>
+    <div class="card" style="background:var(--blue-bg);border-color:var(--blue)">
+      <strong style="color:var(--blue)">路径 B：API 查询</strong>
+      <ul style="font-size:13px;margin-top:8px;padding-left:18px">
+        <li>/api/export/full (JSON/NDJSON)</li>
+        <li>/api/export/{entity}.jsonl</li>
+        <li>/api/events 事件流</li>
+        <li>_graph + _analysis_hints</li>
+      </ul>
+      <div style="margin-top:8px"><span class="badge badge-blue">程序化接入</span></div>
+    </div>
+    <div class="card" style="background:var(--purple-bg);border-color:var(--purple)">
+      <strong style="color:var(--purple)">路径 C：MCP Server</strong>
+      <ul style="font-size:13px;margin-top:8px;padding-left:18px">
+        <li>Tools: query_tasks / search_notes</li>
+        <li>get_focus_stats / get_relations</li>
+        <li>Resources: px://notes/{id}</li>
+        <li>Claude/Cursor 原生接入</li>
+      </ul>
+      <div style="margin-top:8px"><span class="badge badge-purple">AI 原生</span></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- 8. 可靠性 -->
+<div class="section-anchor" id="reliability">
+<h2>8. 可靠性保障</h2>
+<div class="card">
+  <div class="grid grid-2">
+    <div>
+      <h3 style="color:var(--green)">同步可靠性</h3>
+      <ul style="font-size:13px;padding-left:20px">
+        <li>Outbox 合并矩阵（create+delete 消除）</li>
+        <li>Tombstone 防复活（TTL 90d + 5 道检查）</li>
+        <li>SAVEPOINT 隔离（单事件失败不滚全批）</li>
+        <li>死信处理（不可重试错误自动移出 outbox）</li>
+        <li>Promise mutex 串行化（sync/fullSync 不并发）</li>
+      </ul>
+    </div>
+    <div>
+      <h3 style="color:var(--blue)">数据可靠性</h3>
+      <ul style="font-size:13px;padding-left:20px">
+        <li>双库自动备份（每日 3:00）</li>
+        <li>定时 JSONL 快照（每日 3:30）</li>
+        <li>一致性检查与修复（每小时）</li>
+        <li>.md 原子写入（临时文件 + os.replace）</li>
+        <li>三层锁（RLock → FileLock → SQLite 事务）</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>已知风险与缓解</h3>
+  <table>
+    <thead><tr><th>风险</th><th>严重度</th><th>缓解措施</th></tr></thead>
+    <tbody>
+      <tr><td>跨库一致性（DB + .md）</td><td><span class="badge badge-red">高</span></td><td>Saga + 补偿操作 + 定时一致性检查</td></tr>
+      <tr><td>sync_pull 读 .md 性能</td><td><span class="badge badge-amber">中</span></td><td>read_notes_batch 批量读取 + content_hash 跳过</td></tr>
+      <tr><td>LWW 依赖客户端时钟</td><td><span class="badge badge-amber">中</span></td><td>content_hash 缓解 + HLC（Phase 3 可选）</td></tr>
+      <tr><td>万条笔记以上规模</td><td><span class="badge badge-amber">中</span></td><td>舒适区万条以内，十万条需文件分片</td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<!-- 9. 多工作空间 -->
+<div class="section-anchor" id="workspace">
+<h2>9. 多工作空间（隐私空间）</h2>
+<div class="card">
+  <h3>方案 C：DB-per-workspace + 全局配置库</h3>
+  <div style="font-family:monospace;font-size:12px;line-height:1.8;white-space:pre-wrap;background:var(--bg);padding:16px;border-radius:8px;overflow-x:auto">
+data/
+├── workspaces/
+│   ├── default/          # 日常空间
+│   │   ├── pomodoroxii.db
+│   │   ├── index.db
+│   │   └── notes/
+│   ├── test/             # 测试空间
+│   │   ├── pomodoroxii.db
+│   │   ├── index.db
+│   │   └── notes/
+│   └── work/             # 工作空间
+│       ├── pomodoroxii.db
+│       ├── index.db
+│       └── notes/
+├── reflections/          # 复盘按空间分
+│   ├── default/
+│   └── test/
+└── app.db                # 全局库（workspace 注册表 + 认证）
+  </div>
+
+  <table style="margin-top:16px">
+    <thead><tr><th>层</th><th>改动</th><th>幅度</th></tr></thead>
+    <tbody>
+      <tr><td>认证</td><td>JWT 加 workspace_id</td><td><span class="badge badge-green">小</span></td></tr>
+      <tr><td>DB engine</td><td>动态选择（根据 JWT）</td><td><span class="badge badge-amber">中</span></td></tr>
+      <tr><td>models/services/routes</td><td><strong>不改</strong></td><td><span class="badge badge-green">无</span></td></tr>
+      <tr><td>sync 引擎</td><td><strong>零影响</strong>（天然隔离）</td><td><span class="badge badge-green">无</span></td></tr>
+      <tr><td>file_system</td><td>root_dir 动态推导</td><td><span class="badge badge-green">小</span></td></tr>
+    </tbody>
+  </table>
+
+  <div style="margin-top:12px">
+    <span class="badge badge-green">完全物理隔离</span>
+    <span class="badge badge-blue">业务代码零改动</span>
+    <span class="badge badge-purple">每空间独立备份</span>
+    <span class="badge badge-teal">参考: Dify / Obsidian / Chrome Profiles</span>
+  </div>
+</div>
+</div>
+
+<!-- 10. 技术栈 -->
+<div class="section-anchor" id="techstack">
+<h2>10. 技术栈升级</h2>
+<div class="card">
+  <div class="grid grid-2">
+    <div>
+      <h3 style="color:var(--blue)">后端</h3>
+      <table>
+        <tbody>
+          <tr><td>Python</td><td><strong>3.13</strong></td></tr>
+          <tr><td>包管理</td><td><strong>uv + pyproject.toml</strong></td></tr>
+          <tr><td>框架</td><td>FastAPI 0.115+</td></tr>
+          <tr><td>ORM</td><td>SQLAlchemy 2.0 + 命名约定</td></tr>
+          <tr><td>迁移</td><td><strong>Alembic async</strong></td></tr>
+          <tr><td>认证</td><td><strong>PyJWT + bcrypt</strong>（替代 python-jose）</td></tr>
+          <tr><td>日志</td><td><strong>JSON 结构化 + request_id</strong></td></tr>
+          <tr><td>性能</td><td><strong>uvloop + httptools</strong></td></tr>
+          <tr><td>定时</td><td><strong>APScheduler</strong></td></tr>
+          <tr><td>Agent</td><td><strong>MCP python-sdk</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3 style="color:var(--green)">前端</h3>
+      <table>
+        <tbody>
+          <tr><td>框架</td><td><strong>Vue 3.5</strong></td></tr>
+          <tr><td>构建</td><td><strong>Vite 6</strong></td></tr>
+          <tr><td>状态</td><td><strong>Pinia 3</strong></td></tr>
+          <tr><td>离线</td><td>Dexie.js 4.4（保持）</td></tr>
+          <tr><td>CSS</td><td>Tailwind CSS v4（保持）</td></tr>
+          <tr><td>TS</td><td><strong>5.x strict mode</strong></td></tr>
+          <tr><td>类型</td><td><strong>openapi-typescript</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h3 style="margin-top:16px">明确不升级</h3>
+  <div style="display:flex;flex-wrap:wrap;gap:6px">
+    <span class="badge badge-red">SQLModel（锁定版本）</span>
+    <span class="badge badge-red">Svelte/Solid（重写成本高）</span>
+    <span class="badge badge-red">PostgreSQL（单用户 SQLite 够用）</span>
+    <span class="badge badge-red">CRDT（不需要）</span>
+    <span class="badge badge-red">Redis（不需要）</span>
+    <span class="badge badge-red">GraphQL（不需要）</span>
+  </div>
+</div>
+</div>
+
+<!-- 11. 实施路线图 -->
+<div class="section-anchor" id="milestones">
+<h2>11. 实施路线图</h2>
+<div class="card">
+  <div class="timeline-item">
+    <div class="timeline-dot" style="background:var(--blue)"></div>
+    <div class="timeline-content">
+      <div class="timeline-title">M0：项目骨架 <span class="badge badge-blue">2 天</span></div>
+      <div class="timeline-meta">目录结构 / pyproject.toml / settings / db/base+session / Alembic / main.py+lifespan / errors+logging / Dockerfile</div>
+      <div class="progress"><div class="progress-fill" style="width:100%;background:var(--blue)"></div></div>
+      <div style="font-size:12px;margin-top:4px;color:var(--green)">验证：curl /api/health 返回 200</div>
+    </div>
+  </div>
+
+  <div class="timeline-item">
+    <div class="timeline-dot" style="background:var(--green)"></div>
+    <div class="timeline-content">
+      <div class="timeline-title">M1：认证 + Task 垂直切片 <span class="badge badge-green">3 天</span></div>
+      <div class="timeline-meta">auth/security.py (PyJWT) / routes/v1/auth.py / models/task.py / services/base.py + task_service.py / routes/v1/tasks.py / tests</div>
+      <div class="progress"><div class="progress-fill" style="width:85%;background:var(--green)"></div></div>
+      <div style="font-size:12px;margin-top:4px;color:var(--green)">验证：Task CRUD 全流程 + 测试通过</div>
+    </div>
+  </div>
+
+  <div class="timeline-item">
+    <div class="timeline-dot" style="background:var(--purple)"></div>
+    <div class="timeline-content">
+      <div class="timeline-title">M2：Sync 引擎 <span class="badge badge-purple">5 天</span></div>
+      <div class="timeline-meta">16 表 ORM / sync_safety.py 5 道检查 / tombstone_service / cascade_service / sync_service pull+push+full / tests</div>
+      <div class="progress"><div class="progress-fill" style="width:70%;background:var(--purple)"></div></div>
+      <div style="font-size:12px;margin-top:4px;color:var(--green)">验证：sync 全流程 + 墓碑防复活 + 级联删除</div>
+    </div>
+  </div>
+
+  <div class="timeline-item">
+    <div class="timeline-dot" style="background:var(--amber)"></div>
+    <div class="timeline-content">
+      <div class="timeline-title">M3：file_system 集成 <span class="badge badge-amber">5 天</span></div>
+      <div class="timeline-meta">移植 15 文件 / 补全 7 表 / frontmatter.py / note_service Saga / notes+search 路由 / AGENTS.md / tests</div>
+      <div class="progress"><div class="progress-fill" style="width:55%;background:var(--amber)"></div></div>
+      <div style="font-size:12px;margin-top:4px;color:var(--green)">验证：.md 含 frontmatter + FTS5 + DB↔.md 一致</div>
+    </div>
+  </div>
+
+  <div class="timeline-item">
+    <div class="timeline-dot" style="background:var(--teal)"></div>
+    <div class="timeline-content">
+      <div class="timeline-title">M4：可靠性 + Agent 接入 <span class="badge badge-teal">5 天</span></div>
+      <div class="timeline-meta">backup_service / snapshot_service / consistency_service / export_service / routes/export+admin / mcp/server+tools+resources</div>
+      <div class="progress"><div class="progress-fill" style="width:40%;background:var(--teal)"></div></div>
+      <div style="font-size:12px;margin-top:4px;color:var(--green)">验证：备份 + 快照 + MCP Claude Desktop 连接</div>
+    </div>
+  </div>
+
+  <div class="timeline-item">
+    <div class="timeline-dot" style="background:var(--red)"></div>
+    <div class="timeline-content">
+      <div class="timeline-title">M5：前端迁移 <span class="badge badge-red">5 天</span></div>
+      <div class="timeline-meta">Vue 3.5 + Vite 6 + Pinia 3 / Dexie v16 (+content_hash, -_etag) / openapi-typescript / 适配 notes API</div>
+      <div class="progress"><div class="progress-fill" style="width:25%;background:var(--red)"></div></div>
+      <div style="font-size:12px;margin-top:4px;color:var(--green)">验证：前端全功能跑通</div>
+    </div>
+  </div>
+
+  <div class="timeline-item">
+    <div class="timeline-dot" style="background:var(--muted)"></div>
+    <div class="timeline-content">
+      <div class="timeline-title">M6：部署 + 收尾 <span class="badge" style="background:var(--bg);color:var(--muted)">2 天</span></div>
+      <div class="timeline-meta">docker-compose / Cloudflare Tunnel / pre-commit hooks (ruff + eslint) / README.md</div>
+      <div class="progress"><div class="progress-fill" style="width:10%;background:var(--muted)"></div></div>
+      <div style="font-size:12px;margin-top:4px;color:var(--green)">验证：线上可访问 + 同步跑通</div>
+    </div>
+  </div>
+
+  <div style="text-align:center;margin-top:16px;padding:12px;background:var(--green-bg);border-radius:8px">
+    <strong style="color:var(--green)">总计：~27 天（5-6 周）</strong>
+  </div>
+</div>
+</div>
+
+<!-- 12. 参考项目 -->
+<div class="section-anchor" id="references">
+<h2>12. 参考项目</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>项目</th><th>借鉴点</th><th>应用场景</th></tr></thead>
+    <tbody>
+      <tr><td><strong>FastAPI 官方生产模式</strong></td><td>三层架构、命名约定、lifespan</td><td>项目结构</td></tr>
+      <tr><td><strong>Joplin</strong></td><td>REST API + 事件流 + DB+.md 双存储</td><td>API 设计</td></tr>
+      <tr><td><strong>Obsidian</strong></td><td>frontmatter 自描述 + diff-match-patch</td><td>文件格式</td></tr>
+      <tr><td><strong>Tolaria</strong> (12K+ stars)</td><td>AGENTS.md + Files-first 可移植性</td><td>Agent 友好</td></tr>
+      <tr><td><strong>MCP 协议</strong></td><td>Tools + Resources + Prompts</td><td>Agent 接入</td></tr>
+      <tr><td><strong>PowerSync</strong></td><td>Bucket 分桶 + Write Checkpoints</td><td>同步引擎（长期）</td></tr>
+      <tr><td><strong>Dify</strong></td><td>workspace_id 隔离 + Context 传播</td><td>多工作空间</td></tr>
+      <tr><td><strong>Chrome Profiles</strong></td><td>独立数据目录 + 共享配置</td><td>多工作空间</td></tr>
+      <tr><td><strong>Todoist</strong></td><td>Karma 系统、任务管理标杆</td><td>任务管理</td></tr>
+      <tr><td><strong>Flomo</strong></td><td>卡片笔记 + 标签</td><td>速记系统</td></tr>
+      <tr><td><strong>Day One</strong></td><td>模板、天气、心情追踪</td><td>复盘系统</td></tr>
+      <tr><td><strong>Toggl Track</strong></td><td>时间追踪 + 报告 + 导出</td><td>统计分析</td></tr>
+      <tr><td><strong>Streaks / Habitica</strong></td><td>连续天数、游戏化习惯</td><td>习惯追踪</td></tr>
+      <tr><td><strong>Sunsama</strong></td><td>日计划 + 时间块 + 拖拽</td><td>时间块</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card" style="background:var(--green-bg);border-color:var(--green);text-align:center">
+  <strong style="color:var(--green);font-size:16px">核心文档清单（12 份）</strong>
+  <div style="font-size:13px;margin-top:8px;color:var(--text)">
+    01-深度架构规划 | 02-技术栈升级 | 03-子功能定位分析 | 04-数据管理深度分析<br>
+    05-file_system 移植分析 | 06-实施计划评审 | 07-元数据可移植性升级 | 08-可移植性现状<br>
+    09-核心文档审查报告 | 10-用户扩展需求 | 11-平台愿景 | 12-AI 编码规范
+  </div>
+  <div style="font-size:12px;margin-top:8px;color:var(--muted)">路径：E:\Development\MyAwesomeApp\PomodoroXII\核心文档\</div>
+</div>
+</div>
+
+</div>
+</body>
+</html>

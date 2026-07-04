@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PomodoroXII — 架构与功能全景报告</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.4.0/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #fafafa; --surface: #ffffff; --border: #e5e7eb;
+    --text: #1f2937; --text2: #6b7280; --text3: #9ca3af;
+    --accent: #059669; --accent-light: #d1fae5;
+    --blue: #3b82f6; --blue-light: #dbeafe;
+    --amber: #f59e0b; --amber-light: #fef3c7;
+    --purple: #8b5cf6; --purple-light: #ede9fe;
+    --rose: #f43f5e; --rose-light: #ffe4e6;
+    --radius: 16px; --radius-sm: 8px; --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+    --shadow-lg: 0 10px 40px rgba(0,0,0,0.1);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f172a; --surface: #1e293b; --border: #334155;
+      --text: #e2e8f0; --text2: #94a3b8; --text3: #64748b;
+      --accent: #34d399; --accent-light: #064e3b;
+      --blue: #60a5fa; --blue-light: #1e3a5f;
+      --amber: #fbbf24; --amber-light: #451a03;
+      --purple: #a78bfa; --purple-light: #2e1065;
+      --rose: #fb7185; --rose-light: #4c0519;
+      --shadow: 0 1px 3px rgba(0,0,0,0.3);
+      --shadow-lg: 0 10px 40px rgba(0,0,0,0.4);
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; -webkit-font-smoothing: antialiased; }
+  
+  /* Header */
+  .hero {
+    background: linear-gradient(135deg, var(--accent) 0%, #065f46 50%, var(--purple) 100%);
+    color: white; padding: 80px 40px 60px; text-align: center; position: relative; overflow: hidden;
+  }
+  .hero::before { content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+    background: radial-gradient(circle at 30% 50%, rgba(255,255,255,0.08) 0%, transparent 50%),
+                radial-gradient(circle at 70% 30%, rgba(255,255,255,0.05) 0%, transparent 40%);
+  }
+  .hero h1 { font-size: clamp(28px, 4vw, 48px); font-weight: 800; letter-spacing: -0.02em; margin-bottom: 12px; position: relative; }
+  .hero p { font-size: clamp(14px, 1.5vw, 18px); opacity: 0.9; max-width: 600px; margin: 0 auto; position: relative; }
+  .hero-stats { display: flex; justify-content: center; gap: 32px; margin-top: 32px; position: relative; flex-wrap: wrap; }
+  .hero-stat { text-align: center; }
+  .hero-stat .num { font-size: 32px; font-weight: 800; display: block; }
+  .hero-stat .label { font-size: 12px; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.05em; }
+
+  /* Layout */
+  .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+  .section { padding: 60px 0; border-bottom: 1px solid var(--border); }
+  .section:last-child { border-bottom: none; }
+  .section-title { font-size: 26px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
+  .section-title .icon { font-size: 28px; }
+  .section-desc { color: var(--text2); margin-bottom: 32px; font-size: 15px; }
+
+  /* Cards */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; box-shadow: var(--shadow); transition: transform 0.2s, box-shadow 0.2s; }
+  .card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+  .card-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .card-icon { width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; }
+  .card h3 { font-size: 16px; font-weight: 600; }
+  .card p { color: var(--text2); font-size: 14px; line-height: 1.6; }
+
+  /* Feature table */
+  .feature-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .feature-table th { text-align: left; padding: 12px 16px; background: var(--bg); border-bottom: 2px solid var(--border); font-weight: 600; white-space: nowrap; }
+  .feature-table td { padding: 10px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .feature-table tr:hover td { background: var(--accent-light); }
+  .tag { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
+  .tag-p0 { background: var(--rose-light); color: var(--rose); }
+  .tag-p1 { background: var(--amber-light); color: #b45309; }
+  .tag-p2 { background: var(--blue-light); color: var(--blue); }
+  .tag-p3 { background: var(--purple-light); color: var(--purple); }
+  .tag-p4 { background: #f3f4f6; color: var(--text2); }
+
+  /* Timeline */
+  .timeline { position: relative; padding-left: 32px; }
+  .timeline::before { content: ''; position: absolute; left: 7px; top: 0; bottom: 0; width: 2px; background: var(--border); border-radius: 1px; }
+  .milestone { position: relative; margin-bottom: 28px; }
+  .milestone::before { content: ''; position: absolute; left: -28px; top: 4px; width: 16px; height: 16px; border-radius: 50%; background: var(--accent); border: 3px solid var(--surface); z-index: 1; }
+  .milestone.done::before { background: var(--accent); }
+  .milestone.active::before { background: var(--amber); animation: pulse 2s infinite; }
+  .milestone.future::before { background: var(--border); }
+  .milestone h4 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .milestone p { color: var(--text2); font-size: 13px; }
+  .milestone .days { display: inline-block; background: var(--accent-light); color: var(--accent); padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; margin-left: 8px; }
+
+  /* Mermaid container */
+  .mermaid-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; overflow-x: auto; margin: 20px 0; }
+  .mermaid { display: flex; justify-content: center; }
+
+  /* Nav */
+  .toc { position: fixed; right: 24px; top: 120px; width: 220px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); z-index: 100; max-height: calc(100vh - 140px); overflow-y: auto; }
+  .toc-title { font-size: 13px; font-weight: 700; margin-bottom: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; }
+  .toc a { display: block; padding: 6px 0; color: var(--text2); text-decoration: none; font-size: 13px; border-left: 2px solid transparent; padding-left: 12px; transition: all 0.15s; }
+  .toc a:hover, .toc a.active { color: var(--accent); border-left-color: var(--accent); }
+
+  /* Principles */
+  .principles { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .principle { padding: 20px; border-radius: var(--radius-sm); border-left: 4px solid; }
+  .principle h4 { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
+  .principle p { font-size: 13px; color: var(--text2); }
+
+  /* Progress bar */
+  .progress-bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin-top: 8px; }
+  .progress-fill { height: 100%; border-radius: 4px; transition: width 1s ease; }
+  
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  @media (max-width: 1024px) { .toc { display: none; } }
+  @media (max-width: 640px) {
+    .hero { padding: 48px 20px 36px; }
+    .hero-stats { gap: 20px; }
+    .section { padding: 36px 0; }
+    .card-grid { grid-template-columns: 1fr; }
+    .feature-table { font-size: 12px; }
+    .feature-table th, .feature-table td { padding: 8px 10px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Hero -->
+<div class="hero">
+  <h1>PomodoroXII</h1>
+  <p>架构与功能全景报告 &mdash; 基于深度分析的可视化总览，包含设计理念、三层架构、11 功能域 60 子功能、同步引擎、元数据体系、实施路线图</p>
+  <div class="hero-stats">
+    <div class="hero-stat"><span class="num">11</span><span class="label">功能域</span></div>
+    <div class="hero-stat"><span class="num">60</span><span class="label">子功能</span></div>
+    <div class="hero-stat"><span class="num">14</span><span class="label">同步实体</span></div>
+    <div class="hero-stat"><span class="num">~27</span><span class="label">天开发周期</span></div>
+    <div class="hero-stat"><span class="num">31</span><span class="label">参考项目</span></div>
+  </div>
+</div>
+
+<!-- TOC -->
+<nav class="toc" id="toc">
+  <div class="toc-title">目录导航</div>
+  <a href="#s1">1. 设计理念</a>
+  <a href="#s2">2. 三层架构</a>
+  <a href="#s3">3. 功能域全景</a>
+  <a href="#s4">4. 同步引擎</a>
+  <a href="#s5">5. 四维元数据</a>
+  <a href="#s6">6. Agent 三路径</a>
+  <a href="#s7">7. 可靠性保障</a>
+  <a href="#s8">8. 多工作空间</a>
+  <a href="#s9">9. 技术栈升级</a>
+  <a href="#s10">10. 实施路线图</a>
+  <a href="#s11">11. 参考项目</a>
+  <a href="#s12">12. 核心文档索引</a>
+</nav>
+
+<div class="container">
+
+<!-- Section 1: Design Philosophy -->
+<section class="section" id="s1">
+  <h2 class="section-title"><span class="icon">&#x2699;</span> 设计理念</h2>
+  <p class="section-desc">三条架构铁律 + Vibe Coding 五原则，从第一天就确立的代码组织哲学</p>
+
+  <div class="principles">
+    <div class="principle" style="background: var(--accent-light); border-color: var(--accent);">
+      <h4>&#x2699; Routers commit, Services flush</h4>
+      <p>事务控制权在请求边界（Router），Service 只 flush 不 commit。SAVEPOINT 隔离不会被击穿。</p>
+    </div>
+    <div class="principle" style="background: var(--blue-light); border-color: var(--blue);">
+      <h4>&#x1F4DD; Services 不导入 FastAPI</h4>
+      <p>业务逻辑与 HTTP 解耦。Service 可以独立单元测试，也可以被 CLI / 定时任务 / MCP Server 复用。</p>
+    </div>
+    <div class="principle" style="background: var(--amber-light); border-color: var(--amber);">
+      <h4>&#x1F4BE; Models 纯数据</h4>
+      <p>ORM 模型只有字段和约束，无业务方法。SyncMixin 统一元数据字段，避免每个模型重复定义。</p>
+    </div>
+    <div class="principle" style="background: var(--purple-light); border-color: var(--purple);">
+      <h4>&#x1F4E6; 子系统自包含</h4>
+      <p>file_system 15 个文件自包含，只依赖 3 个第三方包。AI 改子系统时不需要理解全局上下文。</p>
+    </div>
+    <div class="principle" style="background: var(--rose-light); border-color: var(--rose);">
+      <h4>&#x1F6E1;&#xFE0F; 测试即规格</h4>
+      <p>测试 = AI 的安全围栏。每个 Service 方法至少 3 个测试（正常/边界/错误），断言不可变行为不被破坏。</p>
+    </div>
+    <div class="principle" style="background: #f0fdf4; border-color: var(--accent);">
+      <h4>&#x1F91D; AGENTS.md 自描述</h4>
+      <p>每个子系统根目录放 AGENTS.md：做什么、对外接口是什么、不能碰什么。AI 读了就知道约束。</p>
+    </div>
+  </div>
+
+  <div class="mermaid-wrap" style="margin-top:32px;">
+  <pre class="mermaid">
+  graph LR
+    subgraph 铁律["&#x2699; 三条铁律 (不可违反)"]
+      L1["Routers commit<br/>事务边界在 Router"]
+      L2["Services flush<br/>不导入 FastAPI"]
+      L3["Models 纯数据<br/>SyncMixin 统一"]
+      L1 --> L2 --> L3
+    end
+    subgraph 原则["&#x1F4A1; Vibe Coding 五原则"]
+      P1["契约先行<br/>实现可换"]
+      P2["子自包含<br/>上下文独立"]
+      P3["测试即规格<br/>AI 安全围栏"]
+      P4["功能隔离<br/>新增不改旧"]
+      P5["元数据自描述<br/>AGENTS.md"]
+    end
+    铁律 --> 原则
+    style 铁律 fill:#dcfce7,stroke:#22c55e,color:#166534
+    style 原则 fill:#dbeafe,stroke:#3b82f6,color:#1e40af
+  </pre>
+  </div>
+</section>
+
+<!-- Section 2: Three-Layer Architecture -->
+<section class="section" id="s2">
+  <h2 class="section-title"><span class="icon">&#x1F3E2;</span> 三层架构 + 双存储</h2>
+  <p class="section-desc">API 层（校验+commit）→ Service 层（flush+业务）→ 双存储（DB + file_system），Saga 模式桥接跨库一致性</p>
+
+  <div class="mermaid-wrap">
+  <pre class="mermaid">
+  graph TB
+    subgraph Client["&#x1F4BB; 客户端 (Vue3 + Dexie)"]
+      UI["UI Components / Pinia Stores"]
+      Outbox["Outbox Queue (IndexedDB)"]
+      UI -->|"dispatch"| Outbox
+      Outbox -->|"sync push"| API
+    end
+
+    subgraph API["&#x2699; API Layer (routes/v1)"]
+      REST["REST /api/v1 tasks/sessions/notes..."]
+      SyncEP["Sync /api/sync push/pull/full"]
+      ExportEP["Export /api/export jsonl/graph"]
+      MCPEP["MCP Server tools/resources"]
+    end
+
+    subgraph Service["&#x1F527; Service Layer (flush only)"]
+      TaskSvc["TaskService CRUD + version"]
+      NoteSvc["NoteService Saga DB↔FS"]
+      SyncSvc["SyncService SAVEPOINT"]
+      CascadeSvc["CascadeService 统一级联"]
+      SafetyChk["sync_safety 5道安全检查"]
+      BackupSvc["BackupService 双库备份"]
+    end
+
+    subgraph Storage["&#x1F4BE; 双存储层"]
+      SQLite[(pomodoroxii.db SQLAlchemy + Alembic)]
+      FS["file_system 子系统 .md + frontmatter index.db FTS5"]
+      ExportDir["data/export/*.jsonl 快照"]
+    end
+
+    API -->|"validate + call"| Service
+    Service -->|"flush"| SQLite
+    NoteSvc -->|"Saga bridge"| FS
+    SnapshotSvc -->|"write"| ExportDir
+    SafetyChk -->|"guard"| SyncSvc
+    SyncSvc -->|"pull response"| API
+    API -->|"response"| Client
+
+    style Client fill:#fef3c7,stroke:#f59e0b,color:#92400e
+    style API fill:#dbeafe,stroke:#3b82f6,color:#1e40af
+    style Service fill:#ede9fe,stroke:#8b5cf6,color:#5b21b6
+    style SQLite fill:#dcfce7,stroke:#22c55e,color:#166534
+    style FS fill:#fce7f3,stroke:#ec4899,color:#9f1239
+  </pre>
+  </div>
+
+  <div class="card-grid" style="margin-top:24px;">
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon" style="background:var(--blue-light);color:var(--blue);">&#x2699;</div>
+        <h3>API Layer</h3>
+      </div>
+      <p>4 类端点：<strong>REST</strong> (/api/v1 CRUD)、<strong>Sync</strong> (/api/sync push/pull/full)、<strong>Export</strong> (/api/export jsonl/graph)、<strong>MCP</strong> (Agent 原生接入)。路由只做校验 + 调 Service + commit。</p>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon" style="background:var(--purple-light);color:var(--purple);">&#x1F527;</div>
+        <h3>Service Layer</h3>
+      </div>
+      <p>9 个核心 Service，全部 flush 不 commit。NoteService 用 Saga 模式桥接 DB 和 file_system。SyncService 内部用 SAVEPOINT 隔离每个事件。</p>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon" style="background:var(--accent-light);color:var(--accent);">&#x1F4BE;</div>
+        <h3>双存储层</h3>
+      </div>
+      <p>pomodoroxii.db 存元数据和热数据（SQLAlchemy + Alembic），file_system 存 .md 正文（FTS5 全文搜索 + 版本历史）。Saga 模式保证跨库原子性。</p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Feature Domains -->
+<section class="section" id="s3">
+  <h2 class="section-title"><span class="icon">&#x1F3AF;</span> 11 功能域 × 60 子功能</h2>
+  <p class="section-desc">精确到子功能级别的定位分析，含优先级矩阵、协作关系、成熟参考项目</p>
+
+  <div class="mermaid-wrap">
+  <pre class="mermaid">
+  flowchart TB
+    USER((&#x1F464; 用户))
+    subgraph A["&#x1F345; A. 番茄钟核心"] A1["A1 计时器"] A2["A2 事件追踪"] A4["A4 认知标记"] A1 --> A2 --> A4 end
+    subgraph B["&#x1F4CB; B. 任务管理"] B1["B1 任务CRUD"] B3["B3 任务关联"] B4["B4 标签"] B5["B5 优先级"] B1 --> B3 & B4 & B5 end
+    subgraph C["&#x1F4DD; C. 笔记系统"] C1["C1 笔记CRUD"] C2["C2 文件夹"] C3["C3 FTS5搜索"] C4["C4 版本历史"] C5["C5 回收站"] C6["C6 转换"] C1 --> C2 & C3 & C4 & C5 end
+    subgraph D["&#x1F4A8; D. 速记系统"] D1["D1 速记CRUD"] D2["D2 心情"] D6["D6 评论"] D3["D3 速记关联"] D1 --> D2 & D6 & D3 end
+    subgraph E["&#x1F4AD; E. 复盘系统"] E1["E1 复盘"] E2["E2 结构化"] E3["E3 模板"] E6["E6 自动关联"] E1 --> E2 & E3 end
+    subgraph F["&#x1F4CA; F. 统计分析"] F1["F1 统计"] F7["F7 导出"] F1 --> F7 end
+    subgraph G["&#x1F504; G. 同步引擎"] G1["G1 Outbox"] G2["G2 云端同步"] G4["G4 冲突解决"] G5["G5 墓碑"] G1 --> G2 --> G4 & G5 end
+    subgraph I["&#x1F4C5; I. 日程管理"] I1["I1 日程"] I2["I2 日历视图"] I1 --> I2 end
+    subgraph J["&#x1F31C; J. 习惯追踪"] J1["J1 习惯"] J2["J2 打卡"] J3["J3 连续天数"] J1 --> J2 --> J3 end
+    subgraph K["&#x1F552; K. 时间块"] K1["K1 时间块"] K2["K2 类型"] K3["K3 状态"] K1 --> K2 & K3 end
+
+    USER --> A1 & B1 & D1 & E1 & F1 & G1
+    A1 --> B3 & D3 & E6 & F1
+    D1 --> C6 --> C1
+    B1 --> F1
+    E1 --> F1
+    G4 -->|"note/folder"| NFS["NoteFileService Saga"]
+    G4 -->|"其他12种"| ORM["ORM 直处理"]
+
+    style A fill:#fef3c7,stroke:#f59e0b,color:#92400e
+    style B fill:#dbeafe,stroke:#3b82f6,color:#1e40af
+    style C fill:#dcfce7,stroke:#22c55e,color:#166534
+    style D fill:#fce7f3,stroke:#ec4899,color:#9f1239
+    style E fill:#ede9fe,stroke:#8b5cf6,color:#5b21b6
+    style G fill:#fecaca,stroke:#ef4444,color:#991b1b
+  </pre>
+  </div>
+
+  <table class="feature-table" style="margin-top:24px;">
+    <thead><tr><th>功能域</th><th>子功能数</th><th>优先级</th><th>成熟参考项目</th><th>PomodoroXII 改进方向</th></tr></thead>
+    <tbody>
+      <tr><td><strong>A. 番茄钟核心</strong></td><td>4</td><td><span class="tag tag-p0">P0</span></td><td>Forest / Toggl Track</td><td>+ 心流状态检测</td></tr>
+      <tr><td><strong>B. 任务管理</strong></td><td>5</td><td><span class="tag tag-p0">P0</span></td><td>Todoist / Things 3</td><td>+ 优先级矩阵 + 标签树</td></tr>
+      <tr><td><strong>C. 笔记系统</strong></td><td>7</td><td><span class="tag tag-p1">P1</span></td><td>Obsidian / Joplin</td><td>file_system 集成 + FTS5</td></tr>
+      <tr><td><strong>D. 速记系统</strong></td><td>7</td><td><span class="tag tag-p1">P1</span></td><td>Flomo / Google Keep</td><td>+ 心情 + 评论 + 标签树</td></tr>
+      <tr><td><strong>E. 复盘系统</strong></td><td>6</td><td><span class="tag tag-p2">P2</span></td><td>Day One / Reflectly</td><td>.md 归档 + session 快照</td></tr>
+      <tr><td><strong>F. 统计分析</strong></td><td>7</td><td><span class="tag tag-p2">P2</span></td><td>Toggl / RescueTime</td><td>后端 Export API</td></tr>
+      <tr><td><strong>G. 同步引擎</strong></td><td>6</td><td><span class="tag tag-p0">P0</span></td><td>PowerSync / Replicache</td><td>Safety 提取 + SAVEPOINT</td></tr>
+      <tr><td><strong>I. 日程管理</strong></td><td>3</td><td><span class="tag tag-p2">P2</span></td><td>Google Calendar</td><td>保留 + 轻量化</td></tr>
+      <tr><td><strong>J. 习惯追踪</strong></td><td>3</td><td><span class="tag tag-p3">P3</span></td><td>Streaks / Habitica</td><td>保留 + 连续天数算法</td></tr>
+      <tr><td><strong>K. 时间块</strong></td><td>3</td><td><span class="tag tag-p3">P3</span></td><td>Sunsama / Clockify</td><td>保留 + 类型状态扩展</td></tr>
+      <tr><td><strong>H. 基础设施</strong></td><td>6</td><td><span class="tag tag-p0">P0</span></td><td>Auth0 / Docker</td><td>PyJWT + uv + Alembic</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Section 4: Sync Engine -->
+<section class="section" id="s4">
+  <h2 class="section-title"><span class="icon">&#x1F504;</span> 同步引擎</h2>
+  <p class="section-desc">Outbox 合并矩阵 + 多层 Tombstone 防复活 + SAVEPOINT 隔离 + sync 双路径分叉</p>
+
+  <div class="mermaid-wrap">
+  <pre class="mermaid">
+  flowchart TD
+    PUSH["sync_push(events)"]
+    LOOP{"遍历事件"}
+    SP["begin_nested() SAVEPOINT"]
+    PUSH --> LOOP --> SP
+    SAFETY{"5道安全检查"}
+    SAFETY -->|"墓碑优先 / 零点时间戳<br/>字段剥离 / TTL过期 / 循环引用"| ADAPTER{"entity type?"}
+    ADAPTER -->|"note/folder"| NFS["NoteFileService Saga: DB+FS"]
+    ADAPTER -->|"其他12种"| ORM["ORM 直处理 CRUD"]
+    NFS --> FLUSH["service.flush()"]
+    ORM --> FLUSH
+    FLUSH --> NEXT{"更多事件?"}
+    NEXT -->|"是"| SP
+    NEXT -->|"否"| COMMIT["db.commit() 整批统一提交"]
+
+    style SAFETY fill:#fef3c7,stroke:#f59e0b,color:#92400e
+    style SP fill:#dbeafe,stroke:#3b82f6,color:#1e40af
+    style COMMIT fill:#dcfce7,stroke:#22c55e,color:#166534
+    style PUSH fill:#ede9fe,stroke:#8b5cf6,color:#5b21b6
+  </pre>
+  </div>
+
+  <div class="card-grid" style="margin-top:24px;">
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--accent-light);color:var(--accent);">&#x2705;</div><h3>Outbox 合并矩阵</h3></div>
+      <p>create+delete→drop both, update+update→keep latest, delete+create→update。客户端不产生重复事件。</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--rose-light);color:var(--rose);">&#x1F5D1;</div><h3>Tombstone 多层防护</h3></div>
+      <p>删除先建墓碑 → pull 时跳过已删 → 清理 30 天过期墓碑 → revive 防复活检查。四层防护不丢数据。</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--blue-light);color:var(--blue);">&#x2753;</div><h3>sync 双路径</h3></div>
+      <p>note/folder → NoteFileService (Saga 桥接 DB+FS)，其他 12 种实体 → ORM 直处理。adapter 分发，互不影响。</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--amber-light);color:var(--amber);">&#x23F1;</div><h3>LWW + version 字段</h3></div>
+      <p>当前用 updated_at 做 Last-Write-Wins。Phase 3 可选引入 HLC（混合逻辑时钟）替代纯时间戳比较。</p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Four-Dimensional Metadata -->
+<section class="section" id="s5">
+  <h2 class="section-title"><span class="icon">&#x1F4CA;</span> 四维元数据产出</h2>
+  <p class="section-desc">时间 + 专注 + 认知 + 行为 = Agent 可消费的个人状态全貌</p>
+
+  <div class="mermaid-wrap">
+  <pre class="mermaid">
+  mindmap
+    root((PomodoroXII 四维元数据))
+      时间维度
+        番茄钟会话 started_at ended_at duration
+        Agent问: "上周专注多少小时?"
+        ::icon(fa fa-clock)
+      专注维度
+        认知标记 attention_score flow_state
+        Agent问: "什么时段最专注?"
+        ::icon(fa fa-bullseye)
+      认知维度
+        复盘 mood energy achievements
+        session_snapshot 冻结快照
+        Agent问: "状态趋势如何?"
+        ::icon(fa fa-brain)
+      行为维度
+        任务完成率 习惯连续天数
+        time_block 分布 tag聚类
+        Agent问: "行为模式?"
+        ::icon(fa fa-chart-line)
+  </pre>
+  </div>
+
+  <div class="card-grid" style="margin-top:24px;">
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--blue-light);color:var(#blue);">&#x1F550;</div><h3>时间维度</h3></div>
+      <p><strong>来源：</strong>番茄钟会话 | <strong>字段：</strong>started_at, ended_at, duration, type, completed<br/><strong>Agent 问：</strong>"我上周专注了多少小时？"</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--amber-light);color:var(--amber);">&#x1F3AF;</div><h3>专注维度</h3></div>
+      <p><strong>来源：</strong>认知标记 | <strong>字段：</strong>attention_score, flow_state, distraction_count<br/><strong>Agent 问：</strong>"什么时间段我最专注？"</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--purple-light);color:var(--purple);">&#x1F4AD;</div><h3>认知维度</h3></div>
+      <p><strong>来源：</strong>复盘 + 事件 | <strong>字段：</strong>mood, energy, achievements, challenges, session_snapshot<br/><strong>Agent 问：</strong>"我的状态趋势如何？"</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--accent-light);color:var(--accent);">&#x1F4C8;</div><h3>行为维度</h3></div>
+      <p><strong>来源：</strong>任务/习惯/时间块 | <strong>字段：</strong>task完成率, habit连续, time_block分布<br/><strong>Agent 问：</strong>"我的行为模式是什么？"</p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Agent Three-Path -->
+<section class="section" id="s6">
+  <h2 class="section-title"><span class="icon">&#x1F916;</span> Agent 三路径消费</h2>
+  <p class="section-desc">MCP Server（实时）+ REST API（程序化）+ 文件系统（离线），三层互补覆盖所有场景</p>
+
+  <div class="mermaid-wrap">
+  <pre class="mermaid">
+  flowchart TB
+    subgraph Agent["&#x1F916; AI Agent / 插件"]
+      Claude(["Claude Desktop"])
+      Cursor(["Cursor IDE"])
+      Script(["Python 脚本"])
+    end
+    subgraph L1["Layer 1: MCP Server &#x26A1; 实时"]
+      MCP["MCP Server SSE/stdio"]
+      TOOLS["query_tasks() search_notes() get_focus_stats()"]
+      MCP --> TOOLS
+    end
+    subgraph L2["Layer 2: REST Export API &#x1F4E1; 程序化"]
+      EXPORT["/api/export/*"]
+      JSONL["GET /export/jsonl NDJSON流式"]
+      FULL["GET /export/full _meta+_data+_graph"]
+      EVENTS["GET /api/events 增量变更流"]
+      EXPORT --> JSONL & FULL & EVENTS
+    end
+    subgraph L3["Layer 3: .md frontmatter &#x1F4C4; 离线"]
+      NOTES["data/notes/*.md YAML frontmatter"]
+      REFL["data/reflections/*.md session_snapshot"]
+      NOTES & REFL
+    end
+    subgraph L4["Layer 4: 定时快照 &#x1F4BE; 分析"]
+      SNAP["data/export/*.jsonl 每日快照"]
+      ARROW["*.arrow Apache Arrow 列式"]
+      SNAP & ARROW
+    end
+    Claude --> L1
+    Cursor --> L1
+    Script --> L2 & L4
+    style L1 fill:#fef3c7,stroke:#f59e0b,color:#92400e
+    style L2 fill:#dbeafe,stroke:#3b82f6,color:#1e40af
+    style L3 fill:#dcfce7,stroke:#22c55e,color:#166534
+    style L4 fill:#fce7f3,stroke:#ec4899,color:#9f1239
+  </pre>
+  </div>
+</section>
+
+<!-- Section 7: Reliability -->
+<section class="section" id="s7">
+  <h2 class="section-title"><span class="icon">&#x1F6E1;&#xFE0F;</span> 可靠性保障</h2>
+  <p class="section-desc">四道防线保证元数据不丢失：同步可靠 + 数据可靠 + 风险缓解</p>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--accent-light);color:var(--accent);">&#x1F6E1;&#xFE0F;</div><h3>同步可靠性</h3></div>
+      <p><strong>Outbox 合并矩阵</strong>防重复 | <strong>SAVEPOINT 隔离</strong>单事件回滚 | <strong>Tombstone 多层</strong>防误删复活 | <strong>零点时间戳检测</strong>自动修复</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--blue-light);color:var(--blue);">&#x1F4BE;</div><h3>数据可靠性</h3></div>
+      <p><strong>Alembic 迁移</strong>替代 _migrate_schema | <strong>双库自动备份</strong>(pomodoroxii.db + index.db)每天 03:00 | <strong>.md 原子写入</strong>临时文件 + os.replace</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--amber-light);color:var(--amber);">&#x1F6A8;</div><h3>风险缓解</h3></div>
+      <p><strong>Saga 补偿操作</strong>跨库失败回滚 | <strong>一致性检查</strong>DB ↔ .md 定期扫描 | <strong>CascadeService</strong>统一级联防孤儿记录</p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Multi-Workspace -->
+<section class="section" id="s8">
+  <h2 class="section-title"><span class="icon">&#x1F3E2;</span> 多工作空间</h2>
+  <p class="section-desc">DB-per-workspace 方案：每空间完全隔离，业务代码零改动</p>
+
+  <div class="mermaid-wrap">
+  <pre class="mermaid">
+  flowchart TB
+    subgraph Global["&#x1F310; 全局层 app.db"]
+      APP_DB[(app.db 全局配置)]
+      WS_REG["Workspace 注册表"]
+      AUTH["认证密码"]
+    end
+    subgraph W1["&#x1F3E0; 工作空间: 日常"]
+      DB1[(pomodoroxii.db)] ID1[(index.db)] FS1["data/ notes+reflections"]
+      DB1 <--> ID1 FS1 --- ID1
+    end
+    subgraph W2["&#x1F9EA; 工作空间: 测试"]
+      DB2[(pomodoroxii.db)] ID2[(index.db)] FS2["data/ notes+reflections"]
+      DB2 <--> ID2 FS2 --- ID2
+    end
+    subgraph API["&#x2699; API 层"]
+      JWT["JWT 含 workspace_id"]
+      ENGINE["动态选择 DB Engine"]
+    end
+    CLIENT(["&#x1F4BB; 客户端"])
+    CLIENT --> JWT --> ENGINE
+    ENGINE --> W1
+    ENGINE --> W2
+    style Global fill:#f0fdf4,stroke:#22c55e,color:#166534
+    style W1 fill:#eff6ff,stroke:#3b82f6,color:#1e40af
+    style W2 fill:#fdf4ff,stroke:#a855f7,color:#6b21a8
+  </pre>
+  </div>
+</section>
+
+<!-- Section 9: Tech Stack Upgrade -->
+<section class="section" id="s9">
+  <h2 class="section-title"><span class="icon">&#x2699;</span> 技术栈升级</h2>
+  <p class="section-desc">保守升级路线：框架不变，工具链全面现代化</p>
+
+  <table class="feature-table">
+    <thead><tr><th>组件</th><th>PomodoroXI 现状</th><th>PomodoroXII 升级</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td><strong>包管理</strong></td><td>pip</td><td><strong>uv</strong></td><td>快 10-100x，lockfile 可重现</td></tr>
+      <tr><td><strong>迁移</strong></td><td>_migrate_schema()</td><td><strong>Alembic async</strong></td><td>支持列删/改类型</td></tr>
+      <tr><td><strong>架构</strong></td><td>routes 直处理务</td><td><strong>三层架构</strong></td><td>Routers commit, Services flush</td></tr>
+      <tr><td><strong>日志</strong></td><td>标准 logging</td><td><strong>JSON 结构化 + request_id</strong></td><td>可 grep 可观测</td></tr>
+      <tr><td><strong>异常</strong></td><td>无统一体系</td><td><strong>AppError 体系</strong></td><td>NotFound/Conflict/Validation</td></tr>
+      <tr><td><strong>性能</strong></td><td>uvicorn 默认</td><td><strong>uvloop + httptools</strong></td><td>免费 20%+ 吞吐提升</td></tr>
+      <tr><td><strong>认证</strong></td><td>python-jose + passlib</td><td><strong>PyJWT + bcrypt</strong></td><td>python-jose 已停更</td></tr>
+      <tr><td><strong>前端</strong></td><td>Vue3 + Vite5</td><td><strong>Vue3.5 + Vite6 + strict TS</strong></td><td>小版本升级 + 类型安全</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Section 10: Implementation Roadmap -->
+<section class="section" id="s10">
+  <h2 class="section-title"><span class="icon">&#x1F4C5;</span> 实施路线图</h2>
+  <p class="section-desc">7 个 Milestone，总计约 27 天，渐进式交付可运行版本</p>
+
+  <div class="mermaid-wrap">
+  <pre class="mermaid">
+  gantt
+    title PomodoroXII 实施路线图 (~27天)
+    dateFormat YYYY-MM-DD
+    axisFormat %m/%d
+    section Phase1 基础
+    M0 项目骨架         :done, m0, 2026-07-02, 2d
+    M1 认证+Task切片     :active, m1, after m0, 3d
+    section Phase2 核心
+    M2 Sync引擎          :m2, after m1, 5d
+    M3 file系统集成       :m3, after m2, 5d
+    section Phase3 增强
+    M4 可靠性+Agent接入   :m4, after m3, 5d
+    M5 前端迁移          :m5, after m4, 5d
+    section Phase4 收尾
+    M6 部署+收尾         :m6, after m5, 2d
+  </pre>
+  </div>
+
+  <div class="timeline" style="margin-top:32px; columns: 2; column-gap: 24px;">
+    <div class="milestone done">
+      <h4>M0: 项目骨架 <span class="days">2天</span></h4>
+      <p>pyproject.toml + uv init、settings.py、DeclarativeBase + SyncMixin、async engine、Alembic baseline、Docker Compose、AGENTS.md</p>
+    </div>
+    <div class="milestone active">
+      <h4>M1: 认证 + Task 垂直切片 <span class="days">3天</span></h4>
+      <p>PyJWT auth、Task model + service + router + tests、BaseService CRUD 框架、薄路由模式验证</p>
+    </div>
+    <div class="milestone future">
+      <h4>M2: Sync 引擎 <span class="days">5天</span></h4>
+      <p>SyncService + sync_safety 5道检查、Outbox 合并矩阵、Tombstone 管理、ENTITY_REGISTRY、sync push/pull/full</p>
+    </div>
+    <div class="milestone future">
+      <h4>M3: file系统集成 <span class="days">5天</span></h4>
+      <p>移植 15 个文件子系统、NoteFileService Saga 桥接、.md frontmatter 读写、FTS5 trigram 配置、search_ops</p>
+    </div>
+    <div class="milestone future">
+      <h4>M4: 可靠性 + Agent 接入 <span class="days">5天</span></h4>
+      <p>BackupService 双库备份、SnapshotService JSONL 导出、ExportService (_meta/_graph/_analysis_hints)、MCP Server 骨架</p>
+    </div>
+    <div class="milestone future">
+      <h4>M5: 前端迁移 <span class="days">5天</span></h4>
+      <p>Vue3.5 + Vite6 + Pinia3 + TS strict、useSync v2、composables 重构、Tailwind v4 组件库</p>
+    </div>
+    <div class="milestone future">
+      <h4>M6: 部署 + 收尾 <span class="days">2天</span></h4>
+      <p>Docker 多阶段构建、Cloudflare Tunnel、健康检查、性能基线测试、文档补全</p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 11: Reference Projects -->
+<section class="section" id="s11">
+  <h2 class="section-title"><span class="icon">&#x1F4DA;</span> 参考项目</h2>
+  <p class="section-desc">31 个成熟项目的借鉴点汇总</p>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--blue-light);color:var(--blue);">&#x1F4CB;</div><h3>Todoist</h3></div>
+      <p>任务管理标杆。借鉴：Karma 积分系统、标签树、优先级矩阵、Smart Schedule。</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--accent-light);color:var(--accent);">&#x1F4D4;</div><h3>Obsidian</h3></div>
+      <p>本地优先知识管理标杆。借鉴：纯文件 + frontmatter、vault 隔离、Omnisearch 插件、Sync diff-match-patch。</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--purple-light);color:var(--purple);">&#x1F4D4;</div><h3>Joplin</h3></div>
+      <p>开源笔记标杆。借鉴：REST API 资源路由 + 事件流 /events、Token 认证、端到端加密。</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--amber-light);color:var(--amber);">&#x1F504;</div><h3>PowerSync</h3></div>
+      <p>SQLite 同步引擎标杆。借鉴：Bucket 分桶同步、Write Checkpoints、PRAGMA user_version schema 管理。</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--rose-light);color:var(--rose);">&#x1F504;</div><h3>Replicache</h3></div>
+      <p>客户端同步标杆。借鉴：Mutator 模式（服务端统一执行）、push-based 请求、乐观更新。</p>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-icon" style="background:var(--blue-light);color:var(--blue);">&#x1F4C5;</div><h3>Dify</h3></div>
+      <p>多租户架构标杆。借鉴：workspace_id 数据隔离、shared-database + shared-schema 模式。</p>
+    </div>
+  </div>
+</section>
+
+<!-- Section 12: Document Index -->
+<section class="section" id="s12">
+  <h2 class="section-title"><span class="icon">&#x1F4C1;</span> 核心文档索引</h2>
+  <p class="section-desc">PomodoroXII/核心文档/ 目录下的 12 份指导文档</p>
+
+  <table class="feature-table">
+    <thead><tr><th>#</th><th>文件名</th><th>内容概要</th><th>字数</th></tr></thead>
+    <tbody>
+      <tr><td>01</td><td>深度架构规划.md</td><td>完整项目结构 + 三层架构 + 7个核心代码段 + 7 Milestone</td><td>~819行</td></tr>
+      <tr><td>02</td><td>技术栈升级推荐.md</td><td>后端10项 + 前端7项 + 不升级清单 + PyJWT修正</td><td>~452行</td></tr>
+      <tr><td>03</td><td>子功能定位分析与协作关系.md</td><td>11域60子功能 + 协作关系图 + 耦合点 + 31个参考</td><td>~447行</td></tr>
+      <tr><td>04</td><td>数据管理深度分析.md</td><td>12问题(P0×2 P1×5 P2×5) + HLC/Alembic/Service层</td><td>~910行</td></tr>
+      <tr><td>05</td><td>file_system移植方案分析.md</td><td>3大风险(content所有权/跨库事务/pull性能)</td><td>~594行</td></tr>
+      <tr><td>06</td><td>实施计划评审与缺陷修正.md</td><td>3严重缺陷(Saga击穿/安全防线缺失/N+1查询)</td><td>~417行</td></tr>
+      <tr><td>07</td><td>元数据可移植性升级方案.md</td><td>MCP+Export API+frontmatter+快照 四层访问</td><td>~617行</td></tr>
+      <tr><td>08</td><td>元数据可移植性现状分析.md</td><td>6障碍诊断(.md无frontmatter/时间戳/tags/关系等)</td><td>~252行</td></tr>
+      <tr><td>09</td><td>核心文档深度审查报告.md</td><td>交叉验证结果 + 3遗漏功能域(I/J/K) + 修正清单</td><td>~299行</td></tr>
+      <tr><td>10</td><td>用户扩展需求开发.md</td><td>需求1复盘归档 + 需求3多工作空间 + 需求预留位</td><td>~600行</td></tr>
+      <tr><td>11</td><td>平台愿景与元数据规划.md</td><td>PCV评估8/10 + 四维元数据 + MarkVault融合接口</td><td>~400行</td></tr>
+      <tr><td>12</td><td>AI编码规范指导.md</td><td>AGENTS.md规范 + CLAUDE.md最佳实践 + 五原则</td><td>~350行</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</div><!-- end container -->
+
+<footer style="text-align:center; padding: 40px 24px; color: var(--text3); font-size: 13px; border-top: 1px solid var(--border);">
+  PomodoroXII 架构与功能全景报告 &mdash; 生成于 2026-07-02 &mdash; 基于 pomodoroxi 源码深度分析 + 行业最佳实践调研
+</footer>
+
+<script>
+// Mermaid init
+mermaid.initialize({ startOnLoad: true, theme: 'default', themeVariables: { primaryColor: '#dbeafe', primaryTextColor: '#1e40af', primaryBorderColor: '#3b82f6', lineColor: '#64748b', secondaryColor: '#dcfce7', tertiaryColor: '#fef3c7' }, flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' }, gantt: { barHeight: 20, fontSize: 12 } });
+
+// TOC active state on scroll
+const sections = document.querySelectorAll('.section');
+const tocLinks = document.querySelectorAll('.toc a');
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      const id = e.target.getAttribute('id');
+      tocLinks.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + id));
+    }
+  });
+}, { rootMargin: '-20% 0px -70% 0px' });
+sections.forEach(s => observer.observe(s));
+
+// Smooth scroll
+tocLinks.forEach(link => {
+  link.addEventListener('click', e => {
+    e.preventDefault();
+    document.querySelector(link.getAttribute('href')).scrollIntoView({ behavior: 'smooth' });
+  });
+});
+</script>
+
+</body>
+</html>
