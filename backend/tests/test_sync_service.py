@@ -10,7 +10,6 @@ import uuid
 
 import pytest
 
-
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -51,9 +50,10 @@ def _task_payload(**overrides) -> dict:
 @pytest.mark.asyncio
 async def test_push_create_event_inserts_row(space_session):
     """push() with action=create should insert a new row."""
-    from app.services.sync import SyncService
-    from app.models.task import Task
     from sqlalchemy import select
+
+    from app.models.task import Task
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
@@ -80,8 +80,8 @@ async def test_push_create_event_inserts_row(space_session):
 @pytest.mark.asyncio
 async def test_push_update_event_modifies_row(space_session):
     """push() with action=update should modify an existing row."""
-    from app.services.sync import SyncService
     from app.models.task import Task
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
@@ -109,8 +109,8 @@ async def test_push_update_event_modifies_row(space_session):
 @pytest.mark.asyncio
 async def test_push_delete_event_removes_row_and_writes_tombstone(space_session):
     """push() with action=delete should remove the row and write a tombstone."""
-    from app.services.sync import SyncService
     from app.models.task import Task
+    from app.services.sync import SyncService
     from app.services.tombstone import TombstoneService
 
     svc = SyncService(space_session)
@@ -155,9 +155,9 @@ async def test_push_delete_idempotent_when_row_already_gone(space_session):
 @pytest.mark.asyncio
 async def test_push_tombstone_blocks_create_resurrection(space_session):
     """C1: create after REST delete should conflict with tombstone."""
-    from app.services.sync import SyncService
     from app.models.session import Session
     from app.routes.v1.sessions import SessionService
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
@@ -187,8 +187,8 @@ async def test_push_tombstone_blocks_create_resurrection(space_session):
 @pytest.mark.asyncio
 async def test_push_tombstone_blocks_update_upsert(space_session):
     """C1: update upsert on tombstoned id should not recreate the row."""
-    from app.services.sync import SyncService
     from app.models.task import Task
+    from app.services.sync import SyncService
     from app.services.task import TaskService
 
     svc = SyncService(space_session)
@@ -259,8 +259,8 @@ async def test_push_folder_update_rejects_circular_parent(space_session):
 @pytest.mark.asyncio
 async def test_push_strips_client_fields_from_payload(space_session):
     """C2: push should ignore client-only and protected fields."""
-    from app.services.sync import SyncService
     from app.models.task import Task
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
@@ -290,8 +290,8 @@ async def test_push_strips_client_fields_from_payload(space_session):
 @pytest.mark.asyncio
 async def test_push_batch_events_applies_all(space_session):
     """push() with multiple events should apply all of them."""
-    from app.services.sync import SyncService
     from app.models.task import Task
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     events = [
@@ -319,8 +319,8 @@ async def test_push_batch_events_applies_all(space_session):
 @pytest.mark.asyncio
 async def test_push_lww_conflict_keeps_newer(space_session):
     """push() should apply remote update when remote_ts > local_ts."""
-    from app.services.sync import SyncService
     from app.models.task import Task
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
@@ -743,8 +743,8 @@ async def test_sync_mode_skips_tombstone_on_delete(space_session, tmp_path):
 async def test_sync_service_push_note_event_uses_note_service(space_session, tmp_path):
     """SyncService.push with etype='note' should delegate to NoteService
     (writing both .md file and DB row)."""
-    from app.services.sync import SyncService
     from app.models.note import Note
+    from app.services.sync import SyncService
 
     fs = await _make_fs_for_sync(tmp_path)
     svc = SyncService(space_session, fs)
@@ -781,9 +781,10 @@ async def test_sync_service_push_note_event_uses_note_service(space_session, tmp
 @pytest.mark.asyncio
 async def test_push_writes_audit_log(space_session):
     """push() should write one SyncAuditLog row per applied event."""
-    from app.services.sync import SyncService
-    from app.models.sync_audit_log import SyncAuditLog
     from sqlalchemy import select
+
+    from app.models.sync_audit_log import SyncAuditLog
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
@@ -805,9 +806,10 @@ async def test_push_writes_audit_log(space_session):
 @pytest.mark.asyncio
 async def test_pull_writes_audit_log(space_session):
     """pull() should write one SyncAuditLog row with event_type='pull'."""
-    from app.services.sync import SyncService
-    from app.models.sync_audit_log import SyncAuditLog
     from sqlalchemy import select
+
+    from app.models.sync_audit_log import SyncAuditLog
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     await svc.pull(since="", limit=100)
@@ -820,8 +822,8 @@ async def test_pull_writes_audit_log(space_session):
 @pytest.mark.asyncio
 async def test_audit_failure_does_not_break_main_flow(space_session, monkeypatch):
     """If SyncAuditLog insert raises, push() must still return applied."""
-    from app.services.sync import SyncService
     from app.models import sync_audit_log as audit_module
+    from app.services.sync import SyncService
 
     def _boom(*args, **kwargs):
         raise RuntimeError("simulated audit failure")
@@ -854,9 +856,10 @@ async def test_push_batches_audit_flushes(space_session, monkeypatch):
     ``_write_audit`` (N round-trips for N events). D-4 queues them in
     ``_pending_audits`` and flushes the batch at the end of push().
     """
-    from app.services.sync import SyncService
-    from app.models.sync_audit_log import SyncAuditLog
     from sqlalchemy import select
+
+    from app.models.sync_audit_log import SyncAuditLog
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
 
@@ -1157,8 +1160,8 @@ async def test_http_push_tombstone_conflict_excluded_from_applied(client):
 @pytest.mark.asyncio
 async def test_push_note_update_preserves_client_updated_at(space_session, tmp_path):
     """P1-3: sync push note update should preserve client_updated_at in DB row."""
-    from app.services.sync import SyncService
     from app.models.note import Note
+    from app.services.sync import SyncService
 
     fs = await _make_fs_for_sync(tmp_path)
     svc = SyncService(space_session, fs)
@@ -1198,8 +1201,8 @@ async def test_push_note_update_preserves_client_updated_at_metadata_only(
     space_session, tmp_path,
 ):
     """P1-3: sync push note update with only metadata (no content) preserves client_updated_at."""
-    from app.services.sync import SyncService
     from app.models.note import Note
+    from app.services.sync import SyncService
 
     fs = await _make_fs_for_sync(tmp_path)
     svc = SyncService(space_session, fs)
@@ -1236,8 +1239,8 @@ async def test_sync_mode_update_does_not_bump_updated_at_in_base_service(
     space_session, tmp_path,
 ):
     """P1-3: BaseService.update with bump_updated_at=False should NOT bump updated_at/version."""
-    from app.services.base import BaseService
     from app.models.task import Task
+    from app.services.base import BaseService
 
     # Seed a task directly via BaseService
     base = BaseService(space_session)

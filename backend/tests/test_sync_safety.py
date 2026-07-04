@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # --------------------------------------------------------------------------- #
 # normalize_timestamp
 # --------------------------------------------------------------------------- #
@@ -120,8 +119,8 @@ def test_sanitize_zero_time_preserves_real_timestamp():
 
 def test_serialize_entity_converts_orm_to_dict_with_tags_parsed(space_session):
     """serialize_entity should extract columns and parse tags JSON to list."""
-    from app.services.sync_safety import serialize_entity
     from app.models.task import Task
+    from app.services.sync_safety import serialize_entity
 
     task = Task(
         id="ser-1",
@@ -138,8 +137,8 @@ def test_serialize_entity_converts_orm_to_dict_with_tags_parsed(space_session):
 
 def test_serialize_entity_handles_empty_tags(space_session):
     """serialize_entity should return [] for empty tags string."""
-    from app.services.sync_safety import serialize_entity
     from app.models.task import Task
+    from app.services.sync_safety import serialize_entity
 
     task = Task(
         id="ser-2",
@@ -159,8 +158,8 @@ def test_serialize_entity_handles_empty_tags(space_session):
 @pytest.mark.asyncio
 async def test_check_lww_conflict_returns_local_when_local_newer(space_session):
     """If local updated_at > remote_ts, conflict resolves to 'local'."""
-    from app.services.sync_safety import check_lww_conflict
     from app.models.task import Task
+    from app.services.sync_safety import check_lww_conflict
 
     local = Task(
         id="lww-1",
@@ -177,8 +176,8 @@ async def test_check_lww_conflict_returns_local_when_local_newer(space_session):
 @pytest.mark.asyncio
 async def test_check_lww_conflict_returns_remote_when_remote_newer(space_session):
     """If remote_ts > local updated_at, conflict resolves to 'remote'."""
-    from app.services.sync_safety import check_lww_conflict
     from app.models.task import Task
+    from app.services.sync_safety import check_lww_conflict
 
     local = Task(
         id="lww-2",

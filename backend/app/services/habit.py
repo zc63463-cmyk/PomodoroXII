@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.habit import Habit
 from app.models.habit_check_in import HabitCheckIn

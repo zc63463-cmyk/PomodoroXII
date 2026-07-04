@@ -38,7 +38,7 @@ async def init_meta_db() -> AsyncEngine:
 
     # Import models so Base.metadata is populated.
     from app.db.models import meta  # noqa: F401
-    from app.db.models.meta import Space, MetaSetting
+    from app.db.models.meta import MetaSetting, Space
 
     _meta_engine = create_engine(settings.database_url, echo=settings.debug)
     _meta_session_factory = create_session_factory(_meta_engine)

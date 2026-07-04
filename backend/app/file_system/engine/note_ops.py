@@ -12,9 +12,10 @@ from pathlib import Path
 
 from nanoid import generate
 
-from app.file_system.interfaces import NoteMeta, NoteStatus, NoteLevel
-from app.file_system.frontmatter import wrap_with_frontmatter, strip_frontmatter
-from .base import _utc_now_iso, _sha256, _generate_note_id, _make_filename
+from app.file_system.frontmatter import strip_frontmatter, wrap_with_frontmatter
+from app.file_system.interfaces import NoteLevel, NoteMeta, NoteStatus
+
+from .base import _generate_note_id, _make_filename, _sha256, _utc_now_iso
 
 
 class NoteOpsMixin:

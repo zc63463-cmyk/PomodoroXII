@@ -1,6 +1,6 @@
 """SQLAlchemy model for quick notes (rapid capture with optional session link)."""
 
-from sqlalchemy import String, Boolean, CheckConstraint
+from sqlalchemy import Boolean, CheckConstraint, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

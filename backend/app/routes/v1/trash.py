@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_space_db, get_space_context
+from app.deps import get_space_context, get_space_db
 from app.errors import NotFoundError, ValidationError
 from app.models.folder import Folder
 from app.models.note import Note

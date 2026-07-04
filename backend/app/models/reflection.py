@@ -1,6 +1,6 @@
 """SQLAlchemy model for daily reflections."""
 
-from sqlalchemy import String, Boolean, CheckConstraint, Index
+from sqlalchemy import Boolean, CheckConstraint, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

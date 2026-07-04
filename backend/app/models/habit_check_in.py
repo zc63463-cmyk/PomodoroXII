@@ -1,6 +1,6 @@
 """SQLAlchemy model for habit check-ins (daily check-in records)."""
 
-from sqlalchemy import String, Integer
+from sqlalchemy import Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

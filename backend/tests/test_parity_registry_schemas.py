@@ -12,7 +12,6 @@ import pytest
 from app.registry import REGISTRY
 from app.registry.entities import EntityCategory
 
-
 # 例外表：实体 -> 例外原因
 # Junction tables 没有独立 schema（通过父实体管理）
 SCHEMA_EXCEPTIONS: dict[str, str] = {

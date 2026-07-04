@@ -12,8 +12,8 @@ Verifies that:
 from __future__ import annotations
 
 import asyncio
-import pytest
 
+import pytest
 
 # --------------------------------------------------------------------------- #
 # Unit tests for frontmatter helpers
@@ -51,7 +51,7 @@ def test_serialize_frontmatter_empty_tags():
 
 def test_wrap_with_frontmatter_prepends():
     """wrap_with_frontmatter should prepend frontmatter before content."""
-    from app.file_system.frontmatter import wrap_with_frontmatter, strip_frontmatter
+    from app.file_system.frontmatter import strip_frontmatter, wrap_with_frontmatter
 
     result = wrap_with_frontmatter({"id": "n_1", "title": "T"}, "Hello world")
     assert result.startswith("---\n")
@@ -62,13 +62,13 @@ def test_wrap_with_frontmatter_prepends():
 
 def test_wrap_with_frontmatter_replaces_existing():
     """wrap_with_frontmatter should replace existing frontmatter, not duplicate."""
-    from app.file_system.frontmatter import wrap_with_frontmatter, has_frontmatter
+    from app.file_system.frontmatter import has_frontmatter, wrap_with_frontmatter
 
     content_with_fm = "---\nid: old\n---\nBody"
     result = wrap_with_frontmatter({"id": "new"}, content_with_fm)
     # Should only have one frontmatter block
     lines = result.split("\n")
-    delimiter_count = sum(1 for l in lines if l.strip() == "---")
+    delimiter_count = sum(1 for line in lines if line.strip() == "---")
     assert delimiter_count == 2, f"Expected 2 delimiters, got {delimiter_count}"
     assert "id: new" in result
     assert "id: old" not in result
@@ -84,7 +84,7 @@ def test_strip_frontmatter_no_frontmatter():
 
 def test_extract_frontmatter_roundtrip():
     """extract_frontmatter should parse back to dict + body."""
-    from app.file_system.frontmatter import serialize_frontmatter, extract_frontmatter
+    from app.file_system.frontmatter import extract_frontmatter, serialize_frontmatter
 
     original_meta = {
         "id": "n_xyz",
@@ -124,7 +124,7 @@ def test_has_frontmatter_detection():
 async def test_create_note_writes_frontmatter_to_disk(tmp_path):
     """create_note should write .md file with YAML frontmatter."""
     from app.file_system.api import get_file_system
-    from app.file_system.frontmatter import has_frontmatter, extract_frontmatter
+    from app.file_system.frontmatter import extract_frontmatter, has_frontmatter
 
     fs = await get_file_system(
         root_dir=tmp_path / "notes",

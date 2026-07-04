@@ -25,6 +25,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "httpx>=0.28",
+    "ruff>=0.8",
 ]
 
 [build-system]
@@ -38,3 +39,25 @@ packages = ["app"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# WIP / MCP areas are owned by another agent; do not lint them here.
+exclude = ["app/mcp/**", "tests/test_mcp_server.py"]
+
+[tool.ruff.lint]
+# F: pyflakes (unused imports, undefined names — real bugs)
+# E: pycodestyle errors
+# W: pycodestyle warnings
+# I: isort (import ordering)
+select = ["F", "E", "W", "I"]
+# Ignore style nits that the codebase already doesn't follow:
+# E501: line too long (we set line-length=100 but some docstrings exceed it)
+# E722: bare except (used in a few places for broad error capture)
+# E402: module-level import not at top (some tests import inside functions)
+ignore = ["E501", "E722", "E402"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use broader exception handling and star imports for fixtures.
+"tests/**" = ["E402", "F401", "F811"]

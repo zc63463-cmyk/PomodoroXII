@@ -8,7 +8,6 @@ async DB helpers.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,7 +15,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.time import utc_now_iso
-
 
 # --------------------------------------------------------------------------- #
 # Timestamp normalization
@@ -81,7 +79,6 @@ def sanitize_zero_time(ts: str, now: str | None = None) -> str:
 # Re-exported from app.services.serializers so callers that import from
 # sync_safety (e.g. SyncService.pull) get the same canonical implementation.
 from app.services.serializers import serialize_entity  # noqa: F401, E402
-
 
 # --------------------------------------------------------------------------- #
 # Last-Write-Wins conflict detection

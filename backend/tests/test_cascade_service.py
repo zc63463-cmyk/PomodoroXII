@@ -65,8 +65,8 @@ async def test_get_descendant_ids_skips_trashed_subtrees(space_session):
 @pytest.mark.asyncio
 async def test_soft_delete_folder_cascades_to_descendants(space_session):
     """soft_delete_folder() should set trashed_at on all descendants."""
-    from app.services.cascade import CascadeService
     from app.models.folder import Folder
+    from app.services.cascade import CascadeService
 
     svc = CascadeService(space_session)
     root = await _make_folder(space_session, "root")
@@ -87,8 +87,8 @@ async def test_soft_delete_folder_cascades_to_descendants(space_session):
 @pytest.mark.asyncio
 async def test_soft_delete_folder_clears_notes_folder_id(space_session):
     """soft_delete_folder() should set notes.folder_id = None in the subtree."""
-    from app.services.cascade import CascadeService
     from app.models.note import Note
+    from app.services.cascade import CascadeService
 
     svc = CascadeService(space_session)
     root = await _make_folder(space_session, "root")
@@ -110,8 +110,8 @@ async def test_soft_delete_folder_clears_notes_folder_id(space_session):
 @pytest.mark.asyncio
 async def test_soft_delete_folder_clears_quick_notes_folder_id(space_session):
     """soft_delete_folder() should set quick_notes.folder_id = None in the subtree."""
-    from app.services.cascade import CascadeService
     from app.models.quick_note import QuickNote
+    from app.services.cascade import CascadeService
 
     svc = CascadeService(space_session)
     root = await _make_folder(space_session, "root")
@@ -131,8 +131,8 @@ async def test_soft_delete_folder_clears_quick_notes_folder_id(space_session):
 @pytest.mark.asyncio
 async def test_soft_delete_folder_raises_not_found(space_session):
     """soft_delete_folder() should raise NotFoundError for non-existent id."""
-    from app.services.cascade import CascadeService
     from app.errors import NotFoundError
+    from app.services.cascade import CascadeService
 
     svc = CascadeService(space_session)
     with pytest.raises(NotFoundError):
@@ -142,17 +142,17 @@ async def test_soft_delete_folder_raises_not_found(space_session):
 @pytest.mark.asyncio
 async def test_cascade_delete_task_removes_junction_links(space_session):
     """delete_task_cascade() should remove task_quick_notes rows for the task."""
-    from app.services.cascade import CascadeService
+    from sqlalchemy import select
+
     from app.models.task import Task
     from app.models.task_quick_note import TaskQuickNote
-    from sqlalchemy import select
+    from app.services.cascade import CascadeService
 
     svc = CascadeService(space_session)
 
     # Create a task and a junction row.
     task_id = uuid.uuid4().hex
     qn_id = uuid.uuid4().hex
-    session_id = uuid.uuid4().hex
 
     space_session.add(Task(
         id=task_id, title="Test", status="todo", priority="medium", tags="[]",

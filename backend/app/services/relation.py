@@ -16,9 +16,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ValidationError
-from app.models.task_quick_note import TaskQuickNote
-from app.models.session_quick_note import SessionQuickNote
 from app.models.schedule_quick_note import ScheduleQuickNote
+from app.models.session_quick_note import SessionQuickNote
+from app.models.task_quick_note import TaskQuickNote
 
 
 class RelationService:
@@ -68,14 +68,20 @@ class RelationService:
         if existing is not None:
             return existing
         row = model(**{parent_col: parent_id, "quick_note_id": quick_note_id})
-        self.db.add(row)
         try:
-            await self.db.flush()
-            await self.db.refresh(row)
+            # P2-1: isolate the insert in a SAVEPOINT so an IntegrityError
+            # only rolls back this insert, not the outer transaction.
+            # Previously this called self.db.rollback() which discarded
+            # ALL pending changes in the session, violating the
+            # "services flush, never rollback" iron rule.
+            async with self.db.begin_nested():
+                self.db.add(row)
+                await self.db.flush()
+                await self.db.refresh(row)
             return row
         except IntegrityError:
             # Race: another concurrent request inserted the same row.
-            await self.db.rollback()
+            # SAVEPOINT was rolled back; outer transaction is still alive.
             res = await self.db.execute(
                 select(model).where(
                     getattr(model, parent_col) == parent_id,

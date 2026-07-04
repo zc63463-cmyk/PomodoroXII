@@ -7,20 +7,24 @@ Stage 3+: API, frontend, MCP, CLI layers.
 from app.file_system.interfaces import (
     FileSystem,
     FolderMeta,
+    NoteLevel,
     NoteMeta,
     NoteStatus,
-    NoteLevel,
     SearchResult,
     VersionRecord,
 )
 from app.file_system.schema import (
     Base,
-    NoteModel as NoteORM,
-    FolderModel as FolderORM,
+    NoteLink,
     NotePathHistory,
     NoteVersion,
-    NoteLink,
     init_database,
+)
+from app.file_system.schema import (
+    FolderModel as FolderORM,
+)
+from app.file_system.schema import (
+    NoteModel as NoteORM,
 )
 
 __all__ = [

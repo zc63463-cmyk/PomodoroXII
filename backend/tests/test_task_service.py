@@ -7,8 +7,8 @@ import pytest
 @pytest.mark.asyncio
 async def test_task_service_create_converts_tags_list_to_json(space_session):
     """create() should convert tags list to JSON string."""
-    from app.services.task import TaskService
     from app.models.task import Task
+    from app.services.task import TaskService
 
     svc = TaskService(space_session)
     obj = await svc.create({"title": "T", "tags": ["a", "b"]})
@@ -20,8 +20,8 @@ async def test_task_service_create_converts_tags_list_to_json(space_session):
 @pytest.mark.asyncio
 async def test_task_service_update_converts_tags_list_to_json(space_session):
     """update() should convert tags list to JSON string before applying."""
-    from app.services.task import TaskService
     from app.models.task import Task
+    from app.services.task import TaskService
 
     svc = TaskService(space_session)
     obj = await svc.create({"title": "Original", "tags": ["a", "b"]})

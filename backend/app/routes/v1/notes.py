@@ -18,10 +18,10 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_space_db, get_space_context, get_file_system
+from app.deps import get_file_system, get_space_context, get_space_db
 from app.file_system.interfaces import FileSystem
 from app.schemas.common import PaginatedResponse
-from app.schemas.note import NoteCreate, NoteUpdate, NoteResponse
+from app.schemas.note import NoteCreate, NoteResponse, NoteUpdate
 from app.services.note import NoteService
 
 router = APIRouter()

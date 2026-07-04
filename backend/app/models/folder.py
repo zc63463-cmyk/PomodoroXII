@@ -11,7 +11,7 @@ constant in routes/trash.py controls automatic cleanup (independent of
 the sync tombstone TTL).
 """
 
-from sqlalchemy import Boolean, String, Integer, UniqueConstraint, Index, text
+from sqlalchemy import Boolean, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

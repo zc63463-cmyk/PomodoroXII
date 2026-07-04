@@ -6,7 +6,6 @@ Does NOT import FastAPI.  Only flushes, never commits.
 from __future__ import annotations
 
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.folder import Folder
 from app.services.base import BaseService

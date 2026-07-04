@@ -16,7 +16,6 @@ import uuid
 
 import pytest
 
-
 # --------------------------------------------------------------------------- #
 # Shared HTTP helpers (mirror test_sync_integration.py patterns)
 # --------------------------------------------------------------------------- #
@@ -213,9 +212,9 @@ async def test_base_service_delete_writes_tombstone_when_entity_type_set(space_s
     Closes P2 gap: existing test_base_service.py uses a TaskService without
     entity_type, so the _ensure_tombstone mechanism was never unit-tested.
     """
+    from app.models.task import Task
     from app.services.base import BaseService
     from app.services.tombstone import TombstoneService
-    from app.models.task import Task
 
     class SyncedTaskService(BaseService):
         model = Task
@@ -247,9 +246,9 @@ async def test_base_service_delete_skips_tombstone_when_entity_type_unset(space_
     Ensures the entity_type guard works both ways — only sync-participating
     entities get tombstones.
     """
+    from app.models.task import Task
     from app.services.base import BaseService
     from app.services.tombstone import TombstoneService
-    from app.models.task import Task
 
     class PlainTaskService(BaseService):
         model = Task
@@ -380,8 +379,8 @@ async def test_push_update_does_not_overwrite_version_from_client(space_session)
     The client may send version in the payload; strip_client_fields must
     remove it so the server-side version counter is authoritative.
     """
-    from app.services.sync import SyncService
     from app.models.task import Task
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex

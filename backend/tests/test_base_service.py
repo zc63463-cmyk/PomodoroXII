@@ -17,8 +17,8 @@ import pytest
 @pytest.mark.asyncio
 async def test_create_flushes_row_visible_in_same_session(space_session):
     """create() should flush so the row is visible within the same session."""
-    from app.services.base import BaseService
     from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task
@@ -41,8 +41,8 @@ async def test_create_flushes_row_visible_in_same_session(space_session):
 @pytest.mark.asyncio
 async def test_create_does_not_commit_rollback_undoes_it(space_session):
     """create() must flush only — rollback should undo the insert."""
-    from app.services.base import BaseService
     from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task
@@ -67,8 +67,8 @@ async def test_create_does_not_commit_rollback_undoes_it(space_session):
 @pytest.mark.asyncio
 async def test_get_returns_instance_by_id(space_session):
     """get() should return the ORM instance for an existing id."""
-    from app.services.base import BaseService
     from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task
@@ -90,9 +90,9 @@ async def test_get_returns_instance_by_id(space_session):
 @pytest.mark.asyncio
 async def test_get_raises_not_found_for_missing_id(space_session):
     """get() should raise NotFoundError for a non-existent id."""
-    from app.services.base import BaseService
-    from app.models.task import Task
     from app.errors import NotFoundError
+    from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task
@@ -105,8 +105,8 @@ async def test_get_raises_not_found_for_missing_id(space_session):
 @pytest.mark.asyncio
 async def test_list_returns_items_with_total_and_pagination(space_session):
     """list() should return (items, total) with pagination."""
-    from app.services.base import BaseService
     from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task
@@ -128,8 +128,8 @@ async def test_list_returns_items_with_total_and_pagination(space_session):
 @pytest.mark.asyncio
 async def test_list_applies_equality_filters(space_session):
     """list() should filter by equality on specified columns."""
-    from app.services.base import BaseService
     from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task
@@ -158,22 +158,21 @@ async def test_list_applies_equality_filters(space_session):
 @pytest.mark.asyncio
 async def test_update_modifies_fields_and_bumps_updated_at(space_session):
     """update() should set fields and bump updated_at."""
-    from app.services.base import BaseService
     from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task
 
     svc = TaskService(space_session)
     task_id = uuid.uuid4().hex
-    original = await svc.create({
+    await svc.create({
         "id": task_id,
         "title": "Original",
         "status": "todo",
         "priority": "medium",
         "tags": "[]",
     })
-    original_updated = original.updated_at
     updated = await svc.update(task_id, {"title": "Updated title"})
     assert updated.title == "Updated title"
     # updated_at is seconds-precision; within the same second it may equal
@@ -185,9 +184,9 @@ async def test_update_modifies_fields_and_bumps_updated_at(space_session):
 @pytest.mark.asyncio
 async def test_delete_removes_instance_and_raises_when_missing(space_session):
     """delete() should remove the row; calling on missing id raises NotFoundError."""
-    from app.services.base import BaseService
-    from app.models.task import Task
     from app.errors import NotFoundError
+    from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task
@@ -213,8 +212,8 @@ async def test_delete_removes_instance_and_raises_when_missing(space_session):
 @pytest.mark.asyncio
 async def test_update_bumps_version(space_session):
     """BaseService.update should auto-increment the version field."""
-    from app.services.base import BaseService
     from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task
@@ -236,8 +235,8 @@ async def test_update_bumps_version(space_session):
 @pytest.mark.asyncio
 async def test_update_refreshes_updated_at(space_session):
     """BaseService.update should refresh updated_at (via explicit set or onupdate)."""
-    from app.services.base import BaseService
     from app.models.task import Task
+    from app.services.base import BaseService
 
     class TaskService(BaseService):
         model = Task

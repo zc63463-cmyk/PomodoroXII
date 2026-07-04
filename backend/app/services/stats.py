@@ -19,13 +19,13 @@ from datetime import timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.session import Session as PomodoroSession
-from app.models.task import Task
+from app.models.folder import Folder
 from app.models.habit import Habit
 from app.models.habit_check_in import HabitCheckIn
-from app.models.schedule import Schedule
 from app.models.note import Note
-from app.models.folder import Folder
+from app.models.schedule import Schedule
+from app.models.session import Session as PomodoroSession
+from app.models.task import Task
 from app.services.time import utc_now
 
 

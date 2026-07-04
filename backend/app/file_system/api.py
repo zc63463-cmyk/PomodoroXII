@@ -1,9 +1,11 @@
 """FastAPI dependency injection — FileSystem instance factory."""
 from __future__ import annotations
+
 import asyncio
 from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
+
 from app.file_system.engine import FileSystemStorage
 from app.file_system.interfaces import FileSystem
 

@@ -25,6 +25,7 @@ class TestUtcNowIso:
     def test_utc_now_returns_timezone_aware(self):
         """utc_now should return a timezone-aware datetime."""
         from datetime import timezone
+
         from app.services.time import utc_now
 
         dt = utc_now()

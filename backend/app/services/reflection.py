@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.reflection import Reflection
 from app.services.base import BaseService

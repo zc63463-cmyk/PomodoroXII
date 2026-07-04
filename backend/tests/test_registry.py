@@ -124,7 +124,10 @@ def test_registry_register_duplicate_raises_valueerror():
     """Re-registering an entity name must raise ValueError."""
     from app.registry import EntityRegistry
     from app.registry.entities import (
-        EntitySpec, FieldSpec, StorageType, EntityCategory,
+        EntityCategory,
+        EntitySpec,
+        FieldSpec,
+        StorageType,
     )
     local = EntityRegistry()
     spec = EntitySpec(

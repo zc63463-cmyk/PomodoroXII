@@ -8,8 +8,8 @@ import inspect
 class TestModelRegistration:
     def test_18_models_registered_on_metadata(self):
         """All 20 tables (2 meta + 16 business + 2 sync audit) should be registered."""
-        from app.db.base import Base
         import app.models  # noqa: F401 — trigger registration
+        from app.db.base import Base
 
         table_names = set(Base.metadata.tables.keys())
         expected = {
@@ -30,8 +30,9 @@ class TestModelRegistration:
 
     def test_all_models_import_from_db_base(self):
         """No model should import from app.database — only app.db.base."""
-        import app.models
         import os
+
+        import app.models
         models_dir = os.path.dirname(app.models.__file__)
         for fname in os.listdir(models_dir):
             if fname.endswith(".py") and fname != "__init__.py":
@@ -84,7 +85,7 @@ class TestFolderModel:
 class TestSyncMixin:
     def test_fields_present_on_standard_entities(self):
         """Task, Session, Note should have id/created_at/updated_at/version from SyncMixin."""
-        from app.models import Task, Session, Note
+        from app.models import Note, Session, Task
         for model_cls in [Task, Session, Note]:
             columns = {c.name for c in model_cls.__table__.columns}
             assert "id" in columns, f"{model_cls.__name__} missing id"

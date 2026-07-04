@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_space_db, get_space_context
+from app.deps import get_space_context, get_space_db
 from app.models.setting import Setting
 from app.services.time import utc_now_iso
 

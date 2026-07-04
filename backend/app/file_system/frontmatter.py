@@ -29,9 +29,7 @@ Design decisions:
 """
 from __future__ import annotations
 
-import json
 from typing import Any
-
 
 _FRONTMATTER_DELIMITER = "---"
 _FRONTMATTER_END = "---\n"

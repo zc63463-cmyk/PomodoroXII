@@ -1,11 +1,10 @@
 """Tombstone model for tracking deleted entities during sync."""
 
-from app.services.time import utc_now_iso
-
 from sqlalchemy import Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+from app.services.time import utc_now_iso
 
 
 class Tombstone(Base):

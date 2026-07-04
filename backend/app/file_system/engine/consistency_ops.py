@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from .base import _utc_now_iso, _generate_note_id, _sha256
+from .base import _generate_note_id, _sha256, _utc_now_iso
 
 
 class ConsistencyOpsMixin:

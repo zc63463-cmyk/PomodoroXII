@@ -1,11 +1,10 @@
 """SQLAlchemy model for the sync audit log."""
 
-from app.services.time import utc_now_iso
-
 from sqlalchemy import Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+from app.services.time import utc_now_iso
 
 
 class SyncAuditLog(Base):

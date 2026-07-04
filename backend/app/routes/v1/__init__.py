@@ -16,23 +16,23 @@ def build_v1_router() -> APIRouter:
 
     # --- Existing meta-layer routers (master token) ---
     from app.routes.v1.auth import router as auth_router
-    from app.routes.v1.spaces import router as spaces_router
+    from app.routes.v1.folders import router as folders_router
+    from app.routes.v1.habits import router as habits_router
     from app.routes.v1.meta import router as meta_router
+    from app.routes.v1.notes import router as notes_router
+    from app.routes.v1.quick_notes import router as quick_notes_router
+    from app.routes.v1.reflections import router as reflections_router
+    from app.routes.v1.schedules import router as schedules_router
+    from app.routes.v1.sessions import router as sessions_router
+    from app.routes.v1.settings import router as settings_router
+    from app.routes.v1.spaces import router as spaces_router
+    from app.routes.v1.stats import router as stats_router
+    from app.routes.v1.sync import router as sync_router
 
     # --- Space-scoped entity routers (space token) ---
     from app.routes.v1.tasks import router as tasks_router
-    from app.routes.v1.sessions import router as sessions_router
-    from app.routes.v1.notes import router as notes_router
-    from app.routes.v1.folders import router as folders_router
-    from app.routes.v1.quick_notes import router as quick_notes_router
-    from app.routes.v1.reflections import router as reflections_router
-    from app.routes.v1.habits import router as habits_router
-    from app.routes.v1.schedules import router as schedules_router
     from app.routes.v1.time_blocks import router as time_blocks_router
     from app.routes.v1.trash import router as trash_router
-    from app.routes.v1.stats import router as stats_router
-    from app.routes.v1.settings import router as settings_router
-    from app.routes.v1.sync import router as sync_router
 
     # Meta-layer (master token required).
     router.include_router(auth_router, prefix="/auth", tags=["auth"])

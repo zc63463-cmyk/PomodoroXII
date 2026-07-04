@@ -118,8 +118,8 @@ async def get_file_system(ctx: dict[str, Any] = Depends(get_space_context)) -> A
     ``app.file_system.api``) to create and initialise a filesystem
     rooted at the space's notes directory.
     """
-    from app.settings import settings
     from app.file_system.api import get_file_system as _create_fs
+    from app.settings import settings
 
     space_id = ctx["space_id"]
     root_dir = settings.space_notes_dir(space_id)

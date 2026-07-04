@@ -176,8 +176,12 @@ class NoteService(BaseService):
         if "tags" in data:
             data["tags"] = json.dumps(_parse_tags(data["tags"]))
         if updated_at_override is not None:
+            # Sync path: preserve the client-provided timestamp and do NOT
+            # bump version.  Bump only happens for normal REST/service calls.
             data["updated_at"] = updated_at_override
-        return await super().update(id, data, bump_updated_at=False)
+            return await super().update(id, data, bump_updated_at=False)
+        # Normal REST/service path: bump updated_at and version via BaseService.
+        return await super().update(id, data)
 
     async def update(
         self, id: str, data: dict[str, Any],

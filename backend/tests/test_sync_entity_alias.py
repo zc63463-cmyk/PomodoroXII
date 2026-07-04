@@ -44,8 +44,8 @@ def test_canonicalize_unknown_returns_none():
 @pytest.mark.asyncio
 async def test_push_accepts_snake_case_entity_type(space_session, tmp_path):
     """P1-2: /sync/push should accept snake_case entity_type and canonicalize."""
-    from app.services.sync import SyncService
     from app.models.task import Task
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = "p12-snake-task"
@@ -66,8 +66,8 @@ async def test_push_accepts_snake_case_entity_type(space_session, tmp_path):
 @pytest.mark.asyncio
 async def test_push_accepts_snake_case_quick_note(space_session):
     """P1-2: /sync/push should accept 'quick_note' and canonicalize to 'quickNote'."""
-    from app.services.sync import SyncService
     from app.models.quick_note import QuickNote
+    from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = "p12-snake-qn"

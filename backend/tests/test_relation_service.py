@@ -45,9 +45,10 @@ async def test_link_is_idempotent(space_session):
 @pytest.mark.asyncio
 async def test_unlink_removes_row(space_session):
     """unlink() should remove the junction row."""
-    from app.services.relation import RelationService
-    from app.models.task_quick_note import TaskQuickNote
     from sqlalchemy import select
+
+    from app.models.task_quick_note import TaskQuickNote
+    from app.services.relation import RelationService
 
     svc = RelationService(space_session)
     task_id = uuid.uuid4().hex
@@ -174,9 +175,10 @@ async def test_link_integrity_error_preserves_pending_changes(space_session):
     so the route can commit them together. Calling rollback() on the
     whole session would discard them.
     """
-    from app.services.relation import RelationService
-    from app.models.task import Task
     from sqlalchemy.exc import IntegrityError
+
+    from app.models.task import Task
+    from app.services.relation import RelationService
 
     # Add a pending Task that should survive the IntegrityError handling.
     task = Task(
@@ -234,8 +236,9 @@ async def test_link_integrity_error_does_not_call_rollback(space_session):
     rollback() discards ALL pending changes in the outer transaction.
     SAVEPOINT (begin_nested) isolates only the failed insert.
     """
-    from app.services.relation import RelationService
     from sqlalchemy.exc import IntegrityError
+
+    from app.services.relation import RelationService
 
     # Spy on rollback.
     rollback_called = {"n": 0}

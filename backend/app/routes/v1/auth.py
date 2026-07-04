@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.security import hash_password, verify_password, create_master_token
+from app.auth.security import create_master_token, hash_password, verify_password
 from app.db.models.meta import MetaSetting
 from app.deps import get_current_user, get_meta_db
 from app.errors import AuthenticationError, ConflictError

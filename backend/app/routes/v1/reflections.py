@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_space_db, get_space_context
+from app.deps import get_space_context, get_space_db
 from app.schemas.common import PaginatedResponse
 from app.schemas.reflection import ReflectionCreate, ReflectionResponse
 from app.services.reflection import ReflectionService
