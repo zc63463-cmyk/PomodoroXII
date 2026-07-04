@@ -38,3 +38,22 @@ class TestUtcNowIso:
         assert ts.endswith("Z"), f"Expected Z suffix, got: {ts}"
         time_part = ts.split("T")[1].rstrip("Z")
         assert "." in time_part, f"Expected microseconds, got: {time_part}"
+
+    def test_utc_now_iso_ms_returns_exactly_3_digit_milliseconds(self):
+        """utc_now_iso_ms should emit exactly 3-digit ms (not 6-digit μs).
+
+        P0-2: sync cursor compares timestamps lexicographically. Mixing
+        6-digit microsecond and 3-digit millisecond strings breaks the
+        cursor pagination because the same instant produces unequal
+        strings. Canonical form is 3-digit ms.
+        """
+        from app.services.time import utc_now_iso_ms
+
+        ts = utc_now_iso_ms()
+        # Format: 2026-07-02T10:30:45.123Z  (3 ms digits, not 6)
+        time_part = ts.split("T")[1].rstrip("Z")
+        assert "." in time_part, f"Expected ms fraction, got: {time_part}"
+        fraction = time_part.split(".")[1]
+        assert len(fraction) == 3, (
+            f"Expected exactly 3 millisecond digits, got {len(fraction)}: {ts}"
+        )

@@ -18,12 +18,18 @@ def utc_now_iso() -> str:
 
 
 def utc_now_iso_ms() -> str:
-    """Return current UTC time as ISO 8601 string with Z suffix, microsecond precision.
+    """Return current UTC time as ISO 8601 string with Z suffix, millisecond precision.
 
-    Format: 2026-07-02T10:30:45.123456Z
-    Used by tombstone and sync audit records.
+    Format: 2026-07-02T10:30:45.123Z
+    Used by tombstone and sync audit records, and as the canonical timestamp
+    format for sync-enabled entities (SyncMixin.updated_at).
+
+    P0-2: emits exactly 3-digit milliseconds (not 6-digit microseconds) so
+    lexicographic comparison of timestamps is consistent across rows.
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    now = datetime.now(timezone.utc)
+    ms = now.microsecond // 1000
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms:03d}Z"
 
 
 def utc_now() -> datetime:

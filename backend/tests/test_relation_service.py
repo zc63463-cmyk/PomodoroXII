@@ -159,3 +159,116 @@ async def test_link_to_session(space_session):
     link = await svc.link("session", session_id, qn_id)
     assert link.session_id == session_id
     assert link.quick_note_id == qn_id
+
+
+# --------------------------------------------------------------------------- #
+# P2-1: SAVEPOINT isolation for link() IntegrityError handling
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_link_integrity_error_preserves_pending_changes(space_session):
+    """P2-1: link() IntegrityError handling must use SAVEPOINT, not rollback.
+
+    When a concurrent INSERT wins the race and link() catches
+    IntegrityError, other pending changes in the session must survive
+    so the route can commit them together. Calling rollback() on the
+    whole session would discard them.
+    """
+    from app.services.relation import RelationService
+    from app.models.task import Task
+    from sqlalchemy.exc import IntegrityError
+
+    # Add a pending Task that should survive the IntegrityError handling.
+    task = Task(
+        id="p21-survivor", title="Survivor", status="todo",
+        priority="medium", tags="[]",
+    )
+    space_session.add(task)
+    await space_session.flush()
+
+    # Monkeypatch flush to raise IntegrityError on the next call (simulating
+    # a concurrent INSERT that wins the race between our SELECT and INSERT).
+    original_flush = space_session.flush
+    call_count = {"n": 0}
+
+    async def fake_flush(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise IntegrityError(
+                "simulated UNIQUE constraint violation",
+                params=None,
+                orig=Exception("UNIQUE constraint failed"),
+            )
+        return await original_flush(*args, **kwargs)
+
+    space_session.flush = fake_flush
+
+    svc = RelationService(space_session)
+    # link() should catch IntegrityError, use SAVEPOINT (not rollback),
+    # and re-query. The re-query won't find a row (we didn't actually
+    # insert one), so link() will re-raise. That's fine — we just need
+    # to verify the survivor Task is still in the session afterward.
+    try:
+        await svc.link("task", "p21-parent", "p21-qn")
+    except IntegrityError:
+        pass  # Expected: re-query finds nothing, re-raises
+
+    # Restore flush before asserting.
+    space_session.flush = original_flush
+
+    # Verify the survivor Task was NOT rolled back.
+    from sqlalchemy import select
+    res = await space_session.execute(
+        select(Task).where(Task.id == "p21-survivor")
+    )
+    assert res.scalar_one_or_none() is not None, (
+        "P2-1: link() rollback() discarded other pending changes; "
+        "should use SAVEPOINT (begin_nested) instead"
+    )
+
+
+@pytest.mark.asyncio
+async def test_link_integrity_error_does_not_call_rollback(space_session):
+    """P2-1: link() IntegrityError handling must NOT call session.rollback().
+
+    rollback() discards ALL pending changes in the outer transaction.
+    SAVEPOINT (begin_nested) isolates only the failed insert.
+    """
+    from app.services.relation import RelationService
+    from sqlalchemy.exc import IntegrityError
+
+    # Spy on rollback.
+    rollback_called = {"n": 0}
+    original_rollback = space_session.rollback
+
+    async def spy_rollback(*args, **kwargs):
+        rollback_called["n"] += 1
+        return await original_rollback(*args, **kwargs)
+
+    space_session.rollback = spy_rollback
+
+    # Monkeypatch flush to raise IntegrityError on first call.
+    original_flush = space_session.flush
+    flush_count = {"n": 0}
+
+    async def fake_flush(*args, **kwargs):
+        flush_count["n"] += 1
+        if flush_count["n"] == 1:
+            raise IntegrityError(
+                "simulated", params=None,
+                orig=Exception("UNIQUE constraint failed"),
+            )
+        return await original_flush(*args, **kwargs)
+
+    space_session.flush = fake_flush
+
+    svc = RelationService(space_session)
+    try:
+        await svc.link("task", "p21-parent", "p21-qn")
+    except IntegrityError:
+        pass
+
+    assert rollback_called["n"] == 0, (
+        "P2-1: link() called session.rollback() — should use SAVEPOINT "
+        "(begin_nested) to isolate the failed insert"
+    )

@@ -91,6 +91,7 @@ REGISTRY.register(EntitySpec(
         FieldSpec("actual_pomodoros", "integer", nullable=False, default=0),
         FieldSpec("archived_at", "datetime", nullable=True),
     ),
+    pull_key="tasks",
     description="Todo/plan item with pomodoro estimates",
 ))
 
@@ -128,6 +129,7 @@ REGISTRY.register(EntitySpec(
         FieldSpec("total_pause_duration", "integer", nullable=True, default=0),
         FieldSpec("cognitive_mark_summary", "string", nullable=True, default=""),
     ),
+    pull_key="sessions",
     description="Pomodoro work/break interval with enhanced metrics",
 ))
 
@@ -153,6 +155,8 @@ REGISTRY.register(EntitySpec(
         ),
         FieldSpec("trashed_at", "datetime", nullable=True, indexed=True),
     ),
+    pull_key="notes",
+    delete_strategy="fs_saga",
     description="Lightweight knowledge-base entry; content lives in FS, meta in DB",
 ))
 
@@ -173,6 +177,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("is_system", "boolean", nullable=False, default=False),
         FieldSpec("trashed_at", "datetime", nullable=True, indexed=True),
     ),
+    pull_key="folders",
+    delete_strategy="cascade_soft_delete",
     description="Self-referencing VFS folder for organising notes/quick_notes",
 ))
 
@@ -196,6 +202,9 @@ REGISTRY.register(EntitySpec(
         FieldSpec("migrated_to_note_id", "string", nullable=True, indexed=True),
         FieldSpec("session_id", "string", nullable=True, indexed=True),
     ),
+    sync_entity_type="quickNote",
+    pull_key="quickNotes",
+    delete_strategy="soft_delete",
     description="Rapid-capture note with optional session link",
 ))
 
@@ -217,6 +226,7 @@ REGISTRY.register(EntitySpec(
         FieldSpec("is_structured", "boolean", nullable=False, default=False),
         FieldSpec("auto_linked_session_ids", "json", nullable=False, default="[]"),
     ),
+    pull_key="reflections",
     description="Daily retrospective with structured sections",
 ))
 
@@ -239,6 +249,7 @@ REGISTRY.register(EntitySpec(
         FieldSpec("sort_order", "integer", nullable=False, default=0),
         FieldSpec("archived", "boolean", nullable=False, default=False),
     ),
+    pull_key="habits",
     description="Habit streak chain with rest-day protection",
 ))
 
@@ -256,6 +267,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("count", "integer", nullable=False, default=1),
         FieldSpec("note", "string", nullable=False, default=""),
     ),
+    sync_entity_type="habitCheckIn",
+    pull_key="habitCheckIns",
     description="Daily check-in record for a habit",
 ))
 
@@ -280,6 +293,7 @@ REGISTRY.register(EntitySpec(
         FieldSpec("start_time", "string", nullable=True),
         FieldSpec("end_time", "string", nullable=True),
     ),
+    pull_key="schedules",
     description="Calendar event with completion status",
 ))
 
@@ -309,6 +323,8 @@ REGISTRY.register(EntitySpec(
         ),
         FieldSpec("sort_order", "integer", nullable=False, default=0),
     ),
+    sync_entity_type="timeBlock",
+    pull_key="timeBlocks",
     description="Planned time block on a given date",
 ))
 
@@ -324,6 +340,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("note_id", "string", nullable=False, indexed=True),
         FieldSpec("content", "text", nullable=False, default=""),
     ),
+    sync_entity_type="memoComment",
+    pull_key="memoComments",
     description="Comment on a quick note (小记评论)",
 ))
 
@@ -341,6 +359,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("session_id", "string", nullable=False, indexed=True),
         FieldSpec("quick_note_id", "string", nullable=False, indexed=True),
     ),
+    sync_entity_type="sessionQuickNote",
+    pull_key="sessionQuickNotes",
     description="Junction: pomodoro session <-> quick note",
 ))
 
@@ -356,6 +376,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("schedule_id", "string", nullable=False, indexed=True),
         FieldSpec("quick_note_id", "string", nullable=False, indexed=True),
     ),
+    sync_entity_type="scheduleQuickNote",
+    pull_key="scheduleQuickNotes",
     description="Junction: schedule <-> quick note",
 ))
 
@@ -371,6 +393,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("task_id", "string", nullable=False, indexed=True),
         FieldSpec("quick_note_id", "string", nullable=False, indexed=True),
     ),
+    sync_entity_type="taskQuickNote",
+    pull_key="taskQuickNotes",
     description="Junction: task <-> quick note",
 ))
 

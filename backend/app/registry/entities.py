@@ -67,8 +67,41 @@ class EntitySpec:
     fields: tuple[FieldSpec, ...]
     primary_key: str = "id"
     description: str = ""
+    # P1.2 + P2.1: sync protocol metadata.
+    # sync_entity_type uses camelCase for legacy client compatibility
+    # (e.g. "quickNote", "timeBlock"); effective_sync_entity_type falls
+    # back to `name` when None.
+    sync_entity_type: str | None = None
+    pull_key: str | None = None
+    # P2.1: routing / service / schema metadata (future scaffold use).
+    route_prefix: str | None = None
+    service_path: str | None = None
+    schema_module: str | None = None
+    schema_prefix: str | None = None
+    # P2.1: delete strategy. hard_tombstone = default (Task-like);
+    # soft_delete = trashed_at column; cascade_soft_delete = Folder;
+    # fs_saga = Note (FS+DB split with saga compensation).
+    delete_strategy: str = "hard_tombstone"
+    # P2.1: feature flags for scaffold / introspection.
+    route_enabled: bool = False
+    mcp_schema_enabled: bool = True
 
     @property
     def field_names(self) -> tuple[str, ...]:
         """Return the ordered tuple of field names."""
         return tuple(f.name for f in self.fields)
+
+    @property
+    def effective_sync_entity_type(self) -> str:
+        """sync_entity_type or fallback to name (snake_case default)."""
+        return self.sync_entity_type or self.name
+
+    @property
+    def effective_pull_key(self) -> str:
+        """pull_key or fallback to name + 's' (simple plural).
+
+        Note: this naive pluralisation only works for regular cases
+        (task→tasks, habit→habits). Entities with irregular plurals
+        must declare pull_key explicitly in builtin.py.
+        """
+        return self.pull_key or (self.name + "s")

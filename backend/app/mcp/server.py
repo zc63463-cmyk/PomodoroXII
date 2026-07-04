@@ -164,6 +164,23 @@ async def get_task_distribution(space_id: str) -> dict:
 
 
 @mcp.tool
+async def get_daily_detail(space_id: str, date: str) -> dict:
+    """Get session count and total duration for a specific date.
+
+    Args:
+        space_id: The space to query.
+        date: Date in YYYY-MM-DD format.
+
+    Returns:
+        Dict with date, count, and duration for completed work sessions.
+    """
+    from app.services.stats import StatsService
+
+    async with get_space_session(space_id) as db:
+        return await StatsService(db).daily_detail(date=date)
+
+
+@mcp.tool
 async def get_habit_summary(space_id: str, days: int = 30) -> dict:
     """Get habit check-in statistics: streaks, completion rates.
 

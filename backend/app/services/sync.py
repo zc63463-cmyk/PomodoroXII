@@ -16,21 +16,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.folder import Folder
-from app.models.habit import Habit
-from app.models.habit_check_in import HabitCheckIn
-from app.models.memo_comment import MemoComment
 from app.models.note import Note
-from app.models.quick_note import QuickNote
-from app.models.reflection import Reflection
-from app.models.schedule import Schedule
-from app.models.schedule_quick_note import ScheduleQuickNote
-from app.models.session import Session
-from app.models.session_quick_note import SessionQuickNote
-from app.models.task import Task
-from app.models.task_quick_note import TaskQuickNote
-from app.models.time_block import TimeBlock
 from app.models.tombstone import Tombstone
+from app.registry.sync_registry import build_sync_registry
+from app.services.sync_entity_types import canonicalize_entity_type
 from app.services.sync_safety import (
     check_folder_circular_ref,
     check_lww_conflict,
@@ -45,25 +34,14 @@ logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
-# Entity registry
+# Entity registry — derived from REGISTRY (single source of truth)
 # --------------------------------------------------------------------------- #
+# P2.4: replaced 14 hardcoded ORM imports + camelCase dict with
+# build_sync_registry() which derives from REGISTRY.list_sync_enabled().
+# The build is lazy (runs at module import); tests in test_build_sync_registry.py
+# verify parity with the legacy hardcoded dict.
 
-ENTITY_REGISTRY: dict[str, dict[str, Any]] = {
-    "task": {"model": Task, "pull_key": "tasks"},
-    "session": {"model": Session, "pull_key": "sessions"},
-    "note": {"model": Note, "pull_key": "notes"},
-    "folder": {"model": Folder, "pull_key": "folders"},
-    "quickNote": {"model": QuickNote, "pull_key": "quickNotes"},
-    "reflection": {"model": Reflection, "pull_key": "reflections"},
-    "habit": {"model": Habit, "pull_key": "habits"},
-    "habitCheckIn": {"model": HabitCheckIn, "pull_key": "habitCheckIns"},
-    "schedule": {"model": Schedule, "pull_key": "schedules"},
-    "timeBlock": {"model": TimeBlock, "pull_key": "timeBlocks"},
-    "memoComment": {"model": MemoComment, "pull_key": "memoComments"},
-    "sessionQuickNote": {"model": SessionQuickNote, "pull_key": "sessionQuickNotes"},
-    "scheduleQuickNote": {"model": ScheduleQuickNote, "pull_key": "scheduleQuickNotes"},
-    "taskQuickNote": {"model": TaskQuickNote, "pull_key": "taskQuickNotes"},
-}
+ENTITY_REGISTRY: dict[str, dict[str, Any]] = build_sync_registry()
 
 
 class SyncService:
@@ -97,7 +75,10 @@ class SyncService:
         errors: list[dict[str, str]] = []
 
         for event in events:
-            etype = event.get("entity_type", "")
+            etype_raw = event.get("entity_type", "")
+            # P1-2: canonicalize snake_case (registry name) -> camelCase
+            # (ENTITY_REGISTRY key) so clients using either convention work.
+            etype = canonicalize_entity_type(etype_raw) or ""
             eid = event.get("entity_id", "")
             action = event.get("action", "")
             payload = event.get("payload", {}) or {}
@@ -105,9 +86,9 @@ class SyncService:
 
             if etype not in ENTITY_REGISTRY:
                 errors.append({
-                    "entity_type": etype,
+                    "entity_type": etype_raw,
                     "entity_id": eid,
-                    "error": f"Unknown entity_type: {etype}",
+                    "error": f"Unknown entity_type: {etype_raw}",
                 })
                 continue
 
@@ -138,11 +119,17 @@ class SyncService:
                                 "entity_id": eid,
                                 "resolution": "tombstone",
                             })
-                        applied.append({
-                            "entity_type": etype,
-                            "entity_id": eid,
-                            "action": action,
-                        })
+                        # P1-1: only "ok" and "conflict_remote" represent a
+                        # successful application of the remote event. Other
+                        # conflict resolutions (local/tombstone) mean the
+                        # remote event was REJECTED — reporting them in
+                        # ``applied`` would mislead clients.
+                        if resolution in ("ok", "conflict_remote"):
+                            applied.append({
+                                "entity_type": etype,
+                                "entity_id": eid,
+                                "action": action,
+                            })
                         await self._write_audit(
                             "push", etype, eid,
                             details=f"action={action} resolution={resolution}",
@@ -186,11 +173,15 @@ class SyncService:
                             "entity_id": eid,
                             "resolution": "circular_ref",
                         })
-                    applied.append({
-                        "entity_type": etype,
-                        "entity_id": eid,
-                        "action": action,
-                    })
+                    # P1-1: only "ok" and "conflict_remote" represent a
+                    # successful application. local/tombstone/circular_ref
+                    # mean the remote event was REJECTED.
+                    if resolution in ("ok", "conflict_remote"):
+                        applied.append({
+                            "entity_type": etype,
+                            "entity_id": eid,
+                            "action": action,
+                        })
                     await self._write_audit(
                         "push", etype, eid,
                         details=f"action={action} resolution={resolution}",
@@ -361,6 +352,9 @@ class SyncService:
         if action == "create":
             data = dict(payload)
             data["id"] = eid
+            # P1-3: preserve client updated_at so subsequent LWW checks compare
+            # against the client timestamp, not server-now.
+            data["updated_at"] = client_ts_n
             # sync_mode=True preserves client updated_at/version/created_at.
             note_svc = NoteService(self.db, self.fs, sync_mode=True)
             await note_svc.create(data)
@@ -376,6 +370,7 @@ class SyncService:
                 # Treat as create (idempotent upsert).
                 data = dict(payload)
                 data["id"] = eid
+                data["updated_at"] = client_ts_n
                 note_svc = NoteService(self.db, self.fs, sync_mode=True)
                 await note_svc.create(data)
                 return "ok"
@@ -386,7 +381,7 @@ class SyncService:
             note_svc = NoteService(self.db, self.fs, sync_mode=True)
             update_data = dict(payload)
             update_data["updated_at"] = client_ts_n
-            await note_svc.update(eid, update_data)
+            await note_svc.update(eid, update_data, updated_at_override=client_ts_n)
             return "conflict_remote"
 
         if action == "delete":
@@ -441,12 +436,28 @@ class SyncService:
             q = select(model)
             if since_n:
                 q = q.where(model.updated_at > since_n)
-            q = q.order_by(model.updated_at.asc()).limit(limit + 1)
+            q = q.order_by(model.updated_at.asc(), model.id.asc()).limit(limit + 1)
             rows = (await self.db.execute(q)).scalars().all()
             if len(rows) > limit:
                 result["has_more"] = True
                 rows = rows[:limit]
             serialized = [serialize_entity(r) for r in rows]
+            # P0-1: Note content lives in the filesystem, not the ORM row.
+            # Inject `content` / `content_missing` so devices pulling changes
+            # receive the full Markdown body, not just metadata.
+            if model is Note and serialized:
+                note_ids = [r.id for r in rows]
+                if self.fs is not None:
+                    contents = await self.fs.read_notes_batch(note_ids)
+                else:
+                    contents = [None] * len(note_ids)
+                for note_payload, body in zip(serialized, contents):
+                    if body is None:
+                        note_payload["content"] = ""
+                        note_payload["content_missing"] = True
+                    else:
+                        note_payload["content"] = body
+                        note_payload["content_missing"] = False
             result[pull_key] = serialized
             for r in rows:
                 ts = normalize_timestamp(r.updated_at or "")
@@ -506,7 +517,7 @@ class SyncService:
         tq = select(Tombstone)
         if since_n:
             tq = tq.where(Tombstone.deleted_at > since_n)
-        tq = tq.order_by(Tombstone.deleted_at.asc()).limit(limit + 1)
+        tq = tq.order_by(Tombstone.deleted_at.asc(), Tombstone.entity_id.asc()).limit(limit + 1)
         rows = (await self.db.execute(tq)).scalars().all()
         has_more = len(rows) > limit
         if has_more:

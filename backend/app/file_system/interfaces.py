@@ -145,6 +145,16 @@ class FileSystem(ABC):
         ...
 
     @abstractmethod
+    async def read_notes_batch(self, note_ids: list[str]) -> list[str | None]:
+        """Batch-read note contents, preserving input order.
+
+        Returns a list aligned with ``note_ids``: each entry is the note's
+        Markdown body (frontmatter stripped) or ``None`` when the note is
+        missing / soft-deleted / file deleted out-of-band.
+        """
+        ...
+
+    @abstractmethod
     async def read_note_meta(self, note_id: str) -> NoteMeta:
         ...
 
