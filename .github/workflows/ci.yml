@@ -8,7 +8,7 @@
 #   - pull_request to main
 #
 # Jobs:
-#   1. test   — pytest 361 tests + ruff lint
+#   1. test   — pytest + ruff lint
 #   2. build  — Docker image build (only on main, after test passes)
 # ===================================================================
 
@@ -68,10 +68,10 @@ jobs:
       - name: Sync dependencies (dev extras included)
         run: uv sync --frozen --extra dev
 
-      - name: Lint with ruff (non-blocking)
-        run: uv run ruff check app tests || true
+      - name: Lint with ruff
+        run: uv run ruff check app tests
 
-      - name: Run pytest (361 tests)
+      - name: Run pytest
         env:
           PYTHONDONTWRITEBYTECODE: "1"
           PYTHONUNBUFFERED: "1"
