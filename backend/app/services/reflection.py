@@ -33,8 +33,6 @@ class ReflectionService(BaseService):
         for field in _JSON_LIST_FIELDS:
             if field in data and isinstance(data[field], list):
                 data[field] = json.dumps(data[field])
-        if "is_structured" in data and isinstance(data["is_structured"], bool):
-            data["is_structured"] = "true" if data["is_structured"] else "false"
         return await super().create(data)
 
     async def list(

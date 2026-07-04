@@ -50,4 +50,8 @@ class Session(Base, SyncMixin):
             "type IN ('work','short_break','long_break','free','countdown')",
             name="check_session_type",
         ),
+        CheckConstraint(
+            "mood IN ('great','good','normal','bad','terrible') OR mood IS NULL",
+            name="check_session_mood",
+        ),
     )

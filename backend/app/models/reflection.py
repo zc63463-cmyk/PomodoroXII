@@ -1,6 +1,6 @@
 """SQLAlchemy model for daily reflections."""
 
-from sqlalchemy import String, CheckConstraint, Index
+from sqlalchemy import String, Boolean, CheckConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -19,7 +19,7 @@ class Reflection(Base, SyncMixin):
     tags: Mapped[str] = mapped_column(String(4000), default="[]")
     # Phase 2 extensions: structured reflection + auto-linking
     sections: Mapped[str] = mapped_column(String(4000), default="[]")
-    is_structured: Mapped[str] = mapped_column(String(10), default="false")
+    is_structured: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_linked_session_ids: Mapped[str] = mapped_column(String(4000), default="[]")
 
     __table_args__ = (

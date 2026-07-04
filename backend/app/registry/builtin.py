@@ -214,7 +214,7 @@ REGISTRY.register(EntitySpec(
         FieldSpec("related_task_ids", "json", nullable=False, default="[]"),
         FieldSpec("tags", "json", nullable=False, default="[]"),
         FieldSpec("sections", "json", nullable=False, default="[]"),
-        FieldSpec("is_structured", "string", nullable=False, default="false"),
+        FieldSpec("is_structured", "boolean", nullable=False, default=False),
         FieldSpec("auto_linked_session_ids", "json", nullable=False, default="[]"),
     ),
     description="Daily retrospective with structured sections",

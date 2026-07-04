@@ -13,6 +13,14 @@ class QuickNote(Base, SyncMixin):
     Supports optional association with a pomodoro session via session_id.
     A session can have multiple quick notes; a quick note can exist
     independently without a session link.
+
+    Two distinct "removed" states:
+      - ``trashed_at``: Soft-delete via trash route (same as Note/Folder).
+        Item appears in recycle bin, can be restored or purged.
+      - ``archived_at``: Migration archive — set when a quick note is
+        converted to a full Note. The quick note row is kept for
+        reference (with ``migrated_to_note_id`` pointing to the new
+        Note) but hidden from active listings. This is NOT a deletion.
     """
 
     __tablename__ = "quick_notes"
