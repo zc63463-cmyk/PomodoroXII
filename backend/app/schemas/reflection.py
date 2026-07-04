@@ -12,7 +12,6 @@ class ReflectionBase(BaseModel):
     Several fields (``related_task_ids``, ``tags``, ``sections``,
     ``auto_linked_session_ids``) are JSON-serialised strings in SQLite; the
     validators below reverse that when loading from the ORM.
-    ``is_structured`` is stored as the string ``"true"``/``"false"``.
     """
 
     date: str = Field(..., max_length=10)
@@ -40,14 +39,6 @@ class ReflectionBase(BaseModel):
         if isinstance(v, str):
             return json.loads(v) if v else []
         return v  # type: ignore[return-value]
-
-    @field_validator("is_structured", mode="before")
-    @classmethod
-    def parse_bool_field(cls, v: object) -> bool:
-        """Parse string 'true'/'false' to bool when loading from ORM."""
-        if isinstance(v, str):
-            return v.lower() == "true"
-        return bool(v)
 
 
 class ReflectionCreate(ReflectionBase):
