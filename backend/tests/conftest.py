@@ -14,8 +14,10 @@ matching against the versions other modules already bound.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -32,36 +34,84 @@ os.environ["TEMP"] = str(_tests_dir)
 os.environ["TMPDIR"] = str(_tests_dir)
 
 
-@pytest.fixture
-def tmp_path():  # type: ignore[no-redef]
-    """Override pytest's tmp_path to return the tests/ directory.
+def _sanitize_nodeid(nodeid: str) -> str:
+    """Create a filesystem-safe directory name from a pytest nodeid.
 
-    Trae sandbox blocks os.mkdir(), so we cannot create per-test temp
-    directories. Tests that need filesystem isolation must use
-    monkeypatch to point env vars at in-memory or existing paths,
-    rather than relying on tmp_path subdirectories.
+    The nodeid contains module paths and parametrization values that may
+    include characters unsafe for directory names.  We sanitize them and
+    append a short hash to avoid collisions between different modules that
+    happen to have a test with the same name.
     """
-    return _tests_dir
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", nodeid)
+    safe = safe.strip("_")
+    short_hash = hashlib.sha256(nodeid.encode()).hexdigest()[:16]
+    return f"{safe[:80]}_{short_hash}"
+
+
+@pytest.fixture
+def tmp_path(request):  # type: ignore[no-redef]
+    """Override pytest's tmp_path to return a per-test directory under tests/.tmp/.
+
+    Trae sandbox blocks os.mkdir() outside the project, but creating
+    subdirectories under the existing tests/ directory is allowed.
+    We use a dedicated ``tests/.tmp/`` root (never ``tests/<test_name>/``)
+    so this fixture cannot collide with real test packages such as
+    ``tests/test_file_system``.
+    """
+    temp_root = _tests_dir / ".tmp"
+    temp_root.mkdir(exist_ok=True)
+    sanitized = _sanitize_nodeid(request.node.nodeid)
+    path = temp_root / sanitized
+    path.mkdir(exist_ok=True)
+    return path
+
+
+def _ensure_inside_temp_root(path: Path, temp_root: Path) -> None:
+    """Raise if *path* resolves outside the dedicated temp root.
+
+    This guard prevents accidental deletion of real test packages (e.g.
+    ``tests/test_file_system``) if the tmp_path override is misconfigured.
+    """
+    resolved = path.resolve()
+    root_resolved = temp_root.resolve()
+    # Allow the root itself; any subpath must start with root + sep.
+    if resolved == root_resolved:
+        return
+    prefix = str(root_resolved) + os.sep
+    if not str(resolved).startswith(prefix):
+        raise RuntimeError(
+            f"Refusing to operate on path outside temp root: {resolved} "
+            f"(root: {root_resolved})"
+        )
 
 
 @pytest.fixture(autouse=True)
 def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point all PomodoroXII paths at a per-test temp directory."""
+    """Point all PomodoroXII paths at a per-test temp directory.
+
+    ``tmp_path`` is overridden to ``tests/.tmp/<sanitized_nodeid>/`` so
+    each test gets its own filesystem sandbox.  We recreate that directory
+    from scratch before every test to ensure no .db files, notes/, or
+    spaces/ leak across tests.
+    """
+    import shutil
+
+    temp_root = _tests_dir / ".tmp"
+    _ensure_inside_temp_root(tmp_path, temp_root)
+    _ensure_inside_temp_root(temp_root, temp_root)
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path, ignore_errors=True)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
     meta_db = tmp_path / "meta.db"
     spaces_dir = tmp_path / "spaces"
 
-    # P2.4 fix: tmp_path is overridden to tests/ (Trae sandbox workaround),
-    # so .db files and spaces/ dir persist across test runs. Delete them
-    # before each test to ensure a clean state (otherwise /auth/setup
-    # returns 409 Conflict from leftover admin rows).
-    import shutil
-    for stale_db in tmp_path.glob("*.db"):
-        try:
-            stale_db.unlink()
-        except OSError:
-            pass
-    if spaces_dir.exists():
-        shutil.rmtree(spaces_dir, ignore_errors=True)
+    # P2.4 fix follow-up: fs_instance stores its SQLite index DB under
+    # tmp_path/index/index.db. Leftover index DBs leak across test runs
+    # because the file is opened by aiosqlite and outlives the fixture.
+    index_dir = tmp_path / "index"
+    if index_dir.exists():
+        shutil.rmtree(index_dir, ignore_errors=True)
 
     monkeypatch.setenv("POMODOROXII_DATABASE_URL", f"sqlite+aiosqlite:///{meta_db.as_posix()}")
     monkeypatch.setenv("POMODOROXII_SPACES_DATA_DIR", str(spaces_dir))
@@ -129,10 +179,10 @@ async def space_session(_isolate_env: Path):
     Base.metadata.create_all (excluding meta tables) on the space engine,
     so all 18 business tables are available.
     """
-    from app.db.meta_session import init_meta_db, close_meta_db
+    from app.db.meta_session import close_meta_db, init_meta_db
     from app.space_manager import (
-        get_space_engine_manager,
         dispose_space_engine_manager,
+        get_space_engine_manager,
     )
 
     await init_meta_db()
@@ -161,10 +211,11 @@ async def client(_isolate_env: Path):
         if key.startswith("app.routes.") or key == "app.main":
             del sys.modules[key]
 
+    from httpx import ASGITransport, AsyncClient
+
+    from app.db.meta_session import close_meta_db, init_meta_db
     from app.main import create_app
-    from app.db.meta_session import init_meta_db, close_meta_db
     from app.space_manager import dispose_space_engine_manager
-    from httpx import AsyncClient, ASGITransport
 
     await init_meta_db()
     app = create_app()
@@ -172,3 +223,21 @@ async def client(_isolate_env: Path):
         yield ac
     await dispose_space_engine_manager()
     await close_meta_db()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_temp_root() -> None:
+    """Clean up the dedicated temp root created by the tmp_path override.
+
+    Each test uses ``tests/.tmp/<sanitized_nodeid>/`` as its temp directory.
+    This fixture removes the entire ``tests/.tmp/`` directory after the
+    test session.  It never globs ``tests/test_*/`` to avoid deleting real
+    test packages such as ``tests/test_file_system``.
+    """
+    yield
+    import shutil
+
+    temp_root = _tests_dir / ".tmp"
+    _ensure_inside_temp_root(temp_root, temp_root)
+    if temp_root.exists():
+        shutil.rmtree(temp_root, ignore_errors=True)

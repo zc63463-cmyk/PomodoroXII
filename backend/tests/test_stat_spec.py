@@ -1,37 +1,51 @@
-"""StatSpec 登记 + parity 增强。
+"""StatSpec registration + parity gate.
 
-确保 StatsService 方法名、REST 路由、MCP 工具名三处通过 STAT_SPECS 单一事实源同步。
+Ensures StatsService method names, REST routes, and MCP tool names stay in
+sync through STAT_SPECS. Actual REST paths and MCP tools are derived from
+the live router / server modules rather than hardcoded lists.
 """
 from __future__ import annotations
 
 from app.services.stats_spec import STAT_SPECS
+from tests.parity_helpers import (
+    get_actual_stats_mcp_tools,
+    get_stats_rest_paths,
+    skip_if_mcp_unavailable,
+)
 
 
 def test_stat_specs_covers_all_rest_endpoints():
-    """STAT_SPECS 必须覆盖所有 REST /stats 端点。"""
-    rest_paths = {s.route_path for s in STAT_SPECS}
-    expected = {
-        "/overview", "/focus-trend", "/task-distribution", "/daily-detail",
-        "/habit-summary", "/schedule-summary", "/note-summary",
-    }
-    missing = expected - rest_paths
-    assert not missing, f"STAT_SPECS missing REST paths: {missing}"
+    """STAT_SPECS must match the actual REST /stats router bidirectionally."""
+    actual_paths = get_stats_rest_paths()
+    expected_paths = {s.route_path for s in STAT_SPECS}
+
+    missing_from_router = expected_paths - actual_paths
+    assert not missing_from_router, (
+        f"STAT_SPECS paths not implemented in REST router: {missing_from_router}"
+    )
+
+    missing_from_specs = actual_paths - expected_paths
+    assert not missing_from_specs, (
+        f"REST /stats paths missing from STAT_SPECS: {missing_from_specs}"
+    )
 
 
 def test_stat_specs_covers_all_mcp_tools():
-    """STAT_SPECS 必须覆盖所有 MCP stats 工具(或显式 mcp_enabled=False)。"""
-    mcp_names = {s.mcp_tool for s in STAT_SPECS if s.mcp_enabled}
-    expected = {
-        "get_stats_overview", "get_focus_trend", "get_task_distribution",
-        "get_daily_detail", "get_habit_summary", "get_schedule_summary",
-        "get_note_summary",
-    }
-    missing = expected - mcp_names
-    assert not missing, f"STAT_SPECS MCP missing: {missing}"
+    """STAT_SPECS must match actual MCP stats tools bidirectionally."""
+    skip_if_mcp_unavailable()
+
+    actual_tools = get_actual_stats_mcp_tools()
+    expected_tools = {s.mcp_tool for s in STAT_SPECS if s.mcp_enabled}
+
+    missing = expected_tools - actual_tools
+    assert not missing, f"STAT_SPECS MCP tools missing from server: {missing}"
+
+    extra = actual_tools - expected_tools
+    assert not extra, f"MCP has extra stats tools not in STAT_SPECS: {extra}"
 
 
 def test_stat_specs_route_and_mcp_names_consistent():
-    """每个 spec 的 route_path 和 mcp_tool 必须配对。"""
+    """Every enabled spec must pair a route_path with an mcp_tool."""
     for spec in STAT_SPECS:
         if spec.mcp_enabled:
             assert spec.mcp_tool is not None, (

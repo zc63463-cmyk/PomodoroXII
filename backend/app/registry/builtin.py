@@ -92,6 +92,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("archived_at", "datetime", nullable=True),
     ),
     pull_key="tasks",
+    route_enabled=True,
+    route_prefix="/tasks",
     description="Todo/plan item with pomodoro estimates",
 ))
 
@@ -130,6 +132,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("cognitive_mark_summary", "string", nullable=True, default=""),
     ),
     pull_key="sessions",
+    route_enabled=True,
+    route_prefix="/sessions",
     description="Pomodoro work/break interval with enhanced metrics",
 ))
 
@@ -157,6 +161,8 @@ REGISTRY.register(EntitySpec(
     ),
     pull_key="notes",
     delete_strategy="fs_saga",
+    route_enabled=True,
+    route_prefix="/notes",
     description="Lightweight knowledge-base entry; content lives in FS, meta in DB",
 ))
 
@@ -179,6 +185,8 @@ REGISTRY.register(EntitySpec(
     ),
     pull_key="folders",
     delete_strategy="cascade_soft_delete",
+    route_enabled=True,
+    route_prefix="/folders",
     description="Self-referencing VFS folder for organising notes/quick_notes",
 ))
 
@@ -205,6 +213,8 @@ REGISTRY.register(EntitySpec(
     sync_entity_type="quickNote",
     pull_key="quickNotes",
     delete_strategy="soft_delete",
+    route_enabled=True,
+    route_prefix="/quick-notes",
     description="Rapid-capture note with optional session link",
 ))
 
@@ -227,6 +237,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("auto_linked_session_ids", "json", nullable=False, default="[]"),
     ),
     pull_key="reflections",
+    route_enabled=True,
+    route_prefix="/reflections",
     description="Daily retrospective with structured sections",
 ))
 
@@ -250,6 +262,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("archived", "boolean", nullable=False, default=False),
     ),
     pull_key="habits",
+    route_enabled=True,
+    route_prefix="/habits",
     description="Habit streak chain with rest-day protection",
 ))
 
@@ -294,6 +308,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("end_time", "string", nullable=True),
     ),
     pull_key="schedules",
+    route_enabled=True,
+    route_prefix="/schedules",
     description="Calendar event with completion status",
 ))
 
@@ -325,6 +341,8 @@ REGISTRY.register(EntitySpec(
     ),
     sync_entity_type="timeBlock",
     pull_key="timeBlocks",
+    route_enabled=True,
+    route_prefix="/time-blocks",
     description="Planned time block on a given date",
 ))
 
@@ -478,6 +496,8 @@ REGISTRY.register(EntitySpec(
     category=EntityCategory.META,
     sync_enabled=False,
     soft_delete=False,
+    route_enabled=True,
+    route_prefix="/spaces",
     primary_key="id",
     fields=(
         FieldSpec("id", "string", nullable=False),
@@ -523,6 +543,8 @@ REGISTRY.register(EntitySpec(
     category=EntityCategory.SETTING,
     sync_enabled=False,
     soft_delete=False,
+    route_enabled=True,
+    route_prefix="/settings",
     primary_key="key",
     fields=(
         FieldSpec("key", "string", nullable=False, unique=True),
