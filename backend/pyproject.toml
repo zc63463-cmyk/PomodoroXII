@@ -17,6 +17,7 @@ dependencies = [
     "filelock>=3.16",
     "nanoid>=2.0.0",
     "python-slugify>=8.0.4",
+    "fastmcp>=2.0",
 ]
 
 [project.optional-dependencies]
