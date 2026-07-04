@@ -13,6 +13,7 @@ from pathlib import Path
 from nanoid import generate
 
 from app.file_system.interfaces import NoteMeta, NoteStatus, NoteLevel
+from app.file_system.frontmatter import wrap_with_frontmatter, strip_frontmatter
 from .base import _utc_now_iso, _sha256, _generate_note_id, _make_filename
 
 
@@ -71,8 +72,17 @@ class NoteOpsMixin:
                 tags_json = json.dumps(tags, ensure_ascii=False)
                 word_count = len(content.split())
 
-                # Write .md file (atomic)
-                self._atomic_write(abs_path, content)
+                # Write .md file with YAML frontmatter (self-describing)
+                fm_meta = {
+                    "id": note_id,
+                    "title": title,
+                    "tags": tags,
+                    "folder_id": folder_id,
+                    "content_hash": f"sha256:{content_hash[:16]}",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                self._atomic_write(abs_path, wrap_with_frontmatter(fm_meta, content))
 
                 # Insert DB row (FTS5 trigger fires automatically)
                 with self._connect() as conn:
@@ -110,7 +120,10 @@ class NoteOpsMixin:
             path = self.root / row[0]
             if not path.exists():
                 raise FileNotFoundError(f"Note file missing: {path}")
-            return path.read_text(encoding="utf-8")
+            raw = path.read_text(encoding="utf-8")
+            # Strip YAML frontmatter for backward compatibility (callers
+            # expect raw markdown content, not frontmatter metadata).
+            return strip_frontmatter(raw)
         return await asyncio.to_thread(_do)
 
     async def read_notes_batch(self, note_ids: list[str]) -> list[str | None]:
@@ -136,7 +149,8 @@ class NoteOpsMixin:
                     continue
                 abs_path = self.root / rel_path
                 if abs_path.exists():
-                    results.append(abs_path.read_text(encoding="utf-8"))
+                    raw = abs_path.read_text(encoding="utf-8")
+                    results.append(strip_frontmatter(raw))
                 else:
                     results.append(None)
             return results
@@ -240,8 +254,17 @@ class NoteOpsMixin:
                         backup_path = backup_dir / f"{version_id}.md"
                         self._atomic_write(backup_path, old_content)
 
-                    # Write new content (atomic)
-                    self._atomic_write(abs_path, content)
+                    # Write new content with updated frontmatter (atomic)
+                    fm_meta = {
+                        "id": note_id,
+                        "title": row["title"],
+                        "tags": json.loads(row["tags"]) if row["tags"] else [],
+                        "folder_id": row["folder_id"],
+                        "content_hash": f"sha256:{new_hash[:16]}",
+                        "created_at": row["created_at"],
+                        "updated_at": now,
+                    }
+                    self._atomic_write(abs_path, wrap_with_frontmatter(fm_meta, content))
 
                     # Update DB row
                     conn.execute(
