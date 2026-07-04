@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.errors import NotFoundError
 from app.services.time import utc_now_iso
@@ -72,14 +73,35 @@ class BaseService:
         ).scalars().all()
         return rows, total
 
-    async def update(self, id: str, data: dict[str, Any]) -> Any:
-        """Update fields on the row with *id* and bump updated_at."""
+    async def update(
+        self, id: str, data: dict[str, Any], *, bump_updated_at: bool = True,
+    ) -> Any:
+        """Update fields on the row with *id* and bump updated_at.
+
+        When *bump_updated_at* is False (sync_mode=True path), the caller
+        is responsible for setting ``updated_at`` and ``version`` in *data*.
+        We explicitly preserve ``updated_at`` to block ``SyncMixin.onupdate``
+        from firing during the UPDATE (which would otherwise overwrite
+        the client-provided timestamp with server-now).
+        """
         obj = await self.get(id)
+        original_ts = obj.updated_at
         for k, v in data.items():
             setattr(obj, k, v)
-        obj.updated_at = utc_now_iso()
-        if hasattr(obj, "version"):
-            obj.version = (obj.version or 0) + 1
+        if bump_updated_at:
+            obj.updated_at = utc_now_iso()
+            if hasattr(obj, "version"):
+                obj.version = (obj.version or 0) + 1
+        else:
+            # P1-3: sync_mode path. Force updated_at into the UPDATE SET
+            # clause so SyncMixin.onupdate=utc_now_iso_ms does not fire.
+            # If data contains updated_at, it was already setattr'd above;
+            # but setattr with the same value does NOT mark the column as
+            # dirty, which would allow onupdate to fire and overwrite the
+            # client timestamp. flag_modified forces the column into SET.
+            if "updated_at" not in data:
+                obj.updated_at = original_ts
+            flag_modified(obj, "updated_at")
         await self.db.flush()
         await self.db.refresh(obj)
         return obj

@@ -15,9 +15,33 @@ matching against the versions other modules already bound.
 from __future__ import annotations
 
 import importlib
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
+
+# Trae IDE sandbox blocks Windows O_TEMPORARY flag file creation and
+# even plain os.mkdir()/os.open() in temp dirs. We override pytest's
+# tmp_path fixture below to return an existing directory, bypassing
+# tempfile.mkdtemp() which calls os.mkdir().
+_tests_dir = Path(__file__).resolve().parent
+tempfile.tempdir = str(_tests_dir)
+os.environ["TMP"] = str(_tests_dir)
+os.environ["TEMP"] = str(_tests_dir)
+os.environ["TMPDIR"] = str(_tests_dir)
+
+
+@pytest.fixture
+def tmp_path():  # type: ignore[no-redef]
+    """Override pytest's tmp_path to return the tests/ directory.
+
+    Trae sandbox blocks os.mkdir(), so we cannot create per-test temp
+    directories. Tests that need filesystem isolation must use
+    monkeypatch to point env vars at in-memory or existing paths,
+    rather than relying on tmp_path subdirectories.
+    """
+    return _tests_dir
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +49,19 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point all PomodoroXII paths at a per-test temp directory."""
     meta_db = tmp_path / "meta.db"
     spaces_dir = tmp_path / "spaces"
+
+    # P2.4 fix: tmp_path is overridden to tests/ (Trae sandbox workaround),
+    # so .db files and spaces/ dir persist across test runs. Delete them
+    # before each test to ensure a clean state (otherwise /auth/setup
+    # returns 409 Conflict from leftover admin rows).
+    import shutil
+    for stale_db in tmp_path.glob("*.db"):
+        try:
+            stale_db.unlink()
+        except OSError:
+            pass
+    if spaces_dir.exists():
+        shutil.rmtree(spaces_dir, ignore_errors=True)
 
     monkeypatch.setenv("POMODOROXII_DATABASE_URL", f"sqlite+aiosqlite:///{meta_db.as_posix()}")
     monkeypatch.setenv("POMODOROXII_SPACES_DATA_DIR", str(spaces_dir))

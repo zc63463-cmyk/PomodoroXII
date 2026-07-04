@@ -9,6 +9,7 @@ async DB helpers.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -22,22 +23,38 @@ from app.services.time import utc_now_iso
 # --------------------------------------------------------------------------- #
 
 def normalize_timestamp(ts: str) -> str:
-    """Normalize an ISO timestamp to millisecond precision.
+    """Normalize an ISO timestamp to canonical 3-digit millisecond precision.
 
+    Handles all common ISO 8601 variants:
     - Empty string → empty string (passthrough).
-    - Second-precision ISO (e.g. ``2026-07-04T10:00:00Z``) → padded to
-      ``2026-07-04T10:00:00.000Z``.
-    - Millisecond-precision input → returned unchanged.
+    - Second-precision ``2026-07-04T10:00:00Z`` → ``2026-07-04T10:00:00.000Z``.
+    - Millisecond-precision ``2026-07-04T10:00:00.123Z`` → unchanged.
+    - Microsecond-precision ``2026-07-04T10:00:00.123456Z`` → truncated to
+      ``2026-07-04T10:00:00.123Z``.
+    - ``+00:00`` offset → normalized to ``Z``.
+    - Bare datetime (no Z) → treated as UTC and given ``.000Z`` suffix.
+
+    P0-2: ensures lexicographic comparison of timestamps is consistent
+    regardless of input precision, so the sync cursor (since = max
+    updated_at seen so far) does not skip or repeat rows due to format
+    mismatch.
     """
     if not ts:
         return ""
-    # Already has millisecond precision.
-    if "." in ts:
+    try:
+        # Python 3.11+ fromisoformat accepts "Z" suffix directly, but
+        # replacing with "+00:00" is safer for any 3.10 stragglers.
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        # Unparseable input — return as-is (defensive; callers should
+        # generally not feed garbage timestamps).
         return ts
-    # Insert .000 before the trailing Z (or +00:00, but we expect Z form).
-    if ts.endswith("Z"):
-        return ts[:-1] + ".000Z"
-    return ts
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    ms = dt.microsecond // 1000
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms:03d}Z"
 
 
 def is_zero_time(ts: str | None) -> bool:

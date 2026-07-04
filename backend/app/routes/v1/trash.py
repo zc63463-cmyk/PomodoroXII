@@ -24,6 +24,8 @@ from app.models.folder import Folder
 from app.models.note import Note
 from app.models.quick_note import QuickNote
 from app.models.tombstone import Tombstone
+from app.registry import REGISTRY
+from app.registry.resolve import resolve_model
 from app.schemas.common import PaginatedResponse
 from app.schemas.trash import TrashItemResponse
 from app.services.cascade import CascadeService
@@ -31,13 +33,15 @@ from app.services.tombstone import TombstoneService
 
 router = APIRouter()
 
-# entity_type -> ORM model.  These are the entities that support
-# soft-delete via the ``trashed_at`` column.  Task is NOT included here
-# because it uses hard-delete + tombstone (no trashed_at column).
+# P2.5: derived from REGISTRY.list_soft_delete() — single source of truth.
+# Maps entity_type (snake_case) -> ORM model class for soft-delete entities.
+# Note: list_trash() still uses hardcoded SELECT per entity because each
+# entity's title extraction logic differs (Note.title, Folder.name,
+# QuickNote.content[:50]). YAGNI — refactor to TrashService only when
+# a 4th soft-delete entity lands.
 _ENTITY_MAP: dict[str, type] = {
-    "note": Note,
-    "folder": Folder,
-    "quick_note": QuickNote,
+    spec.name: resolve_model(spec)
+    for spec in REGISTRY.list_soft_delete()
 }
 
 

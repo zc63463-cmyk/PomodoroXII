@@ -20,6 +20,7 @@ import json
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.file_system.interfaces import FileSystem
 from app.models.note import Note
@@ -112,11 +113,16 @@ class NoteService(BaseService):
         """Read the .md content for a note."""
         return await self.fs.read_note(id)
 
-    async def update_content(self, id: str, content: str) -> Any:
+    async def update_content(
+        self, id: str, content: str, *, updated_at_override: str | None = None,
+    ) -> Any:
         """Rewrite the .md file and sync content_hash/word_count.
 
         Saga: save old content before FS rewrite; if DB flush fails,
         restore the old .md content.
+
+        When *updated_at_override* is provided (sync_mode=True), the DB
+        row's updated_at is set to this value instead of server-now.
         """
         # Save old content for compensation.
         old_content: str | None = None
@@ -130,7 +136,15 @@ class NoteService(BaseService):
             obj = await self.get(id)
             obj.content_hash = meta.content_hash
             obj.word_count = meta.word_count
-            obj.updated_at = utc_now_iso()
+            obj.updated_at = (
+                updated_at_override if updated_at_override is not None
+                else utc_now_iso()
+            )
+            if updated_at_override is not None:
+                # P1-3: Force updated_at into the UPDATE SET clause so
+                # SyncMixin.onupdate=utc_now_iso_ms does not fire and
+                # overwrite the client-provided timestamp.
+                flag_modified(obj, "updated_at")
             await self.db.flush()
             await self.db.refresh(obj)
             return obj
@@ -143,11 +157,17 @@ class NoteService(BaseService):
                     pass
             raise
 
-    async def update_metadata(self, id: str, data: dict[str, Any]) -> Any:
+    async def update_metadata(
+        self, id: str, data: dict[str, Any],
+        *, updated_at_override: str | None = None,
+    ) -> Any:
         """Update DB-only fields (title, tags, category, etc.).
 
         Content-managed fields (content, content_hash, word_count) are
         stripped -- they must be updated via ``update_content``.
+
+        When *updated_at_override* is provided (sync_mode=True), the
+        caller's timestamp is preserved instead of bumping to server-now.
         """
         data = dict(data)
         data.pop("content", None)
@@ -155,17 +175,31 @@ class NoteService(BaseService):
         data.pop("word_count", None)
         if "tags" in data:
             data["tags"] = json.dumps(_parse_tags(data["tags"]))
-        return await super().update(id, data)
+        if updated_at_override is not None:
+            data["updated_at"] = updated_at_override
+        return await super().update(id, data, bump_updated_at=False)
 
-    async def update(self, id: str, data: dict[str, Any]) -> Any:
-        """Dispatch update: content goes to fs, the rest to DB."""
+    async def update(
+        self, id: str, data: dict[str, Any],
+        *, updated_at_override: str | None = None,
+    ) -> Any:
+        """Dispatch update: content goes to fs, the rest to DB.
+
+        When *updated_at_override* is provided (sync_mode=True), the
+        client timestamp is preserved across both content and metadata
+        updates instead of being bumped to server-now.
+        """
         data = dict(data)
         content = data.pop("content", None)
         obj = None
         if content is not None:
-            obj = await self.update_content(id, content)
+            obj = await self.update_content(
+                id, content, updated_at_override=updated_at_override,
+            )
         if data:
-            obj = await self.update_metadata(id, data)
+            obj = await self.update_metadata(
+                id, data, updated_at_override=updated_at_override,
+            )
         if obj is None:
             obj = await self.get(id)
         return obj

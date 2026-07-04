@@ -40,6 +40,33 @@ def test_normalize_timestamp_handles_empty_string():
     assert normalize_timestamp("") == ""
 
 
+def test_normalize_timestamp_truncates_microseconds_to_milliseconds():
+    """Microsecond-precision (6 digits) should be truncated to 3-digit ms.
+
+    Ensures ``2026-07-04T10:00:00.123456Z`` and ``2026-07-04T10:00:00.123Z``
+    normalize to the same canonical string so lexicographic comparison
+    (sync cursor) treats them as equal.
+    """
+    from app.services.sync_safety import normalize_timestamp
+
+    assert normalize_timestamp("2026-07-04T10:00:00.123456Z") == "2026-07-04T10:00:00.123Z"
+    assert normalize_timestamp("2026-07-04T10:00:00.999999Z") == "2026-07-04T10:00:00.999Z"
+
+
+def test_normalize_timestamp_handles_plus_offset():
+    """+00:00 suffix should be normalized to Z with millisecond padding."""
+    from app.services.sync_safety import normalize_timestamp
+
+    assert normalize_timestamp("2026-07-04T10:00:00+00:00") == "2026-07-04T10:00:00.000Z"
+
+
+def test_normalize_timestamp_handles_no_z_suffix():
+    """Bare ISO datetime (no Z) should be normalized to .000Z form."""
+    from app.services.sync_safety import normalize_timestamp
+
+    assert normalize_timestamp("2026-07-04T10:00:00") == "2026-07-04T10:00:00.000Z"
+
+
 # --------------------------------------------------------------------------- #
 # is_zero_time
 # --------------------------------------------------------------------------- #

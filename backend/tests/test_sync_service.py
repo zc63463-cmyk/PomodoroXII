@@ -946,3 +946,319 @@ async def test_pull_tombstones_has_more_false_when_under_limit(space_session):
     assert result["tombstones_has_more"] is False, (
         "tombstones_has_more should be False when under limit"
     )
+
+
+# --------------------------------------------------------------------------- #
+# P1-1: applied/conflicts contract — conflicts excluded from applied
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_push_conflict_local_not_in_applied(space_session):
+    """P1-1: LWW conflict resolved to 'local' must NOT be in applied.
+
+    The remote (older) event was rejected — nothing was applied. Reporting
+    it in ``applied`` would mislead clients into thinking their change
+    landed on the server.
+    """
+    from app.services.sync import SyncService
+    from app.services.task import TaskService
+
+    svc = SyncService(space_session)
+    eid = uuid.uuid4().hex
+    # Local row at 12:00 (newer).
+    await TaskService(space_session).create({
+        "id": eid, "title": "Local", "status": "todo",
+        "priority": "medium", "tags": "[]",
+    })
+    # Direct DB update to set updated_at to 12:00 (newer than client_ts).
+    from app.models.task import Task
+    row = await space_session.get(Task, eid)
+    row.updated_at = "2026-07-04T12:00:00.000Z"
+    await space_session.flush()
+
+    # Push update with older client_ts (10:00) → LWW resolves to 'local'.
+    result = await svc.push([_make_event(
+        entity_id=eid,
+        action="update",
+        payload={"title": "Older update should not win"},
+        client_updated_at="2026-07-04T10:00:00.000Z",
+    )])
+    assert any(c.get("resolution") == "local" for c in result["conflicts"]), (
+        f"expected a 'local' conflict, got {result['conflicts']}"
+    )
+    applied_ids = [a["entity_id"] for a in result["applied"]]
+    assert eid not in applied_ids, (
+        f"conflict_local event must NOT appear in applied, got {result['applied']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_push_conflict_tombstone_not_in_applied(space_session):
+    """P1-1: tombstone-blocked create must NOT be in applied."""
+    from app.services.sync import SyncService
+    from app.services.task import TaskService
+
+    svc = SyncService(space_session)
+    eid = uuid.uuid4().hex
+    await TaskService(space_session).create({
+        "id": eid, "title": "Gone", "status": "todo",
+        "priority": "medium", "tags": "[]",
+    })
+    await TaskService(space_session).delete(eid)
+
+    result = await svc.push([_make_event(
+        entity_id=eid,
+        action="create",
+        payload={
+            "id": eid, "title": "Resurrected", "status": "todo",
+            "priority": "medium", "tags": "[]",
+        },
+    )])
+    assert any(c.get("resolution") == "tombstone" for c in result["conflicts"]), (
+        f"expected a 'tombstone' conflict, got {result['conflicts']}"
+    )
+    applied_ids = [a["entity_id"] for a in result["applied"]]
+    assert eid not in applied_ids, (
+        f"conflict_tombstone event must NOT appear in applied, got {result['applied']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_push_conflict_circular_ref_not_in_applied(space_session):
+    """P1-1: folder circular-ref conflict must NOT be in applied."""
+    from app.services.sync import SyncService
+
+    svc = SyncService(space_session)
+    a, b = uuid.uuid4().hex, uuid.uuid4().hex
+    # Create A then B(parent=A) so updating A's parent to B would form a cycle.
+    await svc.push([_make_event(
+        entity_type="folder", entity_id=a, action="create",
+        payload={"name": "A", "parent_id": None},
+    )])
+    await svc.push([_make_event(
+        entity_type="folder", entity_id=b, action="create",
+        payload={"name": "B", "parent_id": a},
+    )])
+    result = await svc.push([_make_event(
+        entity_type="folder", entity_id=a, action="update",
+        payload={"parent_id": b},
+        client_updated_at="2026-07-04T12:00:00.000Z",
+    )])
+    assert any(c.get("resolution") == "circular_ref" for c in result["conflicts"]), (
+        f"expected a 'circular_ref' conflict, got {result['conflicts']}"
+    )
+    applied_ids = [a["entity_id"] for a in result["applied"]]
+    assert a not in applied_ids, (
+        f"conflict_circular_ref event must NOT appear in applied, got {result['applied']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_push_conflict_remote_in_applied(space_session):
+    """P1-1: LWW conflict resolved to 'remote' MUST be in applied.
+
+    When the remote (client) version is newer, the server applies it —
+    so it belongs in ``applied``. It also appears in ``conflicts`` with
+    ``resolution=remote`` so clients can transparently see that a remote
+    win occurred.
+    """
+    from app.services.sync import SyncService
+    from app.services.task import TaskService
+
+    svc = SyncService(space_session)
+    eid = uuid.uuid4().hex
+    # Local row at 10:00 (older).
+    await TaskService(space_session).create({
+        "id": eid, "title": "Local", "status": "todo",
+        "priority": "medium", "tags": "[]",
+    })
+    from app.models.task import Task
+    row = await space_session.get(Task, eid)
+    row.updated_at = "2026-07-04T10:00:00.000Z"
+    await space_session.flush()
+
+    # Push update with newer client_ts (12:00) → LWW resolves to 'remote'.
+    result = await svc.push([_make_event(
+        entity_id=eid,
+        action="update",
+        payload={"title": "Remote wins"},
+        client_updated_at="2026-07-04T12:00:00.000Z",
+    )])
+    assert any(c.get("resolution") == "remote" for c in result["conflicts"]), (
+        f"expected a 'remote' conflict, got {result['conflicts']}"
+    )
+    applied_ids = [a["entity_id"] for a in result["applied"]]
+    assert eid in applied_ids, (
+        f"conflict_remote event MUST appear in applied (remote was applied), "
+        f"got {result['applied']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_push_tombstone_conflict_excluded_from_applied(client):
+    """P1-1 (HTTP layer): tombstone-blocked create excluded from applied."""
+    # Setup admin + space token.
+    resp = await client.post(
+        "/api/v1/auth/setup", json={"password": "test-password-123"}
+    )
+    assert resp.status_code in (200, 201)
+    resp = await client.post(
+        "/api/v1/auth/login", json={"password": "test-password-123"}
+    )
+    master_token = resp.json()["access_token"]
+    headers = {"Authorization": f"Bearer {master_token}"}
+    resp = await client.post(
+        "/api/v1/spaces", json={"name": "Tomb Conflict Space"}, headers=headers
+    )
+    space_id = resp.json()["id"]
+    resp = await client.post(
+        f"/api/v1/spaces/{space_id}/token", headers=headers
+    )
+    space_token = resp.json()["space_token"]
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    # Create a task via REST, then delete it (writes tombstone).
+    eid = uuid.uuid4().hex
+    resp = await client.post(
+        "/api/v1/tasks",
+        json={"id": eid, "title": "To delete", "status": "todo",
+              "priority": "medium", "tags": []},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    resp = await client.delete(f"/api/v1/tasks/{eid}", headers=headers)
+    assert resp.status_code in (200, 204)
+
+    # Push create same id → should conflict with tombstone, not be applied.
+    resp = await client.post(
+        "/api/v1/sync/push",
+        json={"events": [_make_event(
+            entity_id=eid, action="create",
+            payload={"id": eid, "title": "Resurrected", "status": "todo",
+                     "priority": "medium", "tags": "[]"},
+        )]},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert any(c.get("resolution") == "tombstone" for c in data["conflicts"]), (
+        f"expected tombstone conflict, got {data['conflicts']}"
+    )
+    applied_ids = [a["entity_id"] for a in data["applied"]]
+    assert eid not in applied_ids, (
+        f"tombstone-conflict event must NOT appear in applied, got {data['applied']}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# P1-3: Note sync update preserves client_updated_at
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_push_note_update_preserves_client_updated_at(space_session, tmp_path):
+    """P1-3: sync push note update should preserve client_updated_at in DB row."""
+    from app.services.sync import SyncService
+    from app.models.note import Note
+
+    fs = await _make_fs_for_sync(tmp_path)
+    svc = SyncService(space_session, fs)
+    eid = "p13-note-update-content"
+
+    # Step 1: push note create with client_updated_at=10:00
+    await svc.push([{
+        "entity_type": "note",
+        "entity_id": eid,
+        "action": "create",
+        "payload": {
+            "id": eid, "title": "Original", "content": "old body", "tags": "[]",
+        },
+        "client_updated_at": "2026-07-04T10:00:00.000Z",
+    }])
+
+    # Step 2: push note update with client_updated_at=12:00 + new content
+    result = await svc.push([{
+        "entity_type": "note",
+        "entity_id": eid,
+        "action": "update",
+        "payload": {"title": "Updated", "content": "new body"},
+        "client_updated_at": "2026-07-04T12:00:00.000Z",
+    }])
+
+    assert len(result["applied"]) == 1
+    row = await space_session.get(Note, eid)
+    # DB row's updated_at should be client_ts (not server-now)
+    assert row.updated_at == "2026-07-04T12:00:00.000Z"
+    # FS content should be updated
+    content = await fs.read_note(eid)
+    assert "new body" in content
+
+
+@pytest.mark.asyncio
+async def test_push_note_update_preserves_client_updated_at_metadata_only(
+    space_session, tmp_path,
+):
+    """P1-3: sync push note update with only metadata (no content) preserves client_updated_at."""
+    from app.services.sync import SyncService
+    from app.models.note import Note
+
+    fs = await _make_fs_for_sync(tmp_path)
+    svc = SyncService(space_session, fs)
+    eid = "p13-note-update-meta"
+
+    # Create with client_updated_at=10:00
+    await svc.push([{
+        "entity_type": "note",
+        "entity_id": eid,
+        "action": "create",
+        "payload": {
+            "id": eid, "title": "Original", "content": "body", "tags": "[]",
+        },
+        "client_updated_at": "2026-07-04T10:00:00.000Z",
+    }])
+
+    # Update only title (no content) with client_updated_at=12:00
+    result = await svc.push([{
+        "entity_type": "note",
+        "entity_id": eid,
+        "action": "update",
+        "payload": {"title": "Updated Title"},
+        "client_updated_at": "2026-07-04T12:00:00.000Z",
+    }])
+
+    assert len(result["applied"]) == 1
+    row = await space_session.get(Note, eid)
+    assert row.updated_at == "2026-07-04T12:00:00.000Z"
+    assert row.title == "Updated Title"
+
+
+@pytest.mark.asyncio
+async def test_sync_mode_update_does_not_bump_updated_at_in_base_service(
+    space_session, tmp_path,
+):
+    """P1-3: BaseService.update with bump_updated_at=False should NOT bump updated_at/version."""
+    from app.services.base import BaseService
+    from app.models.task import Task
+
+    # Seed a task directly via BaseService
+    base = BaseService(space_session)
+    base.model = Task
+    eid = "p13-base-bump-false"
+    obj = await base.create({
+        "id": eid, "title": "Seed", "status": "todo",
+        "priority": "medium", "tags": "[]",
+        "updated_at": "2026-07-04T10:00:00.000Z",
+    })
+    original_ts = obj.updated_at
+    original_version = obj.version
+
+    # Update with bump_updated_at=False
+    updated = await base.update(eid, {"title": "New"}, bump_updated_at=False)
+    assert updated.title == "New"
+    # updated_at and version should be unchanged
+    assert updated.updated_at == original_ts
+    assert updated.version == original_version
+
+    # Update with default bump_updated_at=True should bump
+    bumped = await base.update(eid, {"title": "Bumped"})
+    assert bumped.updated_at != original_ts
+    assert bumped.version == original_version + 1

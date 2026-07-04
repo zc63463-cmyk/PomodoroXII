@@ -227,3 +227,39 @@ async def test_meta_endpoints_require_master_token(client):
         headers={"Authorization": f"Bearer {space_token}"},
     )
     assert resp.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# P1-2: sync_entity_type / pull_key fields in entity spec
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_meta_serialize_includes_sync_entity_type(client):
+    """P1-2: /meta/entities should return sync_entity_type field."""
+    token = await _get_master_token(client)
+    resp = await client.get(
+        "/api/v1/meta/entities", headers=_master_auth(token)
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    # quick_note has sync_entity_type='quickNote'
+    qn = next(e for e in data["entities"] if e["name"] == "quick_note")
+    assert qn["sync_entity_type"] == "quickNote"
+    # task has no explicit sync_entity_type (name == sync_entity_type), None
+    task = next(e for e in data["entities"] if e["name"] == "task")
+    assert task.get("sync_entity_type") is None
+
+
+@pytest.mark.asyncio
+async def test_meta_serialize_includes_pull_key(client):
+    """P1-2: /meta/entities should return pull_key field."""
+    token = await _get_master_token(client)
+    resp = await client.get(
+        "/api/v1/meta/entities", headers=_master_auth(token)
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    qn = next(e for e in data["entities"] if e["name"] == "quick_note")
+    assert qn["pull_key"] == "quickNotes"
+    task = next(e for e in data["entities"] if e["name"] == "task")
+    assert task["pull_key"] == "tasks"
