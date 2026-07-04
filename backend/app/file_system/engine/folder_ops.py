@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 
 from app.file_system.interfaces import FolderMeta
 from .base import _utc_now_iso
@@ -199,10 +201,12 @@ class FolderOpsMixin:
     async def delete_folder(self, folder_id: str) -> None:
         """A.3: 递归软删文件夹 — 设置 trashed_at, 子笔记入回收站.
 
+        全部操作在单次锁内完成，消除 TOCTOU 竞态窗口：
         1. 校验 folder_id 存在且非系统文件夹 (is_system=0)
         2. BFS 递归收集所有子孙文件夹 id
-        3. 该批次文件夹下所有非删除笔记 → 调用 delete_note (复用 .trash 移动逻辑)
-        4. 标记所有子孙文件夹 trashed_at
+        3. 收集该批次文件夹下所有非删除笔记
+        4. 在同一锁内逐个将笔记 .md 移到 .trash/ + DB 标记 is_deleted
+        5. 标记所有子孙文件夹 trashed_at
         """
         def _do():
             with self._lock, self._file_lock:
@@ -228,29 +232,34 @@ class FolderOpsMixin:
                     # 收集该批次文件夹下所有未删除笔记
                     placeholders = ",".join("?" * len(to_trash_folders))
                     note_rows = conn.execute(
-                        f"SELECT note_id FROM notes WHERE folder_id IN ({placeholders}) "
+                        f"SELECT note_id, current_path FROM notes WHERE folder_id IN ({placeholders}) "
                         f"AND is_deleted = 0",
                         to_trash_folders,
                     ).fetchall()
-                # Note: 这里需要释放锁以便调用 delete_note (它自己加锁)
-                # 但为避免双重加锁, 我们在锁内直接执行 delete_note 的等价操作
-                # 实际上 delete_note 是 async + 加锁, 我们无法在 _do 内 await
-                # 因此采用"先收集笔记 id, 锁外逐个 delete_note, 再加锁标记 trashed"
-                return note_rows, to_trash_folders, now
-        # 在锁外逐个调用 delete_note (已实现 .trash 移动 + DB 更新)
-        note_rows, to_trash_folders, now = await asyncio.to_thread(_do)
-        for r in note_rows:
-            await self.delete_note(r[0])
-        # 标记文件夹 trashed_at
-        def _mark():
-            with self._lock, self._file_lock:
-                with self._connect() as conn:
+                    # 在同一锁内逐个将笔记移到回收站（内联 delete_note 逻辑）
+                    for note_row in note_rows:
+                        note_id = note_row[0]
+                        rel_path = note_row[1]
+                        abs_path = self.root / rel_path
+                        # Timestamped trash filename to avoid collision
+                        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+                        trash_filename = f"{Path(rel_path).stem}-{timestamp}.md"
+                        trash_rel = f".trash/{trash_filename}"
+                        trash_path = self.root / trash_rel
+                        if abs_path.exists():
+                            abs_path.rename(trash_path)
+                        conn.execute(
+                            "UPDATE notes SET is_deleted = 1, status = ?, current_path = ?, "
+                            "updated_at = ? WHERE note_id = ?",
+                            ("trashed", trash_rel, now, note_id),
+                        )
+                    # 标记所有子孙文件夹 trashed_at
                     conn.executemany(
                         "UPDATE folders SET trashed_at = ?, updated_at = ? WHERE id = ?",
                         [(now, now, fid) for fid in to_trash_folders],
                     )
                     conn.commit()
-        await asyncio.to_thread(_mark)
+        await asyncio.to_thread(_do)
 
     async def list_folders(self, parent_id=None) -> list[FolderMeta]:
         """E.3: 列出文件夹, 排除已 trashed 的文件夹."""
