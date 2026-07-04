@@ -213,6 +213,37 @@ class SyncService:
             "server_time": utc_now_iso(),
         }
 
+    async def _check_preflight(
+        self,
+        etype: str,
+        eid: str,
+        action: str,
+        payload: dict[str, Any],
+        client_ts: str,
+    ) -> tuple[str | None, str, dict[str, Any]]:
+        """Shared pre-flight checks for _apply_event and _push_note_event.
+
+        Performs:
+        1. Timestamp sanitization (zero-time detection + normalization).
+        2. Client field stripping (C2).
+        3. Tombstone anti-resurrection check (C1) for create/update.
+
+        Returns ``(resolution, client_ts_n, payload)`` where *resolution*
+        is ``None`` if all checks pass, or a conflict string (e.g.
+        ``"conflict_tombstone"``) if the event should be rejected.
+        """
+        client_ts_n = sanitize_zero_time(
+            normalize_timestamp(client_ts), now=utc_now_iso()
+        )
+        payload = strip_client_fields(payload, etype)
+
+        if action in ("create", "update"):
+            tomb = await TombstoneService(self.db).exists(etype, eid)
+            if tomb is not None:
+                return "conflict_tombstone", client_ts_n, payload
+
+        return None, client_ts_n, payload
+
     async def _apply_event(
         self,
         model: type,
@@ -231,18 +262,11 @@ class SyncService:
             ``"conflict_tombstone"``    — entity is tombstoned, create/update rejected
             ``"conflict_circular_ref"`` — folder parent_id would create a cycle
         """
-        client_ts_n = sanitize_zero_time(
-            normalize_timestamp(client_ts), now=utc_now_iso()
+        resolution, client_ts_n, payload = await self._check_preflight(
+            etype, eid, action, payload, client_ts,
         )
-
-        # C2: Strip client-only and protected fields from payload.
-        payload = strip_client_fields(payload, etype)
-
-        # C1: Anti-resurrection — reject create/update for tombstoned entities.
-        if action in ("create", "update"):
-            tomb = await TombstoneService(self.db).exists(etype, eid)
-            if tomb is not None:
-                return "conflict_tombstone"
+        if resolution is not None:
+            return resolution
 
         if action == "create":
             # C3: Folder circular reference detection on create.
@@ -328,18 +352,11 @@ class SyncService:
         """
         from app.services.note import NoteService
 
-        client_ts_n = sanitize_zero_time(
-            normalize_timestamp(client_ts), now=utc_now_iso()
+        resolution, client_ts_n, payload = await self._check_preflight(
+            etype, eid, action, payload, client_ts,
         )
-
-        # C2: Strip client-only and protected fields from payload.
-        payload = strip_client_fields(payload, etype)
-
-        # C1: Anti-resurrection — reject create/update for tombstoned entities.
-        if action in ("create", "update"):
-            tomb = await TombstoneService(self.db).exists(etype, eid)
-            if tomb is not None:
-                return "conflict_tombstone"
+        if resolution is not None:
+            return resolution
 
         if action == "create":
             data = dict(payload)

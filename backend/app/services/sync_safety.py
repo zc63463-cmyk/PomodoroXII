@@ -61,24 +61,9 @@ def sanitize_zero_time(ts: str, now: str | None = None) -> str:
 # --------------------------------------------------------------------------- #
 # Entity serialization
 # --------------------------------------------------------------------------- #
-
-def serialize_entity(obj: Any) -> dict:
-    """Convert an ORM instance to a plain dict.
-
-    Like ``app.services.serializers.serialize_entity`` but duplicated here
-    so sync safety utilities remain self-contained. Tags stored as JSON
-    strings are parsed back to lists.
-    """
-    d = {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
-    if "tags" in d and isinstance(d["tags"], str):
-        if not d["tags"]:
-            d["tags"] = []
-        else:
-            try:
-                d["tags"] = json.loads(d["tags"])
-            except (json.JSONDecodeError, ValueError):
-                d["tags"] = []
-    return d
+# Re-exported from app.services.serializers so callers that import from
+# sync_safety (e.g. SyncService.pull) get the same canonical implementation.
+from app.services.serializers import serialize_entity  # noqa: F401, E402
 
 
 # --------------------------------------------------------------------------- #
