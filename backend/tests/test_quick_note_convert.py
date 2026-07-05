@@ -229,3 +229,37 @@ async def test_convert_copies_memo_comments(space_session, tmp_path):
         )
     ).scalars().all()
     assert len(orig_comments) == 2
+
+
+# --------------------------------------------------------------------------- #
+# C-4: convert a trashed QuickNote -> ValidationError (422)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_convert_trashed_quick_note_raises_validation_error(space_session, tmp_path):
+    """convert() on a trashed QuickNote raises ValidationError.
+
+    C-4 fix: align with NoteService.update_metadata trashed_at guard.
+    A trashed quick note must be restored before conversion; the guard
+    takes precedence over the archived_at check.
+    """
+    from app.errors import ValidationError
+    from app.file_system.api import get_file_system
+    from app.services.note import NoteService
+    from app.services.quick_note import QuickNoteService
+    from app.services.time import utc_now_iso
+
+    fs = await get_file_system(
+        root_dir=tmp_path / "notes",
+        index_db=tmp_path / "index.db",
+    )
+    qn_svc = QuickNoteService(space_session)
+    note_svc = NoteService(space_session, fs)
+
+    qn = await qn_svc.create({"content": "trashed before convert"})
+    # Simulate soft-delete (no REST soft-delete route for QN; set trashed_at directly).
+    qn.trashed_at = utc_now_iso()
+    await space_session.flush()
+
+    with pytest.raises(ValidationError, match="trash"):
+        await qn_svc.convert(qn.id, note_service=note_svc)

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 
-from app.errors import ConflictError
+from app.errors import ConflictError, ValidationError
 from app.models.memo_comment import MemoComment
 from app.models.quick_note import QuickNote
 from app.services.base import BaseService
@@ -79,10 +79,15 @@ class QuickNoteService(BaseService):
         Raises:
             NotFoundError: quick note missing (via ``self.get``).
             ConflictError: already converted.
+            ValidationError: quick note is trashed (restore first).
 
         Only flushes; the caller (route) is responsible for ``commit``.
         """
         qn = await self.get(id)  # raises NotFoundError if missing
+        if qn.trashed_at is not None:
+            raise ValidationError(
+                f"QuickNote {id} is in trash; restore before converting"
+            )
         if qn.archived_at is not None or qn.migrated_to_note_id is not None:
             raise ConflictError(f"QuickNote {id} already converted")
 
