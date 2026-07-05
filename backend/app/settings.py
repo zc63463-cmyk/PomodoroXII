@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     ]
     debug: bool = False
     environment: str = "development"
+    backup_enabled: bool = True
 
     model_config = SettingsConfigDict(
         env_prefix="POMODOROXII_",
