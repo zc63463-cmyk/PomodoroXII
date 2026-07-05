@@ -107,29 +107,26 @@ class SyncService:
                                 "entity_id": eid,
                                 "resolution": "local",
                             })
-                        elif resolution == "conflict_remote":
-                            conflicts.append({
-                                "entity_type": etype,
-                                "entity_id": eid,
-                                "resolution": "remote",
-                            })
                         elif resolution == "conflict_tombstone":
                             conflicts.append({
                                 "entity_type": etype,
                                 "entity_id": eid,
                                 "resolution": "tombstone",
                             })
-                        # P1-1: only "ok" and "conflict_remote" represent a
-                        # successful application of the remote event. Other
-                        # conflict resolutions (local/tombstone) mean the
-                        # remote event was REJECTED — reporting them in
-                        # ``applied`` would mislead clients.
+                        # P1-1: conflict_remote represents a successful
+                        # application of the remote event, so it belongs ONLY
+                        # in applied (with resolution='remote' for client
+                        # visibility). conflicts is reserved for rejected
+                        # events (local/tombstone).
                         if resolution in ("ok", "conflict_remote"):
-                            applied.append({
+                            applied_item: dict[str, str] = {
                                 "entity_type": etype,
                                 "entity_id": eid,
                                 "action": action,
-                            })
+                            }
+                            if resolution == "conflict_remote":
+                                applied_item["resolution"] = "remote"
+                            applied.append(applied_item)
                         await self._write_audit(
                             "push", etype, eid,
                             details=f"action={action} resolution={resolution}",
@@ -155,12 +152,6 @@ class SyncService:
                             "entity_id": eid,
                             "resolution": "local",
                         })
-                    elif resolution == "conflict_remote":
-                        conflicts.append({
-                            "entity_type": etype,
-                            "entity_id": eid,
-                            "resolution": "remote",
-                        })
                     elif resolution == "conflict_tombstone":
                         conflicts.append({
                             "entity_type": etype,
@@ -173,15 +164,20 @@ class SyncService:
                             "entity_id": eid,
                             "resolution": "circular_ref",
                         })
-                    # P1-1: only "ok" and "conflict_remote" represent a
-                    # successful application. local/tombstone/circular_ref
-                    # mean the remote event was REJECTED.
+                    # P1-1: conflict_remote represents a successful
+                    # application of the remote event, so it belongs ONLY
+                    # in applied (with resolution='remote' for client
+                    # visibility). conflicts is reserved for rejected
+                    # events (local/tombstone/circular_ref).
                     if resolution in ("ok", "conflict_remote"):
-                        applied.append({
+                        applied_item: dict[str, str] = {
                             "entity_type": etype,
                             "entity_id": eid,
                             "action": action,
-                        })
+                        }
+                        if resolution == "conflict_remote":
+                            applied_item["resolution"] = "remote"
+                        applied.append(applied_item)
                     await self._write_audit(
                         "push", etype, eid,
                         details=f"action={action} resolution={resolution}",
