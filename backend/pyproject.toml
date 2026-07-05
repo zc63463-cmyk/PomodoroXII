@@ -43,8 +43,6 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-# WIP / MCP areas are owned by another agent; do not lint them here.
-exclude = ["app/mcp/**", "tests/test_mcp_server.py"]
 
 [tool.ruff.lint]
 # F: pyflakes (unused imports, undefined names — real bugs)
