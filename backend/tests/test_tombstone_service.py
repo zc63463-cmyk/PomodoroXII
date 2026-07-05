@@ -6,6 +6,7 @@ after conftest's per-test module reload.
 
 from __future__ import annotations
 
+import re
 import uuid
 
 import pytest
@@ -13,7 +14,13 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_create_writes_tombstone_with_entity_type_and_id(space_session):
-    """create() should insert a tombstone row with the given type and id."""
+    """create() should insert a tombstone row with the given type and id.
+
+    P0-2: deleted_at must use 3-digit millisecond precision (e.g.
+    ``...S.123Z``) to match the canonical sync timestamp format.
+    Seconds-precision values (``...SZ``) break lexicographic cursor
+    comparison because ``"Z" > "."`` (ASCII 90 > 46).
+    """
     from app.models.tombstone import Tombstone
     from app.services.tombstone import TombstoneService
 
@@ -23,7 +30,12 @@ async def test_create_writes_tombstone_with_entity_type_and_id(space_session):
     assert tomb.entity_type == "task"
     assert tomb.entity_id == entity_id
     assert tomb.deleted_at is not None
-    assert tomb.deleted_at.endswith("Z")
+    assert re.match(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$",
+        tomb.deleted_at,
+    ), (
+        f"deleted_at should be 3-digit ms precision, got {tomb.deleted_at}"
+    )
 
 
 @pytest.mark.asyncio
