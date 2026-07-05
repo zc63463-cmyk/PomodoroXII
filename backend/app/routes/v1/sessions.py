@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_space_context, get_space_db
 from app.schemas.common import PaginatedResponse
-from app.schemas.session import SessionCreate, SessionResponse
+from app.schemas.session import SessionCreate, SessionResponse, SessionUpdate
 from app.services.session import SessionService
 
 router = APIRouter()
@@ -67,6 +67,20 @@ async def get_session(
 ):
     """Return a single session by id."""
     return await SessionService(db).get(id)
+
+
+@router.put("/{id}", response_model=SessionResponse)
+async def update_session(
+    id: str,
+    data: SessionUpdate,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Update an existing session (partial update)."""
+    obj = await SessionService(db).update(id, data.model_dump(exclude_unset=True))
+    await db.commit()
+    await db.refresh(obj)
+    return obj
 
 
 @router.delete("/{id}")

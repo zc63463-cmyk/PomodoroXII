@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_space_context, get_space_db
 from app.schemas.common import PaginatedResponse
-from app.schemas.habit import HabitCreate, HabitResponse
+from app.schemas.habit import HabitCreate, HabitResponse, HabitUpdate
 from app.schemas.habit_check_in import (
     HabitCheckInCreate,
     HabitCheckInResponse,
@@ -69,6 +69,20 @@ async def get_habit(
 ):
     """Return a single habit by id."""
     return await HabitService(db).get(id)
+
+
+@router.put("/{id}", response_model=HabitResponse)
+async def update_habit(
+    id: str,
+    data: HabitUpdate,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Update an existing habit (partial update)."""
+    obj = await HabitService(db).update(id, data.model_dump(exclude_unset=True))
+    await db.commit()
+    await db.refresh(obj)
+    return obj
 
 
 @router.delete("/{id}")
