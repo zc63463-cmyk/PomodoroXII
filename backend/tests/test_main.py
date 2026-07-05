@@ -51,6 +51,14 @@ class TestCreateApp:
             resp = await client.get("/api/health")
         assert "x-request-id" in resp.headers
 
+    async def test_security_headers_middleware_registered(self):
+        """SecurityHeadersMiddleware should attach X-Content-Type-Options to /api/health."""
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/health")
+        assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+
     async def test_cors_headers_present(self):
         """CORS preflight should return appropriate headers."""
         app = create_app()
