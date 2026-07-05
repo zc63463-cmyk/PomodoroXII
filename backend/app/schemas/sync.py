@@ -29,14 +29,18 @@ class SyncAppliedItem(BaseModel):
     entity_type: str
     entity_id: str
     action: str
+    # P1-1: present (="remote") when LWW resolved to the remote version;
+    # absent for clean "ok" applications. conflict_remote no longer appears
+    # in ``conflicts`` because it represents a successful application.
+    resolution: str | None = None
 
 
 class SyncConflictItem(BaseModel):
-    """A conflict that was resolved by LWW."""
+    """A conflict that was resolved by LWW (remote event REJECTED)."""
 
     entity_type: str
     entity_id: str
-    resolution: str  # "local" | "remote" | "tombstone" | "circular_ref"
+    resolution: str  # "local" | "tombstone" | "circular_ref"
 
 
 class SyncErrorItem(BaseModel):

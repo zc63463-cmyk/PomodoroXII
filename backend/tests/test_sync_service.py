@@ -1058,12 +1058,13 @@ async def test_push_conflict_circular_ref_not_in_applied(space_session):
 
 @pytest.mark.asyncio
 async def test_push_conflict_remote_in_applied(space_session):
-    """P1-1: LWW conflict resolved to 'remote' MUST be in applied.
+    """P1-1: LWW conflict resolved to 'remote' MUST be in applied with
+    resolution='remote', and MUST NOT be in conflicts.
 
-    When the remote (client) version is newer, the server applies it —
-    so it belongs in ``applied``. It also appears in ``conflicts`` with
-    ``resolution=remote`` so clients can transparently see that a remote
-    win occurred.
+    Per approved decision: conflict_remote represents a successful
+    application of the remote event, so it belongs ONLY in applied
+    (with resolution='remote' for client visibility). conflicts is
+    reserved for rejected events (local/tombstone/circular_ref).
     """
     from app.services.sync import SyncService
     from app.services.task import TaskService
@@ -1087,13 +1088,20 @@ async def test_push_conflict_remote_in_applied(space_session):
         payload={"title": "Remote wins"},
         client_updated_at="2026-07-04T12:00:00.000Z",
     )])
-    assert any(c.get("resolution") == "remote" for c in result["conflicts"]), (
-        f"expected a 'remote' conflict, got {result['conflicts']}"
+
+    # conflict_remote MUST be in applied with resolution='remote'
+    applied_for_eid = [a for a in result["applied"] if a["entity_id"] == eid]
+    assert len(applied_for_eid) == 1, (
+        f"conflict_remote MUST appear in applied, got {result['applied']}"
     )
-    applied_ids = [a["entity_id"] for a in result["applied"]]
-    assert eid in applied_ids, (
-        f"conflict_remote event MUST appear in applied (remote was applied), "
-        f"got {result['applied']}"
+    assert applied_for_eid[0].get("resolution") == "remote", (
+        f"applied item should have resolution='remote', got {applied_for_eid[0]}"
+    )
+
+    # conflict_remote MUST NOT be in conflicts
+    conflict_resolutions = [c.get("resolution") for c in result["conflicts"]]
+    assert "remote" not in conflict_resolutions, (
+        f"conflict_remote must NOT appear in conflicts, got {result['conflicts']}"
     )
 
 
