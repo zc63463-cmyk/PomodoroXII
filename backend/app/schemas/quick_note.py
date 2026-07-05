@@ -70,3 +70,16 @@ class QuickNoteResponse(QuickNoteBase):
     version: int = 1
 
     model_config = {"from_attributes": True}
+
+
+class QuickNoteConvertResponse(BaseModel):
+    """Response for ``POST /api/v1/quick-notes/{id}/convert``.
+
+    Returned when a QuickNote is converted into a full Note. The original
+    quick note row is preserved (with ``archived_at`` + ``migrated_to_note_id``
+    set) but excluded from listings; the new Note is reachable via ``note_id``.
+    """
+
+    note_id: str
+    quick_note_id: str
+    migrated_comments_count: int = 0

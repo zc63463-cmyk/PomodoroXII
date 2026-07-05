@@ -343,8 +343,8 @@ async def test_notes_update_content_changes_hash(client):
 
 
 @pytest.mark.asyncio
-async def test_notes_delete_removes_both(client):
-    """DELETE /api/v1/notes/{id} removes DB row; subsequent GET returns 404."""
+async def test_notes_delete_soft_deletes(client):
+    """DELETE /api/v1/notes/{id} soft-deletes; row stays with trashed_at set."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     resp = await client.post(
@@ -357,10 +357,17 @@ async def test_notes_delete_removes_both(client):
         f"/api/v1/notes/{note_id}", headers=headers
     )
     assert resp.status_code == 200
+    # D-2: soft-delete keeps the row with trashed_at set (GET single still 200).
     resp = await client.get(
         f"/api/v1/notes/{note_id}", headers=headers
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["trashed_at"] is not None
+    # Listing excludes trashed notes.
+    resp = await client.get("/api/v1/notes", headers=headers)
+    assert resp.status_code == 200
+    ids = [item["id"] for item in resp.json()["items"]]
+    assert note_id not in ids
 
 
 # --------------------------------------------------------------------------- #

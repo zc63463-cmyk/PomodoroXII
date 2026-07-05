@@ -208,28 +208,62 @@ class NoteService(BaseService):
             obj = await self.get(id)
         return obj
 
-    async def delete(self, id: str) -> None:
-        """Delete note: DB row + tombstone first, then FS best-effort.
+    async def delete(self, id: str, *, hard: bool = False) -> None:
+        """Delete note: soft-delete by default, hard-delete when requested.
+
+        - REST default (``hard=False``, ``sync_mode=False``): sets
+          ``trashed_at`` and moves the .md file to ``.trash/``. No
+          tombstone is written -- the note can be restored. Idempotent.
+        - ``hard=True`` or ``sync_mode=True``: removes the DB row, writes
+          a tombstone (skipped in sync_mode -- the sync layer writes it),
+          and best-effort deletes the .md file. Idempotent.
 
         DB delete and tombstone creation happen before FS deletion so
         that if FS fails, the DB state is still consistent (the orphan
         .md file is harmless and can be cleaned by a consistency check).
-
-        Idempotent: if the .md file or DB row is already gone, the
-        operation completes without raising.  In ``sync_mode=True`` the
-        tombstone write is skipped — the remote tombstone decision is
-        authoritative and we must not overwrite it.
         """
-        # DB delete first (tombstone is the source of truth for deletion).
         obj = await self.db.get(self.model, id)
-        if obj is not None:
-            await self.db.delete(obj)
-            await self.db.flush()
-        # M1: Create tombstone via BaseService helper (skipped in sync_mode).
-        if not self.sync_mode:
-            await self._ensure_tombstone(id)
-        # FS deletion is best-effort (orphan .md is harmless).
-        try:
-            await self.fs.delete_note(id)
-        except (KeyError, FileNotFoundError):
-            pass
+
+        if self.sync_mode or hard:
+            # Hard delete: DB delete + tombstone + FS best-effort.
+            if obj is not None:
+                await self.db.delete(obj)
+                await self.db.flush()
+            # M1: Create tombstone via BaseService helper (skipped in sync_mode).
+            if not self.sync_mode:
+                await self._ensure_tombstone(id)
+            # FS deletion is best-effort (orphan .md is harmless).
+            try:
+                await self.fs.delete_note(id)
+            except (KeyError, FileNotFoundError):
+                pass
+            return
+
+        # REST soft delete: set trashed_at + move .md to .trash/.
+        # Idempotent: missing row or already-trashed row is a no-op.
+        if obj is None:
+            return
+        if obj.trashed_at is not None:
+            return
+        obj.trashed_at = utc_now_iso()
+        await self.db.flush()
+        await self.fs.delete_note(id)
+
+    async def restore(self, id: str) -> Any:
+        """Restore a soft-deleted note: clear ``trashed_at`` + move .md back.
+
+        Raises ``NotFoundError`` if the note does not exist, or
+        ``ValidationError`` if it is not in the trash. The filesystem
+        ``restore`` may raise ``FileExistsError`` if the target path is
+        occupied -- the route layer maps this to a 409 ConflictError.
+        """
+        obj = await self.get(id)  # raises NotFoundError if missing
+        if obj.trashed_at is None:
+            from app.errors import ValidationError
+
+            raise ValidationError(f"Note {id} is not in trash")
+        obj.trashed_at = None
+        await self.db.flush()
+        await self.fs.restore(id)
+        await self.db.refresh(obj)
+        return obj

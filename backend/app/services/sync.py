@@ -382,7 +382,7 @@ class SyncService:
 
         if action == "delete":
             note_svc = NoteService(self.db, self.fs, sync_mode=True)
-            await note_svc.delete(eid)
+            await note_svc.delete(eid, hard=True)
             # sync_mode skips tombstone inside NoteService; push delete is authoritative.
             await TombstoneService(self.db).create(etype, eid)
             return "ok"
