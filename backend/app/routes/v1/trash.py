@@ -162,7 +162,7 @@ async def restore_item(
         # NoteService.restore handles both ORM trashed_at + fs .trash/ move.
         try:
             await NoteService(db, fs).restore(entity_id)
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, FileExistsError) as exc:
             raise ConflictError(str(exc)) from exc
         await db.commit()
         return {

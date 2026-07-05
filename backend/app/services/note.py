@@ -8,8 +8,8 @@ both stores using a Saga Try-Compensate pattern:
   the .md file.
 - ``update_content``: save old content → FS rewrite → DB flush; on DB
   failure compensate by restoring the old .md content.
-- ``delete``: DB delete + tombstone first → FS best-effort; if FS fails
-  the orphan .md is harmless (consistency check can clean it later).
+- ``delete``: default soft-delete (sets trashed_at + moves .md to .trash/);
+  hard=True (sync/REST purge) does DB delete + tombstone + FS best-effort.
 
 Does NOT import FastAPI.  Only flushes, never commits.
 """
@@ -54,8 +54,8 @@ class NoteService(BaseService):
     - ``update_content`` rewrites the .md file and syncs hash/count.
       If the DB flush fails, the old .md content is restored.
     - ``update_metadata`` updates DB-only fields (title, tags, etc.).
-    - ``delete`` removes the DB row and writes a tombstone first, then
-      best-effort deletes the .md file.  Idempotent.
+    - ``delete`` (default) soft-deletes: sets trashed_at + moves .md to
+      .trash/; hard=True removes DB row + tombstone + FS best-effort. Both idempotent.
     """
 
     entity_type = "note"
@@ -169,6 +169,18 @@ class NoteService(BaseService):
         When *updated_at_override* is provided (sync_mode=True), the
         caller's timestamp is preserved instead of bumping to server-now.
         """
+        # E-5: REST guard -- reject metadata updates on trashed notes.
+        # Sync push path (sync_mode=True) bypasses this check to preserve
+        # the existing wire-format semantics where sync drives the lifecycle.
+        if not self.sync_mode:
+            existing = await self.get(id)
+            if existing.trashed_at is not None:
+                from app.errors import ValidationError
+
+                raise ValidationError(
+                    f"Note {id} is in trash; restore before editing"
+                )
+
         data = dict(data)
         data.pop("content", None)
         data.pop("content_hash", None)

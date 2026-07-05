@@ -245,3 +245,36 @@ async def test_note_purge_untrashed_returns_422(client):
         f"/api/v1/trash/note/{note_id}", headers=headers
     )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_note_restore_returns_409_when_target_path_occupied(
+    client, monkeypatch
+):
+    """POST /trash/note/{id}/restore maps FileExistsError -> 409 ConflictError.
+
+    Regression guard: trash.py restore_item must catch both FileNotFoundError
+    and FileExistsError from NoteService.restore (the latter occurs when the
+    target .md path is occupied by another note).
+    """
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+    note_id = await _create_note(client, headers, content="to be soft-deleted")
+
+    # Soft-delete the note so it is in trash.
+    resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # Mock NoteService.restore to raise FileExistsError (simulates path conflict).
+    from app.services.note import NoteService
+
+    async def _raise_file_exists(self, id):
+        raise FileExistsError(f"target path for note {id} already occupied")
+
+    monkeypatch.setattr(NoteService, "restore", _raise_file_exists)
+
+    resp = await client.post(
+        f"/api/v1/trash/note/{note_id}/restore", headers=headers
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error_type"] == "conflict"
