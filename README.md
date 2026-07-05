@@ -50,7 +50,7 @@ PomodoroXII/
 ```bash
 cd backend
 uv sync
-uv run pytest -q          # 全量测试（当前 617）
+uv run pytest -q          # 全量测试（当前 619）
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 

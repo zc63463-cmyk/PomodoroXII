@@ -250,3 +250,34 @@ async def test_patch_metadata_on_trashed_note_returns_422(client):
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["error_type"] == "validation_error"
+
+
+# --------------------------------------------------------------------------- #
+# E-4: PUT /content on a soft-deleted note -> 404 (FS is_deleted=0 guard)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_put_content_on_trashed_note_returns_404(client):
+    """PUT /notes/{id}/content on a soft-deleted note -> 404.
+
+    E-4 edge behavior pin: fs.edit_note has an `is_deleted=0` guard that
+    raises KeyError on trashed notes; the route maps KeyError/FileNotFoundError
+    to 404. This test pins the existing behavior as a regression guard.
+    """
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+    note = await _create_note(client, headers, content="will be trashed")
+    note_id = note["id"]
+
+    # Soft-delete via REST DELETE.
+    resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # PUT /content on trashed note must return 404 (FS guard).
+    resp = await client.put(
+        f"/api/v1/notes/{note_id}/content",
+        json={"content": "edited after trash"},
+        headers=headers,
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["error_type"] == "not_found"
