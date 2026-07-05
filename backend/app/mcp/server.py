@@ -425,9 +425,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=9000, help="HTTP port")
     args = parser.parse_args()
 
-    # Initialize meta DB for stdio mode (HTTP mode uses lifespan).
-    if args.transport == "stdio":
-        asyncio.run(init_meta_db())
+    # Initialize meta DB for all transports; HTTP mode must do it explicitly
+    # since FastMCP is not given an application lifespan handler.
+    asyncio.run(init_meta_db())
 
     try:
         if args.transport == "http":
@@ -435,9 +435,8 @@ def main() -> None:
         else:
             mcp.run()
     finally:
-        if args.transport == "stdio":
-            asyncio.run(dispose_space_engine_manager())
-            asyncio.run(close_meta_db())
+        asyncio.run(dispose_space_engine_manager())
+        asyncio.run(close_meta_db())
 
 
 if __name__ == "__main__":
