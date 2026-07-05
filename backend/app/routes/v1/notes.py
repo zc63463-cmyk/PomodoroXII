@@ -19,9 +19,15 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_file_system, get_space_context, get_space_db
+from app.errors import ValidationError
 from app.file_system.interfaces import FileSystem
 from app.schemas.common import PaginatedResponse
-from app.schemas.note import NoteCreate, NoteResponse, NoteUpdate
+from app.schemas.note import (
+    NoteCreate,
+    NoteResponse,
+    NoteSearchResultItem,
+    NoteUpdate,
+)
 from app.services.note import NoteService
 
 router = APIRouter()
@@ -62,6 +68,35 @@ async def list_notes(
         "offset": (page - 1) * per_page,
         "has_more": ((page - 1) * per_page + len(items)) < total,
     }
+
+
+@router.get("/search", response_model=list[NoteSearchResultItem])
+async def search_notes(
+    q: str = Query(..., min_length=1, description="搜索关键词"),
+    limit: int = Query(20, ge=1, le=100),
+    folder_id: str | None = Query(None),
+    db: AsyncSession = Depends(get_space_db),
+    fs: FileSystem = Depends(get_file_system),
+    ctx: dict = Depends(get_space_context),
+):
+    """Full-text search across notes (FTS5 with LIKE fallback for short queries)."""
+    query = q.strip()
+    if not query:
+        raise ValidationError("q must not be empty")
+    if folder_id:
+        results = await fs.search_in_folder(folder_id, query, limit=limit)
+    else:
+        results = await fs.search(query, limit=limit)
+    return [
+        NoteSearchResultItem(
+            note_id=r.note_id,
+            title=r.title,
+            folder_id=r.folder_id,
+            excerpt=r.excerpt,
+            score=r.score,
+        )
+        for r in results
+    ]
 
 
 @router.get("/{id}", response_model=NoteResponse)
