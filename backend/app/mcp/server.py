@@ -28,11 +28,11 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 from fastmcp import FastMCP
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.meta_session import init_meta_db, close_meta_db
-from app.space_manager import get_space_engine_manager, dispose_space_engine_manager
-from sqlalchemy import select
+from app.db.meta_session import close_meta_db, init_meta_db
+from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
 
 logger = logging.getLogger(__name__)
 
