@@ -12,7 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_space_context, get_space_db
 from app.schemas.common import PaginatedResponse
-from app.schemas.time_block import TimeBlockCreate, TimeBlockResponse
+from app.schemas.time_block import (
+    TimeBlockCreate,
+    TimeBlockResponse,
+    TimeBlockUpdate,
+)
 from app.services.time_block import TimeBlockService
 
 router = APIRouter()
@@ -65,6 +69,20 @@ async def get_time_block(
 ):
     """Return a single time block by id."""
     return await TimeBlockService(db).get(id)
+
+
+@router.put("/{id}", response_model=TimeBlockResponse)
+async def update_time_block(
+    id: str,
+    data: TimeBlockUpdate,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Update an existing time block (partial update)."""
+    obj = await TimeBlockService(db).update(id, data.model_dump(exclude_unset=True))
+    await db.commit()
+    await db.refresh(obj)
+    return obj
 
 
 @router.delete("/{id}")

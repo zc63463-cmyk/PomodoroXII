@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_space_context, get_space_db
 from app.schemas.common import PaginatedResponse
-from app.schemas.schedule import ScheduleCreate, ScheduleResponse
+from app.schemas.schedule import ScheduleCreate, ScheduleResponse, ScheduleUpdate
 from app.services.schedule import ScheduleService
 
 router = APIRouter()
@@ -60,6 +60,20 @@ async def get_schedule(
 ):
     """Return a single schedule by id."""
     return await ScheduleService(db).get(id)
+
+
+@router.put("/{id}", response_model=ScheduleResponse)
+async def update_schedule(
+    id: str,
+    data: ScheduleUpdate,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Update an existing schedule (partial update)."""
+    obj = await ScheduleService(db).update(id, data.model_dump(exclude_unset=True))
+    await db.commit()
+    await db.refresh(obj)
+    return obj
 
 
 @router.delete("/{id}")
