@@ -15,7 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_space_context, get_space_db
 from app.schemas.common import PaginatedResponse
-from app.schemas.reflection import ReflectionCreate, ReflectionResponse
+from app.schemas.reflection import (
+    ReflectionCreate,
+    ReflectionResponse,
+    ReflectionUpdate,
+)
 from app.services.reflection import ReflectionService
 
 router = APIRouter()
@@ -68,6 +72,20 @@ async def get_reflection(
 ):
     """Return a single reflection by id."""
     return await ReflectionService(db).get(id)
+
+
+@router.put("/{id}", response_model=ReflectionResponse)
+async def update_reflection(
+    id: str,
+    data: ReflectionUpdate,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Update an existing reflection (partial update)."""
+    obj = await ReflectionService(db).update(id, data.model_dump(exclude_unset=True))
+    await db.commit()
+    await db.refresh(obj)
+    return obj
 
 
 @router.delete("/{id}")
