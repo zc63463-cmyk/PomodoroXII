@@ -78,6 +78,9 @@ class SyncPullResponse(BaseModel):
     # Composite cursor secondary key: max id among rows sharing next_since.
     # Empty when no rows share the latest timestamp.
     next_since_id: str = ""
+    # Composite cursor for tombstones: max entity_id among tombstones sharing
+    # next_since. Empty when no tombstones share the latest timestamp.
+    next_tombstone_since_id: str = ""
     tombstones: list[dict[str, Any]] = Field(default_factory=list)
 
 

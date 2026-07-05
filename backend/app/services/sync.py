@@ -399,6 +399,7 @@ class SyncService:
         limit: int = 1000,
         *,
         since_id: str = "",
+        tombstone_since_id: str = "",
         tombstones_since_override: str | None = None,
     ) -> dict[str, Any]:
         """Return all entities updated after *since* grouped by pull_key.
@@ -439,6 +440,10 @@ class SyncService:
         # updated_at, instead of dropping it whenever max_ts == since_n.
         latest_entity_ts = ""
         latest_entity_id = ""
+        # Track tombstone cursor separately so next_tombstone_since_id stays
+        # alive across multiple pages sharing the same deleted_at.
+        latest_tomb_ts = ""
+        latest_tomb_id = ""
 
         for entry in ENTITY_REGISTRY.values():
             model = entry["model"]
@@ -493,7 +498,7 @@ class SyncService:
             since if tombstones_since_override is None else tombstones_since_override
         )
         tombstones, tomb_has_more = await self._fetch_tombstones(
-            since=tombstones_since, limit=limit,
+            since=tombstones_since, limit=limit, since_id=tombstone_since_id,
         )
         result["tombstones"] = [
             {
@@ -512,6 +517,12 @@ class SyncService:
             ts = normalize_timestamp(t.deleted_at or "")
             if ts and ts > max_ts:
                 max_ts = ts
+            if ts and (
+                ts > latest_tomb_ts
+                or (ts == latest_tomb_ts and t.entity_id > latest_tomb_id)
+            ):
+                latest_tomb_ts = ts
+                latest_tomb_id = t.entity_id
 
         result["next_since"] = max_ts
         # Only expose next_since_id when the latest entity timestamp equals the
@@ -520,6 +531,9 @@ class SyncService:
         # (since, since_id) composite key.
         if latest_entity_ts and latest_entity_ts == max_ts:
             result["next_since_id"] = latest_entity_id
+        # Expose next_tombstone_since_id when tombstones share the global cursor.
+        if latest_tomb_ts and latest_tomb_ts == max_ts:
+            result["next_tombstone_since_id"] = latest_tomb_id
         await self._write_audit(
             "pull", "batch", "",
             details=(
@@ -532,7 +546,11 @@ class SyncService:
         return result
 
     async def _fetch_tombstones(
-        self, since: str = "", limit: int = 1000
+        self,
+        since: str = "",
+        limit: int = 1000,
+        *,
+        since_id: str = "",
     ) -> tuple[list[Any], bool]:
         """Return ``(tombstone_rows, has_more)`` optionally filtered by *since*.
 
@@ -543,13 +561,29 @@ class SyncService:
         when tombstones accumulate over time (90-day TTL). Fetches
         ``limit + 1`` rows to detect ``has_more`` without an extra COUNT.
 
+        The composite cursor ``(since, since_id)`` mirrors entity pagination:
+        ``(deleted_at > since) OR (deleted_at == since AND entity_id > since_id)``.
+        Omitting *since_id* preserves the legacy behaviour.
+
         If *since* is empty (or unnormalizable to a non-empty string),
         returns ALL tombstones — used by ``full()``.
         """
         since_n = normalize_timestamp(since) if since else ""
         tq = select(Tombstone)
         if since_n:
-            tq = tq.where(Tombstone.deleted_at > since_n)
+            if since_id:
+                tq = tq.where(
+                    or_(
+                        Tombstone.deleted_at > since_n,
+                        and_(Tombstone.deleted_at == since_n, Tombstone.entity_id > since_id),
+                    )
+                )
+            else:
+                tq = tq.where(Tombstone.deleted_at > since_n)
+        elif since_id:
+            # No timestamp constraint (e.g. full() with override=""), but
+            # entity_id cursor still lets clients page through all tombstones.
+            tq = tq.where(Tombstone.entity_id > since_id)
         tq = tq.order_by(Tombstone.deleted_at.asc(), Tombstone.entity_id.asc()).limit(limit + 1)
         rows = (await self.db.execute(tq)).scalars().all()
         has_more = len(rows) > limit
@@ -562,7 +596,12 @@ class SyncService:
     # ----------------------------------------------------------------- #
 
     async def full(
-        self, since: str = "", limit: int = 1000, *, since_id: str = ""
+        self,
+        since: str = "",
+        limit: int = 1000,
+        *,
+        since_id: str = "",
+        tombstone_since_id: str = "",
     ) -> dict[str, Any]:
         """Like pull() but tombstones are returned regardless of *since*.
 
@@ -571,14 +610,14 @@ class SyncService:
 
         D-3 optimization: delegates to ``pull()`` with
         ``tombstones_since_override=""`` so the tombstones query is
-        executed exactly once (the previous implementation issued a
-        second SELECT over Tombstones just to override the filtered
-        result).
+        executed exactly once. Tombstones still honour *tombstone_since_id*
+        for same-deleted_at pagination even when *since* is bypassed.
         """
         result = await self.pull(
             since=since,
             limit=limit,
             since_id=since_id,
+            tombstone_since_id=tombstone_since_id,
             tombstones_since_override="",
         )
         result["is_full"] = True

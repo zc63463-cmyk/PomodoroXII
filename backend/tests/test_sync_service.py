@@ -546,9 +546,9 @@ async def test_full_issues_single_tombstones_query(space_session, monkeypatch):
     call_count = {"n": 0}
     real_fetch = svc._fetch_tombstones
 
-    async def _counting_fetch(since: str = "", limit: int = 1000):
+    async def _counting_fetch(since: str = "", limit: int = 1000, *, since_id: str = ""):
         call_count["n"] += 1
-        return await real_fetch(since=since, limit=limit)
+        return await real_fetch(since=since, limit=limit, since_id=since_id)
 
     monkeypatch.setattr(svc, "_fetch_tombstones", _counting_fetch)
 
