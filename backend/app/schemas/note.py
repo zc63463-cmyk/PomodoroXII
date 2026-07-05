@@ -83,3 +83,16 @@ class NoteResponse(NoteBase):
     version: int = 1
 
     model_config = {"from_attributes": True}
+
+
+class NoteSearchResultItem(BaseModel):
+    """Schema for note search results.
+
+    Field-aligned with ``app.file_system.interfaces.SearchResult``.
+    """
+
+    note_id: str
+    title: str
+    folder_id: Optional[str] = None
+    excerpt: str = ""
+    score: float = 0.0
