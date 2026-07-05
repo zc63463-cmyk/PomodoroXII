@@ -1,0 +1,17 @@
+services:
+  backend:
+    image: ghcr.io/zc63463-cmyk/pomodoroxii-backend:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      POMODOROXII_SECRET_KEY: ${POMODOROXII_SECRET_KEY}
+      POMODOROXII_ENVIRONMENT: production
+      POMODOROXII_SPACES_DATA_DIR: /app/data/spaces
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
