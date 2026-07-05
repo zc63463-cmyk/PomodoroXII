@@ -344,3 +344,93 @@ async def test_pull_since_id_with_distinct_timestamps(space_session):
         f"page 2 should return dt-2, got {[t['id'] for t in page2['tasks']]}"
     )
     assert page2["has_more"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Tombstone since_id pagination — same-deleted_at rows paged without skip/repeat
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_tombstones_same_timestamp_5_rows_three_pages_with_since_id(space_session):
+    """5 tombstones same deleted_at, limit=2: tombstone_since_id must survive page2.
+
+    Flow:
+    - Page 1: full(since="", tombstone_since_id="", limit=2) -> t1, t2;
+      tombstones_has_more=True; next_tombstone_since_id="t2".
+    - Page 2: full(since=ts, tombstone_since_id="t2", limit=2) -> t3, t4;
+      tombstones_has_more=True; next_tombstone_since_id="t4".
+    - Page 3: full(since=ts, tombstone_since_id="t4", limit=2) -> t5;
+      tombstones_has_more=False.
+
+    Without tombstone_since_id, page 2 would use WHERE deleted_at > ts and
+    skip t3/t4/t5 (all share the same deleted_at).
+    """
+    from app.models.tombstone import Tombstone
+    from app.services.sync import SyncService
+
+    ts = "2026-07-04T10:00:00.000Z"
+    for tid in ["t5", "t3", "t1", "t4", "t2"]:
+        tb = Tombstone(entity_type="task", entity_id=tid, deleted_at=ts)
+        space_session.add(tb)
+    await space_session.flush()
+
+    svc = SyncService(space_session, fs=None)
+
+    page1 = await svc.full(since="", tombstone_since_id="", limit=2)
+    assert page1["tombstones_has_more"] is True
+    assert [t["entity_id"] for t in page1["tombstones"]] == ["t1", "t2"], (
+        f"page 1 should return t1+t2 in entity_id-asc order, "
+        f"got {[t['entity_id'] for t in page1['tombstones']]}"
+    )
+    assert page1["next_tombstone_since_id"] == "t2", (
+        f"page 1 next_tombstone_since_id should be 't2', "
+        f"got {page1.get('next_tombstone_since_id')}"
+    )
+
+    page2 = await svc.full(since=ts, tombstone_since_id="t2", limit=2)
+    assert page2["tombstones_has_more"] is True
+    assert [t["entity_id"] for t in page2["tombstones"]] == ["t3", "t4"], (
+        f"page 2 should return t3+t4, "
+        f"got {[t['entity_id'] for t in page2['tombstones']]}"
+    )
+    assert page2["next_tombstone_since_id"] == "t4", (
+        f"page 2 next_tombstone_since_id should be 't4', "
+        f"got {page2.get('next_tombstone_since_id')}"
+    )
+
+    page3 = await svc.full(since=ts, tombstone_since_id="t4", limit=2)
+    assert page3["tombstones_has_more"] is False
+    assert [t["entity_id"] for t in page3["tombstones"]] == ["t5"], (
+        f"page 3 should return only t5, "
+        f"got {[t['entity_id'] for t in page3['tombstones']]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tombstone_since_id_backward_compatible(space_session):
+    """Omitting tombstone_since_id (default empty string) preserves old behaviour.
+
+    full(since="") with no tombstone_since_id returns all tombstones — the
+    (deleted_at, entity_id) filter is skipped when since is empty, just like
+    before. next_tombstone_since_id is still returned for clients that want
+    to page.
+    """
+    from app.models.tombstone import Tombstone
+    from app.services.sync import SyncService
+
+    ts = "2026-07-04T10:00:00.000Z"
+    for tid in ["bc-b", "bc-a"]:
+        tb = Tombstone(entity_type="task", entity_id=tid, deleted_at=ts)
+        space_session.add(tb)
+    await space_session.flush()
+
+    svc = SyncService(space_session, fs=None)
+    result = await svc.full(since="", limit=10)
+    ids = [t["entity_id"] for t in result["tombstones"]]
+    assert ids == ["bc-a", "bc-b"], (
+        f"both tombstones should be returned without tombstone_since_id, got {ids}"
+    )
+    assert result["next_tombstone_since_id"] == "bc-b", (
+        f"next_tombstone_since_id should be 'bc-b', "
+        f"got {result.get('next_tombstone_since_id')}"
+    )
