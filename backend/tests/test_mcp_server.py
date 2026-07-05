@@ -14,7 +14,6 @@ import uuid
 
 import pytest
 
-
 # --------------------------------------------------------------------------- #
 # Server identity
 # --------------------------------------------------------------------------- #
@@ -43,7 +42,7 @@ def test_mcp_server_has_instructions():
 @pytest.mark.asyncio
 async def test_list_all_spaces_returns_list():
     """list_all_spaces should return a list (possibly empty)."""
-    from app.db.meta_session import init_meta_db, close_meta_db
+    from app.db.meta_session import close_meta_db, init_meta_db
     from app.mcp.server import list_all_spaces
 
     await init_meta_db()
@@ -198,6 +197,7 @@ def test_mcp_module_has_no_dead_context_import():
     Since Context is never referenced in server.py, it must not be imported.
     """
     import inspect
+
     import app.mcp.server as server_mod
 
     source = inspect.getsource(server_mod)
