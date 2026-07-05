@@ -71,6 +71,9 @@ class SyncPullResponse(BaseModel):
     # to *limit*. The top-level has_more is also surfaced True in that case.
     tombstones_has_more: bool = False
     next_since: str = ""
+    # Composite cursor secondary key: max id among rows sharing next_since.
+    # Empty when no rows share the latest timestamp.
+    next_since_id: str = ""
     tombstones: list[dict[str, Any]] = Field(default_factory=list)
 
 
