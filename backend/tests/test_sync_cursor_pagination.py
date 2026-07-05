@@ -6,16 +6,17 @@ Covers:
 - Ordering by (updated_at, id) so rows sharing a timestamp are returned in a
   deterministic order (clients can de-dup).
 - Tombstones follow the same (deleted_at, id) ordering for the same reason.
+- since_id pagination: rows sharing the same timestamp can be paged through
+  via the (since, since_id) tuple without skipping or repeating rows.
 
-Note on the cursor contract:
-    The current cursor API uses ``since`` = the max ``updated_at`` seen so
-    far and the filter is ``WHERE updated_at > since``. For the rare case
-    of multiple rows sharing the exact same timestamp, the next page *would*
-    skip the remaining same-ts rows. The fix here is *not* a perfect cursor
-    (that would require ``since_id``); it is the deterministic ordering so
-    clients can detect and de-duplicate. The pagination_no_skip tests below
-    verify the first page behaviour (which is the common case) and document
-    the known limitation in the second-page case.
+The cursor contract:
+    The cursor is the ``(since, since_id)`` tuple. ``since`` is the max
+    ``updated_at`` seen so far; ``since_id`` is the max ``id`` among rows
+    sharing that timestamp. The filter is::
+        (updated_at > since) OR (updated_at == since AND id > since_id)
+    This guarantees no rows are skipped or repeated across pages, even when
+    many rows share the same timestamp. ``next_since_id`` is returned in
+    the response so clients can pass it on the next pull.
 """
 from __future__ import annotations
 
@@ -105,11 +106,11 @@ async def test_pull_same_timestamp_3_rows_first_page_returns_2_with_has_more(spa
     """3 rows with the same updated_at, limit=2:
     - First page returns 2 rows + has_more=True.
     - First-page ids are the two smallest (id-asc ordering).
+    - next_since_id is the id of the last returned row so the next page
+      can resume via (since=ts, since_id=last_id).
 
-    Note: the *second* page would skip the 3rd row because the cursor is
-    ``> since`` and all 3 share the same ts. This is a known limitation
-    documented in the plan; clients must de-dup same-ts rows. The test
-    here verifies the first-page behaviour only.
+    See ``test_pull_same_timestamp_pagination_with_since_id`` for the
+    full two-page flow that verifies the 3rd row is reachable.
     """
     from app.models.task import Task
     from app.services.sync import SyncService
@@ -131,6 +132,9 @@ async def test_pull_same_timestamp_3_rows_first_page_returns_2_with_has_more(spa
         f"first page should return 2 id-asc rows, got {page1_ids}"
     )
     assert page1["next_since"] == ts
+    assert page1["next_since_id"] == "same-ts-2", (
+        f"next_since_id should be last returned id, got {page1.get('next_since_id')}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -159,3 +163,128 @@ async def test_tombstones_same_timestamp_ordered_by_id(space_session):
     assert tomb_ids == ["tomb-a", "tomb-b", "tomb-c"], (
         f"expected id-asc tombstone order, got {tomb_ids}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# since_id pagination — same-timestamp rows paged without skip/repeat
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_pull_same_timestamp_pagination_with_since_id(space_session):
+    """since_id lets the second page pick up the 3rd same-timestamp row.
+
+    Flow:
+    - 3 tasks sharing updated_at="2026-07-04T10:00:00.000Z" with ids
+      s1/s2/s3 (inserted out of order to also verify id-asc sorting).
+    - Page 1: pull(since="", since_id="", limit=2) returns s1+s2,
+      has_more=True, next_since=ts, next_since_id="s2".
+    - Page 2: pull(since=ts, since_id="s2", limit=2) returns s3 only,
+      has_more=False.
+
+    Without since_id, page 2 would use WHERE updated_at > ts and skip s3.
+    """
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    ts = "2026-07-04T10:00:00.000Z"
+    for tid in ["s3", "s1", "s2"]:
+        t = Task(
+            id=tid, title=tid, status="todo", priority="medium",
+            tags="[]", updated_at=ts,
+        )
+        space_session.add(t)
+    await space_session.flush()
+
+    svc = SyncService(space_session, fs=None)
+    page1 = await svc.pull(since="", since_id="", limit=2)
+    assert page1["has_more"] is True
+    page1_ids = [t["id"] for t in page1["tasks"]]
+    assert page1_ids == ["s1", "s2"], (
+        f"page 1 should return s1+s2 in id-asc order, got {page1_ids}"
+    )
+    assert page1["next_since"] == ts
+    assert page1["next_since_id"] == "s2", (
+        f"page 1 next_since_id should be 's2', got {page1.get('next_since_id')}"
+    )
+
+    page2 = await svc.pull(since=ts, since_id="s2", limit=2)
+    page2_ids = [t["id"] for t in page2["tasks"]]
+    assert page2_ids == ["s3"], (
+        f"page 2 should return only s3 (the 3rd same-ts row), got {page2_ids}"
+    )
+    assert page2["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_pull_since_id_backward_compatible(space_session):
+    """Omitting since_id (default empty string) preserves old behaviour.
+
+    pull(since="") with no since_id returns all rows — the (updated_at, id)
+    filter is skipped when since is empty, just like before.
+    """
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    ts = "2026-07-04T10:00:00.000Z"
+    for tid in ["bc-1", "bc-2"]:
+        t = Task(
+            id=tid, title=tid, status="todo", priority="medium",
+            tags="[]", updated_at=ts,
+        )
+        space_session.add(t)
+    await space_session.flush()
+
+    svc = SyncService(space_session, fs=None)
+    # No since_id kwarg — should default to "" and behave as before.
+    result = await svc.pull(since="", limit=10)
+    ids = [t["id"] for t in result["tasks"]]
+    assert set(ids) == {"bc-1", "bc-2"}, (
+        f"both rows should be returned without since_id, got {ids}"
+    )
+    assert result["next_since"] == ts
+    # next_since_id should be the max id among returned rows.
+    assert result["next_since_id"] == "bc-2", (
+        f"next_since_id should be 'bc-2', got {result.get('next_since_id')}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pull_since_id_with_distinct_timestamps(space_session):
+    """since_id is harmless when timestamps are distinct.
+
+    When each row has a unique updated_at, the (ts == since AND id > since_id)
+    branch never matches, so the filter reduces to ``updated_at > since``.
+    The 2nd row should be returned on page 2 even though since_id is set
+    to a value that doesn't share the page-1 timestamp.
+    """
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    t1 = Task(
+        id="dt-1", title="t1", status="todo", priority="medium",
+        tags="[]", updated_at="2026-07-04T10:00:00.000Z",
+    )
+    t2 = Task(
+        id="dt-2", title="t2", status="todo", priority="medium",
+        tags="[]", updated_at="2026-07-04T11:00:00.000Z",
+    )
+    space_session.add_all([t1, t2])
+    await space_session.flush()
+
+    svc = SyncService(space_session, fs=None)
+    page1 = await svc.pull(since="", limit=1)
+    assert page1["has_more"] is True
+    assert [t["id"] for t in page1["tasks"]] == ["dt-1"]
+    next_since = page1["next_since"]
+    next_since_id = page1["next_since_id"]
+    assert next_since == "2026-07-04T10:00:00.000Z"
+    assert next_since_id == "dt-1"
+
+    # Page 2: pass since_id=dt-1 (which is at 10:00, not 11:00). Since dt-2
+    # has a different (later) timestamp, the ts > since branch matches and
+    # dt-2 is returned. The id > since_id branch is irrelevant here.
+    page2 = await svc.pull(since=next_since, since_id=next_since_id, limit=1)
+    assert [t["id"] for t in page2["tasks"]] == ["dt-2"], (
+        f"page 2 should return dt-2, got {[t['id'] for t in page2['tasks']]}"
+    )
+    assert page2["has_more"] is False

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.note import Note
@@ -402,6 +402,7 @@ class SyncService:
         since: str = "",
         limit: int = 1000,
         *,
+        since_id: str = "",
         tombstones_since_override: str | None = None,
     ) -> dict[str, Any]:
         """Return all entities updated after *since* grouped by pull_key.
@@ -411,6 +412,12 @@ class SyncService:
         ``deleted_at > since`` are returned under the ``tombstones`` key.
         ``next_since`` is the maximum ``updated_at`` observed across
         all returned rows (empty string if no rows).
+
+        The composite cursor ``(since, since_id)`` guarantees that rows
+        sharing the same ``updated_at`` can be paged without skipping or
+        repeating: the filter is ``updated_at > since`` OR
+        ``(updated_at == since AND id > since_id)``. Omitting ``since_id``
+        preserves the legacy behaviour.
 
         D-3 optimization: ``tombstones_since_override`` lets ``full()``
         reuse ``pull()``'s single tombstones query instead of issuing
@@ -426,16 +433,26 @@ class SyncService:
             "has_more": False,
             "tombstones_has_more": False,  # D-5: tombstones pagination flag
             "next_since": "",
+            "next_since_id": "",
             "tombstones": [],
         }
         max_ts = since_n
+        next_since_id = ""
 
         for entry in ENTITY_REGISTRY.values():
             model = entry["model"]
             pull_key = entry["pull_key"]
             q = select(model)
             if since_n:
-                q = q.where(model.updated_at > since_n)
+                if since_id:
+                    q = q.where(
+                        or_(
+                            model.updated_at > since_n,
+                            and_(model.updated_at == since_n, model.id > since_id),
+                        )
+                    )
+                else:
+                    q = q.where(model.updated_at > since_n)
             q = q.order_by(model.updated_at.asc(), model.id.asc()).limit(limit + 1)
             rows = (await self.db.execute(q)).scalars().all()
             if len(rows) > limit:
@@ -463,6 +480,9 @@ class SyncService:
                 ts = normalize_timestamp(r.updated_at or "")
                 if ts and ts > max_ts:
                     max_ts = ts
+                    next_since_id = r.id
+                elif ts and ts == max_ts and r.id > next_since_id:
+                    next_since_id = r.id
 
         # Tombstones — use override if provided, else honour *since*.
         tombstones_since = (
@@ -488,11 +508,21 @@ class SyncService:
             ts = normalize_timestamp(t.deleted_at or "")
             if ts and ts > max_ts:
                 max_ts = ts
+                # Tombstones use deleted_at as cursor and do not participate
+                # in the since_id composite key (their id is internal).
+                next_since_id = ""
 
         result["next_since"] = max_ts
+        # Only expose next_since_id when entities advanced the timestamp.
+        # If the latest timestamp came solely from tombstones, leave it empty.
+        if max_ts != since_n:
+            result["next_since_id"] = next_since_id
         await self._write_audit(
             "pull", "batch", "",
-            details=f"since={since} limit={limit} has_more={result['has_more']}",
+            details=(
+                f"since={since} since_id={since_id} limit={limit} "
+                f"has_more={result['has_more']}"
+            ),
         )
         # D-4: batched audit flush — one flush for this pull() call.
         await self._flush_pending_audits()
@@ -528,7 +558,9 @@ class SyncService:
     # full
     # ----------------------------------------------------------------- #
 
-    async def full(self, since: str = "", limit: int = 1000) -> dict[str, Any]:
+    async def full(
+        self, since: str = "", limit: int = 1000, *, since_id: str = ""
+    ) -> dict[str, Any]:
         """Like pull() but tombstones are returned regardless of *since*.
 
         Sets ``is_full=True`` so clients can distinguish a full sync
@@ -543,6 +575,7 @@ class SyncService:
         result = await self.pull(
             since=since,
             limit=limit,
+            since_id=since_id,
             tombstones_since_override="",
         )
         result["is_full"] = True
