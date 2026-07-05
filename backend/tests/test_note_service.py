@@ -158,7 +158,7 @@ async def test_update_metadata_updates_db_only(space_session, tmp_path):
 
 @pytest.mark.asyncio
 async def test_delete_removes_both_and_tombstone(space_session, tmp_path):
-    """delete() should remove DB row, soft-delete .md, and write tombstone."""
+    """delete(hard=True) removes DB row + .md file + writes tombstone."""
     from app.errors import NotFoundError
     from app.services.note import NoteService
     from app.services.tombstone import TombstoneService

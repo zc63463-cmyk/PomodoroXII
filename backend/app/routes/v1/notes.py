@@ -10,7 +10,7 @@ coordinates both stores and requires a ``FileSystem`` instance.
 - ``PATCH /{id}`` updates metadata only (DB-only, does NOT write .md).
 - ``PUT /{id}/content`` rewrites the .md body and updates content_hash.
 - ``PUT /{id}`` (deprecated) dispatches content to fs + metadata to DB.
-- ``DELETE`` removes both the .md file and the DB row (idempotent + tombstone).
+- ``DELETE`` soft-deletes: sets trashed_at + moves .md to .trash/ (idempotent, no tombstone). Use DELETE /trash/note/{id} to purge.
 
 Routes commit; the service only flushes.
 """
@@ -242,7 +242,7 @@ async def delete_note(
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
 ):
-    """Delete a note from both fs and DB (idempotent, records a tombstone)."""
+    """Soft-delete a note: set trashed_at + move .md to .trash/ (idempotent, no tombstone)."""
     await NoteService(db, fs).delete(id)
     await db.commit()
     return {"message": "Deleted"}

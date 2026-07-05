@@ -219,3 +219,34 @@ async def test_put_full_deprecated_but_still_works(client):
         assert put_op.get("deprecated") is True, (
             "PUT /api/v1/notes/{id} should be marked deprecated=True in OpenAPI"
         )
+
+
+# --------------------------------------------------------------------------- #
+# E-5: PATCH on a soft-deleted note -> 422 (must restore first)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_patch_metadata_on_trashed_note_returns_422(client):
+    """PATCH /notes/{id} on a soft-deleted note -> 422 (must restore first).
+
+    E-5 edge behavior guard: NoteService.update_metadata must reject metadata
+    updates on trashed notes to prevent silent DB mutations on a recycled
+    item. The sync push path (sync_mode=True) bypasses this guard.
+    """
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+    note = await _create_note(client, headers, content="will be trashed")
+    note_id = note["id"]
+
+    # Soft-delete via REST DELETE.
+    resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # PATCH on trashed note must fail with 422.
+    resp = await client.patch(
+        f"/api/v1/notes/{note_id}",
+        json={"title": "Patched After Trash"},
+        headers=headers,
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error_type"] == "validation_error"
