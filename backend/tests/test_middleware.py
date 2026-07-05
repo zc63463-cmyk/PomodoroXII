@@ -1,8 +1,7 @@
-"""Tests for app.middleware — RequestIdMiddleware."""
+"""Tests for app.middleware — RequestIdMiddleware and SecurityHeadersMiddleware."""
 
 from __future__ import annotations
 
-import re
 import uuid
 
 import httpx
@@ -11,7 +10,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 
 from app.logging import request_id_var
-from app.middleware import RequestIdMiddleware
+from app.middleware import RequestIdMiddleware, SecurityHeadersMiddleware
+from app.settings import settings
 
 
 def _build_test_app() -> FastAPI:
@@ -69,3 +69,89 @@ class TestRequestIdMiddleware:
         assert resp.status_code == 200
         assert len(captured) == 1
         assert captured[0] == custom_id
+
+
+# --------------------------------------------------------------------------- #
+# SecurityHeadersMiddleware
+# --------------------------------------------------------------------------- #
+
+
+def _build_security_app() -> FastAPI:
+    """Minimal FastAPI app with only SecurityHeadersMiddleware."""
+    app = FastAPI()
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    @app.get("/ping")
+    async def _ping():
+        return {"ok": True}
+
+    return app
+
+
+class TestSecurityHeadersMiddleware:
+    @pytest.fixture
+    def app(self):
+        return _build_security_app()
+
+    @pytest.fixture(autouse=True)
+    def reset_settings(self, monkeypatch):
+        """Restore default settings after each test."""
+        yield
+        monkeypatch.undo()
+
+    @pytest.mark.asyncio
+    async def test_common_security_headers_always_present(self, app, monkeypatch):
+        """All non-HSTS headers should be attached in every environment."""
+        monkeypatch.setattr(settings, "environment", "development")
+        monkeypatch.setattr(settings, "debug", True)
+
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/ping")
+
+        assert resp.status_code == 200
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
+        assert resp.headers["X-Frame-Options"] == "DENY"
+        assert resp.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+        assert "camera=()" in resp.headers["Permissions-Policy"]
+        assert "microphone=()" in resp.headers["Permissions-Policy"]
+        assert "geolocation=()" in resp.headers["Permissions-Policy"]
+
+    @pytest.mark.asyncio
+    async def test_hsts_present_in_production(self, app, monkeypatch):
+        """HSTS header should be sent in production when debug is disabled."""
+        monkeypatch.setattr(settings, "environment", "production")
+        monkeypatch.setattr(settings, "debug", False)
+
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/ping")
+
+        assert resp.status_code == 200
+        assert resp.headers["Strict-Transport-Security"] == "max-age=31536000; includeSubDomains"
+
+    @pytest.mark.asyncio
+    async def test_hsts_absent_in_development(self, app, monkeypatch):
+        """HSTS header should NOT be sent in development."""
+        monkeypatch.setattr(settings, "environment", "development")
+        monkeypatch.setattr(settings, "debug", True)
+
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/ping")
+
+        assert resp.status_code == 200
+        assert "Strict-Transport-Security" not in resp.headers
+
+    @pytest.mark.asyncio
+    async def test_hsts_absent_when_debug_enabled_even_in_production(self, app, monkeypatch):
+        """Debug mode must suppress HSTS even if environment claims production."""
+        monkeypatch.setattr(settings, "environment", "production")
+        monkeypatch.setattr(settings, "debug", True)
+
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/ping")
+
+        assert resp.status_code == 200
+        assert "Strict-Transport-Security" not in resp.headers

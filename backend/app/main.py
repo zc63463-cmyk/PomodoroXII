@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.errors import register_exception_handlers
 from app.logging import setup_logging
-from app.middleware import RequestIdMiddleware
+from app.middleware import RequestIdMiddleware, SecurityHeadersMiddleware
 from app.settings import settings
 
 logger = logging.getLogger("pomodoroxi")
@@ -56,14 +56,14 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    app.add_middleware(
-        CORSMiddleware,
+    app.add_middleware(CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
 
     register_exception_handlers(app)
 
