@@ -129,3 +129,32 @@ def get_actual_stats_mcp_tools() -> set[str]:
         if "StatsService" in source:
             stats_tools.add(name)
     return stats_tools
+
+
+# --------------------------------------------------------------------------- #
+# MCP tool registration expectations — single source of truth
+# --------------------------------------------------------------------------- #
+
+EXPECTED_MCP_TOOLS = frozenset(
+    {
+        "list_all_spaces",
+        "get_stats_overview",
+        "get_focus_trend",
+        "get_task_distribution",
+        "get_daily_detail",
+        "get_habit_summary",
+        "get_schedule_summary",
+        "get_note_summary",
+        "get_registry_health",
+        "list_entities",
+        "get_entity_schema",
+        "get_sync_status",
+        "sync_pull",
+    }
+)
+"""Names of every tool that must be registered on the FastMCP server.
+
+This set is the single source of truth for MCP tool registration coverage.
+Tests that verify tool counts or tool lists should import this constant
+instead of duplicating the literal set.
+"""

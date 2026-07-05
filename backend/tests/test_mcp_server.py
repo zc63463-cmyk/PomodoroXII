@@ -232,30 +232,21 @@ def test_mcp_server_instructions_non_empty():
 # Tool registration — verify via FastMCP list_tools
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.asyncio
-async def test_all_tools_registered_via_fastmcp():
-    """All 13 tools should be registered with FastMCP (not just defined as functions)."""
+
+def test_all_tools_registered_via_fastmcp():
+    """All expected tools should be registered with FastMCP.
+
+    Uses the EXPECTED_MCP_TOOLS constant from parity_helpers as the single
+    source of truth, avoiding duplication of the tool list in this file.
+    """
     from app.mcp.server import mcp
 
-    tools = await mcp.list_tools()
+    tools = asyncio.run(mcp.list_tools())
     tool_names = {t.name for t in tools}
-    expected = {
-        "list_all_spaces",
-        "get_stats_overview",
-        "get_focus_trend",
-        "get_task_distribution",
-        "get_daily_detail",
-        "get_habit_summary",
-        "get_schedule_summary",
-        "get_note_summary",
-        "get_registry_health",
-        "list_entities",
-        "get_entity_schema",
-        "get_sync_status",
-        "sync_pull",
-    }
-    missing = expected - tool_names
-    extra = tool_names - expected
+    from tests.parity_helpers import EXPECTED_MCP_TOOLS
+
+    missing = EXPECTED_MCP_TOOLS - tool_names
+    extra = tool_names - EXPECTED_MCP_TOOLS
     assert not missing, f"Tools missing from FastMCP registry: {missing}"
     assert not extra, f"Unexpected extra tools in FastMCP registry: {extra}"
 
