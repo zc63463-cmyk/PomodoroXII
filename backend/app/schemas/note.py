@@ -44,11 +44,15 @@ class NoteCreate(NoteBase):
 
 
 class NoteUpdate(BaseModel):
-    """Schema for updating an existing note.
+    """Schema for the deprecated ``PUT /notes/{id}`` dispatcher.
 
     ``content`` is accepted so the route can dispatch it to
     ``NoteService.update_content()`` which rewrites the ``.md`` file.
     Metadata fields are persisted on the DB row only.
+
+    Prefer ``PATCH /notes/{id}`` (metadata only) + ``PUT /notes/{id}/content``
+    (content only) -- this schema is kept for backward compatibility and will
+    be removed in the next major.
     """
 
     title: Optional[str] = Field(default=None, max_length=500)
@@ -65,6 +69,40 @@ class NoteUpdate(BaseModel):
         if isinstance(v, str):
             return json.loads(v) if v else []
         return v
+
+
+class NoteMetadataUpdate(BaseModel):
+    """Schema for ``PATCH /notes/{id}`` -- metadata only, does NOT write .md.
+
+    Content-managed fields (``content``, ``content_hash``, ``word_count``)
+    are intentionally absent: clients must use ``PUT /notes/{id}/content``
+    to rewrite the ``.md`` body.
+    """
+
+    title: Optional[str] = Field(default=None, max_length=500)
+    summary: Optional[str] = Field(default=None, max_length=500)
+    tags: Optional[list[str]] = None
+    folder_id: Optional[str] = Field(default=None, max_length=36)
+    category: Optional[str] = Field(default=None, max_length=200)
+    status: Optional[str] = Field(default=None, max_length=20)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def parse_tags(cls, v: object) -> object:
+        """Parse JSON string to list when arriving from sync push."""
+        if isinstance(v, str):
+            return json.loads(v) if v else []
+        return v
+
+
+class NoteUpdateContent(BaseModel):
+    """Schema for ``PUT /notes/{id}/content`` -- rewrites the .md body.
+
+    Accepts a single ``content`` field. The route also tolerates a
+    ``text/plain`` request body (parsed manually via ``Request``).
+    """
+
+    content: str = Field(..., max_length=100000)
 
 
 class NoteResponse(NoteBase):
@@ -96,3 +134,18 @@ class NoteSearchResultItem(BaseModel):
     folder_id: Optional[str] = None
     excerpt: str = ""
     score: float = 0.0
+
+
+class VersionRecordResponse(BaseModel):
+    """Schema for note version history entries.
+
+    Field-aligned with ``app.file_system.interfaces.VersionRecord``.
+    """
+
+    version_id: str
+    note_id: str
+    content_hash: str
+    changed_at: str
+    change_summary: str
+
+    model_config = {"from_attributes": True}

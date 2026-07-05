@@ -172,7 +172,9 @@ async def test_delete_removes_both_and_tombstone(space_session, tmp_path):
     })
     note_id = note.id
 
-    await svc.delete(note_id)
+    # D-2: REST default is now soft-delete; explicitly request hard delete
+    # to preserve the original test intent (row + .md + tombstone gone).
+    await svc.delete(note_id, hard=True)
 
     # DB row is gone.
     with pytest.raises(NotFoundError):
@@ -201,9 +203,10 @@ async def test_delete_idempotent(space_session, tmp_path):
     })
 
     # First delete should succeed.
-    await svc.delete(note.id)
+    # D-2: default is soft-delete; verify hard-delete idempotency here.
+    await svc.delete(note.id, hard=True)
     # Second delete should not raise.
-    await svc.delete(note.id)
+    await svc.delete(note.id, hard=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -372,7 +375,8 @@ async def test_delete_db_first_then_fs(space_session, tmp_path):
     note = await svc.create({"title": "Del", "content": "bye"})
     note_id = note.id
 
-    await svc.delete(note_id)
+    # D-2: explicit hard delete to preserve original test intent.
+    await svc.delete(note_id, hard=True)
 
     # DB row should be gone.
     from sqlalchemy import select
@@ -431,7 +435,8 @@ async def test_delete_always_writes_tombstone(space_session, tmp_path):
     await fs.delete_note(note_id)
 
     # delete() should still succeed and write a tombstone.
-    await svc.delete(note_id)
+    # D-2: explicit hard delete to preserve original test intent.
+    await svc.delete(note_id, hard=True)
     assert await TombstoneService(space_session).exists("note", note_id) is not None
 
 
@@ -461,7 +466,8 @@ async def test_create_update_delete_end_to_end(space_session, tmp_path):
     assert note.category == "test"
 
     # Delete
-    await svc.delete(note.id)
+    # D-2: explicit hard delete to preserve original test intent.
+    await svc.delete(note.id, hard=True)
     assert await TombstoneService(space_session).exists("note", note.id) is not None
 
 
@@ -537,3 +543,71 @@ async def test_update_metadata_sync_mode_preserves_client_updated_at(space_sessi
     assert updated.title == "Sync Title"
     assert updated.updated_at == client_ts
     assert updated.version == original_version
+
+
+# --------------------------------------------------------------------------- #
+# D-2: soft-delete + restore (default REST path)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_delete_default_is_soft_delete(space_session, tmp_path):
+    """Default delete() (no hard=True) soft-deletes: row stays, .md moves to .trash/."""
+    from app.models.note import Note
+    from app.services.note import NoteService
+    from app.services.tombstone import TombstoneService
+
+    fs = await _make_fs(tmp_path)
+    svc = NoteService(space_session, fs)
+
+    note = await svc.create({"title": "Soft", "content": "will be trashed"})
+    note_id = note.id
+
+    # Default delete = soft delete.
+    await svc.delete(note_id)
+
+    # DB row still exists with trashed_at set.
+    row = await space_session.get(Note, note_id)
+    assert row is not None
+    assert row.trashed_at is not None
+
+    # .md file moved to .trash/ -> read_note raises KeyError.
+    with pytest.raises(KeyError):
+        await fs.read_note(note_id)
+
+    # No tombstone written for soft delete.
+    assert await TombstoneService(space_session).exists("note", note_id) is None
+
+    # Idempotent: second soft delete on already-trashed note is a no-op.
+    await svc.delete(note_id)
+    row = await space_session.get(Note, note_id)
+    assert row is not None
+    assert row.trashed_at is not None
+
+    # Soft delete on missing row is also a no-op (no raise).
+    await svc.delete("nonexistent-id-xyz")
+
+
+@pytest.mark.asyncio
+async def test_restore_clears_trashed_at_and_recovers_md(space_session, tmp_path):
+    """restore() clears trashed_at, moves .md back from .trash/, and is non-idempotent."""
+    from app.errors import ValidationError
+    from app.services.note import NoteService
+
+    fs = await _make_fs(tmp_path)
+    svc = NoteService(space_session, fs)
+
+    note = await svc.create({"title": "Restore Me", "content": "recoverable body"})
+    note_id = note.id
+
+    # Soft-delete then restore.
+    await svc.delete(note_id)
+    restored = await svc.restore(note_id)
+
+    assert restored.trashed_at is None
+    content = await fs.read_note(note_id)
+    assert content == "recoverable body"
+
+    # Repeat restore -> ValidationError (note no longer in trash).
+    with pytest.raises(ValidationError):
+        await svc.restore(note_id)
