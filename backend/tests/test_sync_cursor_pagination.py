@@ -216,6 +216,62 @@ async def test_pull_same_timestamp_pagination_with_since_id(space_session):
 
 
 @pytest.mark.asyncio
+async def test_pull_same_timestamp_5_rows_three_pages_with_since_id(space_session):
+    """5 rows with the same updated_at, limit=2: since_id must survive page2.
+
+    Regression: the original implementation only returned next_since_id when
+    max_ts advanced past since_n. On page2 all remaining rows still share the
+    same timestamp, so max_ts == since_n and next_since_id was dropped. The
+    client then fell back to (since, "") and skipped the 5th row.
+
+    Flow:
+    - Page 1: pull(since="", since_id="", limit=2) -> s1, s2; next_since_id=s2.
+    - Page 2: pull(since=ts, since_id="s2", limit=2) -> s3, s4; has_more=True;
+      next_since_id=s4 (this is the regression fix).
+    - Page 3: pull(since=ts, since_id="s4", limit=2) -> s5; has_more=False.
+    """
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    ts = "2026-07-04T10:00:00.000Z"
+    for tid in ["s5", "s3", "s1", "s4", "s2"]:
+        t = Task(
+            id=tid, title=tid, status="todo", priority="medium",
+            tags="[]", updated_at=ts,
+        )
+        space_session.add(t)
+    await space_session.flush()
+
+    svc = SyncService(space_session, fs=None)
+
+    page1 = await svc.pull(since="", since_id="", limit=2)
+    assert page1["has_more"] is True
+    assert [t["id"] for t in page1["tasks"]] == ["s1", "s2"]
+    assert page1["next_since"] == ts
+    assert page1["next_since_id"] == "s2"
+
+    page2 = await svc.pull(since=ts, since_id="s2", limit=2)
+    assert page2["has_more"] is True
+    assert [t["id"] for t in page2["tasks"]] == ["s3", "s4"], (
+        f"page 2 should return s3+s4, got {[t['id'] for t in page2['tasks']]}"
+    )
+    assert page2["next_since"] == ts
+    assert page2["next_since_id"] == "s4", (
+        f"page 2 next_since_id should be 's4', got {page2.get('next_since_id')}"
+    )
+
+    page3 = await svc.pull(since=ts, since_id="s4", limit=2)
+    assert page3["has_more"] is False
+    assert [t["id"] for t in page3["tasks"]] == ["s5"], (
+        f"page 3 should return s5, got {[t['id'] for t in page3['tasks']]}"
+    )
+    assert page3["next_since"] == ts
+    assert page3["next_since_id"] == "s5", (
+        f"page 3 next_since_id should be 's5', got {page3.get('next_since_id')}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_pull_since_id_backward_compatible(space_session):
     """Omitting since_id (default empty string) preserves old behaviour.
 

@@ -437,7 +437,12 @@ class SyncService:
             "tombstones": [],
         }
         max_ts = since_n
-        next_since_id = ""
+        # P1 hotfix: track the latest timestamp/id seen from *entities* separately
+        # from the global max_ts (which may be advanced by tombstones). This keeps
+        # next_since_id alive across multiple pages that all share the same
+        # updated_at, instead of dropping it whenever max_ts == since_n.
+        latest_entity_ts = ""
+        latest_entity_id = ""
 
         for entry in ENTITY_REGISTRY.values():
             model = entry["model"]
@@ -480,9 +485,12 @@ class SyncService:
                 ts = normalize_timestamp(r.updated_at or "")
                 if ts and ts > max_ts:
                     max_ts = ts
-                    next_since_id = r.id
-                elif ts and ts == max_ts and r.id > next_since_id:
-                    next_since_id = r.id
+                if ts and (
+                    ts > latest_entity_ts
+                    or (ts == latest_entity_ts and r.id > latest_entity_id)
+                ):
+                    latest_entity_ts = ts
+                    latest_entity_id = r.id
 
         # Tombstones — use override if provided, else honour *since*.
         tombstones_since = (
@@ -508,15 +516,14 @@ class SyncService:
             ts = normalize_timestamp(t.deleted_at or "")
             if ts and ts > max_ts:
                 max_ts = ts
-                # Tombstones use deleted_at as cursor and do not participate
-                # in the since_id composite key (their id is internal).
-                next_since_id = ""
 
         result["next_since"] = max_ts
-        # Only expose next_since_id when entities advanced the timestamp.
-        # If the latest timestamp came solely from tombstones, leave it empty.
-        if max_ts != since_n:
-            result["next_since_id"] = next_since_id
+        # Only expose next_since_id when the latest entity timestamp equals the
+        # global cursor. If the global cursor was advanced solely by tombstones,
+        # leave next_since_id empty because tombstones do not participate in the
+        # (since, since_id) composite key.
+        if latest_entity_ts and latest_entity_ts == max_ts:
+            result["next_since_id"] = latest_entity_id
         await self._write_audit(
             "pull", "batch", "",
             details=(
