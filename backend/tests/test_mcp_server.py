@@ -185,3 +185,113 @@ def test_weekly_review_prompt_generates_text():
     assert "spc_test" in result
     assert "get_task_distribution" in result
     assert "get_schedule_summary" in result
+
+
+# --------------------------------------------------------------------------- #
+# Code quality — no dead imports
+# --------------------------------------------------------------------------- #
+
+def test_mcp_module_has_no_dead_context_import():
+    """Context should not be imported if never used (dead import).
+
+    FastMCP 3.x may change Context's import path, causing ImportError.
+    Since Context is never referenced in server.py, it must not be imported.
+    """
+    import inspect
+    import app.mcp.server as server_mod
+
+    source = inspect.getsource(server_mod)
+    # Context is never used in the module body; importing it is dead code.
+    assert "from fastmcp import" in source
+    # The import line must NOT include Context.
+    for line in source.splitlines():
+        if line.strip().startswith("from fastmcp import"):
+            assert "Context" not in line, (
+                f"Dead import: Context is imported but never used. Line: {line}"
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Server identity — real assertions (replaces weak placeholder)
+# --------------------------------------------------------------------------- #
+
+def test_mcp_server_instructions_non_empty():
+    """The server should have non-empty instructions for LLM clients."""
+    from app.mcp.server import mcp
+
+    # FastMCP 3.x stores instructions; verify it's accessible and non-empty.
+    instructions = getattr(mcp, "instructions", None)
+    if instructions is None:
+        # Some versions nest under config or _instructions
+        instructions = getattr(getattr(mcp, "config", None), "instructions", None)
+    assert instructions is not None, "MCP server has no instructions attribute"
+    assert len(str(instructions)) > 0, "MCP server instructions are empty"
+
+
+# --------------------------------------------------------------------------- #
+# Tool registration — verify via FastMCP list_tools
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_all_tools_registered_via_fastmcp():
+    """All 13 tools should be registered with FastMCP (not just defined as functions)."""
+    from app.mcp.server import mcp
+
+    tools = await mcp.list_tools()
+    tool_names = {t.name for t in tools}
+    expected = {
+        "list_all_spaces",
+        "get_stats_overview",
+        "get_focus_trend",
+        "get_task_distribution",
+        "get_daily_detail",
+        "get_habit_summary",
+        "get_schedule_summary",
+        "get_note_summary",
+        "get_registry_health",
+        "list_entities",
+        "get_entity_schema",
+        "get_sync_status",
+        "sync_pull",
+    }
+    missing = expected - tool_names
+    extra = tool_names - expected
+    assert not missing, f"Tools missing from FastMCP registry: {missing}"
+    assert not extra, f"Unexpected extra tools in FastMCP registry: {extra}"
+
+
+# --------------------------------------------------------------------------- #
+# Tools without prior test coverage
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_get_focus_trend_returns_data(space_session):
+    """get_focus_trend should return trend data with 'data' key."""
+    from app.mcp.server import get_focus_trend
+
+    result = await get_focus_trend("spc_test", days=7)
+    assert isinstance(result, dict)
+    assert "data" in result
+    assert isinstance(result["data"], list)
+
+
+@pytest.mark.asyncio
+async def test_get_daily_detail_returns_data(space_session):
+    """get_daily_detail should return count and duration for a date."""
+    from app.mcp.server import get_daily_detail
+
+    result = await get_daily_detail("spc_test", date="2026-01-01")
+    assert isinstance(result, dict)
+    assert "date" in result
+    assert "count" in result
+    assert "duration" in result
+
+
+@pytest.mark.asyncio
+async def test_get_schedule_summary_returns_data(space_session):
+    """get_schedule_summary should return schedule completion stats."""
+    from app.mcp.server import get_schedule_summary
+
+    result = await get_schedule_summary("spc_test", days=7)
+    assert isinstance(result, dict)
+    assert "completed" in result or "total" in result

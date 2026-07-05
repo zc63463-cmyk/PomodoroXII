@@ -27,7 +27,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastmcp import FastMCP, Context
+from fastmcp import FastMCP
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.meta_session import init_meta_db, close_meta_db
