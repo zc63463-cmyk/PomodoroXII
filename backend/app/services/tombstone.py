@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tombstone import Tombstone
-from app.services.time import utc_now, utc_now_iso
+from app.services.time import utc_now, utc_now_iso_ms
 
 TOMBSTONE_TTL_DAYS = 90
 
@@ -36,7 +36,7 @@ class TombstoneService:
         tomb = Tombstone(
             entity_type=entity_type,
             entity_id=entity_id,
-            deleted_at=utc_now_iso(),
+            deleted_at=utc_now_iso_ms(),
         )
         self.db.add(tomb)
         try:
