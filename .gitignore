@@ -59,6 +59,8 @@ pytest_*.log
 pytest_run.log
 # Dedicated temp root for conftest.py tmp_path override.
 backend/tests/.tmp/
+# pytest tmp dirs (uv lock files, ad-hoc test workspace)
+.pytest-tmp/
 
 # -------------------------------------------------------------------
 # Project runtime data (must never be committed)
@@ -115,6 +117,8 @@ desktop.ini
 
 # NOTE: .trae/documents/ IS committed — these are project design docs.
 # NOTE: backend/.codebase-memory/graph.db.zst IS committed — shared index artifact.
+# codebase-memory artifact.json contains volatile indexed_at/commit fields — do not commit.
+.codebase-memory/artifact.json
 
 # -------------------------------------------------------------------
 # WorkBuddy local state (agent memory, do not commit)
