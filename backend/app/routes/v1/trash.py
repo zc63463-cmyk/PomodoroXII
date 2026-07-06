@@ -9,6 +9,10 @@ notes) and hard-deleted entities (tasks, purged items) via tombstones.
   (hard delete + sync tombstone).  Folders cascade to descendants.
 - ``POST /cleanup`` — remove expired sync tombstones (older than TTL).
 
+Note restore/purge also coordinate with the filesystem (``.trash/`` dir)
+via ``NoteService.restore`` / ``fs.purge``.  Other entity types only
+clear ``trashed_at`` on restore and hard-delete the ORM row on purge.
+
 Uses ``TombstoneService`` (sync deletion tracking) and ``CascadeService``
 (folder descendant traversal).  Routes commit; the services only flush.
 """
@@ -18,8 +22,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_space_context, get_space_db
-from app.errors import NotFoundError, ValidationError
+from app.deps import get_file_system, get_space_context, get_space_db
+from app.errors import ConflictError, NotFoundError, ValidationError
+from app.file_system.interfaces import FileSystem
 from app.models.folder import Folder
 from app.models.note import Note
 from app.models.quick_note import QuickNote
@@ -29,6 +34,7 @@ from app.registry.resolve import resolve_model
 from app.schemas.common import PaginatedResponse
 from app.schemas.trash import TrashItemResponse
 from app.services.cascade import CascadeService
+from app.services.note import NoteService
 from app.services.tombstone import TombstoneService
 
 router = APIRouter()
@@ -143,9 +149,28 @@ async def restore_item(
     entity_type: str,
     entity_id: str,
     db: AsyncSession = Depends(get_space_db),
+    fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
 ):
-    """Restore a trashed item by clearing its ``trashed_at`` timestamp."""
+    """Restore a trashed item by clearing its ``trashed_at`` timestamp.
+
+    For notes, also coordinates with the filesystem to move the ``.md``
+    file back from ``.trash/`` via ``NoteService.restore``. Other entity
+    types only clear the ORM ``trashed_at`` column.
+    """
+    if entity_type == "note":
+        # NoteService.restore handles both ORM trashed_at + fs .trash/ move.
+        try:
+            await NoteService(db, fs).restore(entity_id)
+        except (FileNotFoundError, FileExistsError) as exc:
+            raise ConflictError(str(exc)) from exc
+        await db.commit()
+        return {
+            "message": "Restored",
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+        }
+
     model = _resolve_model(entity_type)
     obj = await db.get(model, entity_id)
     if obj is None:
@@ -165,19 +190,48 @@ async def purge_item(
     entity_type: str,
     entity_id: str,
     db: AsyncSession = Depends(get_space_db),
+    fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
 ):
     """Permanently delete a trashed item (hard delete + sync tombstone).
 
+    For notes, also purges the filesystem ``.trash/`` entry via
+    ``fs.purge`` (deletes the ``.md`` file + fs SQLite index rows).
     For folders, descendant folders discovered via ``CascadeService`` are
     also hard-deleted and tombstoned.
     """
+    tomb_svc = TombstoneService(db)
+
+    if entity_type == "note":
+        # Note purge: validate trashed_at -> fs.purge -> ORM delete -> tombstone.
+        obj = await db.get(Note, entity_id)
+        if obj is None:
+            raise NotFoundError(f"note '{entity_id}' not found")
+        if obj.trashed_at is None:
+            raise ValidationError(
+                f"note '{entity_id}' is not trashed; refuse to purge"
+            )
+        # 1. Purge filesystem (.trash/ file + fs SQLite rows).
+        try:
+            await fs.purge(entity_id)
+        except (KeyError, FileNotFoundError):
+            pass  # fs row already gone -- continue with ORM cleanup.
+        # 2. Delete ORM row.
+        await db.delete(obj)
+        # 3. Write tombstone.
+        await tomb_svc.create(entity_type, entity_id)
+        await db.flush()
+        await db.commit()
+        return {
+            "message": "Purged",
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+        }
+
     model = _resolve_model(entity_type)
     obj = await db.get(model, entity_id)
     if obj is None:
         raise NotFoundError(f"{entity_type} '{entity_id}' not found")
-
-    tomb_svc = TombstoneService(db)
 
     # Folders: cascade-purge descendants before removing the root.
     if entity_type == "folder":

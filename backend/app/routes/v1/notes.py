@@ -7,26 +7,30 @@ coordinates both stores and requires a ``FileSystem`` instance.
 - ``POST`` writes the .md file then inserts the ORM row.
 - ``GET /{id}`` returns metadata only (no content).
 - ``GET /{id}/content`` returns the raw .md body as plain text.
-- ``PUT`` dispatches content to the filesystem and the rest to the DB.
-- ``DELETE`` removes both the .md file and the DB row (idempotent + tombstone).
+- ``PATCH /{id}`` updates metadata only (DB-only, does NOT write .md).
+- ``PUT /{id}/content`` rewrites the .md body and updates content_hash.
+- ``PUT /{id}`` (deprecated) dispatches content to fs + metadata to DB.
+- ``DELETE`` soft-deletes: sets trashed_at + moves .md to .trash/ (idempotent, no tombstone). Use DELETE /trash/note/{id} to purge.
 
 Routes commit; the service only flushes.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_file_system, get_space_context, get_space_db
-from app.errors import ValidationError
+from app.errors import NotFoundError, ValidationError
 from app.file_system.interfaces import FileSystem
 from app.schemas.common import PaginatedResponse
 from app.schemas.note import (
     NoteCreate,
+    NoteMetadataUpdate,
     NoteResponse,
     NoteSearchResultItem,
     NoteUpdate,
+    VersionRecordResponse,
 )
 from app.services.note import NoteService
 
@@ -99,17 +103,6 @@ async def search_notes(
     ]
 
 
-@router.get("/{id}", response_model=NoteResponse)
-async def get_note(
-    id: str,
-    db: AsyncSession = Depends(get_space_db),
-    fs: FileSystem = Depends(get_file_system),
-    ctx: dict = Depends(get_space_context),
-):
-    """Return note metadata by id (content is fetched separately)."""
-    return await NoteService(db, fs).get(id)
-
-
 @router.get("/{id}/content", response_class=PlainTextResponse)
 async def get_note_content(
     id: str,
@@ -122,7 +115,107 @@ async def get_note_content(
     return content
 
 
-@router.put("/{id}", response_model=NoteResponse)
+@router.get("/{id}/versions", response_model=list[VersionRecordResponse])
+async def list_note_versions(
+    id: str,
+    db: AsyncSession = Depends(get_space_db),
+    fs: FileSystem = Depends(get_file_system),
+    ctx: dict = Depends(get_space_context),
+):
+    """List version history backups for a note (newest first)."""
+    # Validate the note exists (raises NotFoundError via BaseService.get).
+    await NoteService(db, fs).get(id)
+    return await fs.list_versions(id)
+
+
+@router.get("/{id}/versions/{version_id}", response_class=PlainTextResponse)
+async def get_note_version(
+    id: str,
+    version_id: str,
+    db: AsyncSession = Depends(get_space_db),
+    fs: FileSystem = Depends(get_file_system),
+    ctx: dict = Depends(get_space_context),
+):
+    """Fetch a specific version's plain-text content (the prior .md body)."""
+    # Validate the note exists.
+    await NoteService(db, fs).get(id)
+    try:
+        return await fs.get_version(id, version_id)
+    except (KeyError, FileNotFoundError) as exc:
+        raise NotFoundError(str(exc)) from exc
+
+
+@router.put("/{id}/content", response_model=NoteResponse)
+async def update_note_content(
+    id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_space_db),
+    fs: FileSystem = Depends(get_file_system),
+    ctx: dict = Depends(get_space_context),
+):
+    """Replace the .md body for a note.
+
+    Updates ``content_hash`` and ``word_count`` on the DB row. Accepts
+    either ``application/json`` (``{"content": "..."}``) or ``text/plain``
+    (raw body).
+    """
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        payload = await request.json()
+        if not isinstance(payload, dict) or "content" not in payload:
+            raise ValidationError("JSON body must be an object with a 'content' field")
+        content = payload["content"]
+    else:
+        # text/plain or other -- read raw body and decode as UTF-8.
+        raw = await request.body()
+        content = raw.decode("utf-8", errors="replace")
+    if not isinstance(content, str):
+        raise ValidationError("'content' must be a string")
+    if len(content) > 100000:
+        raise ValidationError("content exceeds max length 100000")
+
+    try:
+        obj = await NoteService(db, fs).update_content(id, content)
+    except (KeyError, FileNotFoundError) as exc:
+        raise NotFoundError(f"Note {id} not found") from exc
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+@router.patch("/{id}", response_model=NoteResponse)
+async def update_note_metadata(
+    id: str,
+    data: NoteMetadataUpdate,
+    db: AsyncSession = Depends(get_space_db),
+    fs: FileSystem = Depends(get_file_system),
+    ctx: dict = Depends(get_space_context),
+):
+    """Update note metadata (title/tags/etc) -- does NOT write the .md file.
+
+    Content-managed fields (content_hash, word_count) are intentionally
+    not accepted here; use ``PUT /{id}/content`` to rewrite the body.
+    """
+    obj = await NoteService(db, fs).update_metadata(
+        id, data.model_dump(exclude_unset=True)
+    )
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+@router.get("/{id}", response_model=NoteResponse)
+async def get_note(
+    id: str,
+    db: AsyncSession = Depends(get_space_db),
+    fs: FileSystem = Depends(get_file_system),
+    ctx: dict = Depends(get_space_context),
+):
+    """Return note metadata by id (content is fetched separately)."""
+    return await NoteService(db, fs).get(id)
+
+
+@router.put("/{id}", response_model=NoteResponse, deprecated=True)
 async def update_note(
     id: str,
     data: NoteUpdate,
@@ -130,7 +223,12 @@ async def update_note(
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
 ):
-    """Update a note: content goes to the filesystem, metadata to the DB."""
+    """[Deprecated] Update a note via the legacy dispatcher.
+
+    Prefer ``PATCH /{id}`` for metadata + ``PUT /{id}/content`` for content.
+    This route is kept for backward compatibility and will be removed in the
+    next major.
+    """
     obj = await NoteService(db, fs).update(id, data.model_dump(exclude_unset=True))
     await db.commit()
     await db.refresh(obj)
@@ -144,7 +242,7 @@ async def delete_note(
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
 ):
-    """Delete a note from both fs and DB (idempotent, records a tombstone)."""
+    """Soft-delete a note: set trashed_at + move .md to .trash/ (idempotent, no tombstone)."""
     await NoteService(db, fs).delete(id)
     await db.commit()
     return {"message": "Deleted"}

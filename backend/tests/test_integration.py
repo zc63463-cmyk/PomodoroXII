@@ -135,7 +135,11 @@ async def test_full_lifecycle_space_token_task_session_stats(client):
 @pytest.mark.asyncio
 async def test_note_saga_end_to_end_consistency(client):
     """Note saga: create -> get_meta -> get_content -> update_content ->
-    hash_changed -> delete -> 404.
+    hash_changed -> soft-delete -> purge -> 404.
+
+    D-2: REST DELETE /notes/{id} now defaults to soft-delete (row stays with
+    trashed_at set, .md moves to .trash/). To verify the full hard-delete
+    path, we purge via DELETE /trash/note/{id} afterwards.
     """
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
@@ -172,11 +176,18 @@ async def test_note_saga_end_to_end_consistency(client):
     new_hash = resp.json()["content_hash"]
     assert new_hash != original_hash
 
-    # 5. Delete (removes .md + DB row + tombstone)
+    # 5. Soft-delete via DELETE /notes/{id} (row stays, trashed_at set).
     resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
     assert resp.status_code == 200
+    resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["trashed_at"] is not None
 
-    # 6. Get after delete -> 404
+    # 6. Purge via DELETE /trash/note/{id} -> row gone, tombstone written.
+    resp = await client.delete(f"/api/v1/trash/note/{note_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # 7. Get after purge -> 404
     resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
     assert resp.status_code == 404
 
