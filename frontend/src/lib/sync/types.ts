@@ -100,3 +100,45 @@ export interface OutboxMergeResult {
   /** replace 时可能改写目标行 action（如 delete→create 改为 update） */
   newAction?: OutboxAction
 }
+
+// ===== S1-2 Sync 协议层类型 =====
+
+import type { components } from '@/types/api-generated'
+
+/** F1-D17: 引擎 HTTP 类型用 api-generated（禁用 legacy @/types 的 SyncPull/PushResponse） */
+export type ApiSyncPullResponse = components['schemas']['SyncPullResponse']
+export type ApiSyncPushResponse = components['schemas']['SyncPushResponse']
+export type ApiSyncEvent = components['schemas']['SyncEvent']
+
+/** 14 个 pull_key（复数，与 PULL_KEY_TO_TABLE 键的并集子集） */
+export const SYNC_PULL_KEYS = [
+  'tasks', 'sessions', 'notes', 'folders', 'quickNotes', 'reflections',
+  'habits', 'habitCheckIns', 'schedules', 'timeBlocks', 'memoComments',
+  'sessionQuickNotes', 'scheduleQuickNotes', 'taskQuickNotes',
+] as const
+export type SyncPullKey = (typeof SYNC_PULL_KEYS)[number]
+
+/** F1-D16 权威 SyncConflict（pre-push dirty 冲突 outboxId = -1，表示尚未 push） */
+export interface SyncConflict {
+  outboxId: number
+  entityType: string        // camelCase 单数
+  entityId: string
+  localVersion: unknown
+  remoteVersion: unknown
+  conflictType: 'version' | 'content_hash'
+}
+
+/** push-batch 单批处理结果 */
+export interface HandlePushResult {
+  clearedOutboxIds: number[]
+  conflicts: SyncConflict[]
+  remoteWinCount: number
+  circularRefCount: number
+  retriableErrorCount: number
+}
+
+/** pull-loop 处理结果 */
+export interface PullLoopResult {
+  pages: number
+  dirtyConflicts: SyncConflict[]
+}
