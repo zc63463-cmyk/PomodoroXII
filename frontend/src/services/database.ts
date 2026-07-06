@@ -1,4 +1,11 @@
-/** Dexie.js IndexedDB wrapper for offline-first data. */
+/**
+ * Dexie.js IndexedDB wrapper for offline-first data.
+ *
+ * Design: F0-A §3.4–§3.5 · s0-1 plan D1–D4
+ * - No singleton `export const db` (SpaceDBManager proxy in S0-2).
+ * - v16: `content_hash` index + strip `_etag` + default `deletion_state` / `version`.
+ * - `deletion_state` ≠ REST `trashed_at` (see types/sync.ts).
+ */
 
 import Dexie, { type Table } from 'dexie'
 import type {
@@ -65,13 +72,16 @@ export function toPlain<T>(obj: T): T {
  * outbox / settings / syncMeta are intentionally excluded — they are local
  * plumbing, not synced entities.
  */
-const V16_SYNC_TABLES = [
+/** Synced entity stores — v16 upgrade iterates these only (F0 §3.4). */
+export const V16_SYNC_TABLES = [
   'tasks', 'sessions', 'reflections', 'reports', 'reportTemplates',
   'habits', 'habitCheckIns', 'timeBlocks', 'sessionEvents', 'sessionContexts',
   'cognitiveMarks', 'tags', 'taskTags', 'taskRelations', 'focusPatterns',
   'reflectionTemplates', 'schedules', 'quickNotes', 'notes', 'memoComments',
   'sessionQuickNotes', 'scheduleQuickNotes', 'taskQuickNotes', 'folders',
 ] as const
+
+export type V16SyncTableName = (typeof V16_SYNC_TABLES)[number]
 
 export class PomodoroXIDB extends Dexie {
   tasks!: Table<CachedTask>

@@ -254,13 +254,9 @@ export interface PaginatedResponse<T> {
   has_more: boolean
 }
 
-/** 客户端 sync 层字段；与 REST trashed_at 并存 */
-export interface SyncFields {
-  content_hash?: string
-  deletion_state: 'active' | 'deleted'
-  version: number
-  _dirty: boolean
-}
+export type { SyncFields, SyncPlumbingTable } from './sync'
+export { SYNC_PLUMBING_TABLES } from './sync'
+import type { SyncFields } from './sync'
 
 // Cached entities for IndexedDB
 export interface CachedTask extends Task, SyncFields {}

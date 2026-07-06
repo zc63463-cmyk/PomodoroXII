@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import Dexie from 'dexie'
-import { PomodoroXIDB } from '@/services/database'
+import { PomodoroXIDB, V16_SYNC_TABLES } from '@/services/database'
+import { SYNC_PLUMBING_TABLES } from '@/types/sync'
+import { dexieDbNameForSpace } from '@/lib/platform'
 
 /**
  * PomodoroXIDB 测试。
@@ -106,5 +108,43 @@ describe('PomodoroXIDB', () => {
     }
 
     await db.delete()
+  })
+
+  it('v16 upgrade excludes plumbing tables (F0 §3.4 / T28)', () => {
+    for (const name of SYNC_PLUMBING_TABLES) {
+      expect(V16_SYNC_TABLES as readonly string[]).not.toContain(name)
+    }
+  })
+
+  it('v16 upgrade preserves trashed_at while filling SyncFields (F0 §3.5)', async () => {
+    const dbName = 'pomodoroxi-v16-trash-' + crypto.randomUUID()
+    const trashedAt = '2026-07-01T12:00:00.000Z'
+
+    const oldDb = new Dexie(dbName)
+    oldDb.version(15).stores({
+      notes: 'id, title, updated_at, category, folder_id, status, trashed_at, *tags, _dirty',
+    })
+    await oldDb.open()
+    await oldDb.table('notes').put({
+      id: 'n-trash',
+      title: 'Trashed note',
+      trashed_at: trashedAt,
+      _etag: 'legacy',
+    })
+    await oldDb.close()
+
+    const db = new PomodoroXIDB(dbName)
+    await db.open()
+    const row = await db.notes.get('n-trash')
+    expect(row?.trashed_at).toBe(trashedAt)
+    expect(row?.deletion_state).toBe('active')
+    expect(row?.version).toBe(1)
+    const raw = row as unknown as Record<string, unknown>
+    expect(raw._etag).toBeUndefined()
+    await db.delete()
+  })
+
+  it('dexieDbNameForSpace matches F0 HC-3 naming', () => {
+    expect(dexieDbNameForSpace('abc-123')).toBe('pomodoroxi_abc-123')
   })
 })
