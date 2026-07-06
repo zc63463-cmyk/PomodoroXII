@@ -8,6 +8,7 @@
  */
 
 import type { PomodoroXIDB } from '@/services/database'
+import type { OutboxEvent } from '@/types'
 import {
   ENTITY_TYPE_TO_TABLE,
   type OutboxAction,
@@ -49,6 +50,9 @@ export function resolveOutboxMerge(
  * 必须在 db.transaction('rw', db.<entity>, db.outbox, ...) 内调用。
  * 同 (entityType, entityId) 的未同步行合并到 createdAt 最大的一行。
  * entityType 必须是 14 sync-enabled 类型之一，否则 throw。
+ *
+ * payload 约束：必须可被 JSON.stringify 序列化（不可含 BigInt / 循环引用）。
+ * payload 为 undefined 时抛错（F1-D6 要求 payload 为 string）。
  */
 export async function enqueueOutbox(
   db: PomodoroXIDB,
@@ -60,6 +64,14 @@ export async function enqueueOutbox(
   // 运行时校验 entityType（编译期 SyncEntityType 已收口，此处额外防御）
   if (!(entityType in ENTITY_TYPE_TO_TABLE)) {
     throw new Error(`Invalid sync entity type: ${entityType}`)
+  }
+  // entityId 空串守卫
+  if (!entityId || !entityId.trim()) {
+    throw new Error('entityId must not be empty')
+  }
+  // payload undefined 守卫（JSON.stringify(undefined) 返回 undefined 非 string）
+  if (payload === undefined) {
+    throw new Error('payload must not be undefined')
   }
 
   const payloadStr = JSON.stringify(payload)
@@ -128,6 +140,11 @@ export async function enqueueOutbox(
 /** 未同步 outbox 行数 — 用 filter 避免 boolean 索引查询（DataError） */
 export async function countUnsyncedOutbox(db: PomodoroXIDB): Promise<number> {
   return db.outbox.filter((e) => !e.synced).count()
+}
+
+/** 未同步 outbox 行列表（按 createdAt 升序，供 S1-2 push-batch 使用，F1 §5.1） */
+export async function listUnsyncedOutbox(db: PomodoroXIDB): Promise<OutboxEvent[]> {
+  return db.outbox.filter((e) => !e.synced).sortBy('createdAt')
 }
 
 /** 按主键列表批量删除 outbox 行（push 成功后清行用） */

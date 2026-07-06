@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { PomodoroXIDB } from '@/services/database'
 import { SYNC_META_KEYS } from './types'
-import { loadSyncMeta, saveSyncMeta, clearSyncCursors, touchLastSyncAt } from './sync-meta'
+import { loadSyncMeta, saveSyncMeta, clearSyncCursors, touchLastSyncAt, touchLastFullSync } from './sync-meta'
 
 /**
  * sync-meta.ts 单测（SM1–SM6）。
@@ -110,5 +110,28 @@ describe('sync-meta', () => {
     await touchLastSyncAt(db, iso)
     const row = await db.syncMeta.get(SYNC_META_KEYS.LAST_SYNC_AT)
     expect(row?.value).toBe(iso)
+  })
+
+  it('SM7: saveSyncMeta 空对象 no-op + undefined 值过滤', async () => {
+    db = await openTestDb()
+    // 空对象 → no-op
+    await saveSyncMeta(db, {})
+    expect(await db.syncMeta.count()).toBe(0)
+    // undefined 值 → 过滤，不写入 "undefined" 字符串
+    await saveSyncMeta(db, { since: undefined })
+    expect(await db.syncMeta.count()).toBe(0)
+    const meta = await loadSyncMeta(db)
+    expect(meta.since).toBe('')
+  })
+
+  it('SM8: touchLastFullSync 写入 last_full_sync key', async () => {
+    db = await openTestDb()
+    const iso = '2026-07-06T00:00:00.000Z'
+    await touchLastFullSync(db, iso)
+    const row = await db.syncMeta.get(SYNC_META_KEYS.LAST_FULL_SYNC)
+    expect(row?.value).toBe(iso)
+    // 验证 loadSyncMeta 也能读到
+    const meta = await loadSyncMeta(db)
+    expect(meta.lastFullSync).toBe(iso)
   })
 })

@@ -38,15 +38,17 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
   }
 }
 
-/** 部分写入 syncMeta（upsert key-value 行），仅更新传入字段 */
+/** 部分写入 syncMeta（upsert key-value 行），仅更新传入字段；undefined 值自动过滤 */
 export async function saveSyncMeta(
   db: PomodoroXIDB,
   partial: Partial<SyncMetaSnapshot>,
 ): Promise<void> {
-  const entries = Object.entries(partial).map(([field, value]) => ({
-    key: FIELD_TO_KEY[field as keyof SyncMetaSnapshot],
-    value: String(value),
-  }))
+  const entries = Object.entries(partial)
+    .filter(([, value]) => value !== undefined)
+    .map(([field, value]) => ({
+      key: FIELD_TO_KEY[field as keyof SyncMetaSnapshot],
+      value: String(value),
+    }))
   if (entries.length > 0) await db.syncMeta.bulkPut(entries)
 }
 
@@ -62,4 +64,9 @@ export async function clearSyncCursors(db: PomodoroXIDB): Promise<void> {
 /** 写入 last_sync_at（ISO 字符串），供 S1-4 UI 显示 */
 export async function touchLastSyncAt(db: PomodoroXIDB, iso: string): Promise<void> {
   await db.syncMeta.put({ key: SYNC_META_KEYS.LAST_SYNC_AT, value: iso })
+}
+
+/** 写入 last_full_sync（ISO 字符串），fullSync 完成后调用（F1 §2.1） */
+export async function touchLastFullSync(db: PomodoroXIDB, iso: string): Promise<void> {
+  await db.syncMeta.put({ key: SYNC_META_KEYS.LAST_FULL_SYNC, value: iso })
 }
