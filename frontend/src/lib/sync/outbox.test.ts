@@ -6,8 +6,13 @@ import {
   enqueueOutbox,
   countUnsyncedOutbox,
   deleteOutboxByIds,
+  listUnsyncedOutbox,
 } from './outbox'
-import type { OutboxAction } from './types'
+import {
+  type OutboxAction,
+  type SyncEntityType,
+  ENTITY_TYPE_TO_TABLE,
+} from './types'
 
 /**
  * outbox.ts 单测。
@@ -213,4 +218,85 @@ describe('outbox integration', () => {
     await deleteOutboxByIds(db, [])
     expect(await db.outbox.count()).toBe(1)
   })
+
+  // --- T17: payload=undefined → throw ---
+  it('T17: enqueueOutbox payload=undefined → throw', async () => {
+    db = await openTestDb()
+    await expect(
+      enqueueOutbox(db, 'task', 't1', 'create', undefined),
+    ).rejects.toThrow('payload must not be undefined')
+  })
+
+  // --- T18: payload 含 bigint → throw (序列化失败传播) ---
+  it('T18: enqueueOutbox payload 含 bigint → throw', async () => {
+    db = await openTestDb()
+    await expect(
+      enqueueOutbox(db, 'task', 't1', 'create', { a: BigInt(1) }),
+    ).rejects.toThrow()
+  })
+
+  // --- E2: entityId 空串 → throw ---
+  it('E2: enqueueOutbox entityId 空串 → throw', async () => {
+    db = await openTestDb()
+    await expect(
+      enqueueOutbox(db, 'task', '', 'create', {}),
+    ).rejects.toThrow('entityId must not be empty')
+  })
+
+  // --- H3: listUnsyncedOutbox 按 createdAt 排序 ---
+  it('H3: listUnsyncedOutbox — 按 createdAt 升序返回未同步行', async () => {
+    db = await openTestDb()
+    const base = Date.now()
+    // 3 行未同步（故意乱序写入）
+    await db.outbox.bulkAdd([
+      { entityType: 'task', entityId: 'e2', action: 'create', payload: '{}', createdAt: base + 200, synced: false },
+      { entityType: 'task', entityId: 'e1', action: 'create', payload: '{}', createdAt: base + 100, synced: false },
+      { entityType: 'task', entityId: 'e3', action: 'create', payload: '{}', createdAt: base + 300, synced: false },
+    ])
+    // 1 行已同步（应排除）
+    await db.outbox.add({
+      entityType: 'task', entityId: 'e4', action: 'create', payload: '{}', createdAt: base + 50, synced: true,
+    })
+
+    const rows = await listUnsyncedOutbox(db)
+    expect(rows).toHaveLength(3)
+    // 按 createdAt 升序
+    expect(rows[0]!.entityId).toBe('e1')
+    expect(rows[1]!.entityId).toBe('e2')
+    expect(rows[2]!.entityId).toBe('e3')
+  })
+
+  // --- T15: 三行以上 outbox 去重 → latest createdAt ---
+  it('T15: 三行去重 — 合并到 latest createdAt 行', async () => {
+    db = await openTestDb()
+    // 手动插入 3 行同实体未同步 outbox（不同 createdAt）
+    const base = Date.now()
+    await db.outbox.bulkAdd([
+      { entityType: 'task', entityId: 't1', action: 'create', payload: 'p1', createdAt: base + 100, synced: false },
+      { entityType: 'task', entityId: 't1', action: 'update', payload: 'p2', createdAt: base + 200, synced: false },
+      { entityType: 'task', entityId: 't1', action: 'update', payload: 'p3', createdAt: base + 300, synced: false },
+    ])
+    // 再 enqueue 一行 update → 应合并到 latest (createdAt=base+300)
+    await enqueueOutbox(db, 'task', 't1', 'update', { id: 't1', title: 'final' })
+
+    const rows = await db.outbox.where('entityId').equals('t1').toArray()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.payload).toBe(JSON.stringify({ id: 't1', title: 'final' }))
+  })
+
+  // --- T16: 14 实体表驱动 smoke ---
+  it.each(Object.keys(ENTITY_TYPE_TO_TABLE) as SyncEntityType[])(
+    'T16: enqueueOutbox %s — 入队成功',
+    async (entityType) => {
+      db = await openTestDb()
+      const entityId = `${entityType}-smoke`
+      await enqueueOutbox(db, entityType, entityId, 'create', { id: entityId })
+
+      const rows = await db.outbox.where('entityId').equals(entityId).toArray()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.entityType).toBe(entityType)
+      await db.delete()
+      db = undefined as unknown as PomodoroXIDB
+    },
+  )
 })
