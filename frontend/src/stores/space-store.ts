@@ -14,6 +14,7 @@ import { tokenStorage } from '@/lib/token-storage'
 import { spaceDBManager } from '@/services/space-db'
 import { metaDB, type SpaceMeta } from '@/services/meta-database'
 import { useBootstrapStore } from '@/lib/bootstrap-store'
+import { PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
 
 export interface SpaceInfo extends SpaceMeta {
   has_password: boolean // D8: always false
@@ -88,6 +89,11 @@ export const useSpaceStore = create<SpaceState & SpaceActions>()(
           set({ currentSpaceId: spaceId, spaceToken: token, isLoading: false })
           // S31-1: 用户主动选空间成功 → bootstrap 门控放行
           useBootstrapStore.getState().setReady()
+          // S0-4: 派发 pxii:space-switched 事件 → SpaceSwitchProvider 执行 reset
+          // 注意：hydrate 路径不派发事件（冷启动恢复不触发 reset — F0 附录 F）
+          window.dispatchEvent(
+            new CustomEvent(PXII_SPACE_SWITCHED_EVENT, { detail: { spaceId } }),
+          )
         } catch (e) {
           set({ isLoading: false, error: (e as Error).message })
           throw e

@@ -1,9 +1,9 @@
 /**
  * Logout lifecycle (F0 §5.7).
  *
- * S0-3 skeleton — no 17 store reset (S0-4 adds).
- * Order: syncEngine.destroy → queryClient.clear → auth/space reset
- *        → spaceDBManager.close → metaDB.clearSpaces → tokenStorage.clearAll → redirect
+ * Order: syncEngine.destroy → queryClient.clear → 17 store reset
+ *        → auth/space/bootstrap reset → spaceDBManager.close
+ *        → metaDB.clearSpaces → tokenStorage.clearAll → redirect
  */
 
 import { queryClient } from '@/lib/query-client'
@@ -11,6 +11,7 @@ import { syncEngineStub as syncEngine } from '@/lib/sync/types'
 import { useAuthStore } from '@/stores/auth-store'
 import { useSpaceStore } from '@/stores/space-store'
 import { useBootstrapStore } from '@/lib/bootstrap-store'
+import { STORE_RESET_FNS } from '@/stores'
 import { spaceDBManager } from '@/services/space-db'
 import { metaDB } from '@/services/meta-database'
 import { tokenStorage } from '@/lib/token-storage'
@@ -22,8 +23,8 @@ export async function performLogout(): Promise<void> {
   // 2. Clear React Query cache
   queryClient.clear()
 
-  // 3. (S0-4: 17 business store reset — STORE_RESET_ORDER)
-  //    S0-3 skips this step
+  // 3. Reset 17 business stores (F0 §6.3c / 附录 E — ordered reset)
+  STORE_RESET_FNS.forEach((fn) => fn())
 
   // 3b. Reset auth-store + space-store + bootstrap-store (before token clearing)
   useAuthStore.getState().reset()

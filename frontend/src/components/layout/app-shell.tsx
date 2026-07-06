@@ -6,7 +6,7 @@
  * Header: logo + SpaceSwitcher + SyncStatusBar + Logout
  * Desktop: sidebar + main content
  * Mobile: bottom nav
- * S3-6: Command palette stub (Ctrl+K) + shortcut help dialog (?)
+ * S0-4: Command palette / shortcut help state migrated to ui-store (Zustand)
  */
 
 import { useState } from 'react'
@@ -19,15 +19,16 @@ import { ShortcutHelpDialog } from '@/components/layout/shortcut-help-dialog'
 import { Button } from '@/components/ui/button'
 import { performLogout } from '@/lib/logout'
 import { useKeyboardShortcuts } from '@/hooks/use-keyboard-shortcuts'
+import { useUIStore } from '@/stores/ui-store'
 import { LogOutIcon } from 'lucide-react'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const {
-    commandPaletteOpen,
-    setCommandPaletteOpen,
-    shortcutHelpOpen,
-    setShortcutHelpOpen,
-  } = useKeyboardShortcuts()
+  // Register keyboard shortcuts (no return value — state lives in ui-store)
+  useKeyboardShortcuts()
+  const isCommandPaletteOpen = useUIStore((s) => s.isCommandPaletteOpen)
+  const isShortcutHelpOpen = useUIStore((s) => s.isShortcutHelpOpen)
+  const setCommandPaletteOpen = useUIStore((s) => s.setCommandPaletteOpen)
+  const setShortcutHelpOpen = useUIStore((s) => s.setShortcutHelpOpen)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
 
   const handleLogout = async () => {
@@ -70,13 +71,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* Mobile: bottom nav */}
       <MobileBottomNav />
 
-      {/* S3-6: Dialog stubs */}
+      {/* S0-4: Dialog stubs — state from ui-store */}
       <CommandPaletteStub
-        open={commandPaletteOpen}
+        open={isCommandPaletteOpen}
         onOpenChange={setCommandPaletteOpen}
       />
       <ShortcutHelpDialog
-        open={shortcutHelpOpen}
+        open={isShortcutHelpOpen}
         onOpenChange={setShortcutHelpOpen}
       />
     </div>
