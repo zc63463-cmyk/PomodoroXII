@@ -63,6 +63,19 @@ curl http://localhost:8000/api/health
 
 API 交互文档：`http://localhost:8000/docs`
 
+### 前端
+
+```bash
+cd frontend
+npm install
+cp .env.local.example .env.local    # NEXT_PUBLIC_API_BASE=http://localhost:8000
+npm run dev                          # http://localhost:3000
+```
+
+Gate 检查：`npm run lint && npm run typecheck && npm run test && npm run build`
+
+详见 [frontend/README.md](frontend/README.md)。
+
 ---
 
 ## 环境变量

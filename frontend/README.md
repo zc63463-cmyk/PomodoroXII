@@ -90,6 +90,14 @@ frontend/
 - `vitest.setup.ts` 固定时区为 UTC，安装 fake-indexeddb 使 Dexie 在 jsdom 下正常工作
 - 测试文件与源文件同目录，命名 `*.test.ts`
 
+## 已知技术债
+
+| 项 | 说明 | 计划时机 |
+|----|------|----------|
+| `Note.content` 字段 | `types/index.ts` 中 `Note.content: string` 仍保留全文；后端 Phase D 已 metadata/content 分离 | S3 notes 前对齐 `CachedNote` |
+| `OutboxEvent.entityType` 枚举 | 缺 10 个类型（report/reportTemplate/sessionEvent/sessionContext/cognitiveMark/tag/taskTag/taskRelation/focusPattern/reflectionTemplate） | S1 Sync 重建 outbox 时扩展 |
+| `api-generated.ts` 未生成 | `npm run generate:api` 脚本已就绪，但需后端运行 | S0-2 backend 联调时执行 |
+
 ## 许可
 
 私有项目。

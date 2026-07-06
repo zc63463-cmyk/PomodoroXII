@@ -68,4 +68,43 @@ describe('PomodoroXIDB', () => {
 
     await db.delete()
   })
+
+  it('v16 upgrade applies _etag removal and deletion_state/version fill across multiple tables', async () => {
+    const dbName = 'pomodoroxi-v16-multi-' + crypto.randomUUID()
+
+    // Arrange: 用 raw Dexie 模拟 v15 旧库，声明 tasks + sessions + notes
+    // （v15 时的 schema 声明，来自 database.ts 的 version(5) 和 version(15)）
+    const oldDb = new Dexie(dbName)
+    oldDb.version(15).stores({
+      tasks: 'id, status, created_at, updated_at, due_date, _dirty',
+      sessions: 'id, task_id, started_at, type, synced, _dirty, mood',
+      notes: 'id, title, updated_at, category, folder_id, status, trashed_at, *tags, _dirty',
+    })
+    await oldDb.open()
+
+    // 在三张表各放一行带 _etag 的 v15 数据
+    await oldDb.table('tasks').put({ id: 't1', title: 'Task', status: 'todo', _etag: 'e-t1' })
+    await oldDb.table('sessions').put({ id: 's1', task_id: null, type: 'work', _etag: 'e-s1' })
+    await oldDb.table('notes').put({ id: 'n1', title: 'Note', _etag: 'e-n1' })
+    await oldDb.close()
+
+    // Act: 用 PomodoroXIDB 打开，触发 v15→v16 upgrade
+    const db = new PomodoroXIDB(dbName)
+    await db.open()
+
+    // Assert: 三张表的行都完成了 upgrade 转换
+    const task = await db.tasks.get('t1')
+    const session = await db.sessions.get('s1')
+    const note = await db.notes.get('n1')
+
+    for (const row of [task, session, note]) {
+      expect(row).toBeDefined()
+      const raw = row as unknown as Record<string, unknown>
+      expect(raw._etag).toBeUndefined()
+      expect(raw.deletion_state).toBe('active')
+      expect(raw.version).toBe(1)
+    }
+
+    await db.delete()
+  })
 })
