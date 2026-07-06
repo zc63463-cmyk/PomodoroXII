@@ -2,8 +2,8 @@
  * Dual JWT Axios clients: metaApi (master token) + spaceApi (space token).
  *
  * Design: F0 §2.4 (reissueMutex single-flight, CF retry)
+ * S0-3: restored window.location redirect (routes now exist)
  * S0-2 modifications:
- *   A. No window.location redirect (S0-3 adds routing)
  *   B. Separate __retried (401 guard) from __cfRetryCount (CF counter)
  *   C. reissueMutex single-flight preserved
  * D8 reserved: has_password check omitted (backend always false)
@@ -50,9 +50,12 @@ metaApi.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
     const status = error.response?.status
-    // Modification A: no window.location redirect
+    // S0-3: redirect to /login (routes now exist)
     if (status === 401) {
       tokenStorage.clearAll()
+      if (typeof window !== 'undefined') {
+        window.location.href = '/login'
+      }
       return Promise.reject(error)
     }
     return handleCloudflareRetry(metaApi, error)
@@ -86,14 +89,20 @@ spaceApi.interceptors.response.use(
         originalConfig.headers!.Authorization = `Bearer ${reissued}`
         return spaceApi(originalConfig)
       }
-      // Modification A: no redirect, just clearSpace
+      // S0-3: redirect to /select-space (routes now exist)
       tokenStorage.clearSpace()
+      if (typeof window !== 'undefined') {
+        window.location.href = '/select-space'
+      }
       return Promise.reject(error)
     }
 
-    // Modification A: no redirect, just clearSpace
+    // S0-3: redirect to /select-space (routes now exist)
     if (status === 403) {
       tokenStorage.clearSpace()
+      if (typeof window !== 'undefined') {
+        window.location.href = '/select-space'
+      }
       return Promise.reject(error)
     }
 

@@ -32,7 +32,7 @@ interface SpaceActions {
   createSpace: (name: string, password?: string) => Promise<SpaceInfo>
   selectSpace: (spaceId: string, spacePassword?: string) => Promise<void>
   issueSpaceToken: (spaceId: string, spacePassword?: string) => Promise<string>
-  hydrate: () => void
+  hydrate: () => Promise<void>
   reset: () => void
 }
 
@@ -94,15 +94,27 @@ export const useSpaceStore = create<SpaceState & SpaceActions>()(
       issueSpaceToken: async (spaceId, _spacePassword) =>
         spacesApi.issueToken(spaceId),
 
-      hydrate: () => {
+      hydrate: async () => {
         const spaceId = tokenStorage.getCurrentSpaceId()
         const spaceToken = tokenStorage.getSpaceToken()
         set({ currentSpaceId: spaceId, spaceToken })
-        metaDB
-          .getAllSpaces()
-          .then((raw) => set({ spaces: raw.map(toSpaceInfo) }))
-          .catch(() => {})
-        if (spaceId) spaceDBManager.switchTo(spaceId).catch(() => {})
+        // Load space list from metaDB (non-fatal if fails)
+        try {
+          const raw = await metaDB.getAllSpaces()
+          set({ spaces: raw.map(toSpaceInfo) })
+        } catch {
+          // metaDB read failure is non-blocking
+        }
+        // Must have both spaceId and spaceToken to attempt switchTo
+        if (spaceId && spaceToken) {
+          try {
+            await spaceDBManager.switchTo(spaceId)
+          } catch {
+            // switchTo failed — clear space state, guard will redirect /select-space
+            tokenStorage.clearSpace()
+            set({ currentSpaceId: null, spaceToken: null })
+          }
+        }
       },
 
       reset: () =>
