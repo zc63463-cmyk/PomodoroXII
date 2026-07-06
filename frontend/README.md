@@ -71,7 +71,7 @@ npm run lint && npm run typecheck && npm run test && npm run build
 
 ## S0 进度与 F0 对齐
 
-设计契约：`.trae/documents/f0-platform-shell-exploration.md`（**F0-A v0.2.3**）
+设计契约：`.trae/documents/f0-platform-shell-exploration.md`（**F0-A v1.0**）
 
 | S0 段 | 状态 | F0 章节 |
 |-------|------|---------|
