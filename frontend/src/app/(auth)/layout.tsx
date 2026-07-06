@@ -3,10 +3,12 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { tokenStorage } from '@/lib/token-storage'
+import { resolveAuthRouteGuard } from '@/lib/route-guard'
 
 /**
  * Auth layout — 3-state guard (F0 §4.2).
  *
+ * Uses route-guard pure function (S3-3).
  * ③ master + space + spaceId → redirect /dashboard
  * ② master, no space → redirect /select-space
  * ① no master → allow (setup or login page)
@@ -21,15 +23,17 @@ export default function AuthLayout({
   const [checked, setChecked] = useState(false)
 
   useEffect(() => {
-    const master = tokenStorage.getMasterToken()
-    const space = tokenStorage.getSpaceToken()
-    const spaceId = tokenStorage.getCurrentSpaceId()
+    const decision = resolveAuthRouteGuard({
+      masterToken: tokenStorage.getMasterToken(),
+      spaceToken: tokenStorage.getSpaceToken(),
+      spaceId: tokenStorage.getCurrentSpaceId(),
+    })
 
-    if (master && space && spaceId) {
+    if (decision === 'redirect-dashboard') {
       router.replace('/dashboard')
       return
     }
-    if (master && (!space || !spaceId)) {
+    if (decision === 'redirect-select-space') {
       router.replace('/select-space')
       return
     }

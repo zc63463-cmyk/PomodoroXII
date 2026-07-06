@@ -11,37 +11,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
-import {
-  TimerIcon,
-  ListTodoIcon,
-  CalendarIcon,
-  ZapIcon,
-  BarChart3Icon,
-  PenLineIcon,
-  NotebookIcon,
-  RepeatIcon,
-  Trash2Icon,
-  SettingsIcon,
-} from 'lucide-react'
-
-interface NavItem {
-  path: string
-  label: string
-  Icon: React.ComponentType<{ className?: string }>
-}
-
-const NAV_ITEMS: readonly NavItem[] = [
-  { path: '/timer', label: '番茄钟', Icon: TimerIcon },
-  { path: '/tasks', label: '任务', Icon: ListTodoIcon },
-  { path: '/schedules', label: '日程', Icon: CalendarIcon },
-  { path: '/quick-notes', label: '速记', Icon: ZapIcon },
-  { path: '/stats', label: '统计', Icon: BarChart3Icon },
-  { path: '/reflections', label: '反思', Icon: PenLineIcon },
-  { path: '/notes', label: '笔记', Icon: NotebookIcon },
-  { path: '/habits', label: '习惯', Icon: RepeatIcon },
-  { path: '/trash', label: '回收站', Icon: Trash2Icon },
-  { path: '/settings', label: '设置', Icon: SettingsIcon },
-]
+import { NAV_ITEMS } from '@/lib/nav-config'
 
 export function DesktopSidebar() {
   const pathname = usePathname()

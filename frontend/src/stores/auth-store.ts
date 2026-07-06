@@ -67,8 +67,8 @@ export const useAuthStore = create<AuthState & AuthActions>()(
       },
 
       logout: () => {
-        tokenStorage.clearAll()
-        set({ masterToken: null, error: null })
+        // S3-7: unified logout entry — delegates to performLogout
+        void import('@/lib/logout').then(({ performLogout }) => performLogout())
       },
 
       hydrate: () => {

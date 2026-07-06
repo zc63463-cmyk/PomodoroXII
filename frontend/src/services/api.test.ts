@@ -64,6 +64,13 @@ describe('api.ts interceptors', () => {
       tokenStorageMock.getSpaceToken.mockReturnValue(token)
     })
     axiosPostSpy = vi.spyOn(axios, 'post')
+
+    // S3-4: mock window.location so we can assert redirect href
+    Object.defineProperty(window, 'location', {
+      value: { href: '' },
+      writable: true,
+      configurable: true,
+    })
   })
 
   afterEach(() => {
@@ -112,7 +119,7 @@ describe('api.ts interceptors', () => {
   })
 
   // -------- Test 2: T30b reissue 失败 --------
-  it('T30b: reissue fails → clearSpace + all requests reject (master preserved)', async () => {
+  it('T30b: reissue fails → clearSpace + redirect /select-space + all reject (master preserved)', async () => {
     tokenStorageMock.getMasterToken.mockReturnValue('master-xxx')
     tokenStorageMock.getCurrentSpaceId.mockReturnValue('space-1')
     tokenStorageMock.getSpaceToken.mockReturnValue('expired-token')
@@ -131,11 +138,12 @@ describe('api.ts interceptors', () => {
     expect(axiosPostSpy).toHaveBeenCalledTimes(1)
     expect(tokenStorageMock.clearSpace).toHaveBeenCalled()
     expect(tokenStorageMock.clearAll).not.toHaveBeenCalled()
+    expect(window.location.href).toBe('/select-space')
     expect(results.every((r) => r instanceof Error)).toBe(true)
   })
 
   // -------- Test 3: metaApi 401 --------
-  it('metaApi 401 → clearAll + reject (no redirect)', async () => {
+  it('metaApi 401 → clearAll + redirect to /login', async () => {
     tokenStorageMock.getMasterToken.mockReturnValue('master-xxx')
 
     metaApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
@@ -148,10 +156,11 @@ describe('api.ts interceptors', () => {
 
     expect(tokenStorageMock.clearAll).toHaveBeenCalledTimes(1)
     expect(tokenStorageMock.clearSpace).not.toHaveBeenCalled()
+    expect(window.location.href).toBe('/login')
   })
 
   // -------- Test 4: spaceApi 403 --------
-  it('spaceApi 403 → clearSpace + reject (master preserved)', async () => {
+  it('spaceApi 403 → clearSpace + redirect to /select-space (master preserved)', async () => {
     tokenStorageMock.getSpaceToken.mockReturnValue('space-xxx')
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
@@ -165,10 +174,11 @@ describe('api.ts interceptors', () => {
     expect(tokenStorageMock.clearSpace).toHaveBeenCalledTimes(1)
     expect(tokenStorageMock.clearAll).not.toHaveBeenCalled()
     expect(axiosPostSpy).not.toHaveBeenCalled()
+    expect(window.location.href).toBe('/select-space')
   })
 
   // -------- Test 5: spaceApi 401 无 master --------
-  it('spaceApi 401 without master token → clearSpace + reject (no reissue)', async () => {
+  it('spaceApi 401 without master → clearSpace + redirect to /select-space (no reissue)', async () => {
     tokenStorageMock.getMasterToken.mockReturnValue(null)
     tokenStorageMock.getCurrentSpaceId.mockReturnValue('space-1')
     tokenStorageMock.getSpaceToken.mockReturnValue('expired-token')
@@ -184,5 +194,6 @@ describe('api.ts interceptors', () => {
     expect(axiosPostSpy).not.toHaveBeenCalled()
     expect(tokenStorageMock.clearSpace).toHaveBeenCalledTimes(1)
     expect(tokenStorageMock.clearAll).not.toHaveBeenCalled()
+    expect(window.location.href).toBe('/select-space')
   })
 })
