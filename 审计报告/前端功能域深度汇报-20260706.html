@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PomodoroXII 前端功能域深度汇报</title>
+<style>
+:root[data-theme="dark"]{
+  --bg:#0f172a; --bg-2:#1e293b; --bg-3:#334155;
+  --fg:#f8fafc; --fg-2:#cbd5e1; --fg-3:#94a3b8;
+  --border:#334155; --accent:#3b82f6; --accent-2:#60a5fa;
+  --warn:#f59e0b; --ok:#10b981; --danger:#ef4444; --purple:#a855f7;
+  --shadow:0 10px 30px rgba(0,0,0,.35);
+}
+:root[data-theme="light"]{
+  --bg:#f8fafc; --bg-2:#ffffff; --bg-3:#e2e8f0;
+  --fg:#0f172a; --fg-2:#334155; --fg-3:#64748b;
+  --border:#cbd5e1; --accent:#2563eb; --accent-2:#3b82f6;
+  --warn:#d97706; --ok:#059669; --danger:#dc2626; --purple:#9333ea;
+  --shadow:0 4px 20px rgba(0,0,0,.08);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg);line-height:1.7;font-size:15px}
+a{color:var(--accent-2)}
+.topnav{position:sticky;top:0;z-index:100;background:var(--bg-2);border-bottom:1px solid var(--border);padding:10px 24px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.topnav .brand{font-weight:700;color:var(--accent-2);font-size:15px}
+.topnav .links{display:flex;gap:4px;flex-wrap:wrap;flex:1}
+.topnav a{color:var(--fg-2);text-decoration:none;padding:6px 10px;border-radius:6px;font-size:13px}
+.topnav a:hover{background:var(--bg-3);color:var(--fg)}
+.theme-btn{background:var(--bg-3);border:1px solid var(--border);color:var(--fg);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px}
+.container{max-width:1200px;margin:0 auto;padding:32px 24px 80px}
+.hero{background:linear-gradient(135deg,#1e3a5f,#7c3aed);color:#fff;padding:48px 36px;border-radius:16px;margin-bottom:28px;box-shadow:var(--shadow)}
+.hero h1{margin:0 0 8px;font-size:28px}
+.hero .meta{opacity:.88;font-size:14px}
+.hero .chips{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}
+.chip{background:rgba(255,255,255,.15);padding:6px 14px;border-radius:999px;font-size:13px;border:1px solid rgba(255,255,255,.2)}
+section{margin-bottom:36px}
+h2{font-size:22px;margin:0 0 16px;padding-bottom:8px;border-bottom:2px solid var(--accent)}
+h3{font-size:17px;margin:24px 0 12px;color:var(--accent-2)}
+.card{background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:20px 24px;margin-bottom:16px;box-shadow:var(--shadow)}
+.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.grid-3{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+.stat{text-align:center;padding:18px}
+.stat .num{font-size:32px;font-weight:800;color:var(--accent-2);line-height:1.2}
+.stat .lbl{font-size:13px;color:var(--fg-3);margin-top:4px}
+.verdict{border-left:4px solid var(--warn);padding:16px 20px;background:var(--bg-2);border-radius:0 10px 10px 0;margin-bottom:20px}
+.verdict.ok{border-left-color:var(--ok)}
+.verdict strong{color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:12px 0}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--bg-3);font-weight:600;white-space:nowrap}
+tr:nth-child(even){background:rgba(148,163,184,.06)}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;margin:1px 2px}
+.tag-high{background:rgba(239,68,68,.2);color:#fca5a5}
+.tag-med{background:rgba(245,158,11,.2);color:#fcd34d}
+.tag-low{background:rgba(16,185,129,.2);color:#6ee7b7}
+.tag-new{background:rgba(168,85,247,.25);color:#d8b4fe}
+.svg-wrap{background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:16px;margin:16px 0;overflow-x:auto}
+.svg-wrap svg{display:block;margin:0 auto;max-width:100%;height:auto}
+.svg-caption{text-align:center;font-size:13px;color:var(--fg-3);margin-top:8px}
+.timeline{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}
+.tl-item{flex:1;min-width:140px;background:var(--bg-3);border-radius:8px;padding:12px;border-top:3px solid var(--accent)}
+.tl-item h4{margin:0 0 6px;font-size:14px}
+.tl-item p{margin:0;font-size:12px;color:var(--fg-3)}
+ul.compact{margin:8px 0;padding-left:20px}
+ul.compact li{margin:4px 0}
+footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--border);font-size:13px;color:var(--fg-3);text-align:center}
+@media print{
+  .topnav,.theme-btn{display:none}
+  .hero{break-inside:avoid}
+  .svg-wrap{break-inside:avoid}
+}
+@media(max-width:640px){
+  .hero h1{font-size:22px}
+  .container{padding:20px 14px 60px}
+}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand">PomodoroXII · 前端深度汇报</div>
+  <div class="links">
+    <a href="#summary">摘要</a>
+    <a href="#inventory">源项目盘点</a>
+    <a href="#delta">后端差分</a>
+    <a href="#diagrams">架构图</a>
+    <a href="#domains">功能域</a>
+    <a href="#sprints">Sprint 规划</a>
+    <a href="#effort">工作量</a>
+    <a href="#actions">行动建议</a>
+  </div>
+  <button class="theme-btn" onclick="toggleTheme()" id="themeBtn">☀ 浅色</button>
+</nav>
+
+<div class="container">
+
+<header class="hero">
+  <h1>Phase F 前端功能域深度汇报</h1>
+  <div class="meta">
+    审查时间：2026-07-06 · 审查工具：Cursor Agent + CBM 索引 ·
+    源参考：<code>pomodoroxi/frontend</code> (Vue 3) ·
+    目标：<code>PomodoroXII/frontend</code> (React 19 + Next.js 15，尚未创建)
+  </div>
+  <div class="chips">
+    <span class="chip">后端 Phase D 就绪 · 621 tests</span>
+    <span class="chip">前端 Phase F = 0%</span>
+    <span class="chip">13 Views · 99 Components</span>
+    <span class="chip">建议按功能域分批交付</span>
+  </div>
+</header>
+
+<section id="summary">
+  <h2>一、执行摘要</h2>
+  <div class="verdict">
+    <strong>结论：前端开发工作量大，必须按功能页面 / 功能域分类、分 Sprint 交付。</strong>
+    这不是简单的「Vue → React 换皮」，而是 <em>框架迁移 + 多空间架构 + Sync 三游标 + 笔记 API 契约变更</em> 的组合重写。
+  </div>
+  <div class="grid-3">
+    <div class="card stat"><div class="num">13</div><div class="lbl">路由 View 页面</div></div>
+    <div class="card stat"><div class="num">~6,900</div><div class="lbl">View 层代码行（仅 .vue）</div></div>
+    <div class="card stat"><div class="num">165</div><div class="lbl">源前端单测 spec</div></div>
+    <div class="card stat"><div class="num">6–8 周</div><div class="lbl">MVP 估算（1 人）</div></div>
+    <div class="card stat"><div class="num">12–16 周</div><div class="lbl">全量对标 Vue 源</div></div>
+    <div class="card stat"><div class="num">0%</div><div class="lbl">当前仓库 frontend/</div></div>
+  </div>
+  <div class="card">
+    <h3>三档交付建议</h3>
+    <table>
+      <thead><tr><th>阶段</th><th>页面范围</th><th>可演示能力</th><th>周期</th></tr></thead>
+      <tbody>
+        <tr><td><strong>MVP</strong></td><td>Login + Space + Timer + Tasks + Sync 基础</td><td>多空间登录、专注计时、任务、多设备同步</td><td>6–8 周</td></tr>
+        <tr><td><strong>Beta</strong></td><td>+ Memo + Notes + Trash</td><td>速记→笔记、文件夹、搜索、回收站</td><td>+3–4 周</td></tr>
+        <tr><td><strong>1.0</strong></td><td>+ Stats + Reflection + Schedule + Settings + PWA</td><td>对标源 Vue 全功能</td><td>+3–4 周</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="inventory">
+  <h2>二、源 Vue 前端盘点（pomodoroxi/frontend）</h2>
+
+  <h3>2.1 路由 ↔ 功能页</h3>
+  <div class="card" style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr><th>路由</th><th>View</th><th>行数</th><th>功能域</th><th>复杂度</th><th>React 优先级</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>/timer</code></td><td>TimerView</td><td>1,237</td><td>番茄钟核心</td><td><span class="tag tag-high">极高</span></td><td>S2 · P0</td></tr>
+        <tr><td><code>/stats</code></td><td>StatsView</td><td>914</td><td>统计 / 洞察</td><td><span class="tag tag-high">极高</span></td><td>S4</td></tr>
+        <tr><td><code>/notes/:id</code></td><td>NoteDetailView</td><td>727</td><td>笔记编辑</td><td><span class="tag tag-high">高</span></td><td>S3 · API 变</td></tr>
+        <tr><td><code>/notes</code></td><td>NoteListView</td><td>703</td><td>笔记列表 + 文件夹</td><td><span class="tag tag-high">高</span></td><td>S3</td></tr>
+        <tr><td><code>/schedule</code></td><td>ScheduleCalendarView</td><td>520</td><td>日程日历</td><td><span class="tag tag-med">中高</span></td><td>S4</td></tr>
+        <tr><td><code>/settings</code></td><td>SettingsView</td><td>494</td><td>设置 / 同步 / 导出</td><td><span class="tag tag-med">中</span></td><td>S5</td></tr>
+        <tr><td><code>/tasks</code></td><td>TaskView</td><td>481</td><td>任务管理</td><td><span class="tag tag-med">中高</span></td><td>S2 · P0</td></tr>
+        <tr><td><code>/notes/trash</code></td><td>TrashView</td><td>352</td><td>回收站</td><td><span class="tag tag-med">中</span></td><td>S3 · 软删</td></tr>
+        <tr><td><code>/reflections</code></td><td>ReflectionView</td><td>247</td><td>日复盘</td><td><span class="tag tag-med">中</span></td><td>S4</td></tr>
+        <tr><td><code>/memo</code></td><td>MemoView</td><td>200</td><td>速记 / 小记</td><td><span class="tag tag-med">中高</span></td><td>S3</td></tr>
+        <tr><td><code>/login</code></td><td>LoginView</td><td>134</td><td>登录</td><td><span class="tag tag-low">低</span></td><td>S0 · 双 JWT</td></tr>
+        <tr><td><code>/quick-note</code></td><td>→ redirect <code>/memo</code></td><td>—</td><td>已合并</td><td>—</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>2.2 组件 / 状态 / 逻辑层</h3>
+  <div class="grid-2">
+    <div class="card">
+      <h3>组件目录（99 个 .vue）</h3>
+      <table>
+        <tr><th>目录</th><th>数量</th><th>说明</th></tr>
+        <tr><td><code>memo/</code></td><td>29</td><td>速记时间线、编辑器、convert</td></tr>
+        <tr><td><code>shared/</code></td><td>15</td><td>全局搜索、Toast、Modal</td></tr>
+        <tr><td><code>stats/</code></td><td>13</td><td>图表、AI 洞察</td></tr>
+        <tr><td><code>reflection/</code></td><td>10</td><td>结构化复盘</td></tr>
+        <tr><td><code>timer/</code></td><td>10</td><td>计时环、白噪音</td></tr>
+        <tr><td><code>reports/</code></td><td>7</td><td>日报弹窗</td></tr>
+        <tr><td><code>task/</code></td><td>7</td><td>任务卡片</td></tr>
+        <tr><td>其他</td><td>8</td><td>habits、layout 等</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h3>逻辑层规模</h3>
+      <ul class="compact">
+        <li><strong>Pinia Store ×17</strong> → 迁移为 Zustand（timer, session, notes, folders, memo…）</li>
+        <li><strong>Composable ×36</strong> → React Hooks；<code>useSyncCloud.ts</code> 约 1,100 行</li>
+        <li><strong>Dexie schema v15</strong> → v16（+content_hash，-content body，+三游标 syncMeta）</li>
+        <li><strong>Services ~10</strong>：约 30% 可原样迁移（api.ts, export-v2.ts, types/）</li>
+        <li><strong>前端测试 165 spec</strong> → 需改写为 RTL + Playwright</li>
+      </ul>
+      <p style="margin-top:12px;font-size:13px;color:var(--fg-3)">主导航：番茄钟 · 任务 · 日程 · 小记 · 统计；更多菜单：反思 · 笔记 · 设置</p>
+    </div>
+  </div>
+</section>
+
+<section id="delta">
+  <h2>三、与 PomodoroXII 后端的差分（必改项）</h2>
+  <div class="card" style="overflow-x:auto">
+    <p>源 Vue 为<strong>单 Token 单 Dexie</strong>；PomodoroXII 后端已演进，以下能力<strong>无法 1:1 搬运</strong>：</p>
+    <table>
+      <thead><tr><th>能力</th><th>源 Vue</th><th>PomodoroXII 后端</th><th>前端影响</th></tr></thead>
+      <tbody>
+        <tr><td>认证</td><td>单 JWT</td><td>Master + <strong>Space Token</strong></td><td>登录流 + SpaceSwitcher <span class="tag tag-new">新做</span></td></tr>
+        <tr><td>本地 DB</td><td>单 Dexie</td><td>每 Space 独立 Dexie + <strong>Proxy</strong></td><td>基础设施层 <span class="tag tag-new">新做</span></td></tr>
+        <tr><td>笔记更新</td><td>一体 PUT</td><td><strong>PATCH</strong> 元数据 + <strong>PUT /content</strong></td><td>编辑器双 API</td></tr>
+        <tr><td>笔记删除</td><td>硬删语义</td><td>REST <strong>软删</strong> + trash purge</td><td>TrashView 重写</td></tr>
+        <tr><td>版本历史</td><td>本地/旧</td><td><strong>GET /versions</strong> REST</td><td>NoteDetail 新侧栏</td></tr>
+        <tr><td>速记 convert</td><td>本地 store</td><td><strong>POST .../convert</strong></td><td>Memo 改调 API</td></tr>
+        <tr><td>Sync pull</td><td><code>since</code> 分页</td><td><strong>since + since_id + tombstone_since_id</strong></td><td>Sync 引擎 <span class="tag tag-new">整模块重写</span></td></tr>
+        <tr><td>冲突处理</td><td>conflicts[]</td><td>LWW 远端 → <code>applied[].resolution=remote</code></td><td>冲突 UI 调整</td></tr>
+        <tr><td>搜索</td><td>可能本地</td><td><strong>GET /notes/search</strong> FTS5</td><td>服务端搜索</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="diagrams">
+  <h2>四、架构图</h2>
+
+  <h3>4.1 功能域地图（按页面分批）</h3>
+  <div class="svg-wrap">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" width="920" height="520" role="img" aria-label="PomodoroXII 前端功能域地图">
+      <defs>
+        <linearGradient id="gShell" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#1e3a5f"/><stop offset="100%" stop-color="#0f172a"/></linearGradient>
+        <linearGradient id="gCore" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#dc2626"/><stop offset="100%" stop-color="#ea580c"/></linearGradient>
+        <linearGradient id="gProd" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#2563eb"/><stop offset="100%" stop-color="#7c3aed"/></linearGradient>
+        <linearGradient id="gKnow" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#059669"/><stop offset="100%" stop-color="#0d9488"/></linearGradient>
+        <linearGradient id="gInfra" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#475569"/><stop offset="100%" stop-color="#64748b"/></linearGradient>
+      </defs>
+      <rect width="920" height="520" fill="#f8fafc"/>
+      <text x="460" y="28" text-anchor="middle" font-size="16" font-weight="700" fill="#0f172a">PomodoroXII 前端功能域地图（按页面 / Sprint 分批）</text>
+      <rect x="20" y="48" width="880" height="72" rx="10" fill="url(#gShell)"/>
+      <text x="40" y="72" fill="#fff" font-weight="700" font-size="13">Platform Shell · S0</text>
+      <text x="40" y="92" fill="#cbd5e1" font-size="12">Login · SpaceSwitcher ★新 · AppLayout · 全局搜索 · 快捷键 · Sync 状态条 · 主题</text>
+      <text x="40" y="108" fill="#94a3b8" font-size="11">路由: /login · layout 包裹全部 authenticated 页</text>
+      <rect x="20" y="140" width="280" height="160" rx="10" fill="url(#gCore)" opacity=".93"/>
+      <text x="40" y="168" fill="#fff" font-weight="700" font-size="13">A. 番茄钟域 · S2 ★最大</text>
+      <text x="40" y="188" fill="#fecaca" font-size="11">/timer · TimerView 1237行</text>
+      <text x="40" y="208" fill="#fff" font-size="11">计时环 · 模式 · 沉浸式 · WakeLock</text>
+      <text x="40" y="226" fill="#fff" font-size="11">任务关联 · 习惯打卡 · 时间块</text>
+      <text x="40" y="244" fill="#fff" font-size="11">白噪音 · 日报 · 认知标记 · 撤销</text>
+      <text x="40" y="268" fill="#fde68a" font-size="10">Store: timer, session, habits, timeBlocks</text>
+      <rect x="320" y="140" width="280" height="160" rx="10" fill="url(#gProd)" opacity=".93"/>
+      <text x="340" y="168" fill="#fff" font-weight="700" font-size="13">B/I/J/K. 生产力域 · S2/S4</text>
+      <text x="340" y="188" fill="#dbeafe" font-size="11">/tasks 481 · /schedule 520</text>
+      <text x="340" y="208" fill="#fff" font-size="11">任务 CRUD · 标签 · 关系</text>
+      <text x="340" y="226" fill="#fff" font-size="11">日程日历 · 习惯 streak</text>
+      <text x="340" y="244" fill="#fff" font-size="11">时间块 · 与 session 对比</text>
+      <text x="340" y="268" fill="#bfdbfe" font-size="10">Store: task, schedules, habits</text>
+      <rect x="620" y="140" width="280" height="160" rx="10" fill="url(#gKnow)" opacity=".93"/>
+      <text x="640" y="168" fill="#fff" font-weight="700" font-size="13">C/D. 知识域 · S3 ★API变</text>
+      <text x="640" y="188" fill="#a7f3d0" font-size="11">/memo · /notes · /trash</text>
+      <text x="640" y="208" fill="#fff" font-size="11">速记 convert→Note ★REST</text>
+      <text x="640" y="226" fill="#fff" font-size="11">文件夹 · FTS 搜索 · 版本历史</text>
+      <text x="640" y="244" fill="#fff" font-size="11">PATCH meta + PUT content</text>
+      <text x="640" y="268" fill="#99f6e4" font-size="10">29 memo 组件 · 最重 UI 域之一</text>
+      <rect x="20" y="320" width="430" height="88" rx="10" fill="#7c3aed" opacity=".88"/>
+      <text x="40" y="348" fill="#fff" font-weight="700" font-size="13">E/F/G. 洞察域 · S4</text>
+      <text x="40" y="368" fill="#ede9fe" font-size="11">/stats 914 · /reflections 247 · 日报 / AI 洞察</text>
+      <text x="40" y="388" fill="#fff" font-size="11">活动日历 · 专注趋势 · 结构化复盘</text>
+      <rect x="470" y="320" width="200" height="88" rx="10" fill="#0369a1" opacity=".88"/>
+      <text x="490" y="348" fill="#fff" font-weight="700" font-size="13">H. 设置 · S5</text>
+      <text x="490" y="368" fill="#e0f2fe" font-size="11">/settings 494</text>
+      <text x="490" y="388" fill="#fff" font-size="11">计时 · 同步 · 导出 · 通知</text>
+      <rect x="690" y="320" width="210" height="88" rx="10" fill="url(#gInfra)"/>
+      <text x="710" y="348" fill="#fff" font-weight="700" font-size="13">Cross-cutting · S1</text>
+      <text x="710" y="368" fill="#e2e8f0" font-size="11">Sync 三游标 ★重写</text>
+      <text x="710" y="388" fill="#e2e8f0" font-size="11">Dexie Proxy ★新</text>
+      <rect x="20" y="430" width="880" height="70" rx="8" fill="#fff" stroke="#cbd5e1"/>
+      <text x="40" y="455" fill="#334155" font-weight="600" font-size="12">推荐顺序: S0 Shell → S1 Sync → S2 Timer+Tasks → S3 Notes+Memo → S4 Stats+Reflection → S5 Settings+PWA</text>
+      <text x="40" y="475" fill="#64748b" font-size="11">★ = PomodoroXII 相对 Vue 源项目的新增或必须重写部分</text>
+      <text x="40" y="493" fill="#64748b" font-size="11">Pomodoroxi-plus 的 Mental Model / Cytoscape 图复盘默认 Out of Scope</text>
+    </svg>
+    <div class="svg-caption">图 1 · 功能域与 Sprint 映射</div>
+  </div>
+
+  <h3>4.2 前端数据层（React 目标架构）</h3>
+  <div class="svg-wrap">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" width="900" height="440" role="img" aria-label="PomodoroXII 前端数据层架构">
+      <rect width="900" height="440" fill="#0f172a"/>
+      <text x="450" y="28" text-anchor="middle" fill="#f8fafc" font-size="15" font-weight="700">PomodoroXII 前端数据层（目标架构）</text>
+      <rect x="40" y="50" width="820" height="56" rx="8" fill="#1e293b" stroke="#475569"/>
+      <text x="60" y="74" fill="#94a3b8" font-size="11">UI Layer</text>
+      <text x="60" y="92" fill="#e2e8f0" font-size="12">Next.js App Router pages · shadcn/ui · Compound Components</text>
+      <rect x="40" y="120" width="390" height="72" rx="8" fill="#312e81" stroke="#6366f1"/>
+      <text x="60" y="144" fill="#c7d2fe" font-weight="600" font-size="12">Client State · Zustand ×17</text>
+      <text x="60" y="164" fill="#e0e7ff" font-size="11">timer · session · notes · folders · memo · settings…</text>
+      <text x="60" y="180" fill="#a5b4fc" font-size="10">selector 单测 · 不含服务端 cache</text>
+      <rect x="470" y="120" width="390" height="72" rx="8" fill="#134e4a" stroke="#14b8a6"/>
+      <text x="490" y="144" fill="#99f6e4" font-weight="600" font-size="12">Server Cache · TanStack Query v6</text>
+      <text x="490" y="164" fill="#ccfbf1" font-size="11">useTasks · useNotesMeta · useStats · 乐观更新</text>
+      <text x="490" y="180" fill="#5eead4" font-size="10">openapi-typescript 类型安全</text>
+      <rect x="40" y="210" width="820" height="80" rx="8" fill="#7f1d1d" stroke="#ef4444"/>
+      <text x="60" y="234" fill="#fecaca" font-weight="700" font-size="12">Sync Engine ★ 整模块重写（非搬运 useSyncCloud）</text>
+      <text x="60" y="254" fill="#fee2e2" font-size="11">Outbox merge · Push batch · Pull 三游标循环 until has_more=false</text>
+      <text x="60" y="272" fill="#fee2e2" font-size="11">tombstone 末页应用 · conflict_remote · note content_hash 对账</text>
+      <rect x="40" y="308" width="390" height="88" rx="8" fill="#1c1917" stroke="#78716c"/>
+      <text x="60" y="332" fill="#d6d3d1" font-weight="600" font-size="12">Offline · Dexie v16 per Space</text>
+      <text x="60" y="352" fill="#e7e5e4" font-size="11">SpaceDBManager + Table Proxy ★新</text>
+      <text x="60" y="370" fill="#a8a29e" font-size="10">+content_hash · -content · outbox · syncMeta 三游标</text>
+      <text x="60" y="386" fill="#a8a29e" font-size="10">navigator.storage.persist()</text>
+      <rect x="470" y="308" width="390" height="88" rx="8" fill="#172554" stroke="#3b82f6"/>
+      <text x="490" y="332" fill="#93c5fd" font-weight="600" font-size="12">API Client · Axios</text>
+      <text x="490" y="352" fill="#dbeafe" font-size="11">Master JWT → spaces/token → Space JWT</text>
+      <text x="490" y="370" fill="#bfdbfe" font-size="10">401 刷新 · PATCH/PUT content · /sync/push|pull</text>
+      <text x="490" y="386" fill="#bfdbfe" font-size="10">@serwist/next PWA 离线壳</text>
+      <rect x="120" y="410" width="660" height="24" rx="4" fill="#334155"/>
+      <text x="450" y="426" text-anchor="middle" fill="#94a3b8" font-size="11">PomodoroXII FastAPI Backend（621 tests · Phase D 就绪）</text>
+    </svg>
+    <div class="svg-caption">图 2 · 四层数据架构：UI → State/Query → Sync/Offline → API</div>
+  </div>
+
+  <h3>4.3 核心用户路径（跨域协作流）</h3>
+  <div class="svg-wrap">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" width="900" height="360" role="img" aria-label="核心用户路径协作流">
+      <rect width="900" height="360" fill="#fafafa"/>
+      <text x="450" y="24" text-anchor="middle" font-size="14" font-weight="700" fill="#111">核心用户路径（前端需覆盖的跨域流程）</text>
+      <defs><marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#666"/></marker></defs>
+      <rect x="30" y="50" width="100" height="40" rx="6" fill="#ef4444"/><text x="80" y="75" text-anchor="middle" fill="#fff" font-size="11">Timer</text>
+      <rect x="160" y="50" width="100" height="40" rx="6" fill="#f97316"/><text x="210" y="75" text-anchor="middle" fill="#fff" font-size="11">Session</text>
+      <rect x="290" y="50" width="100" height="40" rx="6" fill="#eab308"/><text x="340" y="75" text-anchor="middle" fill="#111" font-size="11">Task</text>
+      <rect x="420" y="50" width="100" height="40" rx="6" fill="#22c55e"/><text x="470" y="75" text-anchor="middle" fill="#fff" font-size="11">QuickNote</text>
+      <rect x="550" y="50" width="100" height="40" rx="6" fill="#14b8a6"/><text x="600" y="75" text-anchor="middle" fill="#fff" font-size="11">Convert</text>
+      <rect x="680" y="50" width="100" height="40" rx="6" fill="#3b82f6"/><text x="730" y="75" text-anchor="middle" fill="#fff" font-size="11">Note</text>
+      <rect x="30" y="130" width="120" height="40" rx="6" fill="#8b5cf6"/><text x="90" y="155" text-anchor="middle" fill="#fff" font-size="11">Outbox</text>
+      <rect x="180" y="130" width="120" height="40" rx="6" fill="#6366f1"/><text x="240" y="155" text-anchor="middle" fill="#fff" font-size="11">Sync Push</text>
+      <rect x="330" y="130" width="140" height="40" rx="6" fill="#6366f1"/><text x="400" y="155" text-anchor="middle" fill="#fff" font-size="11">Pull 三游标</text>
+      <rect x="500" y="130" width="120" height="40" rx="6" fill="#64748b"/><text x="560" y="155" text-anchor="middle" fill="#fff" font-size="11">Dexie</text>
+      <rect x="650" y="130" width="120" height="40" rx="6" fill="#64748b"/><text x="710" y="155" text-anchor="middle" fill="#fff" font-size="11">Trash/Tomb</text>
+      <rect x="200" y="220" width="140" height="40" rx="6" fill="#0ea5e9"/><text x="270" y="245" text-anchor="middle" fill="#fff" font-size="11">Stats/Report</text>
+      <rect x="380" y="220" width="140" height="40" rx="6" fill="#a855f7"/><text x="450" y="245" text-anchor="middle" fill="#fff" font-size="11">Reflection</text>
+      <rect x="560" y="220" width="140" height="40" rx="6" fill="#f59e0b"/><text x="630" y="245" text-anchor="middle" fill="#fff" font-size="11">Schedule</text>
+      <path d="M130 70 H160" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M260 70 H290" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M390 70 H420" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M520 70 H550" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M650 70 H680" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M90 90 V130" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M240 90 V130" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M600 90 V130" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M150 150 H180" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M300 150 H330" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M470 150 H500" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M620 150 H650" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M240 170 V220" stroke="#666" marker-end="url(#arr)"/>
+      <path d="M400 170 V220" stroke="#666" marker-end="url(#arr)"/>
+      <text x="450" y="300" text-anchor="middle" fill="#64748b" font-size="11">任意 CRUD → Outbox → Push；Pull 回填 Dexie；Note 软删 ↔ Trash ↔ Tombstone</text>
+      <text x="450" y="320" text-anchor="middle" fill="#64748b" font-size="11">Timer 会话 → Stats/Reflection；QuickNote → convert → Note（对接 Phase D REST）</text>
+    </svg>
+    <div class="svg-caption">图 3 · 番茄钟 → 同步 → 知识 → 洞察 主链路</div>
+  </div>
+
+  <h3>4.4 Sprint 时间线</h3>
+  <div class="svg-wrap">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 200" width="880" height="200" role="img" aria-label="前端 Sprint 时间线">
+      <rect width="880" height="200" fill="#fff"/>
+      <text x="440" y="22" text-anchor="middle" font-weight="700" fill="#0f172a" font-size="14">推荐 6 个前端 Sprint（每 Sprint 1–2 个可演示页面）</text>
+      <defs><marker id="a2" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#94a3b8"/></marker></defs>
+      <rect x="20" y="40" width="130" height="140" rx="6" fill="#1e293b"/>
+      <text x="85" y="62" text-anchor="middle" fill="#fff" font-weight="600" font-size="12">S0 骨架</text>
+      <text x="85" y="82" text-anchor="middle" fill="#94a3b8" font-size="10">Next+shadcn</text>
+      <text x="85" y="98" text-anchor="middle" fill="#94a3b8" font-size="10">Dexie Proxy</text>
+      <text x="85" y="114" text-anchor="middle" fill="#94a3b8" font-size="10">Auth+Space</text>
+      <text x="85" y="158" text-anchor="middle" fill="#64748b" font-size="11">~1.5 周</text>
+      <rect x="165" y="40" width="130" height="140" rx="6" fill="#7f1d1d"/>
+      <text x="230" y="62" text-anchor="middle" fill="#fff" font-weight="600" font-size="12">S1 Sync</text>
+      <text x="230" y="82" text-anchor="middle" fill="#fecaca" font-size="10">三游标 Pull</text>
+      <text x="230" y="98" text-anchor="middle" fill="#fecaca" font-size="10">Outbox Push</text>
+      <text x="230" y="114" text-anchor="middle" fill="#fecaca" font-size="10">冲突 UI</text>
+      <text x="230" y="158" text-anchor="middle" fill="#fca5a5" font-size="11">~2 周</text>
+      <rect x="310" y="40" width="130" height="140" rx="6" fill="#dc2626"/>
+      <text x="375" y="62" text-anchor="middle" fill="#fff" font-weight="600" font-size="12">S2 Timer</text>
+      <text x="375" y="82" text-anchor="middle" fill="#fecaca" font-size="10">/timer MVP</text>
+      <text x="375" y="98" text-anchor="middle" fill="#fecaca" font-size="10">+ Tasks</text>
+      <text x="375" y="114" text-anchor="middle" fill="#fecaca" font-size="10">Session</text>
+      <text x="375" y="158" text-anchor="middle" fill="#fca5a5" font-size="11">~2 周</text>
+      <rect x="455" y="40" width="130" height="140" rx="6" fill="#059669"/>
+      <text x="520" y="62" text-anchor="middle" fill="#fff" font-weight="600" font-size="12">S3 Notes</text>
+      <text x="520" y="82" text-anchor="middle" fill="#a7f3d0" font-size="10">/memo</text>
+      <text x="520" y="98" text-anchor="middle" fill="#a7f3d0" font-size="10">/notes</text>
+      <text x="520" y="114" text-anchor="middle" fill="#a7f3d0" font-size="10">/trash</text>
+      <text x="520" y="158" text-anchor="middle" fill="#6ee7b7" font-size="11">~3 周</text>
+      <rect x="600" y="40" width="130" height="140" rx="6" fill="#2563eb"/>
+      <text x="665" y="62" text-anchor="middle" fill="#fff" font-weight="600" font-size="12">S4 洞察</text>
+      <text x="665" y="82" text-anchor="middle" fill="#bfdbfe" font-size="10">/stats</text>
+      <text x="665" y="98" text-anchor="middle" fill="#bfdbfe" font-size="10">/reflections</text>
+      <text x="665" y="114" text-anchor="middle" fill="#bfdbfe" font-size="10">/schedule</text>
+      <text x="665" y="158" text-anchor="middle" fill="#93c5fd" font-size="11">~2.5 周</text>
+      <rect x="745" y="40" width="115" height="140" rx="6" fill="#64748b"/>
+      <text x="802" y="62" text-anchor="middle" fill="#fff" font-weight="600" font-size="12">S5 收尾</text>
+      <text x="802" y="82" text-anchor="middle" fill="#cbd5e1" font-size="10">/settings</text>
+      <text x="802" y="98" text-anchor="middle" fill="#cbd5e1" font-size="10">PWA E2E</text>
+      <text x="802" y="114" text-anchor="middle" fill="#cbd5e1" font-size="10">Vue 清理</text>
+      <text x="802" y="158" text-anchor="middle" fill="#94a3b8" font-size="11">~1.5 周</text>
+      <path d="M150 110 H165" stroke="#94a3b8" stroke-width="2" marker-end="url(#a2)"/>
+      <path d="M295 110 H310" stroke="#94a3b8" stroke-width="2" marker-end="url(#a2)"/>
+      <path d="M440 110 H455" stroke="#94a3b8" stroke-width="2" marker-end="url(#a2)"/>
+      <path d="M585 110 H600" stroke="#94a3b8" stroke-width="2" marker-end="url(#a2)"/>
+      <path d="M730 110 H745" stroke="#94a3b8" stroke-width="2" marker-end="url(#a2)"/>
+    </svg>
+    <div class="svg-caption">图 4 · 6 Sprint 顺序与周期估算</div>
+  </div>
+</section>
+
+<section id="domains">
+  <h2>五、各功能域深度说明</h2>
+  <div class="grid-2">
+    <div class="card">
+      <h3>域 0 · Platform Shell <span class="tag tag-new">必须先做</span></h3>
+      <ul class="compact">
+        <li>Login/setup + <strong>Space 选择 + space token 签发</strong></li>
+        <li>AppLayout + 移动端底栏 + 8 全局快捷键</li>
+        <li>SpaceSwitcher + Dexie Proxy 切换</li>
+        <li>Sync 状态条 + 冲突入口</li>
+      </ul>
+      <p><strong>估算：</strong>8–12 人天</p>
+    </div>
+    <div class="card">
+      <h3>域 A · 番茄钟 <code>/timer</code> <span class="tag tag-high">最大单页</span></h3>
+      <ul class="compact">
+        <li>计时环、模式切换、沉浸式、WakeLock</li>
+        <li>任务/习惯/时间块/会话/认知标记/白噪音/日报</li>
+        <li>MVP 可砍：沉浸式、白噪音、认知标记 → P1.5</li>
+      </ul>
+      <p><strong>估算：</strong>10–15 人天</p>
+    </div>
+    <div class="card">
+      <h3>域 B · 任务 <code>/tasks</code></h3>
+      <ul class="compact">
+        <li>CRUD、标签、关系、筛选、与 Timer 联动</li>
+        <li>源有 20+ task 相关 spec 可参考</li>
+      </ul>
+      <p><strong>估算：</strong>5–7 人天</p>
+    </div>
+    <div class="card">
+      <h3>域 C/D · 笔记 + 小记 <span class="tag tag-new">API 契约全变</span></h3>
+      <ul class="compact">
+        <li>Memo 29 组件 + convert REST</li>
+        <li>NoteList 文件夹树 + FTS 搜索</li>
+        <li>NoteDetail PATCH + PUT/content + 版本侧栏</li>
+        <li>Trash 软删 / restore / purge 三 tab</li>
+      </ul>
+      <p><strong>估算：</strong>15–20 人天</p>
+    </div>
+    <div class="card">
+      <h3>域 E/F · 统计 + 反思</h3>
+      <ul class="compact">
+        <li>StatsView 914 行：图表、活动日历、AI 洞察</li>
+        <li>Reflection 结构化模板、自动关联 session</li>
+        <li>AI 洞察可二期（无后端 API 则降级）</li>
+      </ul>
+      <p><strong>估算：</strong>10–12 人天</p>
+    </div>
+    <div class="card">
+      <h3>Cross-cutting · Sync <span class="tag tag-high">最高风险</span></h3>
+      <ul class="compact">
+        <li>useSyncCloud ~1100 行 + 40+ sync spec</li>
+        <li>三游标 Pull、Push 批处理、tombstone 末页</li>
+        <li>全 app blocker，可与 Shell 部分并行</li>
+      </ul>
+      <p><strong>估算：</strong>10–15 人天</p>
+    </div>
+  </div>
+</section>
+
+<section id="sprints">
+  <h2>六、推荐 PR / 分支切分</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Sprint</th><th>分支建议</th><th>交付物</th><th>Gate</th></tr></thead>
+      <tbody>
+        <tr><td>S0</td><td><code>feat/frontend-scaffold</code></td><td>Next.js + shadcn + openapi-ts + Dexie Proxy + login/space shell</td><td><code>npm run dev</code> 可启动；空 dashboard；切 space 不 crash</td></tr>
+        <tr><td>S1</td><td><code>feat/web-sync-client</code></td><td>三游标 pull 循环 + outbox push + 冲突 UI 骨架</td><td>与 backend sync 集成测试通过</td></tr>
+        <tr><td>S2</td><td><code>feat/web-timer-tasks</code></td><td>/timer MVP + /tasks</td><td>完成一次 focus session 并 sync</td></tr>
+        <tr><td>S3a</td><td><code>feat/web-notes-list</code></td><td>/notes 列表 + 文件夹 + search</td><td>FTS 命中；folder 树</td></tr>
+        <tr><td>S3b</td><td><code>feat/web-note-editor</code></td><td>/notes/[id] PATCH+PUT content + versions</td><td>content_hash 对账</td></tr>
+        <tr><td>S3c</td><td><code>feat/web-memo-trash</code></td><td>/memo + convert + /trash</td><td>软删→restore→purge 流程</td></tr>
+        <tr><td>S4</td><td><code>feat/web-stats-reflection</code></td><td>/stats + /reflections + /schedule</td><td>图表渲染；复盘保存</td></tr>
+        <tr><td>S5</td><td><code>feat/web-settings-pwa</code></td><td>/settings + PWA + Playwright E2E</td><td>离线壳；E2E 绿</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="timeline">
+    <div class="tl-item" style="border-color:#1e293b"><h4>S0 骨架</h4><p>所有后续 Sprint 的前置</p></div>
+    <div class="tl-item" style="border-color:#ef4444"><h4>S1 Sync</h4><p>与 S2 部分并行</p></div>
+    <div class="tl-item" style="border-color:#dc2626"><h4>S2 Timer</h4><p>MVP 核心体验</p></div>
+    <div class="tl-item" style="border-color:#059669"><h4>S3 Notes</h4><p>可拆 3 个 PR</p></div>
+    <div class="tl-item" style="border-color:#2563eb"><h4>S4 洞察</h4><p>依赖 S2 数据</p></div>
+    <div class="tl-item" style="border-color:#64748b"><h4>S5 收尾</h4><p>PWA + E2E</p></div>
+  </div>
+</section>
+
+<section id="effort">
+  <h2>七、工作量汇总</h2>
+  <div class="card" style="overflow-x:auto">
+    <table>
+      <thead><tr><th>模块</th><th>源 Vue 规模</th><th>React 新增/重写</th><th>人天估算</th></tr></thead>
+      <tbody>
+        <tr><td>S0 基础设施</td><td>—</td><td>Next / Dexie Proxy / Auth / Space</td><td>8–12</td></tr>
+        <tr><td>S1 Sync</td><td>~1100 行 + 40 tests</td><td>三游标 + 新冲突模型</td><td>10–15</td></tr>
+        <tr><td>S2 Timer + Tasks</td><td>1237 + 481 行</td><td>部分 UX 调整</td><td>15–22</td></tr>
+        <tr><td>S3 Notes + Memo</td><td>200+703+727 + 29 组件</td><td><strong>API 契约全改</strong></td><td>15–20</td></tr>
+        <tr><td>S4 Stats + Reflection + Schedule</td><td>914+247+520 行</td><td>图表库选型</td><td>10–12</td></tr>
+        <tr><td>S5 Settings + PWA</td><td>494 行</td><td>E2E + Serwist</td><td>8–10</td></tr>
+        <tr><td>测试迁移</td><td>165 spec</td><td>RTL + Playwright</td><td>10–15</td></tr>
+        <tr><td><strong>合计</strong></td><td colspan="2"></td><td><strong>76–106 人天（约 15–21 周 × 1 人）</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="verdict ok">
+    v4 规划 M5a–c 标注约 9 天偏乐观；按真实体量 + PomodoroXII 后端差分，<strong>1 人 12–16 周全量、6–8 周 MVP</strong> 较现实。2 前端并行可压缩至 <strong>3–4 个月 Beta</strong>。
+  </div>
+</section>
+
+<section id="actions">
+  <h2>八、行动建议</h2>
+  <div class="card">
+    <ol>
+      <li><strong>先 merge Phase D PR</strong> — 前端 OpenAPI 以 main HEAD 为准，避免对着 feature 分支/swagger 漂移。</li>
+      <li><strong>S0 单独立项</strong> — <code>feat/frontend-scaffold</code>：只交付 login、切 space、空 dashboard、Dexie 切换。</li>
+      <li><strong>S1 Sync 与 S2 Timer 部分并行</strong> — Sync 用 mock UI；Timer 可先 REST 直读后接 offline。</li>
+      <li><strong>Notes 域单独 PR 链</strong> — list → editor → memo/trash，与后端 Phase D 一一对应。</li>
+      <li><strong>每个 Sprint 维护「需求调整表」</strong> — 记录相对 Vue 的增删（多 space、软删 UI、三游标等）。</li>
+      <li><strong>默认 Out of Scope</strong> — Pomodoroxi-plus 的 Mental Model / Cytoscape 图复盘；Stats AI 洞察（无 API 时）。</li>
+    </ol>
+  </div>
+  <div class="card">
+    <h3>建议二期 / 可砍功能</h3>
+    <ul class="compact">
+      <li>Timer 沉浸式模式、白噪音、认知标记 → MVP 后 P1.5</li>
+      <li>Stats AI 洞察卡片 → 需后端 API 或纯本地统计</li>
+      <li>ScheduleView 旧版（398 行）→ 只用 ScheduleCalendarView</li>
+      <li>Reflection 图模式（plus 分支 Cytoscape）→ 非 MVP</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <p>PomodoroXII 前端功能域深度汇报 · Cursor Agent · 2026-07-06</p>
+  <p>源参考：<code>e:\Development\MyAwesomeApp\pomodoroxi\frontend</code> · 后端基线：621 tests · Phase D 分支就绪</p>
+  <p>相关文档：<a href="cursor审查/00-索引与摘要.md">cursor审查/00-索引与摘要.md</a> · <a href="../documents/PomodoroXII重构项目深度开发规划v4.md">深度开发规划 v4</a></p>
+</footer>
+
+</div>
+
+<script>
+function toggleTheme(){
+  const html=document.documentElement;
+  const btn=document.getElementById('themeBtn');
+  if(html.getAttribute('data-theme')==='dark'){
+    html.setAttribute('data-theme','light');
+    btn.textContent='🌙 深色';
+  }else{
+    html.setAttribute('data-theme','dark');
+    btn.textContent='☀ 浅色';
+  }
+}
+</script>
+</body>
+</html>
