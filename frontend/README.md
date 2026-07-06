@@ -71,12 +71,12 @@ npm run lint && npm run typecheck && npm run test && npm run build
 
 ## S0 进度与 F0 对齐
 
-设计契约：`.trae/documents/f0-platform-shell-exploration.md`（F0-A v0.2.1）
+设计契约：`.trae/documents/f0-platform-shell-exploration.md`（**F0-A v0.2.3**）
 
 | S0 段 | 状态 | F0 章节 |
 |-------|------|---------|
 | **S0-1** 工程 + Dexie v16 | ✅ 完成 | §3.4 SyncFields、§3.5 deletion_state、附录 B |
-| S0-2 双 JWT + SpaceDBManager | ⏳ 待开始 | §2、§3.1–3.3、§3.2.1 T29 |
+| **S0-2** 双 JWT + SpaceDBManager | ✅ 完成 | §2.4、§3.1–3.3、§3.2.1 **T29**、§3.2.2 useDexieDB |
 | S0-3 Shell + 路由 | ⏳ | §4、§5 |
 | S0-4 stores + sync stub | ⏳ | §7、§8、附录 E |
 
@@ -91,6 +91,31 @@ npm run lint && npm run typecheck && npm run test && npm run build
 | per-space DB 命名 | ✅ `dexieDbNameForSpace()` |
 | `api-generated.ts` | 🟡 stub（S0-4 前 generate） |
 
+### S0-2 已对齐项
+
+| F0 要求 | 实现 |
+|---------|------|
+| 双 JWT Axios（metaApi + spaceApi） | ✅ `services/api.ts` |
+| reissueMutex 单飞（F0 §2.4） | ✅ `tryReissueSpaceToken` IIFE + `reissuePromise` |
+| CF 530/521/522/523/524 重试 | ✅ `handleCloudflareRetry` 指数退避 |
+| `__retried` / `__cfRetryCount` 分离 | ✅ 修复 F0 `__retryCount` 冲突 bug |
+| SpaceDBManager + Proxy | ✅ `services/space-db.ts`（`_currentSpaceId` 修复） |
+| `export const db = proxy` | ✅ 非 singleton，Proxy 透明转发 |
+| MetaDB（pxii_meta）空间缓存 | ✅ `services/meta-database.ts` |
+| auth/space stores | ✅ `stores/auth-store.ts` + `stores/space-store.ts` |
+| `useDexieDB` hook | ✅ `hooks/use-dexie-db.ts`（useMemo deps=spaceId） |
+| SSR 安全 token storage | ✅ `lib/token-storage.ts`（isBrowser 守卫） |
+| 无 `window.location` redirect | ✅ S0-2 约束（S0-3 加路由 redirect） |
+| D8 预留 `has_password` | ✅ 恒 `false`，`_spacePassword` 保留但不用 |
+
+### T29 验证结果（F0 §3.2.1 O1 closure）
+
+**T29 (Proxy + liveQuery): PASS**
+
+- `liveQuery(() => db.tasks.toArray())` 通过 `SpaceDBManager.proxy` 成功订阅数据变更
+- Proxy 的 `get` trap 将方法 bind 到 `manager.current`（real DB），liveQuery 正常工作
+- 结论：F0 O1 closure 达成，F0 可升级至 v1.0
+
 ## 项目结构
 
 ```
@@ -98,13 +123,25 @@ frontend/
 ├── src/
 │   ├── app/              # Next.js App Router（S0-3 扩展 auth/app 路由组）
 │   ├── components/ui/    # shadcn UI 组件
-│   ├── services/         # Dexie (database.ts) — S0-2 增 api/space-db
+│   ├── hooks/
+│   │   └── use-dexie-db.ts  # useMemo deps=spaceId (F0 §3.2.2)
+│   ├── services/
+│   │   ├── database.ts      # PomodoroXIDB (Dexie v16)
+│   │   ├── api.ts           # metaApi + spaceApi 双 Axios (F0 §2.4)
+│   │   ├── auth-api.ts      # setup/login/verify 薄封装
+│   │   ├── spaces-api.ts    # listSpaces/createSpace/issueToken
+│   │   ├── space-db.ts      # SpaceDBManager + Proxy (F0 §3.1)
+│   │   └── meta-database.ts # pxii_meta 空间缓存 (F0 §3.3)
+│   ├── stores/
+│   │   ├── auth-store.ts    # Zustand auth 状态 (F0 §7.3.1)
+│   │   └── space-store.ts   # Zustand space 状态 (F0 §7.3.2)
 │   ├── types/
 │   │   ├── sync.ts       # SyncFields + plumbing 表常量 (F0 §3.4)
 │   │   ├── api-generated.ts  # openapi stub → S0-4 替换
 │   │   └── index.ts      # 领域模型 + Cached*
 │   ├── lib/
 │   │   ├── platform.ts   # HC-7 keys、API_V1_PREFIX、DB 命名 (F0 附录 B)
+│   │   ├── token-storage.ts  # SSR 安全双 JWT 存取
 │   │   └── utils.ts      # cn() 等
 │   └── utils/            # 常量、格式化
 ├── next.config.ts
