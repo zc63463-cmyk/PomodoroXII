@@ -120,3 +120,161 @@ async def test_purge_folder_with_no_descendants_succeeds(client):
     # Folder should be gone.
     resp = await client.get(f"/api/v1/folders/{leaf_id}", headers=headers)
     assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# D-2: Note soft-delete -> trash -> restore -> purge cycle
+# --------------------------------------------------------------------------- #
+
+
+async def _create_note(client, headers, *, content="Hello world", title="Test"):
+    """Helper: create a note and return its id."""
+    resp = await client.post(
+        "/api/v1/notes",
+        json={"title": title, "content": content},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_note_soft_delete_appears_in_trash(client):
+    """DELETE /notes/{id} soft-deletes; note appears in /trash, not in /notes."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    note_id = await _create_note(client, headers, content="trash me")
+
+    # Soft-delete via DELETE /notes/{id}.
+    resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    # Note should appear in trash listing.
+    resp = await client.get("/api/v1/trash", headers=headers)
+    assert resp.status_code == 200
+    trash_ids = [item["entity_id"] for item in resp.json()["items"]]
+    assert note_id in trash_ids
+
+    # Note should NOT appear in regular /notes listing.
+    resp = await client.get("/api/v1/notes", headers=headers)
+    assert resp.status_code == 200
+    note_ids = [item["id"] for item in resp.json()["items"]]
+    assert note_id not in note_ids
+
+    # GET single note still 200 with trashed_at set.
+    resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["trashed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_note_restore_recovers_md_and_clears_trashed_at(client):
+    """POST /trash/note/{id}/restore clears trashed_at and recovers .md body."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    note_id = await _create_note(
+        client, headers, content="Restorable body content"
+    )
+
+    # Soft-delete.
+    resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # Restore via trash route.
+    resp = await client.post(
+        f"/api/v1/trash/note/{note_id}/restore", headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+
+    # trashed_at should be cleared.
+    resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["trashed_at"] is None
+
+    # .md content should be fully recovered.
+    resp = await client.get(
+        f"/api/v1/notes/{note_id}/content", headers=headers
+    )
+    assert resp.status_code == 200
+    assert "Restorable body content" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_note_purge_writes_tombstone_and_returns_404(client):
+    """DELETE /trash/note/{id} (purge) hard-deletes + writes tombstone."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    note_id = await _create_note(client, headers, content="purge me")
+
+    # Soft-delete first.
+    resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # Purge via trash route.
+    resp = await client.delete(
+        f"/api/v1/trash/note/{note_id}", headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["entity_type"] == "note"
+    assert resp.json()["entity_id"] == note_id
+
+    # Note row is gone -> GET /notes/{id} returns 404.
+    resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 404
+
+    # Tombstone visible in /sync/full.
+    resp = await client.get("/api/v1/sync/full", headers=headers)
+    assert resp.status_code == 200
+    tomb_ids = [t["entity_id"] for t in resp.json()["tombstones"]]
+    assert note_id in tomb_ids
+
+
+@pytest.mark.asyncio
+async def test_note_purge_untrashed_returns_422(client):
+    """Purging a note that was NOT soft-deleted first returns 422."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    note_id = await _create_note(client, headers, content="not trashed yet")
+
+    # Try to purge without soft-deleting first -> 422 ValidationError.
+    resp = await client.delete(
+        f"/api/v1/trash/note/{note_id}", headers=headers
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_note_restore_returns_409_when_target_path_occupied(
+    client, monkeypatch
+):
+    """POST /trash/note/{id}/restore maps FileExistsError -> 409 ConflictError.
+
+    Regression guard: trash.py restore_item must catch both FileNotFoundError
+    and FileExistsError from NoteService.restore (the latter occurs when the
+    target .md path is occupied by another note).
+    """
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+    note_id = await _create_note(client, headers, content="to be soft-deleted")
+
+    # Soft-delete the note so it is in trash.
+    resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # Mock NoteService.restore to raise FileExistsError (simulates path conflict).
+    from app.services.note import NoteService
+
+    async def _raise_file_exists(self, id):
+        raise FileExistsError(f"target path for note {id} already occupied")
+
+    monkeypatch.setattr(NoteService, "restore", _raise_file_exists)
+
+    resp = await client.post(
+        f"/api/v1/trash/note/{note_id}/restore", headers=headers
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error_type"] == "conflict"
