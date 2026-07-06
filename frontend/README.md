@@ -77,8 +77,8 @@ npm run lint && npm run typecheck && npm run test && npm run build
 |-------|------|---------|
 | **S0-1** 工程 + Dexie v16 | ✅ 完成 | §3.4 SyncFields、§3.5 deletion_state、附录 B |
 | **S0-2** 双 JWT + SpaceDBManager | ✅ 完成 | §2.4、§3.1–3.3、§3.2.1 **T29**、§3.2.2 useDexieDB |
-| S0-3 Shell + 路由 | ⏳ | §4、§5 |
-| S0-4 stores + sync stub | ⏳ | §7、§8、附录 E |
+| **S0-3** Shell + 路由 | ✅ 完成 | §4、§5、§6.1 SpaceBootstrap |
+| **S0-4** stores + sync stub | ✅ 完成 | §7、§6.3 SpaceSwitchProvider、附录 E |
 
 ### S0-1 已对齐项
 
@@ -89,7 +89,7 @@ npm run lint && npm run typecheck && npm run test && npm run build
 | `deletion_state` vs `trashed_at` | ✅ v16 upgrade 测试覆盖 |
 | HC-7 localStorage keys | ✅ `lib/platform.ts` |
 | per-space DB 命名 | ✅ `dexieDbNameForSpace()` |
-| `api-generated.ts` | 🟡 stub（S0-4 前 generate） |
+| `api-generated.ts` | ✅ 已由 `npm run generate:api` 生成 | ✅ `types/api-generated.ts` |
 
 ### S0-2 已对齐项
 
@@ -116,6 +116,33 @@ npm run lint && npm run typecheck && npm run test && npm run build
 - Proxy 的 `get` trap 将方法 bind 到 `manager.current`（real DB），liveQuery 正常工作
 - 结论：F0 O1 closure 达成，F0 可升级至 v1.0
 
+### S0-3 已对齐项
+
+| F0 要求 | 实现 |
+|---------|------|
+| (auth)/ + (app)/ 路由组 | ✅ `app/(auth)/` + `app/(app)/` |
+| 三态路由守卫 | ✅ `lib/route-guard.ts`（13 tests） |
+| AppShell + DesktopSidebar + MobileBottomNav | ✅ `components/layout/` |
+| SpaceSwitcher + SyncStatusBar | ✅ `components/layout/` |
+| SpaceBootstrap 门控 | ✅ `lib/space-bootstrap.tsx`（phase: pending→ready/failed） |
+| S31-1 failed→ready 修复 | ✅ `space-store.selectSpace` 末尾 `setReady()` |
+| 17 路由占位 | ✅ 19 routes build（含 /_not-found + / ） |
+
+### S0-4 已对齐项
+
+| F0 要求 | 实现 |
+|---------|------|
+| 17 业务 store 空壳（§7.3.3-7.3.19） | ✅ `stores/` 17 文件 + `stores/index.ts` |
+| STORE_RESET_ORDER + STORE_RESET_FNS（附录 E） | ✅ 17 项有序 reset |
+| SpaceSwitchProvider（§6.3） | ✅ `lib/on-space-switch.tsx`（destroy→clear→17 reset） |
+| CrossTabSyncProvider（§3.6） | ✅ `lib/cross-tab-sync.tsx`（storage 事件→reload） |
+| providers.tsx 嵌套（§6.1） | ✅ QueryClient>Theme>SpaceBootstrap>SpaceSwitch>CrossTabSync |
+| performLogout 补全（§5.7） | ✅ destroy→clear→17 reset→auth/space/bootstrap→close→metaDB→clearAll→redirect |
+| ui-store 迁移（§7.3.18） | ✅ use-keyboard-shortcuts + app-shell 从 useState 迁至 ui-store |
+| use-sync hook + sync-status-bar | ✅ `hooks/use-sync.ts` + sync-status-bar 接入 |
+| `pxii:space-switched` 事件派发 | ✅ `space-store.selectSpace` dispatchEvent |
+| `api-generated.ts` | ✅ `npm run generate:api` 生成（172KB） |
+
 ## 项目结构
 
 ```
@@ -134,14 +161,20 @@ frontend/
 │   │   └── meta-database.ts # pxii_meta 空间缓存 (F0 §3.3)
 │   ├── stores/
 │   │   ├── auth-store.ts    # Zustand auth 状态 (F0 §7.3.1)
-│   │   └── space-store.ts   # Zustand space 状态 (F0 §7.3.2)
+│   │   ├── space-store.ts   # Zustand space 状态 (F0 §7.3.2)
+│   │   ├── {17 业务 store}   # app/timer/session/task/note/quick-note/folder/habit/schedule/time-block/reflection/stats/search/trash/sync/ui/settings (F0 §7.3.3-7.3.19)
+│   │   └── index.ts         # STORE_RESET_ORDER + STORE_RESET_FNS (附录 E)
 │   ├── types/
 │   │   ├── sync.ts       # SyncFields + plumbing 表常量 (F0 §3.4)
-│   │   ├── api-generated.ts  # openapi stub → S0-4 替换
+│   │   ├── api-generated.ts  # openapi-typescript 生成 (172KB)
 │   │   └── index.ts      # 领域模型 + Cached*
 │   ├── lib/
 │   │   ├── platform.ts   # HC-7 keys、API_V1_PREFIX、DB 命名 (F0 附录 B)
 │   │   ├── token-storage.ts  # SSR 安全双 JWT 存取
+│   │   ├── logout.ts     # 7 步 logout 生命周期 (F0 §5.7)
+│   │   ├── on-space-switch.tsx  # SpaceSwitchProvider (F0 §6.3)
+│   │   ├── cross-tab-sync.tsx   # CrossTabSyncProvider (F0 §3.6)
+│   │   ├── space-bootstrap.tsx  # SpaceBootstrap 门控
 │   │   └── utils.ts      # cn() 等
 │   └── utils/            # 常量、格式化
 ├── next.config.ts
@@ -151,9 +184,10 @@ frontend/
 
 ## 测试
 
-测试使用 Vitest + jsdom + fake-indexeddb：
+测试使用 Vitest + jsdom + fake-indexeddb（**86 tests**）：
 - `vitest.setup.ts` 固定时区为 UTC，安装 fake-indexeddb 使 Dexie 在 jsdom 下正常工作
-- 测试文件与源文件同目录，命名 `*.test.ts`
+- 测试文件与源文件同目录，命名 `*.test.ts` / `*.test.tsx`
+- 覆盖：Dexie schema、platform 常量、token storage、API client、route guard、17 store reset、stores/index、ui-store、space-store 事件派发、SpaceSwitchProvider、performLogout、useSync
 
 ## 已知技术债
 
@@ -161,7 +195,9 @@ frontend/
 |----|------|----------|
 | `Note.content` 字段 | `types/index.ts` 中 `Note.content: string` 仍保留全文；后端 Phase D 已 metadata/content 分离 | S3 notes 前对齐 `CachedNote` |
 | `OutboxEvent.entityType` 枚举 | 缺 10 个类型（report/reportTemplate/sessionEvent/sessionContext/cognitiveMark/tag/taskTag/taskRelation/focusPattern/reflectionTemplate） | S1 Sync 重建 outbox 时扩展 |
-| `api-generated.ts` | 当前为 **stub**；S0-4 Gate 前运行 `npm run generate:api` 替换 | S0-4 |
+| Sync pull/push 实现 | syncEngineStub 仅有 destroy；sync-store 为 idle 空壳 | S1 |
+| 业务页真实数据加载 | 17 store actions 为 no-op stub | S2+ |
+| CI frontend workflow | GitHub Actions 尚无 frontend job | S1+ |
 
 ## 许可
 

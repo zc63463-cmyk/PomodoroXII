@@ -58,4 +58,23 @@ describe('space-store selectSpace', () => {
     expect(useSpaceStore.getState().currentSpaceId).toBe('space-1')
     expect(useSpaceStore.getState().spaceToken).toBe('new-space-token')
   })
+
+  it('selectSpace success → dispatches pxii:space-switched event', async () => {
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
+
+    await useSpaceStore.getState().selectSpace('space-2')
+
+    // 验证派发了 pxii:space-switched 事件
+    const spaceSwitchCall = dispatchSpy.mock.calls.find(
+      (call) => {
+        const event = call[0] as Event
+        return event.type === 'pxii:space-switched'
+      },
+    )
+    expect(spaceSwitchCall).toBeDefined()
+    const dispatchedEvent = spaceSwitchCall![0] as CustomEvent
+    expect(dispatchedEvent.detail).toEqual({ spaceId: 'space-2' })
+
+    dispatchSpy.mockRestore()
+  })
 })

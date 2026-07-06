@@ -3,14 +3,20 @@
 /**
  * Keyboard shortcuts hook (F0 §5.6).
  *
+ * S0-4: Migrated from useState to ui-store (Zustand).
  * S3-5: SHORTCUT_ROUTES imported from nav-config (single source of truth).
- * S3-6: Added Ctrl+K (command palette), ? (shortcut help), Escape (close dialogs).
+ * S3-6: Ctrl+K (command palette), ? (shortcut help), Escape (close dialogs).
  * Number keys 1–5 navigate to main routes.
+ *
+ * React best practices:
+ * - selector-only subscriptions for stable action references
+ * - actions are stable (Zustand) — safe in useEffect deps
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import { SHORTCUT_ROUTES } from '@/lib/nav-config'
+import { useUIStore } from '@/stores/ui-store'
 
 function isFormField(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
@@ -18,25 +24,19 @@ function isFormField(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable
 }
 
-export interface ShortcutState {
-  commandPaletteOpen: boolean
-  setCommandPaletteOpen: (open: boolean) => void
-  shortcutHelpOpen: boolean
-  setShortcutHelpOpen: (open: boolean) => void
-}
-
-export function useKeyboardShortcuts(): ShortcutState {
+export function useKeyboardShortcuts(): void {
   const router = useRouter()
   const pathname = usePathname()
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
-  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false)
+  const toggleCommandPalette = useUIStore((s) => s.toggleCommandPalette)
+  const setShortcutHelpOpen = useUIStore((s) => s.setShortcutHelpOpen)
+  const closeAllPanels = useUIStore((s) => s.closeAllPanels)
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       // Ctrl+K / Meta+K → toggle command palette
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
         e.preventDefault()
-        setCommandPaletteOpen((prev) => !prev)
+        toggleCommandPalette()
         return
       }
 
@@ -47,10 +47,9 @@ export function useKeyboardShortcuts(): ShortcutState {
         return
       }
 
-      // Escape → close dialogs
+      // Escape → close all dialogs
       if (e.key === 'Escape') {
-        setCommandPaletteOpen(false)
-        setShortcutHelpOpen(false)
+        closeAllPanels()
         return
       }
 
@@ -65,12 +64,5 @@ export function useKeyboardShortcuts(): ShortcutState {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [router, pathname])
-
-  return {
-    commandPaletteOpen,
-    setCommandPaletteOpen,
-    shortcutHelpOpen,
-    setShortcutHelpOpen,
-  }
+  }, [router, pathname, toggleCommandPalette, setShortcutHelpOpen, closeAllPanels])
 }
