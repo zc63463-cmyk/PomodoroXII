@@ -1,36 +1,95 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PomodoroXII Frontend
 
-## Getting Started
+PomodoroXII 前端 — 基于 Next.js 15 的离线优先番茄钟应用客户端。
+使用 Dexie.js 管理 IndexedDB 本地数据，支持客户端 sync 层与后端 REST API 对接。
 
-First, run the development server:
+## 技术栈
+
+| 技术 | 版本 | 说明 |
+|------|------|------|
+| Next.js | 15.5.20 | App Router + Turbopack |
+| React | 19.1.0 | 启用 React Compiler |
+| Tailwind CSS | v4 | via @tailwindcss/postcss |
+| Dexie.js | ^4.4.4 | IndexedDB 封装，当前 schema v16 |
+| shadcn | ^4.13.0 | UI 组件（基于 @base-ui/react） |
+| Zustand | ^5.0.14 | 状态管理 |
+| Vitest | ^4.1.9 | 测试框架 + fake-indexeddb |
+
+> **React Compiler 配置说明**：Next.js 15.5 中 React Compiler 通过
+> `next.config.ts` 的 `experimental.reactCompiler: true` 启用（非 Next 16
+> 的顶层 `reactCompiler: true`）。构建日志会输出 `✓ reactCompiler` 确认生效。
+
+## 前置条件
+
+- Node.js >= 20
+- 后端服务运行在 `http://localhost:8000`（用于 API 代理与 openapi 生成）
+
+## 快速开始
+
+### 安装依赖
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cd frontend
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 环境变量
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+复制示例文件并按需修改：
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+cp .env.local.example .env.local
+```
 
-## Learn More
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `NEXT_PUBLIC_API_BASE` | `http://localhost:8000` | 后端 API 基地址 |
 
-To learn more about Next.js, take a look at the following resources:
+> 开发模式下，`next.config.ts` 的 `rewrites()` 会将 `/api/:path*`
+> 代理到 `${NEXT_PUBLIC_API_BASE}/api/:path*`，实现跨域请求转发。
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 常用命令
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| 命令 | 说明 |
+|------|------|
+| `npm run dev` | 启动开发服务器（Turbopack），访问 http://localhost:3000 |
+| `npm run build` | 生产构建（Turbopack），React Compiler 生效 |
+| `npm run start` | 启动生产服务器 |
+| `npm run lint` | ESLint 检查 |
+| `npm run typecheck` | TypeScript 类型检查（tsc --noEmit） |
+| `npm run test` | 运行 Vitest 测试（jsdom + fake-indexeddb） |
+| `npm run generate:api` | 从后端 openapi.json 生成 TypeScript 类型 |
 
-## Deploy on Vercel
+### Gate 检查
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+提交前需全部通过：
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npm run lint && npm run typecheck && npm run test && npm run build
+```
+
+## 项目结构
+
+```
+frontend/
+├── src/
+│   ├── app/              # Next.js App Router 页面
+│   ├── components/ui/    # shadcn UI 组件
+│   ├── services/         # Dexie 数据库封装 (database.ts)
+│   ├── types/            # TypeScript 类型定义
+│   ├── lib/              # 工具函数 (cn 等)
+│   └── utils/            # 常量、格式化、辅助函数
+├── next.config.ts        # Next.js 配置（reactCompiler、API rewrites）
+├── vitest.config.ts      # 测试配置
+└── vitest.setup.ts       # 测试环境初始化（UTC 时区、fake-indexeddb）
+```
+
+## 测试
+
+测试使用 Vitest + jsdom + fake-indexeddb：
+- `vitest.setup.ts` 固定时区为 UTC，安装 fake-indexeddb 使 Dexie 在 jsdom 下正常工作
+- 测试文件与源文件同目录，命名 `*.test.ts`
+
+## 许可
+
+私有项目。
