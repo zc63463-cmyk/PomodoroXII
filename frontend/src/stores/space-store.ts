@@ -109,10 +109,11 @@ export const useSpaceStore = create<SpaceState & SpaceActions>()(
         if (spaceId && spaceToken) {
           try {
             await spaceDBManager.switchTo(spaceId)
-          } catch {
-            // switchTo failed — clear space state, guard will redirect /select-space
+          } catch (e) {
+            // Clear space state, then throw so bootstrap can toast (S3-1/S3-2)
             tokenStorage.clearSpace()
             set({ currentSpaceId: null, spaceToken: null })
+            throw new Error(`空间恢复失败: ${(e as Error).message}`)
           }
         }
       },

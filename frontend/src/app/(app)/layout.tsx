@@ -1,19 +1,19 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import { tokenStorage } from '@/lib/token-storage'
+import { useBootstrapStore } from '@/lib/bootstrap-store'
+import { resolveAppRouteGuard } from '@/lib/route-guard'
 import { AppShell } from '@/components/layout/app-shell'
 
 /**
  * App layout — 2-state guard + /select-space exception (F0 §4.3).
  *
- * No master → /login
- * /select-space → only needs master, no AppShell
- * Other routes → need master + space, wrapped in AppShell
+ * Uses bootstrap phase gate (S3-2) + route-guard pure function (S3-3).
+ * /select-space: only needs master, no AppShell, no bootstrap wait.
+ * Other routes: need master + space + bootstrap ready.
  */
-
-const SELECT_SPACE_PATH = '/select-space'
 
 function LoadingScreen() {
   return (
@@ -30,39 +30,43 @@ export default function AppLayout({
 }) {
   const router = useRouter()
   const pathname = usePathname()
-  const [checked, setChecked] = useState(false)
+  const phase = useBootstrapStore((s) => s.phase)
 
   useEffect(() => {
-    const master = tokenStorage.getMasterToken()
-    const space = tokenStorage.getSpaceToken()
-    const spaceId = tokenStorage.getCurrentSpaceId()
+    const decision = resolveAppRouteGuard({
+      pathname,
+      masterToken: tokenStorage.getMasterToken(),
+      spaceToken: tokenStorage.getSpaceToken(),
+      spaceId: tokenStorage.getCurrentSpaceId(),
+      bootstrapPhase: phase,
+    })
 
-    // No master → login
-    if (!master) {
-      router.replace('/login')
-      return
+    switch (decision) {
+      case 'redirect-login':
+        router.replace('/login')
+        break
+      case 'redirect-select-space':
+        router.replace('/select-space')
+        break
+      // allow-select-space, allow-shell, wait → no redirect
     }
+  }, [router, pathname, phase])
 
-    // /select-space only needs master
-    if (pathname === SELECT_SPACE_PATH) {
-      setChecked(true)
-      return
-    }
-
-    // Other (app) routes need master + space
-    if (!space || !spaceId) {
-      router.replace(SELECT_SPACE_PATH)
-      return
-    }
-
-    setChecked(true)
-  }, [router, pathname])
+  const decision = resolveAppRouteGuard({
+    pathname,
+    masterToken: tokenStorage.getMasterToken(),
+    spaceToken: tokenStorage.getSpaceToken(),
+    spaceId: tokenStorage.getCurrentSpaceId(),
+    bootstrapPhase: phase,
+  })
 
   // /select-space: no AppShell (full-screen space picker)
-  if (pathname === SELECT_SPACE_PATH) {
-    return checked ? <>{children}</> : <LoadingScreen />
-  }
-
-  if (!checked) return <LoadingScreen />
+  if (decision === 'allow-select-space') return <>{children}</>
+  // Wait for bootstrap to finish before rendering AppShell
+  if (decision === 'wait') return <LoadingScreen />
+  // Redirect cases: show loading while router.replace takes effect
+  if (decision === 'redirect-login' || decision === 'redirect-select-space')
+    return <LoadingScreen />
+  // allow-shell
   return <AppShell>{children}</AppShell>
 }

@@ -9,27 +9,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
-import {
-  TimerIcon,
-  ListTodoIcon,
-  CalendarIcon,
-  ZapIcon,
-  BarChart3Icon,
-} from 'lucide-react'
-
-interface NavItem {
-  path: string
-  label: string
-  Icon: React.ComponentType<{ className?: string }>
-}
-
-const MOBILE_NAV_ITEMS: readonly NavItem[] = [
-  { path: '/timer', label: '番茄钟', Icon: TimerIcon },
-  { path: '/tasks', label: '任务', Icon: ListTodoIcon },
-  { path: '/schedules', label: '日程', Icon: CalendarIcon },
-  { path: '/quick-notes', label: '速记', Icon: ZapIcon },
-  { path: '/stats', label: '统计', Icon: BarChart3Icon },
-]
+import { MOBILE_NAV_ITEMS } from '@/lib/nav-config'
 
 export function MobileBottomNav() {
   const pathname = usePathname()

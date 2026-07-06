@@ -6,6 +6,7 @@
  * Header: logo + SpaceSwitcher + SyncStatusBar + Logout
  * Desktop: sidebar + main content
  * Mobile: bottom nav
+ * S3-6: Command palette stub (Ctrl+K) + shortcut help dialog (?)
  */
 
 import { useState } from 'react'
@@ -13,13 +14,20 @@ import { DesktopSidebar } from '@/components/layout/desktop-sidebar'
 import { MobileBottomNav } from '@/components/layout/mobile-bottom-nav'
 import { SpaceSwitcher } from '@/components/layout/space-switcher'
 import { SyncStatusBar } from '@/components/layout/sync-status-bar'
+import { CommandPaletteStub } from '@/components/layout/command-palette-stub'
+import { ShortcutHelpDialog } from '@/components/layout/shortcut-help-dialog'
 import { Button } from '@/components/ui/button'
 import { performLogout } from '@/lib/logout'
 import { useKeyboardShortcuts } from '@/hooks/use-keyboard-shortcuts'
 import { LogOutIcon } from 'lucide-react'
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  useKeyboardShortcuts()
+  const {
+    commandPaletteOpen,
+    setCommandPaletteOpen,
+    shortcutHelpOpen,
+    setShortcutHelpOpen,
+  } = useKeyboardShortcuts()
   const [isLoggingOut, setIsLoggingOut] = useState(false)
 
   const handleLogout = async () => {
@@ -61,6 +69,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Mobile: bottom nav */}
       <MobileBottomNav />
+
+      {/* S3-6: Dialog stubs */}
+      <CommandPaletteStub
+        open={commandPaletteOpen}
+        onOpenChange={setCommandPaletteOpen}
+      />
+      <ShortcutHelpDialog
+        open={shortcutHelpOpen}
+        onOpenChange={setShortcutHelpOpen}
+      />
     </div>
   )
 }

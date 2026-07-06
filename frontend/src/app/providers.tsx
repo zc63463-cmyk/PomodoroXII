@@ -10,14 +10,14 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { ThemeProvider } from 'next-themes'
 import { queryClient } from '@/lib/query-client'
-import { AuthBootstrap } from '@/lib/auth-bootstrap'
+import { SpaceBootstrap } from '@/lib/space-bootstrap'
 import { Toaster } from '@/components/ui/sonner'
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
-        <AuthBootstrap>{children}</AuthBootstrap>
+        <SpaceBootstrap>{children}</SpaceBootstrap>
         <Toaster position="bottom-right" />
       </ThemeProvider>
     </QueryClientProvider>

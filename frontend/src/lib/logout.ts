@@ -10,6 +10,7 @@ import { queryClient } from '@/lib/query-client'
 import { syncEngineStub as syncEngine } from '@/lib/sync/types'
 import { useAuthStore } from '@/stores/auth-store'
 import { useSpaceStore } from '@/stores/space-store'
+import { useBootstrapStore } from '@/lib/bootstrap-store'
 import { spaceDBManager } from '@/services/space-db'
 import { metaDB } from '@/services/meta-database'
 import { tokenStorage } from '@/lib/token-storage'
@@ -24,9 +25,10 @@ export async function performLogout(): Promise<void> {
   // 3. (S0-4: 17 business store reset — STORE_RESET_ORDER)
   //    S0-3 skips this step
 
-  // 3b. Reset auth-store + space-store (before token clearing)
+  // 3b. Reset auth-store + space-store + bootstrap-store (before token clearing)
   useAuthStore.getState().reset()
   useSpaceStore.getState().reset()
+  useBootstrapStore.getState().reset()
 
   // 4. Close current Dexie DB connection
   spaceDBManager.close()
