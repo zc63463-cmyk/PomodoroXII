@@ -73,6 +73,19 @@ describe('resolveAppRouteGuard', () => {
       }),
     ).toBe('redirect-login')
   })
+
+  // S31-1: 文档化恢复语义 — guard 纯函数不变量
+  it('master+space, bootstrap failed → still redirect-select-space (guard alone)', () => {
+    expect(
+      resolveAppRouteGuard({ ...base, bootstrapPhase: 'failed' }),
+    ).toBe('redirect-select-space')
+  })
+
+  it('master+space, bootstrap ready after re-select → allow-shell', () => {
+    expect(
+      resolveAppRouteGuard({ ...base, bootstrapPhase: 'ready' }),
+    ).toBe('allow-shell')
+  })
 })
 
 describe('resolveAuthRouteGuard', () => {

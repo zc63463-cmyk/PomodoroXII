@@ -13,6 +13,7 @@ import { spacesApi } from '@/services/spaces-api'
 import { tokenStorage } from '@/lib/token-storage'
 import { spaceDBManager } from '@/services/space-db'
 import { metaDB, type SpaceMeta } from '@/services/meta-database'
+import { useBootstrapStore } from '@/lib/bootstrap-store'
 
 export interface SpaceInfo extends SpaceMeta {
   has_password: boolean // D8: always false
@@ -85,6 +86,8 @@ export const useSpaceStore = create<SpaceState & SpaceActions>()(
           tokenStorage.setCurrentSpaceId(spaceId)
           await spaceDBManager.switchTo(spaceId)
           set({ currentSpaceId: spaceId, spaceToken: token, isLoading: false })
+          // S31-1: 用户主动选空间成功 → bootstrap 门控放行
+          useBootstrapStore.getState().setReady()
         } catch (e) {
           set({ isLoading: false, error: (e as Error).message })
           throw e
