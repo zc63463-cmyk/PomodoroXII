@@ -1,13 +1,13 @@
 import { describe, it, expect } from 'vitest'
+import Dexie from 'dexie'
 import { PomodoroXIDB } from '@/services/database'
 
 /**
- * PomodoroXIDB 基础测试。
+ * PomodoroXIDB 测试。
  *
- * 注：Dexie 的 upgrade 钩子只在数据库版本升级时运行（从旧版本升至新版本），
- * 对全新创建的库（直接创建到最高版本 v16）不会触发。因此这里以 schema 级
- * 验证为主（content_hash 索引存在、版本号正确），upgrade 钩子的运行时行为
- * 会在从旧 pomodoroxi 同名库升级的集成场景中被覆盖。
+ * schema 级验证：content_hash 索引存在、版本号正确。
+ * upgrade 运行时验证：v15→v16 升级时 _etag 被删除、deletion_state/version
+ * 被填充（通过 raw Dexie 创建 v15 旧库 + PomodoroXIDB 打开触发 upgrade）。
  */
 describe('PomodoroXIDB', () => {
   it('opens a named database with tasks table then deletes it', async () => {
@@ -33,6 +33,39 @@ describe('PomodoroXIDB', () => {
     const db = new PomodoroXIDB(dbName)
     await db.open()
     expect(db.verno).toBe(16)
+    await db.delete()
+  })
+
+  it('v16 upgrade strips _etag and fills deletion_state/version on existing rows', async () => {
+    const dbName = 'pomodoroxi-v16-upgrade-' + crypto.randomUUID()
+
+    // Arrange: 用 raw Dexie 模拟 v15 旧库
+    const oldDb = new Dexie(dbName)
+    oldDb.version(15).stores({
+      tasks: 'id, status, created_at, updated_at, due_date, _dirty',
+    })
+    await oldDb.open()
+    await oldDb.table('tasks').put({
+      id: 'test-1',
+      title: 'Test task from v15',
+      status: 'todo',
+      _etag: 'abc123',
+    })
+    await oldDb.close()
+
+    // Act: 用 PomodoroXIDB 打开，触发 v15→v16 upgrade
+    const db = new PomodoroXIDB(dbName)
+    await db.open()
+
+    // Assert: 验证 upgrade hook 转换
+    const row = await db.tasks.get('test-1')
+    expect(row).toBeDefined()
+    // _etag is a v15 legacy field not in CachedTask type; cast to inspect
+    const raw = row as unknown as Record<string, unknown>
+    expect(raw._etag).toBeUndefined()
+    expect(row!.deletion_state).toBe('active')
+    expect(row!.version).toBe(1)
+
     await db.delete()
   })
 })
