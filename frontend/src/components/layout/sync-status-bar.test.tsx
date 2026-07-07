@@ -125,4 +125,35 @@ describe('SyncStatusBar', () => {
     fireEvent.keyDown(bar, { key: 'Enter' })
     expect(sync).toHaveBeenCalledTimes(1)
   })
+
+  it('SSB9: idle 时 Space 键 → sync 调 1 次', () => {
+    const sync = vi.fn()
+    mockUseSync.mockReturnValue({
+      status: 'idle',
+      lastSyncedAt: null,
+      pendingCount: 0,
+      error: null,
+      sync,
+    })
+    render(createElement(SyncStatusBar))
+    const bar = screen.getByRole('button')
+    fireEvent.keyDown(bar, { key: ' ' })
+    expect(sync).toHaveBeenCalledTimes(1)
+  })
+
+  it('SSB10: syncing 时 Enter/Space 均不触发 sync', () => {
+    const sync = vi.fn()
+    mockUseSync.mockReturnValue({
+      status: 'syncing',
+      lastSyncedAt: null,
+      pendingCount: 1,
+      error: null,
+      sync,
+    })
+    render(createElement(SyncStatusBar))
+    const bar = screen.getByRole('button')
+    fireEvent.keyDown(bar, { key: 'Enter' })
+    fireEvent.keyDown(bar, { key: ' ' })
+    expect(sync).not.toHaveBeenCalled()
+  })
 })
