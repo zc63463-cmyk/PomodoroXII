@@ -13,7 +13,7 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import type { SyncConflict, SyncStatus } from '@/lib/sync/types'
-import { syncEngine } from '@/lib/sync'
+import { syncEngine, applyEngineStateToStore } from '@/lib/sync'
 
 interface SyncState {
   status: SyncStatus
@@ -45,16 +45,8 @@ export const useSyncStore = create<SyncStore>()(
         set({ status: 'syncing', error: null })
         try {
           await syncEngine.sync()
-          const status = syncEngine.getStatus()
-          set({
-            status,
-            lastSyncedAt: syncEngine.getLastSyncedAt(),
-            pendingCount: syncEngine.getPendingCount(),
-            conflicts: syncEngine.getConflicts(),
-            error:
-              status === 'infra-error' ? '网络异常，同步暂停' :
-              status === 'error' ? '同步出错' : null,
-          })
+          // S1-4.1：DRY 单一真相源（与 wire onSyncComplete 共用）
+          applyEngineStateToStore(syncEngine)
         } catch (e) {
           set({ status: 'error', error: (e as Error).message })
         }
@@ -62,11 +54,8 @@ export const useSyncStore = create<SyncStore>()(
 
       resolveConflict: async (outboxId, resolution) => {
         await syncEngine.resolveConflict(outboxId, resolution)
-        set({
-          status: syncEngine.getStatus(),
-          conflicts: syncEngine.getConflicts(),
-          pendingCount: syncEngine.getPendingCount(),
-        })
+        // S1-4.1：DRY 单一真相源
+        applyEngineStateToStore(syncEngine)
       },
 
       setStatus: (status) => set({ status }),

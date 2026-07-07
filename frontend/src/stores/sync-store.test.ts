@@ -19,9 +19,13 @@ const mockSyncEngine = vi.hoisted(() => ({
   getConflicts: vi.fn().mockReturnValue([]),
 }))
 
-vi.mock('@/lib/sync', () => ({
-  syncEngine: mockSyncEngine,
-}))
+vi.mock('@/lib/sync', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/sync')>()
+  return {
+    ...actual,
+    syncEngine: mockSyncEngine,
+  }
+})
 
 import { useSyncStore } from '@/stores/sync-store'
 
@@ -80,5 +84,13 @@ describe('sync-store', () => {
     expect(mockSyncEngine.resolveConflict).toHaveBeenCalledWith(42, 'accept-remote')
     expect(useSyncStore.getState().conflicts).toEqual([])
     expect(useSyncStore.getState().pendingCount).toBe(0)
+  })
+
+  it('SS6: triggerSync error → store.error="同步出错"（经 applyEngineStateToStore）', async () => {
+    mockSyncEngine.getStatus.mockReturnValue('error')
+    await useSyncStore.getState().triggerSync()
+    expect(mockSyncEngine.sync).toHaveBeenCalledTimes(1)
+    expect(useSyncStore.getState().status).toBe('error')
+    expect(useSyncStore.getState().error).toBe('同步出错')
   })
 })

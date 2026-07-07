@@ -43,7 +43,8 @@ export class RealSyncEngine implements SyncEngine {
     pull: Set<() => void>
     push: Set<() => void>
     conflict: Set<(c: SyncConflict[]) => void>
-  } = { pull: new Set(), push: new Set(), conflict: new Set() }
+    syncComplete: Set<() => void>
+  } = { pull: new Set(), push: new Set(), conflict: new Set(), syncComplete: new Set() }
 
   constructor(db: PomodoroXIDB, spaceId: string, api?: AxiosInstance) {
     this.db = db
@@ -185,6 +186,7 @@ export class RealSyncEngine implements SyncEngine {
     this.listeners.pull.clear()
     this.listeners.push.clear()
     this.listeners.conflict.clear()
+    this.listeners.syncComplete.clear()
     this.status = 'idle'
   }
 
@@ -203,6 +205,11 @@ export class RealSyncEngine implements SyncEngine {
   onConflict(cb: (conflicts: SyncConflict[]) => void): () => void {
     this.listeners.conflict.add(cb)
     return () => this.listeners.conflict.delete(cb)
+  }
+
+  onSyncComplete(cb: () => void): () => void {
+    this.listeners.syncComplete.add(cb)
+    return () => this.listeners.syncComplete.delete(cb)
   }
 
   // ---- 内部方法 ----
@@ -228,6 +235,12 @@ export class RealSyncEngine implements SyncEngine {
     if (newConflicts.length === 0) return
     this.conflicts.push(...newConflicts)
     this.listeners.conflict.forEach((cb) => cb(this.conflicts))
+  }
+
+  /** S1-4.1：触发 onSyncComplete 回调（每周期末 1 次，含 error 路径；destroy 后不触发） */
+  private fireSyncComplete(): void {
+    if (this.destroyed) return
+    this.listeners.syncComplete.forEach((cb) => cb())
   }
 
   /** sync/fullSync 共用内核：runPullLoop → pushAllPending（禁止内联 HTTP） */
@@ -260,6 +273,8 @@ export class RealSyncEngine implements SyncEngine {
       this.lastSyncedAt = new Date().toISOString()
       await touchLastSyncAt(this.db, this.lastSyncedAt)
       this.setStatus(this.conflicts.length > 0 ? 'conflict' : 'idle')
+      // S1-4.1：周期末触发 onSyncComplete（成功路径）
+      this.fireSyncComplete()
     } catch (err) {
       // DR-8：5xx / Network → infra-error；其余 → error
       const axiosErr = err as { response?: { status?: number }; message?: string }
@@ -268,6 +283,8 @@ export class RealSyncEngine implements SyncEngine {
         (typeof status === 'number' && status >= 500) ||
         (axiosErr?.message?.includes('Network') ?? false)
       this.setStatus(isInfra ? 'infra-error' : 'error')
+      // S1-4.1：周期末触发 onSyncComplete（错误路径）
+      this.fireSyncComplete()
     } finally {
       this.isSyncing = false
     }

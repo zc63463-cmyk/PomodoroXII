@@ -1,10 +1,11 @@
 'use client'
 
 /**
- * SpaceSwitchProvider (F0 §6.3).
+ * SpaceSwitchProvider (F0 §6.3 / F1-D15).
  *
  * Listens for pxii:space-switched event and executes the hard order:
  * ② syncEngine.destroy() → ③ queryClient.clear() → ④ STORE_RESET_FNS.forEach()
+ * → ⑥ bootstrapSyncEngine(spaceId)
  *
  * Note: ① switchTo is already completed in space-store.selectSpace() before
  * the event is dispatched. ⑤ CrossTabSyncProvider handles cross-tab notification.
