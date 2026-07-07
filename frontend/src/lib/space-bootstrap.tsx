@@ -7,16 +7,17 @@
  * 1. auth-store.hydrate() (sync — reads localStorage)
  * 2. No master → setReady() (guard will redirect /login)
  * 3. Has master → await space-store.hydrate()
- * 4. Success → setReady()
+ * 4. Success → bootstrapSyncEngine + setReady()
  * 5. Failure → setFailed(msg) + toast.error
  */
 
-import { useEffect } from 'react'
+import { useEffect, createElement, Fragment } from 'react'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/stores/auth-store'
 import { useSpaceStore } from '@/stores/space-store'
 import { useBootstrapStore } from '@/lib/bootstrap-store'
 import { tokenStorage } from '@/lib/token-storage'
+import { bootstrapSyncEngine } from '@/lib/sync'
 
 export function SpaceBootstrap({ children }: { children: React.ReactNode }) {
   const hydrateAuth = useAuthStore((s) => s.hydrate)
@@ -42,7 +43,10 @@ export function SpaceBootstrap({ children }: { children: React.ReactNode }) {
       try {
         await hydrateSpace()
         if (cancelled) return
-        setReady()
+        // S1-4: hydrate 成功后 bootstrap sync 引擎（不派发 pxii:space-switched）
+        const spaceId = useSpaceStore.getState().currentSpaceId
+        if (spaceId) bootstrapSyncEngine(spaceId)
+        if (!cancelled) setReady()
       } catch (e) {
         if (cancelled) return
         const msg = (e as Error).message
@@ -57,5 +61,5 @@ export function SpaceBootstrap({ children }: { children: React.ReactNode }) {
     }
   }, [hydrateAuth, hydrateSpace, setReady, setFailed])
 
-  return <>{children}</>
+  return createElement(Fragment, null, children)
 }

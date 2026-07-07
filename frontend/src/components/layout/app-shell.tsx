@@ -16,6 +16,7 @@ import { SpaceSwitcher } from '@/components/layout/space-switcher'
 import { SyncStatusBar } from '@/components/layout/sync-status-bar'
 import { CommandPaletteStub } from '@/components/layout/command-palette-stub'
 import { ShortcutHelpDialog } from '@/components/layout/shortcut-help-dialog'
+import { ConflictPanel } from '@/components/sync/conflict-panel'
 import { Button } from '@/components/ui/button'
 import { performLogout } from '@/lib/logout'
 import { useKeyboardShortcuts } from '@/hooks/use-keyboard-shortcuts'
@@ -80,6 +81,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         open={isShortcutHelpOpen}
         onOpenChange={setShortcutHelpOpen}
       />
+
+      {/* S1-4: Sync 冲突面板 */}
+      <ConflictPanel />
     </div>
   )
 }

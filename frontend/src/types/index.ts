@@ -462,6 +462,12 @@ export interface SyncPushResponse {
 }
 
 // Sync conflict entry
+/**
+ * @deprecated S1-4 起请使用 `@/lib/sync/types` 中的 `SyncConflict`。
+ * 本类型保留仅为向后兼容（types/index.ts 内部 SyncPushResponse 引用）；
+ * 形状不同：lib/sync/types 用 outboxId/entityType/entityId/localVersion/remoteVersion/conflictType，
+ * 此处用 index/type/entity_id/reason。
+ */
 export interface SyncConflict {
   index: number
   type: string
