@@ -74,8 +74,16 @@ export function SyncStatusBar() {
     'span',
     {
       role: 'button',
-      tabIndex: 0,
+      tabIndex: isClickable ? 0 : -1, // S1-4.2：syncing 不可聚焦
       onClick: isClickable ? sync : undefined,
+      onKeyDown: isClickable
+        ? (e: React.KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              sync()
+            }
+          }
+        : undefined,
       title: '点击立即同步',
       className,
     },

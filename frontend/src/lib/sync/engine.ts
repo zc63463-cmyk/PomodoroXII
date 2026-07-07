@@ -158,6 +158,8 @@ export class RealSyncEngine implements SyncEngine {
     if (this.conflicts.length === 0) {
       this.setStatus('idle')
     }
+    // S1-4.2：resolve 也走 wire（含仍 conflict 时 store 应仍为 conflict）
+    this.fireSyncComplete()
   }
 
   async fullSync(): Promise<void> {

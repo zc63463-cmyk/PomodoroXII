@@ -45,7 +45,8 @@ export const useSyncStore = create<SyncStore>()(
         set({ status: 'syncing', error: null })
         try {
           await syncEngine.sync()
-          // S1-4.1：DRY 单一真相源（与 wire onSyncComplete 共用）
+          // S1-4.2 兜底：sync() 早退（offline/isSyncing）时 onSyncComplete 不触发；
+          // 成功路径 onSyncComplete 已写终态，此处幂等双写无害
           applyEngineStateToStore(syncEngine)
         } catch (e) {
           set({ status: 'error', error: (e as Error).message })
@@ -54,8 +55,7 @@ export const useSyncStore = create<SyncStore>()(
 
       resolveConflict: async (outboxId, resolution) => {
         await syncEngine.resolveConflict(outboxId, resolution)
-        // S1-4.1：DRY 单一真相源
-        applyEngineStateToStore(syncEngine)
+        // S1-4.2：store 由 wire onSyncComplete 更新（resolveConflict 已 fireSyncComplete）
       },
 
       setStatus: (status) => set({ status }),

@@ -95,15 +95,34 @@ describe('SyncStatusBar', () => {
     expect(sync).toHaveBeenCalledTimes(1)
   })
 
-  it('SSB6: lastSyncedAt=2026-07-07T08:30:00Z TZ=UTC → 显示 08:30', () => {
+  it('SSB7: syncing 时 tabIndex=-1 + click 不调 sync', () => {
+    const sync = vi.fn()
     mockUseSync.mockReturnValue({
-      status: 'idle',
-      lastSyncedAt: '2026-07-07T08:30:00Z',
-      pendingCount: 0,
+      status: 'syncing',
+      lastSyncedAt: null,
+      pendingCount: 1,
       error: null,
-      sync: vi.fn(),
+      sync,
     })
     render(createElement(SyncStatusBar))
-    expect(screen.getByText(/已同步.*08:30/)).toBeInTheDocument()
+    const bar = screen.getByRole('button')
+    expect(bar.tabIndex).toBe(-1) // S142-5：syncing 不可聚焦
+    fireEvent.click(bar)
+    expect(sync).not.toHaveBeenCalled() // 已有 isClickable 守卫
+  })
+
+  it('SSB8: idle 时 Enter 键 → sync 调 1 次', () => {
+    const sync = vi.fn()
+    mockUseSync.mockReturnValue({
+      status: 'idle',
+      lastSyncedAt: null,
+      pendingCount: 0,
+      error: null,
+      sync,
+    })
+    render(createElement(SyncStatusBar))
+    const bar = screen.getByRole('button')
+    fireEvent.keyDown(bar, { key: 'Enter' })
+    expect(sync).toHaveBeenCalledTimes(1)
   })
 })
