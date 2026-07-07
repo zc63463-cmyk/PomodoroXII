@@ -1,27 +1,63 @@
 /**
- * SyncEngine interface — F1 implementation, S0 stub (F0 §8.1).
+ * SyncEngine interface — F0 §8.1 全 12 方法（S1-3 扩充）。
  *
- * S0-3 only needs `destroy()` for logout. Full interface defined
- * for F1 to implement; stub is type-safe via Pick.
+ * S1-3：RealSyncEngine 实现全接口；syncEngineStub 扩为全 no-op
+ * （S1-4 前 logout/on-space-switch 仍 import 它，仅调 destroy）。
  */
 
-/** SyncEngine 接口 — F1 实现 */
+/** outbox 动作类型（与 OutboxEvent.action 一致） */
+export type SyncOp = 'create' | 'update' | 'delete'
+
+/** SyncEngine 状态（F0 §8.1 / DR-8） */
+export type SyncStatus = 'idle' | 'syncing' | 'error' | 'conflict' | 'infra-error'
+
+/** SyncEngine 接口 — F0 §8.1 全 12 方法 */
 export interface SyncEngine {
-  markDirty(
-    entityType: string,
-    entityId: string,
-    op: 'create' | 'update' | 'delete',
-  ): void
+  markDirty(entityType: string, entityId: string, op: SyncOp): void
   sync(): Promise<void>
-  getStatus(): 'idle' | 'syncing' | 'error' | 'conflict' | 'infra-error'
+  getStatus(): SyncStatus
   getLastSyncedAt(): string | null
   getPendingCount(): number
+  getConflicts(): SyncConflict[]
+  resolveConflict(
+    outboxId: number,
+    resolution: 'accept-remote' | 'keep-local',
+  ): Promise<void>
+  fullSync(): Promise<void>
   destroy(): void
+  onPullComplete?(cb: () => void): () => void
+  onPushComplete?(cb: () => void): () => void
+  onConflict?(cb: (conflicts: SyncConflict[]) => void): () => void
 }
 
-/** S0 stub — destroy 为 no-op，F1 替换为真实实现 */
-export const syncEngineStub: Pick<SyncEngine, 'destroy'> = {
+/** S1-4 前 no-op stub（logout/on-space-switch 仅调 destroy） */
+export const syncEngineStub: SyncEngine = {
+  markDirty() {},
+  async sync() {},
+  getStatus() {
+    return 'idle'
+  },
+  getLastSyncedAt() {
+    return null
+  },
+  getPendingCount() {
+    return 0
+  },
+  getConflicts() {
+    return []
+  },
+  async resolveConflict() {},
+  async fullSync() {},
   destroy() {},
+  onPullComplete() {
+    return () => {}
+  },
+  onPushComplete() {
+    return () => {}
+  },
+  onConflict() {
+    return () => {}
+  },
 }
 
 // ===== S1-1 Sync 基础层类型 =====
