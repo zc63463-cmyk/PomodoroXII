@@ -33,4 +33,20 @@ describe('useSync', () => {
     const { result } = renderHook(() => useSync())
     expect(result.current.lastSyncedAt).toBe('2026-07-06T12:00:00Z')
   })
+
+  it('returns error and conflicts from store', () => {
+    useSyncStore.setState({
+      error: '同步出错',
+      conflicts: [{ outboxId: 1, entityType: 'task', entityId: 't1', localVersion: {}, remoteVersion: {}, conflictType: 'version' }],
+    })
+    const { result } = renderHook(() => useSync())
+    expect(result.current.error).toBe('同步出错')
+    expect(result.current.conflicts).toHaveLength(1)
+  })
+
+  it('returns sync and resolveConflict actions', () => {
+    const { result } = renderHook(() => useSync())
+    expect(typeof result.current.sync).toBe('function')
+    expect(typeof result.current.resolveConflict).toBe('function')
+  })
 })
