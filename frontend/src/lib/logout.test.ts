@@ -9,8 +9,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // Mock syncEngine
-vi.mock('@/lib/sync/types', () => ({
-  syncEngineStub: {
+vi.mock('@/lib/sync', () => ({
+  syncEngine: {
     destroy: vi.fn(),
   },
 }))
@@ -45,7 +45,7 @@ vi.mock('@/lib/token-storage', () => ({
 
 // Import after mocks
 import { performLogout } from '@/lib/logout'
-import { syncEngineStub } from '@/lib/sync/types'
+import { syncEngine } from '@/lib/sync'
 import { queryClient } from '@/lib/query-client'
 import { spaceDBManager } from '@/services/space-db'
 import { metaDB } from '@/services/meta-database'
@@ -77,7 +77,7 @@ describe('performLogout', () => {
 
   it('calls syncEngine.destroy', async () => {
     await performLogout()
-    expect(syncEngineStub.destroy).toHaveBeenCalledTimes(1)
+    expect(syncEngine.destroy).toHaveBeenCalledTimes(1)
   })
 
   it('calls queryClient.clear', async () => {

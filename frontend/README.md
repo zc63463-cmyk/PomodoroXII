@@ -184,7 +184,7 @@ frontend/
 
 ## 测试
 
-测试使用 Vitest + jsdom + fake-indexeddb（**86 tests**）：
+测试使用 Vitest + jsdom + fake-indexeddb（**~213 tests**）：
 - `vitest.setup.ts` 固定时区为 UTC，安装 fake-indexeddb 使 Dexie 在 jsdom 下正常工作
 - 测试文件与源文件同目录，命名 `*.test.ts` / `*.test.tsx`
 - 覆盖：Dexie schema、platform 常量、token storage、API client、route guard、17 store reset、stores/index、ui-store、space-store 事件派发、SpaceSwitchProvider、performLogout、useSync
@@ -195,9 +195,25 @@ frontend/
 |----|------|----------|
 | `Note.content` 字段 | `types/index.ts` 中 `Note.content: string` 仍保留全文；后端 Phase D 已 metadata/content 分离 | S3 notes 前对齐 `CachedNote` |
 | `OutboxEvent.entityType` 枚举 | 缺 10 个类型（report/reportTemplate/sessionEvent/sessionContext/cognitiveMark/tag/taskTag/taskRelation/focusPattern/reflectionTemplate） | S1 Sync 重建 outbox 时扩展 |
-| Sync pull/push 实现 | syncEngineStub 仅有 destroy；sync-store 为 idle 空壳 | S1 |
+| ~~Sync pull/push 实现~~ | ✅ S1-4 已完成 RealSyncEngine + 冲突 UI + sonner toast | ✅ S1 |
 | 业务页真实数据加载 | 17 store actions 为 no-op stub | S2+ |
 | CI frontend workflow | GitHub Actions 尚无 frontend job | S1+ |
+
+## Sync 架构（S1）
+
+S1-4 已完成 RealSyncEngine 全链路接线：
+
+| 层 | 文件 | 职责 |
+|----|------|------|
+| 引擎 | `lib/sync/engine.ts` | runSyncCycle + 冲突解决 + Web Lock |
+| 协议 | `lib/sync/{merge,pull-loop,push-batch}.ts` | 合并/拉取/推送 |
+| 单例 | `lib/sync/index.ts` | syncEngine + bootstrapSyncEngine + wireSyncEngineToStore |
+| Store | `stores/sync-store.ts` | 委托 engine + DR-8 错误文案 |
+| Hook | `hooks/use-sync.ts` | selector 订阅 |
+| UI | `components/sync/conflict-panel.tsx` + `components/layout/sync-status-bar.tsx` | 冲突面板 + 状态栏 |
+| Toast | `lib/sync/toast.ts` | sonner 通知 |
+
+生命周期硬顺序（F1-D15）：SpaceSwitch destroy → clear → reset → bootstrapSyncEngine；SpaceBootstrap hydrate OK → bootstrapSyncEngine → setReady。
 
 ## 许可
 

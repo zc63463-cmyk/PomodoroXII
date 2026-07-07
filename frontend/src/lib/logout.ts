@@ -7,7 +7,7 @@
  */
 
 import { queryClient } from '@/lib/query-client'
-import { syncEngineStub as syncEngine } from '@/lib/sync/types'
+import { syncEngine } from '@/lib/sync'
 import { useAuthStore } from '@/stores/auth-store'
 import { useSpaceStore } from '@/stores/space-store'
 import { useBootstrapStore } from '@/lib/bootstrap-store'
