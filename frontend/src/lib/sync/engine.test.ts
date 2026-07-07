@@ -738,4 +738,103 @@ describe('RealSyncEngine', () => {
     expect(engine.getStatus()).toBe('idle')
     engine.destroy()
   })
+
+  // ===== 组 I：onSyncComplete 回调（EN21, EN22, EN23 — S1-4.1）=====
+
+  it('EN21: sync 成功 → onSyncComplete 回调 1 次；回调内 status=idle + lastSyncedAt 非空', async () => {
+    db = await openTestDb()
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+
+    let syncCompleteCount = 0
+    let statusAtCallback: string | null = null
+    let lastSyncedAtCallback: string | null = null
+    const off = engine.onSyncComplete(() => {
+      syncCompleteCount++
+      statusAtCallback = engine.getStatus()
+      lastSyncedAtCallback = engine.getLastSyncedAt()
+    })
+
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      if (url.includes('/sync/full') || url.includes('/sync/pull')) {
+        return ok(singlePageData(), config)
+      }
+      if (url.includes('/sync/push')) {
+        return ok(emptyPushResponse(), config)
+      }
+      return errResponse(404, config)
+    }
+
+    await engine.sync()
+
+    expect(syncCompleteCount).toBe(1)
+    expect(statusAtCallback).toBe('idle')
+    expect(lastSyncedAtCallback).not.toBeNull()
+
+    off()
+    engine.destroy()
+  })
+
+  it('EN22: sync 5xx → onSyncComplete 1 次；status=infra-error', async () => {
+    db = await openTestDb()
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+
+    let syncCompleteCount = 0
+    let statusAtCallback: string | null = null
+    engine.onSyncComplete(() => {
+      syncCompleteCount++
+      statusAtCallback = engine.getStatus()
+    })
+
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      throw {
+        response: {
+          status: 500,
+          statusText: 'Internal Server Error',
+          data: { detail: 'Internal Server Error' },
+          headers: {},
+          config,
+        },
+        message: 'Request failed with status code 500',
+        config,
+        isAxiosError: true,
+        name: 'AxiosError',
+      }
+    }
+
+    await engine.sync()
+
+    expect(syncCompleteCount).toBe(1)
+    expect(statusAtCallback).toBe('infra-error')
+
+    engine.destroy()
+  })
+
+  it('EN23: 加 onSyncComplete 后 onPullComplete 仍 1 次（DR-10 回归）', async () => {
+    db = await openTestDb()
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+
+    let pullCallCount = 0
+    let syncCompleteCount = 0
+    engine.onPullComplete(() => pullCallCount++)
+    engine.onSyncComplete(() => syncCompleteCount++)
+
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      if (url.includes('/sync/full')) return ok(page1Data(), config)
+      if (url.includes('/sync/pull')) return ok(page2Data(), config)
+      if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
+      return errResponse(404, config)
+    }
+
+    await engine.sync()
+
+    expect(pullCallCount).toBe(1) // DR-10：不因 onSyncComplete 破坏
+    expect(syncCompleteCount).toBe(1)
+
+    engine.destroy()
+  })
 })

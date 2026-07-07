@@ -201,19 +201,20 @@ frontend/
 
 ## Sync 架构（S1）
 
-S1-4 已完成 RealSyncEngine 全链路接线：
+S1-4 已完成 RealSyncEngine 全链路接线；S1-4.1 修复 sync 终态传播（onSyncComplete 周期末触发，单一真相源 applyEngineStateToStore）：
 
 | 层 | 文件 | 职责 |
 |----|------|------|
-| 引擎 | `lib/sync/engine.ts` | runSyncCycle + 冲突解决 + Web Lock |
+| 引擎 | `lib/sync/engine.ts` | runSyncCycle + 冲突解决 + Web Lock + onSyncComplete |
 | 协议 | `lib/sync/{merge,pull-loop,push-batch}.ts` | 合并/拉取/推送 |
-| 单例 | `lib/sync/index.ts` | syncEngine + bootstrapSyncEngine + wireSyncEngineToStore |
-| Store | `stores/sync-store.ts` | 委托 engine + DR-8 错误文案 |
+| 单例 | `lib/sync/index.ts` | syncEngine + bootstrapSyncEngine + wireSyncEngineToStore + applyEngineStateToStore |
+| Store | `stores/sync-store.ts` | 委托 engine + applyEngineStateToStore |
 | Hook | `hooks/use-sync.ts` | selector 订阅 |
-| UI | `components/sync/conflict-panel.tsx` + `components/layout/sync-status-bar.tsx` | 冲突面板 + 状态栏 |
+| UI | `components/sync/conflict-panel.tsx` + `components/layout/sync-status-bar.tsx` | 冲突面板 + 可点击状态栏 |
 | Toast | `lib/sync/toast.ts` | sonner 通知 |
 
 生命周期硬顺序（F1-D15）：SpaceSwitch destroy → clear → reset → bootstrapSyncEngine；SpaceBootstrap hydrate OK → bootstrapSyncEngine → setReady。
+S1-4.1：onSyncComplete 在每 sync 周期末（success | error）触发 1 次，wire 通过 applyEngineStateToStore 写终态；onPullComplete 仅 invalidateQueries（F1 §6.4）。
 
 ## 许可
 

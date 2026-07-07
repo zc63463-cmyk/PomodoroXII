@@ -28,6 +28,8 @@ export interface SyncEngine {
   onPullComplete?(cb: () => void): () => void
   onPushComplete?(cb: () => void): () => void
   onConflict?(cb: (conflicts: SyncConflict[]) => void): () => void
+  /** S1-4.1：sync 周期终态（success | error | conflict），每周期恰好 1 次 */
+  onSyncComplete?(cb: () => void): () => void
 }
 
 /** S1-4 前 no-op stub（logout/on-space-switch 仅调 destroy） */
@@ -56,6 +58,9 @@ export const syncEngineStub: SyncEngine = {
     return () => {}
   },
   onConflict() {
+    return () => {}
+  },
+  onSyncComplete() {
     return () => {}
   },
 }

@@ -18,7 +18,26 @@ export let syncEngine: SyncEngine = syncEngineStub
 export { syncEngineStub } from './types'
 export type { SyncEngine, SyncConflict, SyncStatus, SyncOp } from './types'
 
-/** 引擎事件 → sync-store 状态 + Query invalidate（F1 §6.3b / F1-D6b） */
+/**
+ * DR-8：engine 终态 → sync-store（S1-4.1 单一真相源）。
+ *
+ * 由 wireSyncEngineToStore 的 onSyncComplete 回调与 sync-store.triggerSync/
+ * resolveConflict 共用，避免重复内联 DR-8 文案映射。
+ */
+export function applyEngineStateToStore(engine: SyncEngine): void {
+  const status = engine.getStatus()
+  useSyncStore.setState({
+    status,
+    lastSyncedAt: engine.getLastSyncedAt(),
+    pendingCount: engine.getPendingCount(),
+    conflicts: engine.getConflicts(),
+    error:
+      status === 'infra-error' ? '网络异常，同步暂停' :
+      status === 'error' ? '同步出错' : null,
+  })
+}
+
+/** 引擎事件 → sync-store 状态 + Query invalidate（F1 §6.3b / S1-4.1 重构） */
 export function wireSyncEngineToStore(
   engine: RealSyncEngine,
   spaceId: string,
@@ -27,13 +46,7 @@ export function wireSyncEngineToStore(
   useSyncStore.setState({ pendingCount: engine.getPendingCount() })
 
   engine.onPullComplete(() => {
-    useSyncStore.setState({
-      status: engine.getStatus(),
-      lastSyncedAt: engine.getLastSyncedAt(),
-      pendingCount: engine.getPendingCount(),
-      conflicts: engine.getConflicts(),
-      error: null,
-    })
+    // F1 §6.4：pull 后仅 invalidate，不写终态（终态由 onSyncComplete 统一处理）
     queryClient.invalidateQueries({ queryKey: ['pxii', spaceId] })
   })
 
@@ -43,6 +56,11 @@ export function wireSyncEngineToStore(
 
   engine.onConflict((conflicts) => {
     useSyncStore.setState({ status: 'conflict', conflicts })
+  })
+
+  engine.onSyncComplete(() => {
+    // S1-4.1：周期末单一真相源 — 终态由 onSyncComplete 写
+    applyEngineStateToStore(engine)
   })
 }
 
