@@ -14,11 +14,12 @@ import { render } from '@testing-library/react'
 import { SpaceSwitchProvider } from '@/lib/on-space-switch'
 import { PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
 
-// Mock syncEngine
-vi.mock('@/lib/sync/types', () => ({
-  syncEngineStub: {
+// Mock syncEngine + bootstrapSyncEngine
+vi.mock('@/lib/sync', () => ({
+  syncEngine: {
     destroy: vi.fn(),
   },
+  bootstrapSyncEngine: vi.fn(),
 }))
 
 // Mock queryClient
@@ -29,7 +30,7 @@ vi.mock('@/lib/query-client', () => ({
 }))
 
 // Import after mocks
-import { syncEngineStub } from '@/lib/sync/types'
+import { syncEngine, bootstrapSyncEngine } from '@/lib/sync'
 import { queryClient } from '@/lib/query-client'
 import { useSyncStore } from '@/stores/sync-store'
 import { useTimerStore } from '@/stores/timer-store'
@@ -50,7 +51,7 @@ describe('SpaceSwitchProvider', () => {
   it('dispatching pxii:space-switched calls syncEngine.destroy', () => {
     render(createElement(SpaceSwitchProvider, null, 'test'))
     window.dispatchEvent(new CustomEvent(PXII_SPACE_SWITCHED_EVENT))
-    expect(syncEngineStub.destroy).toHaveBeenCalledTimes(1)
+    expect(syncEngine.destroy).toHaveBeenCalledTimes(1)
   })
 
   it('dispatching pxii:space-switched calls queryClient.clear', () => {
@@ -85,5 +86,12 @@ describe('SpaceSwitchProvider', () => {
 
     expect(useAuthStore.getState().masterToken).toBe('test-token')
     expect(useSpaceStore.getState().currentSpaceId).toBe('space-1')
+  })
+
+  it('dispatching pxii:space-switched calls bootstrapSyncEngine with currentSpaceId', () => {
+    useSpaceStore.setState({ currentSpaceId: 'space-1' })
+    render(createElement(SpaceSwitchProvider, null, 'test'))
+    window.dispatchEvent(new CustomEvent(PXII_SPACE_SWITCHED_EVENT))
+    expect(bootstrapSyncEngine).toHaveBeenCalledWith('space-1')
   })
 })
