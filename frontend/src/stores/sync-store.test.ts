@@ -74,23 +74,29 @@ describe('sync-store', () => {
     expect(useSyncStore.getState().error).toBe('network')
   })
 
-  it('SS5: resolveConflict 委托 engine 并更新 conflicts/pendingCount', async () => {
+  it('SS5: resolveConflict 委托 engine（store 由 wire onSyncComplete 更新）', async () => {
     mockSyncEngine.getConflicts.mockReturnValue([])
     mockSyncEngine.getPendingCount.mockReturnValue(0)
     mockSyncEngine.getStatus.mockReturnValue('idle')
 
     await useSyncStore.getState().resolveConflict(42, 'accept-remote')
 
+    // S1-4.2：仅断言委托；store 状态更新由 EN27 + wire 覆盖
     expect(mockSyncEngine.resolveConflict).toHaveBeenCalledWith(42, 'accept-remote')
-    expect(useSyncStore.getState().conflicts).toEqual([])
-    expect(useSyncStore.getState().pendingCount).toBe(0)
   })
 
-  it('SS6: triggerSync error → store.error="同步出错"（经 applyEngineStateToStore）', async () => {
-    mockSyncEngine.getStatus.mockReturnValue('error')
+  it('SS7: sync 早退（offline/isSyncing）→ triggerSync 末尾 apply 兜底；store 非 syncing', async () => {
+    // mock sync 立即 resolve（模拟早退，不调 onSyncComplete）
+    // getStatus 仍 'idle' → 末尾 applyEngineStateToStore 写 idle
+    mockSyncEngine.sync.mockResolvedValueOnce(undefined)
+    mockSyncEngine.getStatus.mockReturnValue('idle')
+    mockSyncEngine.getLastSyncedAt.mockReturnValue(null)
+    mockSyncEngine.getPendingCount.mockReturnValue(0)
+
     await useSyncStore.getState().triggerSync()
+
+    // 关键：triggerSync 先 set 'syncing'，末尾 apply 必须覆盖回 idle
+    expect(useSyncStore.getState().status).toBe('idle')
     expect(mockSyncEngine.sync).toHaveBeenCalledTimes(1)
-    expect(useSyncStore.getState().status).toBe('error')
-    expect(useSyncStore.getState().error).toBe('同步出错')
   })
 })

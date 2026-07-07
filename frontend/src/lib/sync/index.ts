@@ -1,10 +1,12 @@
 /**
- * Sync 模块聚合 — 单例 + bootstrap + wire（F1 §6.3b / §7.1 ⑥）。
+ * Sync 模块聚合 — 单例 + bootstrap + wire（F1 §6.3b / §7.1 ⑥ / S1-4.1 / S1-4.2）。
  *
  * - syncEngine: 可变单例；bootstrap 时替换引用（F1-D15，ES live binding）
  * - bootstrapSyncEngine: 创建/替换 RealSyncEngine，调用方为 SpaceSwitchProvider ④ 之后
  *   或 SpaceBootstrap hydrate 成功之后
- * - wireSyncEngineToStore: 注册 onPull/onPush/onConflict 回调到 sync-store + Query invalidate
+ * - wireSyncEngineToStore: onPullComplete(invalidate) / onPushComplete / onConflict /
+ *   onSyncComplete(applyEngineStateToStore)
+ * - applyEngineStateToStore: DR-8 单一真相源（wire onSyncComplete 与 triggerSync 早退兜底共用）
  */
 
 import { queryClient } from '@/lib/query-client'

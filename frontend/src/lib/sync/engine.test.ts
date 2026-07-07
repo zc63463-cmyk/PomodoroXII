@@ -837,4 +837,47 @@ describe('RealSyncEngine', () => {
 
     engine.destroy()
   })
+
+  // ===== 组 J：resolveConflict onSyncComplete（EN27 — S1-4.2）=====
+
+  it('EN27: resolveConflict 清空冲突 → onSyncComplete 1 次；回调内 status=idle', async () => {
+    db = await openTestDb()
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+
+    const outboxId = await db.outbox.add({
+      entityType: 'task',
+      entityId: 't1',
+      action: 'update',
+      payload: '{}',
+      createdAt: Date.now(),
+      synced: false,
+    } as never)
+
+    // 注入冲突 + 手动设 status='conflict'
+    const internal = engine as unknown as {
+      conflicts: unknown[]
+      setStatus: (s: string) => void
+    }
+    internal.conflicts = [{
+      outboxId, entityType: 'task', entityId: 't1',
+      localVersion: {}, remoteVersion: {}, conflictType: 'version',
+    }]
+    internal.setStatus('conflict')
+
+    let syncCompleteCount = 0
+    let statusAtCallback: string | null = null
+    engine.onSyncComplete(() => {
+      syncCompleteCount++
+      statusAtCallback = engine.getStatus()
+    })
+
+    await engine.resolveConflict(outboxId, 'accept-remote')
+
+    expect(syncCompleteCount).toBe(1) // S142-1：resolve 也走 onSyncComplete
+    expect(statusAtCallback).toBe('idle')
+    expect(engine.getConflicts().length).toBe(0)
+
+    engine.destroy()
+  })
 })
