@@ -4,7 +4,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import type { QuickNote } from '@/types'
 
-type QuickNotePendingAction = 'delete' | 'pin' | 'restore' | 'purge'
+type QuickNotePendingAction = 'delete' | 'pin' | 'restore' | 'purge' | 'migrate'
 
 interface UseQuickNoteItemActionsOptions {
   quickNotes: QuickNote[]
@@ -14,6 +14,7 @@ interface UseQuickNoteItemActionsOptions {
   restoreQuickNote: (id: string) => Promise<void>
   purgeQuickNote: (id: string) => Promise<void>
   togglePin: (id: string) => Promise<void>
+  migrateToNote: (id: string) => Promise<string>
   describeQuickNoteError: (error: unknown, fallback: string) => string
 }
 
@@ -25,6 +26,7 @@ export function useQuickNoteItemActions({
   restoreQuickNote,
   purgeQuickNote,
   togglePin,
+  migrateToNote,
   describeQuickNoteError,
 }: UseQuickNoteItemActionsOptions) {
   const [pendingById, setPendingById] = useState<Record<string, QuickNotePendingAction>>({})
@@ -119,11 +121,33 @@ export function useQuickNoteItemActions({
     [describeQuickNoteError, pendingById, togglePin],
   )
 
+  const migrateToNoteWithPending = useCallback(
+    async (id: string) => {
+      if (pendingById[id]) return
+      try {
+        setPendingById((current) => ({ ...current, [id]: 'migrate' }))
+        const noteId = await migrateToNote(id)
+        if (editingId === id) cancelEdit()
+        toast('小记已转为笔记', {
+          description: `笔记 ID：${noteId}`,
+        })
+      } catch (error) {
+        toast.error('小记转为笔记失败', {
+          description: describeQuickNoteError(error, '请稍后重试'),
+        })
+      } finally {
+        setPendingById((current) => clearPending(current, id))
+      }
+    },
+    [cancelEdit, describeQuickNoteError, editingId, migrateToNote, pendingById],
+  )
+
   const timelinePendingById = useMemo(() => filterTimelinePending(pendingById), [pendingById])
   const trashPendingById = useMemo(() => filterTrashPending(pendingById), [pendingById])
 
   return {
     moveToTrashWithUndo,
+    migrateToNoteWithPending,
     purgeFromTrash,
     restoreFromTrash,
     timelinePendingById,
@@ -140,10 +164,10 @@ function clearPending<T extends Record<string, unknown>>(pending: T, id: string)
 
 function filterTimelinePending(
   pending: Record<string, QuickNotePendingAction>,
-): Record<string, 'delete' | 'pin'> {
+): Record<string, 'delete' | 'pin' | 'migrate'> {
   return Object.fromEntries(
-    Object.entries(pending).filter((entry): entry is [string, 'delete' | 'pin'] =>
-      entry[1] === 'delete' || entry[1] === 'pin',
+    Object.entries(pending).filter((entry): entry is [string, 'delete' | 'pin' | 'migrate'] =>
+      entry[1] === 'delete' || entry[1] === 'pin' || entry[1] === 'migrate',
     ),
   )
 }

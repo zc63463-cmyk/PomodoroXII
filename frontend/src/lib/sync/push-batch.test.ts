@@ -226,6 +226,43 @@ describe('push-batch', () => {
 
     expect(await db.outbox.count()).toBe(1)
     expect(result.retriableErrorCount).toBe(1)
+    const row = await db.outbox.get(1)
+    expect(row).toMatchObject({
+      lastError: 'something_failed',
+      lastErrorCode: 'push_error',
+      attemptCount: 1,
+    })
+    expect(row!.failedAt).toEqual(expect.any(String))
+  })
+
+  it('PB7-QN: generic quickNote push error marks only the matching outbox event failed', async () => {
+    db = await openTestDb()
+    await db.outbox.bulkPut([
+      makeOutboxRow(31, 'quickNote', 'failed-qn', 'update', { id: 'failed-qn', content: 'A' }),
+      makeOutboxRow(32, 'quickNote', 'pending-qn', 'update', { id: 'pending-qn', content: 'B' }),
+    ])
+
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      return ok({
+        applied: [],
+        conflicts: [],
+        errors: [{ entity_type: 'quickNote', entity_id: 'failed-qn', error: 'quick_note_rejected' }],
+        server_time: '2026-07-06T12:00:00.000Z',
+      }, config)
+    }
+
+    const rows = await db.outbox.toArray()
+    const result = await pushBatch(db, spaceApi, rows)
+    const failed = await db.outbox.get(31)
+    const pending = await db.outbox.get(32)
+
+    expect(result.retriableErrorCount).toBe(1)
+    expect(failed).toMatchObject({
+      lastError: 'quick_note_rejected',
+      lastErrorCode: 'push_error',
+      attemptCount: 1,
+    })
+    expect(pending!.lastError).toBeUndefined()
   })
 
   it('PB8: 150 行 → pushAllPending 调 2 次 POST 且 outbox 清空', async () => {
@@ -290,6 +327,12 @@ describe('push-batch', () => {
     expect(result.conflicts[0]!.entityType).toBe('task')
     expect(result.conflicts[0]!.entityId).toBe('t1')
     expect(await db.outbox.count()).toBe(1)
+    const row = await db.outbox.get(1)
+    expect(row).toMatchObject({
+      lastError: 'version_mismatch',
+      lastErrorCode: 'version_mismatch',
+      attemptCount: 1,
+    })
   })
 
   it('PB10: 空 outbox → pushAllPending no-op', async () => {

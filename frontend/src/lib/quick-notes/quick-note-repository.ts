@@ -1,5 +1,5 @@
 import { db } from '@/services/space-db'
-import type { CachedQuickNote, QuickNote } from '@/types'
+import type { CachedNote, CachedQuickNote, QuickNote } from '@/types'
 import {
   isActiveQuickNote,
   isConvertedQuickNote,
@@ -100,6 +100,11 @@ export interface QuickNoteMutationContext {
   payload: QuickNote | { id: string }
 }
 
+export interface QuickNoteConvertResult {
+  noteId: string
+  quickNoteId: string
+}
+
 export type QuickNoteSyncStatus = 'pending' | 'failed'
 
 export type QuickNoteLifecycleState =
@@ -148,11 +153,19 @@ export async function listQuickNoteSyncStates(): Promise<
   const pendingOutbox = await db.outbox
     .filter((event) => event.entityType === 'quickNote' && !event.synced)
     .toArray()
+  const failedIds = new Set(
+    pendingOutbox
+      .filter((event) => event.lastError || event.failedAt)
+      .map((event) => event.entityId),
+  )
 
   for (const event of pendingOutbox) pendingIds.add(event.entityId)
 
   return Object.fromEntries(
-    Array.from(pendingIds).map((id) => [id, 'pending' as const]),
+    Array.from(pendingIds).map((id) => [
+      id,
+      failedIds.has(id) ? 'failed' as const : 'pending' as const,
+    ]),
   )
 }
 
@@ -281,6 +294,58 @@ export async function purgeQuickNote(id: string): Promise<void> {
   })
 }
 
+export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConvertResult> {
+  return db.transaction('rw', db.quickNotes, db.notes, db.outbox, async () => {
+    const existing = await getExistingQuickNote(id)
+    const source = stripSyncFields(existing)
+    assertActiveForConvert(source)
+
+    const now = new Date().toISOString()
+    const noteId = crypto.randomUUID()
+    const note: CachedNote = {
+      id: noteId,
+      title: getConversionTitle(source),
+      content: source.content,
+      summary: getConversionSummary(source.content),
+      tags: source.tags,
+      category: null,
+      folder_id: source.folder_id,
+      status: 'active',
+      trashed_at: null,
+      created_at: now,
+      updated_at: now,
+      content_hash: undefined,
+      deletion_state: 'active',
+      version: 1,
+      _dirty: true,
+    }
+    const convertedRow: CachedQuickNote = {
+      ...existing,
+      archived_at: now,
+      migrated_to_note_id: noteId,
+      updated_at: now,
+      deletion_state: 'active',
+      version: (existing.version ?? 1) + 1,
+      _dirty: true,
+    }
+
+    await db.notes.put(note)
+    await db.quickNotes.put(convertedRow)
+
+    await enqueueOutbox(db, 'note', noteId, 'create', stripNoteSyncFields(note))
+    if (quickNoteOutboxHook) {
+      await quickNoteOutboxHook({
+        entityType: 'quickNote',
+        entityId: id,
+        action: 'update',
+        payload: stripSyncFields(convertedRow),
+      })
+    }
+
+    return { noteId, quickNoteId: id }
+  })
+}
+
 async function runQuickNoteMutation<T>(
   context: Omit<QuickNoteMutationContext, 'entityType' | 'payload'> & {
     payload?: QuickNote | { id: string }
@@ -334,6 +399,15 @@ function normalizeQuickNoteMutationResult<T>(
 }
 
 export function stripSyncFields(row: CachedQuickNote): QuickNote {
+  const { content_hash, deletion_state, version, _dirty, ...note } = row
+  void content_hash
+  void deletion_state
+  void version
+  void _dirty
+  return note
+}
+
+function stripNoteSyncFields(row: CachedNote) {
   const { content_hash, deletion_state, version, _dirty, ...note } = row
   void content_hash
   void deletion_state
@@ -417,6 +491,15 @@ function assertActiveForTrash(note: QuickNote): void {
   }
 }
 
+function assertActiveForConvert(note: QuickNote): void {
+  if (isConvertedQuickNote(note)) {
+    throw new QuickNoteRepositoryError('converted', 'QuickNote convert rejected because the row is already converted')
+  }
+  if (!isActiveQuickNote(note)) {
+    throw new QuickNoteRepositoryError('not_active', 'QuickNote convert rejected because the row is not active')
+  }
+}
+
 function assertTrashedForRestore(note: QuickNote): void {
   if (isConvertedQuickNote(note)) {
     throw new QuickNoteRepositoryError('converted', 'QuickNote restore rejected because the row is converted')
@@ -433,4 +516,24 @@ function assertTrashedForPurge(note: QuickNote): void {
   if (!isTrashedQuickNote(note)) {
     throw new QuickNoteRepositoryError('not_trashed', 'QuickNote purge rejected because the row is not trashed')
   }
+}
+
+function getConversionTitle(note: QuickNote): string {
+  const title = note.content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean)
+
+  return title?.slice(0, 80) ?? '无标题小记'
+}
+
+function getConversionSummary(content: string): string {
+  return content
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .join('\n')
+    .slice(0, 280)
 }

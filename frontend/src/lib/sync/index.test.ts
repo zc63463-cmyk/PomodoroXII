@@ -44,9 +44,7 @@ vi.mock('@/stores/sync-store', () => ({
 }))
 
 const mockRefreshQuickNotesFromRepository = vi.fn().mockResolvedValue(undefined)
-const mockConfigureQuickNoteSyncFailureReader = vi.fn()
 vi.mock('@/stores/quick-note-store', () => ({
-  configureQuickNoteSyncFailureReader: mockConfigureQuickNoteSyncFailureReader,
   useQuickNoteStore: {
     getState: () => ({
       refreshQuickNotesFromRepository: mockRefreshQuickNotesFromRepository,

@@ -1,20 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { db, spaceDBManager } from '@/services/space-db'
-import {
-  configureQuickNoteSyncFailureReader,
-  resetQuickNoteSyncFailureReader,
-  useQuickNoteStore,
-} from '@/stores/quick-note-store'
+import { useQuickNoteStore } from '@/stores/quick-note-store'
 
 describe('useQuickNoteStore', () => {
   beforeEach(async () => {
-    resetQuickNoteSyncFailureReader()
     useQuickNoteStore.getState().reset()
     await spaceDBManager.switchTo(`quick-note-store-${crypto.randomUUID()}`)
   })
 
   afterEach(async () => {
-    resetQuickNoteSyncFailureReader()
     useQuickNoteStore.getState().reset()
     await db.delete()
     spaceDBManager.close()
@@ -86,31 +80,57 @@ describe('useQuickNoteStore', () => {
     expect(useQuickNoteStore.getState().isLoading).toBe(false)
   })
 
-  it('derives pending and failed sync status from dirty rows and outbox', async () => {
+  it('derives pending and failed sync status from dirty rows and outbox events', async () => {
     const note = await useQuickNoteStore.getState().createQuickNote({
       id: 'sync-status',
       content: 'pending sync memo',
     })
+    const other = await useQuickNoteStore.getState().createQuickNote({
+      id: 'sync-status-other',
+      content: 'another pending sync memo',
+    })
 
     expect(useQuickNoteStore.getState().syncStatusById[note.id]).toBe('pending')
+    expect(useQuickNoteStore.getState().syncStatusById[other.id]).toBe('pending')
+
+    const failedOutbox = await db.outbox
+      .where('entityId')
+      .equals(note.id)
+      .first()
+    await db.outbox.update(failedOutbox!.id!, {
+      lastError: 'server_rejected_quick_note',
+      lastErrorCode: 'push_error',
+      failedAt: '2026-07-07T13:10:00.000Z',
+      attemptCount: 1,
+    })
+    await useQuickNoteStore.getState().refreshQuickNotesFromRepository()
+
+    expect(useQuickNoteStore.getState().syncStatusById[note.id]).toBe('failed')
+    expect(useQuickNoteStore.getState().syncStatusById[other.id]).toBe('pending')
 
     await db.outbox.clear()
     await db.quickNotes.update(note.id, { _dirty: false })
+    await db.quickNotes.update(other.id, { _dirty: false })
     await useQuickNoteStore.getState().refreshQuickNotesFromRepository()
 
     expect(useQuickNoteStore.getState().syncStatusById[note.id]).toBeUndefined()
-
-    configureQuickNoteSyncFailureReader(() => true)
-    await useQuickNoteStore.getState().updateQuickNote(note.id, {
-      content: 'pending failed memo',
-    })
-
-    expect(useQuickNoteStore.getState().syncStatusById[note.id]).toBe('failed')
+    expect(useQuickNoteStore.getState().syncStatusById[other.id]).toBeUndefined()
   })
 
-  it('rejects migrateToNote until conversion is implemented', async () => {
-    await expect(
-      useQuickNoteStore.getState().migrateToNote('quick-note-id'),
-    ).rejects.toThrow('QuickNote migrateToNote is not implemented in the local MVP')
+  it('migrates a quick note to a note and refreshes visible lifecycle state', async () => {
+    const note = await useQuickNoteStore.getState().createQuickNote({
+      id: 'store-convert',
+      content: 'Store convert\nbody',
+    })
+    await db.outbox.clear()
+
+    const noteId = await useQuickNoteStore.getState().migrateToNote(note.id)
+
+    expect(await db.notes.get(noteId)).toMatchObject({
+      title: 'Store convert',
+      content: 'Store convert\nbody',
+    })
+    expect(useQuickNoteStore.getState().quickNotes.map((item) => item.id)).not.toContain(note.id)
+    expect(useQuickNoteStore.getState().lifecycleStateById[note.id]).toBe('converted')
   })
 })
