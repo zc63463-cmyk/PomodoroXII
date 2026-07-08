@@ -33,15 +33,17 @@ export function useQuickNoteItemActions({
 
   const restoreFromTrash = useCallback(
     async (id: string, opts: { silent?: boolean } = {}) => {
-      if (pendingById[id]) return
+      if (pendingById[id]) return false
       try {
         setPendingById((current) => ({ ...current, [id]: 'restore' }))
         await restoreQuickNote(id)
         if (!opts.silent) toast('小记已恢复')
+        return true
       } catch (error) {
         toast.error('小记恢复失败', {
           description: describeQuickNoteError(error, '请稍后重试'),
         })
+        return false
       } finally {
         setPendingById((current) => clearPending(current, id))
       }
@@ -51,7 +53,7 @@ export function useQuickNoteItemActions({
 
   const moveToTrashWithUndo = useCallback(
     async (id: string) => {
-      if (pendingById[id]) return
+      if (pendingById[id]) return false
       const note = quickNotes.find((item) => item.id === id)
       try {
         setPendingById((current) => ({ ...current, [id]: 'delete' }))
@@ -64,10 +66,12 @@ export function useQuickNoteItemActions({
             onClick: () => void restoreFromTrash(id, { silent: true }),
           },
         })
+        return true
       } catch (error) {
         toast.error('小记删除失败', {
           description: describeQuickNoteError(error, '请稍后重试'),
         })
+        return false
       } finally {
         setPendingById((current) => clearPending(current, id))
       }
@@ -106,14 +110,16 @@ export function useQuickNoteItemActions({
 
   const togglePinWithPending = useCallback(
     async (id: string) => {
-      if (pendingById[id]) return
+      if (pendingById[id]) return false
       try {
         setPendingById((current) => ({ ...current, [id]: 'pin' }))
         await togglePin(id)
+        return true
       } catch (error) {
         toast.error('小记置顶更新失败', {
           description: describeQuickNoteError(error, '请稍后重试'),
         })
+        return false
       } finally {
         setPendingById((current) => clearPending(current, id))
       }
@@ -123,7 +129,7 @@ export function useQuickNoteItemActions({
 
   const migrateToNoteWithPending = useCallback(
     async (id: string) => {
-      if (pendingById[id]) return
+      if (pendingById[id]) return false
       try {
         setPendingById((current) => ({ ...current, [id]: 'migrate' }))
         const noteId = await migrateToNote(id)
@@ -131,10 +137,12 @@ export function useQuickNoteItemActions({
         toast('小记已转为笔记', {
           description: `笔记 ID：${noteId}`,
         })
+        return true
       } catch (error) {
         toast.error('小记转为笔记失败', {
           description: describeQuickNoteError(error, '请稍后重试'),
         })
+        return false
       } finally {
         setPendingById((current) => clearPending(current, id))
       }

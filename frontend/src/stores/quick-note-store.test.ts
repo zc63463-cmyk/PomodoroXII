@@ -56,6 +56,57 @@ describe('useQuickNoteStore', () => {
     expect(useQuickNoteStore.getState().trashedQuickNotes).toEqual([])
   })
 
+  it('switches focus modes and clears selection on exit/reset', () => {
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      focusMode: 'normal',
+      selectedQuickNoteId: null,
+    })
+
+    useQuickNoteStore.getState().toggleFocusEdit()
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      focusMode: 'focus-edit',
+      selectedQuickNoteId: null,
+    })
+
+    useQuickNoteStore.getState().toggleFocusEdit()
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      focusMode: 'normal',
+      selectedQuickNoteId: null,
+    })
+
+    useQuickNoteStore.getState().enterFocusRead('quick-note-a')
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      focusMode: 'focus-read',
+      selectedQuickNoteId: 'quick-note-a',
+    })
+
+    useQuickNoteStore.getState().enterDetailRead('quick-note-b')
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      focusMode: 'detail-read',
+      selectedQuickNoteId: 'quick-note-b',
+    })
+
+    useQuickNoteStore.getState().toggleFocusEdit()
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      focusMode: 'focus-edit',
+      selectedQuickNoteId: null,
+    })
+
+    useQuickNoteStore.getState().enterDetailRead('quick-note-c')
+    useQuickNoteStore.getState().exitFocus()
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      focusMode: 'normal',
+      selectedQuickNoteId: null,
+    })
+
+    useQuickNoteStore.getState().enterFocusRead('quick-note-d')
+    useQuickNoteStore.getState().reset()
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      focusMode: 'normal',
+      selectedQuickNoteId: null,
+    })
+  })
+
   it('silently refreshes after sync tombstones without hiding local trash', async () => {
     const active = await useQuickNoteStore.getState().createQuickNote({
       id: 'active-sync',

@@ -18,26 +18,36 @@ export function QuickNoteTimeline({
   isSearching,
   hasNotes,
   onEdit,
+  onOpenPreview,
+  onClosePreview,
+  onOpenDetail,
   onTogglePin,
   onDelete,
   onMigrate,
   onTagClick,
   pendingById,
+  selectedQuickNoteId,
   syncStatusById,
   searchQuery,
+  disabledInteractions = false,
 }: {
   groups: QuickNoteDateGroup[]
   isLoading: boolean
   isSearching: boolean
   hasNotes: boolean
   onEdit: (note: QuickNote) => void
+  onOpenPreview: (id: string) => void
+  onClosePreview: () => void
+  onOpenDetail: (id: string) => void
   onTogglePin: (id: string) => void
   onDelete: (id: string) => void
   onMigrate: (id: string) => void
   onTagClick: (tag: string) => void
   pendingById?: Record<string, 'delete' | 'pin' | 'migrate'>
+  selectedQuickNoteId?: string | null
   syncStatusById?: Record<string, QuickNoteSyncStatus>
   searchQuery: string
+  disabledInteractions?: boolean
 }) {
   return createElement(
     'section',
@@ -72,13 +82,18 @@ export function QuickNoteTimeline({
             key: note.id,
             note,
             onEdit,
+            onOpenPreview,
+            onClosePreview,
+            onOpenDetail,
             onTogglePin,
             onDelete,
             onMigrate,
             onTagClick,
             pendingAction: pendingById?.[note.id],
+            isExpanded: selectedQuickNoteId === note.id,
             syncStatus: syncStatusById?.[note.id],
             searchQuery,
+            disabledInteractions,
           }),
         ),
       ),

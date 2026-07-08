@@ -47,8 +47,30 @@ describe('quick-note theme smoke', () => {
 
     expect(styleClassNames).toContain('quick-notes-surface')
     expect(styleClassNames).toContain('var(--qn-')
+    expect(styleClassNames).toContain('quick-note-stage')
+    expect(styleClassNames).toContain('quick-note-motion-panel')
+    expect(styleClassNames).toContain('quick-note-timeline-dimmed')
     expect(styleClassNames).not.toMatch(/text-(white|black|slate|gray|zinc|neutral)-\d+/)
     expect(styleClassNames).not.toMatch(/bg-(slate|gray|zinc|neutral|blue|purple)-\d+/)
+  })
+
+  it('defines restrained QuickNote motion primitives with reduced-motion fallback', () => {
+    for (const keyframeName of [
+      'qn-stage-enter',
+      'qn-stage-focus-edit',
+      'qn-stage-focus-read',
+      'qn-stage-detail-read',
+      'qn-panel-enter',
+      'qn-panel-slide-in',
+      'qn-inline-editor-enter',
+    ]) {
+      expect(globalsCss).toContain(`@keyframes ${keyframeName}`)
+    }
+
+    expect(globalsCss).toContain('.quick-note-stage')
+    expect(globalsCss).toContain('.quick-note-motion-panel')
+    expect(globalsCss).toContain('.quick-note-timeline-dimmed')
+    expect(globalsCss).toContain('@media (prefers-reduced-motion: reduce)')
   })
 })
 
