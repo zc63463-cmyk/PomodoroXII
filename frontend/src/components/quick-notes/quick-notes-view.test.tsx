@@ -6,6 +6,8 @@ import type { QuickNote } from '@/types'
 vi.mock('lucide-react', () => ({
   ArchiveRestoreIcon: () =>
     createElement('span', { 'data-testid': 'archive-restore-icon' }),
+  FileTextIcon: () => createElement('span', { 'data-testid': 'file-text-icon' }),
+  GitMergeIcon: () => createElement('span', { 'data-testid': 'merge-icon' }),
   PinIcon: () => createElement('span', { 'data-testid': 'pin-icon' }),
   PlusIcon: () => createElement('span', { 'data-testid': 'plus-icon' }),
   SearchIcon: () => createElement('span', { 'data-testid': 'search-icon' }),
@@ -76,6 +78,7 @@ const storeMocks = vi.hoisted(() => ({
   restoreQuickNote: vi.fn().mockResolvedValue(undefined),
   purgeQuickNote: vi.fn().mockResolvedValue(undefined),
   togglePin: vi.fn().mockResolvedValue(undefined),
+  migrateToNote: vi.fn().mockResolvedValue('note-converted'),
 }))
 
 vi.mock('@/stores/quick-note-store', () => ({
@@ -88,6 +91,7 @@ vi.mock('@/stores/quick-note-store', () => ({
     restoreQuickNote: storeMocks.restoreQuickNote,
     purgeQuickNote: storeMocks.purgeQuickNote,
     togglePin: storeMocks.togglePin,
+    migrateToNote: storeMocks.migrateToNote,
   }),
 }))
 
@@ -130,6 +134,7 @@ describe('QuickNotesView', () => {
     storeMocks.restoreQuickNote.mockClear()
     storeMocks.purgeQuickNote.mockClear()
     storeMocks.togglePin.mockClear()
+    storeMocks.migrateToNote.mockClear()
     previewMocks.ensureQuickNotePreviewSpace.mockReset()
     previewMocks.ensureQuickNotePreviewSpace.mockResolvedValue(undefined)
     repositoryMocks.getQuickNoteRepositoryUserMessage.mockClear()
@@ -928,7 +933,74 @@ describe('QuickNotesView', () => {
 
     expect(screen.getByLabelText('小记内容')).toHaveValue('我正在写的本地草稿')
     expect(screen.getByText(/未保存：远端更新前/)).toBeInTheDocument()
+    expect(screen.getByLabelText('小记远端更新冲突')).toBeInTheDocument()
+    expect(screen.getByText('本地草稿')).toBeInTheDocument()
+    expect(screen.getByText('远端版本')).toBeInTheDocument()
     expect(toastMock).toHaveBeenCalledWith('有远端更新，已保留你的本地草稿')
+  })
+
+  it('lets the editor adopt the remote version from the conflict panel', async () => {
+    const note = makeQuickNote({
+      id: 'remote-conflict-adopt',
+      content: '远端更新前',
+      updated_at: '2026-07-07T13:00:00.000Z',
+    })
+    storeMocks.state.quickNotes = [note]
+    storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
+    const { rerender } = render(createElement(QuickNotesView))
+
+    fireEvent.click(screen.getByRole('button', { name: /远端更新前/ }))
+    fireEvent.change(screen.getByLabelText('小记内容'), {
+      target: { value: '我正在写的本地草稿' },
+    })
+
+    storeMocks.state.quickNotes = [
+      {
+        ...note,
+        content: '远端已经改过',
+        updated_at: '2026-07-07T13:05:00.000Z',
+      },
+    ]
+    rerender(createElement(QuickNotesView))
+
+    fireEvent.click(screen.getByRole('button', { name: '采用远端版本' }))
+
+    expect(screen.getByLabelText('小记内容')).toHaveValue('远端已经改过')
+    expect(screen.queryByLabelText('小记远端更新冲突')).not.toBeInTheDocument()
+    expect(screen.getByText(/已保存：远端已经改过/)).toBeInTheDocument()
+  })
+
+  it('lets the editor merge the remote version into the local draft', async () => {
+    const note = makeQuickNote({
+      id: 'remote-conflict-merge',
+      content: '远端更新前',
+      updated_at: '2026-07-07T13:00:00.000Z',
+    })
+    storeMocks.state.quickNotes = [note]
+    storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
+    const { rerender } = render(createElement(QuickNotesView))
+
+    fireEvent.click(screen.getByRole('button', { name: /远端更新前/ }))
+    fireEvent.change(screen.getByLabelText('小记内容'), {
+      target: { value: '本地草稿内容' },
+    })
+
+    storeMocks.state.quickNotes = [
+      {
+        ...note,
+        content: '远端新内容',
+        updated_at: '2026-07-07T13:05:00.000Z',
+      },
+    ]
+    rerender(createElement(QuickNotesView))
+
+    fireEvent.click(screen.getByRole('button', { name: '合并到草稿' }))
+
+    expect(screen.getByLabelText('小记内容')).toHaveValue(
+      '本地草稿内容\n\n--- 远端版本 ---\n远端新内容',
+    )
+    expect(screen.queryByLabelText('小记远端更新冲突')).not.toBeInTheDocument()
+    expect(screen.getByText(/未保存：远端新内容/)).toBeInTheDocument()
   })
 
   it('adopts remote content when it changes before the local draft is edited', async () => {
@@ -1134,6 +1206,48 @@ describe('QuickNotesView', () => {
     await waitFor(() => {
       expect(toastMock.error).toHaveBeenCalledWith(
         '小记彻底删除失败',
+        expect.objectContaining({ description: '请稍后重试' }),
+      )
+    })
+  })
+
+  it('converts a quick note to a note from the card action', async () => {
+    storeMocks.state.quickNotes = [
+      makeQuickNote({
+        id: 'convert-card',
+        content: '转为笔记的小记',
+      }),
+    ]
+
+    render(createElement(QuickNotesView))
+
+    fireEvent.click(await screen.findByRole('button', { name: '转为笔记' }))
+
+    await waitFor(() => {
+      expect(storeMocks.migrateToNote).toHaveBeenCalledWith('convert-card')
+      expect(toastMock).toHaveBeenCalledWith(
+        '小记已转为笔记',
+        expect.objectContaining({ description: '笔记 ID：note-converted' }),
+      )
+    })
+  })
+
+  it('shows a failure toast when quick note conversion fails', async () => {
+    storeMocks.state.quickNotes = [
+      makeQuickNote({
+        id: 'convert-fail',
+        content: '转换失败小记',
+      }),
+    ]
+    storeMocks.migrateToNote.mockRejectedValueOnce(new Error('convert blocked'))
+
+    render(createElement(QuickNotesView))
+
+    fireEvent.click(await screen.findByRole('button', { name: '转为笔记' }))
+
+    await waitFor(() => {
+      expect(toastMock.error).toHaveBeenCalledWith(
+        '小记转为笔记失败',
         expect.objectContaining({ description: '请稍后重试' }),
       )
     })

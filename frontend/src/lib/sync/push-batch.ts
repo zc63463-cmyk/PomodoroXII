@@ -12,7 +12,7 @@
 import type { AxiosInstance } from 'axios'
 import type { PomodoroXIDB } from '@/services/database'
 import type { OutboxEvent } from '@/types'
-import { listUnsyncedOutbox, deleteOutboxByIds } from './outbox'
+import { listUnsyncedOutbox, deleteOutboxByIds, markOutboxEventsFailed } from './outbox'
 import {
   ENTITY_TYPE_TO_TABLE,
   type ApiSyncEvent,
@@ -42,6 +42,7 @@ async function handlePushResponse(
 ): Promise<HandlePushResult> {
   const clearIds: number[] = []
   const conflicts: SyncConflict[] = []
+  const failedOutboxEvents: Parameters<typeof markOutboxEventsFailed>[1] = []
   let remoteWinCount = 0
   let circularRefCount = 0
   let retriableErrorCount = 0
@@ -92,13 +93,20 @@ async function handlePushResponse(
 
   // 3. errors → 不清 outbox；检查需用户裁决（version_mismatch / content_hash_mismatch）
   for (const item of response.errors) {
+    const outboxRow = batch.find(
+      (b) => b.entityType === item.entity_type && b.entityId === item.entity_id,
+    )
+    if (outboxRow?.id != null) {
+      failedOutboxEvents.push({
+        outboxId: outboxRow.id,
+        error: item.error,
+      })
+    }
+
     if (
       item.error.includes('version_mismatch') ||
       item.error.includes('content_hash_mismatch')
     ) {
-      const outboxRow = batch.find(
-        (b) => b.entityType === item.entity_type && b.entityId === item.entity_id,
-      )
       conflicts.push({
         outboxId: outboxRow && outboxRow.id != null ? outboxRow.id : -1,
         entityType: item.entity_type,
@@ -112,7 +120,8 @@ async function handlePushResponse(
     }
   }
 
-  // 4. 清 outbox（applied + conflicts auto-clear）
+  // 4. 失败事件落库；清 outbox（applied + conflicts auto-clear）
+  await markOutboxEventsFailed(db, failedOutboxEvents)
   await deleteOutboxByIds(db, clearIds)
 
   return {

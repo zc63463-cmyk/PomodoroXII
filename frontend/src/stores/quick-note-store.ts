@@ -9,6 +9,7 @@ import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import {
   createQuickNote,
+  convertQuickNoteToNote,
   listQuickNoteLifecycleStates,
   listQuickNoteSyncStates,
   listQuickNotes,
@@ -23,20 +24,6 @@ import {
   type QuickNoteUpdateInput,
 } from '@/lib/quick-notes/quick-note-repository'
 import type { QuickNote } from '@/types'
-
-export type QuickNoteSyncFailureReader = () => boolean
-
-let readQuickNoteSyncFailed: QuickNoteSyncFailureReader = () => false
-
-export function configureQuickNoteSyncFailureReader(
-  reader: QuickNoteSyncFailureReader,
-): void {
-  readQuickNoteSyncFailed = reader
-}
-
-export function resetQuickNoteSyncFailureReader(): void {
-  readQuickNoteSyncFailed = () => false
-}
 
 interface QuickNoteState {
   quickNotes: QuickNote[]
@@ -79,19 +66,9 @@ async function refreshLists(query: string) {
   return {
     quickNotes,
     trashedQuickNotes,
-    syncStatusById: applyQuickNoteFailureStatus(syncStatusById),
+    syncStatusById,
     lifecycleStateById,
   }
-}
-
-function applyQuickNoteFailureStatus(
-  statuses: Record<string, QuickNoteSyncStatus>,
-): Record<string, QuickNoteSyncStatus> {
-  if (!readQuickNoteSyncFailed()) return statuses
-
-  return Object.fromEntries(
-    Object.keys(statuses).map((id) => [id, 'failed' as const]),
-  )
 }
 
 export const useQuickNoteStore = create<QuickNoteStore>()(
@@ -180,8 +157,11 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
         set({ ...lists, error: null })
       },
 
-      migrateToNote: async () => {
-        throw new Error('QuickNote migrateToNote is not implemented in the local MVP')
+      migrateToNote: async (id) => {
+        const result = await convertQuickNoteToNote(id)
+        const lists = await refreshLists(get().searchQuery)
+        set({ ...lists, error: null })
+        return result.noteId
       },
       reset: () =>
         set({
