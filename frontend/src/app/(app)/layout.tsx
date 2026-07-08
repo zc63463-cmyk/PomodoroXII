@@ -1,11 +1,15 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import { tokenStorage } from '@/lib/token-storage'
 import { useBootstrapStore } from '@/lib/bootstrap-store'
 import { resolveAppRouteGuard } from '@/lib/route-guard'
 import { AppShell } from '@/components/layout/app-shell'
+import {
+  isQuickNotePreviewEnabled,
+  isQuickNotePreviewRoute,
+} from '@/lib/quick-notes/quick-note-preview'
 
 /**
  * App layout — 2-state guard + /select-space exception (F0 §4.3).
@@ -31,8 +35,16 @@ export default function AppLayout({
   const router = useRouter()
   const pathname = usePathname()
   const phase = useBootstrapStore((s) => s.phase)
+  const [previewChecked, setPreviewChecked] = useState(false)
+  const [isQuickNotePreview, setIsQuickNotePreview] = useState(false)
 
   useEffect(() => {
+    const preview =
+      isQuickNotePreviewRoute(pathname) && isQuickNotePreviewEnabled()
+    setIsQuickNotePreview(preview)
+    setPreviewChecked(true)
+    if (preview) return
+
     const decision = resolveAppRouteGuard({
       pathname,
       masterToken: tokenStorage.getMasterToken(),
@@ -51,6 +63,9 @@ export default function AppLayout({
       // allow-select-space, allow-shell, wait → no redirect
     }
   }, [router, pathname, phase])
+
+  if (isQuickNotePreviewRoute(pathname) && !previewChecked) return <LoadingScreen />
+  if (isQuickNotePreview) return <>{children}</>
 
   const decision = resolveAppRouteGuard({
     pathname,

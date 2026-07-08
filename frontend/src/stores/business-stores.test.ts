@@ -208,18 +208,20 @@ describe('business stores reset', () => {
     expect(useSearchStore.getState().searchScope).toBe('all')
   })
 
-  it('trash-store reset restores trashedNotes, trashedQuickNotes, trashedFolders, isLoading', () => {
+  it('trash-store reset restores trashedNotes, trashedQuickNotes, trashedFolders, isLoading, error', () => {
     useTrashStore.setState({
       trashedNotes: [{ id: 'n1' } as never],
       trashedQuickNotes: [{ id: 'q1' } as never],
       trashedFolders: [{ id: 'f1' } as never],
       isLoading: true,
+      error: 'test',
     })
     useTrashStore.getState().reset()
     expect(useTrashStore.getState().trashedNotes).toEqual([])
     expect(useTrashStore.getState().trashedQuickNotes).toEqual([])
     expect(useTrashStore.getState().trashedFolders).toEqual([])
     expect(useTrashStore.getState().isLoading).toBe(false)
+    expect(useTrashStore.getState().error).toBeNull()
   })
 
   it('sync-store reset restores status, lastSyncedAt, pendingCount, error, conflicts', () => {

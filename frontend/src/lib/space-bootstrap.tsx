@@ -18,6 +18,10 @@ import { useSpaceStore } from '@/stores/space-store'
 import { useBootstrapStore } from '@/lib/bootstrap-store'
 import { tokenStorage } from '@/lib/token-storage'
 import { bootstrapSyncEngine } from '@/lib/sync'
+import {
+  isQuickNotePreviewEnabled,
+  isQuickNotePreviewRoute,
+} from '@/lib/quick-notes/quick-note-preview'
 
 export function SpaceBootstrap({ children }: { children: React.ReactNode }) {
   const hydrateAuth = useAuthStore((s) => s.hydrate)
@@ -29,6 +33,14 @@ export function SpaceBootstrap({ children }: { children: React.ReactNode }) {
     let cancelled = false
 
     async function bootstrap() {
+      if (
+        isQuickNotePreviewRoute(window.location.pathname) &&
+        isQuickNotePreviewEnabled()
+      ) {
+        if (!cancelled) setReady()
+        return
+      }
+
       // 1. auth hydrate (sync — reads localStorage)
       hydrateAuth()
 

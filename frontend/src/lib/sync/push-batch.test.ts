@@ -64,6 +64,23 @@ describe('push-batch', () => {
     expect(events[0]!.payload).toEqual({ id: 't1', title: 'X' })
   })
 
+  it('PB1-QN: buildPushEvents maps quickNote delete tombstone payload', () => {
+    const rows: OutboxEvent[] = [
+      makeOutboxRow(11, 'quickNote', 'qn1', 'delete', { id: 'qn1' }, 1751803200000),
+    ]
+
+    const events = buildPushEvents(rows)
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      entity_type: 'quickNote',
+      entity_id: 'qn1',
+      action: 'delete',
+      payload: { id: 'qn1' },
+      client_updated_at: new Date(1751803200000).toISOString(),
+    })
+  })
+
   it('PB2: applied 无 resolution → 清 outbox', async () => {
     db = await openTestDb()
     await db.outbox.put(makeOutboxRow(1, 'task', 't1', 'create'))
@@ -82,6 +99,26 @@ describe('push-batch', () => {
 
     expect(result.clearedOutboxIds).toContain(1)
     expect(await db.outbox.count()).toBe(0)
+  })
+
+  it('PB2-QN: applied quickNote delete clears the repository tombstone outbox', async () => {
+    db = await openTestDb()
+    await db.outbox.put(makeOutboxRow(21, 'quickNote', 'qn1', 'delete', { id: 'qn1' }))
+
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      return ok({
+        applied: [{ entity_type: 'quickNote', entity_id: 'qn1', action: 'delete' }],
+        conflicts: [],
+        errors: [],
+        server_time: '2026-07-06T12:00:00.000Z',
+      }, config)
+    }
+
+    const rows = await db.outbox.toArray()
+    const result = await pushBatch(db, spaceApi, rows)
+
+    expect(result.clearedOutboxIds).toContain(21)
+    expect(await db.outbox.where('entityId').equals('qn1').count()).toBe(0)
   })
 
   it('PB3: applied resolution=remote → 清 + remoteWinCount=1', async () => {

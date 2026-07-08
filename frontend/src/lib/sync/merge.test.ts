@@ -34,6 +34,32 @@ function makeTaskRow(
   } as unknown as Parameters<PomodoroXIDB['tasks']['put']>[0]
 }
 
+function makeQuickNoteRow(
+  id: string,
+  updatedAt: string,
+  dirty = false,
+  deletion = 'active' as const,
+) {
+  return {
+    id,
+    content: 'local quick note',
+    mood: null,
+    tags: [],
+    pinned: false,
+    archived_at: null,
+    archive_file_path: null,
+    session_id: null,
+    folder_id: null,
+    trashed_at: null,
+    migrated_to_note_id: null,
+    created_at: updatedAt,
+    updated_at: updatedAt,
+    _dirty: dirty,
+    deletion_state: deletion,
+    version: 1,
+  } as unknown as Parameters<PomodoroXIDB['quickNotes']['put']>[0]
+}
+
 /** 构造单实体组 pull 响应 */
 function makePullResponse(
   group: string,
@@ -138,6 +164,28 @@ describe('merge', () => {
     expect(row).toBeDefined() // 行仍在
     expect(row!.deletion_state).toBe('deleted')
     expect(row!._dirty).toBe(false)
+  })
+
+  it('MG6-QN: quickNote tombstone marks local row deleted without physical deletion', async () => {
+    db = await openTestDb()
+    await db.quickNotes.put(makeQuickNoteRow('qn1', '2026-01-01T00:00:00.000Z', true))
+    const dirtyConflicts: SyncConflict[] = []
+    const response = makePullResponse('quickNotes', [], {
+      tombstones: [{
+        entity_type: 'quickNote',
+        entity_id: 'qn1',
+        deleted_at: '2026-07-06T00:00:00.000Z',
+      }],
+    })
+
+    await applyMerge(db, response, dirtyConflicts)
+
+    const row = await db.quickNotes.get('qn1')
+    expect(row).toBeDefined()
+    expect(row!.deletion_state).toBe('deleted')
+    expect(row!._dirty).toBe(false)
+    expect(row!.content).toBe('local quick note')
+    expect(dirtyConflicts).toHaveLength(0)
   })
 
   it('MG7: buildPrePushConflict 纯函数形状', () => {

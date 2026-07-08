@@ -43,6 +43,17 @@ vi.mock('@/stores/sync-store', () => ({
   useSyncStore: { setState: mockSetState, getState: () => ({}) },
 }))
 
+const mockRefreshQuickNotesFromRepository = vi.fn().mockResolvedValue(undefined)
+const mockConfigureQuickNoteSyncFailureReader = vi.fn()
+vi.mock('@/stores/quick-note-store', () => ({
+  configureQuickNoteSyncFailureReader: mockConfigureQuickNoteSyncFailureReader,
+  useQuickNoteStore: {
+    getState: () => ({
+      refreshQuickNotesFromRepository: mockRefreshQuickNotesFromRepository,
+    }),
+  },
+}))
+
 vi.mock('@/lib/query-client', () => ({
   queryClient: { invalidateQueries: vi.fn(), clear: vi.fn() },
 }))
@@ -65,7 +76,7 @@ describe('lib/sync/index', () => {
     expect(mod.syncEngine).toBe(mockEngineInstances[0])
   })
 
-  it('IX2: wire 后 onPullComplete 回调 → invalidate query only (S1-4.1 §6.4)', async () => {
+  it('IX2: wire 后 onPullComplete 回调 → invalidate query + refresh QuickNote store', async () => {
     const mod = await import('./index')
     const { queryClient } = await import('@/lib/query-client')
 
@@ -81,6 +92,23 @@ describe('lib/sync/index', () => {
       queryKey: ['pxii', 'space-1'],
     })
     expect(mockSetState).not.toHaveBeenCalled()
+    expect(mockRefreshQuickNotesFromRepository).toHaveBeenCalledTimes(1)
+  })
+
+  it('IX2-QN: wire onPushComplete → pending count + refresh QuickNote store', async () => {
+    const mod = await import('./index')
+
+    mod.bootstrapSyncEngine('space-1')
+    const engine = mockEngineInstances[0]!
+    mockSetState.mockClear()
+    mockRefreshQuickNotesFromRepository.mockClear()
+    engine.getPendingCount.mockReturnValue(3)
+
+    const pushCb = engine.onPushComplete.mock.calls[0]![0] as () => void
+    pushCb()
+
+    expect(mockSetState).toHaveBeenCalledWith({ pendingCount: 3 })
+    expect(mockRefreshQuickNotesFromRepository).toHaveBeenCalledTimes(1)
   })
 
   it('IX3: re-bootstrap 替换为新实例并 destroy 旧实例', async () => {
@@ -122,6 +150,7 @@ describe('lib/sync/index', () => {
         error: null,
       }),
     )
+    expect(mockRefreshQuickNotesFromRepository).toHaveBeenCalledTimes(1)
   })
 
   it('IX5: wire onSyncComplete infra-error → error 文案', async () => {
@@ -145,5 +174,6 @@ describe('lib/sync/index', () => {
         error: '网络异常，同步暂停',
       }),
     )
+    expect(mockRefreshQuickNotesFromRepository).toHaveBeenCalledTimes(1)
   })
 })
