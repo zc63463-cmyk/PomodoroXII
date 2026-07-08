@@ -42,12 +42,17 @@ export function QuickNoteConflictPanel({
         createElement(
           'h2',
           { className: quickNoteStyles.panelTitle },
-          '有远端更新',
+          '这条小记在别处更新了',
         ),
         createElement(
           'p',
           { className: `${quickNoteStyles.metaText} mt-1` },
-          `正在编辑：${getQuickNoteTitle(conflict.note)}。本地草稿已保留，请选择处理方式。`,
+          '你的本地草稿已保留，自动保存已暂停。保存前请选择处理方式。',
+        ),
+        createElement(
+          'p',
+          { className: `${quickNoteStyles.metaText} mt-1` },
+          `正在编辑：${getQuickNoteTitle(conflict.note)}`,
         ),
       ),
       createElement(GitMergeIcon, {
@@ -77,7 +82,7 @@ export function QuickNoteConflictPanel({
           onClick: onKeepLocal,
           className: quickNoteStyles.outlineButton,
         },
-        '保留本地草稿',
+        '覆盖远端并保存',
       ),
       createElement(
         Button,

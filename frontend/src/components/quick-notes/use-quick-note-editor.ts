@@ -10,6 +10,7 @@ import type {
   QuickNoteLifecycleState,
   QuickNoteUpdateInput,
 } from '@/lib/quick-notes/quick-note-repository'
+import { QUICK_NOTE_TYPING_IDLE_MS } from '@/lib/quick-notes/quick-note-editor-status'
 
 interface UseQuickNoteEditorOptions {
   quickNotes: QuickNote[]
@@ -33,12 +34,15 @@ export function useQuickNoteEditor({
   const [editingNoteSnapshot, setEditingNoteSnapshot] = useState<QuickNote | null>(null)
   const [editingBaseContent, setEditingBaseContent] = useState('')
   const [draftConflict, setDraftConflict] = useState<QuickNoteDraftConflict | null>(null)
+  const [isTyping, setIsTyping] = useState(false)
   const [saveState, setSaveState] = useState<QuickNoteSaveState>('saved')
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const draftConflictRef = useRef<QuickNoteDraftConflict | null>(null)
   const latestDraftRef = useRef(draft)
   const saveSequenceRef = useRef(0)
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve())
-  const remoteUpdateToastRef = useRef<string | null>(null)
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  draftConflictRef.current = draftConflict
 
   const editingNote =
     (editingNoteSnapshot?.id === editingId ? editingNoteSnapshot : null) ??
@@ -47,11 +51,13 @@ export function useQuickNoteEditor({
 
   const cancelEdit = useCallback(() => {
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
     saveSequenceRef.current += 1
     setEditingId(null)
     setEditingNoteSnapshot(null)
     setEditingBaseContent('')
     setDraftConflict(null)
+    setIsTyping(false)
     setDraft('')
     setSaveState('saved')
   }, [])
@@ -59,6 +65,12 @@ export function useQuickNoteEditor({
   useEffect(() => {
     latestDraftRef.current = draft
   }, [draft])
+
+  useEffect(() => {
+    return () => {
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     if (!editingId) return
@@ -79,10 +91,9 @@ export function useQuickNoteEditor({
         refreshedNote.updated_at !== editingNoteSnapshot.updated_at)
 
     if (remoteChanged && draftHasLocalChanges) {
-      if (remoteUpdateToastRef.current !== refreshedNote.updated_at) {
-        remoteUpdateToastRef.current = refreshedNote.updated_at
-        toast('有远端更新，已保留你的本地草稿')
-      }
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+      setIsTyping(false)
       setDraftConflict({
         note: refreshedNote,
         localDraft: latestDraftRef.current,
@@ -96,7 +107,6 @@ export function useQuickNoteEditor({
     setEditingNoteSnapshot(refreshedNote)
     setEditingBaseContent(refreshedNote.content)
     setDraftConflict(null)
-    remoteUpdateToastRef.current = null
     if (shouldAdoptRemoteDraft) {
       setDraft(refreshedNote.content)
     }
@@ -130,13 +140,16 @@ export function useQuickNoteEditor({
       const content = latestDraftRef.current.trim()
       if (!content) {
         setSaveState('unsaved')
+        setIsTyping(false)
         toast.error('小记内容不能为空')
         return false
       }
 
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
       const saveSequence = saveSequenceRef.current + 1
       saveSequenceRef.current = saveSequence
+      setIsTyping(false)
       setSaveState('saving')
 
       const queuedSave = saveQueueRef.current
@@ -192,6 +205,12 @@ export function useQuickNoteEditor({
 
   useEffect(() => {
     if (!editingNote) return
+    if (draftConflictRef.current) {
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
+      setSaveState('unsaved')
+      return
+    }
+
     if (draft.trim() === editingNote.content.trim()) {
       setSaveState('saved')
       return
@@ -208,47 +227,69 @@ export function useQuickNoteEditor({
     }
   }, [draft, editingNote, saveEditedDraft])
 
-  async function submitDraft(event: FormEvent<HTMLFormElement>) {
+  function updateDraft(value: string) {
+    setDraft(value)
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+    const hasDraft = value.trim().length > 0
+    setIsTyping(hasDraft)
+    if (hasDraft) {
+      typingTimerRef.current = setTimeout(() => {
+        setIsTyping(false)
+      }, QUICK_NOTE_TYPING_IDLE_MS)
+    }
+  }
+
+  async function submitDraft(event: FormEvent<HTMLFormElement>): Promise<boolean> {
     event.preventDefault()
     const content = draft.trim()
     if (!content) {
+      setIsTyping(false)
       toast.error(editingNote ? '小记内容不能为空' : '先写点内容再记录')
-      return
+      return false
     }
 
     if (editingNote) {
-      await saveEditedDraft({ closeAfterSave: false })
+      if (draftConflict) return false
+      return saveEditedDraft({ closeAfterSave: false })
     } else {
       try {
         await createQuickNote({ content })
+        if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+        setIsTyping(false)
         setDraft('')
+        return true
       } catch (error) {
         toast.error('小记创建失败', {
           description: describeQuickNoteError(error, '请稍后重试'),
         })
+        return false
       }
     }
   }
 
   function startEdit(note: QuickNote) {
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
     saveSequenceRef.current += 1
+    setIsTyping(false)
     setEditingId(note.id)
     setEditingNoteSnapshot(note)
     setEditingBaseContent(note.content)
     setDraftConflict(null)
-    remoteUpdateToastRef.current = null
     setDraft(note.content)
     setSaveState('saved')
   }
 
   function keepLocalDraft() {
     setDraftConflict(null)
-    setSaveState('unsaved')
+    setIsTyping(false)
+    void saveEditedDraft({ closeAfterSave: false })
   }
 
   function useRemoteDraft() {
     if (!draftConflict) return
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+    setIsTyping(false)
     setEditingNoteSnapshot(draftConflict.note)
     setEditingBaseContent(draftConflict.remoteContent)
     setDraft(draftConflict.remoteContent)
@@ -258,6 +299,8 @@ export function useQuickNoteEditor({
 
   function mergeRemoteDraft() {
     if (!draftConflict) return
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+    setIsTyping(false)
     const merged = [
       draftConflict.localDraft.trimEnd(),
       '',
@@ -277,10 +320,11 @@ export function useQuickNoteEditor({
     draft,
     editingId,
     editingNote,
+    isTyping,
     keepLocalDraft,
     mergeRemoteDraft,
     saveState,
-    setDraft,
+    setDraft: updateDraft,
     startEdit,
     submitDraft,
     useRemoteDraft,
