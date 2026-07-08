@@ -5,6 +5,7 @@ import { CheckIcon, MonitorIcon } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { cn } from '@/lib/utils'
 import { useSettingsStore, type SettingsTheme } from '@/stores/settings-store'
+import { THEMES } from '@/utils/constants'
 
 const THEME_OPTIONS: Array<{
   value: SettingsTheme
@@ -50,6 +51,21 @@ const THEME_OPTIONS: Array<{
   },
 ]
 
+function applyThemeClass(theme: SettingsTheme): void {
+  if (typeof document === 'undefined') return
+
+  const root = document.documentElement
+  root.classList.remove(...THEMES)
+
+  if (theme === 'system') {
+    const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)')?.matches
+    root.classList.add(prefersDark ? 'dark' : 'light')
+    return
+  }
+
+  root.classList.add(theme)
+}
+
 export default function SettingsPage() {
   const storedTheme = useSettingsStore((state) => state.theme)
   const updateSetting = useSettingsStore((state) => state.update)
@@ -60,7 +76,9 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!mounted) return
+    if (useSettingsStore.getState().theme !== storedTheme) return
     if (theme !== storedTheme) setTheme(storedTheme)
+    applyThemeClass(storedTheme)
   }, [mounted, setTheme, storedTheme, theme])
 
   const activeTheme = mounted ? storedTheme : 'system'
@@ -73,8 +91,9 @@ export default function SettingsPage() {
   }, [mounted, resolvedTheme, storedTheme])
 
   async function selectTheme(nextTheme: SettingsTheme) {
-    setTheme(nextTheme)
     await updateSetting('theme', nextTheme)
+    setTheme(nextTheme)
+    applyThemeClass(nextTheme)
   }
 
   return createElement(
