@@ -1,5 +1,5 @@
-import { PlaceholderPage } from '@/components/layout/placeholder-page'
+import { QuickNotesView } from '@/components/quick-notes/quick-notes-view'
 
 export default function QuickNotesPage() {
-  return <PlaceholderPage title="速记" sprint="F2" />
+  return <QuickNotesView />
 }
