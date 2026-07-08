@@ -54,10 +54,11 @@ cp .env.local.example .env.local
 | 命令 | 说明 |
 |------|------|
 | `npm run dev` | 启动开发服务器（Turbopack），访问 http://localhost:3000 |
+| `npm run dev:preview` | 固定启动 QuickNote 本地预览，访问 http://127.0.0.1:3005/quick-notes?quickNotePreview=1 |
 | `npm run build` | 生产构建（Turbopack），React Compiler 生效 |
 | `npm run start` | 启动生产服务器 |
 | `npm run lint` | ESLint 检查 |
-| `npm run typecheck` | TypeScript 类型检查（tsc --noEmit） |
+| `npm run typecheck` | 生成 Next 路由类型后执行 TypeScript 类型检查 |
 | `npm run test` | 运行 Vitest 测试（jsdom + fake-indexeddb） |
 | `npm run generate:api` | 从后端 openapi.json 生成 TypeScript 类型 |
 
@@ -68,6 +69,42 @@ cp .env.local.example .env.local
 ```bash
 npm run lint && npm run typecheck && npm run test && npm run build
 ```
+
+### QuickNote 本地预览
+
+QuickNote 的本地预览入口固定使用开发空间初始化参数，便于检查小记页 UI、主题 token 和本地写入闭环：
+
+```bash
+npm run dev:preview
+```
+
+固定地址：
+
+```text
+http://127.0.0.1:3005/quick-notes?quickNotePreview=1
+```
+
+预览期间必须保持运行 `npm run dev:preview` 的终端打开；如果终端关闭或 dev server 退出，浏览器刷新会出现 `ERR_CONNECTION_REFUSED`。遇到端口占用时不要手动杀进程，改用其他端口启动：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev-preview.ps1 -Port 3006
+```
+
+QuickNote 手动 smoke checklist：
+
+- 在 `/settings` 依次切换 `Light / Dark / Midnight / Nord / Daylight`
+- 回到 `/quick-notes?quickNotePreview=1`，确认页面不是空白页
+- 检查标题、composer、搜索框、卡片正文、标签、回收站按钮无白字或低对比
+- 新建含 `#tag` 的小记，确认标签预览出现且卡片标签可点击搜索
+- 打开回收站，确认恢复/彻删按钮可见且文字对比正常
+
+退出 QuickNote preview 时，在浏览器控制台执行：
+
+```js
+localStorage.removeItem('pxii_quick_notes_preview')
+```
+
+正式设置页的“查看小记页”入口指向 `/quick-notes`，不会自动写入 preview 标记。
 
 ## S0 进度与 F0 对齐
 

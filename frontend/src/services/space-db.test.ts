@@ -65,6 +65,18 @@ describe('SpaceDBManager', () => {
     expect(eventDetail).toBe('test-event')
   })
 
+  it('can switch spaces without dispatching pxii:space-switched', async () => {
+    let eventDetail: string | null = null
+    const handler = (e: Event) => {
+      eventDetail = (e as CustomEvent<{ spaceId: string }>).detail.spaceId
+    }
+    window.addEventListener(PXII_SPACE_SWITCHED_EVENT, handler)
+    await spaceDBManager.switchTo('test-silent-event', { dispatchEvent: false })
+    window.removeEventListener(PXII_SPACE_SWITCHED_EVENT, handler)
+    expect(eventDetail).toBeNull()
+    expect(spaceDBManager.currentSpaceId).toBe('test-silent-event')
+  })
+
   it('onSwitch listener receives spaceId and can unsubscribe', async () => {
     let received: string | null = null
     const unsub = spaceDBManager.onSwitch((id) => {

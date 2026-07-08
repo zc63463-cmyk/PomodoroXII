@@ -8,7 +8,10 @@ class SpaceDBManager {
   private _currentSpaceId: string | null = null
   private listeners: Set<SpaceSwitchListener> = new Set()
 
-  async switchTo(spaceId: string): Promise<void> {
+  async switchTo(
+    spaceId: string,
+    options: { dispatchEvent?: boolean } = {},
+  ): Promise<void> {
     if (this.currentDB) {
       this.currentDB.close()
     }
@@ -16,7 +19,7 @@ class SpaceDBManager {
     await this.currentDB.open()
     this._currentSpaceId = spaceId
     this.listeners.forEach((fn) => fn(spaceId))
-    if (typeof window !== 'undefined') {
+    if (options.dispatchEvent !== false && typeof window !== 'undefined') {
       window.dispatchEvent(
         new CustomEvent(PXII_SPACE_SWITCHED_EVENT, {
           detail: { spaceId },
