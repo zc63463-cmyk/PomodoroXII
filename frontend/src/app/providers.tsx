@@ -22,11 +22,17 @@ import { SpaceBootstrap } from '@/lib/space-bootstrap'
 import { SpaceSwitchProvider } from '@/lib/on-space-switch'
 import { CrossTabSyncProvider } from '@/lib/cross-tab-sync'
 import { Toaster } from '@/components/ui/sonner'
+import { THEMES } from '@/utils/constants'
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
+      <ThemeProvider
+        attribute="class"
+        defaultTheme="dark"
+        enableSystem
+        themes={[...THEMES]}
+      >
         <SpaceBootstrap>
           <SpaceSwitchProvider>
             <CrossTabSyncProvider>

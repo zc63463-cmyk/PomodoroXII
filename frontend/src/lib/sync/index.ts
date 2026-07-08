@@ -11,11 +11,20 @@
 
 import { queryClient } from '@/lib/query-client'
 import { spaceDBManager } from '@/services/space-db'
+import {
+  configureQuickNoteSyncFailureReader,
+  useQuickNoteStore,
+} from '@/stores/quick-note-store'
 import { useSyncStore } from '@/stores/sync-store'
 import { RealSyncEngine } from './engine'
 import { syncEngineStub, type SyncEngine } from './types'
 
 export let syncEngine: SyncEngine = syncEngineStub
+
+configureQuickNoteSyncFailureReader(() => {
+  const status = useSyncStore.getState().status
+  return status === 'error' || status === 'infra-error'
+})
 
 export { syncEngineStub } from './types'
 export type { SyncEngine, SyncConflict, SyncStatus, SyncOp } from './types'
@@ -39,6 +48,15 @@ export function applyEngineStateToStore(engine: SyncEngine): void {
   })
 }
 
+function refreshQuickNotesAfterSync(): void {
+  void useQuickNoteStore
+    .getState()
+    .refreshQuickNotesFromRepository()
+    .catch((error) => {
+      console.error('QuickNote sync refresh failed:', error)
+    })
+}
+
 /** 引擎事件 → sync-store 状态 + Query invalidate（F1 §6.3b / S1-4.1 重构） */
 export function wireSyncEngineToStore(
   engine: RealSyncEngine,
@@ -50,10 +68,12 @@ export function wireSyncEngineToStore(
   engine.onPullComplete(() => {
     // F1 §6.4：pull 后仅 invalidate，不写终态（终态由 onSyncComplete 统一处理）
     queryClient.invalidateQueries({ queryKey: ['pxii', spaceId] })
+    refreshQuickNotesAfterSync()
   })
 
   engine.onPushComplete(() => {
     useSyncStore.setState({ pendingCount: engine.getPendingCount() })
+    refreshQuickNotesAfterSync()
   })
 
   engine.onConflict((conflicts) => {
@@ -63,6 +83,7 @@ export function wireSyncEngineToStore(
   engine.onSyncComplete(() => {
     // S1-4.1：周期末单一真相源 — 终态由 onSyncComplete 写
     applyEngineStateToStore(engine)
+    refreshQuickNotesAfterSync()
   })
 }
 
