@@ -70,6 +70,8 @@ cp .env.local.example .env.local
 npm run lint && npm run typecheck && npm run test && npm run build
 ```
 
+当前 QuickNote release 收口基线：`npm run test` 覆盖 39 个测试文件 / 333 个测试用例，`npm run build` 生成 19 个 App Router 路由。QuickNote 相关改动提交前还应保留 focused gate，覆盖 repository/store、runtime sync refresh、trash view/store、outbox failure attribution 与 conversion lifecycle。
+
 ### QuickNote 本地预览
 
 QuickNote 的本地预览入口固定使用开发空间初始化参数，便于检查小记页 UI、主题 token 和本地写入闭环：
