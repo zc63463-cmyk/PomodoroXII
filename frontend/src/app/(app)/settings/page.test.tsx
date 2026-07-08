@@ -24,6 +24,15 @@ describe('SettingsPage theme selection', () => {
   beforeEach(() => {
     setThemeMock.mockClear()
     window.localStorage.clear()
+    document.documentElement.className = ''
+    vi.stubGlobal('matchMedia', vi.fn().mockImplementation(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })))
     useSettingsStore.setState({
       theme: 'system',
       language: 'zh-CN',
@@ -51,6 +60,7 @@ describe('SettingsPage theme selection', () => {
       expect(setThemeMock).toHaveBeenCalledWith('midnight')
       expect(useSettingsStore.getState().theme).toBe('midnight')
       expect(window.localStorage.getItem('theme')).toBe('midnight')
+      expect(document.documentElement).toHaveClass('midnight')
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Nord/ }))
@@ -59,6 +69,8 @@ describe('SettingsPage theme selection', () => {
       expect(setThemeMock).toHaveBeenCalledWith('nord')
       expect(useSettingsStore.getState().theme).toBe('nord')
       expect(window.localStorage.getItem('theme')).toBe('nord')
+      expect(document.documentElement).toHaveClass('nord')
+      expect(document.documentElement).not.toHaveClass('midnight')
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Daylight/ }))
@@ -67,6 +79,8 @@ describe('SettingsPage theme selection', () => {
       expect(setThemeMock).toHaveBeenCalledWith('daylight')
       expect(useSettingsStore.getState().theme).toBe('daylight')
       expect(window.localStorage.getItem('theme')).toBe('daylight')
+      expect(document.documentElement).toHaveClass('daylight')
+      expect(document.documentElement).not.toHaveClass('nord')
     })
   })
 
