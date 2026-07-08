@@ -459,4 +459,153 @@
   .quick-notes-surface::after {
     background-image: var(--qn-grain);
   }
+
+  .quick-note-stage {
+    transform-origin: top center;
+    animation: qn-stage-enter 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    will-change: opacity, transform, filter;
+  }
+
+  .quick-note-stage[data-focus-stage='focus-edit'] {
+    animation-name: qn-stage-focus-edit;
+  }
+
+  .quick-note-stage[data-focus-stage='focus-read'] {
+    animation-name: qn-stage-focus-read;
+  }
+
+  .quick-note-stage[data-focus-stage='detail-read'] {
+    animation-name: qn-stage-detail-read;
+  }
+
+  .quick-note-motion-panel {
+    transform-origin: top center;
+    animation: qn-panel-enter 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    will-change: opacity, transform, filter;
+  }
+
+  .quick-note-motion-panel[data-motion='detail'],
+  .quick-note-motion-panel[data-motion='aside'] {
+    animation-name: qn-panel-slide-in;
+  }
+
+  .quick-note-motion-panel[data-motion='aside'] {
+    animation-delay: 60ms;
+  }
+
+  .quick-note-inline-editor {
+    animation: qn-inline-editor-enter 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    will-change: opacity, transform;
+  }
+
+  .quick-note-timeline-dimmed {
+    transform: translateY(-2px) scale(0.992);
+    transition:
+      opacity 260ms ease,
+      filter 320ms ease,
+      max-height 360ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @keyframes qn-stage-enter {
+    from {
+      opacity: 0;
+      transform: translateY(10px) scale(0.995);
+      filter: blur(2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      filter: blur(0);
+    }
+  }
+
+  @keyframes qn-stage-focus-edit {
+    from {
+      opacity: 0;
+      transform: translateY(14px) scale(0.985);
+      filter: blur(3px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      filter: blur(0);
+    }
+  }
+
+  @keyframes qn-stage-focus-read {
+    from {
+      opacity: 0;
+      transform: translateX(10px) translateY(4px);
+      filter: blur(2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0) translateY(0);
+      filter: blur(0);
+    }
+  }
+
+  @keyframes qn-stage-detail-read {
+    from {
+      opacity: 0;
+      transform: translateY(16px) scale(0.99);
+      filter: blur(3px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      filter: blur(0);
+    }
+  }
+
+  @keyframes qn-panel-enter {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.99);
+      filter: blur(2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      filter: blur(0);
+    }
+  }
+
+  @keyframes qn-panel-slide-in {
+    from {
+      opacity: 0;
+      transform: translateX(18px) scale(0.99);
+      filter: blur(2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+      filter: blur(0);
+    }
+  }
+
+  @keyframes qn-inline-editor-enter {
+    from {
+      opacity: 0;
+      transform: translateY(6px) scale(0.996);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .quick-note-stage,
+    .quick-note-motion-panel,
+    .quick-note-inline-editor {
+      animation: none;
+    }
+
+    .quick-note-timeline-dimmed {
+      transition: none;
+      transform: none;
+    }
+  }
 }

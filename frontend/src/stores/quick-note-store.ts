@@ -25,6 +25,12 @@ import {
 } from '@/lib/quick-notes/quick-note-repository'
 import type { QuickNote } from '@/types'
 
+export type QuickNoteFocusMode =
+  | 'normal'
+  | 'focus-edit'
+  | 'focus-read'
+  | 'detail-read'
+
 interface QuickNoteState {
   quickNotes: QuickNote[]
   trashedQuickNotes: QuickNote[]
@@ -33,6 +39,8 @@ interface QuickNoteState {
   isLoading: boolean
   error: string | null
   searchQuery: string
+  focusMode: QuickNoteFocusMode
+  selectedQuickNoteId: string | null
 }
 
 interface QuickNoteActions {
@@ -46,6 +54,10 @@ interface QuickNoteActions {
   purgeQuickNote: (id: string) => Promise<void>
   togglePin: (id: string) => Promise<void>
   migrateToNote: (id: string) => Promise<string>
+  toggleFocusEdit: () => void
+  enterFocusRead: (id: string) => void
+  enterDetailRead: (id: string) => void
+  exitFocus: () => void
   reset: () => void
 }
 
@@ -81,6 +93,8 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
       isLoading: false,
       error: null,
       searchQuery: '',
+      focusMode: 'normal',
+      selectedQuickNoteId: null,
 
       loadQuickNotes: async (opts) => {
         const query = opts?.query ?? get().searchQuery
@@ -163,6 +177,36 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
         set({ ...lists, error: null })
         return result.noteId
       },
+
+      toggleFocusEdit: () => {
+        const nextFocusMode =
+          get().focusMode === 'focus-edit' ? 'normal' : 'focus-edit'
+        set({
+          focusMode: nextFocusMode,
+          selectedQuickNoteId: null,
+        })
+      },
+
+      enterFocusRead: (id) => {
+        set({
+          focusMode: 'focus-read',
+          selectedQuickNoteId: id,
+        })
+      },
+
+      enterDetailRead: (id) => {
+        set({
+          focusMode: 'detail-read',
+          selectedQuickNoteId: id,
+        })
+      },
+
+      exitFocus: () => {
+        set({
+          focusMode: 'normal',
+          selectedQuickNoteId: null,
+        })
+      },
       reset: () =>
         set({
           quickNotes: [],
@@ -172,6 +216,8 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
           isLoading: false,
           error: null,
           searchQuery: '',
+          focusMode: 'normal',
+          selectedQuickNoteId: null,
         }),
     }),
     { name: 'quick-note-store' },

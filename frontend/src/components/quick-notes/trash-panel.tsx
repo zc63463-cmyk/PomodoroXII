@@ -14,7 +14,7 @@ export function TrashPanel({
   pendingById = {},
 }: {
   notes: QuickNote[]
-  onRestore: (id: string) => void | Promise<void>
+  onRestore: (id: string) => boolean | void | Promise<boolean | void>
   onPurge: (id: string) => boolean | void | Promise<boolean | void>
   pendingById?: Record<string, 'restore' | 'purge'>
 }) {
