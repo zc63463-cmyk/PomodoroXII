@@ -16,6 +16,13 @@ import {
   type SyncEntityType,
 } from './types'
 
+export interface OutboxFailurePatch {
+  outboxId: number
+  error: string
+  errorCode?: string | null
+  failedAt?: string
+}
+
 /**
  * 纯函数：outbox merge 矩阵（F1 §3.1，与 Vue database.ts 一致）。
  *
@@ -110,11 +117,17 @@ export async function enqueueOutbox(
       return
     }
 
-    if (merge.action === 'keep_existing') return
+    if (merge.action === 'keep_existing') {
+      latest.createdAt = now
+      clearOutboxFailure(latest)
+      await db.outbox.put(latest)
+      return
+    }
 
     // replace：合并到 latest 行
     latest.payload = payloadStr
     latest.createdAt = now
+    clearOutboxFailure(latest)
     if (merge.newAction) latest.action = merge.newAction
     await db.outbox.put(latest)
 
@@ -134,6 +147,10 @@ export async function enqueueOutbox(
     payload: payloadStr,
     createdAt: now,
     synced: false,
+    lastError: null,
+    lastErrorCode: null,
+    failedAt: null,
+    attemptCount: 0,
   })
 }
 
@@ -153,4 +170,40 @@ export async function deleteOutboxByIds(
   ids: number[],
 ): Promise<void> {
   if (ids.length > 0) await db.outbox.bulkDelete(ids)
+}
+
+/** Persist per-event push failure metadata without clearing the outbox row. */
+export async function markOutboxEventsFailed(
+  db: PomodoroXIDB,
+  failures: OutboxFailurePatch[],
+): Promise<void> {
+  if (failures.length === 0) return
+
+  const failedAtFallback = new Date().toISOString()
+  await db.transaction('rw', db.outbox, async () => {
+    for (const failure of failures) {
+      const row = await db.outbox.get(failure.outboxId)
+      if (!row || row.synced) continue
+
+      await db.outbox.update(failure.outboxId, {
+        lastError: failure.error,
+        lastErrorCode: failure.errorCode ?? classifyOutboxError(failure.error),
+        failedAt: failure.failedAt ?? failedAtFallback,
+        attemptCount: (row.attemptCount ?? 0) + 1,
+      })
+    }
+  })
+}
+
+function clearOutboxFailure(row: OutboxEvent): void {
+  row.lastError = null
+  row.lastErrorCode = null
+  row.failedAt = null
+  row.attemptCount = 0
+}
+
+function classifyOutboxError(error: string): string {
+  if (error.includes('version_mismatch')) return 'version_mismatch'
+  if (error.includes('content_hash_mismatch')) return 'content_hash_mismatch'
+  return 'push_error'
 }

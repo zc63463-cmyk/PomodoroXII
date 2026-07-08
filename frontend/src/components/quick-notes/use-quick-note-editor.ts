@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import type { QuickNoteSaveState } from '@/components/quick-notes/quick-note-composer'
+import type { QuickNoteDraftConflict } from '@/components/quick-notes/quick-note-conflict-panel'
 import type { QuickNote } from '@/types'
 import type {
   QuickNoteCreateInput,
@@ -31,6 +32,7 @@ export function useQuickNoteEditor({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingNoteSnapshot, setEditingNoteSnapshot] = useState<QuickNote | null>(null)
   const [editingBaseContent, setEditingBaseContent] = useState('')
+  const [draftConflict, setDraftConflict] = useState<QuickNoteDraftConflict | null>(null)
   const [saveState, setSaveState] = useState<QuickNoteSaveState>('saved')
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const latestDraftRef = useRef(draft)
@@ -49,6 +51,7 @@ export function useQuickNoteEditor({
     setEditingId(null)
     setEditingNoteSnapshot(null)
     setEditingBaseContent('')
+    setDraftConflict(null)
     setDraft('')
     setSaveState('saved')
   }, [])
@@ -80,6 +83,11 @@ export function useQuickNoteEditor({
         remoteUpdateToastRef.current = refreshedNote.updated_at
         toast('有远端更新，已保留你的本地草稿')
       }
+      setDraftConflict({
+        note: refreshedNote,
+        localDraft: latestDraftRef.current,
+        remoteContent: refreshedNote.content,
+      })
       setSaveState('unsaved')
       return
     }
@@ -87,6 +95,7 @@ export function useQuickNoteEditor({
     const shouldAdoptRemoteDraft = latestDraftRef.current.trim() === editingBaseContent.trim()
     setEditingNoteSnapshot(refreshedNote)
     setEditingBaseContent(refreshedNote.content)
+    setDraftConflict(null)
     remoteUpdateToastRef.current = null
     if (shouldAdoptRemoteDraft) {
       setDraft(refreshedNote.content)
@@ -151,6 +160,7 @@ export function useQuickNoteEditor({
             updated_at: new Date().toISOString(),
           })
           setEditingBaseContent(content)
+          setDraftConflict(null)
           setSaveState('saved')
 
           if (closeAfterSave) {
@@ -226,19 +236,53 @@ export function useQuickNoteEditor({
     setEditingId(note.id)
     setEditingNoteSnapshot(note)
     setEditingBaseContent(note.content)
+    setDraftConflict(null)
     remoteUpdateToastRef.current = null
     setDraft(note.content)
     setSaveState('saved')
   }
 
+  function keepLocalDraft() {
+    setDraftConflict(null)
+    setSaveState('unsaved')
+  }
+
+  function useRemoteDraft() {
+    if (!draftConflict) return
+    setEditingNoteSnapshot(draftConflict.note)
+    setEditingBaseContent(draftConflict.remoteContent)
+    setDraft(draftConflict.remoteContent)
+    setDraftConflict(null)
+    setSaveState('saved')
+  }
+
+  function mergeRemoteDraft() {
+    if (!draftConflict) return
+    const merged = [
+      draftConflict.localDraft.trimEnd(),
+      '',
+      '--- 远端版本 ---',
+      draftConflict.remoteContent.trim(),
+    ].join('\n')
+    setEditingNoteSnapshot(draftConflict.note)
+    setEditingBaseContent(draftConflict.remoteContent)
+    setDraft(merged)
+    setDraftConflict(null)
+    setSaveState('unsaved')
+  }
+
   return {
     cancelEdit,
+    draftConflict,
     draft,
     editingId,
     editingNote,
+    keepLocalDraft,
+    mergeRemoteDraft,
     saveState,
     setDraft,
     startEdit,
     submitDraft,
+    useRemoteDraft,
   }
 }

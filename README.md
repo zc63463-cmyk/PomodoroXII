@@ -2,7 +2,7 @@
 
 单用户、多空间、多设备同步的番茄钟与笔记后端。每个 **Space** 拥有独立的 SQLite 元数据库与笔记文件系统；REST API 与 FastMCP 工具供 Web / Agent 客户端接入。
 
-> **当前状态：** 后端 Phase A–E 主体已完成（~95%）；**Phase D 笔记/搜索/回收站打满 100%**；**前端 Phase F 脚手架 S0 已完成**（`frontend/`，Next.js 15 + Dexie v16 + 17 Zustand store + 86 tests）。
+> **当前状态：** 后端 Phase A–E 主体已完成（~95%）；**Phase D 笔记/搜索/回收站打满 100%**；**前端 Phase F 脚手架 S0 已完成**（`frontend/`，Next.js 15 + Dexie v16 + 17 Zustand store），QuickNote release hardening 已进入收口验证基线（333 frontend tests）。
 
 ---
 
@@ -73,7 +73,7 @@ npm run dev                          # http://localhost:3000
 npm run generate:api                 # 需后端 @ :8000，生成 src/types/api-generated.ts
 ```
 
-Gate：`npm run lint && npm run typecheck && npm run test && npm run build`（86 tests, 19 routes）
+Gate：`npm run lint && npm run typecheck && npm run test && npm run build`（333 frontend tests, 19 routes）
 
 详见 [frontend/README.md](frontend/README.md)。
 
