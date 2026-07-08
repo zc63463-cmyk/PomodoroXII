@@ -5,6 +5,7 @@ import { SearchIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { QuickNoteComposer } from '@/components/quick-notes/quick-note-composer'
+import { QuickNoteConflictPanel } from '@/components/quick-notes/quick-note-conflict-panel'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
 import { QuickNoteTimeline } from '@/components/quick-notes/quick-note-timeline'
 import { TrashPanel } from '@/components/quick-notes/trash-panel'
@@ -31,6 +32,7 @@ export function QuickNotesView() {
     restoreQuickNote,
     purgeQuickNote,
     togglePin,
+    migrateToNote,
   } = useQuickNoteStore()
   const [showTrash, setShowTrash] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
@@ -66,12 +68,16 @@ export function QuickNotesView() {
   const {
     cancelEdit,
     draft,
+    draftConflict,
     editingId,
     editingNote,
+    keepLocalDraft,
+    mergeRemoteDraft,
     saveState,
     setDraft,
     startEdit,
     submitDraft,
+    useRemoteDraft,
   } = useQuickNoteEditor({
     quickNotes,
     trashedQuickNotes,
@@ -82,6 +88,7 @@ export function QuickNotesView() {
   })
   const {
     moveToTrashWithUndo,
+    migrateToNoteWithPending,
     purgeFromTrash,
     restoreFromTrash,
     timelinePendingById,
@@ -95,6 +102,7 @@ export function QuickNotesView() {
     restoreQuickNote,
     purgeQuickNote,
     togglePin,
+    migrateToNote,
     describeQuickNoteError,
   })
 
@@ -157,6 +165,12 @@ export function QuickNotesView() {
         onSubmit: submitDraft,
         saveState,
       }),
+      createElement(QuickNoteConflictPanel, {
+        conflict: draftConflict,
+        onKeepLocal: keepLocalDraft,
+        onUseRemote: useRemoteDraft,
+        onMerge: mergeRemoteDraft,
+      }),
       createElement(
         'div',
         { className: quickNoteStyles.searchWrap },
@@ -218,6 +232,7 @@ export function QuickNotesView() {
         onEdit: startEdit,
         onTogglePin: (id: string) => void togglePinWithPending(id),
         onDelete: (id: string) => void moveToTrashWithUndo(id),
+        onMigrate: (id: string) => void migrateToNoteWithPending(id),
         onTagClick: (tag: string) => void loadQuickNotes({ query: `#${tag}` }),
         pendingById: timelinePendingById,
         syncStatusById,

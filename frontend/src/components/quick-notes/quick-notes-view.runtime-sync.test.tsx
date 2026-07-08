@@ -30,6 +30,8 @@ type FakeSyncEngine = {
 vi.mock('lucide-react', () => ({
   ArchiveRestoreIcon: () =>
     createElement('span', { 'data-testid': 'archive-restore-icon' }),
+  FileTextIcon: () => createElement('span', { 'data-testid': 'file-text-icon' }),
+  GitMergeIcon: () => createElement('span', { 'data-testid': 'merge-icon' }),
   PinIcon: () => createElement('span', { 'data-testid': 'pin-icon' }),
   PlusIcon: () => createElement('span', { 'data-testid': 'plus-icon' }),
   SearchIcon: () => createElement('span', { 'data-testid': 'search-icon' }),
@@ -253,12 +255,18 @@ describe('QuickNotesView runtime sync refresh', () => {
     })
   })
 
-  it('refreshes pending cards to failed through the onSyncComplete error path', async () => {
+  it('refreshes only the matching pending card to failed from outbox event error metadata', async () => {
     await useQuickNoteStore.getState().createQuickNote({
       id: 'runtime-sync-failed',
       content: '同步失败后显示失败状态',
       created_at: '2026-07-07T13:00:00.000Z',
       updated_at: '2026-07-07T13:00:00.000Z',
+    })
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'runtime-sync-pending',
+      content: '仍然只是待同步状态',
+      created_at: '2026-07-07T13:01:00.000Z',
+      updated_at: '2026-07-07T13:01:00.000Z',
     })
     const engine = makeFakeSyncEngine('infra-error')
     wireFakeSyncEngine(engine)
@@ -266,16 +274,27 @@ describe('QuickNotesView runtime sync refresh', () => {
     render(createElement(QuickNotesView))
 
     expect(await screen.findByRole('button', { name: /同步失败后显示失败状态/ })).toBeInTheDocument()
-    expect(screen.getByText('待同步')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /仍然只是待同步状态/ })).toBeInTheDocument()
+    expect(screen.getAllByText('待同步')).toHaveLength(2)
 
     await act(async () => {
+      const failedOutbox = await db.outbox
+        .where('entityId')
+        .equals('runtime-sync-failed')
+        .first()
+      await db.outbox.update(failedOutbox!.id!, {
+        lastError: 'server_rejected_quick_note',
+        lastErrorCode: 'push_error',
+        failedAt: '2026-07-07T13:10:00.000Z',
+        attemptCount: 1,
+      })
       engine.callbacks.syncComplete?.()
     })
 
     await waitFor(() => {
       expect(screen.getByText('同步失败，可稍后重试')).toBeInTheDocument()
     })
-    expect(screen.queryByText('待同步')).not.toBeInTheDocument()
+    expect(screen.getByText('待同步')).toBeInTheDocument()
     expect(useSyncStore.getState()).toMatchObject({
       status: 'infra-error',
       error: '网络异常，同步暂停',

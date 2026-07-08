@@ -11,20 +11,12 @@
 
 import { queryClient } from '@/lib/query-client'
 import { spaceDBManager } from '@/services/space-db'
-import {
-  configureQuickNoteSyncFailureReader,
-  useQuickNoteStore,
-} from '@/stores/quick-note-store'
+import { useQuickNoteStore } from '@/stores/quick-note-store'
 import { useSyncStore } from '@/stores/sync-store'
 import { RealSyncEngine } from './engine'
 import { syncEngineStub, type SyncEngine } from './types'
 
 export let syncEngine: SyncEngine = syncEngineStub
-
-configureQuickNoteSyncFailureReader(() => {
-  const status = useSyncStore.getState().status
-  return status === 'error' || status === 'infra-error'
-})
 
 export { syncEngineStub } from './types'
 export type { SyncEngine, SyncConflict, SyncStatus, SyncOp } from './types'

@@ -1,5 +1,5 @@
-import { PlaceholderPage } from '@/components/layout/placeholder-page'
+import { TrashView } from '@/components/trash/trash-view'
 
 export default function TrashPage() {
-  return <PlaceholderPage title="回收站" sprint="F2" />
+  return <TrashView />
 }

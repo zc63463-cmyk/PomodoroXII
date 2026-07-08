@@ -7,6 +7,7 @@ import {
   countUnsyncedOutbox,
   deleteOutboxByIds,
   listUnsyncedOutbox,
+  markOutboxEventsFailed,
 } from './outbox'
 import {
   type OutboxAction,
@@ -264,6 +265,97 @@ describe('outbox integration', () => {
     expect(rows[0]!.entityId).toBe('e1')
     expect(rows[1]!.entityId).toBe('e2')
     expect(rows[2]!.entityId).toBe('e3')
+  })
+
+  it('H4: markOutboxEventsFailed — 只标记目标未同步事件并累计 attemptCount', async () => {
+    db = await openTestDb()
+    const ids = await db.outbox.bulkAdd([
+      { entityType: 'task', entityId: 'failed', action: 'update', payload: '{}', createdAt: 1, synced: false },
+      { entityType: 'task', entityId: 'clean', action: 'update', payload: '{}', createdAt: 2, synced: false },
+      { entityType: 'task', entityId: 'synced', action: 'update', payload: '{}', createdAt: 3, synced: true },
+    ], { allKeys: true })
+
+    await markOutboxEventsFailed(db, [
+      {
+        outboxId: ids[0]!,
+        error: 'server_rejected',
+        failedAt: '2026-07-07T13:10:00.000Z',
+      },
+      {
+        outboxId: ids[2]!,
+        error: 'should_not_mark_synced_rows',
+        failedAt: '2026-07-07T13:11:00.000Z',
+      },
+    ])
+    await markOutboxEventsFailed(db, [
+      {
+        outboxId: ids[0]!,
+        error: 'server_rejected_again',
+        errorCode: 'custom_error',
+        failedAt: '2026-07-07T13:12:00.000Z',
+      },
+    ])
+
+    const failed = await db.outbox.get(ids[0]!)
+    const clean = await db.outbox.get(ids[1]!)
+    const synced = await db.outbox.get(ids[2]!)
+
+    expect(failed).toMatchObject({
+      lastError: 'server_rejected_again',
+      lastErrorCode: 'custom_error',
+      failedAt: '2026-07-07T13:12:00.000Z',
+      attemptCount: 2,
+    })
+    expect(clean!.lastError).toBeUndefined()
+    expect(synced!.lastError).toBeUndefined()
+  })
+
+  it('H5: enqueueOutbox replace — clears stale failure metadata on new local mutation', async () => {
+    db = await openTestDb()
+    await enqueueOutbox(db, 'quickNote', 'qn-failed', 'update', { id: 'qn-failed', content: 'old' })
+    const existing = await db.outbox.where('entityId').equals('qn-failed').first()
+    await markOutboxEventsFailed(db, [
+      {
+        outboxId: existing!.id!,
+        error: 'server_rejected_quick_note',
+        failedAt: '2026-07-07T13:10:00.000Z',
+      },
+    ])
+
+    await enqueueOutbox(db, 'quickNote', 'qn-failed', 'update', { id: 'qn-failed', content: 'new' })
+
+    const row = await db.outbox.where('entityId').equals('qn-failed').first()
+    expect(row).toMatchObject({
+      lastError: null,
+      lastErrorCode: null,
+      failedAt: null,
+      attemptCount: 0,
+    })
+    expect(row!.payload).toBe(JSON.stringify({ id: 'qn-failed', content: 'new' }))
+  })
+
+  it('H6: enqueueOutbox keep_existing — clears stale failure metadata on repeated local mutation', async () => {
+    db = await openTestDb()
+    await enqueueOutbox(db, 'quickNote', 'qn-delete-failed', 'delete', { id: 'qn-delete-failed' })
+    const existing = await db.outbox.where('entityId').equals('qn-delete-failed').first()
+    await markOutboxEventsFailed(db, [
+      {
+        outboxId: existing!.id!,
+        error: 'server_rejected_delete',
+        failedAt: '2026-07-07T13:10:00.000Z',
+      },
+    ])
+
+    await enqueueOutbox(db, 'quickNote', 'qn-delete-failed', 'delete', { id: 'qn-delete-failed' })
+
+    const row = await db.outbox.where('entityId').equals('qn-delete-failed').first()
+    expect(row).toMatchObject({
+      action: 'delete',
+      lastError: null,
+      lastErrorCode: null,
+      failedAt: null,
+      attemptCount: 0,
+    })
   })
 
   // --- T15: 三行以上 outbox 去重 → latest createdAt ---

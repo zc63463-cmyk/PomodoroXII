@@ -20,6 +20,7 @@ export function QuickNoteTimeline({
   onEdit,
   onTogglePin,
   onDelete,
+  onMigrate,
   onTagClick,
   pendingById,
   syncStatusById,
@@ -32,8 +33,9 @@ export function QuickNoteTimeline({
   onEdit: (note: QuickNote) => void
   onTogglePin: (id: string) => void
   onDelete: (id: string) => void
+  onMigrate: (id: string) => void
   onTagClick: (tag: string) => void
-  pendingById?: Record<string, 'delete' | 'pin'>
+  pendingById?: Record<string, 'delete' | 'pin' | 'migrate'>
   syncStatusById?: Record<string, QuickNoteSyncStatus>
   searchQuery: string
 }) {
@@ -72,6 +74,7 @@ export function QuickNoteTimeline({
             onEdit,
             onTogglePin,
             onDelete,
+            onMigrate,
             onTagClick,
             pendingAction: pendingById?.[note.id],
             syncStatus: syncStatusById?.[note.id],

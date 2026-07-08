@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { db, spaceDBManager } from '@/services/space-db'
 import {
   configureQuickNoteOutboxHook,
+  convertQuickNoteToNote,
   createQuickNote,
   getQuickNoteRepositoryUserMessage,
+  listQuickNoteLifecycleStates,
   listQuickNotes,
   listTrashedQuickNotes,
   moveQuickNoteToTrash,
@@ -167,6 +169,90 @@ describe('quick-note-repository', () => {
     expect(contexts[5]?.payload).toEqual({ id: note.id })
     expect(contexts).toHaveLength(6)
     expect(await db.outbox.count()).toBe(0)
+  })
+
+  it('converts an active quick note into a note and archives the quick note', async () => {
+    const quickNote = await createQuickNote({
+      id: 'convert-source',
+      content: 'Converted title\nConverted body #note',
+      folder_id: 'folder-1',
+    })
+    await db.outbox.clear()
+
+    const result = await convertQuickNoteToNote(quickNote.id)
+
+    const converted = await db.quickNotes.get(quickNote.id)
+    const note = await db.notes.get(result.noteId)
+    const outboxRows = await db.outbox.toArray()
+
+    expect(result.quickNoteId).toBe(quickNote.id)
+    expect(note).toMatchObject({
+      id: result.noteId,
+      title: 'Converted title',
+      content: 'Converted title\nConverted body #note',
+      summary: 'Converted title\nConverted body #note',
+      tags: ['note'],
+      folder_id: 'folder-1',
+      status: 'active',
+      deletion_state: 'active',
+      _dirty: true,
+    })
+    expect(converted).toMatchObject({
+      id: quickNote.id,
+      archived_at: expect.any(String),
+      migrated_to_note_id: result.noteId,
+      deletion_state: 'active',
+      _dirty: true,
+    })
+    expect(outboxRows).toHaveLength(2)
+    expect(outboxRows.map((row) => `${row.entityType}:${row.action}`).sort()).toEqual([
+      'note:create',
+      'quickNote:update',
+    ])
+    expect((await listQuickNotes()).map((item) => item.id)).not.toContain(quickNote.id)
+    expect((await listQuickNoteLifecycleStates())[quickNote.id]).toBe('converted')
+  })
+
+  it('rolls back note creation and quick note conversion when conversion sync fails', async () => {
+    const quickNote = await createQuickNote({
+      id: 'convert-rollback',
+      content: 'rollback source',
+    })
+    const before = await db.quickNotes.get(quickNote.id)
+    await db.outbox.clear()
+    configureQuickNoteOutboxHook(async () => {
+      throw new Error('convert hook failed')
+    })
+
+    await expect(convertQuickNoteToNote(quickNote.id)).rejects.toThrow('convert hook failed')
+
+    expect(await db.quickNotes.get(quickNote.id)).toEqual(before)
+    expect(await db.notes.count()).toBe(0)
+    expect(await db.outbox.count()).toBe(0)
+  })
+
+  it('rejects converting trashed archived or already converted quick notes', async () => {
+    const trashed = await createQuickNote({ content: 'trashed convert' })
+    await moveQuickNoteToTrash(trashed.id)
+    await expect(convertQuickNoteToNote(trashed.id)).rejects.toMatchObject({
+      code: 'not_active',
+    } satisfies Partial<QuickNoteRepositoryError>)
+
+    const archived = await createQuickNote({ content: 'archived convert' })
+    await db.quickNotes.update(archived.id, {
+      archived_at: '2026-01-02T00:00:00.000Z',
+    })
+    await expect(convertQuickNoteToNote(archived.id)).rejects.toMatchObject({
+      code: 'not_active',
+    } satisfies Partial<QuickNoteRepositoryError>)
+
+    const converted = await createQuickNote({ content: 'already converted' })
+    await db.quickNotes.update(converted.id, {
+      migrated_to_note_id: 'note-1',
+    })
+    await expect(convertQuickNoteToNote(converted.id)).rejects.toMatchObject({
+      code: 'converted',
+    } satisfies Partial<QuickNoteRepositoryError>)
   })
 
   it('rolls back the entity write when the outbox hook rejects', async () => {

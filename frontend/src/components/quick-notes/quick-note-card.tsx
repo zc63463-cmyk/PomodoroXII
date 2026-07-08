@@ -1,7 +1,7 @@
 'use client'
 
 import { createElement } from 'react'
-import { PinIcon, Trash2Icon } from 'lucide-react'
+import { FileTextIcon, PinIcon, Trash2Icon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { renderHighlightedText } from '@/components/quick-notes/quick-note-highlight'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
@@ -19,6 +19,7 @@ export function QuickNoteCard({
   onEdit,
   onTogglePin,
   onDelete,
+  onMigrate,
   onTagClick,
   pendingAction,
   syncStatus,
@@ -28,8 +29,9 @@ export function QuickNoteCard({
   onEdit: (note: QuickNote) => void
   onTogglePin: (id: string) => void
   onDelete: (id: string) => void
+  onMigrate: (id: string) => void
   onTagClick: (tag: string) => void
-  pendingAction?: 'delete' | 'pin'
+  pendingAction?: 'delete' | 'pin' | 'migrate'
   syncStatus?: QuickNoteSyncStatus
   searchQuery: string
 }) {
@@ -85,6 +87,19 @@ export function QuickNoteCard({
             ),
           },
           createElement(PinIcon),
+        ),
+        createElement(
+          Button,
+          {
+            type: 'button',
+            variant: 'ghost',
+            size: 'icon-sm',
+            onClick: () => onMigrate(note.id),
+            disabled: isPending,
+            'aria-label': '转为笔记',
+            className: quickNoteStyles.cardAction,
+          },
+          createElement(FileTextIcon),
         ),
         createElement(
           Button,

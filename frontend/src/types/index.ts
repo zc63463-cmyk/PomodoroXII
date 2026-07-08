@@ -405,6 +405,10 @@ export interface OutboxEvent {
   payload: string
   createdAt: number
   synced: boolean
+  lastError?: string | null
+  lastErrorCode?: string | null
+  failedAt?: string | null
+  attemptCount?: number
 }
 
 // Sync meta stored in IndexedDB
