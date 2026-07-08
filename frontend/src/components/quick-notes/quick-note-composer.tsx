@@ -3,9 +3,10 @@
 import { createElement, FormEvent, KeyboardEvent } from 'react'
 import { PlusIcon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { QuickNoteEditorStatusLine } from '@/components/quick-notes/quick-note-editor-status-line'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
-import { getQuickNoteEditorStatusText } from '@/lib/quick-notes/quick-note-editor-status'
 import { extractQuickNoteTags } from '@/lib/quick-notes/quick-note-tags'
+import type { QuickNoteEditorStatus } from '@/lib/quick-notes/quick-note-editor-status'
 import type { QuickNote } from '@/types'
 
 export type QuickNoteSaveState = 'saved' | 'unsaved' | 'saving' | 'failed'
@@ -36,6 +37,13 @@ export function QuickNoteComposer({
   onToggleFocus?: () => void
 }) {
   const previewTags = extractQuickNoteTags(draft)
+  const editorStatus = getComposerStatus({
+    draft,
+    editingNote,
+    hasConflict,
+    isTyping,
+    saveState,
+  })
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === 'Escape' && isFocusMode) {
@@ -91,14 +99,8 @@ export function QuickNoteComposer({
           { className: 'flex min-w-0 flex-col gap-2' },
           createElement(
             'div',
-            { className: quickNoteStyles.metaText },
-            getComposerStatusText({
-              draft,
-              editingNote,
-              hasConflict,
-              isTyping,
-              saveState,
-            }),
+            { className: 'flex min-h-7 items-center' },
+            createElement(QuickNoteEditorStatusLine, editorStatus),
           ),
           previewTags.length > 0
             ? createElement(
@@ -163,7 +165,7 @@ export function QuickNoteComposer({
   )
 }
 
-function getComposerStatusText({
+function getComposerStatus({
   draft,
   editingNote,
   hasConflict,
@@ -175,20 +177,26 @@ function getComposerStatusText({
   hasConflict: boolean
   isTyping: boolean
   saveState: QuickNoteSaveState
-}): string {
-  if (hasConflict) return getQuickNoteEditorStatusText('conflict')
-  if (saveState === 'saving') return getQuickNoteEditorStatusText('saving')
-  if (saveState === 'failed') return getQuickNoteEditorStatusText('failed')
-  if (isTyping && draft.trim()) return getQuickNoteEditorStatusText('typing')
+}): {
+  status: QuickNoteEditorStatus | null
+  fallbackText?: string
+} {
+  if (hasConflict) return { status: 'conflict' }
+  if (saveState === 'saving') return { status: 'saving' }
+  if (saveState === 'failed') return { status: 'failed' }
+  if (isTyping && draft.trim()) return { status: 'typing' }
   if (!editingNote) {
     return draft.trim()
-      ? getQuickNoteEditorStatusText('dirty')
-      : '新建小记：点击记录保存，Ctrl/Cmd + Enter 快速记录'
+      ? { status: 'dirty' }
+      : {
+          status: null,
+          fallbackText: '新建小记：点击记录保存，Ctrl/Cmd + Enter 快速记录',
+        }
   }
 
   if (saveState === 'unsaved' || draft.trim() !== editingNote.content.trim()) {
-    return getQuickNoteEditorStatusText('dirty')
+    return { status: 'dirty' }
   }
 
-  return getQuickNoteEditorStatusText('saved')
+  return { status: 'saved' }
 }

@@ -4,14 +4,13 @@ import { createElement, useEffect, useMemo, useRef, useState } from 'react'
 import { FileTextIcon, PinIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { QuickNoteEditorStatusLine } from '@/components/quick-notes/quick-note-editor-status-line'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
-import {
-  getQuickNoteEditorStatusText,
-  QUICK_NOTE_TYPING_IDLE_MS,
-} from '@/lib/quick-notes/quick-note-editor-status'
+import { QUICK_NOTE_TYPING_IDLE_MS } from '@/lib/quick-notes/quick-note-editor-status'
 import { getQuickNoteTitle } from '@/lib/quick-notes/quick-note-selectors'
 import { cn } from '@/lib/utils'
 import type { QuickNoteSyncStatus } from '@/lib/quick-notes/quick-note-repository'
+import type { QuickNoteEditorStatus } from '@/lib/quick-notes/quick-note-editor-status'
 import type { QuickNote } from '@/types'
 
 export function QuickNoteReadArticle({
@@ -289,7 +288,7 @@ export function QuickNoteReadArticle({
                 createElement(
                   'p',
                   null,
-                  '远端内容已更新，已保留你正在编辑的本地草稿。请先处理冲突再保存。',
+                  '远端也更新了，自动保存已暂停。请选择处理方式。',
                 ),
                 createElement(
                   'div',
@@ -353,8 +352,7 @@ export function QuickNoteReadArticle({
             'div',
             { className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between' },
             createElement(
-              'span',
-              { className: quickNoteStyles.metaText },
+              QuickNoteEditorStatusLine,
               getInlineEditStatus(saveState, dirty, hasRemoteUpdate, isTyping),
             ),
             createElement(
@@ -405,13 +403,19 @@ function getInlineEditStatus(
   dirty: boolean,
   hasRemoteUpdate: boolean,
   isTyping: boolean,
-): string {
-  if (hasRemoteUpdate) return getQuickNoteEditorStatusText('conflict')
-  if (saveState === 'saving') return getQuickNoteEditorStatusText('saving')
-  if (saveState === 'failed') return getQuickNoteEditorStatusText('failed')
-  if (isTyping && dirty) return getQuickNoteEditorStatusText('typing')
-  if (dirty || saveState === 'dirty') return getQuickNoteEditorStatusText('dirty')
-  return '局部编辑，不会影响顶部 composer 草稿。'
+): {
+  status: QuickNoteEditorStatus | null
+  fallbackText?: string
+} {
+  if (hasRemoteUpdate) return { status: 'conflict' }
+  if (saveState === 'saving') return { status: 'saving' }
+  if (saveState === 'failed') return { status: 'failed' }
+  if (isTyping && dirty) return { status: 'typing' }
+  if (dirty || saveState === 'dirty') return { status: 'dirty' }
+  return {
+    status: null,
+    fallbackText: '局部编辑，不会影响顶部 composer 草稿。',
+  }
 }
 
 function formatReadableDate(iso: string): string {

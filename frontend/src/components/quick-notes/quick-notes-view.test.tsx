@@ -216,13 +216,21 @@ describe('QuickNotesView', () => {
       target: { value: '正在写一条新的小记' },
     })
 
-    expect(screen.getByText('正在输入…')).toBeInTheDocument()
+    const typingStatus = screen.getByText('正在输入…').closest(
+      '[data-quick-note-editor-status]',
+    )
+    expect(typingStatus).toHaveAttribute('data-status', 'typing')
+    expect(typingStatus).toHaveAttribute('aria-live', 'off')
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(700)
     })
 
-    expect(screen.getByText('草稿未保存')).toBeInTheDocument()
+    const dirtyStatus = screen.getByText('草稿未保存').closest(
+      '[data-quick-note-editor-status]',
+    )
+    expect(dirtyStatus).toHaveAttribute('data-status', 'dirty')
+    expect(dirtyStatus).toHaveAttribute('aria-live', 'off')
   })
 
   it('keeps the preview smoke path readable with composer, timeline, and trash affordance', async () => {
@@ -373,9 +381,11 @@ describe('QuickNotesView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
 
-    expect(screen.getByText('已保存')).toHaveClass(
-      'text-[color:var(--qn-muted)]',
+    const savedStatus = screen.getByText('已保存').closest(
+      '[data-quick-note-editor-status]',
     )
+    expect(savedStatus).toHaveAttribute('data-status', 'saved')
+    expect(savedStatus).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByRole('button', { name: /取消/ })).toHaveClass(
       'text-[color:var(--qn-muted)]',
     )
@@ -1559,9 +1569,17 @@ describe('QuickNotesView', () => {
         '远端前标题\n\n我正在写的本地详情草稿',
       )
     })
+    const conflictStatus = screen.getByText('远端有新版本').closest(
+      '[data-quick-note-editor-status]',
+    )
+    expect(conflictStatus).toHaveAttribute('data-status', 'conflict')
+    expect(conflictStatus).toHaveAttribute('aria-live', 'assertive')
     expect(
-      screen.getByText('远端内容已更新，已保留你正在编辑的本地草稿。请先处理冲突再保存。'),
+      screen.getByText('远端也更新了，自动保存已暂停。请选择处理方式。'),
     ).toBeInTheDocument()
+    expect(
+      screen.queryByText('远端内容已更新，已保留你正在编辑的本地草稿。请先处理冲突再保存。'),
+    ).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
 
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
