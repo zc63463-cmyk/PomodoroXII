@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { QuickNoteComposer, type QuickNoteSaveState } from '@/components/quick-notes/quick-note-composer'
 import { QuickNoteConflictPanel, type QuickNoteDraftConflict } from '@/components/quick-notes/quick-note-conflict-panel'
+import { QuickNoteExplorer } from '@/components/quick-notes/quick-note-explorer'
 import { QuickNoteReadView } from '@/components/quick-notes/quick-note-read-view'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
 import { QuickNoteTimeline } from '@/components/quick-notes/quick-note-timeline'
@@ -22,9 +23,11 @@ import type {
   QuickNoteSyncStatus,
 } from '@/lib/quick-notes/quick-note-repository'
 import type { QuickNoteFocusMode } from '@/stores/quick-note-store'
+import type { QuickNoteTagFilterMode } from '@/stores/quick-note-store'
 import type { QuickNote } from '@/types'
 
 interface QuickNotesWorkspaceProps {
+  allQuickNotes: QuickNote[]
   quickNotes: QuickNote[]
   trashedQuickNotes: QuickNote[]
   syncStatusById: Record<string, QuickNoteSyncStatus>
@@ -33,6 +36,9 @@ interface QuickNotesWorkspaceProps {
   error: string | null
   previewError: string | null
   searchQuery: string
+  selectedTagFilters: string[]
+  tagFilterMode: QuickNoteTagFilterMode
+  selectedDate: string | null
   focusMode: QuickNoteFocusMode
   selectedQuickNoteId: string | null
   draft: string
@@ -52,6 +58,11 @@ interface QuickNotesWorkspaceProps {
   onSearchChange: (query: string) => void
   onClearSearch: () => void
   onTagClick: (tag: string) => void
+  onToggleTagFilter: (tag: string) => void
+  onClearTagFilters: () => void
+  onSetTagFilterMode: (mode: QuickNoteTagFilterMode) => void
+  onToggleSelectedDate: (date: string) => void
+  onClearSelectedDate: () => void
   onEdit: (note: QuickNote) => void
   onRestore: (id: string) => boolean | void | Promise<boolean | void>
   onPurge: (id: string) => boolean | void | Promise<boolean | void>
@@ -65,6 +76,7 @@ interface QuickNotesWorkspaceProps {
 }
 
 export function QuickNotesWorkspace({
+  allQuickNotes,
   quickNotes,
   trashedQuickNotes,
   syncStatusById,
@@ -73,6 +85,9 @@ export function QuickNotesWorkspace({
   error,
   previewError,
   searchQuery,
+  selectedTagFilters,
+  tagFilterMode,
+  selectedDate,
   focusMode,
   selectedQuickNoteId,
   draft,
@@ -92,6 +107,11 @@ export function QuickNotesWorkspace({
   onSearchChange,
   onClearSearch,
   onTagClick,
+  onToggleTagFilter,
+  onClearTagFilters,
+  onSetTagFilterMode,
+  onToggleSelectedDate,
+  onClearSelectedDate,
   onEdit,
   onRestore,
   onPurge,
@@ -125,6 +145,7 @@ export function QuickNotesWorkspace({
   const selectedPendingAction = selectedQuickNoteId
     ? timelinePendingById[selectedQuickNoteId]
     : undefined
+  const isFocusEditing = isFocusEdit(focusMode)
 
   useEffect(() => {
     if (!selectedQuickNoteId || focusMode === 'normal') {
@@ -272,8 +293,75 @@ export function QuickNotesWorkspace({
     expandedQuickNoteId: quickPreviewNoteId,
     syncStatusById,
     searchQuery,
-    disabledInteractions: isFocusEdit(focusMode),
+    disabledInteractions: isFocusEditing,
   })
+  const explorer = createElement(QuickNoteExplorer, {
+    notes: allQuickNotes,
+    selectedTagFilters,
+    tagFilterMode,
+    selectedDate,
+    topSlot: createElement(SearchBox, {
+      searchQuery,
+      onSearchChange,
+      onClearSearch,
+    }),
+    onToggleTag: onToggleTagFilter,
+    onClearTags: onClearTagFilters,
+    onSetTagFilterMode,
+    onToggleDate: onToggleSelectedDate,
+    onClearDate: onClearSelectedDate,
+  })
+  const timelineSlot = isFocusEditing
+    ? createElement(
+        'div',
+        {
+          className: quickNoteStyles.focusEditTimelineSink,
+          'data-focus-edit-timeline-sink': 'true',
+          'aria-disabled': true,
+        },
+        timeline,
+      )
+    : timeline
+  const mainColumn = createElement(
+    'div',
+    { className: quickNoteStyles.workspaceMain },
+    createElement(QuickNoteComposer, {
+      draft,
+      editingNote,
+      hasConflict: draftConflict !== null,
+      isTyping,
+      onDraftChange,
+      onCancelEdit,
+      onSubmit: handleComposerSubmit,
+      saveState,
+      variant: isFocusEditing ? 'focus' : 'compact',
+      isFocusMode: isFocusEditing,
+      onToggleFocus: onToggleFocusEdit,
+    }),
+    createElement(QuickNoteConflictPanel, {
+      conflict: draftConflict,
+      onKeepLocal: onKeepLocalDraft,
+      onUseRemote: onUseRemoteDraft,
+      onMerge: onMergeRemoteDraft,
+    }),
+    isFocusEditing
+      ? createElement(
+          'div',
+          { className: quickNoteStyles.focusEditHint },
+          '专注写作中：Ctrl/Cmd + Enter 保存，Esc 返回工作台。',
+        )
+      : null,
+    createElement(FeedbackBlocks, { previewError, error }),
+    !isFocusEditing && showTrash
+      ? createElement(TrashPanel, {
+          notes: trashedQuickNotes,
+          onRestore,
+          onPurge,
+          pendingById: trashPendingById,
+        })
+      : null,
+    timelineSlot,
+  )
 
   return createElement(
     WorkspaceMotion,
@@ -281,64 +369,12 @@ export function QuickNotesWorkspace({
     createElement(
       'div',
       {
-        className: isFocusEdit(focusMode)
+        className: isFocusEditing
           ? quickNoteStyles.focusEditGrid
           : quickNoteStyles.workspaceGrid,
       },
-      createElement(
-        'div',
-        { className: quickNoteStyles.workspaceMain },
-        createElement(QuickNoteComposer, {
-          draft,
-          editingNote,
-          hasConflict: draftConflict !== null,
-          isTyping,
-          onDraftChange,
-          onCancelEdit,
-          onSubmit: handleComposerSubmit,
-          saveState,
-          variant: isFocusEdit(focusMode) ? 'focus' : 'compact',
-          isFocusMode: isFocusEdit(focusMode),
-          onToggleFocus: onToggleFocusEdit,
-        }),
-        createElement(QuickNoteConflictPanel, {
-          conflict: draftConflict,
-          onKeepLocal: onKeepLocalDraft,
-          onUseRemote: onUseRemoteDraft,
-          onMerge: onMergeRemoteDraft,
-        }),
-        isFocusEdit(focusMode)
-          ? createElement(
-              'div',
-              { className: quickNoteStyles.focusEditHint },
-              '专注写作中：Ctrl/Cmd + Enter 保存，Esc 返回工作台。',
-            )
-          : createElement(SearchBox, {
-              searchQuery,
-              onSearchChange,
-              onClearSearch,
-            }),
-        createElement(FeedbackBlocks, { previewError, error }),
-        showTrash
-          ? createElement(TrashPanel, {
-              notes: trashedQuickNotes,
-              onRestore,
-              onPurge,
-              pendingById: trashPendingById,
-            })
-          : null,
-        isFocusEdit(focusMode)
-          ? createElement(
-              'div',
-              {
-                className: quickNoteStyles.timelineDimmed,
-                'aria-hidden': true,
-                inert: true,
-              },
-              timeline,
-          )
-        : timeline,
-      ),
+      explorer,
+      mainColumn,
     ),
   )
 }
@@ -355,7 +391,6 @@ function WorkspaceMotion({
   return createElement(
     'div',
     {
-      key: keyName,
       className,
       'data-focus-stage': keyName,
     },

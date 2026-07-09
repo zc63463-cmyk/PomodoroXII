@@ -13,6 +13,7 @@ import { useQuickNoteStore } from '@/stores/quick-note-store'
 
 export function QuickNotesView() {
   const {
+    allQuickNotes,
     quickNotes,
     trashedQuickNotes,
     syncStatusById,
@@ -20,6 +21,9 @@ export function QuickNotesView() {
     isLoading,
     error,
     searchQuery,
+    selectedTagFilters,
+    tagFilterMode,
+    selectedDate,
     focusMode,
     selectedQuickNoteId,
     loadQuickNotes,
@@ -30,6 +34,11 @@ export function QuickNotesView() {
     purgeQuickNote,
     togglePin,
     migrateToNote,
+    toggleTagFilter,
+    clearTagFilters,
+    setTagFilterMode,
+    toggleSelectedDate,
+    clearSelectedDate,
     toggleFocusEdit,
     enterDetailRead,
     exitFocus,
@@ -118,7 +127,7 @@ export function QuickNotesView() {
     createElement(
       'div',
       {
-        className: `${focusMode === 'detail-read' ? quickNoteStyles.shellWide : quickNoteStyles.shell} ${quickNoteStyles.surface}`,
+        className: `${focusMode === 'detail-read' ? quickNoteStyles.shell : quickNoteStyles.shellWide} ${quickNoteStyles.surface}`,
       },
       createElement(
         'header',
@@ -162,6 +171,7 @@ export function QuickNotesView() {
         ),
       ),
       createElement(QuickNotesWorkspace, {
+        allQuickNotes,
         quickNotes,
         trashedQuickNotes,
         syncStatusById,
@@ -170,6 +180,9 @@ export function QuickNotesView() {
         error,
         previewError,
         searchQuery,
+        selectedTagFilters,
+        tagFilterMode,
+        selectedDate,
         focusMode,
         selectedQuickNoteId,
         draft,
@@ -189,6 +202,11 @@ export function QuickNotesView() {
         onSearchChange: (query: string) => void loadQuickNotes({ query }),
         onClearSearch: clearSearch,
         onTagClick: (tag: string) => void loadQuickNotes({ query: `#${tag}` }),
+        onToggleTagFilter: toggleTagFilter,
+        onClearTagFilters: clearTagFilters,
+        onSetTagFilterMode: setTagFilterMode,
+        onToggleSelectedDate: toggleSelectedDate,
+        onClearSelectedDate: clearSelectedDate,
         onEdit: startEdit,
         onRestore: restoreFromTrash,
         onPurge: purgeFromTrash,

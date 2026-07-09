@@ -49,15 +49,29 @@ describe('quick-note theme smoke', () => {
     expect(styleClassNames).toContain('var(--qn-')
     expect(styleClassNames).toContain('quick-note-stage')
     expect(styleClassNames).toContain('quick-note-motion-panel')
-    expect(styleClassNames).toContain('quick-note-timeline-dimmed')
+    expect(styleClassNames).not.toContain('quick-note-timeline-dimmed')
     expect(styleClassNames).not.toMatch(/text-(white|black|slate|gray|zinc|neutral)-\d+/)
     expect(styleClassNames).not.toMatch(/bg-(slate|gray|zinc|neutral|blue|purple)-\d+/)
+  })
+
+  it('keeps explorer selected states visibly accented in dark themes', () => {
+    expect(quickNoteStyles.explorerSegmentButtonActive).toContain(
+      'bg-[color:var(--qn-accent)]',
+    )
+    expect(quickNoteStyles.explorerSegmentButtonActive).toContain(
+      'text-[color:var(--qn-accent-foreground)]',
+    )
+    expect(quickNoteStyles.explorerTagSelected).toContain(
+      '!bg-[color:var(--qn-accent)]',
+    )
+    expect(quickNoteStyles.explorerCalendarCellSelected).toContain(
+      '!bg-[color:var(--qn-accent)]',
+    )
   })
 
   it('defines restrained QuickNote motion primitives with reduced-motion fallback', () => {
     for (const keyframeName of [
       'qn-stage-enter',
-      'qn-stage-focus-edit',
       'qn-stage-detail-read',
       'qn-panel-enter',
       'qn-panel-slide-in',
@@ -68,9 +82,20 @@ describe('quick-note theme smoke', () => {
 
     expect(globalsCss).toContain('.quick-note-stage')
     expect(globalsCss).toContain('.quick-note-motion-panel')
-    expect(globalsCss).toContain('.quick-note-timeline-dimmed')
+    expect(globalsCss).not.toContain('qn-stage-focus-edit')
+    expect(globalsCss).not.toContain('.quick-note-timeline-dimmed')
     expect(globalsCss).not.toContain('qn-stage-focus-read')
     expect(globalsCss).toContain('@media (prefers-reduced-motion: reduce)')
+  })
+
+  it('keeps focus-edit as an in-place column expansion instead of a full-stage transition', () => {
+    const focusEditStageBlock = getCssBlock(
+      globalsCss,
+      ".quick-note-stage[data-focus-stage='focus-edit']",
+    )
+
+    expect(focusEditStageBlock).toContain('animation-name: qn-stage-enter')
+    expect(focusEditStageBlock).not.toContain('qn-stage-focus-edit')
   })
 })
 
