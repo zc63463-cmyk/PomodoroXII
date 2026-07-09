@@ -1,11 +1,77 @@
-# PR-I QuickNote Focus Modes / 小记详情与专注模式重建派发文档
+# PR-I QuickNote Focus Modes / 历史派发归档
 
-> ⚠️ 历史派发文档，仅供追溯，不再作为当前实现入口。
+> ⚠️ **归档文档，仅供追溯，不再作为当前实现入口。**
 >
-> 当前 QuickNote 已收敛为 `normal / focus-edit / detail-read` 三个 store focusMode；
+> 本文主体记录 PR-I 早期“四态 / focus-read / QuickNoteDetailPanel”方案。
+> 该方案已被后续实现收敛，正文中的旧执行步骤、旧 prompt、旧验收标准不得直接复制给后续 agent。
+>
+> 当前 QuickNote 以代码与测试为准：store focusMode 只有 `normal / focus-edit / detail-read`；
 > 双击卡片是 normal 态下的本地 Quick Preview：卡片自身向下生长并渲染完整内容，
 > 不进入 `focus-read`，不渲染独立轻详情面板，也不展示元信息块。
-> 后续实现请以代码与测试为准，避免按本文旧“四态 / focus-read / QuickNoteDetailPanel”路径继续开发。
+
+## 0. 当前实现入口（2026-07-09）
+
+后续开发、审查、修复应从这里进入，而不是从本文后续历史正文进入。
+
+### 当前状态模型
+
+```text
+store focusMode:
+normal      默认工作台，composer + search + timeline + trash
+focus-edit  composer 专注写作，timeline 弱化且 inert
+detail-read 沉浸阅读/局部 inline edit
+
+local UI state:
+Quick Preview = normal 态下的卡片本地展开态，不属于 focusMode
+```
+
+### 当前交互约定
+
+- 双击卡片正文：只展开当前卡片，卡片自增长并向下挤压后续条目。
+- 点击“阅读”：进入 `detail-read` 沉浸阅读，不经过 `focus-read`。
+- 详情 inline edit：使用局部 draft，不污染顶部 composer；远端冲突时阻止保存并显示保留本地/采用远端/合并。
+- 搜索过滤：只影响列表和 Quick Preview 展开态，不应误判选中详情项被同步删除。
+- focus-edit：timeline 可以保留弱化视觉，但必须 `inert`，不能被 Tab 聚焦。
+
+### 当前代码入口
+
+```text
+frontend/src/stores/quick-note-store.ts
+frontend/src/types/memo.ts
+frontend/src/lib/quick-notes/quick-note-focus.ts
+frontend/src/components/quick-notes/quick-notes-workspace.tsx
+frontend/src/components/quick-notes/quick-note-card.tsx
+frontend/src/components/quick-notes/quick-note-timeline.tsx
+frontend/src/components/quick-notes/quick-note-read-view.tsx
+frontend/src/components/quick-notes/quick-note-read-article.tsx
+frontend/src/components/quick-notes/quick-note-read-aside.tsx
+frontend/src/components/quick-notes/quick-note-styles.ts
+```
+
+### 当前测试入口
+
+```text
+frontend/src/components/quick-notes/quick-notes-view.test.tsx
+frontend/src/components/quick-notes/quick-note-theme-smoke.test.ts
+frontend/src/lib/quick-notes/quick-note-focus.test.ts
+frontend/src/stores/quick-note-store.test.ts
+```
+
+### 当前门禁建议
+
+```powershell
+cd E:\Development\MyAwesomeApp\PomodoroXII\frontend
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+```
+
+### 历史正文阅读规则
+
+- 后续章节只用于理解 PR-I 当时的设计意图和取舍。
+- 遇到 `focus-read`、`enterFocusRead`、`isFocusRead`、`QuickNoteDetailPanel`，一律视为历史残留概念。
+- 如需继续开发，请先对照当前代码和测试，再写新的任务派发文档。
 
 ## 1. 任务定位
 
@@ -685,9 +751,19 @@ PR-I 完成后必须满足：
 
 如果合成一个 PR，PR body 必须按这三块列清边界和测试证据。
 
-## 16. 深度派发解读 Prompt
+## 16. 已废弃的深度派发解读 Prompt（禁止直接复制）
+
+> ⚠️ 以下 prompt 是 PR-I 早期四态方案的历史材料。
+> 它包含 `focus-read`、`enterFocusRead`、`QuickNoteDetailPanel` 等已废弃路径。
+> 不要再把本段作为后续实现入口；如需派发新任务，请基于本文顶部“当前实现入口”重写 prompt。
 
 ```text
+【已废弃，禁止直接执行】
+以下 prompt 是 PR-I 早期四态方案的历史材料，当前 QuickNote 已收敛为：
+- store focusMode：normal / focus-edit / detail-read
+- Quick Preview：normal 态下的卡片本地展开态，不属于 focusMode
+- focus-read / enterFocusRead / isFocusRead / QuickNoteDetailPanel 均不再作为实现目标
+
 你是 PomodoroXII 项目的实现型 coding agent。当前任务是实现 PR-I：QuickNote Focus Modes / 小记详情与专注模式重建。
 
 项目路径：
@@ -824,13 +900,14 @@ http://127.0.0.1:3005/quick-notes?quickNotePreview=1
 
 ## 17. 最终结论
 
-PR-I 的成功标准不是堆更多按钮，而是把 QuickNote 的界面状态边界打牢：
+PR-I 的阶段性价值不是“保留四态本身”，而是把 QuickNote 的界面状态边界打牢。
+当前主线已经选择更轻的三态模型：
 
 ```text
-normal：快速捕捉和浏览
+normal：快速捕捉、搜索、浏览、卡片本地 Quick Preview
 focus-edit：输入专注
-focus-read：工作台内轻详情
-detail-read：沉浸阅读与局部编辑
+detail-read：沉浸阅读与局部 inline edit
 ```
 
-只要这四态清楚，后续再扩展 TOC、导出、关系、Notes 跳转都会更稳。
+其中 Quick Preview 是列表项自己的展开态，不是 `focus-read`，也不需要独立详情面板。
+后续再扩展 TOC、导出、关系、Notes 跳转时，应先保持这条边界不被打破。
