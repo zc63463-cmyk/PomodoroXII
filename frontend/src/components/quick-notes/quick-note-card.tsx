@@ -4,6 +4,7 @@ import { createElement } from 'react'
 import { FileTextIcon, PinIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { renderHighlightedText } from '@/components/quick-notes/quick-note-highlight'
+import { QuickNoteMarkdown } from '@/components/quick-notes/quick-note-markdown'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
 import {
   getQuickNoteSearchNeedle,
@@ -91,19 +92,15 @@ export function QuickNoteCard({
           { className: quickNoteStyles.cardTitle },
           renderHighlightedText(getQuickNoteTitle(note), searchQuery),
         ),
-        createElement(
-          'p',
-          {
-            className: isExpanded
-              ? quickNoteStyles.cardBodyExpanded
-              : quickNoteStyles.cardBody,
-            'aria-label': isExpanded ? '小记快速预览' : undefined,
-          },
-          renderHighlightedText(
-            isExpanded ? note.content : getQuickNoteSummary(note),
-            searchQuery,
-          ),
-        ),
+        isExpanded
+          ? null
+          : createElement(
+              'p',
+              {
+                className: quickNoteStyles.cardBody,
+              },
+              renderHighlightedText(getQuickNoteSummary(note), searchQuery),
+            ),
       ),
       createElement(
         'div',
@@ -192,6 +189,19 @@ export function QuickNoteCard({
         ),
       ),
     ),
+    isExpanded
+      ? createElement(
+          'div',
+          {
+            className: quickNoteStyles.cardBodyExpanded,
+            'aria-label': '小记快速预览',
+          },
+          createElement(QuickNoteMarkdown, {
+            content: note.content,
+            variant: 'preview',
+          }),
+        )
+      : null,
     createElement(
       'footer',
       { className: quickNoteStyles.cardFooter },

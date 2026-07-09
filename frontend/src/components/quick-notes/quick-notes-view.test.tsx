@@ -1640,6 +1640,91 @@ describe('QuickNotesView', () => {
     expect(screen.queryByLabelText('小记快速预览')).not.toBeInTheDocument()
   })
 
+  it('renders markdown semantics in quick preview while staying inside the card', async () => {
+    const note = makeQuickNote({
+      id: 'quick-preview-markdown-note',
+      content: [
+        '# Quick Preview Markdown',
+        '',
+        '- first item',
+        '- second item',
+        '',
+        '> quoted insight',
+        '',
+        'Use `inline code` and [safe link](https://example.com).',
+        '',
+        '<img src=x onerror=alert(1)>',
+      ].join('\n'),
+    })
+    storeMocks.state.quickNotes = [note]
+
+    render(createElement(QuickNotesView))
+
+    const collapsedTrigger = await screen.findByRole('button', {
+      name: /# Quick Preview Markdown/,
+    })
+    fireEvent.doubleClick(collapsedTrigger)
+
+    const expandedCard = screen
+      .getByRole('button', { name: /# Quick Preview Markdown/ })
+      .closest('article')
+    const quickPreview = screen.getByLabelText('小记快速预览')
+
+    expect(quickPreview.closest('article')).toBe(expandedCard)
+    expect(screen.queryByLabelText('小记沉浸阅读')).not.toBeInTheDocument()
+    expect(storeMocks.enterDetailRead).not.toHaveBeenCalled()
+    expect(within(quickPreview).getByRole('heading', {
+      level: 1,
+      name: 'Quick Preview Markdown',
+    })).toBeInTheDocument()
+    expect(within(quickPreview).getAllByRole('listitem')).toHaveLength(2)
+    expect(quickPreview.querySelector('blockquote')).toHaveTextContent('quoted insight')
+    expect(quickPreview.querySelector('code')).toHaveTextContent('inline code')
+    expect(quickPreview.querySelector('img')).toBeNull()
+    expect(quickPreview).toHaveTextContent('<img src=x onerror=alert(1)>')
+    expect(within(quickPreview).getByRole('link', { name: 'safe link' })).toHaveAttribute(
+      'target',
+      '_blank',
+    )
+    expect(within(quickPreview).getByRole('link', { name: 'safe link' })).toHaveAttribute(
+      'rel',
+      'noreferrer',
+    )
+  })
+
+  it('renders the same markdown blocks in detail-read as quick preview', async () => {
+    const markdownContent = [
+      '# Shared Markdown',
+      '',
+      '- first shared item',
+      '- second shared item',
+      '',
+      '> shared quote',
+      '',
+      '```ts',
+      'const value = 42',
+      '```',
+    ].join('\n')
+    const note = makeQuickNote({
+      id: 'detail-markdown-note',
+      content: markdownContent,
+    })
+    storeMocks.state.quickNotes = [note]
+    storeMocks.state.focusMode = 'detail-read'
+    storeMocks.state.selectedQuickNoteId = note.id
+
+    render(createElement(QuickNotesView))
+
+    const detailRead = screen.getByLabelText('小记沉浸阅读')
+    expect(within(detailRead).getByRole('heading', {
+      level: 1,
+      name: 'Shared Markdown',
+    })).toBeInTheDocument()
+    expect(within(detailRead).getAllByRole('listitem')).toHaveLength(2)
+    expect(detailRead.querySelector('blockquote')).toHaveTextContent('shared quote')
+    expect(detailRead.querySelector('pre code')).toHaveTextContent('const value = 42')
+  })
+
   it('opens detail-read from the explicit read action', async () => {
     const note = makeQuickNote({
       id: 'detail-entry-note',
@@ -1844,7 +1929,15 @@ describe('QuickNotesView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
     fireEvent.change(screen.getByLabelText('详情小记内容'), {
-      target: { value: '搜索后保存标题\n\n过滤期间保存的正文' },
+      target: {
+        value: [
+          '搜索后保存标题',
+          '',
+          '## 过滤期间保存的正文',
+          '',
+          '- 保存后的 Markdown 项',
+        ].join('\n'),
+      },
     })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
@@ -1852,11 +1945,17 @@ describe('QuickNotesView', () => {
       expect(storeMocks.updateQuickNote).toHaveBeenCalledWith(
         'inline-hidden-by-search-note',
         {
-          content: '搜索后保存标题\n\n过滤期间保存的正文',
+          content: '搜索后保存标题\n\n## 过滤期间保存的正文\n\n- 保存后的 Markdown 项',
         },
       )
     })
-    expect(screen.getByLabelText('小记沉浸阅读')).toHaveTextContent('过滤期间保存的正文')
+    const detailRead = screen.getByLabelText('小记沉浸阅读')
+    expect(detailRead).toHaveTextContent('过滤期间保存的正文')
+    expect(within(detailRead).getByRole('heading', {
+      level: 2,
+      name: '过滤期间保存的正文',
+    })).toBeInTheDocument()
+    expect(within(detailRead).getByText('保存后的 Markdown 项').closest('li')).not.toBeNull()
   })
 
   it('adopts or merges remote content before detail inline saving', async () => {

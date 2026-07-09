@@ -109,7 +109,12 @@ export const quickNoteStyles = {
   cardBody:
     'mt-2 line-clamp-2 whitespace-pre-wrap text-sm leading-6 text-[color:var(--qn-text)]',
   cardBodyExpanded:
-    'mt-3 whitespace-pre-wrap text-sm leading-7 text-[color:var(--qn-text)]',
+    'mt-3 text-sm leading-7 text-[color:var(--qn-text)]',
+  markdown:
+    'quick-note-markdown max-w-none text-[color:var(--qn-text)] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_a]:font-medium [&_a]:text-[color:var(--qn-accent-readable)] [&_a]:underline [&_a]:underline-offset-4 [&_blockquote]:my-4 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:var(--qn-border-strong)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:var(--qn-muted)] [&_code]:rounded-md [&_code]:bg-[color:var(--qn-search)] [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:text-[color:var(--qn-text-strong)] [&_h1]:mb-3 [&_h1]:mt-4 [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:text-[color:var(--qn-text-strong)] [&_h2]:mb-3 [&_h2]:mt-4 [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:text-[color:var(--qn-text-strong)] [&_h3]:mb-2 [&_h3]:mt-3 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-[color:var(--qn-text-strong)] [&_hr]:my-5 [&_hr]:border-[color:var(--qn-border)] [&_li]:my-1 [&_ol]:my-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-3 [&_pre]:my-4 [&_pre]:overflow-x-auto [&_pre]:rounded-[1rem] [&_pre]:border [&_pre]:border-[color:var(--qn-border)] [&_pre]:bg-[color:var(--qn-search)] [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:text-[color:var(--qn-text-strong)] [&_table]:my-4 [&_table]:w-full [&_table]:border-collapse [&_td]:border [&_td]:border-[color:var(--qn-border)] [&_td]:px-2 [&_td]:py-1.5 [&_th]:border [&_th]:border-[color:var(--qn-border)] [&_th]:bg-[color:var(--qn-panel-muted)] [&_th]:px-2 [&_th]:py-1.5 [&_th]:text-[color:var(--qn-text-strong)] [&_ul]:my-3 [&_ul]:list-disc [&_ul]:pl-5',
+  markdownPreview: 'leading-7',
+  markdownRead: 'leading-8',
+  markdownInlinePreview: 'leading-7',
   cardFooter: 'mt-3 flex flex-wrap items-center gap-2 text-xs text-[color:var(--qn-muted)]',
   syncPending:
     'rounded-full bg-[color:var(--qn-chip)] px-2 py-0.5 text-[color:var(--qn-accent-readable)] ring-1 ring-[color:var(--qn-ring)]',
@@ -154,7 +159,7 @@ export const quickNoteStyles = {
   readTitle:
     'mt-2 max-w-3xl text-3xl font-semibold tracking-[-0.045em] text-[color:var(--qn-text-strong)] sm:text-4xl',
   readBody:
-    'prose prose-sm max-w-none whitespace-pre-wrap text-[color:var(--qn-text)] prose-p:my-4 prose-p:leading-8',
+    'text-[color:var(--qn-text)]',
   inlineEditorWrap:
     'quick-note-inline-editor grid gap-3 rounded-[1.5rem] border border-[color:var(--qn-border-strong)] bg-[color:var(--qn-panel-muted)] p-3 ring-1 ring-[color:var(--qn-selection-ring)]',
   inlineTextarea:
