@@ -1,4 +1,4 @@
-const QUICK_NOTE_TAG_PATTERN = /#[\p{L}\p{N}_-]+/gu
+const QUICK_NOTE_TAG_PATTERN = /#[\p{L}\p{N}_-]+(?:\/[\p{L}\p{N}_-]+)*/gu
 
 export function extractQuickNoteTags(content: string): string[] {
   return normalizeQuickNoteTags(content.match(QUICK_NOTE_TAG_PATTERN) ?? [])
