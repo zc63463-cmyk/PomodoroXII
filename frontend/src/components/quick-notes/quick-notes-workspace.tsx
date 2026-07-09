@@ -17,7 +17,14 @@ import {
   isDetailRead,
   isFocusEdit,
 } from '@/lib/quick-notes/quick-note-focus'
-import { groupQuickNotesByDate } from '@/lib/quick-notes/quick-note-selectors'
+import {
+  getQuickNoteTagStats,
+  groupQuickNotesByDate,
+} from '@/lib/quick-notes/quick-note-selectors'
+import {
+  extractQuickNoteTags,
+  normalizeQuickNoteTag,
+} from '@/lib/quick-notes/quick-note-tags'
 import type {
   QuickNoteLifecycleState,
   QuickNoteSyncStatus,
@@ -61,6 +68,8 @@ interface QuickNotesWorkspaceProps {
   onToggleTagFilter: (tag: string) => void
   onClearTagFilters: () => void
   onSetTagFilterMode: (mode: QuickNoteTagFilterMode) => void
+  onRenameTag: (from: string, to: string) => Promise<void>
+  onCleanupTags: () => Promise<number>
   onToggleSelectedDate: (date: string) => void
   onClearSelectedDate: () => void
   onEdit: (note: QuickNote) => void
@@ -110,6 +119,8 @@ export function QuickNotesWorkspace({
   onToggleTagFilter,
   onClearTagFilters,
   onSetTagFilterMode,
+  onRenameTag,
+  onCleanupTags,
   onToggleSelectedDate,
   onClearSelectedDate,
   onEdit,
@@ -124,6 +135,10 @@ export function QuickNotesWorkspace({
   onUpdateQuickNote,
 }: QuickNotesWorkspaceProps) {
   const groups = useMemo(() => groupQuickNotesByDate(quickNotes), [quickNotes])
+  const popularTags = useMemo(
+    () => getQuickNoteTagStats(allQuickNotes).slice(0, 8).map((stat) => stat.tag),
+    [allQuickNotes],
+  )
   const [quickPreviewNoteId, setQuickPreviewNoteId] = useState<string | null>(null)
   const selectedLifecycleState = selectedQuickNoteId
     ? lifecycleStateById[selectedQuickNoteId]
@@ -250,6 +265,38 @@ export function QuickNotesWorkspace({
     })
   }
 
+  async function handleRenameTag(from: string, to: string) {
+    const fromTag = normalizeQuickNoteTag(from)
+    const toTag = normalizeQuickNoteTag(to)
+    if (!fromTag || !toTag || fromTag === toTag) return
+
+    try {
+      await onRenameTag(fromTag, toTag)
+      toast(`已将 #${fromTag} 重命名为 #${toTag}`)
+    } catch (error) {
+      toast.error('标签重命名失败')
+      void error
+    }
+  }
+
+  async function handleCleanupTags() {
+    try {
+      const changedCount = await onCleanupTags()
+      toast(changedCount > 0 ? `已清理 ${changedCount} 条小记的标签` : '标签已是干净状态')
+    } catch (error) {
+      toast.error('标签清理失败')
+      void error
+    }
+  }
+
+  function handleInsertPopularTag(tag: string) {
+    const normalizedTag = normalizeQuickNoteTag(tag)
+    if (!normalizedTag || draftIncludesTag(draft, normalizedTag)) return
+
+    const trimmedDraft = draft.trimEnd()
+    onDraftChange(trimmedDraft ? `${trimmedDraft} #${normalizedTag}` : `#${normalizedTag} `)
+  }
+
   if (isDetailRead(focusMode) && selectedNote) {
     return createElement(
       WorkspaceMotion,
@@ -308,6 +355,8 @@ export function QuickNotesWorkspace({
     onToggleTag: onToggleTagFilter,
     onClearTags: onClearTagFilters,
     onSetTagFilterMode,
+    onRenameTag: handleRenameTag,
+    onCleanupTags: handleCleanupTags,
     onToggleDate: onToggleSelectedDate,
     onClearDate: onClearSelectedDate,
   })
@@ -337,6 +386,8 @@ export function QuickNotesWorkspace({
       variant: isFocusEditing ? 'focus' : 'compact',
       isFocusMode: isFocusEditing,
       onToggleFocus: onToggleFocusEdit,
+      popularTags,
+      onInsertTag: handleInsertPopularTag,
     }),
     createElement(QuickNoteConflictPanel, {
       conflict: draftConflict,
@@ -377,6 +428,14 @@ export function QuickNotesWorkspace({
       mainColumn,
     ),
   )
+}
+
+function draftIncludesTag(draft: string, tag: string): boolean {
+  const normalizedTag = normalizeQuickNoteTag(tag)
+  if (!normalizedTag) return false
+
+  if (extractQuickNoteTags(draft).includes(normalizedTag)) return true
+  return draft.toLowerCase().split(/\s+/).includes(`#${normalizedTag}`)
 }
 
 function WorkspaceMotion({

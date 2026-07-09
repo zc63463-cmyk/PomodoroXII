@@ -100,6 +100,93 @@ describe('useQuickNoteStore', () => {
     ])
   })
 
+  it('renames a tag across active quick notes and keeps selected filters in sync', async () => {
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'release',
+      content: 'ship #work today',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    })
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'merge-target',
+      content: 'already tagged #project',
+      tags: ['work', 'project'],
+      created_at: '2026-07-02T00:00:00.000Z',
+      updated_at: '2026-07-02T00:00:00.000Z',
+    })
+    useQuickNoteStore.getState().toggleTagFilter('work')
+
+    await useQuickNoteStore.getState().renameQuickNoteTag('work', 'project')
+
+    const state = useQuickNoteStore.getState()
+    expect(state.selectedTagFilters).toEqual(['project'])
+    expect(state.quickNotes.map((note) => note.id).sort()).toEqual(['merge-target', 'release'])
+    expect(state.allQuickNotes.find((note) => note.id === 'release')).toMatchObject({
+      content: 'ship #project today',
+      tags: ['project'],
+    })
+    expect(state.allQuickNotes.find((note) => note.id === 'merge-target')?.tags).toEqual([
+      'project',
+    ])
+  })
+
+  it('renames slash tags in tags only without rewriting content', async () => {
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'slash-tag',
+      content: 'slash tag stays readable',
+      tags: ['work/frontend'],
+    })
+
+    await useQuickNoteStore.getState().renameQuickNoteTag('work/frontend', 'project/frontend')
+
+    expect(useQuickNoteStore.getState().allQuickNotes[0]).toMatchObject({
+      content: 'slash tag stays readable',
+      tags: ['project/frontend'],
+    })
+  })
+
+  it('cleans dirty tags on active notes without changing content or inactive notes', async () => {
+    const active = await useQuickNoteStore.getState().createQuickNote({
+      id: 'dirty-active',
+      content: 'keep content #work',
+    })
+    const clean = await useQuickNoteStore.getState().createQuickNote({
+      id: 'clean-active',
+      content: 'already clean #life',
+    })
+    const trashed = await useQuickNoteStore.getState().createQuickNote({
+      id: 'dirty-trash',
+      content: 'trash content #work',
+    })
+    const converted = await useQuickNoteStore.getState().createQuickNote({
+      id: 'dirty-converted',
+      content: 'converted content #work',
+    })
+    await useQuickNoteStore.getState().deleteQuickNote(trashed.id)
+    await useQuickNoteStore.getState().migrateToNote(converted.id)
+    await db.quickNotes.update(active.id, { tags: ['', '#', ' Work ', '#work', 'life'] })
+    await db.quickNotes.update(clean.id, { tags: ['life'] })
+    await db.quickNotes.update(trashed.id, { tags: ['', '#trash'] })
+    await db.quickNotes.update(converted.id, { tags: ['', '#converted'] })
+    await useQuickNoteStore.getState().refreshQuickNotesFromRepository()
+    useQuickNoteStore.getState().toggleTagFilter('missing')
+    expect(useQuickNoteStore.getState().selectedTagFilters).toEqual(['missing'])
+
+    const changedCount = await useQuickNoteStore.getState().cleanupQuickNoteTags()
+
+    expect(changedCount).toBe(1)
+    expect(useQuickNoteStore.getState().selectedTagFilters).toEqual([])
+    expect(useQuickNoteStore.getState().allQuickNotes.find((note) => note.id === active.id)).toMatchObject({
+      content: 'keep content #work',
+      tags: ['work', 'life'],
+    })
+    expect(useQuickNoteStore.getState().allQuickNotes.find((note) => note.id === clean.id)?.tags).toEqual([
+      'life',
+    ])
+    expect((await db.quickNotes.get(trashed.id))?.tags).toEqual(['', '#trash'])
+    expect((await db.quickNotes.get(converted.id))?.tags).toEqual(['', '#converted'])
+  })
+
   it('derives visible notes from created_at date filters and clears filters on reset', async () => {
     await useQuickNoteStore.getState().createQuickNote({
       id: 'day-one',
