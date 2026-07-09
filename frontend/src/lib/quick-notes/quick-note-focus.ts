@@ -13,10 +13,6 @@ export function isFocusEdit(mode: QuickNoteFocusMode): boolean {
   return mode === 'focus-edit'
 }
 
-export function isFocusRead(mode: QuickNoteFocusMode): boolean {
-  return mode === 'focus-read'
-}
-
 export function isDetailRead(mode: QuickNoteFocusMode): boolean {
   return mode === 'detail-read'
 }

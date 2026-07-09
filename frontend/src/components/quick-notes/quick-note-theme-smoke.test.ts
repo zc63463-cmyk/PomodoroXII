@@ -58,7 +58,6 @@ describe('quick-note theme smoke', () => {
     for (const keyframeName of [
       'qn-stage-enter',
       'qn-stage-focus-edit',
-      'qn-stage-focus-read',
       'qn-stage-detail-read',
       'qn-panel-enter',
       'qn-panel-slide-in',
@@ -70,6 +69,7 @@ describe('quick-note theme smoke', () => {
     expect(globalsCss).toContain('.quick-note-stage')
     expect(globalsCss).toContain('.quick-note-motion-panel')
     expect(globalsCss).toContain('.quick-note-timeline-dimmed')
+    expect(globalsCss).not.toContain('qn-stage-focus-read')
     expect(globalsCss).toContain('@media (prefers-reduced-motion: reduce)')
   })
 })

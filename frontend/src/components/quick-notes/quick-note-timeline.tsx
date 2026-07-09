@@ -26,7 +26,7 @@ export function QuickNoteTimeline({
   onMigrate,
   onTagClick,
   pendingById,
-  selectedQuickNoteId,
+  expandedQuickNoteId,
   syncStatusById,
   searchQuery,
   disabledInteractions = false,
@@ -44,7 +44,7 @@ export function QuickNoteTimeline({
   onMigrate: (id: string) => void
   onTagClick: (tag: string) => void
   pendingById?: Record<string, 'delete' | 'pin' | 'migrate'>
-  selectedQuickNoteId?: string | null
+  expandedQuickNoteId?: string | null
   syncStatusById?: Record<string, QuickNoteSyncStatus>
   searchQuery: string
   disabledInteractions?: boolean
@@ -90,7 +90,7 @@ export function QuickNoteTimeline({
             onMigrate,
             onTagClick,
             pendingAction: pendingById?.[note.id],
-            isExpanded: selectedQuickNoteId === note.id,
+            isExpanded: expandedQuickNoteId === note.id,
             syncStatus: syncStatusById?.[note.id],
             searchQuery,
             disabledInteractions,

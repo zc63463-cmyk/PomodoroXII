@@ -16,8 +16,8 @@ export interface TocItem {
 /** 列表筛选维度 */
 export type MemoFilter = 'all' | 'pinned' | 'archived'
 
-/** 专注模式（Phase 2） */
-export type MemoFocusMode = 'normal' | 'focus-edit' | 'focus-read' | 'detail-read'
+/** 专注/阅读模式（Quick Preview 是列表项本地展开态，不属于 focusMode） */
+export type MemoFocusMode = 'normal' | 'focus-edit' | 'detail-read'
 
 /** 标签视图模式（Phase 2） */
 export type MemoTagViewMode = 'cloud' | 'tree'
@@ -88,7 +88,7 @@ export interface MemoViewState {
   expandedId: string | null
   /** Phase 2: 专注模式 */
   focusMode: MemoFocusMode
-  /** Phase 2: FocusRead 选中的条目 id */
+  /** Phase 2: DetailRead 选中的条目 id */
   selectedMemoId: string | null
   /** Phase 2: 日历选中的日期 */
   selectedDate: string | null

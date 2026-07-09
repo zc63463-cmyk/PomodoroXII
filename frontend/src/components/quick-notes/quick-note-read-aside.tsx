@@ -28,7 +28,7 @@ export function QuickNoteReadAside({
   return createElement(
     'aside',
     {
-      className: cn(quickNoteStyles.readAside, quickNoteStyles.focusPanelMotion),
+      className: cn(quickNoteStyles.readAside, quickNoteStyles.motionPanel),
       'data-motion': 'aside',
     },
     createElement(

@@ -3,7 +3,6 @@ import {
   getSelectedQuickNote,
   isDetailRead,
   isFocusEdit,
-  isFocusRead,
 } from '@/lib/quick-notes/quick-note-focus'
 import type { QuickNote } from '@/types'
 
@@ -37,9 +36,7 @@ describe('quick-note-focus helpers', () => {
   it('classifies quick note focus modes', () => {
     expect(isFocusEdit('focus-edit')).toBe(true)
     expect(isFocusEdit('normal')).toBe(false)
-    expect(isFocusRead('focus-read')).toBe(true)
-    expect(isFocusRead('detail-read')).toBe(false)
     expect(isDetailRead('detail-read')).toBe(true)
-    expect(isDetailRead('focus-read')).toBe(false)
+    expect(isDetailRead('focus-edit')).toBe(false)
   })
 })
