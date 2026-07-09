@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  cleanupQuickNoteTags,
   extractQuickNoteTags,
   mergeQuickNoteTags,
   normalizeQuickNoteTag,
   normalizeQuickNoteTags,
+  renameQuickNoteTagInList,
+  replaceInlineQuickNoteHashtag,
 } from '@/lib/quick-notes/quick-note-tags'
 
 describe('quick-note-tags', () => {
@@ -27,5 +30,46 @@ describe('quick-note-tags', () => {
       'daily',
       '灵感',
     ])
+  })
+
+  it('cleans empty dirty and duplicate tags', () => {
+    expect(cleanupQuickNoteTags(['', '#', ' Work ', '#work', 'life'])).toEqual([
+      'work',
+      'life',
+    ])
+  })
+
+  it('renames tags in a list and merges existing targets without duplicates', () => {
+    expect(renameQuickNoteTagInList(['work', 'life'], 'work', 'project')).toEqual([
+      'project',
+      'life',
+    ])
+    expect(renameQuickNoteTagInList(['work', 'project'], 'work', 'project')).toEqual([
+      'project',
+    ])
+  })
+
+  it('replaces exact simple inline hashtags without touching longer tags', () => {
+    expect(replaceInlineQuickNoteHashtag(
+      'ship #work and #work-now and #Work',
+      'work',
+      'project',
+    )).toBe('ship #project and #work-now and #project')
+  })
+
+  it('does not rewrite slash hashtag prefixes when renaming a parent tag', () => {
+    expect(replaceInlineQuickNoteHashtag(
+      'keep #work/frontend stable while #work changes',
+      'work',
+      'project',
+    )).toBe('keep #work/frontend stable while #project changes')
+  })
+
+  it('does not replace inline content for slash tags', () => {
+    expect(replaceInlineQuickNoteHashtag(
+      'ship #work/frontend and keep text stable',
+      'work/frontend',
+      'project',
+    )).toBe('ship #work/frontend and keep text stable')
   })
 })

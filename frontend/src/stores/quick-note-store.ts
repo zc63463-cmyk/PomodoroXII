@@ -8,8 +8,15 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import {
+  isActiveQuickNote,
   selectQuickNotesForExplorer,
 } from '@/lib/quick-notes/quick-note-selectors'
+import {
+  cleanupQuickNoteTags as cleanupQuickNoteTagList,
+  normalizeQuickNoteTag,
+  renameQuickNoteTagInList,
+  replaceInlineQuickNoteHashtag,
+} from '@/lib/quick-notes/quick-note-tags'
 import {
   createQuickNote,
   convertQuickNoteToNote,
@@ -62,6 +69,8 @@ interface QuickNoteActions {
   purgeQuickNote: (id: string) => Promise<void>
   togglePin: (id: string) => Promise<void>
   migrateToNote: (id: string) => Promise<string>
+  renameQuickNoteTag: (from: string, to: string) => Promise<void>
+  cleanupQuickNoteTags: () => Promise<number>
   toggleTagFilter: (tag: string) => void
   clearTagFilters: () => void
   setTagFilterMode: (mode: QuickNoteTagFilterMode) => void
@@ -114,7 +123,7 @@ function deriveVisibleQuickNotes(
 }
 
 function normalizeFilterTag(tag: string): string {
-  return tag.trim().replace(/^#+/, '').toLowerCase()
+  return normalizeQuickNoteTag(tag)
 }
 
 export const useQuickNoteStore = create<QuickNoteStore>()(
@@ -256,6 +265,75 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
         return result.noteId
       },
 
+      renameQuickNoteTag: async (from, to) => {
+        const fromTag = normalizeQuickNoteTag(from)
+        const toTag = normalizeQuickNoteTag(to)
+        if (!fromTag || !toTag) return
+
+        const state = get()
+        const selectedTagFilters =
+          fromTag === toTag
+            ? normalizeFilterTags(state.selectedTagFilters)
+            : renameQuickNoteTagInList(state.selectedTagFilters, fromTag, toTag)
+
+        if (fromTag !== toTag) {
+          const activeNotes = state.allQuickNotes.filter(isActiveQuickNote)
+          for (const note of activeNotes) {
+            const tags = renameQuickNoteTagInList(note.tags, fromTag, toTag)
+            const content = replaceInlineQuickNoteHashtag(note.content, fromTag, toTag)
+            const patch: QuickNoteUpdateInput = {}
+
+            if (!areStringArraysEqual(note.tags, tags)) patch.tags = tags
+            if (note.content !== content) patch.content = content
+
+            if (Object.keys(patch).length > 0) {
+              await updateQuickNote(note.id, patch)
+            }
+          }
+        }
+
+        const lists = await refreshLists(
+          state.searchQuery,
+          selectedTagFilters,
+          state.selectedDate,
+        )
+        set({ ...lists, selectedTagFilters, error: null })
+      },
+
+      cleanupQuickNoteTags: async () => {
+        const state = get()
+        let changedCount = 0
+
+        for (const note of state.allQuickNotes.filter(isActiveQuickNote)) {
+          const tags = cleanupQuickNoteTagList(note.tags)
+          if (areStringArraysEqual(note.tags, tags)) continue
+          await updateQuickNote(note.id, { tags })
+          changedCount += 1
+        }
+
+        const lists = await refreshLists(
+          state.searchQuery,
+          state.selectedTagFilters,
+          state.selectedDate,
+        )
+        const selectedTagFilters = keepExistingFilterTags(
+          state.selectedTagFilters,
+          lists.allQuickNotes,
+        )
+        set({
+          ...lists,
+          selectedTagFilters,
+          quickNotes: deriveVisibleQuickNotes(
+            lists.allQuickNotes,
+            state.searchQuery,
+            selectedTagFilters,
+            state.selectedDate,
+          ),
+          error: null,
+        })
+        return changedCount
+      },
+
       toggleTagFilter: (tag) => {
         const normalizedTag = normalizeFilterTag(tag)
         if (!normalizedTag) return
@@ -379,3 +457,32 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
     { name: 'quick-note-store' },
   ),
 )
+
+function normalizeFilterTags(tags: string[]): string[] {
+  const normalized: string[] = []
+  const seen = new Set<string>()
+
+  for (const tag of tags) {
+    const normalizedTag = normalizeFilterTag(tag)
+    if (!normalizedTag || seen.has(normalizedTag)) continue
+    seen.add(normalizedTag)
+    normalized.push(normalizedTag)
+  }
+
+  return normalized
+}
+
+function keepExistingFilterTags(filters: string[], notes: QuickNote[]): string[] {
+  const activeTags = new Set(
+    notes
+      .filter(isActiveQuickNote)
+      .flatMap((note) => note.tags.map(normalizeQuickNoteTag))
+      .filter(Boolean),
+  )
+
+  return normalizeFilterTags(filters).filter((tag) => activeTags.has(tag))
+}
+
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
