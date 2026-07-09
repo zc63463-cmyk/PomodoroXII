@@ -28,7 +28,6 @@ import type { QuickNote } from '@/types'
 export type QuickNoteFocusMode =
   | 'normal'
   | 'focus-edit'
-  | 'focus-read'
   | 'detail-read'
 
 interface QuickNoteState {
@@ -55,7 +54,6 @@ interface QuickNoteActions {
   togglePin: (id: string) => Promise<void>
   migrateToNote: (id: string) => Promise<string>
   toggleFocusEdit: () => void
-  enterFocusRead: (id: string) => void
   enterDetailRead: (id: string) => void
   exitFocus: () => void
   reset: () => void
@@ -184,13 +182,6 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
         set({
           focusMode: nextFocusMode,
           selectedQuickNoteId: null,
-        })
-      },
-
-      enterFocusRead: (id) => {
-        set({
-          focusMode: 'focus-read',
-          selectedQuickNoteId: id,
         })
       },
 

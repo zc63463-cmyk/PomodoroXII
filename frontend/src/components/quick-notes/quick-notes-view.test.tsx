@@ -70,7 +70,7 @@ const storeMocks = vi.hoisted(() => ({
     isLoading: false,
     error: null as string | null,
     searchQuery: '',
-    focusMode: 'normal' as 'normal' | 'focus-edit' | 'focus-read' | 'detail-read',
+    focusMode: 'normal' as 'normal' | 'focus-edit' | 'detail-read',
     selectedQuickNoteId: null as string | null,
   },
   loadQuickNotes: vi.fn().mockResolvedValue(undefined),
@@ -82,7 +82,6 @@ const storeMocks = vi.hoisted(() => ({
   togglePin: vi.fn().mockResolvedValue(undefined),
   migrateToNote: vi.fn().mockResolvedValue('note-converted'),
   toggleFocusEdit: vi.fn(),
-  enterFocusRead: vi.fn(),
   enterDetailRead: vi.fn(),
   exitFocus: vi.fn(),
 }))
@@ -99,7 +98,6 @@ vi.mock('@/stores/quick-note-store', () => ({
     togglePin: storeMocks.togglePin,
     migrateToNote: storeMocks.migrateToNote,
     toggleFocusEdit: storeMocks.toggleFocusEdit,
-    enterFocusRead: storeMocks.enterFocusRead,
     enterDetailRead: storeMocks.enterDetailRead,
     exitFocus: storeMocks.exitFocus,
   }),
@@ -148,7 +146,6 @@ describe('QuickNotesView', () => {
     storeMocks.togglePin.mockClear()
     storeMocks.migrateToNote.mockClear()
     storeMocks.toggleFocusEdit.mockClear()
-    storeMocks.enterFocusRead.mockClear()
     storeMocks.enterDetailRead.mockClear()
     storeMocks.exitFocus.mockClear()
     previewMocks.ensureQuickNotePreviewSpace.mockReset()
@@ -169,8 +166,12 @@ describe('QuickNotesView', () => {
     render(createElement(QuickNotesView))
 
     expect(await screen.findByText('还没有小记')).toBeInTheDocument()
-    expect(screen.getByText('速记')).toHaveClass('text-transparent')
-    expect(screen.getByText('Quick Notes')).toHaveClass('text-[color:var(--qn-subtle)]')
+    expect(screen.getByRole('main')).toHaveAttribute(
+      'data-quicknote-visual-style',
+      'apple-notes',
+    )
+    expect(screen.getByText('速记')).toHaveClass('text-[color:var(--qn-text-strong)]')
+    expect(screen.getByText('Quick Notes')).toHaveClass('tracking-[0.18em]')
     expect(screen.getByLabelText('小记内容')).toHaveClass(
       'text-[color:var(--qn-text-strong)]',
     )
@@ -1431,57 +1432,80 @@ describe('QuickNotesView', () => {
     expect(storeMocks.exitFocus).not.toHaveBeenCalled()
   })
 
-  it('opens focus-read detail panel from a card click and closes with Escape', async () => {
+  it('shows a rendered quick preview inside the growing card without entering focus mode', async () => {
     const note = makeQuickNote({
-      id: 'focus-read-note',
-      content: '轻详情标题\n\n这里是完整轻详情内容 #focus\n\n第三段用来确认原位展开',
+      id: 'quick-preview-note',
+      content: '快速预览标题\n\n这里是完整快速预览内容 #focus\n\n第三段用来确认原位展开',
       tags: ['focus'],
     })
     storeMocks.state.quickNotes = [note]
 
     const { rerender } = render(createElement(QuickNotesView))
 
-    const collapsedTrigger = await screen.findByRole('button', { name: /轻详情标题/ })
+    const collapsedTrigger = await screen.findByRole('button', { name: /快速预览标题/ })
     const collapsedCard = collapsedTrigger.closest('article')
     expect(collapsedCard).toHaveClass('max-h-[11.25rem]')
-    expect(screen.getByText(/这里是完整轻详情内容/)).toHaveClass('line-clamp-2')
+    expect(screen.getByText(/这里是完整快速预览内容/)).toHaveClass('line-clamp-2')
 
     fireEvent.click(collapsedTrigger)
-    expect(storeMocks.enterFocusRead).toHaveBeenCalledWith('focus-read-note')
+    fireEvent.doubleClick(collapsedTrigger)
+    expect(storeMocks.state.focusMode).toBe('normal')
 
-    storeMocks.state.focusMode = 'focus-read'
-    storeMocks.state.selectedQuickNoteId = note.id
     rerender(createElement(QuickNotesView))
 
-    const detailPanel = screen.getByLabelText('小记轻详情')
-    expect(detailPanel).toBeInTheDocument()
-    expect(screen.queryByLabelText('小记原位阅读')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /轻详情标题/ })).toHaveAttribute(
+    expect(screen.queryByText('Focus Read')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('小记轻详情')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('小记原位详情')).not.toBeInTheDocument()
+    expect(screen.queryByText('创建')).not.toBeInTheDocument()
+    expect(screen.queryByText('更新')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /快速预览标题/ })).toHaveAttribute(
       'aria-expanded',
       'true',
     )
-    expect(screen.getByRole('button', { name: /轻详情标题/ }).closest('article')).toHaveClass(
-      'max-h-none',
+    const expandedCard = screen.getByRole('button', { name: /快速预览标题/ }).closest('article')
+    expect(expandedCard).toHaveClass('max-h-none')
+    expect(screen.getByRole('button', { name: /快速预览标题/ })).not.toHaveAttribute(
+      'aria-controls',
     )
-    expect(detailPanel).toHaveTextContent('第三段用来确认原位展开')
+    const quickPreview = screen.getByLabelText('小记快速预览')
+    expect(quickPreview.closest('article')).toBe(expandedCard)
+    expect(quickPreview).toHaveTextContent('第三段用来确认原位展开')
+    expect(quickPreview).not.toHaveClass('line-clamp-2')
 
     fireEvent.keyDown(window, { key: 'Escape' })
-    expect(storeMocks.exitFocus).toHaveBeenCalled()
+    expect(storeMocks.exitFocus).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('小记快速预览')).not.toBeInTheDocument()
   })
 
   it('opens detail-read from the explicit read action', async () => {
-    storeMocks.state.quickNotes = [
-      makeQuickNote({
-        id: 'detail-entry-note',
-        content: '沉浸阅读入口\n正文',
-      }),
-    ]
+    const note = makeQuickNote({
+      id: 'detail-entry-note',
+      content: '沉浸阅读入口\n正文',
+    })
+    storeMocks.state.quickNotes = [note]
 
-    render(createElement(QuickNotesView))
+    const { rerender } = render(createElement(QuickNotesView))
+
+    fireEvent.doubleClick(await screen.findByRole('button', { name: /沉浸阅读入口/ }))
+    expect(screen.getByLabelText('小记快速预览')).toHaveTextContent('沉浸阅读入口')
 
     fireEvent.click(await screen.findByRole('button', { name: '阅读小记' }))
 
     expect(storeMocks.enterDetailRead).toHaveBeenCalledWith('detail-entry-note')
+
+    storeMocks.state.focusMode = 'detail-read'
+    storeMocks.state.selectedQuickNoteId = note.id
+    rerender(createElement(QuickNotesView))
+    expect(screen.queryByLabelText('小记快速预览')).not.toBeInTheDocument()
+
+    storeMocks.state.focusMode = 'normal'
+    storeMocks.state.selectedQuickNoteId = null
+    rerender(createElement(QuickNotesView))
+    expect(screen.getByRole('button', { name: /沉浸阅读入口/ })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    expect(screen.queryByLabelText('小记快速预览')).not.toBeInTheDocument()
   })
 
   it('renders detail-read and saves inline edits without touching composer draft', async () => {
@@ -1505,9 +1529,10 @@ describe('QuickNotesView', () => {
     render(createElement(QuickNotesView))
 
     expect(screen.getByLabelText('小记沉浸阅读')).toBeInTheDocument()
-    expect(screen.getByText('Detail Read')).toHaveClass(
+    expect(screen.getByText('沉浸阅读')).toHaveClass(
       'text-[color:var(--qn-subtle)]',
     )
+    expect(screen.queryByText('Detail Read')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('小记内容')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
@@ -1718,56 +1743,65 @@ describe('QuickNotesView', () => {
     )
   })
 
-  it('keeps focus-read open when search filtering hides the active selected note', async () => {
+  it('hides an open quick preview when search filtering removes the card without focus-mode exit', async () => {
     const note = makeQuickNote({
       id: 'selected-filtered-active',
       content: '被搜索过滤的小记\n正文',
     })
     storeMocks.state.quickNotes = [note]
     storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
-    storeMocks.state.focusMode = 'focus-read'
-    storeMocks.state.selectedQuickNoteId = note.id
 
     const { rerender } = render(createElement(QuickNotesView))
 
-    expect(screen.getByLabelText('小记轻详情')).toBeInTheDocument()
+    fireEvent.doubleClick(await screen.findByRole('button', { name: /被搜索过滤的小记/ }))
+    expect(screen.queryByLabelText('小记轻详情')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('小记快速预览')).toHaveTextContent('被搜索过滤的小记')
 
     storeMocks.state.searchQuery = 'unmatched'
     storeMocks.state.quickNotes = []
     rerender(createElement(QuickNotesView))
 
-    expect(screen.getByLabelText('小记轻详情')).toHaveTextContent('被搜索过滤的小记')
+    expect(screen.queryByLabelText('小记轻详情')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('小记快速预览')).not.toBeInTheDocument()
+    expect(screen.getByText('没有匹配的小记')).toBeInTheDocument()
     expect(screen.queryByLabelText('小记原位阅读')).not.toBeInTheDocument()
     expect(storeMocks.exitFocus).not.toHaveBeenCalled()
     expect(toastMock).not.toHaveBeenCalledWith('当前小记已在同步中移除/移入回收站')
+
+    storeMocks.state.searchQuery = ''
+    storeMocks.state.quickNotes = [note]
+    rerender(createElement(QuickNotesView))
+
+    expect(screen.getByRole('button', { name: /被搜索过滤的小记/ })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    expect(screen.queryByLabelText('小记快速预览')).not.toBeInTheDocument()
   })
 
-  it('exits focus-read when the selected note lifecycle moves out of active', async () => {
+  it('hides an open quick preview when the note lifecycle moves out of active', async () => {
     const note = makeQuickNote({
-      id: 'selected-focus-read-trashed',
-      content: '轻详情生命周期\n正文',
+      id: 'selected-quick-preview-trashed',
+      content: '快速预览生命周期\n正文',
     })
     storeMocks.state.quickNotes = [note]
-    storeMocks.state.focusMode = 'focus-read'
-    storeMocks.state.selectedQuickNoteId = note.id
 
     const { rerender } = render(createElement(QuickNotesView))
 
-    expect(screen.getByLabelText('小记轻详情')).toBeInTheDocument()
+    fireEvent.doubleClick(await screen.findByRole('button', { name: /快速预览生命周期/ }))
+    expect(screen.queryByLabelText('小记轻详情')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('小记快速预览')).toHaveTextContent('快速预览生命周期')
 
     storeMocks.state.quickNotes = []
     storeMocks.state.lifecycleStateById = { [note.id]: 'trashed' }
     rerender(createElement(QuickNotesView))
 
-    await waitFor(() => {
-      expect(storeMocks.exitFocus).toHaveBeenCalled()
-    })
-    expect(toastMock).toHaveBeenCalledWith('当前小记已移入回收站')
+    expect(screen.queryByLabelText('小记快速预览')).not.toBeInTheDocument()
+    expect(storeMocks.exitFocus).not.toHaveBeenCalled()
+    expect(toastMock).not.toHaveBeenCalledWith('当前小记已移入回收站')
   })
 
   it.each([
-    ['focus-read', '小记轻详情', /移到回收站/, 'delete'],
-    ['focus-read', '小记轻详情', /转笔记/, 'migrate'],
     ['detail-read', '小记沉浸阅读', /移到回收站/, 'delete'],
     ['detail-read', '小记沉浸阅读', /转为笔记/, 'migrate'],
   ] as const)(
