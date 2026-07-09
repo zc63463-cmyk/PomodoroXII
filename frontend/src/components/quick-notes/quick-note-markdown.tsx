@@ -26,6 +26,10 @@ type MarkdownImageProps = ComponentPropsWithoutRef<'img'> & {
   node?: unknown
 }
 
+type MarkdownTableProps = ComponentPropsWithoutRef<'table'> & {
+  node?: unknown
+}
+
 export function QuickNoteMarkdown({
   content,
   variant = 'read',
@@ -43,6 +47,7 @@ export function QuickNoteMarkdown({
         components: {
           a: MarkdownLink,
           img: MarkdownImageFallback,
+          table: MarkdownTable,
         },
       },
       content,
@@ -56,11 +61,17 @@ function MarkdownLink({
   children,
   ...props
 }: MarkdownAnchorProps): ReactNode {
+  const linkProps = getQuickNoteSafeLinkProps(href)
+
+  if (!linkProps.href) {
+    return createElement('span', null, children)
+  }
+
   return createElement(
     'a',
     {
       ...props,
-      ...getQuickNoteSafeLinkProps(href),
+      ...linkProps,
     },
     children,
   )
@@ -80,6 +91,20 @@ function MarkdownImageFallback({
   }
 
   return createElement('a', linkProps, label)
+}
+
+function MarkdownTable({
+  node: _node,
+  children,
+  ...props
+}: MarkdownTableProps): ReactNode {
+  return createElement(
+    'div',
+    {
+      className: quickNoteStyles.markdownTableScroll,
+    },
+    createElement('table', props, children),
+  )
 }
 
 function getVariantClass(variant: QuickNoteMarkdownVariant): string {
