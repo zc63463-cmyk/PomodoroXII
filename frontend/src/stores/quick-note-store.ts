@@ -279,6 +279,11 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
         if (fromTag !== toTag) {
           const activeNotes = state.allQuickNotes.filter(isActiveQuickNote)
           for (const note of activeNotes) {
+            const hasFromTag = note.tags.some(
+              (tag) => normalizeQuickNoteTag(tag) === fromTag,
+            )
+            if (!hasFromTag) continue
+
             const tags = renameQuickNoteTagInList(note.tags, fromTag, toTag)
             const content = replaceInlineQuickNoteHashtag(note.content, fromTag, toTag)
             const patch: QuickNoteUpdateInput = {}
