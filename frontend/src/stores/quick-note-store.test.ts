@@ -130,6 +130,36 @@ describe('useQuickNoteStore', () => {
     ])
   })
 
+  it('does not rewrite content for active notes that mention a renamed tag without carrying it', async () => {
+    const matching = await useQuickNoteStore.getState().createQuickNote({
+      id: 'matching-tag',
+      content: 'matching #work mention',
+      tags: ['work'],
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    })
+    const mentionOnly = await useQuickNoteStore.getState().createQuickNote({
+      id: 'mention-only',
+      content: 'mentions #work but belongs elsewhere',
+      tags: ['other'],
+      created_at: '2026-07-02T00:00:00.000Z',
+      updated_at: '2026-07-02T00:00:00.000Z',
+    })
+    await db.quickNotes.update(mentionOnly.id, { tags: ['other'] })
+    await useQuickNoteStore.getState().refreshQuickNotesFromRepository()
+
+    await useQuickNoteStore.getState().renameQuickNoteTag('work', 'project')
+
+    expect(useQuickNoteStore.getState().allQuickNotes.find((note) => note.id === matching.id)).toMatchObject({
+      content: 'matching #project mention',
+      tags: ['project'],
+    })
+    expect(useQuickNoteStore.getState().allQuickNotes.find((note) => note.id === mentionOnly.id)).toMatchObject({
+      content: 'mentions #work but belongs elsewhere',
+      tags: ['other'],
+    })
+  })
+
   it('renames slash tags in tags only without rewriting content', async () => {
     await useQuickNoteStore.getState().createQuickNote({
       id: 'slash-tag',

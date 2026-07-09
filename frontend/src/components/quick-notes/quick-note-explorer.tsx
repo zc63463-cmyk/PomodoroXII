@@ -5,12 +5,16 @@ import {
   buildQuickNoteTagTree,
   getQuickNoteActivityData,
   getQuickNoteTagStats,
+  isActiveQuickNote,
   type QuickNoteActivityData,
   type QuickNoteTagStat,
   type QuickNoteTagTreeNode,
 } from '@/lib/quick-notes/quick-note-selectors'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
-import { normalizeQuickNoteTag } from '@/lib/quick-notes/quick-note-tags'
+import {
+  cleanupQuickNoteTags,
+  normalizeQuickNoteTag,
+} from '@/lib/quick-notes/quick-note-tags'
 import { cn } from '@/lib/utils'
 import type { QuickNote } from '@/types'
 import type { QuickNoteTagFilterMode } from '@/stores/quick-note-store'
@@ -55,6 +59,10 @@ export function QuickNoteExplorer({
   const tagStats = useMemo(() => getQuickNoteTagStats(notes), [notes])
   const tagTree = useMemo(() => buildQuickNoteTagTree(tagStats), [tagStats])
   const activityData = useMemo(() => getQuickNoteActivityData(notes), [notes])
+  const hasCleanableTags = useMemo(() => notes.some((note) => {
+    if (!isActiveQuickNote(note)) return false
+    return !areStringArraysEqual(note.tags, cleanupQuickNoteTags(note.tags))
+  }), [notes])
   const selectedTags = useMemo(
     () => new Set(selectedTagFilters.map((tag) => tag.toLowerCase())),
     [selectedTagFilters],
@@ -98,7 +106,7 @@ export function QuickNoteExplorer({
         action: createElement(
           'div',
           { className: quickNoteStyles.explorerHeaderActions },
-          tagStats.length > 0
+          tagStats.length > 0 || hasCleanableTags
             ? createElement(
                 'button',
                 {
@@ -595,4 +603,8 @@ function formatMonth(month: string): string {
 
 function toLocalMonthKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+}
+
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
 }
