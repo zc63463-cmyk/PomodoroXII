@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   getQuickNoteImageFallbackLabel,
   getQuickNoteSafeLinkProps,
+  normalizeQuickNoteMarkdownUrl,
 } from '@/lib/quick-notes/quick-note-markdown'
 
 describe('quick note markdown policy', () => {
@@ -18,5 +19,12 @@ describe('quick note markdown policy', () => {
       alt: 'diagram',
       src: 'https://example.com/diagram.png',
     })).toBe('diagram: https://example.com/diagram.png')
+  })
+
+  it.each([
+    'javascript:alert(1)',
+    'data:text/html,<svg onload=alert(1)>',
+  ])('rejects unsafe markdown link protocol %s', (href) => {
+    expect(normalizeQuickNoteMarkdownUrl(href)).toBe('')
   })
 })
