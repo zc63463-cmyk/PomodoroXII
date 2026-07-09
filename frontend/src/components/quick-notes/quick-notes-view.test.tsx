@@ -271,6 +271,139 @@ describe('QuickNotesView', () => {
     expect(storeMocks.createQuickNote).not.toHaveBeenCalled()
   })
 
+  it('shows filtered hash tag autocomplete suggestions while typing', async () => {
+    const notes = [
+      makeQuickNote({ id: 'tag-work', content: 'Work memo', tags: ['work'] }),
+      makeQuickNote({ id: 'tag-writing', content: 'Writing memo', tags: ['writing'] }),
+      makeQuickNote({ id: 'tag-life', content: 'Life memo', tags: ['life'] }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+
+    render(createElement(QuickNotesView))
+
+    const editor = screen.getByLabelText('小记内容')
+    fireEvent.change(editor, {
+      target: { value: 'ship #w', selectionStart: 7, selectionEnd: 7 },
+    })
+
+    expect(await screen.findByRole('listbox', { name: '标签补全' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '#work' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('option', { name: '#writing' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: '#life' })).not.toBeInTheDocument()
+  })
+
+  it('inserts the selected hash tag autocomplete option with arrow keys and enter', async () => {
+    const notes = [
+      makeQuickNote({ id: 'tag-work', content: 'Work memo', tags: ['work'] }),
+      makeQuickNote({ id: 'tag-writing', content: 'Writing memo', tags: ['writing'] }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+
+    render(createElement(QuickNotesView))
+
+    const editor = screen.getByLabelText('小记内容')
+    fireEvent.change(editor, {
+      target: { value: '#w', selectionStart: 2, selectionEnd: 2 },
+    })
+    expect(await screen.findByRole('option', { name: '#work' })).toHaveAttribute('aria-selected', 'true')
+
+    fireEvent.keyDown(editor, { key: 'ArrowDown' })
+    expect(screen.getByRole('option', { name: '#writing' })).toHaveAttribute('aria-selected', 'true')
+
+    fireEvent.keyDown(editor, { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(editor).toHaveValue('#writing ')
+    })
+    expect(screen.queryByRole('listbox', { name: '标签补全' })).not.toBeInTheDocument()
+  })
+
+  it('inserts the active hash tag autocomplete option with tab', async () => {
+    const notes = [
+      makeQuickNote({ id: 'tag-work', content: 'Work memo', tags: ['work'] }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+
+    render(createElement(QuickNotesView))
+
+    const editor = screen.getByLabelText('小记内容')
+    fireEvent.change(editor, {
+      target: { value: 'draft #w today', selectionStart: 8, selectionEnd: 8 },
+    })
+    expect(await screen.findByRole('option', { name: '#work' })).toBeInTheDocument()
+
+    fireEvent.keyDown(editor, { key: 'Tab' })
+
+    await waitFor(() => {
+      expect(editor).toHaveValue('draft #work today')
+    })
+  })
+
+  it('closes hash tag autocomplete with escape before focus edit handles escape', async () => {
+    const notes = [
+      makeQuickNote({ id: 'tag-work', content: 'Work memo', tags: ['work'] }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+    storeMocks.state.focusMode = 'focus-edit'
+
+    render(createElement(QuickNotesView))
+
+    const editor = screen.getByLabelText('小记内容')
+    fireEvent.change(editor, {
+      target: { value: '#w', selectionStart: 2, selectionEnd: 2 },
+    })
+    expect(await screen.findByRole('listbox', { name: '标签补全' })).toBeInTheDocument()
+
+    fireEvent.keyDown(editor, { key: 'Escape' })
+
+    expect(screen.queryByRole('listbox', { name: '标签补全' })).not.toBeInTheDocument()
+    expect(storeMocks.toggleFocusEdit).not.toHaveBeenCalled()
+    expect(storeMocks.exitFocus).not.toHaveBeenCalled()
+  })
+
+  it('inserts a hash tag autocomplete option with the mouse', async () => {
+    const notes = [
+      makeQuickNote({ id: 'tag-slash', content: 'Slash memo', tags: ['work/frontend'] }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+
+    render(createElement(QuickNotesView))
+
+    const editor = screen.getByLabelText('小记内容')
+    fireEvent.change(editor, {
+      target: { value: '#work', selectionStart: 5, selectionEnd: 5 },
+    })
+
+    fireEvent.click(await screen.findByRole('option', { name: '#work/frontend' }))
+
+    await waitFor(() => {
+      expect(editor).toHaveValue('#work/frontend ')
+    })
+  })
+
+  it('does not block free typing when hash tag autocomplete has no matches', async () => {
+    const notes = [
+      makeQuickNote({ id: 'tag-work', content: 'Work memo', tags: ['work'] }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+
+    render(createElement(QuickNotesView))
+
+    const editor = screen.getByLabelText('小记内容')
+    fireEvent.change(editor, {
+      target: { value: '#zzz', selectionStart: 4, selectionEnd: 4 },
+    })
+
+    expect(editor).toHaveValue('#zzz')
+    expect(screen.queryByRole('listbox', { name: '标签补全' })).not.toBeInTheDocument()
+  })
+
   it('shows typing then dirty status for a new composer draft', async () => {
     vi.useFakeTimers()
     render(createElement(QuickNotesView))
