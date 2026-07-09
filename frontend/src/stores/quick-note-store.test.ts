@@ -74,11 +74,7 @@ describe('useQuickNoteStore', () => {
       selectedQuickNoteId: null,
     })
 
-    useQuickNoteStore.getState().enterFocusRead('quick-note-a')
-    expect(useQuickNoteStore.getState()).toMatchObject({
-      focusMode: 'focus-read',
-      selectedQuickNoteId: 'quick-note-a',
-    })
+    expect('enterFocusRead' in useQuickNoteStore.getState()).toBe(false)
 
     useQuickNoteStore.getState().enterDetailRead('quick-note-b')
     expect(useQuickNoteStore.getState()).toMatchObject({
@@ -99,7 +95,6 @@ describe('useQuickNoteStore', () => {
       selectedQuickNoteId: null,
     })
 
-    useQuickNoteStore.getState().enterFocusRead('quick-note-d')
     useQuickNoteStore.getState().reset()
     expect(useQuickNoteStore.getState()).toMatchObject({
       focusMode: 'normal',

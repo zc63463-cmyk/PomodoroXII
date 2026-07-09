@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { QuickNoteComposer, type QuickNoteSaveState } from '@/components/quick-notes/quick-note-composer'
 import { QuickNoteConflictPanel, type QuickNoteDraftConflict } from '@/components/quick-notes/quick-note-conflict-panel'
-import { QuickNoteDetailPanel } from '@/components/quick-notes/quick-note-detail-panel'
 import { QuickNoteReadView } from '@/components/quick-notes/quick-note-read-view'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
 import { QuickNoteTimeline } from '@/components/quick-notes/quick-note-timeline'
@@ -16,7 +15,6 @@ import {
   getSelectedQuickNote,
   isDetailRead,
   isFocusEdit,
-  isFocusRead,
 } from '@/lib/quick-notes/quick-note-focus'
 import { groupQuickNotesByDate } from '@/lib/quick-notes/quick-note-selectors'
 import type {
@@ -60,7 +58,6 @@ interface QuickNotesWorkspaceProps {
   onTogglePin: (id: string) => boolean | void | Promise<boolean | void>
   onDelete: (id: string) => boolean | Promise<boolean>
   onMigrate: (id: string) => boolean | Promise<boolean>
-  onOpenPreview: (id: string) => void
   onOpenDetail: (id: string) => void
   onToggleFocusEdit: () => void
   onExitFocus: () => void
@@ -101,13 +98,13 @@ export function QuickNotesWorkspace({
   onTogglePin,
   onDelete,
   onMigrate,
-  onOpenPreview,
   onOpenDetail,
   onToggleFocusEdit,
   onExitFocus,
   onUpdateQuickNote,
 }: QuickNotesWorkspaceProps) {
   const groups = useMemo(() => groupQuickNotesByDate(quickNotes), [quickNotes])
+  const [quickPreviewNoteId, setQuickPreviewNoteId] = useState<string | null>(null)
   const selectedLifecycleState = selectedQuickNoteId
     ? lifecycleStateById[selectedQuickNoteId]
     : undefined
@@ -128,7 +125,6 @@ export function QuickNotesWorkspace({
   const selectedPendingAction = selectedQuickNoteId
     ? timelinePendingById[selectedQuickNoteId]
     : undefined
-  const focusReadNote = isFocusRead(focusMode) ? selectedNote : null
 
   useEffect(() => {
     if (!selectedQuickNoteId || focusMode === 'normal') {
@@ -142,6 +138,8 @@ export function QuickNotesWorkspace({
 
   useEffect(() => {
     if (focusMode === 'normal') return
+
+    setQuickPreviewNoteId(null)
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.defaultPrevented) return
@@ -158,8 +156,28 @@ export function QuickNotesWorkspace({
   }, [editingNote, focusMode, onCancelEdit, onExitFocus])
 
   useEffect(() => {
+    if (!quickPreviewNoteId) return
+    if (quickNotes.some((note) => note.id === quickPreviewNoteId)) return
+    setQuickPreviewNoteId(null)
+  }, [quickNotes, quickPreviewNoteId])
+
+  useEffect(() => {
+    if (!quickPreviewNoteId) return
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented) return
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setQuickPreviewNoteId(null)
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [quickPreviewNoteId])
+
+  useEffect(() => {
     if (!selectedQuickNoteId) return
-    if (!isFocusRead(focusMode) && !isDetailRead(focusMode)) return
+    if (!isDetailRead(focusMode)) return
     if (selectedNote) return
     if (isLoading) return
 
@@ -240,15 +258,18 @@ export function QuickNotesWorkspace({
     isSearching,
     hasNotes,
     onEdit,
-    onOpenPreview,
-    onClosePreview: onExitFocus,
-    onOpenDetail,
+    onOpenPreview: setQuickPreviewNoteId,
+    onClosePreview: () => setQuickPreviewNoteId(null),
+    onOpenDetail: (id: string) => {
+      setQuickPreviewNoteId(null)
+      onOpenDetail(id)
+    },
     onTogglePin: (id: string) => void onTogglePin(id),
     onDelete: (id: string) => void onDelete(id),
     onMigrate: (id: string) => void onMigrate(id),
     onTagClick,
     pendingById: timelinePendingById,
-    selectedQuickNoteId: isFocusRead(focusMode) ? selectedQuickNoteId : null,
+    expandedQuickNoteId: quickPreviewNoteId,
     syncStatusById,
     searchQuery,
     disabledInteractions: isFocusEdit(focusMode),
@@ -262,8 +283,6 @@ export function QuickNotesWorkspace({
       {
         className: isFocusEdit(focusMode)
           ? quickNoteStyles.focusEditGrid
-          : focusReadNote
-            ? `${quickNoteStyles.workspaceGrid} lg:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]`
           : quickNoteStyles.workspaceGrid,
       },
       createElement(
@@ -320,24 +339,6 @@ export function QuickNotesWorkspace({
           )
         : timeline,
       ),
-      focusReadNote
-        ? createElement(QuickNoteDetailPanel, {
-            note: focusReadNote,
-            syncStatus: selectedSyncStatus,
-            pendingAction: selectedPendingAction,
-            onClose: onExitFocus,
-            onOpenDetail,
-            onTogglePin,
-            onDelete: async (id: string) => {
-              const ok = await onDelete(id)
-              if (ok) onExitFocus()
-            },
-            onMigrate: async (id: string) => {
-              const ok = await onMigrate(id)
-              if (ok) onExitFocus()
-            },
-          })
-        : null,
     ),
   )
 }

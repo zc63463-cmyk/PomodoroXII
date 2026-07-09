@@ -189,7 +189,7 @@ export function QuickNoteReadArticle({
   return createElement(
     'article',
     {
-      className: cn(quickNoteStyles.readArticle, quickNoteStyles.focusPanelMotion),
+      className: cn(quickNoteStyles.readArticle, quickNoteStyles.motionPanel),
       'data-motion': 'article',
     },
     createElement(
@@ -198,7 +198,7 @@ export function QuickNoteReadArticle({
       createElement(
         'div',
         { className: 'min-w-0' },
-        createElement('p', { className: quickNoteStyles.eyebrow }, 'Detail Read'),
+        createElement('p', { className: quickNoteStyles.eyebrow }, '沉浸阅读'),
         createElement('h1', { className: quickNoteStyles.readTitle }, getQuickNoteTitle(note)),
         createElement(
           'p',

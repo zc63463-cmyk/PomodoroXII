@@ -76,14 +76,13 @@ export function QuickNoteCard({
         {
           role: 'button',
           tabIndex: interactionsDisabled ? -1 : 0,
-          onClick: togglePreview,
+          onDoubleClick: togglePreview,
           onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
             if (event.key !== 'Enter' && event.key !== ' ') return
             event.preventDefault()
             togglePreview()
           },
           'aria-expanded': isExpanded,
-          'aria-controls': isExpanded ? 'quick-note-focus-read-panel' : undefined,
           className:
             'min-w-0 flex-1 cursor-default text-left transition group-hover/card:translate-x-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--qn-border-strong)]',
         },
@@ -95,9 +94,15 @@ export function QuickNoteCard({
         createElement(
           'p',
           {
-            className: quickNoteStyles.cardBody,
+            className: isExpanded
+              ? quickNoteStyles.cardBodyExpanded
+              : quickNoteStyles.cardBody,
+            'aria-label': isExpanded ? '小记快速预览' : undefined,
           },
-          renderHighlightedText(getQuickNoteSummary(note), searchQuery),
+          renderHighlightedText(
+            isExpanded ? note.content : getQuickNoteSummary(note),
+            searchQuery,
+          ),
         ),
       ),
       createElement(

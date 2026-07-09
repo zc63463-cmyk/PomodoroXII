@@ -31,7 +31,6 @@ export function QuickNotesView() {
     togglePin,
     migrateToNote,
     toggleFocusEdit,
-    enterFocusRead,
     enterDetailRead,
     exitFocus,
   } = useQuickNoteStore()
@@ -112,7 +111,10 @@ export function QuickNotesView() {
 
   return createElement(
     'main',
-    { className: quickNoteStyles.page },
+    {
+      className: quickNoteStyles.page,
+      'data-quicknote-visual-style': 'apple-notes',
+    },
     createElement(
       'div',
       {
@@ -193,7 +195,6 @@ export function QuickNotesView() {
         onTogglePin: togglePinWithPending,
         onDelete: moveToTrashWithUndo,
         onMigrate: migrateToNoteWithPending,
-        onOpenPreview: enterFocusRead,
         onOpenDetail: enterDetailRead,
         onToggleFocusEdit: toggleFocusEdit,
         onExitFocus: exitFocus,
