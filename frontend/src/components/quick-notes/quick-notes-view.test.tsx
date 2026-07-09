@@ -546,6 +546,29 @@ describe('QuickNotesView', () => {
     expect(toastMock).toHaveBeenCalledWith('已清理 2 条小记的标签')
   })
 
+  it('shows tag cleanup when dirty active tags normalize to no visible stats', async () => {
+    const notes = [
+      makeQuickNote({
+        id: 'dirty-empty-tags',
+        content: 'Dirty empty tags',
+        tags: ['', '#'],
+      }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+    storeMocks.cleanupQuickNoteTags.mockResolvedValueOnce(1)
+
+    render(createElement(QuickNotesView))
+
+    expect(await screen.findByText('还没有标签，写下 #灵感 试试。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '清理标签' }))
+
+    await waitFor(() => {
+      expect(storeMocks.cleanupQuickNoteTags).toHaveBeenCalledTimes(1)
+    })
+    expect(toastMock).toHaveBeenCalledWith('已清理 1 条小记的标签')
+  })
+
   it('switches between tag cloud and slash-separated tag tree', async () => {
     const notes = [
       makeQuickNote({
