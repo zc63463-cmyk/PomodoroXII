@@ -16,6 +16,13 @@ describe('quick-note-tags', () => {
     ).toEqual(['灵感42', 'daily_note', '产品-v1'])
   })
 
+  it('extracts slash-separated quick note tags as a single tag', () => {
+    expect(extractQuickNoteTags('ship #work/frontend and #life')).toEqual([
+      'work/frontend',
+      'life',
+    ])
+  })
+
   it('normalizes explicit tags and removes duplicates by first appearance', () => {
     expect(normalizeQuickNoteTag('##Capture')).toBe('capture')
     expect(normalizeQuickNoteTags([' Capture ', '#capture', '灵感', '#灵感'])).toEqual([

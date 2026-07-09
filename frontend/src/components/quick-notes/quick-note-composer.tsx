@@ -1,10 +1,14 @@
 'use client'
 
-import { createElement, FormEvent, KeyboardEvent } from 'react'
+import { createElement, FormEvent, KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { PlusIcon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { QuickNoteEditorStatusLine } from '@/components/quick-notes/quick-note-editor-status-line'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
+import {
+  applyQuickNoteTagAutocomplete,
+  getQuickNoteTagAutocompleteState,
+} from '@/lib/quick-notes/quick-note-tag-autocomplete'
 import {
   extractQuickNoteTags,
   normalizeQuickNoteTag,
@@ -44,8 +48,27 @@ export function QuickNoteComposer({
   popularTags?: string[]
   onInsertTag?: (tag: string) => void
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const autocompleteId = useId()
+  const [caretIndex, setCaretIndex] = useState(draft.length)
+  const [autocompleteOpen, setAutocompleteOpen] = useState(false)
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0)
+  const [pendingCaretIndex, setPendingCaretIndex] = useState<number | null>(null)
   const previewTags = extractQuickNoteTags(draft)
   const draftTags = new Set(previewTags)
+  const autocompleteState = useMemo(
+    () =>
+      autocompleteOpen
+        ? getQuickNoteTagAutocompleteState(draft, caretIndex, popularTags)
+        : null,
+    [autocompleteOpen, caretIndex, draft, popularTags],
+  )
+  const autocompleteSuggestions = autocompleteState?.suggestions ?? []
+  const isAutocompleteVisible = autocompleteSuggestions.length > 0
+  const listboxId = `${autocompleteId}-quick-note-tag-autocomplete-listbox`
+  const activeOptionId = isAutocompleteVisible
+    ? `${listboxId}-option-${activeSuggestionIndex}`
+    : undefined
   const editorStatus = getComposerStatus({
     draft,
     editingNote,
@@ -54,7 +77,93 @@ export function QuickNoteComposer({
     saveState,
   })
 
+  useEffect(() => {
+    if (pendingCaretIndex === null) return
+    const textarea = textareaRef.current
+    if (!textarea) return
+
+    textarea.setSelectionRange(pendingCaretIndex, pendingCaretIndex)
+    setCaretIndex(pendingCaretIndex)
+    setPendingCaretIndex(null)
+  }, [draft, pendingCaretIndex])
+
+  useEffect(() => {
+    if (!isAutocompleteVisible) {
+      setActiveSuggestionIndex(0)
+      return
+    }
+    setActiveSuggestionIndex((index) =>
+      Math.min(index, autocompleteSuggestions.length - 1),
+    )
+  }, [autocompleteSuggestions.length, isAutocompleteVisible])
+
+  function handleDraftChange(event: React.ChangeEvent<HTMLTextAreaElement>) {
+    const nextDraft = event.target.value
+    const nextCaretIndex = event.target.selectionStart ?? nextDraft.length
+    setCaretIndex(nextCaretIndex)
+    setAutocompleteOpen(
+      getQuickNoteTagAutocompleteState(nextDraft, nextCaretIndex, popularTags) !== null,
+    )
+    onDraftChange(nextDraft)
+  }
+
+  function syncCaretFromTextarea(event: React.SyntheticEvent<HTMLTextAreaElement>) {
+    const currentValue = event.currentTarget.value
+    const nextCaretIndex = event.currentTarget.selectionStart ?? draft.length
+    setCaretIndex(nextCaretIndex)
+    setAutocompleteOpen(
+      getQuickNoteTagAutocompleteState(currentValue, nextCaretIndex, popularTags) !== null,
+    )
+  }
+
+  function handleKeyUp(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) {
+      return
+    }
+    syncCaretFromTextarea(event)
+  }
+
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault()
+      event.currentTarget.form?.requestSubmit()
+      return
+    }
+
+    if (isAutocompleteVisible) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        event.stopPropagation()
+        setActiveSuggestionIndex((index) =>
+          (index + 1) % autocompleteSuggestions.length,
+        )
+        return
+      }
+
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        event.stopPropagation()
+        setActiveSuggestionIndex((index) =>
+          (index - 1 + autocompleteSuggestions.length) % autocompleteSuggestions.length,
+        )
+        return
+      }
+
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault()
+        event.stopPropagation()
+        insertAutocompleteSuggestion(autocompleteSuggestions[activeSuggestionIndex])
+        return
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        setAutocompleteOpen(false)
+        return
+      }
+    }
+
     if (event.key === 'Escape' && isFocusMode) {
       event.preventDefault()
       event.stopPropagation()
@@ -69,11 +178,19 @@ export function QuickNoteComposer({
       onCancelEdit()
       return
     }
+  }
 
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault()
-      event.currentTarget.form?.requestSubmit()
-    }
+  function insertAutocompleteSuggestion(tag: string | undefined) {
+    if (!tag || !autocompleteState) return
+
+    const nextDraft = applyQuickNoteTagAutocomplete(
+      draft,
+      autocompleteState.range,
+      tag,
+    )
+    setAutocompleteOpen(false)
+    setPendingCaretIndex(nextDraft.caretIndex)
+    onDraftChange(nextDraft.value)
   }
 
   return createElement(
@@ -87,19 +204,62 @@ export function QuickNoteComposer({
     createElement(
       'form',
       { onSubmit, className: 'flex flex-col gap-3' },
-      createElement('textarea', {
-        value: draft,
-        onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) =>
-          onDraftChange(event.target.value),
-        onKeyDown: handleKeyDown,
-        placeholder: isFocusMode ? '专注写作，把这一段想法完整落下来...' : '随手写下正在想的事...',
-        rows: variant === 'focus' ? 12 : editingNote ? 5 : 4,
-        className:
-          variant === 'focus'
-            ? quickNoteStyles.textareaFocus
-            : quickNoteStyles.textarea,
-        'aria-label': '小记内容',
-      }),
+      createElement(
+        'div',
+        { className: quickNoteStyles.tagAutocompleteAnchor },
+        createElement('textarea', {
+          ref: textareaRef,
+          value: draft,
+          onChange: handleDraftChange,
+          onClick: syncCaretFromTextarea,
+          onKeyUp: handleKeyUp,
+          onKeyDown: handleKeyDown,
+          placeholder: isFocusMode ? '专注写作，把这一段想法完整落下来...' : '随手写下正在想的事...',
+          rows: variant === 'focus' ? 12 : editingNote ? 5 : 4,
+          className:
+            variant === 'focus'
+              ? quickNoteStyles.textareaFocus
+              : quickNoteStyles.textarea,
+          'aria-label': '小记内容',
+          'aria-autocomplete': 'list',
+          'aria-controls': isAutocompleteVisible ? listboxId : undefined,
+          'aria-expanded': isAutocompleteVisible,
+          'aria-activedescendant': activeOptionId,
+        }),
+        isAutocompleteVisible
+          ? createElement(
+              'div',
+              {
+                id: listboxId,
+                role: 'listbox',
+                'aria-label': '标签补全',
+                className: quickNoteStyles.tagAutocompleteList,
+              },
+              ...autocompleteSuggestions.map((tag, index) =>
+                createElement(
+                  'button',
+                  {
+                    key: tag,
+                    id: `${listboxId}-option-${index}`,
+                    type: 'button',
+                    role: 'option',
+                    'aria-selected': activeSuggestionIndex === index,
+                    onMouseDown: (event: React.MouseEvent<HTMLButtonElement>) =>
+                      event.preventDefault(),
+                    onClick: () => insertAutocompleteSuggestion(tag),
+                    className: cn(
+                      quickNoteStyles.tagAutocompleteOption,
+                      activeSuggestionIndex === index
+                        ? quickNoteStyles.tagAutocompleteOptionActive
+                        : null,
+                    ),
+                  },
+                  `#${tag}`,
+                ),
+              ),
+            )
+          : null,
+      ),
       createElement(
         'div',
         { className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between' },
