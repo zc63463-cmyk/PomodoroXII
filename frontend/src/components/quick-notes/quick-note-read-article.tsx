@@ -1,10 +1,11 @@
 'use client'
 
-import { createElement, useEffect, useMemo, useRef, useState } from 'react'
+import { createElement, useEffect, useRef, useState } from 'react'
 import { FileTextIcon, PinIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { QuickNoteEditorStatusLine } from '@/components/quick-notes/quick-note-editor-status-line'
+import { QuickNoteMarkdown } from '@/components/quick-notes/quick-note-markdown'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
 import { QUICK_NOTE_TYPING_IDLE_MS } from '@/lib/quick-notes/quick-note-editor-status'
 import { getQuickNoteTitle } from '@/lib/quick-notes/quick-note-selectors'
@@ -80,16 +81,6 @@ export function QuickNoteReadArticle({
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
     }
   }, [])
-
-  const paragraphs = useMemo(
-    () =>
-      note.content
-        .replace(/\r\n/g, '\n')
-        .split(/\n{2,}/)
-        .map((paragraph) => paragraph.trim())
-        .filter(Boolean),
-    [note.content],
-  )
 
   async function saveInlineEdit() {
     const content = draft.trim()
@@ -385,15 +376,10 @@ export function QuickNoteReadArticle({
       : createElement(
           'div',
           { className: quickNoteStyles.readBody },
-          paragraphs.length > 0
-            ? paragraphs.map((paragraph, index) =>
-                createElement(
-                  'p',
-                  { key: `${index}-${paragraph.slice(0, 16)}` },
-                  paragraph,
-                ),
-              )
-            : createElement('p', null, note.content),
+          createElement(QuickNoteMarkdown, {
+            content: note.content,
+            variant: 'read',
+          }),
         ),
   )
 }
