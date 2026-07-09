@@ -139,6 +139,13 @@ export const quickNoteStyles = {
     'rounded-full bg-[color:var(--qn-chip)] px-2 py-0.5 text-xs text-[color:var(--qn-accent-readable)] ring-1 ring-[color:var(--qn-ring)] transition hover:bg-[color:var(--qn-accent-soft)] hover:text-[color:var(--qn-text-strong)] disabled:cursor-default disabled:opacity-60',
   tagShortcutSelected:
     'bg-[color:var(--qn-selection)] text-[color:var(--qn-muted)] ring-[color:var(--qn-selection-ring)]',
+  tagAutocompleteAnchor: 'relative grid gap-2',
+  tagAutocompleteList:
+    'absolute top-full right-0 left-0 z-30 mt-2 grid max-h-56 gap-1 overflow-y-auto rounded-[1rem] border border-[color:var(--qn-border)] bg-[color:var(--qn-paper)] p-1.5 shadow-[var(--qn-shadow-soft)] backdrop-blur-[24px]',
+  tagAutocompleteOption:
+    'flex min-h-8 w-full items-center rounded-[0.75rem] px-3 py-1.5 text-left text-xs font-medium text-[color:var(--qn-accent-readable)] transition hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--qn-border-strong)]',
+  tagAutocompleteOptionActive:
+    'bg-[color:var(--qn-selection)] text-[color:var(--qn-text-strong)] ring-1 ring-[color:var(--qn-selection-ring)]',
   tagActive:
     'bg-[color:var(--qn-accent-soft)] text-[color:var(--qn-accent-readable)] ring-1 ring-[color:var(--qn-border-strong)]',
   mark:
