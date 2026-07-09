@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildQuickNoteTagTree,
   compareQuickNotes,
+  getQuickNoteActivityData,
+  getQuickNoteTagStats,
   getQuickNoteTitle,
   isActiveQuickNote,
   isConvertedQuickNote,
@@ -9,6 +12,7 @@ import {
   getQuickNoteSearchNeedle,
   getQuickNoteTagQuery,
   selectActiveQuickNotes,
+  selectQuickNotesForExplorer,
 } from '@/lib/quick-notes/quick-note-selectors'
 import type { QuickNote } from '@/types'
 
@@ -101,5 +105,102 @@ describe('quick-note-selectors', () => {
 
   it('derives title from first non-empty line', () => {
     expect(getQuickNoteTitle(makeNote('n1', { content: '\n  Hello world\nbody' }))).toBe('Hello world')
+  })
+
+  it('counts tags from active quick notes and ignores duplicate tags per note', () => {
+    const notes = [
+      makeNote('a', { tags: ['work', 'frontend', 'work'] }),
+      makeNote('b', { tags: ['work'] }),
+      makeNote('archived', {
+        tags: ['hidden'],
+        archived_at: '2026-01-03T00:00:00.000Z',
+      }),
+    ]
+
+    expect(getQuickNoteTagStats(notes)).toEqual([
+      { tag: 'work', count: 2 },
+      { tag: 'frontend', count: 1 },
+    ])
+  })
+
+  it('builds slash-separated tag tree with descendant totals', () => {
+    const tree = buildQuickNoteTagTree([
+      { tag: 'work/frontend', count: 2 },
+      { tag: 'work/backend', count: 1 },
+      { tag: 'work', count: 1 },
+      { tag: 'life', count: 1 },
+    ])
+
+    expect(tree).toMatchObject([
+      {
+        path: 'work',
+        name: 'work',
+        count: 1,
+        totalCount: 4,
+        depth: 0,
+        children: [
+          { path: 'work/frontend', name: 'frontend', count: 2, totalCount: 2, depth: 1 },
+          { path: 'work/backend', name: 'backend', count: 1, totalCount: 1, depth: 1 },
+        ],
+      },
+      {
+        path: 'life',
+        name: 'life',
+        count: 1,
+        totalCount: 1,
+        depth: 0,
+        children: [],
+      },
+    ])
+  })
+
+  it('counts activity by created_at local date for active quick notes', () => {
+    const notes = [
+      makeNote('a', { created_at: '2026-07-01T01:00:00.000Z' }),
+      makeNote('b', { created_at: '2026-07-01T12:00:00.000Z' }),
+      makeNote('c', { created_at: '2026-07-02T01:00:00.000Z' }),
+      makeNote('trash', {
+        created_at: '2026-07-01T09:00:00.000Z',
+        trashed_at: '2026-07-03T00:00:00.000Z',
+      }),
+    ]
+
+    expect(getQuickNoteActivityData(notes)).toEqual({
+      '2026-07-01': 2,
+      '2026-07-02': 1,
+    })
+  })
+
+  it('filters explorer notes by search, all selected tags, and created date', () => {
+    const notes = [
+      makeNote('match', {
+        content: 'release plan',
+        tags: ['work', 'frontend'],
+        created_at: '2026-07-01T09:00:00.000Z',
+      }),
+      makeNote('missing-tag', {
+        content: 'release plan',
+        tags: ['work'],
+        created_at: '2026-07-01T10:00:00.000Z',
+      }),
+      makeNote('wrong-date', {
+        content: 'release plan',
+        tags: ['work', 'frontend'],
+        created_at: '2026-07-02T10:00:00.000Z',
+      }),
+      makeNote('wrong-search', {
+        content: 'other note',
+        tags: ['work', 'frontend'],
+        created_at: '2026-07-01T11:00:00.000Z',
+      }),
+    ]
+
+    expect(
+      selectQuickNotesForExplorer(notes, {
+        query: 'release',
+        selectedTags: ['work', 'frontend'],
+        selectedDate: '2026-07-01',
+      }).map((note) => note.id),
+    ).toEqual(['match'])
   })
 })
