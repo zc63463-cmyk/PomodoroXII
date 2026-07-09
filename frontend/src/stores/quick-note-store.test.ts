@@ -44,6 +44,113 @@ describe('useQuickNoteStore', () => {
     ])
   })
 
+  it('keeps all active quick notes while deriving visible notes from search filters', async () => {
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'release',
+      content: 'release memo #work',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    })
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'personal',
+      content: 'personal memo #life',
+      created_at: '2026-07-02T00:00:00.000Z',
+      updated_at: '2026-07-02T00:00:00.000Z',
+    })
+
+    await useQuickNoteStore.getState().loadQuickNotes({ query: 'release' })
+
+    expect(useQuickNoteStore.getState().quickNotes.map((note) => note.id)).toEqual([
+      'release',
+    ])
+    expect(useQuickNoteStore.getState().allQuickNotes.map((note) => note.id)).toEqual([
+      'personal',
+      'release',
+    ])
+  })
+
+  it('derives visible notes with single and multi tag filters', async () => {
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'frontend',
+      content: 'ship ui #work #frontend',
+      tags: ['work', 'frontend'],
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    })
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'backend',
+      content: 'ship api #work #backend',
+      tags: ['work', 'backend'],
+      created_at: '2026-07-02T00:00:00.000Z',
+      updated_at: '2026-07-02T00:00:00.000Z',
+    })
+
+    useQuickNoteStore.getState().toggleTagFilter('work')
+    expect(useQuickNoteStore.getState().selectedTagFilters).toEqual(['work'])
+    expect(useQuickNoteStore.getState().quickNotes.map((note) => note.id)).toEqual([
+      'backend',
+      'frontend',
+    ])
+
+    useQuickNoteStore.getState().setTagFilterMode('multi')
+    useQuickNoteStore.getState().toggleTagFilter('frontend')
+    expect(useQuickNoteStore.getState().selectedTagFilters).toEqual(['work', 'frontend'])
+    expect(useQuickNoteStore.getState().quickNotes.map((note) => note.id)).toEqual([
+      'frontend',
+    ])
+  })
+
+  it('derives visible notes from created_at date filters and clears filters on reset', async () => {
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'day-one',
+      content: 'day one memo',
+      created_at: '2026-07-01T10:00:00.000Z',
+      updated_at: '2026-07-03T10:00:00.000Z',
+    })
+    await useQuickNoteStore.getState().createQuickNote({
+      id: 'day-two',
+      content: 'day two memo',
+      created_at: '2026-07-02T10:00:00.000Z',
+      updated_at: '2026-07-02T10:00:00.000Z',
+    })
+
+    useQuickNoteStore.getState().toggleSelectedDate('2026-07-01')
+
+    expect(useQuickNoteStore.getState().selectedDate).toBe('2026-07-01')
+    expect(useQuickNoteStore.getState().quickNotes.map((note) => note.id)).toEqual([
+      'day-one',
+    ])
+
+    useQuickNoteStore.getState().reset()
+
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      allQuickNotes: [],
+      quickNotes: [],
+      selectedTagFilters: [],
+      tagFilterMode: 'single',
+      selectedDate: null,
+    })
+  })
+
+  it('toggles pin for active notes that are hidden by current explorer filters', async () => {
+    const note = await useQuickNoteStore.getState().createQuickNote({
+      id: 'hidden-pin',
+      content: 'Hidden while searching #work',
+    })
+
+    await useQuickNoteStore.getState().loadQuickNotes({ query: 'no-match' })
+    expect(useQuickNoteStore.getState().quickNotes).toEqual([])
+    expect(useQuickNoteStore.getState().allQuickNotes.map((item) => item.id)).toContain(note.id)
+
+    await useQuickNoteStore.getState().togglePin(note.id)
+    await useQuickNoteStore.getState().loadQuickNotes({ query: '' })
+
+    expect(useQuickNoteStore.getState().quickNotes[0]).toMatchObject({
+      id: note.id,
+      pinned: true,
+    })
+  })
+
   it('soft deletes and restores through store actions', async () => {
     const note = await useQuickNoteStore.getState().createQuickNote({ content: 'delete me' })
 

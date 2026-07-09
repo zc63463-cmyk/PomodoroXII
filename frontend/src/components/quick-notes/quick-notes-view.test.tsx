@@ -60,6 +60,7 @@ const repositoryMocks = vi.hoisted(() => ({
 
 const storeMocks = vi.hoisted(() => ({
   state: {
+    allQuickNotes: [] as QuickNote[],
     quickNotes: [] as QuickNote[],
     trashedQuickNotes: [] as QuickNote[],
     syncStatusById: {} as Record<string, 'pending' | 'failed'>,
@@ -70,6 +71,9 @@ const storeMocks = vi.hoisted(() => ({
     isLoading: false,
     error: null as string | null,
     searchQuery: '',
+    selectedTagFilters: [] as string[],
+    tagFilterMode: 'single' as 'single' | 'multi',
+    selectedDate: null as string | null,
     focusMode: 'normal' as 'normal' | 'focus-edit' | 'detail-read',
     selectedQuickNoteId: null as string | null,
   },
@@ -81,6 +85,11 @@ const storeMocks = vi.hoisted(() => ({
   purgeQuickNote: vi.fn().mockResolvedValue(undefined),
   togglePin: vi.fn().mockResolvedValue(undefined),
   migrateToNote: vi.fn().mockResolvedValue('note-converted'),
+  toggleTagFilter: vi.fn(),
+  clearTagFilters: vi.fn(),
+  setTagFilterMode: vi.fn(),
+  toggleSelectedDate: vi.fn(),
+  clearSelectedDate: vi.fn(),
   toggleFocusEdit: vi.fn(),
   enterDetailRead: vi.fn(),
   exitFocus: vi.fn(),
@@ -97,6 +106,11 @@ vi.mock('@/stores/quick-note-store', () => ({
     purgeQuickNote: storeMocks.purgeQuickNote,
     togglePin: storeMocks.togglePin,
     migrateToNote: storeMocks.migrateToNote,
+    toggleTagFilter: storeMocks.toggleTagFilter,
+    clearTagFilters: storeMocks.clearTagFilters,
+    setTagFilterMode: storeMocks.setTagFilterMode,
+    toggleSelectedDate: storeMocks.toggleSelectedDate,
+    clearSelectedDate: storeMocks.clearSelectedDate,
     toggleFocusEdit: storeMocks.toggleFocusEdit,
     enterDetailRead: storeMocks.enterDetailRead,
     exitFocus: storeMocks.exitFocus,
@@ -128,6 +142,7 @@ function makeQuickNote(overrides: Partial<QuickNote> = {}): QuickNote {
 describe('QuickNotesView', () => {
   beforeEach(() => {
     vi.useRealTimers()
+    storeMocks.state.allQuickNotes = []
     storeMocks.state.quickNotes = []
     storeMocks.state.trashedQuickNotes = []
     storeMocks.state.syncStatusById = {}
@@ -135,6 +150,9 @@ describe('QuickNotesView', () => {
     storeMocks.state.isLoading = false
     storeMocks.state.error = null
     storeMocks.state.searchQuery = ''
+    storeMocks.state.selectedTagFilters = []
+    storeMocks.state.tagFilterMode = 'single'
+    storeMocks.state.selectedDate = null
     storeMocks.state.focusMode = 'normal'
     storeMocks.state.selectedQuickNoteId = null
     storeMocks.loadQuickNotes.mockClear()
@@ -145,6 +163,11 @@ describe('QuickNotesView', () => {
     storeMocks.purgeQuickNote.mockClear()
     storeMocks.togglePin.mockClear()
     storeMocks.migrateToNote.mockClear()
+    storeMocks.toggleTagFilter.mockClear()
+    storeMocks.clearTagFilters.mockClear()
+    storeMocks.setTagFilterMode.mockClear()
+    storeMocks.toggleSelectedDate.mockClear()
+    storeMocks.clearSelectedDate.mockClear()
     storeMocks.toggleFocusEdit.mockClear()
     storeMocks.enterDetailRead.mockClear()
     storeMocks.exitFocus.mockClear()
@@ -354,6 +377,35 @@ describe('QuickNotesView', () => {
     expect(screen.getAllByText('other idea')[1]).toHaveClass('text-[color:var(--qn-text)]')
   })
 
+  it('keeps search, activity calendar, and tags in the left explorer column', async () => {
+    const notes = [
+      makeQuickNote({
+        id: 'layout-note',
+        content: 'Layout note body',
+        tags: ['layout'],
+        created_at: '2026-07-03T10:00:00.000Z',
+      }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+
+    render(createElement(QuickNotesView))
+
+    const explorer = await screen.findByLabelText('小记探索')
+    const grid = explorer.parentElement
+    const mainColumn = explorer.nextElementSibling
+
+    expect(grid).toHaveClass('grid')
+    expect(grid).toHaveClass('lg:grid-cols-[18rem_minmax(0,1fr)]')
+    expect(grid?.firstElementChild).toBe(explorer)
+    expect(explorer).toContainElement(screen.getByLabelText('搜索小记'))
+    expect(within(explorer).getByText('活动日历')).toBeInTheDocument()
+    expect(within(explorer).getByText('标签')).toBeInTheDocument()
+    expect(explorer).not.toContainElement(screen.getByLabelText('小记内容'))
+    expect(mainColumn).toContainElement(screen.getByLabelText('小记内容'))
+    expect(mainColumn).toContainElement(screen.getByRole('button', { name: /Layout note body/ }))
+  })
+
   it('searches by tag when a note tag is clicked', async () => {
     storeMocks.state.quickNotes = [
       makeQuickNote({
@@ -368,6 +420,104 @@ describe('QuickNotesView', () => {
     fireEvent.click(await screen.findByRole('button', { name: '#capture' }))
 
     expect(storeMocks.loadQuickNotes).toHaveBeenCalledWith({ query: '#capture' })
+  })
+
+  it('renders tag exploration stats and dispatches tag filter changes', async () => {
+    const notes = [
+      makeQuickNote({
+        id: 'work-frontend',
+        content: 'Frontend memo',
+        tags: ['work', 'frontend'],
+      }),
+      makeQuickNote({
+        id: 'work-backend',
+        content: 'Backend memo',
+        tags: ['work', 'backend'],
+      }),
+      makeQuickNote({
+        id: 'life',
+        content: 'Life memo',
+        tags: ['life'],
+      }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+    storeMocks.state.selectedTagFilters = ['work']
+
+    render(createElement(QuickNotesView))
+
+    const workTag = await screen.findByRole('button', {
+      name: '筛选标签 #work，2 条小记',
+    })
+    expect(workTag).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(workTag)
+    expect(storeMocks.toggleTagFilter).toHaveBeenCalledWith('work')
+
+    fireEvent.click(screen.getByRole('button', { name: '切换为多选标签过滤' }))
+    expect(storeMocks.setTagFilterMode).toHaveBeenCalledWith('multi')
+
+    fireEvent.click(screen.getByRole('button', { name: '清除标签筛选' }))
+    expect(storeMocks.clearTagFilters).toHaveBeenCalledTimes(1)
+  })
+
+  it('switches between tag cloud and slash-separated tag tree', async () => {
+    const notes = [
+      makeQuickNote({
+        id: 'tree-a',
+        content: 'Tree memo',
+        tags: ['work/frontend'],
+      }),
+      makeQuickNote({
+        id: 'tree-b',
+        content: 'Tree memo',
+        tags: ['work/backend'],
+      }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+
+    render(createElement(QuickNotesView))
+
+    fireEvent.click(await screen.findByRole('button', { name: '标签树视图' }))
+
+    expect(
+      screen.getByRole('button', { name: '筛选标签 #work/frontend，1 条小记' }),
+    ).toHaveClass('text-[color:var(--qn-accent-readable)]')
+    expect(screen.getByText('work')).toBeInTheDocument()
+  })
+
+  it('renders created_at activity calendar and dispatches date filters', async () => {
+    const notes = [
+      makeQuickNote({
+        id: 'created-july-1',
+        content: 'Created July one',
+        created_at: '2026-07-01T10:00:00.000Z',
+        updated_at: '2026-07-07T10:00:00.000Z',
+      }),
+      makeQuickNote({
+        id: 'created-july-2',
+        content: 'Created July two',
+        created_at: '2026-07-02T10:00:00.000Z',
+        updated_at: '2026-07-02T10:00:00.000Z',
+      }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+    storeMocks.state.selectedDate = '2026-07-01'
+
+    render(createElement(QuickNotesView))
+
+    const createdDate = await screen.findByRole('button', {
+      name: '筛选日期 2026-07-01，1 条小记',
+    })
+    expect(createdDate).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(createdDate)
+    expect(storeMocks.toggleSelectedDate).toHaveBeenCalledWith('2026-07-01')
+
+    fireEvent.click(screen.getByRole('button', { name: '清除日期筛选' }))
+    expect(storeMocks.clearSelectedDate).toHaveBeenCalledTimes(1)
   })
 
   it('shows readable edit state and dispatches autosave update', async () => {
@@ -1350,7 +1500,7 @@ describe('QuickNotesView', () => {
     })
   })
 
-  it('enters focus-edit from the composer and renders the expanded writing surface', async () => {
+  it('enters focus-edit by expanding only the right column and pushing the timeline down', async () => {
     storeMocks.state.quickNotes = [
       makeQuickNote({
         id: 'focus-edit-note',
@@ -1358,38 +1508,51 @@ describe('QuickNotesView', () => {
       }),
     ]
 
-    const { rerender } = render(createElement(QuickNotesView))
+    const { container, rerender } = render(createElement(QuickNotesView))
+    const normalStage = container.querySelector('[data-focus-stage="normal"]')
 
     fireEvent.click(screen.getByRole('button', { name: '专注' }))
     expect(storeMocks.toggleFocusEdit).toHaveBeenCalled()
 
     storeMocks.state.focusMode = 'focus-edit'
     rerender(createElement(QuickNotesView))
+    const focusStage = container.querySelector('[data-focus-stage="focus-edit"]')
 
+    expect(focusStage).toBe(normalStage)
+    expect(focusStage?.parentElement).toHaveClass('max-w-7xl')
     expect(screen.getByRole('button', { name: '退出专注' })).toHaveClass(
       'text-[color:var(--qn-accent-readable)]',
     )
     expect(screen.getByLabelText('小记内容')).toHaveAttribute('rows', '12')
+    expect(screen.getByLabelText('小记内容')).toHaveClass(
+      'h-[clamp(20rem,calc(100dvh-23rem),26rem)]',
+    )
+    expect(screen.getByLabelText('小记内容')).toHaveClass('max-h-[26rem]')
+    expect(screen.getByLabelText('小记内容')).toHaveClass('overflow-y-auto')
+    expect(screen.getByLabelText('小记内容')).not.toHaveClass(
+      'min-h-[max(32rem,calc(100svh-12rem))]',
+    )
     expect(screen.getByText(/专注写作中/)).toHaveClass(
       'text-[color:var(--qn-muted)]',
     )
-    expect(screen.getByLabelText('小记时间线').parentElement).toHaveAttribute(
-      'aria-hidden',
-      'true',
+    const explorer = screen.getByLabelText('小记探索')
+    const focusGrid = explorer.parentElement
+    const mainColumn = explorer.nextElementSibling
+    const timeline = screen.getByLabelText('小记时间线')
+    const timelineSink = timeline.parentElement
+
+    expect(explorer).toBeInTheDocument()
+    expect(focusGrid).toHaveClass('lg:grid-cols-[18rem_minmax(0,1fr)]')
+    expect(focusGrid?.firstElementChild).toBe(explorer)
+    expect(mainColumn).toContainElement(screen.getByLabelText('小记内容'))
+    expect(mainColumn).toContainElement(timeline)
+    expect(timelineSink).toHaveAttribute('data-focus-edit-timeline-sink', 'true')
+    expect(timelineSink).toHaveClass('quick-note-focus-timeline-sink')
+    expect(screen.getByRole('button', { name: /给专注模式一点背景/ })).toHaveAttribute(
+      'tabIndex',
+      '-1',
     )
-    expect(screen.getByLabelText('小记时间线').parentElement).toHaveAttribute(
-      'inert',
-    )
-    const enabledTabStops = Array.from(
-      screen
-        .getByLabelText('小记时间线')
-        .parentElement!.querySelectorAll('button, [role="button"], a[href], input, textarea, select, [tabindex]'),
-    ).filter((element) => {
-      const htmlElement = element as HTMLElement
-      if ('disabled' in htmlElement && htmlElement.disabled === true) return false
-      return htmlElement.tabIndex >= 0
-    })
-    expect(enabledTabStops).toHaveLength(0)
+    expect(screen.getByRole('button', { name: '编辑小记' })).toBeDisabled()
   })
 
   it('returns to normal after a successful focus-edit submit', async () => {
