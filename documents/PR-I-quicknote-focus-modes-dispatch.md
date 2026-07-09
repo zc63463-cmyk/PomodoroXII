@@ -1,5 +1,12 @@
 # PR-I QuickNote Focus Modes / 小记详情与专注模式重建派发文档
 
+> ⚠️ 历史派发文档，仅供追溯，不再作为当前实现入口。
+>
+> 当前 QuickNote 已收敛为 `normal / focus-edit / detail-read` 三个 store focusMode；
+> 双击卡片是 normal 态下的本地 Quick Preview：卡片自身向下生长并渲染完整内容，
+> 不进入 `focus-read`，不渲染独立轻详情面板，也不展示元信息块。
+> 后续实现请以代码与测试为准，避免按本文旧“四态 / focus-read / QuickNoteDetailPanel”路径继续开发。
+
 ## 1. 任务定位
 
 PR-I 的目标是恢复并重建原 Pomodoroxi Memo 系统里的四态工作台逻辑，让当前 PomodoroXII 的 QuickNote 页面从“composer + timeline 卡片流”升级为具备详情、专注写作、轻阅读、沉浸阅读/编辑的 Memo workspace。
