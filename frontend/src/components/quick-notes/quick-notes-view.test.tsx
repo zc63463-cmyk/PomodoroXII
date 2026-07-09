@@ -85,6 +85,8 @@ const storeMocks = vi.hoisted(() => ({
   purgeQuickNote: vi.fn().mockResolvedValue(undefined),
   togglePin: vi.fn().mockResolvedValue(undefined),
   migrateToNote: vi.fn().mockResolvedValue('note-converted'),
+  renameQuickNoteTag: vi.fn().mockResolvedValue(undefined),
+  cleanupQuickNoteTags: vi.fn().mockResolvedValue(0),
   toggleTagFilter: vi.fn(),
   clearTagFilters: vi.fn(),
   setTagFilterMode: vi.fn(),
@@ -106,6 +108,8 @@ vi.mock('@/stores/quick-note-store', () => ({
     purgeQuickNote: storeMocks.purgeQuickNote,
     togglePin: storeMocks.togglePin,
     migrateToNote: storeMocks.migrateToNote,
+    renameQuickNoteTag: storeMocks.renameQuickNoteTag,
+    cleanupQuickNoteTags: storeMocks.cleanupQuickNoteTags,
     toggleTagFilter: storeMocks.toggleTagFilter,
     clearTagFilters: storeMocks.clearTagFilters,
     setTagFilterMode: storeMocks.setTagFilterMode,
@@ -163,6 +167,10 @@ describe('QuickNotesView', () => {
     storeMocks.purgeQuickNote.mockClear()
     storeMocks.togglePin.mockClear()
     storeMocks.migrateToNote.mockClear()
+    storeMocks.renameQuickNoteTag.mockClear()
+    storeMocks.renameQuickNoteTag.mockResolvedValue(undefined)
+    storeMocks.cleanupQuickNoteTags.mockClear()
+    storeMocks.cleanupQuickNoteTags.mockResolvedValue(0)
     storeMocks.toggleTagFilter.mockClear()
     storeMocks.clearTagFilters.mockClear()
     storeMocks.setTagFilterMode.mockClear()
@@ -230,6 +238,37 @@ describe('QuickNotesView', () => {
       'text-[color:var(--qn-accent-readable)]',
     )
     expect(screen.getAllByText('#daily_note')).toHaveLength(1)
+  })
+
+  it('inserts popular tags into the composer draft without duplicating them', async () => {
+    const notes = [
+      makeQuickNote({
+        id: 'popular-a',
+        content: 'Popular A',
+        tags: ['work'],
+      }),
+      makeQuickNote({
+        id: 'popular-b',
+        content: 'Popular B',
+        tags: ['work', 'life'],
+      }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+
+    render(createElement(QuickNotesView))
+
+    const editor = screen.getByLabelText('小记内容')
+    fireEvent.click(await screen.findByRole('button', { name: '插入常用标签 #work' }))
+    expect(editor).toHaveValue('#work ')
+
+    fireEvent.click(screen.getByRole('button', { name: '插入常用标签 #work' }))
+    expect(editor).toHaveValue('#work ')
+
+    fireEvent.change(editor, { target: { value: 'draft body' } })
+    fireEvent.click(screen.getByRole('button', { name: '插入常用标签 #life' }))
+    expect(editor).toHaveValue('draft body #life')
+    expect(storeMocks.createQuickNote).not.toHaveBeenCalled()
   })
 
   it('shows typing then dirty status for a new composer draft', async () => {
@@ -459,6 +498,52 @@ describe('QuickNotesView', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '清除标签筛选' }))
     expect(storeMocks.clearTagFilters).toHaveBeenCalledTimes(1)
+  })
+
+  it('renames tags from the explorer inline editor', async () => {
+    const notes = [
+      makeQuickNote({
+        id: 'rename-tag',
+        content: 'Rename memo',
+        tags: ['work'],
+      }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+
+    render(createElement(QuickNotesView))
+
+    fireEvent.click(await screen.findByRole('button', { name: '重命名标签 #work' }))
+    const renameInput = screen.getByLabelText('标签新名称 #work')
+    fireEvent.change(renameInput, { target: { value: 'project' } })
+    fireEvent.keyDown(renameInput, { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(storeMocks.renameQuickNoteTag).toHaveBeenCalledWith('work', 'project')
+    })
+    expect(toastMock).toHaveBeenCalledWith('已将 #work 重命名为 #project')
+  })
+
+  it('shows tag cleanup feedback from the explorer', async () => {
+    const notes = [
+      makeQuickNote({
+        id: 'cleanup-tag',
+        content: 'Cleanup memo',
+        tags: ['work'],
+      }),
+    ]
+    storeMocks.state.allQuickNotes = notes
+    storeMocks.state.quickNotes = notes
+    storeMocks.cleanupQuickNoteTags.mockResolvedValueOnce(2)
+
+    render(createElement(QuickNotesView))
+
+    fireEvent.click(await screen.findByRole('button', { name: '清理标签' }))
+
+    await waitFor(() => {
+      expect(storeMocks.cleanupQuickNoteTags).toHaveBeenCalledTimes(1)
+    })
+    expect(toastMock).toHaveBeenCalledWith('已清理 2 条小记的标签')
   })
 
   it('switches between tag cloud and slash-separated tag tree', async () => {
