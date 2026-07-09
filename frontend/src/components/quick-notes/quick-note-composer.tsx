@@ -5,7 +5,11 @@ import { PlusIcon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { QuickNoteEditorStatusLine } from '@/components/quick-notes/quick-note-editor-status-line'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
-import { extractQuickNoteTags } from '@/lib/quick-notes/quick-note-tags'
+import {
+  extractQuickNoteTags,
+  normalizeQuickNoteTag,
+} from '@/lib/quick-notes/quick-note-tags'
+import { cn } from '@/lib/utils'
 import type { QuickNoteEditorStatus } from '@/lib/quick-notes/quick-note-editor-status'
 import type { QuickNote } from '@/types'
 
@@ -23,6 +27,8 @@ export function QuickNoteComposer({
   variant = 'compact',
   isFocusMode = false,
   onToggleFocus,
+  popularTags = [],
+  onInsertTag,
 }: {
   draft: string
   editingNote: QuickNote | null
@@ -35,8 +41,11 @@ export function QuickNoteComposer({
   variant?: 'compact' | 'focus'
   isFocusMode?: boolean
   onToggleFocus?: () => void
+  popularTags?: string[]
+  onInsertTag?: (tag: string) => void
 }) {
   const previewTags = extractQuickNoteTags(draft)
+  const draftTags = new Set(previewTags)
   const editorStatus = getComposerStatus({
     draft,
     editingNote,
@@ -116,6 +125,34 @@ export function QuickNoteComposer({
                 ),
               )
             : null,
+          popularTags.length > 0
+            ? createElement(
+                'div',
+                { className: quickNoteStyles.tagShortcutWrap },
+                createElement('span', { className: quickNoteStyles.metaText }, '常用标签'),
+                ...popularTags.map((tag) => {
+                  const normalizedTag = normalizeQuickNoteTag(tag)
+                  const selected = draftTags.has(normalizedTag) || draftIncludesTagText(draft, normalizedTag)
+                  return createElement(
+                    'button',
+                    {
+                      key: tag,
+                      type: 'button',
+                      onClick: () => {
+                        if (!selected) onInsertTag?.(tag)
+                      },
+                      'aria-pressed': selected,
+                      'aria-label': `插入常用标签 #${tag}`,
+                      className: cn(
+                        quickNoteStyles.tagShortcut,
+                        selected ? quickNoteStyles.tagShortcutSelected : null,
+                      ),
+                    },
+                    `#${tag}`,
+                  )
+                }),
+              )
+            : null,
         ),
         createElement(
           'div',
@@ -163,6 +200,11 @@ export function QuickNoteComposer({
       ),
     ),
   )
+}
+
+function draftIncludesTagText(draft: string, tag: string): boolean {
+  if (!tag) return false
+  return draft.toLowerCase().split(/\s+/).includes(`#${tag}`)
 }
 
 function getComposerStatus({

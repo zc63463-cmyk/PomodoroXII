@@ -10,6 +10,7 @@ import {
   type QuickNoteTagTreeNode,
 } from '@/lib/quick-notes/quick-note-selectors'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
+import { normalizeQuickNoteTag } from '@/lib/quick-notes/quick-note-tags'
 import { cn } from '@/lib/utils'
 import type { QuickNote } from '@/types'
 import type { QuickNoteTagFilterMode } from '@/stores/quick-note-store'
@@ -25,6 +26,8 @@ interface QuickNoteExplorerProps {
   onToggleTag: (tag: string) => void
   onClearTags: () => void
   onSetTagFilterMode: (mode: QuickNoteTagFilterMode) => void
+  onRenameTag: (from: string, to: string) => Promise<void> | void
+  onCleanupTags: () => Promise<void> | void
   onToggleDate: (date: string) => void
   onClearDate: () => void
 }
@@ -38,10 +41,13 @@ export function QuickNoteExplorer({
   onToggleTag,
   onClearTags,
   onSetTagFilterMode,
+  onRenameTag,
+  onCleanupTags,
   onToggleDate,
   onClearDate,
 }: QuickNoteExplorerProps) {
   const [tagViewMode, setTagViewMode] = useState<TagViewMode>('cloud')
+  const [renamingTag, setRenamingTag] = useState<string | null>(null)
   const [currentMonth, setCurrentMonth] = useState(() => {
     if (selectedDate) return selectedDate.slice(0, 7)
     return toLocalMonthKey(new Date())
@@ -89,18 +95,34 @@ export function QuickNoteExplorer({
       { className: quickNoteStyles.explorerPanel },
       createElement(ExplorerHeader, {
         title: '标签',
-        action: selectedTagFilters.length > 0
-          ? createElement(
-              'button',
-              {
-                type: 'button',
-                onClick: onClearTags,
-                className: quickNoteStyles.explorerTextButton,
-                'aria-label': '清除标签筛选',
-              },
-              '清除',
-            )
-          : null,
+        action: createElement(
+          'div',
+          { className: quickNoteStyles.explorerHeaderActions },
+          tagStats.length > 0
+            ? createElement(
+                'button',
+                {
+                  type: 'button',
+                  onClick: () => void onCleanupTags(),
+                  className: quickNoteStyles.explorerTextButton,
+                  'aria-label': '清理标签',
+                },
+                '清理',
+              )
+            : null,
+          selectedTagFilters.length > 0
+            ? createElement(
+                'button',
+                {
+                  type: 'button',
+                  onClick: onClearTags,
+                  className: quickNoteStyles.explorerTextButton,
+                  'aria-label': '清除标签筛选',
+                },
+                '清除',
+              )
+            : null,
+        ),
       }),
       createElement(
         'div',
@@ -172,11 +194,25 @@ export function QuickNoteExplorer({
           ? createElement(TagCloud, {
               tagStats,
               selectedTags,
+              renamingTag,
+              onRenameStart: setRenamingTag,
+              onRenameCancel: () => setRenamingTag(null),
+              onRenameTag: async (from, to) => {
+                await onRenameTag(from, to)
+                setRenamingTag(null)
+              },
               onToggleTag,
             })
           : createElement(TagTree, {
               nodes: tagTree,
               selectedTags,
+              renamingTag,
+              onRenameStart: setRenamingTag,
+              onRenameCancel: () => setRenamingTag(null),
+              onRenameTag: async (from, to) => {
+                await onRenameTag(from, to)
+                setRenamingTag(null)
+              },
               onToggleTag,
             }),
     ),
@@ -195,10 +231,18 @@ function ExplorerHeader({ title, action }: { title: string; action?: ReactNode }
 function TagCloud({
   tagStats,
   selectedTags,
+  renamingTag,
+  onRenameStart,
+  onRenameCancel,
+  onRenameTag,
   onToggleTag,
 }: {
   tagStats: QuickNoteTagStat[]
   selectedTags: Set<string>
+  renamingTag: string | null
+  onRenameStart: (tag: string) => void
+  onRenameCancel: () => void
+  onRenameTag: (from: string, to: string) => Promise<void>
   onToggleTag: (tag: string) => void
 }) {
   return createElement(
@@ -209,6 +253,10 @@ function TagCloud({
         key: stat.tag,
         stat,
         selected: selectedTags.has(stat.tag.toLowerCase()),
+        isRenaming: renamingTag === stat.tag,
+        onRenameStart,
+        onRenameCancel,
+        onRenameTag,
         onToggleTag,
       }),
     ),
@@ -218,10 +266,18 @@ function TagCloud({
 function TagTree({
   nodes,
   selectedTags,
+  renamingTag,
+  onRenameStart,
+  onRenameCancel,
+  onRenameTag,
   onToggleTag,
 }: {
   nodes: QuickNoteTagTreeNode[]
   selectedTags: Set<string>
+  renamingTag: string | null
+  onRenameStart: (tag: string) => void
+  onRenameCancel: () => void
+  onRenameTag: (from: string, to: string) => Promise<void>
   onToggleTag: (tag: string) => void
 }) {
   return createElement(
@@ -232,6 +288,10 @@ function TagTree({
         key: node.path,
         node,
         selectedTags,
+        renamingTag,
+        onRenameStart,
+        onRenameCancel,
+        onRenameTag,
         onToggleTag,
       }),
     ),
@@ -241,10 +301,18 @@ function TagTree({
 function TagTreeNodeView({
   node,
   selectedTags,
+  renamingTag,
+  onRenameStart,
+  onRenameCancel,
+  onRenameTag,
   onToggleTag,
 }: {
   node: QuickNoteTagTreeNode
   selectedTags: Set<string>
+  renamingTag: string | null
+  onRenameStart: (tag: string) => void
+  onRenameCancel: () => void
+  onRenameTag: (from: string, to: string) => Promise<void>
   onToggleTag: (tag: string) => void
 }): ReactNode {
   const ownStat = { tag: node.path, count: node.count }
@@ -261,6 +329,10 @@ function TagTreeNodeView({
         ? createElement(TagButton, {
             stat: ownStat,
             selected: selectedTags.has(node.path.toLowerCase()),
+            isRenaming: renamingTag === node.path,
+            onRenameStart,
+            onRenameCancel,
+            onRenameTag,
             onToggleTag,
           })
         : createElement(
@@ -279,6 +351,10 @@ function TagTreeNodeView({
         key: child.path,
         node: child,
         selectedTags,
+        renamingTag,
+        onRenameStart,
+        onRenameCancel,
+        onRenameTag,
         onToggleTag,
       }),
     ),
@@ -288,26 +364,108 @@ function TagTreeNodeView({
 function TagButton({
   stat,
   selected,
+  isRenaming,
+  onRenameStart,
+  onRenameCancel,
+  onRenameTag,
   onToggleTag,
 }: {
   stat: QuickNoteTagStat
   selected: boolean
+  isRenaming: boolean
+  onRenameStart: (tag: string) => void
+  onRenameCancel: () => void
+  onRenameTag: (from: string, to: string) => Promise<void>
   onToggleTag: (tag: string) => void
 }) {
+  const [draft, setDraft] = useState(stat.tag)
+  const normalizedDraft = normalizeQuickNoteTag(draft)
+  const normalizedTag = normalizeQuickNoteTag(stat.tag)
+
+  async function submitRename() {
+    if (!normalizedDraft) return
+    if (normalizedDraft === normalizedTag) {
+      onRenameCancel()
+      return
+    }
+    await onRenameTag(stat.tag, normalizedDraft)
+  }
+
   return createElement(
-    'button',
-    {
-      type: 'button',
-      onClick: () => onToggleTag(stat.tag),
-      'aria-pressed': selected,
-      'aria-label': `筛选标签 #${stat.tag}，${stat.count} 条小记`,
-      className: cn(
-        quickNoteStyles.explorerTag,
-        selected ? quickNoteStyles.explorerTagSelected : null,
-      ),
-    },
-    createElement('span', null, `#${stat.tag}`),
-    createElement('span', { className: quickNoteStyles.explorerTagCount }, stat.count),
+    'div',
+    { className: quickNoteStyles.explorerTagItem },
+    createElement(
+      'button',
+      {
+        type: 'button',
+        onClick: () => onToggleTag(stat.tag),
+        'aria-pressed': selected,
+        'aria-label': `筛选标签 #${stat.tag}，${stat.count} 条小记`,
+        className: cn(
+          quickNoteStyles.explorerTag,
+          selected ? quickNoteStyles.explorerTagSelected : null,
+        ),
+      },
+      createElement('span', null, `#${stat.tag}`),
+      createElement('span', { className: quickNoteStyles.explorerTagCount }, stat.count),
+    ),
+    isRenaming
+      ? createElement(
+          'div',
+          { className: quickNoteStyles.explorerRenameWrap },
+          createElement('input', {
+            value: draft,
+            onChange: (event: React.ChangeEvent<HTMLInputElement>) =>
+              setDraft(event.target.value),
+            onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                onRenameCancel()
+                return
+              }
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                void submitRename()
+              }
+            },
+            className: quickNoteStyles.explorerRenameInput,
+            'aria-label': `标签新名称 #${stat.tag}`,
+          }),
+          createElement(
+            'button',
+            {
+              type: 'button',
+              onClick: () => void submitRename(),
+              disabled: !normalizedDraft,
+              className: quickNoteStyles.explorerTextButton,
+              'aria-label': `保存标签重命名 #${stat.tag}`,
+            },
+            '保存',
+          ),
+          createElement(
+            'button',
+            {
+              type: 'button',
+              onClick: onRenameCancel,
+              className: quickNoteStyles.explorerTextButton,
+              'aria-label': `取消标签重命名 #${stat.tag}`,
+            },
+            '取消',
+          ),
+        )
+      : createElement(
+          'button',
+          {
+            type: 'button',
+            onClick: () => {
+              setDraft(stat.tag)
+              onRenameStart(stat.tag)
+            },
+            className: quickNoteStyles.explorerTagManageButton,
+            'aria-label': `重命名标签 #${stat.tag}`,
+          },
+          '重命名',
+        ),
   )
 }
 

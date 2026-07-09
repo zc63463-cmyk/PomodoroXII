@@ -47,6 +47,7 @@ export const quickNoteStyles = {
   explorerPanel:
     'rounded-[1.5rem] border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] p-3 shadow-[var(--qn-shadow-soft)] backdrop-blur-[24px]',
   explorerHeader: 'mb-3 flex items-center justify-between gap-3',
+  explorerHeaderActions: 'flex items-center gap-1',
   explorerTitle:
     'text-[10px] font-semibold uppercase tracking-[0.18em] text-[color:var(--qn-subtle)]',
   explorerTextButton:
@@ -59,11 +60,17 @@ export const quickNoteStyles = {
     'bg-[color:var(--qn-accent)] text-[color:var(--qn-accent-foreground)] shadow-[var(--qn-accent-shadow)]',
   explorerEmpty: 'rounded-[1rem] bg-[color:var(--qn-search)] px-3 py-4 text-xs leading-5 text-[color:var(--qn-muted)]',
   explorerTagCloud: 'flex flex-wrap gap-2',
+  explorerTagItem: 'flex min-w-0 flex-wrap items-center gap-1',
   explorerTag:
     'inline-flex items-center gap-1.5 rounded-full bg-[color:var(--qn-chip)] px-2.5 py-1 text-xs text-[color:var(--qn-accent-readable)] ring-1 ring-[color:var(--qn-ring)] transition hover:bg-[color:var(--qn-accent-soft)] hover:text-[color:var(--qn-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--qn-border-strong)]',
+  explorerTagManageButton:
+    'rounded-full px-2 py-1 text-[10px] text-[color:var(--qn-muted)] transition hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
   explorerTagSelected:
     '!bg-[color:var(--qn-accent)] !text-[color:var(--qn-accent-foreground)] ring-[color:var(--qn-border-strong)] shadow-[var(--qn-accent-shadow)]',
   explorerTagCount: 'rounded-full bg-[color:var(--qn-panel-strong)] px-1.5 py-0.5 text-[10px] text-[color:var(--qn-muted)]',
+  explorerRenameWrap: 'flex min-w-0 flex-wrap items-center gap-1 rounded-[1rem] bg-[color:var(--qn-search)] px-1.5 py-1',
+  explorerRenameInput:
+    'min-w-0 max-w-32 rounded-full border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-2 py-1 text-xs text-[color:var(--qn-text-strong)] outline-none focus:border-[color:var(--qn-border-strong)] focus:ring-2 focus:ring-[color:var(--qn-accent-soft)]',
   explorerTagTree: 'grid gap-1',
   explorerTreeNode: 'grid gap-1',
   explorerTreeRow: 'flex items-center justify-between gap-2',
@@ -127,6 +134,11 @@ export const quickNoteStyles = {
   tagButton:
     'transition hover:bg-[color:var(--qn-accent-soft)] hover:text-[color:var(--qn-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--qn-border-strong)]',
   tagPreview: 'flex flex-wrap items-center gap-2',
+  tagShortcutWrap: 'flex flex-wrap items-center gap-2',
+  tagShortcut:
+    'rounded-full bg-[color:var(--qn-chip)] px-2 py-0.5 text-xs text-[color:var(--qn-accent-readable)] ring-1 ring-[color:var(--qn-ring)] transition hover:bg-[color:var(--qn-accent-soft)] hover:text-[color:var(--qn-text-strong)] disabled:cursor-default disabled:opacity-60',
+  tagShortcutSelected:
+    'bg-[color:var(--qn-selection)] text-[color:var(--qn-muted)] ring-[color:var(--qn-selection-ring)]',
   tagActive:
     'bg-[color:var(--qn-accent-soft)] text-[color:var(--qn-accent-readable)] ring-1 ring-[color:var(--qn-border-strong)]',
   mark:

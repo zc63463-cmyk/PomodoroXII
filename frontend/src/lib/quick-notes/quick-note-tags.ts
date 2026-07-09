@@ -25,3 +25,39 @@ export function normalizeQuickNoteTags(tags: string[]): string[] {
 
   return normalized
 }
+
+export function cleanupQuickNoteTags(tags: string[]): string[] {
+  return normalizeQuickNoteTags(tags)
+}
+
+export function renameQuickNoteTagInList(
+  tags: string[],
+  from: string,
+  to: string,
+): string[] {
+  const fromTag = normalizeQuickNoteTag(from)
+  const toTag = normalizeQuickNoteTag(to)
+  if (!fromTag || !toTag) return cleanupQuickNoteTags(tags)
+
+  return normalizeQuickNoteTags(
+    tags.map((tag) => (normalizeQuickNoteTag(tag) === fromTag ? toTag : tag)),
+  )
+}
+
+export function replaceInlineQuickNoteHashtag(
+  content: string,
+  from: string,
+  to: string,
+): string {
+  const fromTag = normalizeQuickNoteTag(from)
+  const toTag = normalizeQuickNoteTag(to)
+  if (!fromTag || !toTag || fromTag.includes('/') || toTag.includes('/')) {
+    return content
+  }
+
+  return content.replace(QUICK_NOTE_TAG_PATTERN, (match, offset: number, source: string) => {
+    if (source[offset + match.length] === '/') return match
+    const tag = normalizeQuickNoteTag(match)
+    return tag === fromTag ? `#${toTag}` : match
+  })
+}
