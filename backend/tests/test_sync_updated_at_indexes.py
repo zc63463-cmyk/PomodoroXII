@@ -77,7 +77,6 @@ async def test_sync_pull_uses_index_for_updated_at_filter(space_session):
     from SyncMixin.updated_at, the EXPLAIN output will switch from
     ``SEARCH ... USING INDEX`` to ``SCAN``.
     """
-    from app.models.task import Task
 
     # Build the same shape of query that SyncService.pull uses.
     q = (

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import meta_session as meta_session_module
-from app.db.models.meta import MetaSetting, Space
+from app.db.models.meta import Space
 
 
 @pytest.mark.asyncio
