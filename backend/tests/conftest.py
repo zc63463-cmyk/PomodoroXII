@@ -18,20 +18,14 @@ import hashlib
 import importlib
 import os
 import re
-import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
 
-# Trae IDE sandbox blocks Windows O_TEMPORARY flag file creation and
-# even plain os.mkdir()/os.open() in temp dirs. We override pytest's
-# tmp_path fixture below to return an existing directory, bypassing
-# tempfile.mkdtemp() which calls os.mkdir().
 _tests_dir = Path(__file__).resolve().parent
-tempfile.tempdir = str(_tests_dir)
-os.environ["TMP"] = str(_tests_dir)
-os.environ["TEMP"] = str(_tests_dir)
-os.environ["TMPDIR"] = str(_tests_dir)
+_artifacts_root = (_tests_dir.parent / ".test-artifacts").resolve()
+_RUN_ROOT_PATTERN = re.compile(r"run-[0-9a-f]{32}\Z")
 
 
 def _sanitize_nodeid(nodeid: str) -> str:
@@ -45,24 +39,55 @@ def _sanitize_nodeid(nodeid: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", nodeid)
     safe = safe.strip("_")
     short_hash = hashlib.sha256(nodeid.encode()).hexdigest()[:16]
-    return f"{safe[:80]}_{short_hash}"
+    return f"{safe[:24]}_{short_hash}"
+
+
+def _validate_run_root(run_root: Path) -> Path:
+    """Return a canonical approved run root or reject malformed/escaped paths."""
+    resolved = run_root.resolve()
+    _ensure_inside_temp_root(resolved, _artifacts_root)
+    if resolved.parent != _artifacts_root or not _RUN_ROOT_PATTERN.fullmatch(resolved.name):
+        raise RuntimeError(f"Refusing to use invalid test run root: {resolved}")
+    return resolved
+
+
+def _allocate_run_root() -> Path:
+    """Create a unique run root directly below the approved artifacts directory."""
+    _artifacts_root.mkdir(parents=True, exist_ok=True)
+    run_root = _artifacts_root / f"run-{uuid.uuid4().hex}"
+    run_root.mkdir(parents=False, exist_ok=False)
+    return _validate_run_root(run_root)
+
+
+def _test_path_for_nodeid(run_root: Path, nodeid: str) -> Path:
+    """Return the unique per-test sandbox path for *nodeid* within *run_root*."""
+    approved_run_root = _validate_run_root(run_root)
+    path = approved_run_root / _sanitize_nodeid(nodeid)
+    _ensure_inside_temp_root(path, approved_run_root)
+    return path
+
+
+@pytest.fixture(scope="session")
+def test_run_root() -> Path:
+    """Create one repository-local run root without recursive in-suite cleanup.
+
+    The Windows/Trae environment cannot reliably create deeply nested FileSystem
+    test files under the standard OS temp directory. A unique backend-local root
+    preserves isolation while leaving lifecycle cleanup to CI/workspace tooling.
+    """
+    return _allocate_run_root()
 
 
 @pytest.fixture
-def tmp_path(request):  # type: ignore[no-redef]
-    """Override pytest's tmp_path to return a per-test directory under tests/.tmp/.
+def tmp_path(request: pytest.FixtureRequest, test_run_root: Path) -> Path:  # type: ignore[no-redef]
+    """Return a fresh nodeid-hashed directory under the current run root.
 
-    Trae sandbox blocks os.mkdir() outside the project, but creating
-    subdirectories under the existing tests/ directory is allowed.
-    We use a dedicated ``tests/.tmp/`` root (never ``tests/<test_name>/``)
-    so this fixture cannot collide with real test packages such as
-    ``tests/test_file_system``.
+    The run root is allocated below ``backend/.test-artifacts`` for Windows path
+    compatibility. Neither this fixture nor session teardown recursively deletes
+    it; CI/workspace lifecycle tooling owns eventual cleanup.
     """
-    temp_root = _tests_dir / ".tmp"
-    temp_root.mkdir(exist_ok=True)
-    sanitized = _sanitize_nodeid(request.node.nodeid)
-    path = temp_root / sanitized
-    path.mkdir(exist_ok=True)
+    path = _test_path_for_nodeid(test_run_root, request.node.nodeid)
+    path.mkdir(parents=False, exist_ok=False)
     return path
 
 
@@ -86,32 +111,20 @@ def _ensure_inside_temp_root(path: Path, temp_root: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point all PomodoroXII paths at a per-test temp directory.
+def _isolate_env(
+    tmp_path: Path,
+    test_run_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Point all PomodoroXII paths at the current test's unique sandbox.
 
-    ``tmp_path`` is overridden to ``tests/.tmp/<sanitized_nodeid>/`` so
-    each test gets its own filesystem sandbox.  We recreate that directory
-    from scratch before every test to ensure no .db files, notes/, or
-    spaces/ leak across tests.
+    The directory is newly created from a nodeid hash below a run-scoped root,
+    so isolation does not depend on deleting leftovers from earlier tests.
     """
-    import shutil
-
-    temp_root = _tests_dir / ".tmp"
-    _ensure_inside_temp_root(tmp_path, temp_root)
-    _ensure_inside_temp_root(temp_root, temp_root)
-    if tmp_path.exists():
-        shutil.rmtree(tmp_path, ignore_errors=True)
-    tmp_path.mkdir(parents=True, exist_ok=True)
+    _ensure_inside_temp_root(tmp_path, test_run_root)
 
     meta_db = tmp_path / "meta.db"
     spaces_dir = tmp_path / "spaces"
-
-    # P2.4 fix follow-up: fs_instance stores its SQLite index DB under
-    # tmp_path/index/index.db. Leftover index DBs leak across test runs
-    # because the file is opened by aiosqlite and outlives the fixture.
-    index_dir = tmp_path / "index"
-    if index_dir.exists():
-        shutil.rmtree(index_dir, ignore_errors=True)
 
     monkeypatch.setenv("POMODOROXII_DATABASE_URL", f"sqlite+aiosqlite:///{meta_db.as_posix()}")
     monkeypatch.setenv("POMODOROXII_SPACES_DATA_DIR", str(spaces_dir))
@@ -223,21 +236,3 @@ async def client(_isolate_env: Path):
         yield ac
     await dispose_space_engine_manager()
     await close_meta_db()
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _cleanup_temp_root() -> None:
-    """Clean up the dedicated temp root created by the tmp_path override.
-
-    Each test uses ``tests/.tmp/<sanitized_nodeid>/`` as its temp directory.
-    This fixture removes the entire ``tests/.tmp/`` directory after the
-    test session.  It never globs ``tests/test_*/`` to avoid deleting real
-    test packages such as ``tests/test_file_system``.
-    """
-    yield
-    import shutil
-
-    temp_root = _tests_dir / ".tmp"
-    _ensure_inside_temp_root(temp_root, temp_root)
-    if temp_root.exists():
-        shutil.rmtree(temp_root, ignore_errors=True)

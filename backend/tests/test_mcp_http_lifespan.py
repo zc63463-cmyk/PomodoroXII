@@ -5,7 +5,6 @@ the meta database and space engine manager are properly initialized and disposed
 across the server's lifetime, matching the stdio transport behavior.
 """
 
-import argparse
 
 import pytest
 

@@ -21,7 +21,6 @@ async def test_create_writes_tombstone_with_entity_type_and_id(space_session):
     Seconds-precision values (``...SZ``) break lexicographic cursor
     comparison because ``"Z" > "."`` (ASCII 90 > 46).
     """
-    from app.models.tombstone import Tombstone
     from app.services.tombstone import TombstoneService
 
     svc = TombstoneService(space_session)
@@ -41,7 +40,6 @@ async def test_create_writes_tombstone_with_entity_type_and_id(space_session):
 @pytest.mark.asyncio
 async def test_create_is_idempotent_duplicate_does_not_raise(space_session):
     """create() on the same (type, id) should return existing, not raise."""
-    from app.models.tombstone import Tombstone
     from app.services.tombstone import TombstoneService
 
     svc = TombstoneService(space_session)

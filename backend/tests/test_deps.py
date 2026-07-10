@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import create_master_token, create_space_token
 from app.deps import get_current_user, get_space_context, require_master_token
-from app.errors import AuthenticationError, AuthorizationError
+from app.errors import AuthorizationError
 
 
 async def _run(coro):
@@ -112,7 +111,7 @@ async def test_get_meta_db_yields_session():
 async def test_get_space_db_yields_session():
     """get_space_db should yield an AsyncSession bound to the space's database."""
     from app.db.meta_session import close_meta_db, init_meta_db
-    from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
+    from app.space_manager import dispose_space_engine_manager
 
     await init_meta_db()
     try:
