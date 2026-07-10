@@ -57,7 +57,9 @@ dmypy.json
 pyright/
 pytest_*.log
 pytest_run.log
-# Dedicated temp root for conftest.py tmp_path override.
+# Run-scoped backend test artifacts; CI/workspace lifecycle owns cleanup.
+backend/.test-artifacts/
+# Legacy temp root from the previous tmp_path override.
 backend/tests/.tmp/
 # pytest tmp dirs (uv lock files, ad-hoc test workspace)
 .pytest-tmp/

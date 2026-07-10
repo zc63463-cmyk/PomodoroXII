@@ -50,7 +50,6 @@ def _task_payload(**overrides) -> dict:
 @pytest.mark.asyncio
 async def test_push_create_event_inserts_row(space_session):
     """push() with action=create should insert a new row."""
-    from sqlalchemy import select
 
     from app.models.task import Task
     from app.services.sync import SyncService
