@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { useSpaceStore } from '@/stores/space-store'
 import { useBootstrapStore } from '@/lib/bootstrap-store'
+import { spaceDBManager } from '@/services/space-db'
 
 // Mock 依赖
 vi.mock('@/services/spaces-api', () => ({
@@ -64,13 +65,17 @@ describe('space-store selectSpace', () => {
 
     await useSpaceStore.getState().selectSpace('space-2')
 
-    // 验证派发了 pxii:space-switched 事件
+    expect(spaceDBManager.switchTo).toHaveBeenCalledWith('space-2', { dispatchEvent: false })
+    // 验证 selectSpace 只在 store 状态更新后手动派发一次事件
     const spaceSwitchCall = dispatchSpy.mock.calls.find(
       (call) => {
         const event = call[0] as Event
         return event.type === 'pxii:space-switched'
       },
     )
+    expect(
+      dispatchSpy.mock.calls.filter((call) => (call[0] as Event).type === 'pxii:space-switched'),
+    ).toHaveLength(1)
     expect(spaceSwitchCall).toBeDefined()
     const dispatchedEvent = spaceSwitchCall![0] as CustomEvent
     expect(dispatchedEvent.detail).toEqual({ spaceId: 'space-2' })
