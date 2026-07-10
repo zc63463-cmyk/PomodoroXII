@@ -1,7 +1,7 @@
 /**
  * Logout lifecycle (F0 §5.7).
  *
- * Order: syncEngine.destroy → queryClient.clear → 17 store reset
+ * Order: flush draft → syncEngine.destroy → queryClient.clear → 17 store reset
  *        → auth/space/bootstrap reset → spaceDBManager.close
  *        → metaDB.clearSpaces → tokenStorage.clearAll → redirect
  */
@@ -17,29 +17,32 @@ import { metaDB } from '@/services/meta-database'
 import { tokenStorage } from '@/lib/token-storage'
 
 export async function performLogout(): Promise<void> {
-  // 1. Destroy sync engine (S0 stub no-op)
+  // 1. Flush while route listeners and current Space context are still active.
+  await spaceDBManager.flushBeforeClose()
+
+  // 2. Destroy sync engine (S0 stub no-op)
   syncEngine.destroy()
 
-  // 2. Clear React Query cache
+  // 3. Clear React Query cache
   queryClient.clear()
 
-  // 3. Reset 17 business stores (F0 §6.3c / 附录 E — ordered reset)
+  // 4. Reset 17 business stores (F0 §6.3c / 附录 E — ordered reset)
   STORE_RESET_FNS.forEach((fn) => fn())
 
-  // 3b. Reset auth-store + space-store + bootstrap-store (before token clearing)
+  // 4b. Reset auth-store + space-store + bootstrap-store (before token clearing)
   useAuthStore.getState().reset()
   useSpaceStore.getState().reset()
   useBootstrapStore.getState().reset()
 
-  // 4. Close current Dexie DB connection
+  // 5. Close current Space after the flush and resets complete.
   spaceDBManager.close()
 
-  // 5. Clear space list cache
+  // 6. Clear space list cache
   await metaDB.clearSpaces()
 
-  // 6. Clear localStorage tokens (last — above steps may need token)
+  // 7. Clear localStorage tokens (last — above steps may need token)
   tokenStorage.clearAll()
 
-  // 7. Redirect to login
+  // 8. Redirect to login
   window.location.href = '/login'
 }

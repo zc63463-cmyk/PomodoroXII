@@ -18,6 +18,13 @@ import type { QuickNoteEditorStatus } from '@/lib/quick-notes/quick-note-editor-
 import type { QuickNote } from '@/types'
 
 export type QuickNoteSaveState = 'saved' | 'unsaved' | 'saving' | 'failed'
+export type QuickNoteDraftSaveState =
+  | 'idle'
+  | 'dirty'
+  | 'saving'
+  | 'saved'
+  | 'restored'
+  | 'failed'
 
 export function QuickNoteComposer({
   draft,
@@ -33,6 +40,8 @@ export function QuickNoteComposer({
   onToggleFocus,
   popularTags = [],
   onInsertTag,
+  draftSaveState = 'idle',
+  onDiscardDraft,
 }: {
   draft: string
   editingNote: QuickNote | null
@@ -47,6 +56,8 @@ export function QuickNoteComposer({
   onToggleFocus?: () => void
   popularTags?: string[]
   onInsertTag?: (tag: string) => void
+  draftSaveState?: QuickNoteDraftSaveState
+  onDiscardDraft?: () => void | Promise<void>
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const autocompleteId = useId()
@@ -54,6 +65,8 @@ export function QuickNoteComposer({
   const [autocompleteOpen, setAutocompleteOpen] = useState(false)
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0)
   const [pendingCaretIndex, setPendingCaretIndex] = useState<number | null>(null)
+  const [discardArmed, setDiscardArmed] = useState(false)
+  const discardArmedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewTags = extractQuickNoteTags(draft)
   const draftTags = new Set(previewTags)
   const autocompleteState = useMemo(
@@ -75,6 +88,7 @@ export function QuickNoteComposer({
     hasConflict,
     isTyping,
     saveState,
+    draftSaveState,
   })
 
   useEffect(() => {
@@ -86,6 +100,23 @@ export function QuickNoteComposer({
     setCaretIndex(pendingCaretIndex)
     setPendingCaretIndex(null)
   }, [draft, pendingCaretIndex])
+
+  useEffect(() => {
+    if (!draft.trim() || editingNote) setDiscardArmed(false)
+  }, [draft, editingNote])
+
+  useEffect(() => {
+    if (!discardArmed) {
+      if (discardArmedTimerRef.current) clearTimeout(discardArmedTimerRef.current)
+      return
+    }
+    discardArmedTimerRef.current = setTimeout(() => {
+      setDiscardArmed(false)
+    }, 4000)
+    return () => {
+      if (discardArmedTimerRef.current) clearTimeout(discardArmedTimerRef.current)
+    }
+  }, [discardArmed])
 
   useEffect(() => {
     if (!isAutocompleteVisible) {
@@ -100,6 +131,7 @@ export function QuickNoteComposer({
   function handleDraftChange(event: React.ChangeEvent<HTMLTextAreaElement>) {
     const nextDraft = event.target.value
     const nextCaretIndex = event.target.selectionStart ?? nextDraft.length
+    if (discardArmed) setDiscardArmed(false)
     setCaretIndex(nextCaretIndex)
     setAutocompleteOpen(
       getQuickNoteTagAutocompleteState(nextDraft, nextCaretIndex, popularTags) !== null,
@@ -343,7 +375,29 @@ export function QuickNoteComposer({
                 createElement(XIcon),
                 '取消',
               )
-            : null,
+            : draft.trim() && onDiscardDraft
+              ? createElement(
+                  Button,
+                  {
+                    type: 'button',
+                    variant: 'ghost',
+                    onClick: () => {
+                      if (!discardArmed) {
+                        setDiscardArmed(true)
+                        return
+                      }
+                      setDiscardArmed(false)
+                      void onDiscardDraft()
+                    },
+                    'aria-label': discardArmed ? '确认丢弃草稿' : '丢弃草稿',
+                    className: discardArmed
+                      ? 'text-[color:var(--qn-danger)]'
+                      : quickNoteStyles.ghostButton,
+                  },
+                  createElement(XIcon),
+                  discardArmed ? '再次点击确认丢弃' : '丢弃草稿',
+                )
+              : null,
           createElement(
             Button,
             {
@@ -373,12 +427,14 @@ function getComposerStatus({
   hasConflict,
   isTyping,
   saveState,
+  draftSaveState,
 }: {
   draft: string
   editingNote: QuickNote | null
   hasConflict: boolean
   isTyping: boolean
   saveState: QuickNoteSaveState
+  draftSaveState: QuickNoteDraftSaveState
 }): {
   status: QuickNoteEditorStatus | null
   fallbackText?: string
@@ -388,6 +444,10 @@ function getComposerStatus({
   if (saveState === 'failed') return { status: 'failed' }
   if (isTyping && draft.trim()) return { status: 'typing' }
   if (!editingNote) {
+    if (draftSaveState === 'restored') return { status: 'draft-restored' }
+    if (draftSaveState === 'failed') return { status: 'draft-failed' }
+    if (draftSaveState === 'saving') return { status: 'draft-saving' }
+    if (draftSaveState === 'saved') return { status: 'draft-saved' }
     return draft.trim()
       ? { status: 'dirty' }
       : {
