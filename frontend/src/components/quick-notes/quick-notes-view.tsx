@@ -76,8 +76,10 @@ export function QuickNotesView() {
   )
   const {
     cancelEdit,
+    discardNewDraft,
     draft,
     draftConflict,
+    draftSaveState,
     editingId,
     editingNote,
     isTyping,
@@ -189,9 +191,11 @@ export function QuickNotesView() {
         selectedQuickNoteId,
         draft,
         draftConflict,
+        draftSaveState,
         editingNote,
         isTyping,
         onDraftChange: setDraft,
+        onDiscardDraft: discardNewDraft,
         onCancelEdit: cancelEdit,
         onSubmit: submitDraft,
         onKeepLocalDraft: keepLocalDraft,

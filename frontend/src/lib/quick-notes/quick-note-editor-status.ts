@@ -5,6 +5,10 @@ export type QuickNoteEditorStatus =
   | 'saved'
   | 'failed'
   | 'conflict'
+  | 'draft-saving'
+  | 'draft-saved'
+  | 'draft-restored'
+  | 'draft-failed'
 
 export type QuickNoteEditorStatusTone =
   | 'muted'
@@ -51,6 +55,26 @@ const QUICK_NOTE_EDITOR_STATUS_META: Record<QuickNoteEditorStatus, QuickNoteEdit
     text: '远端有新版本',
     tone: 'warning',
     ariaLive: 'assertive',
+  },
+  'draft-saving': {
+    text: '正在保存本机草稿…',
+    tone: 'info',
+    ariaLive: 'polite',
+  },
+  'draft-saved': {
+    text: '草稿已保存到本机',
+    tone: 'success',
+    ariaLive: 'polite',
+  },
+  'draft-restored': {
+    text: '已恢复未保存草稿',
+    tone: 'info',
+    ariaLive: 'polite',
+  },
+  'draft-failed': {
+    text: '本机草稿保存失败，将继续保留输入',
+    tone: 'danger',
+    ariaLive: 'polite',
   },
 }
 

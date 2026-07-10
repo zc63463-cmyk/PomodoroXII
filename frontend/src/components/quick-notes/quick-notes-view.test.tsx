@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement, type ReactNode } from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { QuickNote } from '@/types'
+import { db, spaceDBManager } from '@/services/space-db'
 
 vi.mock('lucide-react', () => ({
   ArchiveRestoreIcon: () =>
@@ -144,8 +145,11 @@ function makeQuickNote(overrides: Partial<QuickNote> = {}): QuickNote {
 }
 
 describe('QuickNotesView', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.useRealTimers()
+    if (!spaceDBManager.hasSpace) {
+      await spaceDBManager.switchTo(`quick-notes-view-${crypto.randomUUID()}`)
+    }
     storeMocks.state.allQuickNotes = []
     storeMocks.state.quickNotes = []
     storeMocks.state.trashedQuickNotes = []
@@ -189,8 +193,12 @@ describe('QuickNotesView', () => {
     toastMock.error.mockClear()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers()
+    if (spaceDBManager.hasSpace) {
+      await db.delete()
+      spaceDBManager.close()
+    }
   })
 
   it('renders empty state', async () => {
@@ -404,8 +412,7 @@ describe('QuickNotesView', () => {
     expect(screen.queryByRole('listbox', { name: '标签补全' })).not.toBeInTheDocument()
   })
 
-  it('shows typing then dirty status for a new composer draft', async () => {
-    vi.useFakeTimers()
+  it('shows typing then local draft saved status for a new composer draft', async () => {
     render(createElement(QuickNotesView))
 
     fireEvent.change(screen.getByLabelText('小记内容'), {
@@ -418,15 +425,70 @@ describe('QuickNotesView', () => {
     expect(typingStatus).toHaveAttribute('data-status', 'typing')
     expect(typingStatus).toHaveAttribute('aria-live', 'off')
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(700)
-    })
+    await waitFor(() => {
+      expect(screen.getByText('草稿已保存到本机')).toBeInTheDocument()
+    }, { timeout: 1200 })
 
-    const dirtyStatus = screen.getByText('草稿未保存').closest(
+    const savedStatus = screen.getByText('草稿已保存到本机').closest(
       '[data-quick-note-editor-status]',
     )
-    expect(dirtyStatus).toHaveAttribute('data-status', 'dirty')
-    expect(dirtyStatus).toHaveAttribute('aria-live', 'off')
+    expect(savedStatus).toHaveAttribute('data-status', 'draft-saved')
+    expect(savedStatus).toHaveAttribute('aria-live', 'polite')
+  })
+
+  it('requires a second click to discard a non-empty new draft', async () => {
+    render(createElement(QuickNotesView))
+
+    fireEvent.change(screen.getByLabelText('小记内容'), {
+      target: { value: '准备主动丢弃的草稿' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '丢弃草稿' }))
+    expect(screen.getByLabelText('小记内容')).toHaveValue('准备主动丢弃的草稿')
+    expect(screen.getByRole('button', { name: '确认丢弃草稿' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '确认丢弃草稿' }))
+    await waitFor(() => expect(screen.getByLabelText('小记内容')).toHaveValue(''))
+  })
+
+  it('disarms the discard confirmation when the user continues typing', async () => {
+    render(createElement(QuickNotesView))
+
+    fireEvent.change(screen.getByLabelText('小记内容'), {
+      target: { value: 'armed 后继续输入' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '丢弃草稿' }))
+    expect(screen.getByRole('button', { name: '确认丢弃草稿' })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('小记内容'), {
+      target: { value: 'armed 后继续输入 更多' },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '丢弃草稿' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: '确认丢弃草稿' })).not.toBeInTheDocument()
+    })
+  })
+
+  it('auto-disarms the discard confirmation after a timeout', async () => {
+    vi.useFakeTimers()
+    render(createElement(QuickNotesView))
+
+    fireEvent.change(screen.getByLabelText('小记内容'), {
+      target: { value: '等待超时解除' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '丢弃草稿' }))
+    expect(screen.getByRole('button', { name: '确认丢弃草稿' })).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    expect(screen.queryByRole('button', { name: '确认丢弃草稿' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '丢弃草稿' })).toBeInTheDocument()
+    vi.useRealTimers()
   })
 
   it('keeps the preview smoke path readable with composer, timeline, and trash affordance', async () => {
