@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.db.session import create_engine, create_session_factory

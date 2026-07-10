@@ -44,7 +44,6 @@ def test_canonicalize_unknown_returns_none():
 @pytest.mark.asyncio
 async def test_push_accepts_snake_case_entity_type(space_session, tmp_path):
     """P1-2: /sync/push should accept snake_case entity_type and canonicalize."""
-    from app.models.task import Task
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)

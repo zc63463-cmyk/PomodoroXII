@@ -26,7 +26,6 @@ async def test_habit_summary_returns_check_in_stats(space_session):
     from datetime import timedelta
 
     from app.models.habit_check_in import HabitCheckIn
-    from app.services.base import BaseService
     from app.services.habit import HabitService
     from app.services.stats import StatsService
     from app.services.time import utc_now

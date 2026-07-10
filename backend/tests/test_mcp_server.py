@@ -10,7 +10,6 @@ These tests verify:
 from __future__ import annotations
 
 import asyncio
-import uuid
 
 import pytest
 

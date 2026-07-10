@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
-
 
 class TestModelRegistration:
     def test_18_models_registered_on_metadata(self):

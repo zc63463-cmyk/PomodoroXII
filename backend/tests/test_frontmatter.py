@@ -11,8 +11,6 @@ Verifies that:
 """
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 # --------------------------------------------------------------------------- #
@@ -62,7 +60,7 @@ def test_wrap_with_frontmatter_prepends():
 
 def test_wrap_with_frontmatter_replaces_existing():
     """wrap_with_frontmatter should replace existing frontmatter, not duplicate."""
-    from app.file_system.frontmatter import has_frontmatter, wrap_with_frontmatter
+    from app.file_system.frontmatter import wrap_with_frontmatter
 
     content_with_fm = "---\nid: old\n---\nBody"
     result = wrap_with_frontmatter({"id": "new"}, content_with_fm)
