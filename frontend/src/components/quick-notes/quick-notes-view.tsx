@@ -27,7 +27,7 @@ export function QuickNotesView() {
     focusMode,
     selectedQuickNoteId,
     loadQuickNotes,
-    createQuickNote,
+    projectRecordedQuickNote,
     updateQuickNote,
     deleteQuickNote,
     restoreQuickNote,
@@ -93,7 +93,7 @@ export function QuickNotesView() {
   } = useQuickNoteEditor({
     quickNotes,
     trashedQuickNotes,
-    createQuickNote,
+    projectRecordedQuickNote,
     updateQuickNote,
     describeQuickNoteError,
     lifecycleStateById,

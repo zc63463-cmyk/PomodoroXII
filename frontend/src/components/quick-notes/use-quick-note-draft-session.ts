@@ -8,16 +8,11 @@ import {
   type QuickNoteDraftStorageAdapter,
   type QuickNoteNewDraftSnapshotV2,
 } from '@/lib/quick-notes/quick-note-draft-repository'
+import type { QuickNoteDraftSaveState } from '@/lib/quick-notes/quick-note-editor-status'
 import { spaceDBManager } from '@/services/space-db'
 import type { QuickNote } from '@/types'
 
-export type QuickNoteDraftSaveState =
-  | 'idle'
-  | 'dirty'
-  | 'saving'
-  | 'saved'
-  | 'restored'
-  | 'failed'
+export type { QuickNoteDraftSaveState } from '@/lib/quick-notes/quick-note-editor-status'
 
 export type QuickNoteDraftIssueCode =
   | 'read-failed'

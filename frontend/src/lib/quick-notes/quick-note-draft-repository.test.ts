@@ -8,7 +8,6 @@ import {
 import {
   QUICK_NOTE_NEW_DRAFT_KEY,
   createDexieQuickNoteDraftAdapter,
-  createQuickNoteDraftRepository,
   type QuickNoteNewDraftSnapshotV2,
 } from '@/lib/quick-notes/quick-note-draft-repository'
 
@@ -49,75 +48,6 @@ describe('quick-note-draft-repository', () => {
   afterEach(async () => {
     resetQuickNoteOutboxHook()
     await Promise.all([dbA.delete(), dbB.delete()])
-  })
-
-  describe('legacy repository', () => {
-    it('saves, loads, and clears a versioned new draft snapshot', async () => {
-      const repository = createQuickNoteDraftRepository(dbA)
-
-      await repository.save('尚未记录的小记', UPDATED_AT)
-
-      await expect(repository.load()).resolves.toEqual({
-        version: 1,
-        content: '尚未记录的小记',
-        updatedAt: UPDATED_AT,
-      })
-
-      await repository.clear()
-      await expect(repository.load()).resolves.toBeNull()
-    })
-
-    it('clears an existing snapshot instead of saving blank content', async () => {
-      const repository = createQuickNoteDraftRepository(dbA)
-      await repository.save('先保存', UPDATED_AT)
-
-      await repository.save('   ', '2026-07-10T04:01:00.000Z')
-
-      expect(await dbA.settings.get(QUICK_NOTE_NEW_DRAFT_KEY)).toBeUndefined()
-    })
-
-    it('safely ignores and removes damaged JSON', async () => {
-      await putRawDraft(dbA, '{damaged-json')
-
-      const repository = createQuickNoteDraftRepository(dbA)
-
-      await expect(repository.load()).resolves.toBeNull()
-      expect(await dbA.settings.get(QUICK_NOTE_NEW_DRAFT_KEY)).toBeUndefined()
-    })
-
-    it('safely ignores and removes unsupported snapshot versions', async () => {
-      await putRawDraft(dbA, JSON.stringify({
-        version: 99,
-        content: 'future format',
-        updatedAt: UPDATED_AT,
-      }))
-
-      const repository = createQuickNoteDraftRepository(dbA)
-
-      await expect(repository.load()).resolves.toBeNull()
-      expect(await dbA.settings.get(QUICK_NOTE_NEW_DRAFT_KEY)).toBeUndefined()
-    })
-
-    it('keeps Space A and Space B drafts strictly isolated', async () => {
-      const repositoryA = createQuickNoteDraftRepository(dbA)
-      const repositoryB = createQuickNoteDraftRepository(dbB)
-
-      await repositoryA.save('Space A 草稿', UPDATED_AT)
-      await repositoryB.save('Space B 草稿', '2026-07-10T04:01:00.000Z')
-
-      await expect(repositoryA.load()).resolves.toMatchObject({ content: 'Space A 草稿' })
-      await expect(repositoryB.load()).resolves.toMatchObject({ content: 'Space B 草稿' })
-    })
-
-    it('does not create QuickNote entities or outbox events', async () => {
-      const repository = createQuickNoteDraftRepository(dbA)
-
-      await repository.save('只是一份本地草稿', UPDATED_AT)
-
-      expect(await dbA.quickNotes.count()).toBe(0)
-      expect(await dbA.outbox.count()).toBe(0)
-      expect(await dbA.settings.count()).toBe(1)
-    })
   })
 
   describe('owner-aware Dexie adapter', () => {

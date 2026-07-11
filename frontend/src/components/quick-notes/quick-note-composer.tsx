@@ -14,17 +14,14 @@ import {
   normalizeQuickNoteTag,
 } from '@/lib/quick-notes/quick-note-tags'
 import { cn } from '@/lib/utils'
-import type { QuickNoteEditorStatus } from '@/lib/quick-notes/quick-note-editor-status'
+import type {
+  QuickNoteDraftSaveState,
+  QuickNoteEditorStatus,
+} from '@/lib/quick-notes/quick-note-editor-status'
 import type { QuickNote } from '@/types'
 
 export type QuickNoteSaveState = 'saved' | 'unsaved' | 'saving' | 'failed'
-export type QuickNoteDraftSaveState =
-  | 'idle'
-  | 'dirty'
-  | 'saving'
-  | 'saved'
-  | 'restored'
-  | 'failed'
+export type { QuickNoteDraftSaveState } from '@/lib/quick-notes/quick-note-editor-status'
 
 export function QuickNoteComposer({
   draft,

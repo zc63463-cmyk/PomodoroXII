@@ -47,9 +47,13 @@ vi.mock('@/lib/quick-notes/quick-note-preview', () => ({
   ensureQuickNotePreviewSpace: previewMocks.ensureQuickNotePreviewSpace,
 }))
 
-vi.mock('@/lib/quick-notes/quick-note-repository', () => ({
-  getQuickNoteRepositoryUserMessage: repositoryMocks.getQuickNoteRepositoryUserMessage,
-}))
+vi.mock('@/lib/quick-notes/quick-note-repository', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/quick-notes/quick-note-repository')>()
+  return {
+    ...actual,
+    getQuickNoteRepositoryUserMessage: repositoryMocks.getQuickNoteRepositoryUserMessage,
+  }
+})
 
 const previewMocks = vi.hoisted(() => ({
   ensureQuickNotePreviewSpace: vi.fn().mockResolvedValue(undefined),
@@ -79,7 +83,7 @@ const storeMocks = vi.hoisted(() => ({
     selectedQuickNoteId: null as string | null,
   },
   loadQuickNotes: vi.fn().mockResolvedValue(undefined),
-  createQuickNote: vi.fn().mockResolvedValue(undefined),
+  projectRecordedQuickNote: vi.fn((_note: QuickNote): undefined => undefined),
   updateQuickNote: vi.fn().mockResolvedValue(undefined),
   deleteQuickNote: vi.fn().mockResolvedValue(undefined),
   restoreQuickNote: vi.fn().mockResolvedValue(undefined),
@@ -102,7 +106,7 @@ vi.mock('@/stores/quick-note-store', () => ({
   useQuickNoteStore: () => ({
     ...storeMocks.state,
     loadQuickNotes: storeMocks.loadQuickNotes,
-    createQuickNote: storeMocks.createQuickNote,
+    projectRecordedQuickNote: storeMocks.projectRecordedQuickNote,
     updateQuickNote: storeMocks.updateQuickNote,
     deleteQuickNote: storeMocks.deleteQuickNote,
     restoreQuickNote: storeMocks.restoreQuickNote,
@@ -164,7 +168,10 @@ describe('QuickNotesView', () => {
     storeMocks.state.focusMode = 'normal'
     storeMocks.state.selectedQuickNoteId = null
     storeMocks.loadQuickNotes.mockClear()
-    storeMocks.createQuickNote.mockClear()
+    storeMocks.projectRecordedQuickNote.mockReset()
+    storeMocks.projectRecordedQuickNote.mockImplementation(
+      (_note: QuickNote): undefined => undefined,
+    )
     storeMocks.updateQuickNote.mockClear()
     storeMocks.deleteQuickNote.mockClear()
     storeMocks.restoreQuickNote.mockClear()
@@ -195,6 +202,7 @@ describe('QuickNotesView', () => {
 
   afterEach(async () => {
     vi.useRealTimers()
+    vi.restoreAllMocks()
     if (spaceDBManager.hasSpace) {
       await db.delete()
       spaceDBManager.close()
@@ -216,7 +224,7 @@ describe('QuickNotesView', () => {
     )
   })
 
-  it('submits composer content through the store action', async () => {
+  it('records composer content locally and projects it through the store action', async () => {
     render(createElement(QuickNotesView))
 
     fireEvent.change(screen.getByLabelText('小记内容'), {
@@ -225,10 +233,11 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: /记录/ }))
 
     await waitFor(() => {
-      expect(storeMocks.createQuickNote).toHaveBeenCalledWith({
+      expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
         content: '今天先把 QuickNote 做顺',
-      })
+      }))
     })
+    expect(await spaceDBManager.current.quickNotes.count()).toBe(1)
   })
 
   it('previews extracted tags from composer input', async () => {
@@ -276,7 +285,7 @@ describe('QuickNotesView', () => {
     fireEvent.change(editor, { target: { value: 'draft body' } })
     fireEvent.click(screen.getByRole('button', { name: '插入常用标签 #life' }))
     expect(editor).toHaveValue('draft body #life')
-    expect(storeMocks.createQuickNote).not.toHaveBeenCalled()
+    expect(storeMocks.projectRecordedQuickNote).not.toHaveBeenCalled()
   })
 
   it('shows filtered hash tag autocomplete suggestions while typing', async () => {
@@ -533,9 +542,9 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: /记录/ }))
 
     await waitFor(() => {
-      expect(storeMocks.createQuickNote).toHaveBeenCalledWith({
+      expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
         content: '新预览 smoke 小记',
-      })
+      }))
     })
   })
 
@@ -1135,8 +1144,10 @@ describe('QuickNotesView', () => {
     expect(screen.getByText('已保存')).toBeInTheDocument()
   })
 
-  it('shows a toast when creating a quick note fails', async () => {
-    storeMocks.createQuickNote.mockRejectedValueOnce(new Error('write blocked'))
+  it('preserves input and shows the stable retry error when the local transaction fails', async () => {
+    vi.spyOn(spaceDBManager.current.quickNotes, 'put').mockRejectedValueOnce(
+      new Error('write blocked'),
+    )
 
     render(createElement(QuickNotesView))
 
@@ -1146,34 +1157,57 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: /记录/ }))
 
     await waitFor(() => {
-      expect(toastMock.error).toHaveBeenCalledWith(
-        '小记创建失败',
-        expect.objectContaining({ description: '请稍后重试' }),
-      )
+      expect(toastMock.error).toHaveBeenCalledWith('小记创建失败', {
+        description: '草稿仍保留在本机，请稍后重试',
+      })
     })
     expect(screen.getByLabelText('小记内容')).toHaveValue('创建失败小记')
+    expect(storeMocks.projectRecordedQuickNote).not.toHaveBeenCalled()
+    expect(await spaceDBManager.current.quickNotes.count()).toBe(0)
+    expect(await spaceDBManager.current.outbox.count()).toBe(0)
+    const retainedDraft = await spaceDBManager.current.settings.get('quickNote:newDraft:v1')
+    expect(retainedDraft).toBeDefined()
+    expect(JSON.parse(retainedDraft!.value)).toMatchObject({
+      content: '创建失败小记',
+    })
   })
 
-  it('uses repository user messages for action failure toasts', async () => {
-    repositoryMocks.getQuickNoteRepositoryUserMessage.mockReturnValue('用户可读错误')
-    storeMocks.createQuickNote.mockRejectedValueOnce(new Error('developer details'))
+  it('keeps a committed note when projection throws and does not restore its consumed draft', async () => {
+    storeMocks.projectRecordedQuickNote.mockImplementationOnce(() => {
+      throw new Error('projection failed')
+    })
 
-    render(createElement(QuickNotesView))
+    const { unmount } = render(createElement(QuickNotesView))
 
     fireEvent.change(screen.getByLabelText('小记内容'), {
-      target: { value: '创建失败小记' },
+      target: { value: '投影失败但已提交的小记' },
     })
     fireEvent.click(screen.getByRole('button', { name: /记录/ }))
 
     await waitFor(() => {
-      expect(repositoryMocks.getQuickNoteRepositoryUserMessage).toHaveBeenCalledWith(
-        expect.any(Error),
-        '请稍后重试',
-      )
-      expect(toastMock.error).toHaveBeenCalledWith(
-        '小记创建失败',
-        expect.objectContaining({ description: '用户可读错误' }),
-      )
+      expect(toastMock).toHaveBeenCalledWith('小记已记录，列表将在稍后刷新')
+    })
+    expect(
+      document.querySelector(
+        '[data-quick-note-editor-status][data-status="draft-failed"]',
+      ),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText('本机草稿保存失败，将继续保留输入'),
+    ).not.toBeInTheDocument()
+    expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledTimes(1)
+    expect(await spaceDBManager.current.quickNotes.count()).toBe(1)
+    await expect(spaceDBManager.current.quickNotes.toArray()).resolves.toEqual([
+      expect.objectContaining({ content: '投影失败但已提交的小记' }),
+    ])
+    await expect(
+      spaceDBManager.current.settings.get('quickNote:newDraft:v1'),
+    ).resolves.toBeUndefined()
+
+    unmount()
+    render(createElement(QuickNotesView))
+    await waitFor(() => {
+      expect(screen.getByLabelText('小记内容')).toHaveValue('')
     })
   })
 
@@ -1249,9 +1283,9 @@ describe('QuickNotesView', () => {
     })
 
     await waitFor(() => {
-      expect(storeMocks.createQuickNote).toHaveBeenCalledWith({
+      expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
         content: '快捷键新建小记',
-      })
+      }))
     })
 
     fireEvent.click(screen.getByRole('button', { name: '移到回收站' }))
@@ -1869,9 +1903,9 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: /记录/ }))
 
     await waitFor(() => {
-      expect(storeMocks.createQuickNote).toHaveBeenCalledWith({
+      expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
         content: '专注写完的一段小记',
-      })
+      }))
     })
     await waitFor(() => {
       expect(storeMocks.exitFocus).toHaveBeenCalledTimes(1)
@@ -1880,7 +1914,9 @@ describe('QuickNotesView', () => {
 
   it('keeps focus-edit open when submit fails', async () => {
     storeMocks.state.focusMode = 'focus-edit'
-    storeMocks.createQuickNote.mockRejectedValueOnce(new Error('write blocked'))
+    vi.spyOn(spaceDBManager.current.quickNotes, 'put').mockRejectedValueOnce(
+      new Error('write blocked'),
+    )
 
     render(createElement(QuickNotesView))
 
@@ -1890,11 +1926,11 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: /记录/ }))
 
     await waitFor(() => {
-      expect(toastMock.error).toHaveBeenCalledWith(
-        '小记创建失败',
-        expect.objectContaining({ description: '请稍后重试' }),
-      )
+      expect(toastMock.error).toHaveBeenCalledWith('小记创建失败', {
+        description: '草稿仍保留在本机，请稍后重试',
+      })
     })
+    expect(storeMocks.projectRecordedQuickNote).not.toHaveBeenCalled()
     expect(storeMocks.exitFocus).not.toHaveBeenCalled()
   })
 
