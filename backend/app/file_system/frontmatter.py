@@ -135,11 +135,28 @@ def extract_frontmatter(content: str) -> tuple[dict[str, Any] | None, str]:
 
 
 def has_frontmatter(content: str) -> bool:
-    """Check whether content starts with a YAML frontmatter block."""
+    """Check whether content starts with a valid YAML frontmatter block.
+
+    A valid frontmatter block:
+    - Starts with a line containing exactly ``---``.
+    - Has a closing line containing exactly ``---``.
+    - Contains at least one ``key: value`` line between the delimiters
+      (so a bare Markdown horizontal rule is not misidentified as frontmatter).
+    """
     if not content:
         return False
     first_line = content.split("\n", 1)[0].strip()
-    return first_line == _FRONTMATTER_DELIMITER
+    if first_line != _FRONTMATTER_DELIMITER:
+        return False
+    lines = content.split("\n")
+    has_mapping = False
+    for i in range(1, len(lines)):
+        line = lines[i].strip()
+        if line == _FRONTMATTER_DELIMITER:
+            return has_mapping
+        if ": " in line or line.endswith(":"):
+            has_mapping = True
+    return False
 
 
 def _parse_yaml_value(raw: str) -> Any:
