@@ -9,6 +9,7 @@ import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import {
   isActiveQuickNote,
+  selectActiveQuickNotes,
   selectQuickNotesForExplorer,
 } from '@/lib/quick-notes/quick-note-selectors'
 import {
@@ -62,6 +63,7 @@ interface QuickNoteActions {
   loadQuickNotes: (opts?: { query?: string }) => Promise<void>
   loadTrashedQuickNotes: () => Promise<void>
   refreshQuickNotesFromRepository: () => Promise<void>
+  projectRecordedQuickNote: (note: QuickNote) => undefined
   createQuickNote: (data: QuickNoteCreateInput) => Promise<QuickNote>
   updateQuickNote: (id: string, data: QuickNoteUpdateInput) => Promise<void>
   deleteQuickNote: (id: string) => Promise<void>
@@ -189,6 +191,34 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
           set({ error: message })
           throw error
         }
+      },
+
+      projectRecordedQuickNote: (note) => {
+        set((state) => {
+          const allQuickNotes = selectActiveQuickNotes([
+            ...state.allQuickNotes.filter((item) => item.id !== note.id),
+            note,
+          ])
+          return {
+            allQuickNotes,
+            quickNotes: deriveVisibleQuickNotes(
+              allQuickNotes,
+              state.searchQuery,
+              state.selectedTagFilters,
+              state.selectedDate,
+            ),
+            lifecycleStateById: {
+              ...state.lifecycleStateById,
+              [note.id]: 'active',
+            },
+            syncStatusById: {
+              ...state.syncStatusById,
+              [note.id]: 'pending',
+            },
+            error: null,
+          }
+        })
+        return undefined
       },
 
       createQuickNote: async (data) => {

@@ -1,6 +1,28 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as quickNoteRepository from '@/lib/quick-notes/quick-note-repository'
 import { db, spaceDBManager } from '@/services/space-db'
 import { useQuickNoteStore } from '@/stores/quick-note-store'
+import type { QuickNote } from '@/types'
+
+function makeQuickNote(overrides: Partial<QuickNote> = {}): QuickNote {
+  const now = '2026-07-11T04:00:00.000Z'
+  return {
+    id: 'projected',
+    content: 'projected note',
+    mood: null,
+    tags: [],
+    pinned: false,
+    archived_at: null,
+    archive_file_path: null,
+    session_id: null,
+    folder_id: null,
+    trashed_at: null,
+    migrated_to_note_id: null,
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  }
+}
 
 describe('useQuickNoteStore', () => {
   beforeEach(async () => {
@@ -9,9 +31,67 @@ describe('useQuickNoteStore', () => {
   })
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     useQuickNoteStore.getState().reset()
     await db.delete()
     spaceDBManager.close()
+  })
+
+  it('projects a recorded QuickNote synchronously through current filters without reads', () => {
+    const repositoryReads = [
+      vi.spyOn(quickNoteRepository, 'listQuickNotes'),
+      vi.spyOn(quickNoteRepository, 'listTrashedQuickNotes'),
+      vi.spyOn(quickNoteRepository, 'listQuickNoteSyncStates'),
+      vi.spyOn(quickNoteRepository, 'listQuickNoteLifecycleStates'),
+    ]
+    const quickNotesTable = spaceDBManager.current.quickNotes
+    const tableRead = vi.spyOn(quickNotesTable, 'toArray')
+    const directTableReads = [
+      vi.spyOn(quickNotesTable, 'get'),
+      vi.spyOn(quickNotesTable, 'count'),
+      vi.spyOn(quickNotesTable, 'where'),
+    ]
+    useQuickNoteStore.setState({
+      allQuickNotes: [],
+      quickNotes: [],
+      searchQuery: 'release',
+      selectedTagFilters: ['work'],
+      selectedDate: '2026-07-11',
+    })
+    const first = makeQuickNote({
+      content: 'release plan #work',
+      tags: ['work'],
+    })
+
+    const result = useQuickNoteStore.getState().projectRecordedQuickNote(first)
+
+    expect(result).toBeUndefined()
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      allQuickNotes: [first],
+      quickNotes: [first],
+      lifecycleStateById: { projected: 'active' },
+      syncStatusById: { projected: 'pending' },
+      error: null,
+    })
+
+    const replacement = makeQuickNote({
+      content: 'personal note',
+      tags: ['personal'],
+      updated_at: '2026-07-11T04:01:00.000Z',
+    })
+
+    expect(
+      useQuickNoteStore.getState().projectRecordedQuickNote(replacement),
+    ).toBeUndefined()
+    expect(useQuickNoteStore.getState().allQuickNotes).toEqual([replacement])
+    expect(useQuickNoteStore.getState().quickNotes).toEqual([])
+    for (const repositoryRead of repositoryReads) {
+      expect(repositoryRead).not.toHaveBeenCalled()
+    }
+    expect(tableRead).not.toHaveBeenCalled()
+    for (const directTableRead of directTableReads) {
+      expect(directTableRead).not.toHaveBeenCalled()
+    }
   })
 
   it('loads active notes filtered by search and sorted by pinned/updated', async () => {
