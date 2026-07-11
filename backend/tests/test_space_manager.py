@@ -2,9 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import pytest
 
 from app.space_manager import SpaceEngineManager
+
+
+@pytest.mark.asyncio
+async def test_init_schema_runs_space_migration_in_thread(monkeypatch, tmp_path: Path):
+    import app.space_manager as space_manager_module
+
+    calls: list[tuple[object, tuple[object, ...]]] = []
+
+    async def fake_to_thread(function, *args):
+        calls.append((function, args))
+
+    monkeypatch.setattr(space_manager_module.asyncio, "to_thread", fake_to_thread)
+
+    await SpaceEngineManager._init_schema(tmp_path / "space.db")
+
+    assert len(calls) == 1
+    assert calls[0][1] == ("space", tmp_path / "space.db")
 
 
 @pytest.mark.asyncio
@@ -30,6 +50,60 @@ async def test_get_engine_is_cached_per_space(tmp_path):
     engine1 = await manager.get_engine("spc_cached", db_path=db_path)
     engine2 = await manager.get_engine("spc_cached", db_path=db_path)
     assert engine1 is engine2
+    await manager.dispose_all()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_path_initialization_is_single_flight(monkeypatch, tmp_path):
+    manager = SpaceEngineManager(max_size=3)
+    calls = 0
+    release = asyncio.Event()
+    original_init_schema = manager._init_schema
+
+    async def slow_init(path):
+        nonlocal calls
+        calls += 1
+        await release.wait()
+        await original_init_schema(path)
+
+    monkeypatch.setattr(manager, "_init_schema", slow_init)
+    db_path = tmp_path / "nested" / ".." / "shared.db"
+    tasks = [asyncio.create_task(manager.get_engine("spc_shared", db_path=db_path)) for _ in range(3)]
+    await asyncio.sleep(0)
+    release.set()
+    engines = await asyncio.gather(*tasks)
+
+    assert calls == 1
+    assert engines[0] is engines[1] is engines[2]
+    await manager.dispose_all()
+
+
+@pytest.mark.asyncio
+async def test_single_flight_failure_propagates_and_can_retry(monkeypatch, tmp_path):
+    manager = SpaceEngineManager(max_size=3)
+    calls = 0
+    original_init_schema = manager._init_schema
+
+    async def flaky_init(path):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        if calls == 1:
+            raise RuntimeError("injected migration failure")
+        await original_init_schema(path)
+
+    monkeypatch.setattr(manager, "_init_schema", flaky_init)
+    db_path = tmp_path / "retry.db"
+    results = await asyncio.gather(
+        manager.get_engine("spc_retry", db_path=db_path),
+        manager.get_engine("spc_retry", db_path=db_path),
+        return_exceptions=True,
+    )
+
+    assert all(isinstance(result, RuntimeError) for result in results)
+    engine = await manager.get_engine("spc_retry", db_path=db_path)
+    assert engine is not None
+    assert calls == 2
     await manager.dispose_all()
 
 
