@@ -1,11 +1,14 @@
 'use client'
 
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   QUICK_NOTE_NEW_DRAFT_VERSION_V2,
+  createDexieQuickNoteDraftAdapter,
   type QuickNoteDraftRowOwner,
   type QuickNoteDraftStorageAdapter,
   type QuickNoteNewDraftSnapshotV2,
 } from '@/lib/quick-notes/quick-note-draft-repository'
+import { spaceDBManager } from '@/services/space-db'
 import type { QuickNote } from '@/types'
 
 export type QuickNoteDraftSaveState =
@@ -67,6 +70,8 @@ export interface QuickNoteDraftSessionController extends QuickNoteDraftSession {
   readonly spaceId: string
   getSnapshot(): DraftSessionSnapshot
   subscribe(listener: () => void): () => void
+  drainBeforeSwitch(): Promise<void>
+  requestBestEffortFlush(): void
   deactivate(): void
 }
 
@@ -125,6 +130,8 @@ interface ReconcileOptions {
   publishSaving?: boolean
 }
 
+type ReconcileOutcome = 'durable' | 'different-draft'
+
 function createIssue(code: QuickNoteDraftIssueCode): QuickNoteDraftIssue {
   return { code, retryable: code !== 'projection-failed' }
 }
@@ -133,6 +140,29 @@ function ownerKey(owner: QuickNoteDraftRowOwner): string {
   return owner.kind === 'v2'
     ? `v2:${owner.draftId}`
     : `raw:${owner.value}`
+}
+
+async function awaitBeforeDeadline(
+  promise: Promise<unknown>,
+  deadline: number,
+): Promise<boolean> {
+  const remaining = deadline - Date.now()
+  if (remaining <= 0) return false
+
+  let timeout: ReturnType<typeof setTimeout> | null = null
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), remaining)
+      }),
+    ])
+  } finally {
+    if (timeout !== null) clearTimeout(timeout)
+  }
 }
 
 export function createQuickNoteDraftSessionController(
@@ -145,9 +175,11 @@ export function createQuickNoteDraftSessionController(
     createDraftId = () => crypto.randomUUID(),
     nowIso = () => new Date().toISOString(),
     debounceMs = 500,
+    flushTimeoutMs = 3_000,
   } = options
   const lane: DraftLane = { tail: Promise.resolve() }
   const listeners = new Set<() => void>()
+  const progressWaiters = new Set<() => void>()
   const frontier = new Map<string, QuickNoteDraftRowOwner>()
   let resolveRestoreReady: () => void = () => undefined
   const restoreReady = new Promise<void>((resolve) => {
@@ -179,9 +211,29 @@ export function createQuickNoteDraftSessionController(
 
   let generation = newGeneration()
 
+  function signalProgress(): void {
+    const waiters = [...progressWaiters]
+    progressWaiters.clear()
+    waiters.forEach((resolve) => resolve())
+  }
+
+  async function awaitProgressBeforeDeadline(deadline: number): Promise<boolean> {
+    let resolveProgress!: () => void
+    const progress = new Promise<void>((resolve) => {
+      resolveProgress = resolve
+      progressWaiters.add(resolve)
+    })
+    try {
+      return await awaitBeforeDeadline(progress, deadline)
+    } finally {
+      progressWaiters.delete(resolveProgress)
+    }
+  }
+
   function publish(patch: Partial<DraftSessionSnapshot>): void {
     if (!active) return
     snapshot = { ...snapshot, ...patch }
+    signalProgress()
     listeners.forEach((listener) => listener())
   }
 
@@ -191,6 +243,7 @@ export function createQuickNoteDraftSessionController(
       () => undefined,
       () => undefined,
     )
+    signalProgress()
     return result
   }
 
@@ -230,6 +283,14 @@ export function createQuickNoteDraftSessionController(
       owners: [...frontier.values()],
       includeRestoredOwner: terminalQueuedBeforeRestore && !restoreSettled,
     }
+  }
+
+  function sameCapture(left: DraftCapture, right: DraftCapture): boolean {
+    return left.generation === right.generation
+      && left.generationId === right.generationId
+      && left.revision === right.revision
+      && left.content === right.content
+      && left.draftId === right.draftId
   }
 
   function isCurrent(capture: DraftCapture): boolean {
@@ -276,15 +337,15 @@ export function createQuickNoteDraftSessionController(
       failureCode = 'save-failed',
       publishSaving = true,
     }: ReconcileOptions = {},
-  ): Promise<void> {
-    if (!force && isDurable(capture)) return Promise.resolve()
+  ): Promise<ReconcileOutcome> {
+    if (!force && isDurable(capture)) return Promise.resolve('durable')
     if (isCurrent(capture) && publishSaving) {
       publish({ saveState: 'saving', issue: null })
     }
 
     return append(async () => {
       const owners = ownersForCapture(capture)
-      if (!force && isDurable(capture)) return
+      if (!force && isDurable(capture)) return 'durable'
       try {
         if (capture.content.trim()) {
           const persisted = makeV2(capture)
@@ -295,7 +356,7 @@ export function createQuickNoteDraftSessionController(
           if (isCurrent(capture)) {
             publish({ saveState: 'saved', issue: null })
           }
-          return
+          return 'durable'
         }
 
         const outcome = await adapter.clearIfOwned(owners)
@@ -304,14 +365,14 @@ export function createQuickNoteDraftSessionController(
           if (isCurrent(capture)) {
             publish({ saveState: 'idle', issue: null })
           }
-          return
+          return 'different-draft'
         }
-        if (outcome === 'cleared' || outcome === 'absent') {
-          markDurable(capture)
-          if (isCurrent(capture)) {
-            publish({ saveState: 'idle', issue: null })
-          }
+
+        markDurable(capture)
+        if (isCurrent(capture)) {
+          publish({ saveState: 'idle', issue: null })
         }
+        return 'durable'
       } catch {
         const mappedIssue = createIssue(failureCode)
         if (isCurrent(capture)) {
@@ -326,6 +387,78 @@ export function createQuickNoteDraftSessionController(
     if (timer === null) return
     clearTimeout(timer)
     timer = null
+  }
+
+  function publishSwitchFlushTimeout(): void {
+    if (!active) return
+    publish({
+      saveState: 'failed',
+      issue: createIssue('switch-flush-timeout'),
+    })
+  }
+
+  async function drainBeforeSwitch(): Promise<void> {
+    if (!active) return
+    cancelTimer()
+    const deadline = Date.now() + flushTimeoutMs
+
+    if (!await awaitBeforeDeadline(restoreReady, deadline)) {
+      publishSwitchFlushTimeout()
+      return
+    }
+
+    while (active) {
+      const before = captureCurrent()
+      const capturedTail = lane.tail
+      if (!await awaitBeforeDeadline(capturedTail, deadline)) {
+        publishSwitchFlushTimeout()
+        return
+      }
+      if (!active) return
+
+      const after = captureCurrent()
+      if (!sameCapture(before, after) || lane.tail !== capturedTail) continue
+      if (isDurable(after)) return
+
+      let reconcileFailed = false
+      let reconcileOutcome: ReconcileOutcome | null = null
+      const forcedReconcile = reconcile(after, { force: true }).then(
+        (outcome) => {
+          reconcileOutcome = outcome
+        },
+        () => {
+          reconcileFailed = true
+        },
+      )
+      const forcedTail = lane.tail
+      if (!await awaitBeforeDeadline(forcedReconcile, deadline)) {
+        publishSwitchFlushTimeout()
+        return
+      }
+      if (!active) return
+      const captureRemainsExact = sameCapture(after, captureCurrent())
+      const tailRemainsExact = lane.tail === forcedTail
+      if (reconcileFailed && captureRemainsExact && tailRemainsExact) return
+      if (
+        reconcileOutcome === 'different-draft'
+        && captureRemainsExact
+        && tailRemainsExact
+      ) {
+        if (!await awaitProgressBeforeDeadline(deadline)) {
+          publishSwitchFlushTimeout()
+          return
+        }
+      }
+    }
+  }
+
+  function requestBestEffortFlush(): void {
+    if (!active) return
+    cancelTimer()
+    if (generation.terminal !== null || generation.consumed) return
+    const capture = captureCurrent()
+    if (isDurable(capture)) return
+    void reconcile(capture, { force: true }).catch(() => undefined)
   }
 
   function change(next: string): void {
@@ -623,6 +756,8 @@ export function createQuickNoteDraftSessionController(
     change,
     record,
     discard,
+    drainBeforeSwitch,
+    requestBestEffortFlush,
     getSnapshot() {
       return snapshot
     },
@@ -637,10 +772,99 @@ export function createQuickNoteDraftSessionController(
       if (!active) return
       active = false
       cancelTimer()
+      signalProgress()
       listeners.clear()
     },
   }
 
   void restore().catch(() => undefined)
   return controller
+}
+
+const EMPTY_SNAPSHOT: DraftSessionSnapshot = {
+  draft: '',
+  saveState: 'idle',
+  issue: null,
+}
+
+export function useQuickNoteDraftSession(input: {
+  onRecorded: (note: QuickNote) => undefined
+}): QuickNoteDraftSession {
+  const latestOnRecorded = useRef(input.onRecorded)
+  latestOnRecorded.current = input.onRecorded
+  const controllerRef = useRef<QuickNoteDraftSessionController | null>(null)
+  const unsubscribeControllerRef = useRef<(() => void) | null>(null)
+  const [snapshot, setSnapshot] = useState<DraftSessionSnapshot>(EMPTY_SNAPSHOT)
+
+  useEffect(() => {
+    let mounted = true
+
+    const install = (spaceId: string): void => {
+      unsubscribeControllerRef.current?.()
+      unsubscribeControllerRef.current = null
+      controllerRef.current?.deactivate()
+
+      const controller = createQuickNoteDraftSessionController({
+        spaceId,
+        adapter: createDexieQuickNoteDraftAdapter(spaceDBManager.current),
+        onRecorded: (note) => {
+          latestOnRecorded.current(note)
+          return undefined
+        },
+      })
+      controllerRef.current = controller
+      unsubscribeControllerRef.current = controller.subscribe(() => {
+        if (!mounted || controllerRef.current !== controller) return
+        setSnapshot(controller.getSnapshot())
+      })
+      if (mounted && controllerRef.current === controller) {
+        setSnapshot(controller.getSnapshot())
+      }
+    }
+
+    const unregisterBeforeSwitch = spaceDBManager.onBeforeSwitch(({ fromSpaceId }) => {
+      const controller = controllerRef.current
+      if (!controller || controller.spaceId !== fromSpaceId) return
+      return controller.drainBeforeSwitch()
+    })
+    const unregisterSwitch = spaceDBManager.onSwitch(install)
+    if (spaceDBManager.currentSpaceId !== null) {
+      install(spaceDBManager.currentSpaceId)
+    }
+
+    const handlePageHide = (): void => {
+      controllerRef.current?.requestBestEffortFlush()
+    }
+    window.addEventListener('pagehide', handlePageHide)
+
+    return () => {
+      mounted = false
+      unregisterBeforeSwitch()
+      unregisterSwitch()
+      window.removeEventListener('pagehide', handlePageHide)
+      const controller = controllerRef.current
+      controller?.requestBestEffortFlush()
+      controller?.deactivate()
+      unsubscribeControllerRef.current?.()
+      unsubscribeControllerRef.current = null
+      controllerRef.current = null
+    }
+  }, [])
+
+  const change = useCallback((next: string): void => {
+    controllerRef.current?.change(next)
+  }, [])
+  const record = useCallback((): Promise<QuickNoteDraftRecordResult> => {
+    return controllerRef.current?.record() ?? Promise.resolve({ kind: 'empty' })
+  }, [])
+  const discard = useCallback((): Promise<QuickNoteDraftDiscardResult> => {
+    return controllerRef.current?.discard() ?? Promise.resolve({ kind: 'discarded' })
+  }, [])
+
+  return {
+    ...snapshot,
+    change,
+    record,
+    discard,
+  }
 }
