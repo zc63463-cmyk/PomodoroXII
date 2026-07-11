@@ -62,9 +62,25 @@ interface DraftSessionSnapshot {
   issue: QuickNoteDraftIssue | null
 }
 
+/** @internal Test seam; do not re-export from an application barrel. */
+export interface QuickNoteDraftSessionController extends QuickNoteDraftSession {
+  readonly spaceId: string
+  getSnapshot(): DraftSessionSnapshot
+  subscribe(listener: () => void): () => void
+  deactivate(): void
+}
+
 type TerminalIntent =
   | { kind: 'record'; promise: Promise<QuickNoteDraftRecordResult> }
   | { kind: 'discard'; promise: Promise<QuickNoteDraftDiscardResult> }
+
+type RecordStorageOutcome =
+  | { kind: 'committed'; note: QuickNote }
+  | { kind: 'failed'; issue: QuickNoteDraftIssue }
+
+type DiscardStorageOutcome =
+  | { kind: 'resolved'; outcome: 'cleared' | 'absent' | 'different-draft' }
+  | { kind: 'failed'; issue: QuickNoteDraftIssue }
 
 interface DraftGeneration {
   id: number
@@ -80,6 +96,7 @@ interface DraftCapture {
   content: string
   draftId: string | null
   owners: readonly QuickNoteDraftRowOwner[]
+  includeRestoredOwner: boolean
 }
 
 interface DurableMarker {
@@ -118,13 +135,13 @@ function ownerKey(owner: QuickNoteDraftRowOwner): string {
     : `raw:${owner.value}`
 }
 
-/** @internal deterministic controller seam; do not barrel-export */
 export function createQuickNoteDraftSessionController(
   options: QuickNoteDraftSessionControllerInput,
-) {
+): QuickNoteDraftSessionController {
   const {
     adapter,
     spaceId,
+    onRecorded,
     createDraftId = () => crypto.randomUUID(),
     nowIso = () => new Date().toISOString(),
     debounceMs = 500,
@@ -132,11 +149,18 @@ export function createQuickNoteDraftSessionController(
   const lane: DraftLane = { tail: Promise.resolve() }
   const listeners = new Set<() => void>()
   const frontier = new Map<string, QuickNoteDraftRowOwner>()
+  let resolveRestoreReady: () => void = () => undefined
+  const restoreReady = new Promise<void>((resolve) => {
+    resolveRestoreReady = resolve
+  })
   let active = true
   let nextGenerationId = 0
   let revision = 0
   let durable: DurableMarker | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
+  let restoreSettled = false
+  let terminalQueuedBeforeRestore = false
+  let restoredOwner: QuickNoteDraftRowOwner | null = null
   let snapshot: DraftSessionSnapshot = {
     draft: '',
     saveState: 'idle',
@@ -178,6 +202,24 @@ export function createQuickNoteDraftSessionController(
     owners.forEach((owner) => frontier.delete(ownerKey(owner)))
   }
 
+  function ownersForCapture(
+    capture: DraftCapture,
+  ): readonly QuickNoteDraftRowOwner[] {
+    const merged = new Map<string, QuickNoteDraftRowOwner>()
+    capture.owners.forEach((owner) => {
+      const key = ownerKey(owner)
+      if (frontier.has(key)) merged.set(key, owner)
+    })
+    if (
+      capture.includeRestoredOwner
+      && restoredOwner !== null
+      && frontier.has(ownerKey(restoredOwner))
+    ) {
+      merged.set(ownerKey(restoredOwner), restoredOwner)
+    }
+    return [...merged.values()]
+  }
+
   function captureCurrent(): DraftCapture {
     return {
       generation,
@@ -186,6 +228,7 @@ export function createQuickNoteDraftSessionController(
       content: snapshot.draft,
       draftId: generation.draftId,
       owners: [...frontier.values()],
+      includeRestoredOwner: terminalQueuedBeforeRestore && !restoreSettled,
     }
   }
 
@@ -240,12 +283,13 @@ export function createQuickNoteDraftSessionController(
     }
 
     return append(async () => {
+      const owners = ownersForCapture(capture)
       if (!force && isDurable(capture)) return
       try {
         if (capture.content.trim()) {
           const persisted = makeV2(capture)
           await adapter.save(persisted)
-          retireOwners(capture.owners)
+          retireOwners(owners)
           addOwner({ kind: 'v2', draftId: persisted.draftId })
           markDurable(capture)
           if (isCurrent(capture)) {
@@ -254,8 +298,8 @@ export function createQuickNoteDraftSessionController(
           return
         }
 
-        const outcome = await adapter.clearIfOwned(capture.owners)
-        retireOwners(capture.owners)
+        const outcome = await adapter.clearIfOwned(owners)
+        retireOwners(owners)
         if (outcome === 'different-draft') {
           if (isCurrent(capture)) {
             publish({ saveState: 'idle', issue: null })
@@ -317,95 +361,255 @@ export function createQuickNoteDraftSessionController(
     }, debounceMs)
   }
 
+  function record(): Promise<QuickNoteDraftRecordResult> {
+    const ownedGeneration = generation
+    if (ownedGeneration.terminal?.kind === 'record') {
+      return ownedGeneration.terminal.promise
+    }
+    if (ownedGeneration.terminal?.kind === 'discard') {
+      return Promise.resolve({ kind: 'busy', operation: 'discard' })
+    }
+    if (!active) {
+      return Promise.resolve({ kind: 'empty' })
+    }
+    if (!snapshot.draft.trim()) {
+      return Promise.resolve({ kind: 'empty' })
+    }
+
+    cancelTimer()
+    if (ownedGeneration.draftId === null) {
+      ownedGeneration.draftId = createDraftId()
+      addOwner({ kind: 'v2', draftId: ownedGeneration.draftId })
+    }
+    if (!restoreSettled) terminalQueuedBeforeRestore = true
+    const capture = captureCurrent()
+    const submitted = makeV2(capture)
+    const submittedOwner: QuickNoteDraftRowOwner = {
+      kind: 'v2',
+      draftId: submitted.draftId,
+    }
+    const storage = append(async (): Promise<RecordStorageOutcome> => {
+      await restoreReady
+      const owners = ownersForCapture(capture)
+      try {
+        await adapter.save(submitted)
+      } catch {
+        return { kind: 'failed', issue: createIssue('save-failed') }
+      }
+
+      retireOwners(owners)
+      addOwner(submittedOwner)
+      markDurable(capture)
+
+      try {
+        const note = await adapter.record(submitted)
+        retireOwners([...owners, submittedOwner])
+        return { kind: 'committed', note }
+      } catch {
+        return { kind: 'failed', issue: createIssue('record-failed') }
+      }
+    })
+
+    // The continuation compares against the exact Promise attached below.
+    let operation!: Promise<QuickNoteDraftRecordResult>
+    // eslint-disable-next-line prefer-const
+    operation = storage.then((outcome): QuickNoteDraftRecordResult => {
+      if (outcome.kind === 'failed') {
+        if (generation === ownedGeneration && isCurrent(capture)) {
+          publish({ saveState: 'failed', issue: outcome.issue })
+        }
+        if (
+          ownedGeneration.terminal?.kind === 'record'
+          && ownedGeneration.terminal.promise === operation
+        ) {
+          ownedGeneration.terminal = null
+        }
+        return outcome
+      }
+
+      ownedGeneration.consumed = true
+      if (generation === ownedGeneration && isCurrent(capture)) {
+        publish({ draft: '', saveState: 'idle', issue: null })
+      }
+      if (!active) {
+        return { kind: 'recorded', note: outcome.note, visibility: 'pending' }
+      }
+
+      try {
+        onRecorded(outcome.note)
+        return { kind: 'recorded', note: outcome.note, visibility: 'refreshed' }
+      } catch {
+        if (generation === ownedGeneration && isSameRevision(capture)) {
+          publish({ saveState: 'failed', issue: createIssue('projection-failed') })
+        }
+        return { kind: 'recorded', note: outcome.note, visibility: 'pending' }
+      }
+    })
+    ownedGeneration.terminal = { kind: 'record', promise: operation }
+    return operation
+  }
+
+  function discard(): Promise<QuickNoteDraftDiscardResult> {
+    const ownedGeneration = generation
+    if (ownedGeneration.terminal?.kind === 'discard') {
+      return ownedGeneration.terminal.promise
+    }
+    if (ownedGeneration.terminal?.kind === 'record') {
+      return Promise.resolve({ kind: 'busy', operation: 'record' })
+    }
+    if (!active) {
+      return Promise.resolve({ kind: 'discarded' })
+    }
+
+    cancelTimer()
+    if (!restoreSettled) terminalQueuedBeforeRestore = true
+    const capture = captureCurrent()
+    const storage = append(async (): Promise<DiscardStorageOutcome> => {
+      await restoreReady
+      const owners = ownersForCapture(capture)
+      try {
+        const outcome = await adapter.clearIfOwned(owners)
+        retireOwners(owners)
+        return { kind: 'resolved', outcome }
+      } catch {
+        return { kind: 'failed', issue: createIssue('discard-failed') }
+      }
+    })
+
+    // The continuation compares against the exact Promise attached below.
+    let operation!: Promise<QuickNoteDraftDiscardResult>
+    // eslint-disable-next-line prefer-const
+    operation = storage.then((outcome): QuickNoteDraftDiscardResult => {
+      if (outcome.kind === 'failed') {
+        if (generation === ownedGeneration && isCurrent(capture)) {
+          publish({ saveState: 'failed', issue: outcome.issue })
+        }
+        if (
+          ownedGeneration.terminal?.kind === 'discard'
+          && ownedGeneration.terminal.promise === operation
+        ) {
+          ownedGeneration.terminal = null
+        }
+        return outcome
+      }
+
+      if (outcome.outcome === 'different-draft' || generation !== ownedGeneration) {
+        return { kind: 'superseded' }
+      }
+
+      ownedGeneration.consumed = true
+      if (isCurrent(capture)) {
+        publish({ draft: '', saveState: 'idle', issue: null })
+      }
+      return { kind: 'discarded' }
+    })
+    ownedGeneration.terminal = { kind: 'discard', promise: operation }
+    return operation
+  }
+
   async function restore(): Promise<void> {
     const initialGeneration = generation
     const initialGenerationId = generation.id
     const initialRevision = revision
-    let loaded
 
     try {
-      loaded = await adapter.load()
-    } catch {
+      let loaded
+      try {
+        loaded = await adapter.load()
+      } catch {
+        if (
+          !terminalQueuedBeforeRestore
+          && active
+          && generation === initialGeneration
+          && generation.id === initialGenerationId
+          && revision === initialRevision
+        ) {
+          publish({ saveState: 'failed', issue: createIssue('read-failed') })
+        }
+        return
+      }
+
       if (
-        active
-        && generation === initialGeneration
+        loaded.kind !== 'absent'
+        && (active || terminalQueuedBeforeRestore)
+      ) {
+        restoredOwner = loaded.owner
+        addOwner(loaded.owner)
+      }
+      if (terminalQueuedBeforeRestore) return
+      if (!active) return
+      const canDisplay = generation === initialGeneration
         && generation.id === initialGenerationId
         && revision === initialRevision
-      ) {
-        publish({ saveState: 'failed', issue: createIssue('read-failed') })
+        && !snapshot.draft.trim()
+
+      if (loaded.kind === 'absent') {
+        if (canDisplay) markDurable(captureCurrent())
+        return
       }
-      return
-    }
 
-    if (!active) return
-    const canDisplay = generation === initialGeneration
-      && generation.id === initialGenerationId
-      && revision === initialRevision
-      && !snapshot.draft.trim()
-
-    if (loaded.kind === 'absent') {
-      if (canDisplay) markDurable(captureCurrent())
-      return
-    }
-
-    addOwner(loaded.owner)
-
-    if (loaded.kind === 'invalid') {
-      const cleanupCapture = captureCurrent()
-      const cleanup = append(async () => {
-        try {
-          const outcome = await adapter.clearIfOwned([loaded.owner])
-          retireOwners([loaded.owner])
-          if (
-            (outcome === 'cleared' || outcome === 'absent')
-            && isCurrent(cleanupCapture)
-            && !cleanupCapture.content.trim()
-          ) {
-            markDurable(cleanupCapture)
+      if (loaded.kind === 'invalid') {
+        const cleanupCapture = captureCurrent()
+        const cleanup = append(async () => {
+          try {
+            const outcome = await adapter.clearIfOwned([loaded.owner])
+            retireOwners([loaded.owner])
+            if (
+              (outcome === 'cleared' || outcome === 'absent')
+              && isCurrent(cleanupCapture)
+              && !cleanupCapture.content.trim()
+            ) {
+              markDurable(cleanupCapture)
+            }
+          } catch {
+            const mappedIssue = createIssue('invalid-record-cleanup-failed')
+            if (isCurrent(cleanupCapture)) {
+              publish({ saveState: 'failed', issue: mappedIssue })
+            }
+            throw mappedIssue
           }
-        } catch {
-          const mappedIssue = createIssue('invalid-record-cleanup-failed')
-          if (isCurrent(cleanupCapture)) {
-            publish({ saveState: 'failed', issue: mappedIssue })
-          }
-          throw mappedIssue
-        }
-      })
-      void cleanup.catch(() => undefined)
-      return
-    }
+        })
+        void cleanup.catch(() => undefined)
+        return
+      }
 
-    if (!canDisplay) {
-      void reconcile(captureCurrent(), { force: true }).catch(() => undefined)
-      return
-    }
+      if (!canDisplay) {
+        void reconcile(captureCurrent(), { force: true }).catch(() => undefined)
+        return
+      }
 
-    if (loaded.snapshot.version === QUICK_NOTE_NEW_DRAFT_VERSION_V2) {
-      generation.draftId = loaded.snapshot.draftId
+      if (loaded.snapshot.version === QUICK_NOTE_NEW_DRAFT_VERSION_V2) {
+        generation.draftId = loaded.snapshot.draftId
+        publish({
+          draft: loaded.snapshot.content,
+          saveState: 'restored',
+          issue: null,
+        })
+        markDurable(captureCurrent())
+        return
+      }
+
+      generation.draftId = createDraftId()
+      addOwner({ kind: 'v2', draftId: generation.draftId })
       publish({
         draft: loaded.snapshot.content,
         saveState: 'restored',
         issue: null,
       })
-      markDurable(captureCurrent())
-      return
+      void reconcile(captureCurrent(), {
+        force: true,
+        failureCode: 'migration-save-failed',
+        publishSaving: false,
+      }).catch(() => undefined)
+    } finally {
+      if (!restoreSettled) {
+        restoreSettled = true
+        resolveRestoreReady()
+      }
     }
-
-    generation.draftId = createDraftId()
-    addOwner({ kind: 'v2', draftId: generation.draftId })
-    publish({
-      draft: loaded.snapshot.content,
-      saveState: 'restored',
-      issue: null,
-    })
-    void reconcile(captureCurrent(), {
-      force: true,
-      failureCode: 'migration-save-failed',
-      publishSaving: false,
-    }).catch(() => undefined)
   }
 
-  const controller = {
+  const controller: QuickNoteDraftSessionController = {
     spaceId,
     get draft() {
       return snapshot.draft
@@ -417,6 +621,8 @@ export function createQuickNoteDraftSessionController(
       return snapshot.issue
     },
     change,
+    record,
+    discard,
     getSnapshot() {
       return snapshot
     },
