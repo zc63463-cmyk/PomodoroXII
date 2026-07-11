@@ -1,9 +1,8 @@
 """REST routes for statistics / analytics.
 
-Read-only aggregation endpoints backed by ``StatsService``.  All endpoints
-return plain dicts (no ``response_model``) so the flexible aggregation
-output of the service passes through unchanged.  Routes commit (no-op for
-reads); the service performs only SELECT queries.
+Read-only aggregation endpoints backed by ``StatsService``.  Explicit response
+models mirror the service output, preserving the runtime JSON shape while
+keeping OpenAPI responses typed.  The service performs only SELECT queries.
 """
 from __future__ import annotations
 
@@ -11,12 +10,21 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_space_context, get_space_db
+from app.schemas.stats import (
+    DailyDetailResponse,
+    FocusTrendResponse,
+    HabitSummaryResponse,
+    NoteSummaryResponse,
+    ScheduleSummaryResponse,
+    StatsOverviewResponse,
+    TaskDistributionResponse,
+)
 from app.services.stats import StatsService
 
 router = APIRouter()
 
 
-@router.get("/overview")
+@router.get("/overview", response_model=StatsOverviewResponse)
 async def stats_overview(
     periods: list[str] | None = Query(
         None,
@@ -29,7 +37,7 @@ async def stats_overview(
     return await StatsService(db).overview(periods=periods)
 
 
-@router.get("/focus-trend")
+@router.get("/focus-trend", response_model=FocusTrendResponse)
 async def stats_focus_trend(
     days: int = Query(7, ge=1, le=365, description="Number of days to trend"),
     db: AsyncSession = Depends(get_space_db),
@@ -39,7 +47,7 @@ async def stats_focus_trend(
     return await StatsService(db).focus_trend(days=days)
 
 
-@router.get("/task-distribution")
+@router.get("/task-distribution", response_model=TaskDistributionResponse)
 async def stats_task_distribution(
     db: AsyncSession = Depends(get_space_db),
     ctx: dict = Depends(get_space_context),
@@ -48,7 +56,7 @@ async def stats_task_distribution(
     return await StatsService(db).task_distribution()
 
 
-@router.get("/daily-detail")
+@router.get("/daily-detail", response_model=DailyDetailResponse)
 async def stats_daily_detail(
     date: str = Query(..., max_length=10, description="Date in YYYY-MM-DD format"),
     db: AsyncSession = Depends(get_space_db),
@@ -58,7 +66,7 @@ async def stats_daily_detail(
     return await StatsService(db).daily_detail(date=date)
 
 
-@router.get("/habit-summary")
+@router.get("/habit-summary", response_model=HabitSummaryResponse)
 async def stats_habit_summary(
     days: int = Query(30, ge=1, le=365, description="Period in days"),
     db: AsyncSession = Depends(get_space_db),
@@ -68,7 +76,7 @@ async def stats_habit_summary(
     return await StatsService(db).habit_summary(days=days)
 
 
-@router.get("/schedule-summary")
+@router.get("/schedule-summary", response_model=ScheduleSummaryResponse)
 async def stats_schedule_summary(
     days: int = Query(30, ge=1, le=365, description="Period in days"),
     db: AsyncSession = Depends(get_space_db),
@@ -78,7 +86,7 @@ async def stats_schedule_summary(
     return await StatsService(db).schedule_summary(days=days)
 
 
-@router.get("/note-summary")
+@router.get("/note-summary", response_model=NoteSummaryResponse)
 async def stats_note_summary(
     db: AsyncSession = Depends(get_space_db),
     ctx: dict = Depends(get_space_context),

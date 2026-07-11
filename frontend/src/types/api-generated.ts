@@ -1205,6 +1205,58 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * AuthLoginResponse
+         * @description Master-token response returned after login.
+         */
+        AuthLoginResponse: {
+            /** Access Token */
+            access_token: string;
+            /** Token Type */
+            token_type: string;
+        };
+        /**
+         * AuthSetupResponse
+         * @description Successful first-time password setup.
+         */
+        AuthSetupResponse: {
+            /** Message */
+            message: string;
+        };
+        /**
+         * AuthVerifyResponse
+         * @description Claims exposed after verifying a bearer token.
+         */
+        AuthVerifyResponse: {
+            /** Valid */
+            valid: boolean;
+            /** User Id */
+            user_id: string;
+            /** Type */
+            type: string;
+        };
+        /**
+         * CountDuration
+         * @description Count and aggregate duration shared by focus statistics.
+         */
+        CountDuration: {
+            /** Count */
+            count: number;
+            /** Duration */
+            duration: number;
+        };
+        /**
+         * DailyDetailResponse
+         * @description Focus aggregates for one requested date.
+         */
+        DailyDetailResponse: {
+            /** Date */
+            date: string;
+            /** Count */
+            count: number;
+            /** Duration */
+            duration: number;
+        };
+        /**
          * EntityCategory
          * @description Business categorisation of an entity.
          * @enum {string}
@@ -1277,6 +1329,16 @@ export interface components {
             pull_key?: string | null;
         };
         /**
+         * ErrorResponse
+         * @description Standard error body for non-2xx responses.
+         */
+        ErrorResponse: {
+            /** Detail */
+            detail: string;
+            /** Error Type */
+            error_type: string;
+        };
+        /**
          * FieldSpecOut
          * @description A single column's metadata.
          */
@@ -1304,6 +1366,26 @@ export interface components {
              * @default
              */
             description: string;
+        };
+        /**
+         * FocusTrendPoint
+         * @description One date in a focus trend.
+         */
+        FocusTrendPoint: {
+            /** Date */
+            date: string;
+            /** Count */
+            count: number;
+            /** Duration */
+            duration: number;
+        };
+        /**
+         * FocusTrendResponse
+         * @description Daily focus aggregates for a requested date range.
+         */
+        FocusTrendResponse: {
+            /** Data */
+            data: components["schemas"]["FocusTrendPoint"][];
         };
         /**
          * FolderCreate
@@ -1363,11 +1445,6 @@ export interface components {
             name?: string | null;
             /** Parent Id */
             parent_id?: string | null;
-        };
-        /** HTTPValidationError */
-        HTTPValidationError: {
-            /** Detail */
-            detail?: components["schemas"]["ValidationError"][];
         };
         /**
          * HabitCheckInCreate
@@ -1526,6 +1603,34 @@ export interface components {
             version: number;
         };
         /**
+         * HabitSummaryItem
+         * @description Check-in statistics for one active habit.
+         */
+        HabitSummaryItem: {
+            /** Habit Id */
+            habit_id: string;
+            /** Title */
+            title: string;
+            /** Total Check Ins */
+            total_check_ins: number;
+            /** Check In Days */
+            check_in_days: number;
+            /** Current Streak */
+            current_streak: number;
+            /** Completion Rate */
+            completion_rate: number;
+        };
+        /**
+         * HabitSummaryResponse
+         * @description Habit statistics for a requested period.
+         */
+        HabitSummaryResponse: {
+            /** Habits */
+            habits: components["schemas"]["HabitSummaryItem"][];
+            /** Period Days */
+            period_days: number;
+        };
+        /**
          * HabitUpdate
          * @description Schema for updating an existing habit.
          */
@@ -1548,6 +1653,16 @@ export interface components {
             sort_order?: number | null;
             /** Archived */
             archived?: boolean | null;
+        };
+        /**
+         * HealthResponse
+         * @description Public API health and version payload.
+         */
+        HealthResponse: {
+            /** Status */
+            status: string;
+            /** Version */
+            version: string;
         };
         /**
          * NoteCreate
@@ -1686,6 +1801,20 @@ export interface components {
              * @default 0
              */
             score: number;
+        };
+        /**
+         * NoteSummaryResponse
+         * @description Active and trashed note/folder counts.
+         */
+        NoteSummaryResponse: {
+            /** Notes */
+            notes: number;
+            /** Folders */
+            folders: number;
+            /** Trashed Notes */
+            trashed_notes: number;
+            /** Trashed Folders */
+            trashed_folders: number;
         };
         /**
          * NoteUpdate
@@ -2225,6 +2354,36 @@ export interface components {
             };
         };
         /**
+         * RequestValidationErrorResponse
+         * @description Stable envelope returned when FastAPI rejects request input.
+         */
+        RequestValidationErrorResponse: {
+            /**
+             * Detail
+             * @constant
+             */
+            detail: "Request validation failed";
+            /**
+             * Error Type
+             * @constant
+             */
+            error_type: "request_validation_error";
+            /** Errors */
+            errors: components["schemas"]["RequestValidationIssue"][];
+        };
+        /**
+         * RequestValidationIssue
+         * @description One FastAPI request-validation issue exposed to API clients.
+         */
+        RequestValidationIssue: {
+            /** Loc */
+            loc: (string | number)[];
+            /** Msg */
+            msg: string;
+            /** Type */
+            type: string;
+        };
+        /**
          * ScheduleCreate
          * @description Schema for creating a new schedule.
          */
@@ -2300,6 +2459,24 @@ export interface components {
              * @default 1
              */
             version: number;
+        };
+        /**
+         * ScheduleSummaryResponse
+         * @description Schedule completion statistics for a requested period.
+         */
+        ScheduleSummaryResponse: {
+            /** Total */
+            total: number;
+            /** Completed */
+            completed: number;
+            /** Pending */
+            pending: number;
+            /** Overdue */
+            overdue: number;
+            /** Period Days */
+            period_days: number;
+            /** Completion Rate */
+            completion_rate: number;
         };
         /**
          * ScheduleUpdate
@@ -2529,12 +2706,68 @@ export interface components {
             cognitive_mark_summary?: string | null;
         };
         /**
+         * SettingsResponse
+         * @description Bare dynamic key/value settings object.
+         */
+        SettingsResponse: {
+            [key: string]: string;
+        };
+        /**
+         * SettingsUpdateResponse
+         * @description Accepted updates and protected keys rejected by a settings write.
+         */
+        SettingsUpdateResponse: {
+            /** Updated */
+            updated: {
+                [key: string]: string;
+            };
+            /** Rejected */
+            rejected: string[];
+        };
+        /**
          * SpaceCreateRequest
          * @description Request body for space creation.
          */
         SpaceCreateRequest: {
             /** Name */
             name: string;
+        };
+        /**
+         * SpaceResponse
+         * @description Public metadata for one registered space.
+         */
+        SpaceResponse: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Db Path */
+            db_path: string;
+            /** Notes Dir */
+            notes_dir: string;
+            /** Is Default */
+            is_default: boolean;
+            /** Created At */
+            created_at: string;
+            /** Updated At */
+            updated_at: string;
+        };
+        /**
+         * SpaceTokenResponse
+         * @description Space-scoped bearer token response.
+         */
+        SpaceTokenResponse: {
+            /** Space Token */
+            space_token: string;
+            /** Token Type */
+            token_type: string;
+        };
+        /**
+         * StatsOverviewResponse
+         * @description Bare dynamic mapping from requested period names to aggregates.
+         */
+        StatsOverviewResponse: {
+            [key: string]: components["schemas"]["CountDuration"];
         };
         /**
          * StorageType
@@ -2771,6 +3004,20 @@ export interface components {
             estimated_pomodoros: number;
             /** Id */
             id?: string | null;
+        };
+        /**
+         * TaskDistributionResponse
+         * @description Task counts grouped by status and priority.
+         */
+        TaskDistributionResponse: {
+            /** By Status */
+            by_status: {
+                [key: string]: number;
+            };
+            /** By Priority */
+            by_priority: {
+                [key: string]: number;
+            };
         };
         /**
          * TaskResponse
@@ -3011,19 +3258,6 @@ export interface components {
             /** Deleted At */
             deleted_at: string;
         };
-        /** ValidationError */
-        ValidationError: {
-            /** Location */
-            loc: (string | number)[];
-            /** Message */
-            msg: string;
-            /** Error Type */
-            type: string;
-            /** Input */
-            input?: unknown;
-            /** Context */
-            ctx?: Record<string, never>;
-        };
         /**
          * VersionRecordResponse
          * @description Schema for note version history entries.
@@ -3070,18 +3304,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["AuthSetupResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3105,18 +3337,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["AuthLoginResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3124,9 +3354,7 @@ export interface operations {
     verify_token_api_v1_auth_verify_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3138,18 +3366,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["AuthVerifyResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3157,9 +3383,7 @@ export interface operations {
     list_spaces_api_v1_spaces_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3171,18 +3395,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["SpaceResponse"][];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3190,9 +3412,7 @@ export interface operations {
     create_space_api_v1_spaces_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3208,18 +3428,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SpaceResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3227,9 +3445,7 @@ export interface operations {
     get_space_api_v1_spaces__space_id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 space_id: string;
             };
@@ -3243,18 +3459,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SpaceResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3262,9 +3476,7 @@ export interface operations {
     issue_space_token_api_v1_spaces__space_id__token_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 space_id: string;
             };
@@ -3278,18 +3490,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SpaceTokenResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3297,9 +3507,7 @@ export interface operations {
     registry_health_api_v1_meta_health_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3314,13 +3522,13 @@ export interface operations {
                     "application/json": components["schemas"]["RegistryHealthOut"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3331,9 +3539,7 @@ export interface operations {
                 /** @description Filter by category: business|sync_infra|meta|setting */
                 category?: string | null;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3348,13 +3554,13 @@ export interface operations {
                     "application/json": components["schemas"]["EntityListOut"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3362,9 +3568,7 @@ export interface operations {
     get_entity_api_v1_meta_entities__entity_type__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 entity_type: string;
             };
@@ -3381,13 +3585,13 @@ export interface operations {
                     "application/json": components["schemas"]["EntitySpecOut"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3395,9 +3599,7 @@ export interface operations {
     get_entity_schema_api_v1_meta_entities__entity_type__schema_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 entity_type: string;
             };
@@ -3414,13 +3616,13 @@ export interface operations {
                     "application/json": components["schemas"]["EntitySchemaOut"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3437,9 +3639,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3454,13 +3654,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_TaskResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3468,9 +3668,7 @@ export interface operations {
     create_task_api_v1_tasks_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3489,13 +3687,13 @@ export interface operations {
                     "application/json": components["schemas"]["TaskResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3503,9 +3701,7 @@ export interface operations {
     get_task_api_v1_tasks__id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -3522,13 +3718,13 @@ export interface operations {
                     "application/json": components["schemas"]["TaskResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3536,9 +3732,7 @@ export interface operations {
     update_task_api_v1_tasks__id__put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -3559,13 +3753,13 @@ export interface operations {
                     "application/json": components["schemas"]["TaskResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3573,9 +3767,7 @@ export interface operations {
     delete_task_api_v1_tasks__id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -3592,13 +3784,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3611,9 +3803,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3628,13 +3818,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_SessionResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3642,9 +3832,7 @@ export interface operations {
     create_session_api_v1_sessions_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3663,13 +3851,13 @@ export interface operations {
                     "application/json": components["schemas"]["SessionResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3677,9 +3865,7 @@ export interface operations {
     get_session_api_v1_sessions__id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -3696,13 +3882,13 @@ export interface operations {
                     "application/json": components["schemas"]["SessionResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3710,9 +3896,7 @@ export interface operations {
     update_session_api_v1_sessions__id__put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -3733,13 +3917,13 @@ export interface operations {
                     "application/json": components["schemas"]["SessionResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3747,9 +3931,7 @@ export interface operations {
     delete_session_api_v1_sessions__id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -3766,13 +3948,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3783,9 +3965,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3800,13 +3980,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_NoteResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3814,9 +3994,7 @@ export interface operations {
     create_note_api_v1_notes_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3835,13 +4013,13 @@ export interface operations {
                     "application/json": components["schemas"]["NoteResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3854,9 +4032,7 @@ export interface operations {
                 limit?: number;
                 folder_id?: string | null;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -3871,13 +4047,13 @@ export interface operations {
                     "application/json": components["schemas"]["NoteSearchResultItem"][];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3885,9 +4061,7 @@ export interface operations {
     get_note_content_api_v1_notes__id__content_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -3904,13 +4078,13 @@ export interface operations {
                     "text/plain": string;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3918,9 +4092,7 @@ export interface operations {
     update_note_content_api_v1_notes__id__content_put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -3937,13 +4109,13 @@ export interface operations {
                     "application/json": components["schemas"]["NoteResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3951,9 +4123,7 @@ export interface operations {
     list_note_versions_api_v1_notes__id__versions_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -3970,13 +4140,13 @@ export interface operations {
                     "application/json": components["schemas"]["VersionRecordResponse"][];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -3984,9 +4154,7 @@ export interface operations {
     get_note_version_api_v1_notes__id__versions__version_id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
                 version_id: string;
@@ -4004,13 +4172,13 @@ export interface operations {
                     "text/plain": string;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4018,9 +4186,7 @@ export interface operations {
     get_note_api_v1_notes__id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4037,13 +4203,13 @@ export interface operations {
                     "application/json": components["schemas"]["NoteResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4051,9 +4217,7 @@ export interface operations {
     update_note_api_v1_notes__id__put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4074,13 +4238,13 @@ export interface operations {
                     "application/json": components["schemas"]["NoteResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4088,9 +4252,7 @@ export interface operations {
     delete_note_api_v1_notes__id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4107,13 +4269,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4121,9 +4283,7 @@ export interface operations {
     update_note_metadata_api_v1_notes__id__patch: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4144,13 +4304,13 @@ export interface operations {
                     "application/json": components["schemas"]["NoteResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4163,9 +4323,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -4180,13 +4338,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_FolderResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4194,9 +4352,7 @@ export interface operations {
     create_folder_api_v1_folders_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -4215,13 +4371,13 @@ export interface operations {
                     "application/json": components["schemas"]["FolderResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4229,9 +4385,7 @@ export interface operations {
     get_folder_api_v1_folders__id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4248,13 +4402,13 @@ export interface operations {
                     "application/json": components["schemas"]["FolderResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4262,9 +4416,7 @@ export interface operations {
     update_folder_api_v1_folders__id__put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4285,13 +4437,13 @@ export interface operations {
                     "application/json": components["schemas"]["FolderResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4299,9 +4451,7 @@ export interface operations {
     delete_folder_api_v1_folders__id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4318,13 +4468,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4335,9 +4485,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -4352,13 +4500,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_QuickNoteResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4366,9 +4514,7 @@ export interface operations {
     create_quick_note_api_v1_quick_notes_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -4387,13 +4533,13 @@ export interface operations {
                     "application/json": components["schemas"]["QuickNoteResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4401,9 +4547,7 @@ export interface operations {
     convert_quick_note_api_v1_quick_notes__id__convert_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4420,13 +4564,13 @@ export interface operations {
                     "application/json": components["schemas"]["QuickNoteConvertResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4434,9 +4578,7 @@ export interface operations {
     get_quick_note_api_v1_quick_notes__id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4453,13 +4595,13 @@ export interface operations {
                     "application/json": components["schemas"]["QuickNoteResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4467,9 +4609,7 @@ export interface operations {
     update_quick_note_api_v1_quick_notes__id__put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4490,13 +4630,13 @@ export interface operations {
                     "application/json": components["schemas"]["QuickNoteResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4504,9 +4644,7 @@ export interface operations {
     delete_quick_note_api_v1_quick_notes__id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4523,13 +4661,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4542,9 +4680,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -4559,13 +4695,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_ReflectionResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4573,9 +4709,7 @@ export interface operations {
     create_reflection_api_v1_reflections_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -4594,13 +4728,13 @@ export interface operations {
                     "application/json": components["schemas"]["ReflectionResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4608,9 +4742,7 @@ export interface operations {
     get_reflection_api_v1_reflections__id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4627,13 +4759,13 @@ export interface operations {
                     "application/json": components["schemas"]["ReflectionResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4641,9 +4773,7 @@ export interface operations {
     update_reflection_api_v1_reflections__id__put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4664,13 +4794,13 @@ export interface operations {
                     "application/json": components["schemas"]["ReflectionResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4678,9 +4808,7 @@ export interface operations {
     delete_reflection_api_v1_reflections__id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4697,13 +4825,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4714,9 +4842,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -4731,13 +4857,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_HabitResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4745,9 +4871,7 @@ export interface operations {
     create_habit_api_v1_habits_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -4766,13 +4890,13 @@ export interface operations {
                     "application/json": components["schemas"]["HabitResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4780,9 +4904,7 @@ export interface operations {
     get_habit_api_v1_habits__id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4799,13 +4921,13 @@ export interface operations {
                     "application/json": components["schemas"]["HabitResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4813,9 +4935,7 @@ export interface operations {
     update_habit_api_v1_habits__id__put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4836,13 +4956,13 @@ export interface operations {
                     "application/json": components["schemas"]["HabitResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4850,9 +4970,7 @@ export interface operations {
     delete_habit_api_v1_habits__id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -4869,13 +4987,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4886,9 +5004,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 habit_id: string;
             };
@@ -4905,13 +5021,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_HabitCheckInResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4919,9 +5035,7 @@ export interface operations {
     create_check_in_api_v1_habits__habit_id__check_ins_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 habit_id: string;
             };
@@ -4942,13 +5056,13 @@ export interface operations {
                     "application/json": components["schemas"]["HabitCheckInResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4959,9 +5073,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -4976,13 +5088,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_ScheduleResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -4990,9 +5102,7 @@ export interface operations {
     create_schedule_api_v1_schedules_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5011,13 +5121,13 @@ export interface operations {
                     "application/json": components["schemas"]["ScheduleResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5025,9 +5135,7 @@ export interface operations {
     get_schedule_api_v1_schedules__id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -5044,13 +5152,13 @@ export interface operations {
                     "application/json": components["schemas"]["ScheduleResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5058,9 +5166,7 @@ export interface operations {
     update_schedule_api_v1_schedules__id__put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -5081,13 +5187,13 @@ export interface operations {
                     "application/json": components["schemas"]["ScheduleResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5095,9 +5201,7 @@ export interface operations {
     delete_schedule_api_v1_schedules__id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -5114,13 +5218,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5133,9 +5237,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5150,13 +5252,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_TimeBlockResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5164,9 +5266,7 @@ export interface operations {
     create_time_block_api_v1_time_blocks_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5185,13 +5285,13 @@ export interface operations {
                     "application/json": components["schemas"]["TimeBlockResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5199,9 +5299,7 @@ export interface operations {
     get_time_block_api_v1_time_blocks__id__get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -5218,13 +5316,13 @@ export interface operations {
                     "application/json": components["schemas"]["TimeBlockResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5232,9 +5330,7 @@ export interface operations {
     update_time_block_api_v1_time_blocks__id__put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -5255,13 +5351,13 @@ export interface operations {
                     "application/json": components["schemas"]["TimeBlockResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5269,9 +5365,7 @@ export interface operations {
     delete_time_block_api_v1_time_blocks__id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 id: string;
             };
@@ -5288,13 +5382,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5305,9 +5399,7 @@ export interface operations {
                 page?: number;
                 per_page?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5322,13 +5414,13 @@ export interface operations {
                     "application/json": components["schemas"]["PaginatedResponse_TrashItemResponse_"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5336,9 +5428,7 @@ export interface operations {
     cleanup_expired_api_v1_trash_cleanup_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5353,13 +5443,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5367,9 +5457,7 @@ export interface operations {
     restore_item_api_v1_trash__entity_type___entity_id__restore_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 entity_type: string;
                 entity_id: string;
@@ -5387,13 +5475,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5401,9 +5489,7 @@ export interface operations {
     purge_item_api_v1_trash__entity_type___entity_id__delete: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path: {
                 entity_type: string;
                 entity_id: string;
@@ -5421,13 +5507,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5438,9 +5524,7 @@ export interface operations {
                 /** @description Periods to aggregate: today|week|month|total */
                 periods?: string[] | null;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5452,16 +5536,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["StatsOverviewResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5472,9 +5556,7 @@ export interface operations {
                 /** @description Number of days to trend */
                 days?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5486,16 +5568,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FocusTrendResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5503,9 +5585,7 @@ export interface operations {
     stats_task_distribution_api_v1_stats_task_distribution_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5517,16 +5597,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskDistributionResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5537,9 +5617,7 @@ export interface operations {
                 /** @description Date in YYYY-MM-DD format */
                 date: string;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5551,16 +5629,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DailyDetailResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5571,9 +5649,7 @@ export interface operations {
                 /** @description Period in days */
                 days?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5585,16 +5661,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["HabitSummaryResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5605,9 +5681,7 @@ export interface operations {
                 /** @description Period in days */
                 days?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5619,16 +5693,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ScheduleSummaryResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5636,9 +5710,7 @@ export interface operations {
     stats_note_summary_api_v1_stats_note_summary_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5650,16 +5722,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["NoteSummaryResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5667,9 +5739,7 @@ export interface operations {
     get_settings_api_v1_settings_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5681,16 +5751,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SettingsResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5698,9 +5768,7 @@ export interface operations {
     update_settings_api_v1_settings_put: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5718,16 +5786,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SettingsUpdateResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5735,9 +5803,7 @@ export interface operations {
     push_events_api_v1_sync_push_post: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5756,13 +5822,13 @@ export interface operations {
                     "application/json": components["schemas"]["SyncPushResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5778,9 +5844,7 @@ export interface operations {
                 tombstone_since_id?: string;
                 limit?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5795,13 +5859,13 @@ export interface operations {
                     "application/json": components["schemas"]["SyncPullResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5816,9 +5880,7 @@ export interface operations {
                 tombstone_since_id?: string;
                 limit?: number;
             };
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5833,13 +5895,13 @@ export interface operations {
                     "application/json": components["schemas"]["SyncFullResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5847,9 +5909,7 @@ export interface operations {
     sync_status_api_v1_sync_status_get: {
         parameters: {
             query?: never;
-            header?: {
-                authorization?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -5864,13 +5924,13 @@ export interface operations {
                     "application/json": components["schemas"]["SyncStatusResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Domain or request validation error */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                 };
             };
         };
@@ -5890,9 +5950,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["HealthResponse"];
                 };
             };
         };

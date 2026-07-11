@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.deps import get_file_system, get_space_context, get_space_db
 from app.errors import NotFoundError, ValidationError
 from app.file_system.interfaces import FileSystem
+from app.routes.v1.responses import PLAIN_TEXT_VALIDATION_ERROR_RESPONSES
 from app.schemas.common import PaginatedResponse
 from app.schemas.note import (
     NoteCreate,
@@ -103,7 +104,11 @@ async def search_notes(
     ]
 
 
-@router.get("/{id}/content", response_class=PlainTextResponse)
+@router.get(
+    "/{id}/content",
+    response_class=PlainTextResponse,
+    responses=PLAIN_TEXT_VALIDATION_ERROR_RESPONSES,
+)
 async def get_note_content(
     id: str,
     db: AsyncSession = Depends(get_space_db),
@@ -128,7 +133,11 @@ async def list_note_versions(
     return await fs.list_versions(id)
 
 
-@router.get("/{id}/versions/{version_id}", response_class=PlainTextResponse)
+@router.get(
+    "/{id}/versions/{version_id}",
+    response_class=PlainTextResponse,
+    responses=PLAIN_TEXT_VALIDATION_ERROR_RESPONSES,
+)
 async def get_note_version(
     id: str,
     version_id: str,

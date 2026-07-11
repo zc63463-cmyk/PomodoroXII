@@ -18,6 +18,7 @@ from app.auth.security import create_space_token
 from app.db.models.meta import Space
 from app.deps import get_meta_db, require_master_token
 from app.errors import NotFoundError
+from app.schemas.space import SpaceResponse, SpaceTokenResponse
 from app.settings import settings
 
 router = APIRouter()
@@ -42,7 +43,7 @@ def _space_to_dict(space: Space) -> dict[str, Any]:
     }
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=SpaceResponse)
 async def create_space(
     body: SpaceCreateRequest,
     user: dict = Depends(require_master_token),
@@ -69,7 +70,7 @@ async def create_space(
     return _space_to_dict(space)
 
 
-@router.get("")
+@router.get("", response_model=list[SpaceResponse])
 async def list_spaces(
     user: dict = Depends(require_master_token),
     db: AsyncSession = Depends(get_meta_db),
@@ -80,7 +81,7 @@ async def list_spaces(
     return [_space_to_dict(s) for s in spaces]
 
 
-@router.get("/{space_id}")
+@router.get("/{space_id}", response_model=SpaceResponse)
 async def get_space(
     space_id: str,
     user: dict = Depends(require_master_token),
@@ -94,7 +95,7 @@ async def get_space(
     return _space_to_dict(space)
 
 
-@router.post("/{space_id}/token")
+@router.post("/{space_id}/token", response_model=SpaceTokenResponse)
 async def issue_space_token(
     space_id: str,
     user: dict = Depends(require_master_token),

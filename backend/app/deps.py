@@ -5,14 +5,13 @@ Token model:
 - ``type == "space"``  → access scoped to a single ``space_id``.
 """
 
-from __future__ import annotations
-
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 import jwt
-from fastapi import Depends, Header
+from fastapi import Depends, Request, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import decode_access_token
@@ -23,18 +22,42 @@ from app.space_manager import get_space_engine_manager
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# Auth
-# --------------------------------------------------------------------------- #
-async def get_current_user(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+class _LegacyCompatibleHTTPBearer(HTTPBearer):
+    """Keep the raw-header parser's Bearer whitespace behavior."""
+
+    async def __call__(
+        self,
+        request: Request,
+    ) -> HTTPAuthorizationCredentials | None:
+        credentials = await super().__call__(request)
+        if credentials is not None:
+            return credentials
+
+        authorization = request.headers.get("Authorization")
+        if authorization and authorization.lower().startswith("bearer "):
+            return HTTPAuthorizationCredentials(scheme="Bearer", credentials="")
+        return None
+
+
+# Security scheme for OpenAPI docs - auto_error=False so we can raise
+# our own AuthenticationError with the project's error envelope.
+_bearer_scheme = _LegacyCompatibleHTTPBearer(
+    auto_error=False,
+    scheme_name="HTTPBearer",
+)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Security(_bearer_scheme),
+) -> dict[str, Any]:
     """Decode the Bearer token and return its payload.
 
     Raises ``AuthenticationError`` if the header is missing/malformed or
     the token is invalid/expired.
     """
-    if not authorization or not authorization.lower().startswith("bearer "):
+    if credentials is None:
         raise AuthenticationError("Missing or invalid Authorization header")
-    token = authorization.split(" ", 1)[1].strip()
+    token = credentials.credentials.strip()
     try:
         payload = decode_access_token(token)
     except jwt.PyJWTError as exc:

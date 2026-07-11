@@ -9,10 +9,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.routes.v1.responses import V1_VALIDATION_ERROR_RESPONSES
+
 
 def build_v1_router() -> APIRouter:
     """Build the v1 API router with all sub-routers."""
-    router = APIRouter(prefix="/api/v1")
+    router = APIRouter(
+        prefix="/api/v1",
+        responses=V1_VALIDATION_ERROR_RESPONSES,
+    )
 
     # --- Existing meta-layer routers (master token) ---
     from app.routes.v1.auth import router as auth_router

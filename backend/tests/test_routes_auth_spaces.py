@@ -100,11 +100,106 @@ async def test_verify_master_token_returns_valid(client):
     assert data["type"] == "master"
 
 
+@pytest.mark.parametrize(
+    "authorization_template",
+    [
+        pytest.param("Bearer  {token}", id="extra-separator-whitespace"),
+        pytest.param("Bearer {token}   ", id="trailing-token-whitespace"),
+    ],
+)
+async def test_verify_accepts_bearer_token_surrounding_whitespace(
+    client,
+    authorization_template: str,
+):
+    """Bearer credentials retain the raw-header parser's whitespace tolerance."""
+    token = await _setup_and_login(client)
+
+    resp = await client.get(
+        "/api/v1/auth/verify",
+        headers={
+            "Authorization": authorization_template.format(token=token),
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "valid": True,
+        "user_id": "admin",
+        "type": "master",
+    }
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        pytest.param("Bearer ", id="empty-credential"),
+        pytest.param("Bearer    ", id="whitespace-only-credential"),
+    ],
+)
+async def test_verify_empty_bearer_credential_keeps_invalid_token_error(
+    client,
+    authorization: str,
+):
+    """Empty Bearer credentials keep the legacy invalid-token response."""
+    resp = await client.get(
+        "/api/v1/auth/verify",
+        headers={"Authorization": authorization},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json() == {
+        "detail": "Invalid or expired token",
+        "error_type": "authentication_error",
+    }
+
+
+@pytest.mark.parametrize(
+    ("authorization", "expected_detail"),
+    [
+        pytest.param(
+            "Basic credentials",
+            "Missing or invalid Authorization header",
+            id="wrong-scheme",
+        ),
+        pytest.param(
+            "Bearer",
+            "Missing or invalid Authorization header",
+            id="malformed-bearer",
+        ),
+        pytest.param(
+            "Bearer not-a-jwt",
+            "Invalid or expired token",
+            id="invalid-token",
+        ),
+    ],
+)
+async def test_verify_invalid_authorization_keeps_legacy_error_messages(
+    client,
+    authorization: str,
+    expected_detail: str,
+):
+    """Wrong schemes, malformed Bearer, and invalid JWTs keep their messages."""
+    resp = await client.get(
+        "/api/v1/auth/verify",
+        headers={"Authorization": authorization},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json() == {
+        "detail": expected_detail,
+        "error_type": "authentication_error",
+    }
+
+
 @pytest.mark.asyncio
 async def test_verify_missing_token_401(client):
     """GET /verify without a token returns 401."""
     resp = await client.get("/api/v1/auth/verify")
     assert resp.status_code == 401
+    assert resp.json() == {
+        "detail": "Missing or invalid Authorization header",
+        "error_type": "authentication_error",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -250,9 +345,13 @@ async def test_space_token_decoded_by_get_space_context(client):
     assert resp.status_code == 200
     space_token = resp.json()["space_token"]
 
+    from fastapi.security import HTTPAuthorizationCredentials
+
     from app.deps import get_current_user, get_space_context
 
-    payload = await get_current_user(authorization=f"Bearer {space_token}")
+    payload = await get_current_user(
+        credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=space_token)
+    )
     ctx = await get_space_context(user=payload)
     assert ctx["space_id"] == space_id
     assert ctx["user_id"] is not None
