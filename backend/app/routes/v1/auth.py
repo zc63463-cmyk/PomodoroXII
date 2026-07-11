@@ -17,6 +17,7 @@ from app.auth.security import create_master_token, hash_password, verify_passwor
 from app.db.models.meta import MetaSetting
 from app.deps import get_current_user, get_meta_db
 from app.errors import AuthenticationError, ConflictError
+from app.schemas.auth import AuthLoginResponse, AuthSetupResponse, AuthVerifyResponse
 
 router = APIRouter()
 
@@ -27,7 +28,7 @@ class PasswordRequest(BaseModel):
     password: str
 
 
-@router.post("/setup", status_code=201)
+@router.post("/setup", status_code=201, response_model=AuthSetupResponse)
 async def setup_password(
     body: PasswordRequest,
     db: AsyncSession = Depends(get_meta_db),
@@ -54,7 +55,7 @@ async def setup_password(
     return {"message": "Password set"}
 
 
-@router.post("/login")
+@router.post("/login", response_model=AuthLoginResponse)
 async def login(
     body: PasswordRequest,
     db: AsyncSession = Depends(get_meta_db),
@@ -73,7 +74,7 @@ async def login(
     return {"access_token": create_master_token("admin"), "token_type": "bearer"}
 
 
-@router.get("/verify")
+@router.get("/verify", response_model=AuthVerifyResponse)
 async def verify_token(payload: dict = Depends(get_current_user)) -> dict:
     """Verify the current Bearer token and return its claims."""
     return {"valid": True, "user_id": payload["sub"], "type": payload["type"]}

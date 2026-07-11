@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import create_master_token, create_space_token
@@ -19,11 +20,16 @@ async def _run(coro):
     return await asyncio.get_event_loop().run_until_complete(coro)
 
 
+def _cred(token: str) -> HTTPAuthorizationCredentials:
+    """Build an HTTPAuthorizationCredentials for direct dependency calls."""
+    return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+
 @pytest.mark.asyncio
 async def test_get_current_user_decodes_valid_token():
     """A valid space token should decode to its payload."""
     token = create_space_token("spc_1", "user_1")
-    payload = await get_current_user(authorization=f"Bearer {token}")
+    payload = await get_current_user(credentials=_cred(token))
     assert payload["sub"] == "user_1"
     assert payload["type"] == "space"
     assert payload["space_id"] == "spc_1"
@@ -33,13 +39,13 @@ async def test_get_current_user_decodes_valid_token():
 async def test_require_master_token_rejects_space_token():
     """A space token must not satisfy require_master_token."""
     token = create_space_token("spc_1", "user_1")
-    user = await get_current_user(authorization=f"Bearer {token}")
+    user = await get_current_user(credentials=_cred(token))
     with pytest.raises(AuthorizationError):
         await require_master_token(user=user)
 
     # And a master token should pass.
     master = create_master_token("admin")
-    master_user = await get_current_user(authorization=f"Bearer {master}")
+    master_user = await get_current_user(credentials=_cred(master))
     result = await require_master_token(user=master_user)
     assert result["type"] == "master"
 
@@ -72,14 +78,14 @@ async def test_get_space_context_returns_space_id_and_user_id():
             break
 
         token = create_space_token("spc_ctx", "user_ctx")
-        user = await get_current_user(authorization=f"Bearer {token}")
+        user = await get_current_user(credentials=_cred(token))
         ctx = await get_space_context(user=user)
         assert ctx == {"space_id": "spc_ctx", "user_id": "user_ctx"}
 
         # A master token should be rejected by get_space_context.
         with pytest.raises(AuthorizationError):
             master = create_master_token("admin")
-            master_user = await get_current_user(authorization=f"Bearer {master}")
+            master_user = await get_current_user(credentials=_cred(master))
             await get_space_context(user=master_user)
     finally:
         await close_meta_db()
