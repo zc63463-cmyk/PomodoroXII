@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
 
 import pytest
@@ -59,16 +58,12 @@ def _upgrade(environment: str, db_path: Path):
     return engine
 
 
-def _selected_metadata(table_names: set[str]) -> MetaData:
-    importlib.import_module("app.db.base")
-    importlib.import_module("app.models")
-    importlib.import_module("app.db.models.meta")
-    from app.db.base import Base
+def _selected_metadata(environment: str) -> MetaData:
+    from app.db.metadata import get_meta_metadata, get_space_metadata
 
-    metadata = MetaData(naming_convention=Base.metadata.naming_convention)
-    for table_name in sorted(table_names):
-        Base.metadata.tables[table_name].to_metadata(metadata)
-    return metadata
+    if environment == "meta":
+        return get_meta_metadata()
+    return get_space_metadata()
 
 
 def _column_signature(inspector, table_name: str) -> dict[str, tuple[str, bool, str | None]]:
@@ -178,7 +173,7 @@ def test_fresh_head_matches_selected_metadata_key_attributes(
     tmp_path: Path, environment: str, table_names: set[str]
 ) -> None:
     engine = _upgrade(environment, tmp_path / f"{environment}_parity.db")
-    metadata = _selected_metadata(table_names)
+    metadata = _selected_metadata(environment)
     inspector = inspect(engine)
     try:
         for table_name in table_names:

@@ -11,7 +11,7 @@ from typing import Any, Literal
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Connection
 
 DatabaseKind = Literal["meta", "space"]
@@ -19,30 +19,6 @@ DatabaseKind = Literal["meta", "space"]
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _ALEMBIC_INI = (_BACKEND_DIR / "alembic.ini").resolve()
 
-_META_TABLES = frozenset({"spaces", "meta_settings"})
-_SPACE_TABLES = frozenset(
-    {
-        "folders",
-        "habit_check_ins",
-        "habits",
-        "memo_comments",
-        "notes",
-        "quick_notes",
-        "reflections",
-        "schedule_quick_notes",
-        "schedules",
-        "session_quick_notes",
-        "sessions",
-        "settings",
-        "sync_audit_log",
-        "sync_outbox",
-        "task_quick_notes",
-        "tasks",
-        "time_blocks",
-        "tombstones",
-    }
-)
-_TABLES = {"meta": _META_TABLES, "space": _SPACE_TABLES}
 _VERSION_TABLES = {
     "meta": "alembic_version_meta",
     "space": "alembic_version_space",
@@ -62,6 +38,18 @@ def _config(kind: DatabaseKind) -> Config:
     config = Config(str(_ALEMBIC_INI), ini_section=f"alembic:{kind}")
     config.get_main_option("script_location")
     return config
+
+
+def _metadata(kind: DatabaseKind) -> MetaData:
+    from app.db.metadata import get_meta_metadata, get_space_metadata
+
+    if kind == "meta":
+        return get_meta_metadata()
+    return get_space_metadata()
+
+
+def _table_names(kind: DatabaseKind) -> frozenset[str]:
+    return frozenset(_metadata(kind).tables)
 
 
 def _single_head(config: Config) -> str:
@@ -124,18 +112,13 @@ def _inspector_fingerprint(connection: Connection, table_names: frozenset[str]) 
 
 
 def _expected_legacy_fingerprint(kind: DatabaseKind) -> dict[str, Any]:
-    import app.models  # noqa: F401
-    from app.db.base import Base
-    from app.db.models import meta  # noqa: F401
-
+    metadata = _metadata(kind)
+    table_names = _table_names(kind)
     engine = create_engine("sqlite://")
     try:
-        Base.metadata.create_all(
-            engine,
-            tables=[Base.metadata.tables[name] for name in sorted(_TABLES[kind])],
-        )
+        metadata.create_all(engine)
         with engine.connect() as connection:
-            return _inspector_fingerprint(connection, _TABLES[kind])
+            return _inspector_fingerprint(connection, table_names)
     finally:
         engine.dispose()
 
@@ -145,7 +128,7 @@ def _classify_schema(
     kind: DatabaseKind,
     known_revisions: set[str],
 ) -> Literal["fresh", "legacy", "managed"]:
-    expected_tables = _TABLES[kind]
+    expected_tables = _table_names(kind)
     version_table = _VERSION_TABLES[kind]
     tables = set(inspect(connection).get_table_names())
     present_version_tables = tables & _ALL_VERSION_TABLES
@@ -213,7 +196,7 @@ def _migrate_file(kind: DatabaseKind, path: Path) -> None:
 
 def run_migrations(kind: DatabaseKind, db_path: Path) -> None:
     """Atomically upgrade one SQLite database, adopting only an exact legacy schema."""
-    if kind not in _TABLES:
+    if kind not in _VERSION_TABLES:
         raise ValueError(f"unsupported database kind: {kind!r}")
 
     path = Path(db_path).expanduser().resolve()

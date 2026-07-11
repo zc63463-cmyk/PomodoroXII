@@ -1,8 +1,8 @@
 """Meta-level ORM models: space registry + global settings.
 
 These tables live in the *meta* database only (never in a per-space
-database). The schema mirrors ``alembic/versions/001_initial.py`` so
-that ``Base.metadata.create_all`` and Alembic produce identical DDL.
+database). The schema is registered only on ``MetaBase.metadata`` so Meta and Space
+migrations can evolve independently.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import MetaBase
 
 
 def _utc_now_iso() -> str:
@@ -20,7 +20,7 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class Space(Base):
+class Space(MetaBase):
     """A user space: owns its own SQLite DB and notes directory.
 
     Attributes:
@@ -45,7 +45,7 @@ class Space(Base):
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False, default=_utc_now_iso)
 
 
-class MetaSetting(Base):
+class MetaSetting(MetaBase):
     """Global key/value setting stored in the meta database."""
 
     __tablename__ = "meta_settings"
