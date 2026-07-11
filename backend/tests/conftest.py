@@ -136,16 +136,22 @@ def _isolate_env(
     import app.settings as settings_module
     importlib.reload(settings_module)
 
-    # db.base has no settings dep, but models import Base from it; keep order.
+    # db.base has no settings dep, but models import its bases; keep order.
+    # Purge model modules before reloading the bases so every ORM class is
+    # registered exactly once on the fresh registries. Reloading a model module
+    # in place leaves its previous class in SQLAlchemy's string lookup table.
+    import sys
+
+    for key in list(sys.modules.keys()):
+        if key == "app.db.models" or key.startswith("app.db.models."):
+            del sys.modules[key]
+
     import app.db.base as db_base_module
     importlib.reload(db_base_module)
-    import app.db.models.meta as models_meta_module
-    # The import above may register tables on the new Base.metadata.
-    # Clear them so the subsequent reload can register fresh.
-    db_base_module.Base.metadata.clear()
-    importlib.reload(models_meta_module)
+    import app.db.metadata as db_metadata_module
     import app.db.models as models_module
-    importlib.reload(models_module)
+    import app.db.models.meta as models_meta_module  # noqa: F401
+    importlib.reload(db_metadata_module)
     import app.db.session as db_session_module
     importlib.reload(db_session_module)
     import app.db.meta_session as meta_session_module

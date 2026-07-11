@@ -36,17 +36,14 @@ def _sqlite_url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
 
 
-def _create_legacy_schema(path: Path, table_names: set[str]) -> None:
-    import app.models  # noqa: F401
-    from app.db.base import Base
-    from app.db.models import meta  # noqa: F401
+def _create_legacy_schema(path: Path, database_kind: str) -> None:
+    from app.db.metadata import get_meta_metadata, get_space_metadata
+
+    metadata = get_meta_metadata() if database_kind == "meta" else get_space_metadata()
 
     engine = create_engine(_sqlite_url(path))
     try:
-        Base.metadata.create_all(
-            engine,
-            tables=[Base.metadata.tables[name] for name in sorted(table_names)],
-        )
+        metadata.create_all(engine)
     finally:
         engine.dispose()
 
@@ -113,7 +110,7 @@ def test_exact_create_all_legacy_schema_is_adopted_without_data_loss(
     from app.db.migrations import run_migrations
 
     path = tmp_path / f"legacy-{database_kind}.db"
-    _create_legacy_schema(path, table_names)
+    _create_legacy_schema(path, database_kind)
     engine = create_engine(_sqlite_url(path))
     with engine.begin() as connection:
         connection.execute(text(marker_sql))
@@ -136,7 +133,7 @@ def test_legacy_schema_with_column_drift_fails_closed(tmp_path: Path) -> None:
     from app.db.migrations import MigrationSafetyError, run_migrations
 
     path = tmp_path / "legacy-column-drift.db"
-    _create_legacy_schema(path, META_TABLES)
+    _create_legacy_schema(path, "meta")
     engine = create_engine(_sqlite_url(path))
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE spaces ADD COLUMN unexpected TEXT"))
@@ -153,7 +150,7 @@ def test_legacy_schema_with_partial_index_predicate_drift_fails_closed(tmp_path:
     from app.db.migrations import MigrationSafetyError, run_migrations
 
     path = tmp_path / "legacy-index-drift.db"
-    _create_legacy_schema(path, SPACE_TABLES)
+    _create_legacy_schema(path, "space")
     engine = create_engine(_sqlite_url(path))
     with engine.begin() as connection:
         connection.execute(text("DROP INDEX uq_folder_root_name"))
@@ -173,7 +170,7 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
     from app.db.migrations import run_migrations
 
     path = tmp_path / "legacy-space-data.db"
-    _create_legacy_schema(path, SPACE_TABLES)
+    _create_legacy_schema(path, "space")
     engine = create_engine(_sqlite_url(path))
     with engine.begin() as connection:
         connection.execute(
@@ -197,7 +194,7 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
             ).scalar_one() == "2026-01-01T00:00:00.000Z"
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_006_sync_timestamp_normalize"
+            ).scalar_one() == "space_007_session_mood_check"
     finally:
         engine.dispose()
 
@@ -299,7 +296,7 @@ def test_legacy_single_chain_wrong_or_multiple_versions_fail_closed(
     from app.db.migrations import MigrationSafetyError, run_migrations
 
     path = tmp_path / f"bad-version-{version_table}-{len(version_rows)}.db"
-    _create_legacy_schema(path, META_TABLES)
+    _create_legacy_schema(path, "meta")
     engine = create_engine(_sqlite_url(path))
     with engine.begin() as connection:
         connection.execute(text(f"CREATE TABLE {version_table} (version_num VARCHAR(64) NOT NULL)"))

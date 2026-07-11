@@ -4,22 +4,19 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import MetaData, inspect, pool
+from sqlalchemy import inspect, pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from app.db.base import Base
-from app.models import *  # noqa: F401, F403
+from app.db.metadata import get_space_metadata
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+target_metadata = get_space_metadata()
+SPACE_TABLES = frozenset(target_metadata.tables)
 META_TABLES = {"meta_settings", "spaces"}
-SPACE_TABLES = set(Base.metadata.tables) - META_TABLES
-target_metadata = MetaData(naming_convention=Base.metadata.naming_convention)
-for table_name in sorted(SPACE_TABLES):
-    Base.metadata.tables[table_name].to_metadata(target_metadata)
 
 
 def _assert_safe_schema(connection: Connection) -> None:
