@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.errors import register_exception_handlers
 from app.logging import setup_logging
 from app.middleware import RequestIdMiddleware, SecurityHeadersMiddleware
+from app.schemas.common import HealthResponse
 from app.settings import settings
 
 logger = logging.getLogger("pomodoroxi")
@@ -92,7 +93,7 @@ def create_app() -> FastAPI:
     from app.routes.v1 import build_v1_router
     app.include_router(build_v1_router())
 
-    @app.get("/api/health")
+    @app.get("/api/health", response_model=HealthResponse)
     async def health_check() -> dict:
         """Health check endpoint for orchestrators / load balancers."""
         return {"status": "ok", "version": "0.1.0"}
