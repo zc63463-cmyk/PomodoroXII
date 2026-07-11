@@ -1,4 +1,5 @@
-import { db } from '@/services/space-db'
+import type { PomodoroXIDB } from '@/services/database'
+import { db, spaceDBManager } from '@/services/space-db'
 import type { CachedNote, CachedQuickNote, QuickNote } from '@/types'
 import {
   isActiveQuickNote,
@@ -118,16 +119,23 @@ export type QuickNoteOutboxHook = (
   context: QuickNoteMutationContext,
 ) => Promise<void> | void
 
-let quickNoteOutboxHook: QuickNoteOutboxHook | null = enqueueQuickNoteOutbox
+type QuickNoteOutboxConfiguration =
+  | { kind: 'default' }
+  | { kind: 'disabled' }
+  | { kind: 'custom'; hook: QuickNoteOutboxHook }
+
+let quickNoteOutboxConfiguration: QuickNoteOutboxConfiguration = { kind: 'default' }
 
 export function configureQuickNoteOutboxHook(
   hook: QuickNoteOutboxHook | null,
 ): void {
-  quickNoteOutboxHook = hook
+  quickNoteOutboxConfiguration = hook === null
+    ? { kind: 'disabled' }
+    : { kind: 'custom', hook }
 }
 
 export function resetQuickNoteOutboxHook(): void {
-  quickNoteOutboxHook = enqueueQuickNoteOutbox
+  quickNoteOutboxConfiguration = { kind: 'default' }
 }
 
 export async function listQuickNotes(query = ''): Promise<QuickNote[]> {
@@ -189,9 +197,38 @@ export async function listQuickNoteLifecycleStates(): Promise<
 export async function createQuickNote(
   input: QuickNoteCreateInput,
 ): Promise<QuickNote> {
+  const database = spaceDBManager.current
+
+  return database.transaction(
+    'rw',
+    database.quickNotes,
+    database.outbox,
+    () => createQuickNoteInTransaction(database, input),
+  )
+}
+
+/** @internal Call only from a transaction containing quickNotes and outbox. */
+export async function createQuickNoteInTransaction(
+  database: PomodoroXIDB,
+  input: QuickNoteCreateInput,
+): Promise<QuickNote> {
+  const note = buildQuickNote(input)
+
+  await database.quickNotes.put(toCachedQuickNote(note))
+  await runConfiguredQuickNoteOutbox(database, {
+    entityType: 'quickNote',
+    entityId: note.id,
+    action: 'create',
+    payload: note,
+  })
+
+  return note
+}
+
+function buildQuickNote(input: QuickNoteCreateInput): QuickNote {
   const now = new Date().toISOString()
   const content = normalizeContent(input.content)
-  const note: QuickNote = {
+  return {
     id: input.id ?? crypto.randomUUID(),
     content,
     mood: input.mood ?? null,
@@ -206,14 +243,6 @@ export async function createQuickNote(
     created_at: input.created_at ?? now,
     updated_at: input.updated_at ?? now,
   }
-
-  await runQuickNoteMutation(
-    { action: 'create', entityId: note.id, payload: note },
-    async () => {
-      await db.quickNotes.put(toCachedQuickNote(note))
-    },
-  )
-  return note
 }
 
 export async function updateQuickNote(
@@ -333,14 +362,12 @@ export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConve
     await db.quickNotes.put(convertedRow)
 
     await enqueueOutbox(db, 'note', noteId, 'create', stripNoteSyncFields(note))
-    if (quickNoteOutboxHook) {
-      await quickNoteOutboxHook({
-        entityType: 'quickNote',
-        entityId: id,
-        action: 'update',
-        payload: stripSyncFields(convertedRow),
-      })
-    }
+    await runConfiguredQuickNoteOutbox(db, {
+      entityType: 'quickNote',
+      entityId: id,
+      action: 'update',
+      payload: stripSyncFields(convertedRow),
+    })
 
     return { noteId, quickNoteId: id }
   })
@@ -358,8 +385,8 @@ async function runQuickNoteMutation<T>(
     const { result, payload } = normalizeQuickNoteMutationResult(written)
     const hookPayload = payload ?? context.payload
 
-    if (context.sync !== false && quickNoteOutboxHook && hookPayload) {
-      await quickNoteOutboxHook({
+    if (context.sync !== false && hookPayload) {
+      await runConfiguredQuickNoteOutbox(db, {
         entityType: 'quickNote',
         entityId: context.entityId,
         action: context.action,
@@ -371,11 +398,18 @@ async function runQuickNoteMutation<T>(
   })
 }
 
-async function enqueueQuickNoteOutbox(
+async function runConfiguredQuickNoteOutbox(
+  database: PomodoroXIDB,
   context: QuickNoteMutationContext,
 ): Promise<void> {
+  if (quickNoteOutboxConfiguration.kind === 'disabled') return
+  if (quickNoteOutboxConfiguration.kind === 'custom') {
+    await quickNoteOutboxConfiguration.hook(context)
+    return
+  }
+
   await enqueueOutbox(
-    db,
+    database,
     context.entityType,
     context.entityId,
     context.action,
