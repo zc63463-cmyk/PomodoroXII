@@ -25,7 +25,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.db.base import Base
+from app.db.migrations import run_migrations
 from app.db.session import create_engine, create_session_factory
 from app.settings import settings
 
@@ -42,6 +42,7 @@ class SpaceEngineManager:
             OrderedDict()
         )
         self._lock = asyncio.Lock()
+        self._initializations: dict[str, asyncio.Task[AsyncEngine]] = {}
 
     # ------------------------------------------------------------------ #
     # Engine access
@@ -54,35 +55,43 @@ class SpaceEngineManager:
             db_path: Optional explicit DB path. Defaults to
                 ``settings.space_db_path(space_id)``.
         """
-        # Fast path: already cached.
+        path = (
+            Path(str(db_path)) if db_path is not None else settings.space_db_path(space_id)
+        ).expanduser().resolve()
+        path_key = str(path)
         async with self._lock:
             entry = self._engines.get(space_id)
             if entry is not None:
                 self._engines.move_to_end(space_id)
                 return entry[0]
+            task = self._initializations.get(path_key)
+            if task is None:
+                task = asyncio.create_task(self._create_engine(space_id, path))
+                self._initializations[path_key] = task
 
-        # Slow path: create outside the lock (double-check on re-entry).
-        path = Path(str(db_path)) if db_path is not None else settings.space_db_path(space_id)
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                async with self._lock:
+                    if self._initializations.get(path_key) is task:
+                        self._initializations.pop(path_key, None)
+
+    async def _create_engine(self, space_id: str, path: Path) -> AsyncEngine:
         path.parent.mkdir(parents=True, exist_ok=True)
-        url = f"sqlite+aiosqlite:///{path.as_posix()}"
-        engine = create_engine(url, echo=settings.debug)
-        await self._init_schema(engine)
-
+        await self._init_schema(path)
+        engine = create_engine(f"sqlite+aiosqlite:///{path.as_posix()}", echo=settings.debug)
         async with self._lock:
-            # Double-check: another coroutine may have inserted it.
             entry = self._engines.get(space_id)
             if entry is not None:
-                # Someone beat us — discard our freshly created engine.
                 await engine.dispose()
                 self._engines.move_to_end(space_id)
                 return entry[0]
-
-            factory = create_session_factory(engine)
-            self._engines[space_id] = (engine, factory)
+            self._engines[space_id] = (engine, create_session_factory(engine))
             self._engines.move_to_end(space_id)
             self._evict_if_needed()
-            logger.info("Created engine for space %s at %s", space_id, path)
-            return engine
+        logger.info("Created engine for space %s at %s", space_id, path)
+        return engine
 
     async def get_session_factory(
         self, space_id: str, db_path: Any | None = None
@@ -142,21 +151,9 @@ class SpaceEngineManager:
     # Schema init
     # ------------------------------------------------------------------ #
     @staticmethod
-    async def _init_schema(engine: AsyncEngine) -> None:
-        """Create business tables (excluding meta tables) for this engine.
-
-        Uses ``run_sync`` so the (sync) ``create_all`` call runs in a
-        thread and does not block the event loop.  Meta tables (``spaces``,
-        ``meta_settings``) are excluded — they belong only in the meta DB.
-        """
-        from app.db.models.meta import MetaSetting, Space
-
-        _meta_tables = {Space.__table__, MetaSetting.__table__}
-        space_tables = [
-            t for t in Base.metadata.sorted_tables if t not in _meta_tables
-        ]
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all, tables=space_tables)
+    async def _init_schema(db_path: Path) -> None:
+        """Run per-space migrations without blocking the event loop."""
+        await asyncio.to_thread(run_migrations, "space", db_path)
 
 
 # Module-level singleton, instantiated lazily so tests can patch settings.

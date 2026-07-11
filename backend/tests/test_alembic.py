@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
 from tests.migrations import alembic_config, migration_engine
@@ -38,13 +39,16 @@ def test_upgrade_head_is_isolated_and_idempotent(
             command.upgrade(cfg, "head")
             command.upgrade(cfg, "head")
 
+        version_table = cfg.get_main_option("version_table")
         tables = set(inspect(engine).get_table_names())
-        assert tables - {"alembic_version"} == expected_tables
-        assert "alembic_version" in tables
+        assert tables - {version_table} == expected_tables
+        assert version_table in tables
         with engine.connect() as connection:
-            revisions = connection.execute(text("SELECT version_num FROM alembic_version")).all()
+            revisions = connection.execute(
+                text(f'SELECT version_num FROM "{version_table}"')
+            ).all()
         assert len(revisions) == 1
-        assert revisions[0][0] == f"001_{schema}_baseline"
+        assert revisions[0][0] == ScriptDirectory.from_config(cfg).get_current_head()
     finally:
         engine.dispose()
 
@@ -59,7 +63,9 @@ def test_downgrade_base_removes_only_chain_tables(tmp_path: Path, schema: str) -
             command.upgrade(cfg, "head")
             command.downgrade(cfg, "base")
 
-        assert set(inspect(engine).get_table_names()) <= {"alembic_version"}
+        assert set(inspect(engine).get_table_names()) <= {
+            cfg.get_main_option("version_table")
+        }
     finally:
         engine.dispose()
 

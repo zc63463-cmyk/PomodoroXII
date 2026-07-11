@@ -3,11 +3,28 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport
 
 from app.errors import NotFoundError
 from app.main import create_app
+
+
+@pytest.mark.asyncio
+async def test_lifespan_propagates_meta_migration_failure(monkeypatch):
+    import app.db.meta_session as meta_session_module
+    from app.main import lifespan
+
+    async def fail_init():
+        raise RuntimeError("migration failed")
+
+    monkeypatch.setattr(meta_session_module, "init_meta_db", fail_init)
+    application = FastAPI()
+
+    with pytest.raises(RuntimeError, match="migration failed"):
+        async with lifespan(application):
+            pytest.fail("startup must not enter ready state")
 
 
 class TestCreateApp:
