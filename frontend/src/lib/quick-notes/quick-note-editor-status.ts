@@ -10,6 +10,14 @@ export type QuickNoteEditorStatus =
   | 'draft-restored'
   | 'draft-failed'
 
+export type QuickNoteDraftSaveState =
+  | 'idle'
+  | 'dirty'
+  | 'saving'
+  | 'saved'
+  | 'restored'
+  | 'failed'
+
 export type QuickNoteEditorStatusTone =
   | 'muted'
   | 'info'

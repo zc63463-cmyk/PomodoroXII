@@ -42,60 +42,6 @@ export interface QuickNoteDraftStorageAdapter {
   record(snapshot: QuickNoteNewDraftSnapshotV2): Promise<QuickNote>
 }
 
-export interface QuickNoteDraftRepository {
-  load: () => Promise<QuickNoteNewDraftSnapshot | null>
-  save: (content: string, updatedAt?: string) => Promise<void>
-  clear: () => Promise<void>
-}
-
-export function createQuickNoteDraftRepository(
-  database: PomodoroXIDB,
-): QuickNoteDraftRepository {
-  return {
-    async load() {
-      const row = await database.settings.get(QUICK_NOTE_NEW_DRAFT_KEY)
-      if (!row) return null
-
-      try {
-        const snapshot: unknown = JSON.parse(row.value)
-        if (!isSupportedSnapshot(snapshot)) {
-          await database.settings.delete(QUICK_NOTE_NEW_DRAFT_KEY)
-          return null
-        }
-        if (!snapshot.content.trim()) {
-          await database.settings.delete(QUICK_NOTE_NEW_DRAFT_KEY)
-          return null
-        }
-        return snapshot
-      } catch {
-        await database.settings.delete(QUICK_NOTE_NEW_DRAFT_KEY)
-        return null
-      }
-    },
-
-    async save(content, updatedAt = new Date().toISOString()) {
-      if (!content.trim()) {
-        await database.settings.delete(QUICK_NOTE_NEW_DRAFT_KEY)
-        return
-      }
-
-      const snapshot: QuickNoteNewDraftSnapshot = {
-        version: QUICK_NOTE_NEW_DRAFT_VERSION,
-        content,
-        updatedAt,
-      }
-      await database.settings.put({
-        key: QUICK_NOTE_NEW_DRAFT_KEY,
-        value: JSON.stringify(snapshot),
-      })
-    },
-
-    async clear() {
-      await database.settings.delete(QUICK_NOTE_NEW_DRAFT_KEY)
-    },
-  }
-}
-
 export function createDexieQuickNoteDraftAdapter(
   database: PomodoroXIDB,
 ): QuickNoteDraftStorageAdapter {
