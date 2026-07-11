@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_space_context, get_space_db
 from app.models.setting import Setting
+from app.schemas.settings import SettingsResponse, SettingsUpdateResponse
 from app.services.time import utc_now_iso
 
 router = APIRouter()
@@ -27,7 +28,7 @@ router = APIRouter()
 PROTECTED_KEYS = {"id"}
 
 
-@router.get("")
+@router.get("", response_model=SettingsResponse)
 async def get_settings(
     db: AsyncSession = Depends(get_space_db),
     ctx: dict = Depends(get_space_context),
@@ -38,7 +39,7 @@ async def get_settings(
     return {row.key: row.value for row in rows}
 
 
-@router.put("")
+@router.put("", response_model=SettingsUpdateResponse)
 async def update_settings(
     data: dict[str, str],
     db: AsyncSession = Depends(get_space_db),

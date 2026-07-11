@@ -1,6 +1,6 @@
 """Pydantic schemas for statistics / analytics responses."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
 
 
 class FocusStatsResponse(BaseModel):
@@ -18,3 +18,81 @@ class FocusStatsResponse(BaseModel):
     by_task: list[dict] = []
 
     model_config = {"from_attributes": True}
+
+
+class CountDuration(BaseModel):
+    """Count and aggregate duration shared by focus statistics."""
+
+    count: int
+    duration: int
+
+
+class StatsOverviewResponse(RootModel[dict[str, CountDuration]]):
+    """Bare dynamic mapping from requested period names to aggregates."""
+
+
+class FocusTrendPoint(BaseModel):
+    """One date in a focus trend."""
+
+    date: str
+    count: int
+    duration: int
+
+
+class FocusTrendResponse(BaseModel):
+    """Daily focus aggregates for a requested date range."""
+
+    data: list[FocusTrendPoint]
+
+
+class TaskDistributionResponse(BaseModel):
+    """Task counts grouped by status and priority."""
+
+    by_status: dict[str, int]
+    by_priority: dict[str, int]
+
+
+class DailyDetailResponse(BaseModel):
+    """Focus aggregates for one requested date."""
+
+    date: str
+    count: int
+    duration: int
+
+
+class HabitSummaryItem(BaseModel):
+    """Check-in statistics for one active habit."""
+
+    habit_id: str
+    title: str
+    total_check_ins: int
+    check_in_days: int
+    current_streak: int
+    completion_rate: float
+
+
+class HabitSummaryResponse(BaseModel):
+    """Habit statistics for a requested period."""
+
+    habits: list[HabitSummaryItem]
+    period_days: int
+
+
+class ScheduleSummaryResponse(BaseModel):
+    """Schedule completion statistics for a requested period."""
+
+    total: int
+    completed: int
+    pending: int
+    overdue: int
+    period_days: int
+    completion_rate: float
+
+
+class NoteSummaryResponse(BaseModel):
+    """Active and trashed note/folder counts."""
+
+    notes: int
+    folders: int
+    trashed_notes: int
+    trashed_folders: int

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi.security import HTTPAuthorizationCredentials
 
 
 @pytest.mark.asyncio
@@ -52,6 +53,8 @@ async def test_get_space_context_accepts_existing_space_id(client):
         )
     ).json()["space_token"]
 
-    payload = await get_current_user(authorization=f"Bearer {space_token}")
+    payload = await get_current_user(
+        credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=space_token)
+    )
     ctx = await get_space_context(user=payload)
     assert ctx["space_id"] == space_id

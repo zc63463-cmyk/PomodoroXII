@@ -8,7 +8,13 @@ than parsing the human-readable ``detail``.
 from __future__ import annotations
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+from app.schemas.common import (
+    RequestValidationErrorResponse,
+    RequestValidationIssue,
+)
 
 
 class AppError(Exception):
@@ -80,6 +86,27 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "detail": exc.detail,
                 "error_type": exc.error_type,
             },
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _handle_request_validation(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        body = RequestValidationErrorResponse(
+            detail="Request validation failed",
+            error_type="request_validation_error",
+            errors=[
+                RequestValidationIssue(
+                    loc=list(error.get("loc", [])),
+                    msg=error.get("msg", ""),
+                    type=error.get("type", ""),
+                )
+                for error in exc.errors()
+            ],
+        )
+        return JSONResponse(
+            status_code=422,
+            content=body.model_dump(mode="json"),
         )
 
     @app.exception_handler(500)
