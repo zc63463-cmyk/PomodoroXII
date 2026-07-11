@@ -1,3 +1,4 @@
+import Dexie from 'dexie'
 import type { PomodoroXIDB } from '@/services/database'
 import { db, spaceDBManager } from '@/services/space-db'
 import type { CachedNote, CachedQuickNote, QuickNote } from '@/types'
@@ -404,7 +405,9 @@ async function runConfiguredQuickNoteOutbox(
 ): Promise<void> {
   if (quickNoteOutboxConfiguration.kind === 'disabled') return
   if (quickNoteOutboxConfiguration.kind === 'custom') {
-    await quickNoteOutboxConfiguration.hook(context)
+    const hook = quickNoteOutboxConfiguration.hook
+    // Register Dexie's keep-alive before the hook can schedule transaction-bound work.
+    await Dexie.waitFor(Promise.resolve().then(() => hook(context)))
     return
   }
 
