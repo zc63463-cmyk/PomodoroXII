@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { PomodoroXIDB } from '@/services/database'
 import { db, spaceDBManager } from '@/services/space-db'
 import {
   configureQuickNoteOutboxHook,
   convertQuickNoteToNote,
   createQuickNote,
+  createQuickNoteInTransaction,
   getQuickNoteRepositoryUserMessage,
   listQuickNoteLifecycleStates,
   listQuickNotes,
@@ -47,6 +49,38 @@ describe('quick-note-repository', () => {
     })
   })
 
+  it('writes create and default Outbox rows only to the supplied transaction database', async () => {
+    const isolatedDB = new PomodoroXIDB(
+      `quick-note-repo-concrete-${crypto.randomUUID()}`,
+    )
+
+    try {
+      await isolatedDB.transaction(
+        'rw',
+        isolatedDB.quickNotes,
+        isolatedDB.outbox,
+        async () => {
+          await createQuickNoteInTransaction(isolatedDB, {
+            id: 'concrete-create',
+            content: 'captured database #draft',
+          })
+        },
+      )
+
+      expect(await isolatedDB.quickNotes.get('concrete-create')).toMatchObject({
+        id: 'concrete-create',
+        content: 'captured database #draft',
+      })
+      expect(
+        await isolatedDB.outbox.where('entityId').equals('concrete-create').count(),
+      ).toBe(1)
+      expect(await db.quickNotes.get('concrete-create')).toBeUndefined()
+      expect(await db.outbox.where('entityId').equals('concrete-create').count()).toBe(0)
+    } finally {
+      await isolatedDB.delete()
+    }
+  })
+
   it('can disable the outbox hook for explicitly local-only tests', async () => {
     configureQuickNoteOutboxHook(null)
     const note = await createQuickNote({ content: 'local create #draft' })
@@ -57,6 +91,34 @@ describe('quick-note-repository', () => {
     await purgeQuickNote(note.id)
 
     expect(await db.outbox.count()).toBe(0)
+  })
+
+  it('does not perform a late current lookup for a custom legacy mutation', async () => {
+    const database = spaceDBManager.current
+    const note = await createQuickNote({ content: 'custom legacy mutation' })
+    const hook = vi.fn<(context: QuickNoteMutationContext) => void>()
+    configureQuickNoteOutboxHook(hook)
+
+    let entityWriteStarted = false
+    const markEntityWrite = () => {
+      entityWriteStarted = true
+    }
+    database.quickNotes.hook('updating', markEntityWrite)
+    const currentSpy = vi.spyOn(spaceDBManager, 'current', 'get').mockImplementation(() => {
+      if (entityWriteStarted) throw new Error('unexpected late current lookup')
+      return database
+    })
+
+    try {
+      await expect(updateQuickNote(note.id, { pinned: true })).resolves.toMatchObject({
+        id: note.id,
+        pinned: true,
+      })
+      expect(hook).toHaveBeenCalledOnce()
+    } finally {
+      currentSpy.mockRestore()
+      database.quickNotes.hook('updating').unsubscribe(markEntityWrite)
+    }
   })
 
   it('enqueues create, update, trash, and restore in the QuickNote outbox by default', async () => {
@@ -211,6 +273,39 @@ describe('quick-note-repository', () => {
     ])
     expect((await listQuickNotes()).map((item) => item.id)).not.toContain(quickNote.id)
     expect((await listQuickNoteLifecycleStates())[quickNote.id]).toBe('converted')
+  })
+
+  it('does not perform a late current lookup for a disabled conversion hook', async () => {
+    const database = spaceDBManager.current
+    const quickNote = await createQuickNote({
+      id: 'convert-disabled-late-lookup',
+      content: 'disabled conversion hook',
+    })
+    await database.outbox.clear()
+    configureQuickNoteOutboxHook(null)
+
+    let noteOutboxWriteStarted = false
+    const markNoteOutboxWrite = () => {
+      noteOutboxWriteStarted = true
+    }
+    database.outbox.hook('creating', markNoteOutboxWrite)
+    const currentSpy = vi.spyOn(spaceDBManager, 'current', 'get').mockImplementation(() => {
+      if (noteOutboxWriteStarted) throw new Error('unexpected late current lookup')
+      return database
+    })
+
+    try {
+      await expect(convertQuickNoteToNote(quickNote.id)).resolves.toMatchObject({
+        quickNoteId: quickNote.id,
+      })
+    } finally {
+      currentSpy.mockRestore()
+      database.outbox.hook('creating').unsubscribe(markNoteOutboxWrite)
+    }
+
+    expect(await database.outbox.toArray()).toEqual([
+      expect.objectContaining({ entityType: 'note', action: 'create' }),
+    ])
   })
 
   it('rolls back note creation and quick note conversion when conversion sync fails', async () => {
