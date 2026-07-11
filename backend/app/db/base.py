@@ -19,7 +19,16 @@ NAMING_CONVENTION = {
 }
 
 
-class Base(DeclarativeBase):
-    """Base class for all ORM models (meta + per-space)."""
+class MetaBase(DeclarativeBase):
+    """Declarative base for the Meta database schema."""
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+class SpaceBase(DeclarativeBase):
+    """Declarative base for per-space database schemas."""
+
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+Base = SpaceBase

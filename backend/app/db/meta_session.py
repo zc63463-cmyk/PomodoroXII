@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.db.base import Base
+from app.db.base import MetaBase
 from app.db.session import create_engine, create_session_factory
 from app.settings import settings
 
@@ -29,7 +29,7 @@ async def init_meta_db() -> AsyncEngine:
 
     Safe to call multiple times — returns the existing engine on subsequent
     calls. Imports the meta models so their tables register on
-    ``Base.metadata`` before ``create_all`` runs.
+    ``MetaBase.metadata`` before ``create_all`` runs.
     """
     global _meta_engine, _meta_session_factory
 
@@ -45,7 +45,7 @@ async def init_meta_db() -> AsyncEngine:
 
     async with _meta_engine.begin() as conn:
         await conn.run_sync(
-            Base.metadata.create_all,
+            MetaBase.metadata.create_all,
             tables=[Space.__table__, MetaSetting.__table__],
         )
 

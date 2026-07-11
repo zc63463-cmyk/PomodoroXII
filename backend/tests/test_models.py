@@ -4,27 +4,24 @@ from __future__ import annotations
 
 
 class TestModelRegistration:
-    def test_18_models_registered_on_metadata(self):
-        """All 20 tables (2 meta + 16 business + 2 sync audit) should be registered."""
-        import app.models  # noqa: F401 — trigger registration
-        from app.db.base import Base
+    def test_meta_and_space_metadata_are_disjoint(self):
+        """Meta and Space models must register on separate metadata objects."""
+        from app.db.metadata import get_meta_metadata, get_space_metadata
 
-        table_names = set(Base.metadata.tables.keys())
-        expected = {
-            # Meta tables (from Phase A)
-            "spaces", "meta_settings",
-            # Business entities (14 standard with SyncMixin)
+        meta_tables = set(get_meta_metadata().tables)
+        space_tables = set(get_space_metadata().tables)
+        expected_space_tables = {
             "tasks", "sessions", "notes", "folders",
             "quick_notes", "reflections", "habits", "habit_check_ins",
             "schedules", "time_blocks", "memo_comments",
-            # Junction tables (3)
             "session_quick_notes", "schedule_quick_notes", "task_quick_notes",
-            # Special tables (4, no SyncMixin)
-            "tombstones", "settings",
-            "sync_outbox", "sync_audit_log",
+            "tombstones", "settings", "sync_outbox", "sync_audit_log",
         }
-        assert expected.issubset(table_names), f"Missing: {expected - table_names}"
-        assert len(table_names) == 20, f"Expected 20 tables, got {len(table_names)}: {table_names}"
+
+        assert meta_tables == {"spaces", "meta_settings"}
+        assert space_tables == expected_space_tables
+        assert meta_tables.isdisjoint(space_tables)
+        assert len(meta_tables | space_tables) == 20
 
     def test_all_models_import_from_db_base(self):
         """No model should import from app.database — only app.db.base."""
@@ -35,7 +32,8 @@ class TestModelRegistration:
         for fname in os.listdir(models_dir):
             if fname.endswith(".py") and fname != "__init__.py":
                 fpath = os.path.join(models_dir, fname)
-                content = open(fpath, encoding="utf-8").read()
+                with open(fpath, encoding="utf-8") as model_file:
+                    content = model_file.read()
                 assert "from app.database import" not in content, \
                     f"{fname} imports from app.database (should be app.db.base)"
 
