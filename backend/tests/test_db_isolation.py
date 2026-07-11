@@ -11,7 +11,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_meta_db_has_only_2_tables(_isolate_env):
-    """Meta DB should only contain spaces + meta_settings."""
+    """Meta DB should only contain spaces + meta_settings (+ its version table)."""
     from sqlalchemy import inspect
 
     from app.db.meta_session import init_meta_db
@@ -21,8 +21,9 @@ async def test_meta_db_has_only_2_tables(_isolate_env):
         tables = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_table_names()
         )
-    assert set(tables) == {"spaces", "meta_settings"}, (
-        f"Meta DB has extra tables: {set(tables) - {'spaces', 'meta_settings'}}"
+    business = set(tables) - {"alembic_version_meta"}
+    assert business == {"spaces", "meta_settings"}, (
+        f"Meta DB has extra tables: {business - {'spaces', 'meta_settings'}}"
     )
 
 
@@ -70,7 +71,7 @@ async def test_space_db_has_all_business_tables(_isolate_env):
         "schedule_quick_notes", "task_quick_notes", "tombstones",
         "settings", "sync_outbox", "sync_audit_log",
     }
-    actual_business = set(tables) - {"spaces", "meta_settings"}
+    actual_business = set(tables) - {"spaces", "meta_settings", "alembic_version_space", "alembic_version_meta"}
     missing = expected_business_tables - actual_business
     assert not missing, f"Space DB missing business tables: {missing}"
     assert len(actual_business) == 18, (
