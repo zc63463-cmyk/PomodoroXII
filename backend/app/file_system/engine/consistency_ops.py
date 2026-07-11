@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from app.file_system.frontmatter import strip_frontmatter
+
 from .base import _generate_note_id, _sha256, _utc_now_iso
 
 
@@ -33,8 +35,9 @@ class ConsistencyOpsMixin:
                         if not abs_path.exists():
                             missing_files.append(row["note_id"])
                             continue
-                        # C.2: 校验文件内容哈希与 DB content_hash 一致
-                        actual_hash = _sha256(abs_path.read_text(encoding="utf-8"))
+                        # content_hash tracks the Markdown body, never YAML frontmatter.
+                        body = strip_frontmatter(abs_path.read_text(encoding="utf-8"))
+                        actual_hash = _sha256(body)
                         if actual_hash != row["content_hash"]:
                             hash_mismatches.append(row["note_id"])
                     # All .md files in notes/ dir
@@ -90,7 +93,8 @@ class ConsistencyOpsMixin:
                         if row:
                             abs_path = self.root / row[0]
                             if abs_path.exists():
-                                new_hash = _sha256(abs_path.read_text(encoding="utf-8"))
+                                body = strip_frontmatter(abs_path.read_text(encoding="utf-8"))
+                                new_hash = _sha256(body)
                                 conn.execute(
                                     "UPDATE notes SET content_hash = ?, updated_at = ? "
                                     "WHERE note_id = ?",

@@ -1,15 +1,17 @@
-"""space baseline
+"""Create the isolated per-space database schema.
 
-Revision ID: 001_space_baseline
+Revision ID: space_001
 Revises:
-Create Date: 2026-07-11 07:39:37.737800
+Create Date: 2026-07-02 05:47:45.886392
+
 """
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = '001_space_baseline'
+# revision identifiers, used by Alembic.
+revision: str = "space_001"
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -35,7 +37,6 @@ def upgrade() -> None:
     with op.batch_alter_table('folders', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_folders_parent_id'), ['parent_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_folders_trashed_at'), ['trashed_at'], unique=False)
-        batch_op.create_index(batch_op.f('ix_folders_updated_at'), ['updated_at'], unique=False)
         batch_op.create_index('uq_folder_root_name', ['name'], unique=True, sqlite_where=sa.text('parent_id IS NULL'))
 
     op.create_table('habit_check_ins',
@@ -52,7 +53,6 @@ def upgrade() -> None:
     with op.batch_alter_table('habit_check_ins', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_habit_check_ins_date'), ['date'], unique=False)
         batch_op.create_index(batch_op.f('ix_habit_check_ins_habit_id'), ['habit_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_habit_check_ins_updated_at'), ['updated_at'], unique=False)
 
     op.create_table('habits',
     sa.Column('title', sa.String(length=500), nullable=False),
@@ -70,9 +70,6 @@ def upgrade() -> None:
     sa.Column('version', sa.Integer(), nullable=False),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_habits'))
     )
-    with op.batch_alter_table('habits', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_habits_updated_at'), ['updated_at'], unique=False)
-
     op.create_table('memo_comments',
     sa.Column('note_id', sa.String(length=36), nullable=False),
     sa.Column('content', sa.String(length=10000), nullable=False),
@@ -84,7 +81,6 @@ def upgrade() -> None:
     )
     with op.batch_alter_table('memo_comments', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_memo_comments_note_id'), ['note_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_memo_comments_updated_at'), ['updated_at'], unique=False)
 
     op.create_table('notes',
     sa.Column('title', sa.String(length=500), nullable=False),
@@ -100,7 +96,6 @@ def upgrade() -> None:
     sa.Column('created_at', sa.String(length=32), nullable=False),
     sa.Column('updated_at', sa.String(length=32), nullable=False),
     sa.Column('version', sa.Integer(), nullable=False),
-    sa.CheckConstraint("status IN ('active', 'archived')", name=op.f('ck_notes_check_note_status')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_notes'))
     )
     with op.batch_alter_table('notes', schema=None) as batch_op:
@@ -108,7 +103,6 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_notes_folder_id'), ['folder_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_notes_status'), ['status'], unique=False)
         batch_op.create_index(batch_op.f('ix_notes_trashed_at'), ['trashed_at'], unique=False)
-        batch_op.create_index(batch_op.f('ix_notes_updated_at'), ['updated_at'], unique=False)
 
     op.create_table('quick_notes',
     sa.Column('content', sa.String(length=50000), nullable=False),
@@ -134,7 +128,6 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_quick_notes_migrated_to_note_id'), ['migrated_to_note_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_quick_notes_session_id'), ['session_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_quick_notes_trashed_at'), ['trashed_at'], unique=False)
-        batch_op.create_index(batch_op.f('ix_quick_notes_updated_at'), ['updated_at'], unique=False)
 
     op.create_table('reflections',
     sa.Column('date', sa.String(length=10), nullable=False),
@@ -156,7 +149,6 @@ def upgrade() -> None:
         batch_op.create_index('idx_reflection_date_mood', ['date', 'mood'], unique=False)
         batch_op.create_index(batch_op.f('ix_reflections_date'), ['date'], unique=False)
         batch_op.create_index(batch_op.f('ix_reflections_mood'), ['mood'], unique=False)
-        batch_op.create_index(batch_op.f('ix_reflections_updated_at'), ['updated_at'], unique=False)
 
     op.create_table('schedule_quick_notes',
     sa.Column('schedule_id', sa.String(length=36), nullable=False),
@@ -170,7 +162,6 @@ def upgrade() -> None:
     with op.batch_alter_table('schedule_quick_notes', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_schedule_quick_notes_quick_note_id'), ['quick_note_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_schedule_quick_notes_schedule_id'), ['schedule_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_schedule_quick_notes_updated_at'), ['updated_at'], unique=False)
 
     op.create_table('schedules',
     sa.Column('title', sa.String(length=500), nullable=False),
@@ -188,9 +179,6 @@ def upgrade() -> None:
     sa.CheckConstraint("priority IN ('high','medium','low')", name=op.f('ck_schedules_check_schedule_priority')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_schedules'))
     )
-    with op.batch_alter_table('schedules', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_schedules_updated_at'), ['updated_at'], unique=False)
-
     op.create_table('session_quick_notes',
     sa.Column('session_id', sa.String(length=36), nullable=False),
     sa.Column('quick_note_id', sa.String(length=36), nullable=False),
@@ -203,7 +191,6 @@ def upgrade() -> None:
     with op.batch_alter_table('session_quick_notes', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_session_quick_notes_quick_note_id'), ['quick_note_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_session_quick_notes_session_id'), ['session_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_session_quick_notes_updated_at'), ['updated_at'], unique=False)
 
     op.create_table('sessions',
     sa.Column('task_id', sa.String(length=36), nullable=True),
@@ -219,23 +206,19 @@ def upgrade() -> None:
     sa.Column('attention_score', sa.Integer(), nullable=True),
     sa.Column('flow_state_detected', sa.Boolean(), nullable=True),
     sa.Column('flow_state_confidence', sa.Float(), nullable=True),
-    sa.Column('interruption_count', sa.Integer(), server_default='0', nullable=True),
-    sa.Column('total_interruption_duration', sa.Integer(), server_default='0', nullable=True),
+    sa.Column('interruption_count', sa.Integer(), server_default=sa.text('0'), nullable=True),
+    sa.Column('total_interruption_duration', sa.Integer(), server_default=sa.text('0'), nullable=True),
     sa.Column('avg_recovery_time', sa.Integer(), nullable=True),
-    sa.Column('pause_count', sa.Integer(), server_default='0', nullable=True),
-    sa.Column('total_pause_duration', sa.Integer(), server_default='0', nullable=True),
+    sa.Column('pause_count', sa.Integer(), server_default=sa.text('0'), nullable=True),
+    sa.Column('total_pause_duration', sa.Integer(), server_default=sa.text('0'), nullable=True),
     sa.Column('cognitive_mark_summary', sa.String(length=4000), nullable=True),
     sa.Column('id', sa.String(length=36), nullable=False),
     sa.Column('created_at', sa.String(length=32), nullable=False),
     sa.Column('updated_at', sa.String(length=32), nullable=False),
     sa.Column('version', sa.Integer(), nullable=False),
-    sa.CheckConstraint("mood IN ('great','good','normal','bad','terrible') OR mood IS NULL", name=op.f('ck_sessions_check_session_mood')),
     sa.CheckConstraint("type IN ('work','short_break','long_break','free','countdown')", name=op.f('ck_sessions_check_session_type')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_sessions'))
     )
-    with op.batch_alter_table('sessions', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_sessions_updated_at'), ['updated_at'], unique=False)
-
     op.create_table('settings',
     sa.Column('key', sa.String(), nullable=False),
     sa.Column('value', sa.String(), nullable=False),
@@ -251,12 +234,6 @@ def upgrade() -> None:
     sa.Column('created_at', sa.String(length=32), nullable=False),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_sync_audit_log'))
     )
-    with op.batch_alter_table('sync_audit_log', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_sync_audit_log_created_at'), ['created_at'], unique=False)
-        batch_op.create_index(batch_op.f('ix_sync_audit_log_entity_id'), ['entity_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_sync_audit_log_entity_type'), ['entity_type'], unique=False)
-        batch_op.create_index(batch_op.f('ix_sync_audit_log_event_type'), ['event_type'], unique=False)
-
     op.create_table('sync_outbox',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('entity_type', sa.String(length=50), nullable=False),
@@ -267,12 +244,6 @@ def upgrade() -> None:
     sa.Column('synced_at', sa.String(length=32), nullable=True),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_sync_outbox'))
     )
-    with op.batch_alter_table('sync_outbox', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_sync_outbox_created_at'), ['created_at'], unique=False)
-        batch_op.create_index(batch_op.f('ix_sync_outbox_entity_id'), ['entity_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_sync_outbox_entity_type'), ['entity_type'], unique=False)
-        batch_op.create_index(batch_op.f('ix_sync_outbox_synced_at'), ['synced_at'], unique=False)
-
     op.create_table('task_quick_notes',
     sa.Column('task_id', sa.String(length=36), nullable=False),
     sa.Column('quick_note_id', sa.String(length=36), nullable=False),
@@ -285,7 +256,6 @@ def upgrade() -> None:
     with op.batch_alter_table('task_quick_notes', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_task_quick_notes_quick_note_id'), ['quick_note_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_task_quick_notes_task_id'), ['task_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_task_quick_notes_updated_at'), ['updated_at'], unique=False)
 
     op.create_table('tasks',
     sa.Column('title', sa.String(length=500), nullable=False),
@@ -307,12 +277,6 @@ def upgrade() -> None:
     sa.CheckConstraint("status IN ('todo','in_progress','done','archived')", name=op.f('ck_tasks_check_task_status')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_tasks'))
     )
-    with op.batch_alter_table('tasks', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_tasks_due_date'), ['due_date'], unique=False)
-        batch_op.create_index(batch_op.f('ix_tasks_priority'), ['priority'], unique=False)
-        batch_op.create_index(batch_op.f('ix_tasks_status'), ['status'], unique=False)
-        batch_op.create_index(batch_op.f('ix_tasks_updated_at'), ['updated_at'], unique=False)
-
     op.create_table('time_blocks',
     sa.Column('task_id', sa.String(length=36), nullable=True),
     sa.Column('title', sa.String(length=500), nullable=False),
@@ -335,7 +299,6 @@ def upgrade() -> None:
     with op.batch_alter_table('time_blocks', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_time_blocks_date'), ['date'], unique=False)
         batch_op.create_index(batch_op.f('ix_time_blocks_task_id'), ['task_id'], unique=False)
-        batch_op.create_index(batch_op.f('ix_time_blocks_updated_at'), ['updated_at'], unique=False)
 
     op.create_table('tombstones',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
@@ -362,68 +325,38 @@ def downgrade() -> None:
 
     op.drop_table('tombstones')
     with op.batch_alter_table('time_blocks', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_time_blocks_updated_at'))
         batch_op.drop_index(batch_op.f('ix_time_blocks_task_id'))
         batch_op.drop_index(batch_op.f('ix_time_blocks_date'))
 
     op.drop_table('time_blocks')
-    with op.batch_alter_table('tasks', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_tasks_updated_at'))
-        batch_op.drop_index(batch_op.f('ix_tasks_status'))
-        batch_op.drop_index(batch_op.f('ix_tasks_priority'))
-        batch_op.drop_index(batch_op.f('ix_tasks_due_date'))
-
     op.drop_table('tasks')
     with op.batch_alter_table('task_quick_notes', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_task_quick_notes_updated_at'))
         batch_op.drop_index(batch_op.f('ix_task_quick_notes_task_id'))
         batch_op.drop_index(batch_op.f('ix_task_quick_notes_quick_note_id'))
 
     op.drop_table('task_quick_notes')
-    with op.batch_alter_table('sync_outbox', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_sync_outbox_synced_at'))
-        batch_op.drop_index(batch_op.f('ix_sync_outbox_entity_type'))
-        batch_op.drop_index(batch_op.f('ix_sync_outbox_entity_id'))
-        batch_op.drop_index(batch_op.f('ix_sync_outbox_created_at'))
-
     op.drop_table('sync_outbox')
-    with op.batch_alter_table('sync_audit_log', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_sync_audit_log_event_type'))
-        batch_op.drop_index(batch_op.f('ix_sync_audit_log_entity_type'))
-        batch_op.drop_index(batch_op.f('ix_sync_audit_log_entity_id'))
-        batch_op.drop_index(batch_op.f('ix_sync_audit_log_created_at'))
-
     op.drop_table('sync_audit_log')
     op.drop_table('settings')
-    with op.batch_alter_table('sessions', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_sessions_updated_at'))
-
     op.drop_table('sessions')
     with op.batch_alter_table('session_quick_notes', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_session_quick_notes_updated_at'))
         batch_op.drop_index(batch_op.f('ix_session_quick_notes_session_id'))
         batch_op.drop_index(batch_op.f('ix_session_quick_notes_quick_note_id'))
 
     op.drop_table('session_quick_notes')
-    with op.batch_alter_table('schedules', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_schedules_updated_at'))
-
     op.drop_table('schedules')
     with op.batch_alter_table('schedule_quick_notes', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_schedule_quick_notes_updated_at'))
         batch_op.drop_index(batch_op.f('ix_schedule_quick_notes_schedule_id'))
         batch_op.drop_index(batch_op.f('ix_schedule_quick_notes_quick_note_id'))
 
     op.drop_table('schedule_quick_notes')
     with op.batch_alter_table('reflections', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_reflections_updated_at'))
         batch_op.drop_index(batch_op.f('ix_reflections_mood'))
         batch_op.drop_index(batch_op.f('ix_reflections_date'))
         batch_op.drop_index('idx_reflection_date_mood')
 
     op.drop_table('reflections')
     with op.batch_alter_table('quick_notes', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_quick_notes_updated_at'))
         batch_op.drop_index(batch_op.f('ix_quick_notes_trashed_at'))
         batch_op.drop_index(batch_op.f('ix_quick_notes_session_id'))
         batch_op.drop_index(batch_op.f('ix_quick_notes_migrated_to_note_id'))
@@ -432,7 +365,6 @@ def downgrade() -> None:
 
     op.drop_table('quick_notes')
     with op.batch_alter_table('notes', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_notes_updated_at'))
         batch_op.drop_index(batch_op.f('ix_notes_trashed_at'))
         batch_op.drop_index(batch_op.f('ix_notes_status'))
         batch_op.drop_index(batch_op.f('ix_notes_folder_id'))
@@ -440,23 +372,17 @@ def downgrade() -> None:
 
     op.drop_table('notes')
     with op.batch_alter_table('memo_comments', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_memo_comments_updated_at'))
         batch_op.drop_index(batch_op.f('ix_memo_comments_note_id'))
 
     op.drop_table('memo_comments')
-    with op.batch_alter_table('habits', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_habits_updated_at'))
-
     op.drop_table('habits')
     with op.batch_alter_table('habit_check_ins', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_habit_check_ins_updated_at'))
         batch_op.drop_index(batch_op.f('ix_habit_check_ins_habit_id'))
         batch_op.drop_index(batch_op.f('ix_habit_check_ins_date'))
 
     op.drop_table('habit_check_ins')
     with op.batch_alter_table('folders', schema=None) as batch_op:
         batch_op.drop_index('uq_folder_root_name', sqlite_where=sa.text('parent_id IS NULL'))
-        batch_op.drop_index(batch_op.f('ix_folders_updated_at'))
         batch_op.drop_index(batch_op.f('ix_folders_trashed_at'))
         batch_op.drop_index(batch_op.f('ix_folders_parent_id'))
 

@@ -10,8 +10,8 @@ from sqlalchemy import Engine, create_engine
 
 def alembic_config(schema: str) -> Config:
     backend_dir = Path(__file__).resolve().parents[2]
-    cfg = Config()
-    cfg.set_main_option("script_location", str(backend_dir / f"alembic_{schema}"))
+    cfg = Config(str(backend_dir / "alembic.ini"), ini_section=f"alembic:{schema}")
+    cfg.get_main_option("script_location")
     cfg.config_file_name = None
     return cfg
 

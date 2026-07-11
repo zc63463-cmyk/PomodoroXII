@@ -13,6 +13,8 @@ RUN uv sync --frozen --no-dev
 
 COPY app/ ./app/
 COPY alembic/ ./alembic/
+COPY alembic_meta/ ./alembic_meta/
+COPY alembic_space/ ./alembic_space/
 COPY alembic.ini ./
 
 # Stage 2: runtime
@@ -26,6 +28,8 @@ WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv ./.venv
 COPY --from=builder --chown=app:app /app/app ./app
 COPY --from=builder --chown=app:app /app/alembic ./alembic
+COPY --from=builder --chown=app:app /app/alembic_meta ./alembic_meta
+COPY --from=builder --chown=app:app /app/alembic_space ./alembic_space
 COPY --from=builder --chown=app:app /app/alembic.ini ./alembic.ini
 
 RUN mkdir -p /app/data && chown app:app /app/data

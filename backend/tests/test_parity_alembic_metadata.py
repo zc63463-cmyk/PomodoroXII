@@ -16,7 +16,15 @@ from tests.migrations import alembic_config, migration_engine
 def _normalize_sql(value: Any) -> str | None:
     if value is None:
         return None
-    return re.sub(r"\s+", " ", str(value).strip()).replace('"', "").replace("`", "").lower()
+    normalized = (
+        re.sub(r"\s+", " ", str(value).strip())
+        .replace('"', "")
+        .replace("`", "")
+        .lower()
+    )
+    if re.fullmatch(r"'[+-]?\d+(?:\.\d+)?'", normalized):
+        return normalized[1:-1]
+    return normalized
 
 
 def _schema_signature(inspector: Inspector, table_name: str) -> dict[str, Any]:
@@ -91,10 +99,11 @@ def test_alembic_head_matches_metadata(tmp_path: Path, schema: str) -> None:
             cfg.attributes["connection"] = connection
             command.upgrade(cfg, "head")
         inspector = inspect(engine)
+        version_table = cfg.get_main_option("version_table")
         actual = {
             table_name: _schema_signature(inspector, table_name)
             for table_name in inspector.get_table_names()
-            if table_name != "alembic_version"
+            if table_name != version_table
         }
     finally:
         engine.dispose()
