@@ -1,14 +1,26 @@
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import Dexie from 'dexie'
 import {
   createQuickNoteDraftSessionController,
+  useQuickNoteDraftSession,
 } from '@/components/quick-notes/use-quick-note-draft-session'
 import {
+  QUICK_NOTE_NEW_DRAFT_KEY,
   QUICK_NOTE_NEW_DRAFT_VERSION_V2,
+  createDexieQuickNoteDraftAdapter,
   type QuickNoteDraftLoadResult,
   type QuickNoteDraftRowOwner,
   type QuickNoteDraftStorageAdapter,
   type QuickNoteNewDraftSnapshotV2,
 } from '@/lib/quick-notes/quick-note-draft-repository'
+import {
+  moveQuickNoteToTrash,
+  purgeQuickNote,
+  resetQuickNoteOutboxHook,
+} from '@/lib/quick-notes/quick-note-repository'
+import { PomodoroXIDB } from '@/services/database'
+import { spaceDBManager } from '@/services/space-db'
 import type { QuickNote } from '@/types'
 
 type ControllerInput = Parameters<typeof createQuickNoteDraftSessionController>[0]
@@ -179,6 +191,205 @@ describe('QuickNote draft session controller', () => {
     expect(controller.draft).toBe('revision B')
     expect(controller.saveState).toBe('saved')
     expect(controller.issue).toBeNull()
+    controller.deactivate()
+  })
+
+  it('drains a newer revision after the captured older tail without copying the lane', async () => {
+    const adapter = new ControlledQuickNoteDraftAdapter()
+    const saveA = createDeferred<void>()
+    adapter.saveEffects.push(() => saveA.promise)
+    const controller = createQuickNoteDraftSessionController(controllerOptions(adapter))
+    await flushMicrotasks()
+
+    controller.change('revision A')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(adapter.startedSaves.map(({ content }) => content)).toEqual(['revision A'])
+
+    const drain = controller.drainBeforeSwitch()
+    controller.change('revision B')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(adapter.startedSaves.map(({ content }) => content)).toEqual(['revision A'])
+
+    saveA.resolve(undefined)
+    await drain
+
+    expect(adapter.startedSaves.map(({ content }) => content)).toEqual([
+      'revision A',
+      'revision B',
+    ])
+    expect(adapter.stored).toMatchObject({ content: 'revision B' })
+    controller.deactivate()
+  })
+
+  it('times out one controller drain without poisoning an independent controller lane', async () => {
+    const adapterA = new ControlledQuickNoteDraftAdapter()
+    const saveA = createDeferred<void>()
+    adapterA.saveEffects.push(() => saveA.promise)
+    const controllerA = createQuickNoteDraftSessionController(controllerOptions(adapterA))
+    await flushMicrotasks()
+
+    controllerA.change('Space A')
+    await vi.advanceTimersByTimeAsync(500)
+    const drainA = controllerA.drainBeforeSwitch()
+    await vi.advanceTimersByTimeAsync(3_000)
+    await drainA
+
+    expect(controllerA.draft).toBe('Space A')
+    expect(controllerA.saveState).toBe('failed')
+    expect(controllerA.issue).toEqual({
+      code: 'switch-flush-timeout',
+      retryable: true,
+    })
+
+    controllerA.deactivate()
+    const adapterB = new ControlledQuickNoteDraftAdapter()
+    const controllerB = createQuickNoteDraftSessionController({
+      ...controllerOptions(adapterB),
+      spaceId: 'space-b',
+    })
+    await flushMicrotasks()
+    controllerB.change('Space B')
+    await vi.advanceTimersByTimeAsync(500)
+    await flushMicrotasks()
+
+    expect(adapterB.stored).toMatchObject({ content: 'Space B' })
+    expect(controllerB.draft).toBe('Space B')
+    expect(controllerB.saveState).toBe('saved')
+
+    saveA.resolve(undefined)
+    await flushMicrotasks()
+    expect(controllerB.draft).toBe('Space B')
+    expect(controllerB.saveState).toBe('saved')
+    controllerB.deactivate()
+  })
+
+  it('keeps draining when a same-capture retry replaces a failed forced tail', async () => {
+    const adapter = new ControlledQuickNoteDraftAdapter()
+    const firstSave = createDeferred<void>()
+    const retrySave = createDeferred<void>()
+    adapter.saveEffects.push(
+      () => firstSave.promise,
+      () => retrySave.promise,
+    )
+    const controller = createQuickNoteDraftSessionController(controllerOptions(adapter))
+    await flushMicrotasks()
+
+    controller.change('same capture')
+    const drain = controller.drainBeforeSwitch()
+    const drainSettled = vi.fn()
+    void drain.then(drainSettled)
+    await flushMicrotasks()
+    expect(adapter.startedSaves).toHaveLength(1)
+
+    controller.requestBestEffortFlush()
+    firstSave.reject(new Error('first forced save failed'))
+    await flushMicrotasks()
+
+    expect(adapter.startedSaves).toHaveLength(2)
+    expect(drainSettled).not.toHaveBeenCalled()
+
+    retrySave.resolve(undefined)
+    await drain
+    expect(adapter.stored).toMatchObject({ content: 'same capture' })
+    expect(controller.saveState).toBe('saved')
+    controller.deactivate()
+  })
+
+  it('times out a blank drain when an external draft supersedes its owned row', async () => {
+    const adapter = new ControlledQuickNoteDraftAdapter()
+    const controller = createQuickNoteDraftSessionController(controllerOptions(adapter))
+    await flushMicrotasks()
+
+    controller.change('owned content')
+    await vi.advanceTimersByTimeAsync(500)
+    await flushMicrotasks()
+    adapter.stored = {
+      version: QUICK_NOTE_NEW_DRAFT_VERSION_V2,
+      draftId: 'external-draft',
+      content: 'external content',
+      updatedAt: '2026-07-11T05:00:00.000Z',
+    }
+
+    controller.change('')
+    await flushMicrotasks()
+    expect(adapter.clearCalls).toHaveLength(1)
+
+    const drainClear = createDeferred<void>()
+    adapter.clearEffects.push(() => drainClear.promise)
+    const drain = controller.drainBeforeSwitch()
+    const drainSettled = vi.fn()
+    void drain.then(drainSettled)
+    await flushMicrotasks()
+    expect(adapter.clearCalls).toHaveLength(2)
+
+    drainClear.resolve(undefined)
+    await flushMicrotasks(20)
+    expect(drainSettled).not.toHaveBeenCalled()
+    expect(adapter.clearCalls).toHaveLength(2)
+
+    await vi.advanceTimersByTimeAsync(2_999)
+    expect(drainSettled).not.toHaveBeenCalled()
+    expect(controller.issue).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(1)
+    await drain
+
+    expect(drainSettled).toHaveBeenCalledTimes(1)
+    expect(adapter.clearCalls).toHaveLength(2)
+    expect(adapter.stored).toMatchObject({
+      draftId: 'external-draft',
+      content: 'external content',
+    })
+    expect(controller.saveState).toBe('failed')
+    expect(controller.issue).toEqual({
+      code: 'switch-flush-timeout',
+      retryable: true,
+    })
+    controller.deactivate()
+  })
+
+  it('does not let best-effort flush revive a successfully recorded terminal draft', async () => {
+    const adapter = new ControlledQuickNoteDraftAdapter()
+    const recordGate = createDeferred<void>()
+    adapter.recordEffects.push(() => recordGate.promise)
+    const controller = createQuickNoteDraftSessionController(controllerOptions(adapter))
+    await flushMicrotasks()
+
+    controller.change('record terminal')
+    const operation = controller.record()
+    controller.requestBestEffortFlush()
+    await flushMicrotasks()
+    expect(adapter.recordCalls).toHaveLength(1)
+
+    recordGate.resolve(undefined)
+    await expect(operation).resolves.toMatchObject({ kind: 'recorded' })
+    await flushMicrotasks()
+
+    expect(adapter.startedSaves).toHaveLength(1)
+    expect(adapter.stored).toBeNull()
+    controller.deactivate()
+  })
+
+  it('does not let best-effort flush revive a successfully discarded terminal draft', async () => {
+    const adapter = new ControlledQuickNoteDraftAdapter()
+    const controller = createQuickNoteDraftSessionController(controllerOptions(adapter))
+    await flushMicrotasks()
+
+    controller.change('discard terminal')
+    const clearGate = createDeferred<void>()
+    adapter.clearEffects.push(() => clearGate.promise)
+
+    const operation = controller.discard()
+    controller.requestBestEffortFlush()
+    await flushMicrotasks()
+    expect(adapter.clearCalls).toHaveLength(1)
+
+    clearGate.resolve(undefined)
+    await expect(operation).resolves.toEqual({ kind: 'discarded' })
+    await flushMicrotasks()
+
+    expect(adapter.startedSaves).toHaveLength(0)
+    expect(adapter.stored).toBeNull()
     controller.deactivate()
   })
 
@@ -1216,5 +1427,383 @@ describe('QuickNote draft session controller', () => {
     expect(controller.saveState).toBe('idle')
     expect(controller.issue).toBeNull()
     controller.deactivate()
+  })
+})
+
+async function deleteTestDatabases(
+  ...databases: Array<PomodoroXIDB | null>
+): Promise<void> {
+  spaceDBManager.close()
+  const uniqueDatabases = [...new Set(
+    databases.filter((database): database is PomodoroXIDB => database !== null),
+  )]
+  await Promise.all(uniqueDatabases.map(async (database) => {
+    database.close()
+    await database.delete()
+  }))
+}
+
+async function readStoredV2Draft(
+  database: PomodoroXIDB,
+): Promise<QuickNoteNewDraftSnapshotV2> {
+  const row = await database.settings.get(QUICK_NOTE_NEW_DRAFT_KEY)
+  expect(row).toBeDefined()
+  return JSON.parse(row!.value) as QuickNoteNewDraftSnapshotV2
+}
+
+describe('QuickNote draft session Space lifecycle', () => {
+  beforeEach(() => {
+    vi.useRealTimers()
+    resetQuickNoteOutboxHook()
+    spaceDBManager.close()
+  })
+
+  afterEach(() => {
+    resetQuickNoteOutboxHook()
+    spaceDBManager.close()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('flushBeforeClose persists the mounted hook draft as an exact v2 row', async () => {
+    let database: PomodoroXIDB | null = null
+    let unmount: (() => void) | null = null
+
+    try {
+      const spaceId = `quick-note-session-flush-${crypto.randomUUID()}`
+      await spaceDBManager.switchTo(spaceId)
+      database = spaceDBManager.current
+      const hook = renderHook(() => useQuickNoteDraftSession({
+        onRecorded: () => undefined,
+      }))
+      unmount = hook.unmount
+
+      act(() => hook.result.current.change('flush current text'))
+      await act(async () => {
+        await spaceDBManager.flushBeforeClose()
+      })
+
+      const stored = await readStoredV2Draft(database)
+      expect(stored).toEqual({
+        version: QUICK_NOTE_NEW_DRAFT_VERSION_V2,
+        draftId: expect.any(String),
+        content: 'flush current text',
+        updatedAt: expect.any(String),
+      })
+      expect(stored.draftId.trim()).not.toBe('')
+    } finally {
+      unmount?.()
+      await flushMicrotasks()
+      await deleteTestDatabases(database)
+    }
+  })
+
+  it('migrates a real v1 row to v2 and remounts with the stable migrated draftId', async () => {
+    let database: PomodoroXIDB | null = null
+    let unmountCurrent: (() => void) | null = null
+
+    try {
+      const spaceId = `quick-note-session-migrate-${crypto.randomUUID()}`
+      await spaceDBManager.switchTo(spaceId)
+      database = spaceDBManager.current
+      await database.settings.put({
+        key: QUICK_NOTE_NEW_DRAFT_KEY,
+        value: JSON.stringify({
+          version: 1,
+          content: 'legacy mounted draft',
+          updatedAt: '2026-07-10T04:00:00.000Z',
+        }),
+      })
+
+      const first = renderHook(() => useQuickNoteDraftSession({
+        onRecorded: () => undefined,
+      }))
+      unmountCurrent = first.unmount
+      await waitFor(() => expect(first.result.current.draft).toBe('legacy mounted draft'))
+      await waitFor(async () => {
+        expect((await readStoredV2Draft(database!)).version).toBe(
+          QUICK_NOTE_NEW_DRAFT_VERSION_V2,
+        )
+      })
+      const migrated = await readStoredV2Draft(database)
+
+      first.unmount()
+      unmountCurrent = null
+      await flushMicrotasks()
+
+      const second = renderHook(() => useQuickNoteDraftSession({
+        onRecorded: () => undefined,
+      }))
+      unmountCurrent = second.unmount
+      await waitFor(() => expect(second.result.current.draft).toBe('legacy mounted draft'))
+      expect(second.result.current.saveState).toBe('restored')
+      expect(await readStoredV2Draft(database)).toEqual(migrated)
+      expect(migrated).toMatchObject({
+        version: QUICK_NOTE_NEW_DRAFT_VERSION_V2,
+        draftId: expect.any(String),
+        content: 'legacy mounted draft',
+      })
+    } finally {
+      unmountCurrent?.()
+      await flushMicrotasks()
+      await deleteTestDatabases(database)
+    }
+  })
+
+  it('single-flights one real default record transaction and projection', async () => {
+    let database: PomodoroXIDB | null = null
+    let controller: ReturnType<typeof createQuickNoteDraftSessionController> | null = null
+
+    try {
+      const spaceId = `quick-note-session-record-${crypto.randomUUID()}`
+      await spaceDBManager.switchTo(spaceId)
+      database = spaceDBManager.current
+      const onRecorded = vi.fn((_note: QuickNote): undefined => undefined)
+      controller = createQuickNoteDraftSessionController({
+        spaceId,
+        adapter: createDexieQuickNoteDraftAdapter(database),
+        onRecorded,
+        createDraftId: () => 'real-record-draft',
+        nowIso: () => '2026-07-11T04:00:00.000Z',
+      })
+      await flushMicrotasks()
+
+      controller.change('record once')
+      const first = controller.record()
+      const second = controller.record()
+
+      expect(second).toBe(first)
+      await expect(first).resolves.toMatchObject({
+        kind: 'recorded',
+        visibility: 'refreshed',
+      })
+      expect(await database.quickNotes.count()).toBe(1)
+      expect(await database.outbox.count()).toBe(1)
+      expect(await database.settings.get(QUICK_NOTE_NEW_DRAFT_KEY)).toBeUndefined()
+      expect(onRecorded).toHaveBeenCalledTimes(1)
+    } finally {
+      controller?.deactivate()
+      await deleteTestDatabases(database)
+    }
+  })
+
+  it('does not revive a consumed real draft after its note is trashed and purged', async () => {
+    let database: PomodoroXIDB | null = null
+    let firstController: ReturnType<typeof createQuickNoteDraftSessionController> | null = null
+    let secondController: ReturnType<typeof createQuickNoteDraftSessionController> | null = null
+
+    try {
+      const spaceId = `quick-note-session-purge-${crypto.randomUUID()}`
+      await spaceDBManager.switchTo(spaceId)
+      database = spaceDBManager.current
+      firstController = createQuickNoteDraftSessionController({
+        spaceId,
+        adapter: createDexieQuickNoteDraftAdapter(database),
+        onRecorded: () => undefined,
+        createDraftId: () => 'purged-draft',
+      })
+      await flushMicrotasks()
+
+      firstController.change('consume then purge')
+      await expect(firstController.record()).resolves.toMatchObject({ kind: 'recorded' })
+      await moveQuickNoteToTrash('purged-draft')
+      await purgeQuickNote('purged-draft')
+      firstController.deactivate()
+
+      secondController = createQuickNoteDraftSessionController({
+        spaceId,
+        adapter: createDexieQuickNoteDraftAdapter(database),
+        onRecorded: () => undefined,
+      })
+      await secondController.drainBeforeSwitch()
+
+      expect(secondController.draft).toBe('')
+      expect(secondController.saveState).toBe('idle')
+      expect(secondController.issue).toBeNull()
+      expect(await database.quickNotes.get('purged-draft')).toBeUndefined()
+      expect(await database.settings.get(QUICK_NOTE_NEW_DRAFT_KEY)).toBeUndefined()
+    } finally {
+      firstController?.deactivate()
+      secondController?.deactivate()
+      await deleteTestDatabases(database)
+    }
+  })
+
+  it('installs one controller per successful Space switch and late Space A completion cannot publish into Space B', async () => {
+    let databaseA: PomodoroXIDB | null = null
+    let databaseB: PomodoroXIDB | null = null
+    let unmount: (() => void) | null = null
+    let putSpy: ReturnType<typeof vi.spyOn> | null = null
+    const saveA = createDeferred<void>()
+
+    try {
+      const spaceAId = `quick-note-session-epoch-a-${crypto.randomUUID()}`
+      const spaceBId = `quick-note-session-epoch-b-${crypto.randomUUID()}`
+      await spaceDBManager.switchTo(spaceAId)
+      databaseA = spaceDBManager.current
+      putSpy = vi.spyOn(databaseA.settings, 'put').mockImplementationOnce((row) => (
+        Dexie.Promise.resolve(saveA.promise).then(() => row.key)
+      ))
+
+      const hook = renderHook(() => useQuickNoteDraftSession({
+        onRecorded: () => undefined,
+      }))
+      unmount = hook.unmount
+      act(() => hook.result.current.change('Space A pending'))
+      await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(1), { timeout: 1_500 })
+
+      await act(async () => {
+        await spaceDBManager.switchTo(spaceBId)
+      })
+      databaseB = spaceDBManager.current
+      await waitFor(() => expect(hook.result.current.draft).toBe(''))
+
+      act(() => hook.result.current.change('Space B durable'))
+      await waitFor(() => expect(hook.result.current.saveState).toBe('saved'), {
+        timeout: 1_500,
+      })
+      const storedB = await readStoredV2Draft(databaseB)
+
+      saveA.resolve(undefined)
+      await flushMicrotasks()
+
+      expect(hook.result.current.draft).toBe('Space B durable')
+      expect(hook.result.current.saveState).toBe('saved')
+      expect(await readStoredV2Draft(databaseB)).toEqual(storedB)
+      expect(storedB.content).toBe('Space B durable')
+    } finally {
+      saveA.resolve(undefined)
+      putSpy?.mockRestore()
+      unmount?.()
+      await flushMicrotasks()
+      await deleteTestDatabases(databaseA, databaseB)
+    }
+  }, 8_000)
+
+  it('does not install or deactivate the current controller when target database open fails', async () => {
+    let databaseA: PomodoroXIDB | null = null
+    let unmount: (() => void) | null = null
+    let unsubscribeSwitch: (() => void) | null = null
+    let openSpy: ReturnType<typeof vi.spyOn> | null = null
+
+    try {
+      const spaceAId = `quick-note-session-open-a-${crypto.randomUUID()}`
+      const failedSpaceId = `quick-note-session-open-failed-${crypto.randomUUID()}`
+      await spaceDBManager.switchTo(spaceAId)
+      databaseA = spaceDBManager.current
+      const hook = renderHook(() => useQuickNoteDraftSession({
+        onRecorded: () => undefined,
+      }))
+      unmount = hook.unmount
+      const onSwitch = vi.fn()
+      unsubscribeSwitch = spaceDBManager.onSwitch(onSwitch)
+
+      act(() => hook.result.current.change('current Space remains'))
+      openSpy = vi.spyOn(PomodoroXIDB.prototype, 'open').mockImplementationOnce(() => {
+        throw new Error('target open failed')
+      })
+
+      await expect(act(async () => {
+        await spaceDBManager.switchTo(failedSpaceId)
+      })).rejects.toThrow('target open failed')
+
+      expect(onSwitch).not.toHaveBeenCalled()
+      expect(spaceDBManager.currentSpaceId).toBe(spaceAId)
+      expect(spaceDBManager.current).toBe(databaseA)
+      expect(hook.result.current.draft).toBe('current Space remains')
+
+      act(() => hook.result.current.change('current controller still usable'))
+      await waitFor(() => expect(hook.result.current.saveState).toBe('saved'), {
+        timeout: 1_500,
+      })
+      expect((await readStoredV2Draft(databaseA)).content).toBe(
+        'current controller still usable',
+      )
+    } finally {
+      openSpy?.mockRestore()
+      unsubscribeSwitch?.()
+      unmount?.()
+      await flushMicrotasks()
+      await deleteTestDatabases(databaseA)
+    }
+  })
+
+  it('pagehide observes a rejected best-effort save without unhandledrejection', async () => {
+    let database: PomodoroXIDB | null = null
+    let unmount: (() => void) | null = null
+    const onUnhandled = vi.fn((event: PromiseRejectionEvent) => {
+      event.preventDefault()
+    })
+
+    try {
+      const spaceId = `quick-note-session-pagehide-${crypto.randomUUID()}`
+      await spaceDBManager.switchTo(spaceId)
+      database = spaceDBManager.current
+      const putSpy = vi.spyOn(database.settings, 'put')
+        .mockRejectedValueOnce(new Error('pagehide save failed'))
+      const hook = renderHook(() => useQuickNoteDraftSession({
+        onRecorded: () => undefined,
+      }))
+      unmount = hook.unmount
+      window.addEventListener('unhandledrejection', onUnhandled)
+
+      act(() => hook.result.current.change('pagehide current draft'))
+      act(() => window.dispatchEvent(new Event('pagehide')))
+
+      await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(hook.result.current.issue).toEqual({
+        code: 'save-failed',
+        retryable: true,
+      }))
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
+      expect(onUnhandled).not.toHaveBeenCalled()
+    } finally {
+      unmount?.()
+      await flushMicrotasks()
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
+      window.removeEventListener('unhandledrejection', onUnhandled)
+      expect(onUnhandled).not.toHaveBeenCalled()
+      await deleteTestDatabases(database)
+    }
+  })
+
+  it('unmount requests one best-effort flush then deactivates the epoch', async () => {
+    let database: PomodoroXIDB | null = null
+    let unmount: (() => void) | null = null
+    const save = createDeferred<void>()
+
+    try {
+      const spaceId = `quick-note-session-unmount-${crypto.randomUUID()}`
+      await spaceDBManager.switchTo(spaceId)
+      database = spaceDBManager.current
+      const putSpy = vi.spyOn(database.settings, 'put').mockImplementationOnce((row) => (
+        Dexie.Promise.resolve(save.promise).then(() => row.key)
+      ))
+      const hook = renderHook(() => useQuickNoteDraftSession({
+        onRecorded: () => undefined,
+      }))
+      unmount = hook.unmount
+
+      act(() => hook.result.current.change('unmount current revision'))
+      const publishedBeforeUnmount = hook.result.current
+      hook.unmount()
+      unmount = null
+
+      await waitFor(() => expect(putSpy).toHaveBeenCalledTimes(1))
+      expect(hook.result.current).toBe(publishedBeforeUnmount)
+
+      save.resolve(undefined)
+      await flushMicrotasks()
+      await new Promise<void>((resolve) => setTimeout(resolve, 550))
+
+      expect(putSpy).toHaveBeenCalledTimes(1)
+      expect(hook.result.current).toBe(publishedBeforeUnmount)
+      expect(hook.result.current.draft).toBe('unmount current revision')
+    } finally {
+      save.resolve(undefined)
+      unmount?.()
+      await flushMicrotasks()
+      await deleteTestDatabases(database)
+    }
   })
 })
