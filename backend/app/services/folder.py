@@ -15,6 +15,7 @@ class FolderService(BaseService):
     """Thin service for Folder — excludes trashed, orders by sort_order/name."""
 
     model = Folder
+    entity_type = "folder"
 
     async def list(
         self,

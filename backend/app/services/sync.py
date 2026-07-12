@@ -10,6 +10,7 @@ Iron rules:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -17,9 +18,12 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.note import Note
+from app.models.sync_outbox import SyncOutbox
 from app.models.tombstone import Tombstone
 from app.registry.sync_registry import build_sync_registry
+from app.services.serializers import serialize_entity
 from app.services.sync_entity_types import canonicalize_entity_type
+from app.services.sync_outbox import record_sync_event
 from app.services.sync_safety import (
     check_folder_circular_ref,
     check_lww_conflict,
@@ -119,6 +123,9 @@ class SyncService:
                         # visibility). conflicts is reserved for rejected
                         # events (local/tombstone).
                         if resolution in ("ok", "conflict_remote"):
+                            await self._record_applied_event(
+                                etype, eid, action, payload,
+                            )
                             applied_item: dict[str, str] = {
                                 "entity_type": etype,
                                 "entity_id": eid,
@@ -170,6 +177,9 @@ class SyncService:
                     # visibility). conflicts is reserved for rejected
                     # events (local/tombstone/circular_ref).
                     if resolution in ("ok", "conflict_remote"):
+                        await self._record_applied_event(
+                            etype, eid, action, payload,
+                        )
                         applied_item: dict[str, str] = {
                             "entity_type": etype,
                             "entity_id": eid,
@@ -199,6 +209,41 @@ class SyncService:
             "errors": errors,
             "server_time": utc_now_iso(),
         }
+
+    async def _record_applied_event(
+        self,
+        entity_type: str,
+        entity_id: str,
+        action: str,
+        payload: dict[str, Any],
+    ) -> None:
+        event_payload: dict[str, Any] | None = None
+        if action != "delete":
+            entry = ENTITY_REGISTRY[entity_type]
+            obj = await self.db.get(entry["model"], entity_id)
+            if obj is not None:
+                event_payload = serialize_entity(obj)
+                if entity_type == "note":
+                    body = None
+                    if self.fs is not None:
+                        try:
+                            body = await self.fs.read_note(entity_id)
+                        except (KeyError, FileNotFoundError):
+                            pass
+                    event_payload["content"] = body or ""
+                    event_payload["content_missing"] = body is None
+            else:
+                # Entity was concurrently deleted after push applied it.
+                # Skip recording a phantom update event to prevent clients
+                # from receiving a snapshot of a non-existent entity.
+                return
+        await record_sync_event(
+            self.db,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            action=action,  # type: ignore[arg-type]
+            payload=event_payload,
+        )
 
     async def _check_preflight(
         self,
@@ -401,6 +446,7 @@ class SyncService:
         since_id: str = "",
         tombstone_since_id: str = "",
         tombstones_since_override: str | None = None,
+        cursor: int | None = None,
     ) -> dict[str, Any]:
         """Return all entities updated after *since* grouped by pull_key.
 
@@ -422,7 +468,8 @@ class SyncService:
         behaviour); an empty string means "return ALL tombstones"
         (used by ``full()``).
         """
-        from app.services.sync_safety import serialize_entity
+        if cursor is not None:
+            return await self._pull_by_cursor(cursor=cursor, limit=limit)
 
         since_n = normalize_timestamp(since)
         result: dict[str, Any] = {
@@ -545,6 +592,90 @@ class SyncService:
         await self._flush_pending_audits()
         return result
 
+    async def _pull_by_cursor(self, *, cursor: int, limit: int) -> dict[str, Any]:
+        rows = (
+            await self.db.execute(
+                select(SyncOutbox)
+                .where(SyncOutbox.id > cursor)
+                .order_by(SyncOutbox.id.asc())
+                .limit(limit + 1)
+            )
+        ).scalars().all()
+        has_more = len(rows) > limit
+        scanned = rows[:limit]
+        result: dict[str, Any] = {
+            "server_time": utc_now_iso(),
+            "has_more": has_more,
+            "tombstones_has_more": False,
+            "next_since": "",
+            "next_since_id": "",
+            "next_tombstone_since_id": "",
+            "next_cursor": scanned[-1].id if scanned else cursor,
+            "cursor_version": 2,
+            "tombstones": [],
+        }
+        for entry in ENTITY_REGISTRY.values():
+            result[entry["pull_key"]] = []
+
+        latest: dict[tuple[str, str], SyncOutbox] = {}
+        order: list[tuple[str, str]] = []
+        for event in scanned:
+            key = (event.entity_type, event.entity_id)
+            if key not in latest:
+                order.append(key)
+            latest[key] = event
+
+        note_payloads: list[dict[str, Any]] = []
+        for key in order:
+            event = latest[key]
+            entry = ENTITY_REGISTRY.get(event.entity_type)
+            if entry is None:
+                continue
+            if event.action == "delete":
+                # Use the event timestamp as deleted_at.  This may differ
+                # slightly from the Tombstone.deleted_at used by the legacy
+                # cursor-less path, but both are server-side ISO timestamps
+                # and clients treat this as a monotonic ordering key, not an
+                # exact source-of-truth deletion time.
+                result["tombstones"].append({
+                    "entity_type": event.entity_type,
+                    "entity_id": event.entity_id,
+                    "deleted_at": normalize_timestamp(event.created_at or ""),
+                })
+                continue
+            try:
+                payload = json.loads(event.payload or "{}")
+            except (json.JSONDecodeError, TypeError):
+                payload = {}
+            if not payload:
+                obj = await self.db.get(entry["model"], event.entity_id)
+                if obj is None:
+                    continue
+                payload = serialize_entity(obj)
+            result[entry["pull_key"]].append(payload)
+            if event.entity_type == "note":
+                note_payloads.append(payload)
+
+        missing_note_payloads = [
+            payload for payload in note_payloads if "content" not in payload
+        ]
+        if missing_note_payloads:
+            note_ids = [payload["id"] for payload in missing_note_payloads]
+            if self.fs is not None:
+                contents = await self.fs.read_notes_batch(note_ids)
+            else:
+                contents = [None] * len(note_ids)
+            for payload, body in zip(missing_note_payloads, contents):
+                payload["content"] = body or ""
+                payload["content_missing"] = body is None
+
+        await self._write_audit(
+            "pull", "batch", "",
+            details=f"cursor={cursor} limit={limit} has_more={has_more}",
+        )
+        await self._flush_pending_audits()
+        return result
+
     async def _fetch_tombstones(
         self,
         since: str = "",
@@ -602,6 +733,7 @@ class SyncService:
         *,
         since_id: str = "",
         tombstone_since_id: str = "",
+        cursor: int | None = None,
     ) -> dict[str, Any]:
         """Like pull() but tombstones are returned regardless of *since*.
 
@@ -613,12 +745,19 @@ class SyncService:
         executed exactly once. Tombstones still honour *tombstone_since_id*
         for same-deleted_at pagination even when *since* is bypassed.
         """
+        if cursor == 0:
+            first_event_id = await self.db.scalar(
+                select(SyncOutbox.id).order_by(SyncOutbox.id.asc()).limit(1)
+            )
+            if first_event_id is None:
+                cursor = None
         result = await self.pull(
             since=since,
             limit=limit,
             since_id=since_id,
             tombstone_since_id=tombstone_since_id,
             tombstones_since_override="",
+            cursor=cursor,
         )
         result["is_full"] = True
         return result

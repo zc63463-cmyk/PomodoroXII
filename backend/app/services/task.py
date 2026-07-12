@@ -84,3 +84,12 @@ class TaskService(BaseService):
             await self.db.flush()
         # M1: Always ensure a tombstone exists (idempotent).
         await self._ensure_tombstone(id)
+        if obj is not None:
+            from app.services.sync_outbox import record_sync_event
+
+            await record_sync_event(
+                self.db,
+                entity_type=self.entity_type,
+                entity_id=id,
+                action="delete",
+            )
