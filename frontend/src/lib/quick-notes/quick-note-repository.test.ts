@@ -97,16 +97,20 @@ describe('quick-note-repository', () => {
     expect(sourceRow).toBeDefined()
 
     try {
-      await databaseA.quickNotes.put(sourceRow!)
+      await databaseA.quickNotes.put({ ...sourceRow!, _dirty: false })
       await databaseA.outbox.clear()
 
       await databaseA.transaction(
         'rw',
         databaseA.quickNotes,
         databaseA.outbox,
-        () => updateQuickNoteInTransaction(databaseA, sourceRow!, {
-          content: '  updated content #Shipped  ',
-        }),
+        async () => {
+          const existing = (await databaseA.quickNotes.get(source.id))!
+          expect(existing._dirty).toBe(false)
+          return updateQuickNoteInTransaction(databaseA, existing, {
+            content: '  updated content #Shipped  ',
+          })
+        },
       )
 
       expect(await databaseA.quickNotes.get(source.id)).toMatchObject({
