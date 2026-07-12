@@ -20,7 +20,6 @@ from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
-    NotFoundError,
     SyncCursorExpiredError,
     SyncSnapshotExpiredError,
     ValidationError,
@@ -779,7 +778,7 @@ class SyncService:
         else:
             snapshot = await self.db.get(SyncSnapshot, snapshot_token)
             if snapshot is None:
-                raise NotFoundError("Sync snapshot not found; restart full sync")
+                raise SyncSnapshotExpiredError()
             cutoff = (utc_now() - SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
             if snapshot.created_at < cutoff:
                 await self.db.delete(snapshot)

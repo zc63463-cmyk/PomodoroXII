@@ -91,6 +91,7 @@ class SyncSnapshotExpiredError(AppError):
     detail = "Sync snapshot expired; restart full sync"
     status_code = 409
     error_type = "sync_snapshot_expired"
+    recovery_action = "restart_full_sync"
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -108,6 +109,8 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "current_cursor": exc.current_cursor,
                 "recovery_action": exc.recovery_action,
             })
+        elif isinstance(exc, SyncSnapshotExpiredError):
+            content["recovery_action"] = exc.recovery_action
         return JSONResponse(status_code=exc.status_code, content=content)
 
     @app.exception_handler(RequestValidationError)

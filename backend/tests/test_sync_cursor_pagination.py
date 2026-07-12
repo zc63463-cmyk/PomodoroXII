@@ -731,6 +731,23 @@ async def test_full_snapshot_rejects_offset_without_token_and_offset_past_end(sp
 
 
 @pytest.mark.asyncio
+async def test_missing_snapshot_continuation_uses_stable_expired_error(space_session):
+    from app.errors import SyncSnapshotExpiredError
+    from app.services.sync import SyncService
+
+    with pytest.raises(SyncSnapshotExpiredError) as raised:
+        await SyncService(space_session).full(
+            cursor=0,
+            snapshot_token="already-pruned-snapshot",
+            snapshot_offset=1,
+            limit=10,
+        )
+
+    assert raised.value.error_type == "sync_snapshot_expired"
+    assert raised.value.recovery_action == "restart_full_sync"
+
+
+@pytest.mark.asyncio
 async def test_existing_expired_snapshot_is_rejected(space_session):
     from app.errors import SyncSnapshotExpiredError
     from app.models.sync_state import SyncSnapshot

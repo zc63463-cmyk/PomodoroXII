@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import event, select
 
+from app.models.sync_audit_log import SyncAuditLog
 from app.models.sync_outbox import SyncOutbox
 from app.services.sync_outbox import (
     advance_retention_floor,
@@ -38,6 +39,20 @@ async def test_prune_removes_events_up_to_persisted_floor(space_session):
         await space_session.execute(select(SyncOutbox).order_by(SyncOutbox.id))
     ).scalars().all()
     assert [event.id for event in remaining] == [events[2].id]
+    audits = (
+        await space_session.execute(
+            select(SyncAuditLog).where(
+                SyncAuditLog.event_type.in_([
+                    "retention_floor_advanced",
+                    "retention_pruned",
+                ])
+            )
+        )
+    ).scalars().all()
+    assert [audit.event_type for audit in audits] == [
+        "retention_floor_advanced",
+        "retention_pruned",
+    ]
 
 
 @pytest.mark.asyncio

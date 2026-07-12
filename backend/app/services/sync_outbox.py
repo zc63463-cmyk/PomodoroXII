@@ -17,6 +17,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.sync_audit_log import SyncAuditLog
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
 
@@ -91,6 +92,17 @@ async def advance_retention_floor(db: AsyncSession, *, floor: int) -> None:
             set_={"retention_floor": floor, "current_cursor": current_cursor},
         )
     )
+    db.add(
+        SyncAuditLog(
+            event_type="retention_floor_advanced",
+            entity_type="sync_outbox",
+            entity_id=str(floor),
+            details=json.dumps(
+                {"previous_floor": current_floor, "new_floor": floor},
+                sort_keys=True,
+            ),
+        )
+    )
     await db.flush()
 
 
@@ -105,8 +117,24 @@ async def prune_sync_events(db: AsyncSession, *, before_id: int) -> int:
         raise ValueError("before_id exceeds persisted retention floor")
 
     result = await db.execute(delete(SyncOutbox).where(SyncOutbox.id <= before_id))
+    pruned_count = int(result.rowcount or 0)
+    db.add(
+        SyncAuditLog(
+            event_type="retention_pruned",
+            entity_type="sync_outbox",
+            entity_id=str(before_id),
+            details=json.dumps(
+                {
+                    "before_id": before_id,
+                    "persisted_floor": state.retention_floor,
+                    "pruned_count": pruned_count,
+                },
+                sort_keys=True,
+            ),
+        )
+    )
     await db.flush()
-    return int(result.rowcount or 0)
+    return pruned_count
 
 
 async def get_current_cursor(db: AsyncSession) -> int:

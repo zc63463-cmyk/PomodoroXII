@@ -927,7 +927,100 @@ describe('RealSyncEngine', () => {
     engine.destroy()
   })
 
-  it('EN27: resolveConflict 清空冲突 → onSyncComplete 1 次；回调内 status=idle', async () => {
+  it('EN26: snapshot expired 恢复再次过期时不递归重启', async () => {
+    db = await openTestDb()
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+    let fullCalls = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if ((config.url ?? '').includes('/sync/full')) {
+        fullCalls++
+        throw {
+          response: {
+            status: 409,
+            data: {
+              error_type: 'sync_snapshot_expired',
+              recovery_action: 'restart_full_sync',
+            },
+            config,
+          },
+          message: 'snapshot expired', config, isAxiosError: true, name: 'AxiosError',
+        }
+      }
+      if ((config.url ?? '').includes('/sync/push')) return ok(emptyPushResponse(), config)
+      return errResponse(404, config)
+    }
+
+    await engine.fullSync()
+
+    expect(fullCalls).toBe(2)
+    expect(engine.getStatus()).toBe('error')
+    engine.destroy()
+  })
+
+  it('EN27: 两个 pre-push 冲突可按实体精确解决，不误操作首项', async () => {
+    db = await openTestDb()
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+    await db.tasks.bulkPut([
+      { id: 'first', title: 'local-first', _dirty: true },
+      { id: 'second', title: 'local-second', _dirty: true },
+    ] as never[])
+    await db.outbox.bulkAdd([
+      { entityType: 'task', entityId: 'first', action: 'update', payload: '{}', createdAt: 1, synced: false },
+      { entityType: 'task', entityId: 'second', action: 'update', payload: '{}', createdAt: 2, synced: false },
+    ] as never[])
+    const internal = engine as unknown as { conflicts: unknown[]; setStatus: (s: string) => void }
+    internal.conflicts = [
+      { outboxId: -1, entityType: 'task', entityId: 'first', localVersion: {}, remoteVersion: { id: 'first', title: 'remote-first' }, conflictType: 'version' },
+      { outboxId: -1, entityType: 'task', entityId: 'second', localVersion: {}, remoteVersion: { id: 'second', title: 'remote-second' }, conflictType: 'version' },
+    ]
+    internal.setStatus('conflict')
+
+    await engine.resolveConflict(
+      -1,
+      'accept-remote',
+      { entityType: 'task', entityId: 'second' },
+    )
+
+    expect((await db.tasks.get('first'))?.title).toBe('local-first')
+    expect((await db.tasks.get('second'))?.title).toBe('remote-second')
+    expect(await db.outbox.where('entityId').equals('first').count()).toBe(1)
+    expect(await db.outbox.where('entityId').equals('second').count()).toBe(0)
+    expect(engine.getConflicts().map((item) => item.entityId)).toEqual(['first'])
+    engine.destroy()
+  })
+
+  it('EN28: pre-push accept-remote 删除 outbox 失败时实体覆盖一并回滚', async () => {
+    db = await openTestDb()
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+    await db.tasks.put({ id: 'atomic', title: 'local', _dirty: true } as never)
+    await db.outbox.add({
+      entityType: 'task', entityId: 'atomic', action: 'update', payload: '{}', createdAt: 1, synced: false,
+    } as never)
+    const internal = engine as unknown as { conflicts: unknown[]; setStatus: (s: string) => void }
+    internal.conflicts = [{
+      outboxId: -1, entityType: 'task', entityId: 'atomic',
+      localVersion: {}, remoteVersion: { id: 'atomic', title: 'remote' }, conflictType: 'version',
+    }]
+    internal.setStatus('conflict')
+    vi.spyOn(db.outbox, 'bulkDelete').mockImplementation(() => {
+      throw new Error('outbox delete failed')
+    })
+
+    await expect(engine.resolveConflict(
+      -1,
+      'accept-remote',
+      { entityType: 'task', entityId: 'atomic' },
+    )).rejects.toThrow('outbox delete failed')
+
+    expect((await db.tasks.get('atomic'))?.title).toBe('local')
+    expect(await db.outbox.where('entityId').equals('atomic').count()).toBe(1)
+    engine.destroy()
+  })
+
+  it('EN29: resolveConflict 清空冲突 → onSyncComplete 1 次；回调内 status=idle', async () => {
     db = await openTestDb()
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))

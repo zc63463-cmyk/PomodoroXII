@@ -22,6 +22,7 @@ export interface SyncEngine {
   resolveConflict(
     outboxId: number,
     resolution: 'accept-remote' | 'keep-local',
+    target?: { entityType: string; entityId: string },
   ): Promise<void>
   fullSync(): Promise<void>
   destroy(): void

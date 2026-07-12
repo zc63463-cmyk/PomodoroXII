@@ -97,9 +97,19 @@ export class RealSyncEngine implements SyncEngine {
   async resolveConflict(
     outboxId: number,
     resolution: 'accept-remote' | 'keep-local',
+    target?: { entityType: string; entityId: string },
   ): Promise<void> {
     if (this.destroyed) return
-    const conflict = this.conflicts.find((c) => c.outboxId === outboxId)
+    const conflict = this.conflicts.find(
+      (candidate) =>
+        candidate.outboxId === outboxId
+        && (outboxId >= 0
+          || !target
+          || (
+            candidate.entityType === target.entityType
+            && candidate.entityId === target.entityId
+          )),
+    )
     if (!conflict) return
 
     if (outboxId < 0) {
@@ -117,22 +127,23 @@ export class RealSyncEngine implements SyncEngine {
             >
           )[tableName]
           if (table) {
-            await table.put({
-              ...(conflict.remoteVersion as Record<string, unknown>),
-              _dirty: false,
+            await this.db.transaction('rw', [this.db.table(tableName), this.db.outbox], async () => {
+              await table.put({
+                ...(conflict.remoteVersion as Record<string, unknown>),
+                _dirty: false,
+              })
+              const matches = await this.db.outbox
+                .where('entityId')
+                .equals(conflict.entityId)
+                .and((e) => e.entityType === conflict.entityType && !e.synced)
+                .toArray()
+              if (matches.length > 0) {
+                await this.db.outbox.bulkDelete(
+                  matches.map((e) => e.id as number),
+                )
+              }
             })
           }
-        }
-        // 删匹配 outbox 行（若存在 pre-push 已入队但尚未 push 的 dirty 行）
-        const matches = await this.db.outbox
-          .where('entityId')
-          .equals(conflict.entityId)
-          .and((e) => e.entityType === conflict.entityType && !e.synced)
-          .toArray()
-        if (matches.length > 0) {
-          await this.db.outbox.bulkDelete(
-            matches.map((e) => e.id as number),
-          )
         }
       }
       // keep-local：保留 _dirty + outbox，no-op
