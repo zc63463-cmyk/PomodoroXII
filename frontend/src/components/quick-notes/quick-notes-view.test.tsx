@@ -2247,54 +2247,61 @@ describe('QuickNotesView', () => {
   })
 
   it('updates the detail snapshot after saving while the selected note is hidden by search', async () => {
-    const note = makeQuickNote({
-      id: 'inline-hidden-by-search-note',
-      content: '搜索前详情标题\n\n原始正文',
-    })
-    storeMocks.state.quickNotes = [note]
-    storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
-    storeMocks.state.focusMode = 'detail-read'
-    storeMocks.state.selectedQuickNoteId = note.id
+    const consoleErrorSpy = vi.spyOn(console, 'error')
 
-    const { rerender } = render(createElement(QuickNotesView))
+    try {
+      const note = makeQuickNote({
+        id: 'inline-hidden-by-search-note',
+        content: '搜索前详情标题\n\n原始正文',
+      })
+      storeMocks.state.quickNotes = [note]
+      storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
+      storeMocks.state.focusMode = 'detail-read'
+      storeMocks.state.selectedQuickNoteId = note.id
 
-    expect(screen.getByLabelText('小记沉浸阅读')).toBeInTheDocument()
+      const { rerender } = render(createElement(QuickNotesView))
 
-    storeMocks.state.searchQuery = 'unmatched'
-    storeMocks.state.quickNotes = []
-    rerender(createElement(QuickNotesView))
+      expect(screen.getByLabelText('小记沉浸阅读')).toBeInTheDocument()
 
-    expect(screen.getByLabelText('小记沉浸阅读')).toBeInTheDocument()
+      storeMocks.state.searchQuery = 'unmatched'
+      storeMocks.state.quickNotes = []
+      rerender(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    fireEvent.change(screen.getByLabelText('详情小记内容'), {
-      target: {
-        value: [
-          '搜索后保存标题',
-          '',
-          '## 过滤期间保存的正文',
-          '',
-          '- 保存后的 Markdown 项',
-        ].join('\n'),
-      },
-    })
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+      expect(screen.getByLabelText('小记沉浸阅读')).toBeInTheDocument()
 
-    await waitFor(() => {
+      fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+      fireEvent.change(screen.getByLabelText('详情小记内容'), {
+        target: {
+          value: [
+            '搜索后保存标题',
+            '',
+            '## 过滤期间保存的正文',
+            '',
+            '- 保存后的 Markdown 项',
+          ].join('\n'),
+        },
+      })
+      fireEvent.click(screen.getByRole('button', { name: '保存' }))
+
+      const detailRead = screen.getByLabelText('小记沉浸阅读')
+      expect(await within(detailRead).findByRole('heading', {
+        level: 2,
+        name: '过滤期间保存的正文',
+      })).toBeInTheDocument()
+      expect(detailRead).toHaveTextContent('过滤期间保存的正文')
+      expect(
+        (await within(detailRead).findByText('保存后的 Markdown 项')).closest('li'),
+      ).not.toBeNull()
       expect(storeMocks.updateQuickNote).toHaveBeenCalledWith(
         'inline-hidden-by-search-note',
         {
           content: '搜索后保存标题\n\n## 过滤期间保存的正文\n\n- 保存后的 Markdown 项',
         },
       )
-    })
-    const detailRead = screen.getByLabelText('小记沉浸阅读')
-    expect(detailRead).toHaveTextContent('过滤期间保存的正文')
-    expect(within(detailRead).getByRole('heading', {
-      level: 2,
-      name: '过滤期间保存的正文',
-    })).toBeInTheDocument()
-    expect(within(detailRead).getByText('保存后的 Markdown 项').closest('li')).not.toBeNull()
+      expect(consoleErrorSpy).not.toHaveBeenCalled()
+    } finally {
+      consoleErrorSpy.mockRestore()
+    }
   })
 
   it('adopts or merges remote content before detail inline saving', async () => {
