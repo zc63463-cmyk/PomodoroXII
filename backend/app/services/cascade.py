@@ -5,10 +5,12 @@ Does NOT import FastAPI.  Only flushes, never commits.
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import NotFoundError, ValidationError
+from app.services.serializers import serialize_entity
+from app.services.sync_outbox import record_sync_event
 from app.services.time import utc_now_iso
 
 
@@ -86,20 +88,44 @@ class CascadeService:
         folder.trashed_at = now
         folder.updated_at = now
 
-        # Detach notes from the deleted subtree.
-        await self.db.execute(
-            update(Note)
-            .where(Note.folder_id.in_(all_ids))
-            .values(folder_id=None, updated_at=now)
-        )
-        # Detach quick notes from the deleted subtree.
-        await self.db.execute(
-            update(QuickNote)
-            .where(QuickNote.folder_id.in_(all_ids))
-            .values(folder_id=None, updated_at=now)
-        )
+        notes = (
+            await self.db.execute(select(Note).where(Note.folder_id.in_(all_ids)))
+        ).scalars().all()
+        quick_notes = (
+            await self.db.execute(
+                select(QuickNote).where(QuickNote.folder_id.in_(all_ids))
+            )
+        ).scalars().all()
+        for note in notes:
+            note.folder_id = None
+            note.updated_at = now
+        for quick_note in quick_notes:
+            quick_note.folder_id = None
+            quick_note.updated_at = now
 
         await self.db.flush()
+        changed_folders = [folder]
+        if desc_ids:
+            changed_folders.extend(
+                row
+                for row in (
+                    await self.db.execute(select(Folder).where(Folder.id.in_(desc_ids)))
+                ).scalars().all()
+                if row.trashed_at == now
+            )
+        for changed in [*changed_folders, *notes, *quick_notes]:
+            entity_type = (
+                "folder" if isinstance(changed, Folder)
+                else "note" if isinstance(changed, Note)
+                else "quickNote"
+            )
+            await record_sync_event(
+                self.db,
+                entity_type=entity_type,
+                entity_id=changed.id,
+                action="update",
+                payload=serialize_entity(changed),
+            )
         return {"trashed_folder_ids": all_ids}
 
     async def delete_task_cascade(self, task_id: str) -> None:

@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.errors import NotFoundError
+from app.services.serializers import serialize_entity
+from app.services.sync_outbox import record_sync_event
 from app.services.time import utc_now_iso
 
 
@@ -35,15 +37,28 @@ class BaseService:
     model: type
     entity_type: str | None = None
 
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(
+        self, db: AsyncSession, *, record_sync_events: bool = True,
+    ) -> None:
         self.db = db
+        self.record_sync_events = record_sync_events
 
-    async def create(self, data: dict[str, Any]) -> Any:
+    async def create(
+        self, data: dict[str, Any], *, record_event: bool = True,
+    ) -> Any:
         """Create a new row from *data* and flush."""
         obj = self.model(**data)
         self.db.add(obj)
         await self.db.flush()
         await self.db.refresh(obj)
+        if self.entity_type and self.record_sync_events and record_event:
+            await record_sync_event(
+                self.db,
+                entity_type=self.entity_type,
+                entity_id=obj.id,
+                action="create",
+                payload=serialize_entity(obj),
+            )
         return obj
 
     async def get(self, id: str) -> Any:
@@ -74,7 +89,12 @@ class BaseService:
         return rows, total
 
     async def update(
-        self, id: str, data: dict[str, Any], *, bump_updated_at: bool = True,
+        self,
+        id: str,
+        data: dict[str, Any],
+        *,
+        bump_updated_at: bool = True,
+        record_event: bool = True,
     ) -> Any:
         """Update fields on the row with *id* and bump updated_at.
 
@@ -104,6 +124,14 @@ class BaseService:
             flag_modified(obj, "updated_at")
         await self.db.flush()
         await self.db.refresh(obj)
+        if self.entity_type and self.record_sync_events and record_event:
+            await record_sync_event(
+                self.db,
+                entity_type=self.entity_type,
+                entity_id=obj.id,
+                action="update",
+                payload=serialize_entity(obj),
+            )
         return obj
 
     async def _ensure_tombstone(self, id: str) -> None:
@@ -129,3 +157,10 @@ class BaseService:
         await self.db.delete(obj)
         await self.db.flush()
         await self._ensure_tombstone(id)
+        if self.entity_type and self.record_sync_events:
+            await record_sync_event(
+                self.db,
+                entity_type=self.entity_type,
+                entity_id=id,
+                action="delete",
+            )
