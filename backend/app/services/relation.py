@@ -19,6 +19,8 @@ from app.errors import ValidationError
 from app.models.schedule_quick_note import ScheduleQuickNote
 from app.models.session_quick_note import SessionQuickNote
 from app.models.task_quick_note import TaskQuickNote
+from app.services.serializers import serialize_entity
+from app.services.sync_outbox import record_sync_event
 
 
 class RelationService:
@@ -78,6 +80,13 @@ class RelationService:
                 self.db.add(row)
                 await self.db.flush()
                 await self.db.refresh(row)
+                await record_sync_event(
+                    self.db,
+                    entity_type=self._KIND_TO_ENTITY_TYPE[kind],
+                    entity_id=row.id,
+                    action="create",
+                    payload=serialize_entity(row),
+                )
             return row
         except IntegrityError:
             # Race: another concurrent request inserted the same row.
@@ -117,6 +126,12 @@ class RelationService:
             await self.db.flush()
             # Write tombstone so sync pull propagates the deletion.
             await TombstoneService(self.db).create(entity_type, entity_id)
+            await record_sync_event(
+                self.db,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                action="delete",
+            )
 
     async def list_quick_notes(self, kind: str, parent_id: str) -> list[Any]:
         """Return all junction rows for a parent entity."""

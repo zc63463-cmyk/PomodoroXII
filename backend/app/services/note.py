@@ -25,6 +25,8 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.file_system.interfaces import FileSystem
 from app.models.note import Note
 from app.services.base import BaseService
+from app.services.serializers import serialize_entity
+from app.services.sync_outbox import record_sync_event
 from app.services.time import utc_now_iso
 
 
@@ -66,7 +68,7 @@ class NoteService(BaseService):
         fs: FileSystem,
         sync_mode: bool = False,
     ) -> None:
-        super().__init__(db)
+        super().__init__(db, record_sync_events=not sync_mode)
         self.fs = fs
         self.model = Note
         self.sync_mode = sync_mode
@@ -100,7 +102,18 @@ class NoteService(BaseService):
             data["tags"] = json.dumps(data["tags"])
 
         try:
-            return await super().create(data)
+            obj = await super().create(data, record_event=False)
+            if self.record_sync_events:
+                payload = serialize_entity(obj)
+                payload["content"] = content
+                await record_sync_event(
+                    self.db,
+                    entity_type=self.entity_type,
+                    entity_id=obj.id,
+                    action="create",
+                    payload=payload,
+                )
+            return obj
         except Exception:
             # Compensate: delete the orphan .md file.
             try:
@@ -114,7 +127,12 @@ class NoteService(BaseService):
         return await self.fs.read_note(id)
 
     async def update_content(
-        self, id: str, content: str, *, updated_at_override: str | None = None,
+        self,
+        id: str,
+        content: str,
+        *,
+        updated_at_override: str | None = None,
+        record_event: bool = True,
     ) -> Any:
         """Rewrite the .md file and sync content_hash/word_count.
 
@@ -147,6 +165,16 @@ class NoteService(BaseService):
                 flag_modified(obj, "updated_at")
             await self.db.flush()
             await self.db.refresh(obj)
+            if self.record_sync_events and record_event:
+                payload = serialize_entity(obj)
+                payload["content"] = content
+                await record_sync_event(
+                    self.db,
+                    entity_type=self.entity_type,
+                    entity_id=obj.id,
+                    action="update",
+                    payload=payload,
+                )
             return obj
         except Exception:
             # Compensate: restore old .md content.
@@ -158,8 +186,12 @@ class NoteService(BaseService):
             raise
 
     async def update_metadata(
-        self, id: str, data: dict[str, Any],
-        *, updated_at_override: str | None = None,
+        self,
+        id: str,
+        data: dict[str, Any],
+        *,
+        updated_at_override: str | None = None,
+        record_event: bool = True,
     ) -> Any:
         """Update DB-only fields (title, tags, category, etc.).
 
@@ -191,9 +223,11 @@ class NoteService(BaseService):
             # Sync path: preserve the client-provided timestamp and do NOT
             # bump version.  Bump only happens for normal REST/service calls.
             data["updated_at"] = updated_at_override
-            return await super().update(id, data, bump_updated_at=False)
+            return await super().update(
+                id, data, bump_updated_at=False, record_event=record_event,
+            )
         # Normal REST/service path: bump updated_at and version via BaseService.
-        return await super().update(id, data)
+        return await super().update(id, data, record_event=record_event)
 
     async def update(
         self, id: str, data: dict[str, Any],
@@ -208,11 +242,30 @@ class NoteService(BaseService):
         data = dict(data)
         content = data.pop("content", None)
         obj = None
-        if content is not None:
+        if content is not None and data:
+            obj = await self.update_content(
+                id, content, updated_at_override=updated_at_override,
+                record_event=False,
+            )
+            obj = await self.update_metadata(
+                id, data, updated_at_override=updated_at_override,
+                record_event=False,
+            )
+            if self.record_sync_events:
+                payload = serialize_entity(obj)
+                payload["content"] = content
+                await record_sync_event(
+                    self.db,
+                    entity_type=self.entity_type,
+                    entity_id=obj.id,
+                    action="update",
+                    payload=payload,
+                )
+        elif content is not None:
             obj = await self.update_content(
                 id, content, updated_at_override=updated_at_override,
             )
-        if data:
+        elif data:
             obj = await self.update_metadata(
                 id, data, updated_at_override=updated_at_override,
             )
@@ -244,6 +297,13 @@ class NoteService(BaseService):
             # M1: Create tombstone via BaseService helper (skipped in sync_mode).
             if not self.sync_mode:
                 await self._ensure_tombstone(id)
+            if obj is not None and self.record_sync_events:
+                await record_sync_event(
+                    self.db,
+                    entity_type=self.entity_type,
+                    entity_id=id,
+                    action="delete",
+                )
             # FS deletion is best-effort (orphan .md is harmless).
             try:
                 await self.fs.delete_note(id)
@@ -260,6 +320,15 @@ class NoteService(BaseService):
         obj.trashed_at = utc_now_iso()
         await self.db.flush()
         await self.fs.delete_note(id)
+        await self.db.refresh(obj)
+        if self.record_sync_events:
+            await record_sync_event(
+                self.db,
+                entity_type=self.entity_type,
+                entity_id=id,
+                action="update",
+                payload=serialize_entity(obj),
+            )
 
     async def restore(self, id: str) -> Any:
         """Restore a soft-deleted note: clear ``trashed_at`` + move .md back.
@@ -278,4 +347,14 @@ class NoteService(BaseService):
         await self.db.flush()
         await self.fs.restore(id)
         await self.db.refresh(obj)
+        if self.record_sync_events:
+            payload = serialize_entity(obj)
+            payload["content"] = await self.fs.read_note(id)
+            await record_sync_event(
+                self.db,
+                entity_type=self.entity_type,
+                entity_id=id,
+                action="update",
+                payload=payload,
+            )
         return obj

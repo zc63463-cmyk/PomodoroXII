@@ -1,4 +1,4 @@
-"""SQLAlchemy model for the sync outbox (pending sync events queue)."""
+"""SQLAlchemy model for the append-only server sync event ledger."""
 
 from sqlalchemy import Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -8,15 +8,16 @@ from app.services.time import utc_now_iso
 
 
 class SyncOutbox(Base):
-    """SyncOutbox model representing a pending sync event.
+    """One ordered server-side entity mutation.
 
-    Each row records an entity mutation (create/update/delete) that must be
-    pushed to remote sync endpoints. ``synced_at`` is set once the event has
-    been acknowledged, after which the row can be pruned.
+    H2 retains the historical ``sync_outbox`` table name for compatibility.
+    Its ``id`` orders events within committed, non-overlapping mutations, but
+    H2-C must not treat allocation order as commit order until concurrency is
+    serialized or a commit-safe sequence protocol is introduced.
+    ``synced_at`` remains nullable for compatibility and is not the cursor.
 
-    Note: this model intentionally does NOT inherit ``SyncMixin``. It uses an
-    auto-incrementing integer primary key because outbox rows are ephemeral
-    queue entries rather than first-class synced entities.
+    This model intentionally does NOT inherit ``SyncMixin``: ledger rows are
+    transport records rather than first-class synced entities.
     """
 
     __tablename__ = "sync_outbox"

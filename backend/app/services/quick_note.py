@@ -14,6 +14,8 @@ from app.errors import ConflictError, ValidationError
 from app.models.memo_comment import MemoComment
 from app.models.quick_note import QuickNote
 from app.services.base import BaseService
+from app.services.serializers import serialize_entity
+from app.services.sync_outbox import record_sync_event
 from app.services.time import utc_now_iso
 
 if TYPE_CHECKING:
@@ -108,6 +110,14 @@ class QuickNoteService(BaseService):
         qn.migrated_to_note_id = note.id
         qn.archived_at = utc_now_iso()
         await self.db.flush()
+        await self.db.refresh(qn)
+        await record_sync_event(
+            self.db,
+            entity_type=self.entity_type,
+            entity_id=qn.id,
+            action="update",
+            payload=serialize_entity(qn),
+        )
 
         # Copy memo_comments (note_id points to new Note.id; originals kept).
         comments = (
@@ -115,10 +125,22 @@ class QuickNoteService(BaseService):
                 select(MemoComment).where(MemoComment.note_id == id)
             )
         ).scalars().all()
+        copied_comments: list[MemoComment] = []
         for c in comments:
-            self.db.add(MemoComment(note_id=note.id, content=c.content))
-        if comments:
+            copied = MemoComment(note_id=note.id, content=c.content)
+            self.db.add(copied)
+            copied_comments.append(copied)
+        if copied_comments:
             await self.db.flush()
+            for copied in copied_comments:
+                await self.db.refresh(copied)
+                await record_sync_event(
+                    self.db,
+                    entity_type="memoComment",
+                    entity_id=copied.id,
+                    action="create",
+                    payload=serialize_entity(copied),
+                )
 
         return {
             "note_id": note.id,

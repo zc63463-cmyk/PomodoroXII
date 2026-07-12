@@ -20,7 +20,37 @@ The cursor contract:
 """
 from __future__ import annotations
 
+import uuid
+
 import pytest
+
+
+async def _setup_login_and_space_token(client) -> tuple[str, str]:
+    """Setup admin, login, create a space, issue a space token."""
+    resp = await client.post(
+        "/api/v1/auth/setup", json={"password": "test-password-123"}
+    )
+    assert resp.status_code in (200, 201)
+    resp = await client.post(
+        "/api/v1/auth/login", json={"password": "test-password-123"}
+    )
+    assert resp.status_code == 200
+    master_token = resp.json()["access_token"]
+    headers = {"Authorization": f"Bearer {master_token}"}
+
+    resp = await client.post(
+        "/api/v1/spaces", json={"name": "Sync Space"}, headers=headers
+    )
+    assert resp.status_code == 201
+    space_id = resp.json()["id"]
+
+    resp = await client.post(
+        f"/api/v1/spaces/{space_id}/token", headers=headers
+    )
+    assert resp.status_code == 200
+    space_token = resp.json()["space_token"]
+    return master_token, space_token
+
 
 # --------------------------------------------------------------------------- #
 # Seconds-precision DB rows vs millisecond cursor
@@ -135,6 +165,201 @@ async def test_pull_same_timestamp_3_rows_first_page_returns_2_with_has_more(spa
     assert page1["next_since_id"] == "same-ts-2", (
         f"next_since_id should be last returned id, got {page1.get('next_since_id')}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Cross-entity pagination safety
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=True,
+    reason="Legacy global timestamp cursor skips truncated older entity rows",
+)
+async def test_legacy_pull_global_cursor_skips_truncated_older_entity_rows(space_session):
+    """A newer entity must not advance the cursor past an older truncated group.
+
+    With ``limit=2`` the task group has one remaining 10:00 row, while a
+    quick note at 12:00 is fully returned. A single global timestamp cursor
+    cannot safely advance to 12:00 until the truncated task group is drained.
+    """
+    from app.models.quick_note import QuickNote
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    old_ts = "2026-07-04T10:00:00.000Z"
+    for task_id in ["task-3", "task-1", "task-2"]:
+        space_session.add(
+            Task(
+                id=task_id,
+                title=task_id,
+                status="todo",
+                priority="medium",
+                tags="[]",
+                updated_at=old_ts,
+            )
+        )
+    space_session.add(
+        QuickNote(
+            id="quick-newer",
+            content="newer entity",
+            tags="[]",
+            updated_at="2026-07-04T12:00:00.000Z",
+        )
+    )
+    await space_session.flush()
+
+    service = SyncService(space_session, fs=None)
+    first = await service.pull(since="", limit=2)
+    second = await service.pull(
+        since=first["next_since"],
+        since_id=first["next_since_id"],
+        tombstone_since_id=first.get("next_tombstone_since_id", ""),
+        limit=2,
+    )
+
+    returned_task_ids = {
+        item["id"] for page in (first, second) for item in page["tasks"]
+    }
+    assert returned_task_ids == {"task-1", "task-2", "task-3"}, (
+        "the global cursor skipped the remaining older task after a newer "
+        f"quick note advanced next_since to {first['next_since']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cursor_pull_pages_cross_entity_events_without_skipping(space_session):
+    from app.services.sync import SyncService
+    from app.services.sync_outbox import record_sync_event
+
+    await record_sync_event(
+        space_session, entity_type="task", entity_id="task-1", action="create",
+        payload={"id": "task-1", "title": "one"},
+    )
+    await record_sync_event(
+        space_session, entity_type="quickNote", entity_id="quick-1", action="create",
+        payload={"id": "quick-1", "content": "quick"},
+    )
+    await record_sync_event(
+        space_session, entity_type="task", entity_id="task-2", action="create",
+        payload={"id": "task-2", "title": "two"},
+    )
+
+    service = SyncService(space_session)
+    first = await service.pull(cursor=0, limit=2)
+    second = await service.pull(cursor=first["next_cursor"], limit=2)
+
+    assert first["cursor_version"] == 2
+    assert first["has_more"] is True
+    assert first["next_cursor"] < second["next_cursor"]
+    assert {item["id"] for page in (first, second) for item in page["tasks"]} == {
+        "task-1", "task-2",
+    }
+    assert [item["id"] for item in first["quickNotes"]] == ["quick-1"]
+
+
+@pytest.mark.asyncio
+async def test_cursor_pull_limit_one_reaches_delete_and_interleaved_update(space_session):
+    from app.services.sync import SyncService
+    from app.services.sync_outbox import record_sync_event
+
+    await record_sync_event(
+        space_session, entity_type="task", entity_id="task-1", action="create",
+        payload={"id": "task-1", "title": "created"},
+    )
+    await record_sync_event(
+        space_session, entity_type="quickNote", entity_id="quick-1", action="delete",
+    )
+    await record_sync_event(
+        space_session, entity_type="task", entity_id="task-1", action="update",
+        payload={"id": "task-1", "title": "updated"},
+    )
+
+    service = SyncService(space_session)
+    cursor = 0
+    pages = []
+    while True:
+        page = await service.pull(cursor=cursor, limit=1)
+        pages.append(page)
+        assert page["next_cursor"] >= cursor
+        cursor = page["next_cursor"]
+        if not page["has_more"]:
+            break
+
+    assert len(pages) == 3
+    assert len(pages[1]["tombstones"]) == 1
+    assert pages[1]["tombstones"][0]["entity_type"] == "quickNote"
+    assert pages[1]["tombstones"][0]["entity_id"] == "quick-1"
+    assert pages[2]["tasks"][0]["title"] == "updated"
+
+
+@pytest.mark.asyncio
+async def test_cursor_pull_folds_repeated_entity_events_to_last_scanned_state(space_session):
+    from app.services.sync import SyncService
+    from app.services.sync_outbox import record_sync_event
+
+    first = await record_sync_event(
+        space_session, entity_type="task", entity_id="same", action="create",
+        payload={"id": "same", "title": "first"},
+    )
+    last = await record_sync_event(
+        space_session, entity_type="task", entity_id="same", action="update",
+        payload={"id": "same", "title": "last"},
+    )
+
+    page = await SyncService(space_session).pull(cursor=0, limit=10)
+    assert page["tasks"] == [{"id": "same", "title": "last"}]
+    assert page["next_cursor"] == last.id
+    assert page["next_cursor"] != first.id
+
+
+@pytest.mark.asyncio
+async def test_cursor_pull_empty_ledger_returns_zero_cursor(client):
+    """GET /sync/pull?cursor=0 on a fresh space (no events) returns next_cursor=None."""
+    _, space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    resp = await client.get(
+        "/api/v1/sync/pull?cursor=0&limit=10", headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cursor_version"] == 2
+    assert body["has_more"] is False
+    # No events in the ledger → next_cursor stays at the requested cursor (0).
+    assert body["next_cursor"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cursor_pull_via_http_after_push_returns_events(client):
+    """POST /sync/push then GET /sync/pull?cursor=0 returns the pushed events."""
+    _, space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    eid = uuid.uuid4().hex
+    resp = await client.post(
+        "/api/v1/sync/push",
+        json={"events": [{
+            "entity_type": "task",
+            "entity_id": eid,
+            "action": "create",
+            "payload": {"id": eid, "title": "Cursor HTTP", "status": "todo", "priority": "medium", "tags": "[]"},
+            "client_updated_at": "2026-07-04T10:00:00.000Z",
+        }]},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    resp = await client.get(
+        "/api/v1/sync/pull?cursor=0&limit=10", headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cursor_version"] == 2
+    task_ids = [t["id"] for t in body.get("tasks", [])]
+    assert eid in task_ids
+    assert body["next_cursor"] is not None
+    assert body["has_more"] is False
 
 
 # --------------------------------------------------------------------------- #
