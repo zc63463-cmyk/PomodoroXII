@@ -1,10 +1,11 @@
 /**
- * syncMeta 读写辅助（F1 §2.1，F1-D2 锁定）。
+ * syncMeta 读写辅助（F1 §2.1，F1-D2 锁定，H2-D 新增 cursor/cursor_version）。
  *
- * 管理 per-space Dexie syncMeta 表中的六键：
+ * 管理 per-space Dexie syncMeta 表中的八键：
  * since / since_id / tombstone_since_id / server_time / last_full_sync / last_sync_at
+ * / cursor / cursor_version
  *
- * 所有函数首参 db: PomodoroXIDB（HC-6 per-space db 注入）。
+ * cursor 优先于旧三游标；cursor=null 或缺失时回退旧协议。
  */
 
 import type { PomodoroXIDB } from '@/services/database'
@@ -18,9 +19,11 @@ const FIELD_TO_KEY: Record<keyof SyncMetaSnapshot, string> = {
   serverTime: SYNC_META_KEYS.SERVER_TIME,
   lastFullSync: SYNC_META_KEYS.LAST_FULL_SYNC,
   lastSyncAt: SYNC_META_KEYS.LAST_SYNC_AT,
+  cursor: SYNC_META_KEYS.CURSOR,
+  cursorVersion: SYNC_META_KEYS.CURSOR_VERSION,
 }
 
-/** 从 syncMeta 表读取全部游标（缺失为空串） */
+/** 从 syncMeta 表读取全部游标（缺失为空串/null） */
 export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> {
   const keys = Object.values(SYNC_META_KEYS)
   const rows = await db.syncMeta.bulkGet(keys)
@@ -28,6 +31,16 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
   rows.forEach((row, i) => {
     if (row) map.set(keys[i], row.value)
   })
+  const cursorStr = map.get(SYNC_META_KEYS.CURSOR) ?? ''
+  const cursorVerStr = map.get(SYNC_META_KEYS.CURSOR_VERSION) ?? ''
+  const parsedCursor = Number(cursorStr)
+  const parsedVersion = Number(cursorVerStr)
+  const validCursor =
+    cursorStr !== '' &&
+    cursorVerStr !== '' &&
+    Number.isSafeInteger(parsedCursor) &&
+    parsedCursor >= 0 &&
+    parsedVersion === 2
   return {
     since: map.get(SYNC_META_KEYS.SINCE) ?? '',
     sinceId: map.get(SYNC_META_KEYS.SINCE_ID) ?? '',
@@ -35,6 +48,8 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
     serverTime: map.get(SYNC_META_KEYS.SERVER_TIME) ?? '',
     lastFullSync: map.get(SYNC_META_KEYS.LAST_FULL_SYNC) ?? '',
     lastSyncAt: map.get(SYNC_META_KEYS.LAST_SYNC_AT) ?? '',
+    cursor: validCursor ? parsedCursor : null,
+    cursorVersion: validCursor ? 2 : null,
   }
 }
 
@@ -47,17 +62,19 @@ export async function saveSyncMeta(
     .filter(([, value]) => value !== undefined)
     .map(([field, value]) => ({
       key: FIELD_TO_KEY[field as keyof SyncMetaSnapshot],
-      value: String(value),
+      value: value === null ? '' : String(value),
     }))
   if (entries.length > 0) await db.syncMeta.bulkPut(entries)
 }
 
-/** 清空三游标（since/since_id/tombstone_since_id），保留 serverTime/lastFullSync/lastSyncAt */
+/** 清空所有游标（since/since_id/tombstone_since_id/cursor/cursor_version），保留 serverTime/lastFullSync/lastSyncAt */
 export async function clearSyncCursors(db: PomodoroXIDB): Promise<void> {
   await db.syncMeta.bulkPut([
     { key: SYNC_META_KEYS.SINCE, value: '' },
     { key: SYNC_META_KEYS.SINCE_ID, value: '' },
     { key: SYNC_META_KEYS.TOMBSTONE_SINCE_ID, value: '' },
+    { key: SYNC_META_KEYS.CURSOR, value: '' },
+    { key: SYNC_META_KEYS.CURSOR_VERSION, value: '' },
   ])
 }
 

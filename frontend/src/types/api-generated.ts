@@ -1180,6 +1180,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sync/ledger-stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ledger Stats
+         * @description Return sync event ledger size stats (H2-E monitoring).
+         */
+        get: operations["ledger_stats_api_v1_sync_ledger_stats_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -2870,6 +2890,14 @@ export interface components {
             tombstones?: {
                 [key: string]: unknown;
             }[];
+            /** Next Cursor */
+            next_cursor?: number | null;
+            /** Cursor Version */
+            cursor_version?: number | null;
+            /** Snapshot Token */
+            snapshot_token?: string | null;
+            /** Snapshot Offset */
+            snapshot_offset?: number | null;
             /**
              * Is Full
              * @default true
@@ -2877,6 +2905,18 @@ export interface components {
             is_full: boolean;
         } & {
             [key: string]: unknown;
+        };
+        /**
+         * SyncLedgerStatsResponse
+         * @description Response body for GET /api/v1/sync/ledger-stats (H2-E monitoring).
+         */
+        SyncLedgerStatsResponse: {
+            /** Total Events */
+            total_events: number;
+            /** Min Id */
+            min_id?: number | null;
+            /** Max Id */
+            max_id?: number | null;
         };
         /**
          * SyncPullResponse
@@ -2917,6 +2957,14 @@ export interface components {
             tombstones?: {
                 [key: string]: unknown;
             }[];
+            /** Next Cursor */
+            next_cursor?: number | null;
+            /** Cursor Version */
+            cursor_version?: number | null;
+            /** Snapshot Token */
+            snapshot_token?: string | null;
+            /** Snapshot Offset */
+            snapshot_offset?: number | null;
         } & {
             [key: string]: unknown;
         };
@@ -5843,6 +5891,8 @@ export interface operations {
                 /** @description Secondary cursor for tombstones: last entity_id within the same deleted_at */
                 tombstone_since_id?: string;
                 limit?: number;
+                /** @description Global sync ledger cursor */
+                cursor?: number | null;
             };
             header?: never;
             path?: never;
@@ -5879,6 +5929,10 @@ export interface operations {
                 /** @description Secondary cursor for tombstones: last entity_id within the same deleted_at */
                 tombstone_since_id?: string;
                 limit?: number;
+                /** @description Global sync ledger cursor */
+                cursor?: number | null;
+                snapshot_token?: string | null;
+                snapshot_offset?: number;
             };
             header?: never;
             path?: never;
@@ -5922,6 +5976,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SyncStatusResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                };
+            };
+        };
+    };
+    ledger_stats_api_v1_sync_ledger_stats_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncLedgerStatsResponse"];
                 };
             };
             /** @description Domain or request validation error */

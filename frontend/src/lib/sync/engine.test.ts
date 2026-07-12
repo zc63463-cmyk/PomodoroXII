@@ -3,6 +3,7 @@ import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { PomodoroXIDB } from '@/services/database'
 import { spaceApi } from '@/services/api'
 import { RealSyncEngine } from './engine'
+import { loadSyncMeta } from './sync-meta'
 
 /**
  * engine.ts 单测（EN1–EN20）。
@@ -839,6 +840,92 @@ describe('RealSyncEngine', () => {
   })
 
   // ===== 组 J：resolveConflict onSyncComplete（EN27 — S1-4.2）=====
+
+  it('EN24: cursor expired 时执行一次真正 full recovery，不 push 部分状态', async () => {
+    db = await openTestDb()
+    await db.syncMeta.bulkPut([
+      { key: 'cursor', value: '5' },
+      { key: 'cursor_version', value: '2' },
+    ])
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+
+    const urls: string[] = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      urls.push(url)
+      if (url.includes('/sync/pull')) {
+        throw {
+          response: {
+            status: 409,
+            data: {
+              error_type: 'sync_cursor_expired',
+              floor: 10,
+              current_cursor: 20,
+              recovery_action: 'full_sync',
+            },
+            config,
+          },
+          message: 'Request failed with status code 409',
+          config,
+          isAxiosError: true,
+          name: 'AxiosError',
+        }
+      }
+      if (url.includes('/sync/full')) {
+        return ok({
+          ...singlePageData(),
+          next_cursor: 20,
+          cursor_version: 2,
+          snapshot_token: 'snap-20',
+          snapshot_offset: 0,
+        }, config)
+      }
+      if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
+      return errResponse(404, config)
+    }
+
+    await engine.sync()
+
+    expect(urls.filter((url) => url.includes('/sync/pull'))).toHaveLength(1)
+    expect(urls.filter((url) => url.includes('/sync/full'))).toHaveLength(1)
+    expect(urls.filter((url) => url.includes('/sync/push'))).toHaveLength(0)
+    expect((await db.syncMeta.get('cursor'))?.value).toBe('20')
+    expect(engine.getStatus()).toBe('idle')
+    engine.destroy()
+  })
+
+  it('EN25: snapshot expired 时重启一次 full sync', async () => {
+    db = await openTestDb()
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+    let fullCalls = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      if (url.includes('/sync/full')) {
+        fullCalls++
+        if (fullCalls === 1) {
+          throw {
+            response: { status: 409, data: { error_type: 'sync_snapshot_expired' }, config },
+            message: 'snapshot expired', config, isAxiosError: true, name: 'AxiosError',
+          }
+        }
+        return ok({
+          ...singlePageData(), next_cursor: 20, cursor_version: 2,
+          snapshot_token: 'snap-restarted', snapshot_offset: 0,
+        }, config)
+      }
+      if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
+      return errResponse(404, config)
+    }
+
+    await engine.fullSync()
+
+    expect(fullCalls).toBe(2)
+    expect((await loadSyncMeta(db)).cursor).toBe(20)
+    expect(engine.getStatus()).toBe('idle')
+    engine.destroy()
+  })
 
   it('EN27: resolveConflict 清空冲突 → onSyncComplete 1 次；回调内 status=idle', async () => {
     db = await openTestDb()

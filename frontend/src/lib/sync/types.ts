@@ -112,7 +112,7 @@ export const PULL_KEY_TO_TABLE: Record<string, string> = {
   taskQuickNotes: 'taskQuickNotes',
 }
 
-/** syncMeta 键名（F1 §2.1，F1-D2 锁定） — 值为 Dexie syncMeta 表的 key */
+/** syncMeta 键名（F1 §2.1，F1-D2 锁定，H2-D 新增 cursor/cursor_version） — 值为 Dexie syncMeta 表的 key */
 export const SYNC_META_KEYS = {
   SINCE: 'since',
   SINCE_ID: 'since_id',
@@ -120,6 +120,8 @@ export const SYNC_META_KEYS = {
   SERVER_TIME: 'server_time',
   LAST_FULL_SYNC: 'last_full_sync',
   LAST_SYNC_AT: 'last_sync_at',
+  CURSOR: 'cursor',
+  CURSOR_VERSION: 'cursor_version',
 } as const
 
 /** syncMeta 快照（camelCase 字段名，与 SYNC_META_KEYS 的 snake_case 值有映射关系） */
@@ -130,6 +132,10 @@ export interface SyncMetaSnapshot {
   serverTime: string
   lastFullSync: string
   lastSyncAt: string
+  /** H2-D: 全局事件账本 cursor（null = 未启用/回退旧协议） */
+  cursor: number | null
+  /** H2-D: cursor 协议版本（2 = 事件账本） */
+  cursorVersion: number | null
 }
 
 /** outbox merge 矩阵动作 */
