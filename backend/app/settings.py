@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import PositiveInt, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -25,21 +25,24 @@ class Settings(BaseSettings):
     # --- Auth / JWT -------------------------------------------------------
     secret_key: str = "change-me"
     algorithm: str = "HS256"
-    master_token_expire_days: int = 7
-    space_token_expire_hours: int = 8
+    master_token_expire_days: PositiveInt = 7
+    space_token_expire_hours: PositiveInt = 8
 
     # --- Meta database ----------------------------------------------------
     database_url: str = "sqlite+aiosqlite:///./data/meta.db"
 
     # --- Spaces layout ----------------------------------------------------
     spaces_data_dir: Path = Path("./data/spaces")
-    engine_pool_max_size: int = 5
+    engine_pool_max_size: PositiveInt = 5
 
     # --- HTTP / runtime ---------------------------------------------------
     cors_origins: Annotated[list[str], NoDecode] = [
         "http://localhost:5173",
         "http://localhost:4173",
     ]
+    trusted_proxy_cidrs: Annotated[list[str], NoDecode] = []
+    request_body_max_bytes: PositiveInt = 10 * 1024 * 1024
+    sync_event_payload_max_bytes: PositiveInt = 256 * 1024
     debug: bool = False
     environment: str = "development"
     backup_enabled: bool = True
@@ -54,15 +57,14 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Validators
     # ------------------------------------------------------------------ #
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", "trusted_proxy_cidrs", mode="before")
     @classmethod
-    def parse_cors_origins(cls, v):
-        """Accept a comma-separated string from env, or a list literal."""
+    def parse_comma_separated_list(cls, v):
+        """Accept comma-separated environment values or list literals."""
         if isinstance(v, list):
             return v
-        env_val = os.environ.get("POMODOROXII_CORS_ORIGINS")
-        if env_val:
-            return [origin.strip() for origin in env_val.split(",") if origin.strip()]
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
         return v
 
     @field_validator("secret_key")
