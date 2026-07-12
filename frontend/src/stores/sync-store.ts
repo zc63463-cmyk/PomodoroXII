@@ -25,7 +25,11 @@ interface SyncState {
 
 interface SyncActions {
   triggerSync: () => Promise<void>
-  resolveConflict: (outboxId: number, resolution: 'accept-remote' | 'keep-local') => Promise<void>
+  resolveConflict: (
+    outboxId: number,
+    resolution: 'accept-remote' | 'keep-local',
+    target?: { entityType: string; entityId: string },
+  ) => Promise<void>
   setStatus: (status: SyncStatus) => void
   reset: () => void
 }
@@ -53,8 +57,8 @@ export const useSyncStore = create<SyncStore>()(
         }
       },
 
-      resolveConflict: async (outboxId, resolution) => {
-        await syncEngine.resolveConflict(outboxId, resolution)
+      resolveConflict: async (outboxId, resolution, target) => {
+        await syncEngine.resolveConflict(outboxId, resolution, target)
         // S1-4.2：store 由 wire onSyncComplete 更新（resolveConflict 已 fireSyncComplete）
       },
 

@@ -299,6 +299,22 @@ async def test_cursor_expired_http_error_has_stable_recovery_fields(client):
 
 
 @pytest.mark.asyncio
+async def test_missing_snapshot_http_error_has_stable_recovery_fields(client):
+    _, space_token = await _setup_login_and_space_token(client)
+    response = await client.get(
+        "/api/v1/sync/full?cursor=0&snapshot_token=already-pruned&snapshot_offset=1",
+        headers={"Authorization": f"Bearer {space_token}"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Sync snapshot expired; restart full sync",
+        "error_type": "sync_snapshot_expired",
+        "recovery_action": "restart_full_sync",
+    }
+
+
+@pytest.mark.asyncio
 async def test_push_endpoint_returns_conflict_for_lww(client):
     """POST /sync/push with older client_ts should return conflict."""
     _, space_token = await _setup_login_and_space_token(client)
