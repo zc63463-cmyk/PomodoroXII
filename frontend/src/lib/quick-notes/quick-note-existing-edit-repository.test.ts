@@ -277,6 +277,38 @@ describe('quick-note-existing-edit-repository', () => {
       }
     })
 
+    it('rolls back an owned recovery deletion when cleanup rejects', async () => {
+      const snapshot = makeSnapshot({
+        editId: 'rollback-edit',
+        revision: 7,
+        draft: '  exact recovery bytes  ',
+      })
+      const raw = `${JSON.stringify(snapshot, null, 2)}\n`
+      await putRawRecovery(database, raw)
+      const realDelete = database.settings.delete.bind(database.settings)
+      const deleteSpy = vi.spyOn(database.settings, 'delete').mockImplementation(
+        (key) => realDelete(key).then(() => {
+          throw new Error('cleanup transaction aborted')
+        }),
+      )
+
+      try {
+        await expect(adapter.clearIfOwned([{
+          kind: 'v1',
+          editId: snapshot.editId,
+          revision: snapshot.revision,
+        }])).rejects.toThrow('cleanup transaction aborted')
+        expect(deleteSpy).toHaveBeenCalledOnce()
+        expect(deleteSpy).toHaveBeenCalledWith(
+          QUICK_NOTE_EXISTING_EDIT_RECOVERY_KEY,
+        )
+      } finally {
+        deleteSpy.mockRestore()
+      }
+
+      expect(await getRawRecovery(database)).toBe(raw)
+    })
+
     it('runs load in one read transaction containing settings and quickNotes', async () => {
       await adapter.checkpoint(makeSnapshot())
       const transactionSpy = vi.spyOn(database, 'transaction')

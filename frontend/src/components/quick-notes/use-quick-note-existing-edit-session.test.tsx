@@ -292,6 +292,29 @@ describe('QuickNote existing-edit session controller', () => {
     expect(adapter.checkpointCalls).toEqual([])
   })
 
+  it('lets normalized equality cleanup win when only the entity timestamp changed', async () => {
+    const snapshot = makeSnapshot({ draft: '  base  ' })
+    adapter.loadResult = validRecoveredLoad({
+      snapshot,
+      note: makeQuickNote({
+        content: snapshot.baseContent,
+        updated_at: '2026-07-12T05:00:00.000Z',
+      }),
+    })
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+
+    await flushMicrotasks()
+
+    expectIdle(controller.state)
+    expect(adapter.clearCalls).toEqual([[
+      { kind: 'v1', editId: snapshot.editId, revision: snapshot.revision },
+    ]])
+    expect(adapter.updateCalls).toEqual([])
+    expect(adapter.checkpointCalls).toEqual([])
+  })
+
   it('restores a local-only edit as dirty and recovery durable', async () => {
     const note = makeQuickNote()
     adapter.loadResult = validRecoveredLoad({
@@ -905,6 +928,10 @@ describe('QuickNote existing-edit session controller', () => {
     const controller = createQuickNoteExistingEditSessionController(
       controllerOptions(adapter),
     )
+    const publishedSnapshots: QuickNoteExistingEditState[] = []
+    controller.subscribe(() => {
+      publishedSnapshots.push(controller.getSnapshot())
+    })
 
     await flushMicrotasks()
     expect(adapter.clearCalls).toEqual([[
@@ -915,6 +942,7 @@ describe('QuickNote existing-edit session controller', () => {
 
     expect(controller.state.phase).toBe('restoring')
     expect(controller.state.editingNote).toBeNull()
+    expect(publishedSnapshots).toEqual([])
     clear.resolve('cleared')
     await flushMicrotasks()
 
@@ -924,20 +952,40 @@ describe('QuickNote existing-edit session controller', () => {
       editingNote: { id: 'latest' },
       draft: 'latest content',
     })
+    const publishedOwnerIds = publishedSnapshots.flatMap((snapshot) => (
+      snapshot.editingNote ? [snapshot.editingNote.id] : []
+    ))
+    expect(publishedOwnerIds).not.toContain('first')
+    expect(publishedOwnerIds).toEqual(['latest'])
   })
 
   it('grants edit ownership only to the latest start intent during recovery-read retry', async () => {
+    const retryLoad = createDeferred<ExistingEditLoadResult>()
     adapter.loadEffects.push(
       () => Promise.reject(new Error('read failed')),
-      async () => ({ kind: 'absent' }),
+      () => retryLoad.promise,
     )
     const controller = createQuickNoteExistingEditSessionController(
       controllerOptions(adapter),
     )
+    const publishedSnapshots: QuickNoteExistingEditState[] = []
+    controller.subscribe(() => {
+      publishedSnapshots.push(controller.getSnapshot())
+    })
     await flushMicrotasks()
 
     controller.start(makeQuickNote({ id: 'first', content: 'first content' }))
     controller.start(makeQuickNote({ id: 'latest', content: 'latest content' }))
+    await flushMicrotasks()
+
+    expect(controller.state.phase).toBe('restoring')
+    expect(controller.state.editingNote).toBeNull()
+    expect(publishedSnapshots.every((snapshot) => (
+      snapshot.editingNote === null
+    ))).toBe(true)
+    expect(adapter.operationLog).toEqual(['load', 'load'])
+
+    retryLoad.resolve({ kind: 'absent' })
     await flushMicrotasks()
 
     expect(controller.state).toMatchObject({
@@ -946,7 +994,11 @@ describe('QuickNote existing-edit session controller', () => {
       editingNote: { id: 'latest' },
       draft: 'latest content',
     })
-    expect(adapter.operationLog).toEqual(['load', 'load'])
+    const publishedOwnerIds = publishedSnapshots.flatMap((snapshot) => (
+      snapshot.editingNote ? [snapshot.editingNote.id] : []
+    ))
+    expect(publishedOwnerIds).not.toContain('first')
+    expect(publishedOwnerIds).toEqual(['latest'])
   })
 
   it('classifies an updated_at-only entity change as a base change', async () => {
@@ -973,6 +1025,35 @@ describe('QuickNote existing-edit session controller', () => {
         note: remote,
         localDraft: 'local content',
         remoteContent: 'base',
+      },
+    })
+    expect(adapter.clearCalls).toEqual([])
+  })
+
+  it('classifies a content-only entity change as a base change', async () => {
+    const remote = makeQuickNote({
+      content: 'remote content',
+      updated_at: BASE_UPDATED_AT,
+    })
+    adapter.loadResult = validRecoveredLoad({
+      snapshot: { draft: 'local content' },
+      note: remote,
+    })
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+
+    await flushMicrotasks()
+
+    expect(controller.state).toMatchObject({
+      phase: 'conflict',
+      durability: 'recovery-durable',
+      editingNote: remote,
+      draft: 'local content',
+      conflict: {
+        note: remote,
+        localDraft: 'local content',
+        remoteContent: 'remote content',
       },
     })
     expect(adapter.clearCalls).toEqual([])
@@ -1014,7 +1095,7 @@ describe('QuickNote existing-edit session controller', () => {
       issue: { code: 'recovery-cleanup-failed' },
     })
     expect(adapter.stored).toEqual(expectedStored)
-    expect(adapter.stored).not.toBe(expectedStored)
+    expect(adapter.stored).toBe(storedClone)
     expect(adapter.clearCalls).toEqual([[
       {
         kind: 'v1',
