@@ -17,12 +17,16 @@ from app.deps import get_file_system, get_space_context, get_space_db
 from app.file_system.interfaces import FileSystem
 from app.schemas.sync import (
     SyncFullResponse,
+    SyncLedgerStatsResponse,
+    SyncPruneResponse,
     SyncPullResponse,
     SyncPushRequest,
     SyncPushResponse,
     SyncStatusResponse,
 )
 from app.services.sync import SyncService
+from app.services.sync_outbox import get_ledger_stats, prune_sync_events
+from app.services.time import utc_now_iso
 
 router = APIRouter()
 
@@ -91,3 +95,37 @@ async def sync_status(
     result = await SyncService(db).status()
     await db.commit()
     return result
+
+
+@router.get("/ledger-stats", response_model=SyncLedgerStatsResponse)
+async def ledger_stats(
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Return sync event ledger size stats (H2-E monitoring)."""
+    stats = await get_ledger_stats(db)
+    await db.commit()
+    return stats
+
+
+@router.delete("/events", response_model=SyncPruneResponse)
+async def prune_events(
+    before_id: int = Query(..., ge=0, description="Delete all events with id <= before_id"),
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Prune sync event ledger entries up to *before_id* (H2-E retention).
+
+    The caller must ensure no active client is still pulling from a cursor
+    ``<= before_id``. A safe heuristic is to prune only events older than the
+    oldest known client cursor, or events older than a TTL window.
+    """
+    pruned = await prune_sync_events(db, before_id=before_id)
+    stats = await get_ledger_stats(db)
+    await db.commit()
+    return SyncPruneResponse(
+        pruned_count=pruned,
+        before_id=before_id,
+        remaining_events=stats["total_events"],
+        server_time=utc_now_iso(),
+    )

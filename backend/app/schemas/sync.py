@@ -98,3 +98,20 @@ class SyncStatusResponse(BaseModel):
     server_time: str
     entity_counts: dict[str, int]
     tombstone_count: int
+
+
+class SyncPruneResponse(BaseModel):
+    """Response body for DELETE /api/v1/sync/events (H2-E retention)."""
+
+    pruned_count: int
+    before_id: int
+    remaining_events: int
+    server_time: str
+
+
+class SyncLedgerStatsResponse(BaseModel):
+    """Response body for GET /api/v1/sync/ledger-stats (H2-E monitoring)."""
+
+    total_events: int
+    min_id: int | None = None
+    max_id: int | None = None

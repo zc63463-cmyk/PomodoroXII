@@ -2870,6 +2870,10 @@ export interface components {
             tombstones?: {
                 [key: string]: unknown;
             }[];
+            /** Next Cursor */
+            next_cursor?: number | null;
+            /** Cursor Version */
+            cursor_version?: number | null;
             /**
              * Is Full
              * @default true
@@ -2917,6 +2921,10 @@ export interface components {
             tombstones?: {
                 [key: string]: unknown;
             }[];
+            /** Next Cursor */
+            next_cursor?: number | null;
+            /** Cursor Version */
+            cursor_version?: number | null;
         } & {
             [key: string]: unknown;
         };
@@ -5843,6 +5851,8 @@ export interface operations {
                 /** @description Secondary cursor for tombstones: last entity_id within the same deleted_at */
                 tombstone_since_id?: string;
                 limit?: number;
+                /** @description Global sync ledger cursor */
+                cursor?: number | null;
             };
             header?: never;
             path?: never;
@@ -5879,6 +5889,8 @@ export interface operations {
                 /** @description Secondary cursor for tombstones: last entity_id within the same deleted_at */
                 tombstone_since_id?: string;
                 limit?: number;
+                /** @description Global sync ledger cursor */
+                cursor?: number | null;
             };
             header?: never;
             path?: never;
