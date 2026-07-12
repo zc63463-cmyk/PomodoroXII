@@ -82,6 +82,8 @@ class SyncPullResponse(BaseModel):
     # next_since. Empty when no tombstones share the latest timestamp.
     next_tombstone_since_id: str = ""
     tombstones: list[dict[str, Any]] = Field(default_factory=list)
+    next_cursor: int | None = Field(default=None, ge=0)
+    cursor_version: int | None = None
 
 
 class SyncFullResponse(SyncPullResponse):

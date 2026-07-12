@@ -48,6 +48,7 @@ async def pull_changes(
     since_id: str = Query("", description="Secondary cursor: last id within the same timestamp"),
     tombstone_since_id: str = Query("", description="Secondary cursor for tombstones: last entity_id within the same deleted_at"),
     limit: int = Query(1000, ge=1, le=5000),
+    cursor: int | None = Query(None, ge=0, description="Global sync ledger cursor"),
     db: AsyncSession = Depends(get_space_db),
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
@@ -55,7 +56,7 @@ async def pull_changes(
     """Pull incremental changes since *since*."""
     result = await SyncService(db, fs).pull(
         since=since, since_id=since_id,
-        tombstone_since_id=tombstone_since_id, limit=limit,
+        tombstone_since_id=tombstone_since_id, limit=limit, cursor=cursor,
     )
     await db.commit()
     return result
@@ -67,6 +68,7 @@ async def full_sync(
     since_id: str = Query("", description="Secondary cursor: last id within the same timestamp"),
     tombstone_since_id: str = Query("", description="Secondary cursor for tombstones: last entity_id within the same deleted_at"),
     limit: int = Query(1000, ge=1, le=5000),
+    cursor: int | None = Query(None, ge=0, description="Global sync ledger cursor"),
     db: AsyncSession = Depends(get_space_db),
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
@@ -74,7 +76,7 @@ async def full_sync(
     """Full sync: returns ALL tombstones regardless of since."""
     result = await SyncService(db, fs).full(
         since=since, since_id=since_id,
-        tombstone_since_id=tombstone_since_id, limit=limit,
+        tombstone_since_id=tombstone_since_id, limit=limit, cursor=cursor,
     )
     await db.commit()
     return result

@@ -1,9 +1,7 @@
 """scaffold_entity.py 脚手架测试。"""
 from __future__ import annotations
 
-import subprocess
-import sys
-from pathlib import Path
+import pytest
 
 from scripts.scaffold_entity import main
 
@@ -37,19 +35,18 @@ def test_scaffold_dry_run_outputs_eight_file_blocks(capsys):
         assert block in output, f"Missing block: {block}\nOutput:\n{output}"
 
 
-def test_scaffold_cli_entrypoint_smoke():
-    """真实 CLI 入口必须可启动并保持 help 退出码语义。"""
-    script = Path(__file__).parent.parent / "scripts" / "scaffold_entity.py"
+def test_scaffold_cli_entrypoint_smoke(monkeypatch, capsys):
+    """真实 CLI 入口必须保持 argparse help 和进程退出码语义。"""
+    import runpy
+    import sys
 
-    result = subprocess.run(
-        [sys.executable, str(script), "--help"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    monkeypatch.setattr(sys, "argv", ["scaffold_entity.py", "--help"])
 
-    assert result.returncode == 0, result.stderr
-    assert "Scaffold a new DB-only entity" in result.stdout
+    with pytest.raises(SystemExit) as raised:
+        runpy.run_module("scripts.scaffold_entity", run_name="__main__")
+
+    assert raised.value.code == 0
+    assert "Scaffold a new DB-only entity" in capsys.readouterr().out
 
 
 def test_scaffold_rejects_invalid_field_type(capsys):
