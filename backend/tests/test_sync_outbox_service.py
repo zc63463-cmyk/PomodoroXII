@@ -11,6 +11,7 @@ Verifies:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from math import nan
 
@@ -176,6 +177,50 @@ async def test_rollback_rolls_back_ledger_rows(space_session):
         )
     ).scalars().all()
     assert len(rows) == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sqlite_writers_commit_in_ledger_id_order(space_session):
+    """同一 space 的多连接写事务必须串行，后提交者不能获得更小 cursor。"""
+    from app.space_manager import get_space_engine_manager
+
+    manager = get_space_engine_manager()
+    first = await manager.get_session("spc_test")
+    second = await manager.get_session("spc_test")
+    first_ready = asyncio.Event()
+    release_first = asyncio.Event()
+    commit_order: list[str] = []
+
+    async def writer_one():
+        event_row = await record_sync_event(
+            first, entity_type="task", entity_id="writer-1", action="create"
+        )
+        first_ready.set()
+        await release_first.wait()
+        await first.commit()
+        commit_order.append("writer-1")
+        return event_row.id
+
+    async def writer_two():
+        await first_ready.wait()
+        event_row = await record_sync_event(
+            second, entity_type="task", entity_id="writer-2", action="create"
+        )
+        await second.commit()
+        commit_order.append("writer-2")
+        return event_row.id
+
+    first_task = asyncio.create_task(writer_one())
+    second_task = asyncio.create_task(writer_two())
+    await first_ready.wait()
+    await asyncio.sleep(0)
+    release_first.set()
+    first_id, second_id = await asyncio.gather(first_task, second_task)
+    await first.close()
+    await second.close()
+
+    assert commit_order == ["writer-1", "writer-2"]
+    assert first_id < second_id
 
 
 @pytest.mark.asyncio

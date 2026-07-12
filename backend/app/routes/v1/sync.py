@@ -17,12 +17,14 @@ from app.deps import get_file_system, get_space_context, get_space_db
 from app.file_system.interfaces import FileSystem
 from app.schemas.sync import (
     SyncFullResponse,
+    SyncLedgerStatsResponse,
     SyncPullResponse,
     SyncPushRequest,
     SyncPushResponse,
     SyncStatusResponse,
 )
 from app.services.sync import SyncService
+from app.services.sync_outbox import get_ledger_stats
 
 router = APIRouter()
 
@@ -69,6 +71,8 @@ async def full_sync(
     tombstone_since_id: str = Query("", description="Secondary cursor for tombstones: last entity_id within the same deleted_at"),
     limit: int = Query(1000, ge=1, le=5000),
     cursor: int | None = Query(None, ge=0, description="Global sync ledger cursor"),
+    snapshot_token: str | None = Query(None, min_length=1, max_length=36),
+    snapshot_offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_space_db),
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
@@ -77,6 +81,7 @@ async def full_sync(
     result = await SyncService(db, fs).full(
         since=since, since_id=since_id,
         tombstone_since_id=tombstone_since_id, limit=limit, cursor=cursor,
+        snapshot_token=snapshot_token, snapshot_offset=snapshot_offset,
     )
     await db.commit()
     return result
@@ -91,3 +96,14 @@ async def sync_status(
     result = await SyncService(db).status()
     await db.commit()
     return result
+
+
+@router.get("/ledger-stats", response_model=SyncLedgerStatsResponse)
+async def ledger_stats(
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Return sync event ledger size stats (H2-E monitoring)."""
+    stats = await get_ledger_stats(db)
+    await db.commit()
+    return stats

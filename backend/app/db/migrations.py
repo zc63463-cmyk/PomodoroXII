@@ -123,6 +123,22 @@ def _expected_legacy_fingerprint(kind: DatabaseKind) -> dict[str, Any]:
         engine.dispose()
 
 
+def _expected_managed_schema(
+    kind: DatabaseKind, revision: str
+) -> tuple[frozenset[str], dict[str, Any]]:
+    config = _config(kind)
+    version_table = _VERSION_TABLES[kind]
+    engine = create_engine("sqlite://")
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, revision)
+            table_names = frozenset(inspect(connection).get_table_names()) - {version_table}
+            return table_names, _inspector_fingerprint(connection, table_names)
+    finally:
+        engine.dispose()
+
+
 def _classify_schema(
     connection: Connection,
     kind: DatabaseKind,
@@ -142,10 +158,6 @@ def _classify_schema(
             raise MigrationSafetyError(
                 f"legacy, foreign, or multiple version tables found: {sorted(present_version_tables)}"
             )
-        if business_tables != expected_tables:
-            raise MigrationSafetyError(
-                f"managed {kind} schema has mixed, unknown, or missing tables"
-            )
         try:
             rows = _version_rows(connection, version_table)
         except Exception as exc:
@@ -154,9 +166,20 @@ def _classify_schema(
             raise MigrationSafetyError(
                 f"{version_table} must contain exactly one migration version"
             )
-        if rows[0] not in known_revisions:
+        revision = rows[0]
+        if revision not in known_revisions:
             raise MigrationSafetyError(
-                f"{version_table} contains unknown migration version {rows[0]!r}"
+                f"{version_table} contains unknown migration version {revision!r}"
+            )
+        revision_tables, expected = _expected_managed_schema(kind, revision)
+        if business_tables != revision_tables:
+            raise MigrationSafetyError(
+                f"managed {kind} schema has mixed, unknown, or missing tables"
+            )
+        actual = _inspector_fingerprint(connection, revision_tables)
+        if actual != expected:
+            raise MigrationSafetyError(
+                f"managed {kind} schema fingerprint does not match revision {revision!r}"
             )
         return "managed"
 

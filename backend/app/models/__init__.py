@@ -20,6 +20,7 @@ from app.models.session_quick_note import SessionQuickNote
 from app.models.setting import Setting
 from app.models.sync_audit_log import SyncAuditLog
 from app.models.sync_outbox import SyncOutbox
+from app.models.sync_state import SyncSnapshot, SyncState
 from app.models.task import Task
 from app.models.task_quick_note import TaskQuickNote
 from app.models.time_block import TimeBlock
@@ -44,5 +45,7 @@ __all__ = [
     "Tombstone",
     "Setting",
     "SyncOutbox",
+    "SyncState",
+    "SyncSnapshot",
     "SyncAuditLog",
 ]

@@ -82,7 +82,7 @@ describe('sync-store', () => {
     await useSyncStore.getState().resolveConflict(42, 'accept-remote')
 
     // S1-4.2：仅断言委托；store 状态更新由 EN27 + wire 覆盖
-    expect(mockSyncEngine.resolveConflict).toHaveBeenCalledWith(42, 'accept-remote')
+    expect(mockSyncEngine.resolveConflict).toHaveBeenCalledWith(42, 'accept-remote', undefined)
   })
 
   it('SS7: sync 早退（offline/isSyncing）→ triggerSync 末尾 apply 兜底；store 非 syncing', async () => {

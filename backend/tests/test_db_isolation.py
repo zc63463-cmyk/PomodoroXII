@@ -3,7 +3,7 @@
 Verifies that:
 1. Meta DB contains only ``spaces`` + ``meta_settings`` (2 tables).
 2. Space DB excludes meta tables (``spaces``, ``meta_settings`` absent).
-3. Space DB contains all 18 business tables.
+3. Space DB contains all 20 business tables.
 """
 
 import pytest
@@ -50,7 +50,7 @@ async def test_space_db_excludes_meta_tables(_isolate_env):
 
 @pytest.mark.asyncio
 async def test_space_db_has_all_business_tables(_isolate_env):
-    """Space DB should contain all 18 business tables."""
+    """Space DB should contain all 20 business tables."""
     from sqlalchemy import inspect
 
     from app.db.meta_session import init_meta_db
@@ -70,11 +70,12 @@ async def test_space_db_has_all_business_tables(_isolate_env):
         "time_blocks", "memo_comments", "session_quick_notes",
         "schedule_quick_notes", "task_quick_notes", "tombstones",
         "settings", "sync_outbox", "sync_audit_log",
+        "sync_state", "sync_snapshots",
     }
     actual_business = set(tables) - {"spaces", "meta_settings", "alembic_version_space", "alembic_version_meta"}
     missing = expected_business_tables - actual_business
     assert not missing, f"Space DB missing business tables: {missing}"
-    assert len(actual_business) == 18, (
-        f"Space DB has {len(actual_business)} business tables, expected 18: "
+    assert len(actual_business) == 20, (
+        f"Space DB has {len(actual_business)} business tables, expected 20: "
         f"extra={actual_business - expected_business_tables}"
     )
