@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from alembic import command
 from sqlalchemy import create_engine, inspect, text
 
 import app.db.migrations as migrations_module
@@ -25,6 +26,8 @@ SPACE_TABLES = {
     "settings",
     "sync_audit_log",
     "sync_outbox",
+    "sync_snapshots",
+    "sync_state",
     "task_quick_notes",
     "tasks",
     "time_blocks",
@@ -166,6 +169,44 @@ def test_legacy_schema_with_partial_index_predicate_drift_fails_closed(tmp_path:
         run_migrations("space", path)
 
 
+def test_managed_space_007_upgrades_to_008_with_existing_outbox_cursor(tmp_path: Path) -> None:
+    from app.db.migrations import _config, run_migrations
+
+    path = tmp_path / "managed-space-007.db"
+    engine = create_engine(_sqlite_url(path))
+    config = _config("space")
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "space_007_session_mood_check")
+            connection.execute(
+                text(
+                    "INSERT INTO sync_outbox "
+                    "(entity_type, entity_id, action, payload, created_at, synced_at) "
+                    "VALUES "
+                    "('tasks', 'task-1', 'upsert', '{}', '2026-01-01T00:00:00.000Z', NULL), "
+                    "('notes', 'note-1', 'delete', '{}', '2026-01-02T00:00:00.000Z', NULL)"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    run_migrations("space", path)
+
+    engine = create_engine(_sqlite_url(path))
+    try:
+        assert {"sync_state", "sync_snapshots"}.issubset(inspect(engine).get_table_names())
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT current_cursor FROM sync_state WHERE id = 1")
+            ).scalar_one() == 2
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version_space")
+            ).scalar_one() == "space_008_sync_retention_snapshot"
+    finally:
+        engine.dispose()
+
+
 def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> None:
     from app.db.migrations import run_migrations
 
@@ -194,7 +235,7 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
             ).scalar_one() == "2026-01-01T00:00:00.000Z"
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_007_session_mood_check"
+            ).scalar_one() == "space_008_sync_retention_snapshot"
     finally:
         engine.dispose()
 

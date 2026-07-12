@@ -253,6 +253,68 @@ async def test_status_endpoint_returns_counts(client):
 
 
 @pytest.mark.asyncio
+async def test_space_token_cannot_prune_sync_ledger(client):
+    """普通 space token 不得拥有任何公开账本删除能力。"""
+    _, space_token = await _setup_login_and_space_token(client)
+    response = await client.delete(
+        "/api/v1/sync/events?before_id=1",
+        headers={"Authorization": f"Bearer {space_token}"},
+    )
+    assert response.status_code in (404, 405)
+
+
+@pytest.mark.asyncio
+async def test_cursor_expired_http_error_has_stable_recovery_fields(client):
+    from app.services.sync_outbox import advance_retention_floor, prune_sync_events
+    from app.space_manager import get_space_engine_manager
+
+    _, space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+    token_payload = __import__("app.auth.security", fromlist=["decode_access_token"]).decode_access_token(
+        space_token
+    )
+    session = await get_space_engine_manager().get_session(token_payload["space_id"])
+    try:
+        from app.services.sync_outbox import record_sync_event
+
+        event_row = await record_sync_event(
+            session, entity_type="task", entity_id="expired-http", action="create"
+        )
+        await advance_retention_floor(session, floor=event_row.id)
+
+        await prune_sync_events(session, before_id=event_row.id)
+        await session.commit()
+    finally:
+        await session.close()
+
+    response = await client.get("/api/v1/sync/pull?cursor=0", headers=headers)
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Sync cursor expired; perform a full sync",
+        "error_type": "sync_cursor_expired",
+        "floor": event_row.id,
+        "current_cursor": event_row.id,
+        "recovery_action": "full_sync",
+    }
+
+
+@pytest.mark.asyncio
+async def test_missing_snapshot_http_error_has_stable_recovery_fields(client):
+    _, space_token = await _setup_login_and_space_token(client)
+    response = await client.get(
+        "/api/v1/sync/full?cursor=0&snapshot_token=already-pruned&snapshot_offset=1",
+        headers={"Authorization": f"Bearer {space_token}"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Sync snapshot expired; restart full sync",
+        "error_type": "sync_snapshot_expired",
+        "recovery_action": "restart_full_sync",
+    }
+
+
+@pytest.mark.asyncio
 async def test_push_endpoint_returns_conflict_for_lww(client):
     """POST /sync/push with older client_ts should return conflict."""
     _, space_token = await _setup_login_and_space_token(client)

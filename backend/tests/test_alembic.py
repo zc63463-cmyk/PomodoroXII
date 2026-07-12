@@ -24,6 +24,7 @@ from tests.migrations import alembic_config, migration_engine
                 "time_blocks", "memo_comments", "session_quick_notes",
                 "schedule_quick_notes", "task_quick_notes", "tombstones",
                 "settings", "sync_outbox", "sync_audit_log",
+                "sync_state", "sync_snapshots",
             },
         ),
     ],

@@ -12,18 +12,30 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
+from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import (
+    SyncCursorExpiredError,
+    SyncSnapshotExpiredError,
+    ValidationError,
+)
 from app.models.note import Note
 from app.models.sync_outbox import SyncOutbox
+from app.models.sync_state import SyncSnapshot
 from app.models.tombstone import Tombstone
 from app.registry.sync_registry import build_sync_registry
 from app.services.serializers import serialize_entity
 from app.services.sync_entity_types import canonicalize_entity_type
-from app.services.sync_outbox import record_sync_event
+from app.services.sync_outbox import (
+    get_current_cursor,
+    get_retention_floor,
+    record_sync_event,
+)
 from app.services.sync_safety import (
     check_folder_circular_ref,
     check_lww_conflict,
@@ -31,10 +43,12 @@ from app.services.sync_safety import (
     sanitize_zero_time,
     strip_client_fields,
 )
-from app.services.time import utc_now_iso
+from app.services.time import utc_now, utc_now_iso
 from app.services.tombstone import TombstoneService
 
 logger = logging.getLogger(__name__)
+
+SYNC_SNAPSHOT_TTL = timedelta(hours=1)
 
 
 # --------------------------------------------------------------------------- #
@@ -593,6 +607,13 @@ class SyncService:
         return result
 
     async def _pull_by_cursor(self, *, cursor: int, limit: int) -> dict[str, Any]:
+        floor = await get_retention_floor(self.db)
+        current_cursor = await get_current_cursor(self.db)
+        if cursor < floor:
+            raise SyncCursorExpiredError(
+                floor=floor,
+                current_cursor=current_cursor,
+            )
         rows = (
             await self.db.execute(
                 select(SyncOutbox)
@@ -734,33 +755,121 @@ class SyncService:
         since_id: str = "",
         tombstone_since_id: str = "",
         cursor: int | None = None,
+        snapshot_token: str | None = None,
+        snapshot_offset: int = 0,
     ) -> dict[str, Any]:
-        """Like pull() but tombstones are returned regardless of *since*.
-
-        Sets ``is_full=True`` so clients can distinguish a full sync
-        response from an incremental pull response.
-
-        D-3 optimization: delegates to ``pull()`` with
-        ``tombstones_since_override=""`` so the tombstones query is
-        executed exactly once. Tombstones still honour *tombstone_since_id*
-        for same-deleted_at pagination even when *since* is bypassed.
-        """
-        if cursor == 0:
-            first_event_id = await self.db.scalar(
-                select(SyncOutbox.id).order_by(SyncOutbox.id.asc()).limit(1)
+        """Return a materialized current-state snapshot for cursor v2 clients."""
+        if cursor is None:
+            result = await self.pull(
+                since=since,
+                limit=limit,
+                since_id=since_id,
+                tombstone_since_id=tombstone_since_id,
+                tombstones_since_override="",
             )
-            if first_event_id is None:
-                cursor = None
-        result = await self.pull(
-            since=since,
-            limit=limit,
-            since_id=since_id,
-            tombstone_since_id=tombstone_since_id,
-            tombstones_since_override="",
-            cursor=cursor,
-        )
-        result["is_full"] = True
+            result["is_full"] = True
+            return result
+
+        if snapshot_token is None:
+            if snapshot_offset != 0:
+                raise ValidationError("snapshot_offset requires snapshot_token")
+            snapshot = await self._create_snapshot()
+            snapshot_offset = 0
+        else:
+            snapshot = await self.db.get(SyncSnapshot, snapshot_token)
+            if snapshot is None:
+                raise SyncSnapshotExpiredError()
+            cutoff = (utc_now() - SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if snapshot.created_at < cutoff:
+                await self.db.delete(snapshot)
+                await self.db.flush()
+                raise SyncSnapshotExpiredError()
+
+        items = json.loads(snapshot.payload)
+        if snapshot_offset < 0:
+            raise ValidationError("snapshot_offset must be non-negative")
+        if snapshot_offset > len(items):
+            raise ValidationError("snapshot_offset exceeds snapshot size")
+        page_items = items[snapshot_offset:snapshot_offset + limit]
+        next_offset = snapshot_offset + len(page_items)
+        has_more = next_offset < len(items)
+        result: dict[str, Any] = {
+            "server_time": utc_now_iso(),
+            "has_more": has_more,
+            "tombstones_has_more": False,
+            "next_since": "",
+            "next_since_id": "",
+            "next_tombstone_since_id": "",
+            "next_cursor": snapshot.cursor,
+            "cursor_version": 2,
+            "snapshot_token": snapshot.token,
+            "snapshot_offset": next_offset,
+            "tombstones": [],
+            "is_full": True,
+        }
+        for entry in ENTITY_REGISTRY.values():
+            result[entry["pull_key"]] = []
+        for item in page_items:
+            if item["kind"] == "tombstone":
+                result["tombstones"].append(item["payload"])
+            else:
+                result[item["pull_key"]].append(item["payload"])
         return result
+
+    async def _create_snapshot(self) -> SyncSnapshot:
+        """Materialize one stable snapshot and capture its incremental cursor."""
+        cutoff = (utc_now() - SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+        await self.db.execute(
+            delete(SyncSnapshot).where(SyncSnapshot.created_at < cutoff)
+        )
+        # Anchor the SQLite read transaction before scanning entity tables.
+        # Later commits receive a cursor greater than this snapshot cursor and
+        # are therefore delivered by the following incremental pull.
+        snapshot_cursor = await get_current_cursor(self.db)
+        items: list[dict[str, Any]] = []
+        for entry in ENTITY_REGISTRY.values():
+            rows = (
+                await self.db.execute(
+                    select(entry["model"]).order_by(entry["model"].id.asc())
+                )
+            ).scalars().all()
+            serialized = [serialize_entity(row) for row in rows]
+            if entry["model"] is Note and serialized:
+                contents = (
+                    await self.fs.read_notes_batch([row.id for row in rows])
+                    if self.fs is not None
+                    else [None] * len(rows)
+                )
+                for payload, body in zip(serialized, contents):
+                    payload["content"] = body or ""
+                    payload["content_missing"] = body is None
+            items.extend({
+                "kind": "entity",
+                "pull_key": entry["pull_key"],
+                "payload": payload,
+            } for payload in serialized)
+
+        tombstones = (
+            await self.db.execute(
+                select(Tombstone).order_by(Tombstone.id.asc())
+            )
+        ).scalars().all()
+        items.extend({
+            "kind": "tombstone",
+            "payload": {
+                "entity_type": tombstone.entity_type,
+                "entity_id": tombstone.entity_id,
+                "deleted_at": normalize_timestamp(tombstone.deleted_at or ""),
+            },
+        } for tombstone in tombstones)
+        snapshot = SyncSnapshot(
+            token=str(uuid.uuid4()),
+            cursor=snapshot_cursor,
+            payload=json.dumps(items, ensure_ascii=False, allow_nan=False),
+        )
+        self.db.add(snapshot)
+        await self.db.flush()
+        return snapshot
 
     # ----------------------------------------------------------------- #
     # status
