@@ -71,7 +71,7 @@ export class RealSyncEngine implements SyncEngine {
       async () => {
         if (this.destroyed) return
         const meta = await loadSyncMeta(this.db)
-        const isFull = meta.since === ''
+        const isFull = meta.since === '' && meta.cursor == null
         await this.runSyncCycle(isFull)
       },
       () => this.scheduleSync(RESYNC_DELAY_MS),
@@ -245,14 +245,32 @@ export class RealSyncEngine implements SyncEngine {
     this.listeners.syncComplete.forEach((cb) => cb())
   }
 
+  private requiresFullRestart(err: unknown): boolean {
+    const response = (err as { response?: { status?: number; data?: { error_type?: string } } })
+      ?.response
+    return response?.status === 409 && (
+      response.data?.error_type === 'sync_cursor_expired'
+      || response.data?.error_type === 'sync_snapshot_expired'
+    )
+  }
+
   /** sync/fullSync 共用内核：runPullLoop → pushAllPending（禁止内联 HTTP） */
   private async runSyncCycle(isFull: boolean): Promise<void> {
     if (this.destroyed) return
     this.isSyncing = true
     this.setStatus('syncing')
     try {
-      // 1. Pull（S1-2 runPullLoop 内部已分页 + merge + saveSyncMeta）
-      const pullResult = await runPullLoop(this.db, this.api, { isFull })
+      // 1. Pull；过期 cursor 必须 fail-closed 并恢复为真正 snapshot，恢复前禁止 push。
+      let pullResult
+      try {
+        pullResult = await runPullLoop(this.db, this.api, { isFull })
+      } catch (err) {
+        if (this.requiresFullRestart(err)) {
+          pullResult = await runPullLoop(this.db, this.api, { isFull: true })
+        } else {
+          throw err
+        }
+      }
       if (this.destroyed) return
       // S1-Hard-1：pull dirtyConflicts 统一进 addConflicts
       this.addConflicts(pullResult.dirtyConflicts)

@@ -166,7 +166,7 @@ describe('merge', () => {
     expect(row!._dirty).toBe(false)
   })
 
-  it('MG6-QN: quickNote tombstone marks local row deleted without physical deletion', async () => {
+  it('MG6-QN: dirty quickNote tombstone 生成冲突且保留本地实体', async () => {
     db = await openTestDb()
     await db.quickNotes.put(makeQuickNoteRow('qn1', '2026-01-01T00:00:00.000Z', true))
     const dirtyConflicts: SyncConflict[] = []
@@ -182,10 +182,41 @@ describe('merge', () => {
 
     const row = await db.quickNotes.get('qn1')
     expect(row).toBeDefined()
-    expect(row!.deletion_state).toBe('deleted')
-    expect(row!._dirty).toBe(false)
+    expect(row!.deletion_state).toBe('active')
+    expect(row!._dirty).toBe(true)
     expect(row!.content).toBe('local quick note')
-    expect(dirtyConflicts).toHaveLength(0)
+    expect(dirtyConflicts).toHaveLength(1)
+    expect(dirtyConflicts[0]!.entityType).toBe('quickNote')
+    expect(dirtyConflicts[0]!.entityId).toBe('qn1')
+    expect(dirtyConflicts[0]!.remoteVersion).toMatchObject({
+      deletion_state: 'deleted',
+      updated_at: '2026-07-06T00:00:00.000Z',
+    })
+  })
+
+  it('MG6-OUTBOX: clean 实体有 unsynced outbox 时 tombstone 生成冲突并保留', async () => {
+    db = await openTestDb()
+    await db.tasks.put(makeTaskRow('t-outbox', '2026-01-01T00:00:00.000Z'))
+    await db.outbox.add({
+      entityType: 'task',
+      entityId: 't-outbox',
+      action: 'update',
+      payload: '{}',
+      createdAt: Date.now(),
+      synced: false,
+    })
+    const dirtyConflicts: SyncConflict[] = []
+
+    await applyMerge(db, makePullResponse('tasks', [], {
+      tombstones: [{
+        entity_type: 'task',
+        entity_id: 't-outbox',
+        deleted_at: '2026-07-06T00:00:00.000Z',
+      }],
+    }), dirtyConflicts)
+
+    expect((await db.tasks.get('t-outbox'))!.deletion_state).toBe('active')
+    expect(dirtyConflicts).toHaveLength(1)
   })
 
   it('MG7: buildPrePushConflict 纯函数形状', () => {
