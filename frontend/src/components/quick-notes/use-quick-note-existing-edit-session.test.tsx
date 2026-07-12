@@ -2339,4 +2339,118 @@ describe('QuickNote existing-edit session controller', () => {
     })
   })
 
+  it('does not let an older stacked save overwrite compensated recovery', async () => {
+    const firstCleanup = createDeferred<
+      'cleared' | 'absent' | 'different-edit'
+    >()
+    const secondUpdate = createDeferred<ExistingEditUpdateResult>()
+    const committedOne = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    const committedTwo = makeQuickNote({
+      content: 'revision two',
+      updated_at: '2026-07-12T04:00:03.000Z',
+    })
+    const committedThree = makeQuickNote({
+      content: 'revision three',
+      updated_at: '2026-07-12T04:00:04.000Z',
+    })
+    adapter.clearEffects.push(() => firstCleanup.promise)
+    adapter.updateEffects.push(
+      async () => ({ kind: 'updated', note: committedOne }),
+      () => secondUpdate.promise,
+      async () => ({ kind: 'updated', note: committedThree }),
+    )
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const firstSave = controller.save()
+    await flushMicrotasks()
+    expect(adapter.clearCalls).toHaveLength(1)
+
+    controller.change('revision two')
+    const secondSave = controller.save()
+    controller.change('revision three')
+    const thirdSave = controller.save()
+    firstCleanup.resolve('cleared')
+    await flushMicrotasks()
+
+    const compensatedRecovery = adapter.checkpointCalls.find((call) => (
+      call.revision === 3 && call.draft === 'revision three'
+    ))
+    expect(compensatedRecovery).toBeDefined()
+    expect(adapter.updateCalls.map((capture) => capture.draft)).toEqual([
+      'revision one',
+      'revision two',
+    ])
+    expect(adapter.stored).toBe(compensatedRecovery)
+    expect(adapter.stored).toEqual(compensatedRecovery)
+    expect(adapter.checkpointCalls.some((call) => (
+      call.revision === 2 && call.draft === 'revision two'
+    ))).toBe(false)
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'recovery-durable',
+      draft: 'revision three',
+    })
+
+    secondUpdate.resolve({ kind: 'updated', note: committedTwo })
+    const results = await Promise.all([firstSave, secondSave, thirdSave])
+
+    expect(results.map((result) => result.kind)).toEqual([
+      'saved',
+      'saved',
+      'saved',
+    ])
+    expect(adapter.updateCalls.map((capture) => capture.draft)).toEqual([
+      'revision one',
+      'revision two',
+      'revision three',
+    ])
+    expect(controller.state).toMatchObject({
+      phase: 'saved',
+      durability: 'entity-durable',
+      editingNote: committedThree,
+      draft: 'revision three',
+    })
+    expect(adapter.stored).toBeNull()
+  })
+
+  it('honors a close upgrade from the terminal saved publication', async () => {
+    const committed = makeQuickNote({
+      content: 'terminal close',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: committed }
+    const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter, onSaved),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('terminal close')
+    let upgraded = false
+    let upgradedSave: ReturnType<typeof controller.save> | undefined
+    controller.subscribe(() => {
+      if (!upgraded && controller.state.phase === 'saved') {
+        upgraded = true
+        upgradedSave = controller.save({ closeAfterSave: true })
+      }
+    })
+
+    const firstSave = controller.save({ closeAfterSave: false })
+    await expect(firstSave).resolves.toMatchObject({ kind: 'saved' })
+
+    expect(upgradedSave).toBe(firstSave)
+    expectIdle(controller.state)
+    expect(adapter.checkpointCalls).toHaveLength(1)
+    expect(adapter.updateCalls).toHaveLength(1)
+    expect(adapter.clearCalls).toHaveLength(1)
+    expect(onSaved).toHaveBeenCalledOnce()
+  })
+
 })

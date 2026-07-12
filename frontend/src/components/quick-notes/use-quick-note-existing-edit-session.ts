@@ -333,6 +333,16 @@ export function createQuickNoteExistingEditSessionController(
     )
   }
 
+  function hasNewerDurableRecoveryOwner(
+    capture: ExistingEditCheckpointCapture,
+  ): boolean {
+    return recoveryOwners.some((owner) => (
+      owner.kind === 'v1'
+      && owner.editId === capture.editId
+      && owner.revision > capture.revision
+    ))
+  }
+
   function activate(note: QuickNote): void {
     if (!active) return
     cancelTrailingTimers()
@@ -757,12 +767,16 @@ export function createQuickNoteExistingEditSessionController(
       updatedAt: nowIso(),
     }
     let checkpointIssue: QuickNoteExistingEditIssue | null = null
+    let captureRecoveryDurable = false
 
-    try {
-      await adapter.checkpoint(recovery)
-      resetRecoveryOwners(attemptedOwner)
-    } catch {
-      checkpointIssue = createIssue('checkpoint-failed', 'memory-only')
+    if (!hasNewerDurableRecoveryOwner(capture)) {
+      try {
+        await adapter.checkpoint(recovery)
+        resetRecoveryOwners(attemptedOwner)
+        captureRecoveryDurable = true
+      } catch {
+        checkpointIssue = createIssue('checkpoint-failed', 'memory-only')
+      }
     }
 
     if (normalizeContent(capture.content) === '') {
@@ -770,7 +784,9 @@ export function createQuickNoteExistingEditSessionController(
         publish({
           ...snapshot,
           phase: checkpointIssue ? 'failed' : 'dirty',
-          durability: checkpointIssue ? 'memory-only' : 'recovery-durable',
+          durability: captureRecoveryDurable
+            ? 'recovery-durable'
+            : 'memory-only',
           issue: checkpointIssue,
         })
       }
@@ -789,7 +805,10 @@ export function createQuickNoteExistingEditSessionController(
       })
     } catch {
       const issue = checkpointIssue
-        ?? createIssue('entity-save-failed', 'recovery-durable')
+        ?? createIssue(
+          'entity-save-failed',
+          captureRecoveryDurable ? 'recovery-durable' : 'memory-only',
+        )
       if (isCurrentCapture(capture)) {
         publish({
           ...snapshot,
@@ -801,9 +820,9 @@ export function createQuickNoteExistingEditSessionController(
       return { kind: 'failed', issue }
     }
 
-    const checkpointDurability: ExistingEditDurability = checkpointIssue
-      ? 'memory-only'
-      : 'recovery-durable'
+    const checkpointDurability: ExistingEditDurability = captureRecoveryDurable
+      ? 'recovery-durable'
+      : 'memory-only'
     if (update.kind === 'conflict') {
       const conflict: QuickNoteDraftConflict = {
         note: update.note,
@@ -968,27 +987,27 @@ export function createQuickNoteExistingEditSessionController(
       return { kind: 'failed', issue: cleanupIssue }
     }
 
-    if (isCurrentCapture(capture)) {
-      if (
-        flight.closeAfterSave
-        && (cleanupResult === 'cleared' || cleanupResult === 'absent')
-      ) {
-        cancelTrailingTimers()
-        identity = null
-        blockedRecoveryOwner = null
-        resetRecoveryOwners()
-        publish(IDLE_STATE)
-      } else {
-        publish({
-          ...snapshot,
-          phase: 'saved',
-          durability: 'entity-durable',
-          editingNote: update.note,
-          draft: capture.content,
-          conflict: null,
-          issue: projectionIssue,
-        })
-      }
+    if (isCurrentCapture(capture) && !flight.closeAfterSave) {
+      publish({
+        ...snapshot,
+        phase: 'saved',
+        durability: 'entity-durable',
+        editingNote: update.note,
+        draft: capture.content,
+        conflict: null,
+        issue: projectionIssue,
+      })
+    }
+    if (
+      isCurrentCapture(capture)
+      && flight.closeAfterSave
+      && (cleanupResult === 'cleared' || cleanupResult === 'absent')
+    ) {
+      cancelTrailingTimers()
+      identity = null
+      blockedRecoveryOwner = null
+      resetRecoveryOwners()
+      publish(IDLE_STATE)
     }
 
     return { kind: 'saved', note: update.note, visibility }
