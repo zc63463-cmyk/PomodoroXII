@@ -237,6 +237,7 @@ describe('QuickNote existing-edit session controller', () => {
       conflict: null,
       issue: null,
     })
+    await flushMicrotasks()
     expect(adapter.operationLog).toEqual(['load'])
 
     load.resolve({ kind: 'absent' })
@@ -473,6 +474,7 @@ describe('QuickNote existing-edit session controller', () => {
     })
 
     controller.start(requested)
+    await flushMicrotasks()
 
     expect(adapter.operationLog).toEqual(['load', 'load'])
     expect(controller.state).toMatchObject({
@@ -1177,4 +1179,695 @@ describe('QuickNote existing-edit session controller', () => {
       window.removeEventListener('unhandledrejection', onUnhandled)
     }
   })
+
+  it('checkpoints at 500ms and starts entity autosave at 900ms', async () => {
+    const updated = makeQuickNote({
+      content: 'local revision',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: updated }
+    const onSaved = vi.fn((note: QuickNote): undefined => {
+      adapter.operationLog.push(`projection:${note.content}`)
+      return undefined
+    })
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter, onSaved),
+    )
+    await flushMicrotasks()
+    adapter.operationLog.length = 0
+    controller.start(makeQuickNote())
+    controller.change('local revision')
+
+    await vi.advanceTimersByTimeAsync(499)
+    expect(adapter.operationLog).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(adapter.operationLog).toEqual(['checkpoint:local revision'])
+    await vi.advanceTimersByTimeAsync(399)
+    expect(adapter.updateCalls).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(adapter.operationLog).toEqual([
+      'checkpoint:local revision',
+      'checkpoint:local revision',
+      'update:local revision',
+      'clear',
+      'projection:local revision',
+    ])
+    expect(adapter.updateCalls).toEqual([{
+      noteId: 'quick-note-1',
+      baseContent: 'base',
+      baseUpdatedAt: BASE_UPDATED_AT,
+      draft: 'local revision',
+    }])
+  })
+
+  it('serializes a successor checkpoint behind an older lane task', async () => {
+    const firstCheckpoint = createDeferred<void>()
+    adapter.checkpointEffects.push(() => firstCheckpoint.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    adapter.operationLog.length = 0
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+
+    await vi.advanceTimersByTimeAsync(500)
+    expect(adapter.operationLog).toEqual(['checkpoint:revision one'])
+    controller.change('revision two')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(adapter.operationLog).toEqual(['checkpoint:revision one'])
+
+    firstCheckpoint.resolve()
+    await flushMicrotasks()
+
+    expect(adapter.operationLog).toEqual([
+      'checkpoint:revision one',
+      'checkpoint:revision two',
+    ])
+  })
+
+  it('keeps the latest revision memory-only when an older checkpoint completes', async () => {
+    const firstCheckpoint = createDeferred<void>()
+    adapter.checkpointEffects.push(() => firstCheckpoint.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(controller.state.phase).toBe('checkpointing')
+
+    controller.change('revision two')
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'revision two',
+    })
+    firstCheckpoint.resolve()
+    await flushMicrotasks()
+
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'revision two',
+    })
+  })
+
+  it('skips a stale autosave before entity update', async () => {
+    adapter.updateResult = {
+      kind: 'updated',
+      note: makeQuickNote({
+        content: 'latest revision',
+        updated_at: '2026-07-12T04:00:02.000Z',
+      }),
+    }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('stale revision')
+
+    await vi.advanceTimersByTimeAsync(899)
+    controller.change('latest revision')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(adapter.updateCalls).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(899)
+    expect(adapter.updateCalls).toHaveLength(1)
+    expect(adapter.updateCalls[0]?.draft).toBe('latest revision')
+  })
+
+  it('saves checkpoint then entity then cleanup then projection', async () => {
+    const updated = makeQuickNote({
+      content: 'complete local draft',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: updated }
+    const onSaved = vi.fn((note: QuickNote): undefined => {
+      adapter.operationLog.push(`projection:${note.content}`)
+      return undefined
+    })
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter, onSaved),
+    )
+    await flushMicrotasks()
+    adapter.operationLog.length = 0
+    controller.start(makeQuickNote())
+    controller.change('complete local draft')
+
+    const result = await controller.save()
+
+    expect(result).toEqual({
+      kind: 'saved',
+      note: updated,
+      visibility: 'refreshed',
+    })
+    expect(adapter.operationLog).toEqual([
+      'checkpoint:complete local draft',
+      'update:complete local draft',
+      'clear',
+      'projection:complete local draft',
+    ])
+    expect(adapter.checkpointCalls).toEqual([{
+      version: QUICK_NOTE_EXISTING_EDIT_RECOVERY_VERSION,
+      editId: 'edit-1',
+      revision: 1,
+      noteId: 'quick-note-1',
+      baseContent: 'base',
+      baseUpdatedAt: BASE_UPDATED_AT,
+      draft: 'complete local draft',
+      updatedAt: BASE_UPDATED_AT,
+    }])
+    expect(adapter.clearCalls).toEqual([[
+      { kind: 'v1', editId: 'edit-1', revision: 1 },
+    ]])
+    expect(controller.state).toMatchObject({
+      phase: 'saved',
+      durability: 'entity-durable',
+      editingNote: updated,
+      draft: 'complete local draft',
+      issue: null,
+    })
+  })
+
+  it('rebases a successor after an older entity commit without self-conflict', async () => {
+    const firstUpdate = createDeferred<ExistingEditUpdateResult>()
+    const firstCommitted = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    const secondCommitted = makeQuickNote({
+      content: 'revision two',
+      updated_at: '2026-07-12T04:00:03.000Z',
+    })
+    adapter.updateEffects.push(() => firstUpdate.promise)
+    adapter.updateResult = { kind: 'updated', note: secondCommitted }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const olderSave = controller.save()
+    await flushMicrotasks()
+    expect(controller.state.phase).toBe('saving')
+
+    controller.change('revision two')
+    firstUpdate.resolve({ kind: 'updated', note: firstCommitted })
+    await olderSave
+
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      editingNote: firstCommitted,
+      draft: 'revision two',
+    })
+    const successorResult = await controller.save()
+
+    expect(successorResult.kind).toBe('saved')
+    expect(adapter.updateCalls).toEqual([
+      {
+        noteId: 'quick-note-1',
+        baseContent: 'base',
+        baseUpdatedAt: BASE_UPDATED_AT,
+        draft: 'revision one',
+      },
+      {
+        noteId: 'quick-note-1',
+        baseContent: 'revision one',
+        baseUpdatedAt: '2026-07-12T04:00:02.000Z',
+        draft: 'revision two',
+      },
+    ])
+  })
+
+  it('materializes a rebased base when a queued successor checkpoint starts', async () => {
+    const firstUpdate = createDeferred<ExistingEditUpdateResult>()
+    const firstCommitted = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateEffects.push(() => firstUpdate.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const olderSave = controller.save()
+    await flushMicrotasks()
+
+    controller.change('revision two')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(adapter.checkpointCalls).toHaveLength(1)
+    firstUpdate.resolve({ kind: 'updated', note: firstCommitted })
+    await olderSave
+    await flushMicrotasks()
+
+    expect(adapter.checkpointCalls).toHaveLength(2)
+    expect(adapter.checkpointCalls[1]).toMatchObject({
+      revision: 2,
+      baseContent: 'revision one',
+      baseUpdatedAt: '2026-07-12T04:00:02.000Z',
+      draft: 'revision two',
+    })
+  })
+
+  it('does not publish durability after a checkpoint base generation changes', async () => {
+    const firstUpdate = createDeferred<ExistingEditUpdateResult>()
+    const successorCheckpoint = createDeferred<void>()
+    const firstCommitted = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateEffects.push(() => firstUpdate.promise)
+    adapter.checkpointEffects.push(
+      () => Promise.resolve(),
+      () => successorCheckpoint.promise,
+    )
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const olderSave = controller.save()
+    await flushMicrotasks()
+
+    controller.change('revision two')
+    await vi.advanceTimersByTimeAsync(500)
+    firstUpdate.resolve({ kind: 'updated', note: firstCommitted })
+    await olderSave
+    await flushMicrotasks()
+    expect(adapter.checkpointCalls[1]).toMatchObject({
+      baseContent: 'revision one',
+      baseUpdatedAt: '2026-07-12T04:00:02.000Z',
+    })
+
+    controller.change('revision three')
+    successorCheckpoint.resolve()
+    await flushMicrotasks()
+
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'revision three',
+    })
+  })
+
+  it('does not clear an older row while a newer revision is memory-only', async () => {
+    const update = createDeferred<ExistingEditUpdateResult>()
+    const committed = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateEffects.push(() => update.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const save = controller.save()
+    await flushMicrotasks()
+    expect(adapter.stored).toMatchObject({ revision: 1, draft: 'revision one' })
+
+    controller.change('revision two')
+    update.resolve({ kind: 'updated', note: committed })
+    await save
+
+    expect(adapter.clearCalls).toEqual([])
+    expect(adapter.stored).toMatchObject({ revision: 1, draft: 'revision one' })
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'revision two',
+    })
+  })
+
+  it('checkpoints blank input but returns empty from save', async () => {
+    const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter, onSaved),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('   ')
+
+    const result = await controller.save({ closeAfterSave: true })
+
+    expect(result).toEqual({ kind: 'empty' })
+    expect(adapter.checkpointCalls).toEqual([{
+      version: QUICK_NOTE_EXISTING_EDIT_RECOVERY_VERSION,
+      editId: 'edit-1',
+      revision: 1,
+      noteId: 'quick-note-1',
+      baseContent: 'base',
+      baseUpdatedAt: BASE_UPDATED_AT,
+      draft: '   ',
+      updatedAt: BASE_UPDATED_AT,
+    }])
+    expect(adapter.updateCalls).toEqual([])
+    expect(adapter.clearCalls).toEqual([])
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'recovery-durable',
+      draft: '   ',
+    })
+  })
+
+  it('refuses replacement while checkpointing', async () => {
+    const checkpoint = createDeferred<void>()
+    adapter.checkpointEffects.push(() => checkpoint.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote({ id: 'owned' }))
+    controller.change('local')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(controller.state.phase).toBe('checkpointing')
+    const before = controller.getSnapshot()
+
+    controller.start(makeQuickNote({ id: 'replacement' }))
+
+    expect(controller.getSnapshot()).toBe(before)
+    expect(controller.state.editingNote?.id).toBe('owned')
+    checkpoint.resolve()
+    await flushMicrotasks()
+  })
+
+  it('refuses replacement while saving', async () => {
+    const update = createDeferred<ExistingEditUpdateResult>()
+    adapter.updateEffects.push(() => update.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote({ id: 'owned' }))
+    controller.change('local')
+    const save = controller.save()
+    await flushMicrotasks()
+    const before = controller.getSnapshot()
+
+    controller.start(makeQuickNote({ id: 'replacement' }))
+
+    expect(controller.getSnapshot()).toBe(before)
+    expect(controller.state.editingNote?.id).toBe('owned')
+    update.resolve({
+      kind: 'updated',
+      note: makeQuickNote({ id: 'owned', content: 'local' }),
+    })
+    await save
+  })
+
+  it('retains the owner frontier when the latest save checkpoint rejects', async () => {
+    const updated = makeQuickNote({
+      content: 'revision two',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: updated }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(adapter.stored).toMatchObject({ revision: 1 })
+
+    controller.change('revision two')
+    adapter.checkpointEffects.push(() => Promise.reject(new Error('blocked')))
+    const result = await controller.save()
+
+    expect(result).toEqual({
+      kind: 'saved',
+      note: updated,
+      visibility: 'refreshed',
+    })
+    expect(adapter.clearCalls).toEqual([[
+      { kind: 'v1', editId: 'edit-1', revision: 1 },
+      { kind: 'v1', editId: 'edit-1', revision: 2 },
+    ]])
+    expect(adapter.stored).toBeNull()
+    expect(adapter.updateCalls).toHaveLength(1)
+
+    adapter.loadResult = { kind: 'absent' }
+    const reconstructed = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+
+    expectIdle(reconstructed.state)
+    expect(adapter.updateCalls).toHaveLength(1)
+  })
+
+  it('coalesces the same exact edit and revision save into one Promise', async () => {
+    const autosaveCheckpoint = createDeferred<void>()
+    adapter.checkpointEffects.push(
+      () => Promise.resolve(),
+      () => autosaveCheckpoint.promise,
+    )
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('single flight')
+    await vi.advanceTimersByTimeAsync(900)
+    expect(controller.state.phase).toBe('saving')
+    expect(adapter.checkpointCalls).toHaveLength(2)
+
+    const first = controller.save({ closeAfterSave: true })
+    const second = controller.save({ closeAfterSave: false })
+
+    expect(second).toBe(first)
+    autosaveCheckpoint.resolve()
+    await expect(first).resolves.toMatchObject({ kind: 'saved' })
+    expect(adapter.updateCalls).toHaveLength(1)
+    expectIdle(controller.state)
+  })
+
+  it('resets both trailing timers so only the latest capture reaches storage', async () => {
+    adapter.updateResult = {
+      kind: 'updated',
+      note: makeQuickNote({
+        content: 'latest capture',
+        updated_at: '2026-07-12T04:00:02.000Z',
+      }),
+    }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    adapter.operationLog.length = 0
+    controller.start(makeQuickNote())
+    controller.change('superseded capture')
+    await vi.advanceTimersByTimeAsync(400)
+    controller.change('latest capture')
+
+    await vi.advanceTimersByTimeAsync(499)
+    expect(adapter.operationLog).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(adapter.operationLog).toEqual(['checkpoint:latest capture'])
+    await vi.advanceTimersByTimeAsync(399)
+    expect(adapter.updateCalls).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(adapter.updateCalls).toHaveLength(1)
+    expect(adapter.updateCalls[0]?.draft).toBe('latest capture')
+    expect(adapter.checkpointCalls.every((call) => (
+      call.draft === 'latest capture'
+    ))).toBe(true)
+  })
+
+  it('accepts new input during checkpointing and preserves latest durability', async () => {
+    const checkpoint = createDeferred<void>()
+    adapter.checkpointEffects.push(() => checkpoint.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('older checkpoint')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(controller.state.phase).toBe('checkpointing')
+
+    controller.change('new during checkpoint')
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'new during checkpoint',
+    })
+    checkpoint.resolve()
+    await flushMicrotasks()
+
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'new during checkpoint',
+    })
+  })
+
+  it('accepts new input during saving and rebases the latest dirty revision', async () => {
+    const update = createDeferred<ExistingEditUpdateResult>()
+    const committed = makeQuickNote({
+      content: 'older save',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateEffects.push(() => update.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('older save')
+    const save = controller.save()
+    await flushMicrotasks()
+
+    controller.change('new during save')
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'new during save',
+    })
+    update.resolve({ kind: 'updated', note: committed })
+    await save
+
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      editingNote: committed,
+      draft: 'new during save',
+    })
+    expect(adapter.clearCalls).toEqual([])
+  })
+
+  it('serializes restore load and recovery cleanup through the mutable lane', async () => {
+    const load = createDeferred<ExistingEditLoadResult>()
+    const clear = createDeferred<'cleared' | 'absent' | 'different-edit'>()
+    adapter.loadEffects.push(() => load.promise)
+    adapter.clearEffects.push(() => clear.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    expect(adapter.operationLog).toEqual(['load'])
+
+    controller.start(makeQuickNote({ id: 'pending', content: 'pending base' }))
+    load.resolve(validRecoveredLoad({ snapshot: { draft: 'base' } }))
+    await flushMicrotasks()
+    expect(adapter.operationLog).toEqual(['load', 'clear'])
+    expect(controller.state.phase).toBe('restoring')
+
+    clear.resolve('cleared')
+    await flushMicrotasks()
+    controller.change('pending local')
+    await vi.advanceTimersByTimeAsync(500)
+
+    expect(adapter.operationLog).toEqual([
+      'load',
+      'clear',
+      'checkpoint:pending local',
+    ])
+  })
+
+  it('returns a typed conflict from the authoritative entity update', async () => {
+    const remote = makeQuickNote({
+      content: 'remote revision',
+      updated_at: '2026-07-12T05:00:00.000Z',
+    })
+    adapter.updateResult = { kind: 'conflict', note: remote }
+    const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter, onSaved),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('local revision')
+
+    const result = await controller.save()
+
+    expect(result).toEqual({
+      kind: 'conflict',
+      conflict: {
+        note: remote,
+        localDraft: 'local revision',
+        remoteContent: 'remote revision',
+      },
+    })
+    expect(controller.state).toMatchObject({
+      phase: 'conflict',
+      durability: 'recovery-durable',
+      draft: 'local revision',
+      conflict: {
+        note: remote,
+        localDraft: 'local revision',
+        remoteContent: 'remote revision',
+      },
+    })
+    expect(adapter.clearCalls).toEqual([])
+    expect(onSaved).not.toHaveBeenCalled()
+  })
+
+  it('returns a typed unavailable result from the authoritative entity update', async () => {
+    adapter.updateResult = { kind: 'unavailable', lifecycle: 'trashed' }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('local revision')
+
+    const result = await controller.save()
+
+    expect(result).toEqual({ kind: 'unavailable', lifecycle: 'trashed' })
+    expect(controller.state).toMatchObject({
+      phase: 'target-unavailable',
+      durability: 'recovery-durable',
+      draft: 'local revision',
+    })
+    expect(adapter.clearCalls).toEqual([])
+  })
+
+  it('returns saved pending when projection throws after entity durability', async () => {
+    const updated = makeQuickNote({
+      content: 'local revision',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: updated }
+    const onSaved = vi.fn((_note: QuickNote): undefined => {
+      throw new Error('projection unavailable')
+    })
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter, onSaved),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('local revision')
+
+    const result = await controller.save()
+
+    expect(result).toEqual({
+      kind: 'saved',
+      note: updated,
+      visibility: 'pending',
+    })
+    expect(controller.state).toMatchObject({
+      phase: 'saved',
+      durability: 'entity-durable',
+      editingNote: updated,
+      issue: {
+        code: 'projection-failed',
+        retryable: false,
+        durability: 'entity-durable',
+      },
+    })
+    expect(onSaved).toHaveBeenCalledOnce()
+  })
+
 })
