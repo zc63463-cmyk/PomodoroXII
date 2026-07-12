@@ -70,12 +70,12 @@ async def test_space_db_has_all_business_tables(_isolate_env):
         "time_blocks", "memo_comments", "session_quick_notes",
         "schedule_quick_notes", "task_quick_notes", "tombstones",
         "settings", "sync_outbox", "sync_audit_log", "sync_clients",
-        "sync_state", "sync_snapshots",
+        "sync_state", "sync_snapshots", "sync_snapshot_chunks",
     }
     actual_business = set(tables) - {"spaces", "meta_settings", "alembic_version_space", "alembic_version_meta"}
     missing = expected_business_tables - actual_business
     assert not missing, f"Space DB missing business tables: {missing}"
-    assert len(actual_business) == 21, (
-        f"Space DB has {len(actual_business)} business tables, expected 21: "
+    assert len(actual_business) == 22, (
+        f"Space DB has {len(actual_business)} business tables, expected 22: "
         f"extra={actual_business - expected_business_tables}"
     )

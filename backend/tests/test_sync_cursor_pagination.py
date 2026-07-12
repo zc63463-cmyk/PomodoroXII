@@ -20,6 +20,7 @@ The cursor contract:
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 
 import pytest
@@ -649,6 +650,7 @@ async def test_full_cursor_zero_is_current_state_snapshot_not_ledger_replay(spac
         action="create",
         payload={"id": "ledger-only", "content": "current", "tags": "[]"},
     )
+    await space_session.commit()
 
     page = await SyncService(space_session).full(cursor=0, limit=100)
 
@@ -670,7 +672,7 @@ async def test_full_snapshot_pages_all_entity_groups_and_tombstones_with_one_off
         Task(id="snap-task-2", title="two"),
         Tombstone(entity_type="task", entity_id="deleted-task"),
     ])
-    await space_session.flush()
+    await space_session.commit()
 
     service = SyncService(space_session)
     first = await service.full(cursor=0, limit=1)
@@ -702,6 +704,262 @@ async def test_full_snapshot_pages_all_entity_groups_and_tombstones_with_one_off
 
 
 @pytest.mark.asyncio
+async def test_create_snapshot_does_not_write_during_entity_scan(space_session, monkeypatch):
+    from sqlalchemy import event
+
+    from app.models.task import Task
+    from app.services.sync import SyncService
+    from app.services.sync_snapshot_chunks import SnapshotChunkEncoder
+
+    space_session.add(Task(id="scan-before-write", title="scan"))
+    await space_session.commit()
+
+    saw_entity_select = False
+    caller_rolled_back = False
+    dml_statements: list[str] = []
+
+    def track_sql(_conn, _cursor, statement, _parameters, _context, _executemany):
+        nonlocal saw_entity_select
+        normalized = statement.lstrip().upper()
+        if normalized.startswith("SELECT") and "FROM TASKS" in normalized:
+            saw_entity_select = True
+        if normalized.startswith(("INSERT", "UPDATE", "DELETE")):
+            dml_statements.append(normalized)
+
+    def track_caller_rollback(_session):
+        nonlocal caller_rolled_back
+        caller_rolled_back = True
+
+    original_add = SnapshotChunkEncoder.add
+
+    def assert_scan_is_read_only(self, item):
+        assert saw_entity_select
+        assert dml_statements == []
+        assert not caller_rolled_back
+        return original_add(self, item)
+
+    engine = space_session.bind.sync_engine
+    caller_session = space_session.sync_session
+    event.listen(engine, "before_cursor_execute", track_sql)
+    event.listen(caller_session, "after_rollback", track_caller_rollback)
+    monkeypatch.setattr(SnapshotChunkEncoder, "add", assert_scan_is_read_only)
+    try:
+        snapshot = await SyncService(space_session)._create_snapshot()
+    finally:
+        event.remove(caller_session, "after_rollback", track_caller_rollback)
+        event.remove(engine, "before_cursor_execute", track_sql)
+
+    assert snapshot.status == "ready"
+    assert not caller_rolled_back
+    assert dml_statements
+
+
+@pytest.mark.asyncio
+async def test_create_snapshot_retries_note_hash_conflict_and_succeeds(
+    space_session, monkeypatch
+):
+    from app.models.note import Note
+    from app.services.sync import SyncService
+
+    stable_body = "stable body"
+    space_session.add(Note(
+        id="retry-note",
+        title="retry",
+        content_hash=hashlib.sha256(stable_body.encode("utf-8")).hexdigest(),
+    ))
+    await space_session.commit()
+
+    class FileSystem:
+        async def read_notes_batch(self, note_ids):
+            return [stable_body]
+
+    calls = 0
+
+    async def changing_read_notes_batch(note_ids):
+        nonlocal calls
+        assert note_ids == ["retry-note"]
+        calls += 1
+        return ["changed body" if calls == 1 else stable_body]
+
+    fs = FileSystem()
+    monkeypatch.setattr(fs, "read_notes_batch", changing_read_notes_batch)
+    page = await SyncService(space_session, fs).full(cursor=0, limit=100)
+
+    assert calls == 2
+    assert page["notes"][0]["content"] == stable_body
+
+
+@pytest.mark.asyncio
+async def test_create_snapshot_fails_closed_after_three_note_hash_conflicts(space_session):
+    from sqlalchemy import func, select
+
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.note import Note
+    from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
+    from app.services.sync import SyncService
+
+    space_session.add(Note(
+        id="unstable-note",
+        title="unstable",
+        content_hash=hashlib.sha256(b"stable body").hexdigest(),
+    ))
+    await space_session.commit()
+
+    class ChangingFileSystem:
+        def __init__(self):
+            self.calls = 0
+
+        async def read_notes_batch(self, note_ids):
+            assert note_ids == ["unstable-note"]
+            self.calls += 1
+            return [f"changed body {self.calls}"]
+
+    fs = ChangingFileSystem()
+    with pytest.raises(SyncSnapshotExpiredError):
+        await SyncService(space_session, fs).full(cursor=0, limit=100)
+
+    assert fs.calls == 3
+    assert await space_session.scalar(select(func.count()).select_from(SyncSnapshot)) == 0
+    assert await space_session.scalar(select(func.count()).select_from(SyncSnapshotChunk)) == 0
+
+
+@pytest.mark.asyncio
+async def test_create_snapshot_preserves_pending_caller_changes(space_session):
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    pending = Task(id="pending-before-snapshot", title="pending")
+    space_session.add(pending)
+
+    page = await SyncService(space_session).full(cursor=0, limit=100)
+
+    assert "pending-before-snapshot" not in {task["id"] for task in page["tasks"]}
+    assert pending in space_session
+    async with AsyncSession(bind=space_session.bind, autoflush=False) as observer:
+        assert await observer.get(Task, pending.id) is None
+
+    await space_session.flush()
+    await space_session.commit()
+    async with AsyncSession(bind=space_session.bind, autoflush=False) as observer:
+        stored = await observer.scalar(select(Task).where(Task.id == pending.id))
+        assert stored is not None
+        assert stored.id == pending.id
+
+
+@pytest.mark.asyncio
+async def test_expired_chunked_snapshot_explicitly_deletes_chunks(space_session):
+    from sqlalchemy import func, select
+
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    space_session.add(Task(id="expired-chunk", title="expired"))
+    await space_session.commit()
+    service = SyncService(space_session)
+    first = await service.full(cursor=0, limit=1)
+    token = first["snapshot_token"]
+    snapshot = await space_session.get(SyncSnapshot, token)
+    assert snapshot is not None
+    snapshot.expires_at = "2000-01-01T00:00:00Z"
+    await space_session.flush()
+
+    with pytest.raises(SyncSnapshotExpiredError):
+        await service.full(cursor=1, snapshot_token=token, snapshot_offset=0, limit=1)
+
+    assert await space_session.get(SyncSnapshot, token) is None
+    remaining = await space_session.scalar(
+        select(func.count()).select_from(SyncSnapshotChunk).where(
+            SyncSnapshotChunk.snapshot_token == token
+        )
+    )
+    assert remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_chunked_snapshot_missing_or_tampered_chunk_fails_closed(space_session):
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.sync_state import SyncSnapshotChunk
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    space_session.add_all([Task(id=f"damage-{index}", title=str(index)) for index in range(3)])
+    await space_session.commit()
+    service = SyncService(space_session)
+    first = await service.full(cursor=0, limit=1)
+    token = first["snapshot_token"]
+    chunk = await space_session.get(SyncSnapshotChunk, (token, 0))
+    assert chunk is not None
+    chunk.checksum = "0" * 64
+    await space_session.flush()
+
+    with pytest.raises(SyncSnapshotExpiredError):
+        await service.full(
+            cursor=0,
+            snapshot_token=token,
+            snapshot_offset=first["snapshot_offset"],
+            limit=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_chunked_snapshot_sequence_gap_fails_closed(space_session):
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    space_session.add(Task(id="sequence-gap", title="gap"))
+    await space_session.commit()
+    service = SyncService(space_session)
+    first = await service.full(cursor=0, limit=1)
+    token = first["snapshot_token"]
+    snapshot = await space_session.get(SyncSnapshot, token)
+    chunk = await space_session.get(SyncSnapshotChunk, (token, 0))
+    assert snapshot is not None and chunk is not None
+    chunk.item_start = 1
+    await space_session.flush()
+
+    with pytest.raises(SyncSnapshotExpiredError):
+        await service.full(
+            cursor=0,
+            snapshot_token=token,
+            snapshot_offset=0,
+            limit=1,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["item_count", "chunk_count"])
+async def test_chunked_snapshot_manifest_count_tampering_fails_closed(space_session, field):
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.sync_state import SyncSnapshot
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    space_session.add(Task(id=f"manifest-{field}", title=field))
+    await space_session.commit()
+    service = SyncService(space_session)
+    first = await service.full(cursor=0, limit=1)
+    snapshot = await space_session.get(SyncSnapshot, first["snapshot_token"])
+    assert snapshot is not None
+    setattr(snapshot, field, getattr(snapshot, field) + 1)
+    await space_session.commit()
+
+    with pytest.raises(SyncSnapshotExpiredError):
+        await service.full(
+            cursor=0,
+            snapshot_token=first["snapshot_token"],
+            snapshot_offset=0,
+            limit=1,
+        )
+
+
+@pytest.mark.asyncio
 async def test_full_snapshot_rejects_offset_without_token_and_offset_past_end(space_session):
     from app.errors import ValidationError
     from app.models.task import Task
@@ -712,7 +970,7 @@ async def test_full_snapshot_rejects_offset_without_token_and_offset_past_end(sp
         await service.full(cursor=0, snapshot_offset=1, limit=10)
 
     space_session.add(Task(id="snapshot-bounds", title="bounds"))
-    await space_session.flush()
+    await space_session.commit()
     first = await service.full(cursor=0, limit=10)
     with pytest.raises(ValidationError, match="non-negative"):
         await service.full(
@@ -721,6 +979,16 @@ async def test_full_snapshot_rejects_offset_without_token_and_offset_past_end(sp
             snapshot_offset=-1,
             limit=10,
         )
+    at_end = await service.full(
+        cursor=0,
+        snapshot_token=first["snapshot_token"],
+        snapshot_offset=first["snapshot_offset"],
+        limit=10,
+    )
+    assert at_end["snapshot_offset"] == first["snapshot_offset"]
+    assert at_end["has_more"] is False
+    assert at_end["tasks"] == []
+
     with pytest.raises(ValidationError, match="exceeds snapshot size"):
         await service.full(
             cursor=0,
@@ -774,15 +1042,31 @@ async def test_existing_expired_snapshot_is_rejected(space_session):
 
 @pytest.mark.asyncio
 async def test_snapshot_continuation_rejects_expired_token_with_stable_error(space_session):
+    from sqlalchemy import func, select
+
     from app.errors import SyncSnapshotExpiredError
-    from app.models.sync_state import SyncSnapshot
+    from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
     from app.services.sync import SyncService
 
     space_session.add(SyncSnapshot(
         token="expired-continuation",
         cursor=0,
-        payload="[]",
+        payload="",
+        format="gzip-chunks-v1",
+        status="ready",
+        item_count=1,
+        chunk_count=1,
         created_at="2000-01-01T00:00:00Z",
+    ))
+    space_session.add(SyncSnapshotChunk(
+        snapshot_token="expired-continuation",
+        chunk_index=0,
+        item_start=0,
+        item_count=1,
+        compressed_payload=b"chunk",
+        uncompressed_bytes=5,
+        compressed_bytes=5,
+        checksum="0" * 64,
     ))
     await space_session.flush()
 
@@ -796,6 +1080,12 @@ async def test_snapshot_continuation_rejects_expired_token_with_stable_error(spa
 
     assert raised.value.error_type == "sync_snapshot_expired"
     assert await space_session.get(SyncSnapshot, "expired-continuation") is None
+    chunk_count = await space_session.scalar(
+        select(func.count()).select_from(SyncSnapshotChunk).where(
+            SyncSnapshotChunk.snapshot_token == "expired-continuation"
+        )
+    )
+    assert chunk_count == 0
 
 
 @pytest.mark.asyncio
@@ -811,7 +1101,7 @@ async def test_new_snapshot_prunes_expired_materialized_snapshots(space_session)
             created_at="2000-01-01T00:00:00Z",
         )
     )
-    await space_session.flush()
+    await space_session.commit()
 
     await SyncService(space_session).full(cursor=0, limit=10)
 
@@ -840,6 +1130,7 @@ async def test_full_after_prune_recovers_new_device_from_current_state(space_ses
     await advance_retention_floor(space_session, floor=event.id)
 
     await prune_sync_events(space_session, before_id=event.id)
+    await space_session.commit()
 
     page = await SyncService(space_session).full(cursor=0, limit=100)
     assert {item["id"] for item in page["tasks"]} == {"survives-prune"}

@@ -21,7 +21,7 @@ from app.models.setting import Setting
 from app.models.sync_audit_log import SyncAuditLog
 from app.models.sync_client import SyncClient
 from app.models.sync_outbox import SyncOutbox
-from app.models.sync_state import SyncSnapshot, SyncState
+from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk, SyncState
 from app.models.task import Task
 from app.models.task_quick_note import TaskQuickNote
 from app.models.time_block import TimeBlock
@@ -49,5 +49,6 @@ __all__ = [
     "SyncClient",
     "SyncState",
     "SyncSnapshot",
+    "SyncSnapshotChunk",
     "SyncAuditLog",
 ]
