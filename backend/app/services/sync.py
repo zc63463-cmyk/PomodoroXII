@@ -802,16 +802,9 @@ class SyncService:
                 ).replace(tzinfo=timezone.utc)
                 expires_at = (created_at + SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
             if expires_at <= now:
-                await self.db.execute(
-                    delete(SyncSnapshotChunk).where(
-                        SyncSnapshotChunk.snapshot_token == snapshot.token
-                    )
-                )
-                await self.db.execute(
-                    delete(SyncSnapshot).where(SyncSnapshot.token == snapshot.token)
-                )
-                await self.db.flush()
-                raise SyncSnapshotExpiredError()
+                # Report the expired token without mutating the caller's session.
+                # The HTTP boundary performs cleanup in a dedicated transaction.
+                raise SyncSnapshotExpiredError(expired_snapshot_token=snapshot.token)
 
         if snapshot.status != "ready":
             raise SyncSnapshotExpiredError()

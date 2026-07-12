@@ -93,6 +93,10 @@ class SyncSnapshotExpiredError(AppError):
     error_type = "sync_snapshot_expired"
     recovery_action = "restart_full_sync"
 
+    def __init__(self, *, expired_snapshot_token: str | None = None) -> None:
+        super().__init__()
+        self.expired_snapshot_token = expired_snapshot_token
+
 
 def register_exception_handlers(app: FastAPI) -> None:
     """Register handlers for AppError subclasses and a catch-all 500."""

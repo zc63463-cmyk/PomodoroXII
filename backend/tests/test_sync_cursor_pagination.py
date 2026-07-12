@@ -868,16 +868,17 @@ async def test_expired_chunked_snapshot_explicitly_deletes_chunks(space_session)
     snapshot.expires_at = "2000-01-01T00:00:00Z"
     await space_session.flush()
 
-    with pytest.raises(SyncSnapshotExpiredError):
+    with pytest.raises(SyncSnapshotExpiredError) as raised:
         await service.full(cursor=1, snapshot_token=token, snapshot_offset=0, limit=1)
 
-    assert await space_session.get(SyncSnapshot, token) is None
+    assert raised.value.expired_snapshot_token == token
+    assert await space_session.get(SyncSnapshot, token) is not None
     remaining = await space_session.scalar(
         select(func.count()).select_from(SyncSnapshotChunk).where(
             SyncSnapshotChunk.snapshot_token == token
         )
     )
-    assert remaining == 0
+    assert remaining == 1
 
 
 @pytest.mark.asyncio
@@ -1079,13 +1080,14 @@ async def test_snapshot_continuation_rejects_expired_token_with_stable_error(spa
         )
 
     assert raised.value.error_type == "sync_snapshot_expired"
-    assert await space_session.get(SyncSnapshot, "expired-continuation") is None
+    assert raised.value.expired_snapshot_token == "expired-continuation"
+    assert await space_session.get(SyncSnapshot, "expired-continuation") is not None
     chunk_count = await space_session.scalar(
         select(func.count()).select_from(SyncSnapshotChunk).where(
             SyncSnapshotChunk.snapshot_token == "expired-continuation"
         )
     )
-    assert chunk_count == 0
+    assert chunk_count == 1
 
 
 @pytest.mark.asyncio
