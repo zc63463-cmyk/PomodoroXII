@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class SyncEvent(BaseModel):
@@ -16,11 +17,29 @@ class SyncEvent(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     client_updated_at: str = Field(default="")
 
+    @field_validator("payload")
+    @classmethod
+    def validate_payload_json_size(cls, value: dict[str, Any]) -> dict[str, Any]:
+        from app.settings import settings
+
+        try:
+            encoded = json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("payload must contain valid JSON values") from exc
+        if len(encoded) > settings.sync_event_payload_max_bytes:
+            raise ValueError("payload exceeds maximum JSON size")
+        return value
+
 
 class SyncPushRequest(BaseModel):
     """Request body for POST /api/v1/sync/push."""
 
-    events: list[SyncEvent]
+    events: list[SyncEvent] = Field(..., min_length=1, max_length=500)
 
 
 class SyncAppliedItem(BaseModel):

@@ -24,6 +24,7 @@ PUBLIC_OPERATIONS = {
     ("POST", "/api/v1/auth/setup"),
     ("POST", "/api/v1/auth/login"),
     ("GET", "/api/health"),
+    ("GET", "/api/ready"),
 }
 ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
 REQUEST_VALIDATION_ERROR_RESPONSE_REF = (
@@ -303,7 +304,7 @@ class TestOpenAPIContractGate:
         assert len(schemes) > 0, "No securitySchemes defined"
 
     async def test_only_setup_login_and_health_are_security_free(self, client):
-        """Exactly the three intended public operations omit HTTPBearer."""
+        """Exactly the intended public operations omit HTTPBearer."""
         schema = (await client.get("/openapi.json")).json()
         security_free = {
             (method, path)
