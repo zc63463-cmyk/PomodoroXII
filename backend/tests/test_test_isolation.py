@@ -33,12 +33,20 @@ def test_different_nodeids_use_different_test_directories(tmp_path: Path):
     assert first != second
 
 
-def test_nodeid_hash_directory_keeps_windows_path_budget(tmp_path: Path):
-    """The hashed sandbox component must stay short enough for nested Windows paths."""
+def test_nodeid_mapping_is_stable_and_keeps_windows_path_budget(tmp_path: Path):
+    """Nodeid mapping must be stable and leave room for nested Windows paths."""
     builder = _path_builder()
-    path = builder(tmp_path.parent, "tests/" + "very-long-nodeid-" * 30)
+    nodeid = "tests/" + "very-long-nodeid-" * 30
 
-    assert len(path.name) <= 41
+    first = builder(tmp_path.parent, nodeid)
+    second = builder(tmp_path.parent, nodeid)
+    representative_suffix = Path("spaces") / "spc_123456789012" / "notes" / (
+        "n_" + "x" * 12 + "-title.md"
+    )
+
+    assert first == second
+    assert len(first.name) <= 25
+    assert len(str(Path(first.name) / representative_suffix)) <= 85
 
 
 def test_test_directory_is_nested_under_single_run_root(tmp_path: Path):
@@ -59,11 +67,54 @@ def test_path_escape_guard_rejects_paths_outside_run_root(tmp_path: Path):
         suite_conftest._ensure_inside_temp_root(escaped_path, run_root)
 
 
+def test_default_artifacts_root_is_backend_local(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("POMODOROXII_TEST_ARTIFACTS_ROOT", raising=False)
+
+    resolved = suite_conftest._resolve_artifacts_root()
+
+    assert resolved == (Path(suite_conftest.__file__).resolve().parents[1] / ".test-artifacts")
+
+
+def test_configured_artifacts_root_is_normalized(monkeypatch: pytest.MonkeyPatch):
+    configured = (
+        suite_conftest._project_root.parent
+        / "external-test-root"
+        / ".."
+        / "pomodoroxii-test-artifacts"
+    )
+    monkeypatch.setenv("POMODOROXII_TEST_ARTIFACTS_ROOT", str(configured))
+
+    resolved = suite_conftest._resolve_artifacts_root()
+
+    assert resolved == configured.resolve()
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        Path(suite_conftest.__file__).resolve().parents[2],
+        Path(suite_conftest.__file__).resolve().parents[1],
+        Path.home(),
+        Path.home().anchor,
+    ],
+)
+def test_configured_artifacts_root_rejects_broad_or_source_paths(configured: Path):
+    with pytest.raises(RuntimeError, match="Refusing"):
+        suite_conftest._resolve_artifacts_root(configured)
+
+
+def test_configured_artifacts_root_requires_dedicated_name():
+    configured = suite_conftest._project_root.parent / "artifacts"
+
+    with pytest.raises(RuntimeError, match="dedicated directory"):
+        suite_conftest._resolve_artifacts_root(configured)
+
+
 def test_nodeid_builder_rejects_run_root_outside_artifacts_root():
     """A forged run root outside backend/.test-artifacts must be rejected."""
     builder = _path_builder()
     tests_dir = Path(suite_conftest.__file__).resolve().parent
-    outside_run_root = tests_dir / "run-00000000000000000000000000000000"
+    outside_run_root = tests_dir / "run-0000000000000000"
 
     with pytest.raises(RuntimeError, match="outside temp root"):
         builder(outside_run_root, "tests/test_escape.py::test_escape")
@@ -80,10 +131,22 @@ def test_nodeid_builder_rejects_artifacts_root_as_run_root():
 def test_nodeid_builder_rejects_malformed_run_root_name():
     """Only allocator-shaped run roots may host per-test sandboxes."""
     builder = _path_builder()
-    malformed_run_root = suite_conftest._artifacts_root / "not-a-run-root"
+    malformed_run_root = suite_conftest._artifacts_root / "run-000000000000000g"
 
     with pytest.raises(RuntimeError, match="invalid test run root"):
         builder(malformed_run_root, "tests/test_escape.py::test_escape")
+
+
+def test_nodeid_builder_rejects_nested_run_root():
+    builder = _path_builder()
+    nested_run_root = (
+        suite_conftest._artifacts_root
+        / "container"
+        / "run-0000000000000000"
+    )
+
+    with pytest.raises(RuntimeError, match="invalid test run root"):
+        builder(nested_run_root, "tests/test_escape.py::test_escape")
 
 
 def test_run_root_allocator_creates_unique_roots_under_artifacts_root(
