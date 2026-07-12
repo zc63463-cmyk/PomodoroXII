@@ -105,7 +105,7 @@ describe('quick-note sync integration smoke', () => {
     expect(await db.outbox.where('entityId').equals(note.id).count()).toBe(0)
   })
 
-  it('flows from repository purge to quickNote delete push and pull tombstone merge', async () => {
+  it('flows from repository purge to delete push and preserves a dirty pull tombstone conflict', async () => {
     const note = await createQuickNote({ content: 'remote synced #Trash' })
     await moveQuickNoteToTrash(note.id)
     await db.outbox.clear()
@@ -185,9 +185,28 @@ describe('quick-note sync integration smoke', () => {
 
     const tombstoned = await db.quickNotes.get(note.id)
     expect(tombstoned).toBeDefined()
-    expect(tombstoned!.deletion_state).toBe('deleted')
-    expect(tombstoned!._dirty).toBe(false)
+    expect(tombstoned!.deletion_state).toBe('active')
+    expect(tombstoned!._dirty).toBe(true)
     expect(tombstoned!.content).toBe('same note on another local snapshot')
-    expect(dirtyConflicts).toHaveLength(0)
+    expect(dirtyConflicts).toHaveLength(1)
+    expect(dirtyConflicts[0]).toMatchObject({
+      outboxId: -1,
+      entityType: 'quickNote',
+      entityId: note.id,
+      conflictType: 'version',
+      localVersion: {
+        id: note.id,
+        content: 'same note on another local snapshot',
+        deletion_state: 'active',
+        _dirty: true,
+      },
+      remoteVersion: {
+        id: note.id,
+        content: 'same note on another local snapshot',
+        deletion_state: 'deleted',
+        updated_at: '2026-07-06T00:00:00.000Z',
+        _dirty: false,
+      },
+    })
   })
 })
