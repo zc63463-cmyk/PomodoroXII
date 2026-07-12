@@ -166,7 +166,16 @@ implements QuickNoteExistingEditStorageAdapter {
     this.clearCalls.push(owners)
     const effect = this.clearEffects.shift()
     const result = effect ? await effect() : this.clearResult
-    if (result === 'cleared') this.stored = null
+    if (result === 'cleared' && this.stored !== null) {
+      const stored = this.stored
+      const ownsStored = owners.some((owner) => (
+        owner.kind === 'v1'
+        && owner.editId === stored.editId
+        && owner.revision === stored.revision
+      ))
+      if (!ownsStored) return 'different-edit'
+      this.stored = null
+    }
     return result
   }
 }
@@ -2113,7 +2122,7 @@ describe('QuickNote existing-edit session controller', () => {
 
     expect(controller.state).toMatchObject({
       phase: 'dirty',
-      durability: 'memory-only',
+      durability: 'recovery-durable',
       editingNote: committed,
       draft: 'revision two during cleanup',
     })
@@ -2130,6 +2139,203 @@ describe('QuickNote existing-edit session controller', () => {
     expect(adapter.stored).toMatchObject({
       revision: 2,
       draft: 'revision two during cleanup',
+    })
+  })
+
+  it('exposes the identical real Promise to a reentrant same-revision save', async () => {
+    const committed = makeQuickNote({
+      content: 'single revision',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: committed }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('single revision')
+    let reentered = false
+    let reentrantSave: ReturnType<typeof controller.save> | undefined
+    controller.subscribe(() => {
+      if (!reentered && controller.state.phase === 'saving') {
+        reentered = true
+        reentrantSave = controller.save({ closeAfterSave: true })
+      }
+    })
+
+    const firstSave = controller.save({ closeAfterSave: false })
+
+    expect(reentrantSave).toBeInstanceOf(Promise)
+    expect(reentrantSave).toBe(firstSave)
+    await expect(firstSave).resolves.toMatchObject({ kind: 'saved' })
+    expect(adapter.updateCalls).toHaveLength(1)
+    expectIdle(controller.state)
+  })
+
+  it('keeps rev1 ahead of a rev2 save queued by the saving subscriber', async () => {
+    const committedOne = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    const committedTwo = makeQuickNote({
+      content: 'revision two',
+      updated_at: '2026-07-12T04:00:03.000Z',
+    })
+    adapter.updateEffects.push(
+      async () => ({ kind: 'updated', note: committedOne }),
+      async () => ({ kind: 'updated', note: committedTwo }),
+    )
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    let queuedSuccessor = false
+    let successorSave: ReturnType<typeof controller.save> | undefined
+    controller.subscribe(() => {
+      if (!queuedSuccessor && controller.state.phase === 'saving') {
+        queuedSuccessor = true
+        controller.change('revision two')
+        successorSave = controller.save()
+      }
+    })
+
+    const firstSave = controller.save()
+    await Promise.all([firstSave, successorSave])
+
+    expect(adapter.updateCalls.map((capture) => capture.draft)).toEqual([
+      'revision one',
+      'revision two',
+    ])
+  })
+
+  it('does not rearm stale timers after a dirty subscriber saves', async () => {
+    const committed = makeQuickNote({
+      content: 'subscriber save',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: committed }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    let captured = false
+    let subscriberSave: ReturnType<typeof controller.save> | undefined
+    controller.subscribe(() => {
+      if (!captured && controller.state.phase === 'dirty') {
+        captured = true
+        subscriberSave = controller.save()
+      }
+    })
+
+    controller.change('subscriber save')
+    await subscriberSave
+    expect(adapter.checkpointCalls).toHaveLength(1)
+    expect(adapter.updateCalls).toHaveLength(1)
+    expect(adapter.clearCalls).toHaveLength(1)
+    expect(adapter.stored).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(901)
+
+    expect(adapter.checkpointCalls).toHaveLength(1)
+    expect(adapter.updateCalls).toHaveLength(1)
+    expect(adapter.clearCalls).toHaveLength(1)
+    expect(adapter.stored).toBeNull()
+  })
+
+  it('keeps repeated background checkpoint authority bounded to the latest row', async () => {
+    const committed = makeQuickNote({
+      content: 'revision four',
+      updated_at: '2026-07-12T04:00:05.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: committed }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+
+    for (let revision = 1; revision <= 4; revision += 1) {
+      controller.change(`revision ${revision}`)
+      await vi.advanceTimersByTimeAsync(500)
+    }
+    expect(adapter.stored).toMatchObject({
+      revision: 4,
+      draft: 'revision 4',
+    })
+
+    await expect(controller.save()).resolves.toMatchObject({ kind: 'saved' })
+
+    expect(adapter.clearCalls).toEqual([[
+      { kind: 'v1', editId: 'edit-1', revision: 4 },
+    ]])
+    expect(adapter.stored).toBeNull()
+  })
+
+  it('does not let mismatched owners clear the controlled stored row', async () => {
+    const stored = makeSnapshot({ editId: 'stored-edit', revision: 7 })
+    adapter.stored = stored
+
+    const result = await adapter.clearIfOwned([
+      { kind: 'v1', editId: 'other-edit', revision: 7 },
+      { kind: 'v1', editId: 'stored-edit', revision: 6 },
+    ])
+
+    expect(result).toBe('different-edit')
+    expect(adapter.stored).toBe(stored)
+  })
+
+  it('keeps newer input memory-only when compensation completes stale', async () => {
+    const clear = createDeferred<'cleared' | 'absent' | 'different-edit'>()
+    const compensation = createDeferred<void>()
+    const committed = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: committed }
+    adapter.checkpointEffects.push(
+      () => Promise.resolve(),
+      () => compensation.promise,
+    )
+    adapter.clearEffects.push(() => clear.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const save = controller.save()
+    await flushMicrotasks()
+
+    controller.change('revision two during cleanup')
+    clear.resolve('cleared')
+    await flushMicrotasks()
+    expect(adapter.checkpointCalls).toHaveLength(2)
+    controller.change('revision three during compensation')
+    compensation.resolve()
+    await save
+
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'revision three during compensation',
+    })
+    expect(adapter.stored).toMatchObject({
+      revision: 2,
+      draft: 'revision two during cleanup',
+    })
+
+    await vi.advanceTimersByTimeAsync(500)
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'recovery-durable',
+      draft: 'revision three during compensation',
+    })
+    expect(adapter.stored).toMatchObject({
+      revision: 3,
+      draft: 'revision three during compensation',
     })
   })
 

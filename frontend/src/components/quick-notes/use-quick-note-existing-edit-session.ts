@@ -146,7 +146,7 @@ interface ExistingEditSaveLaneCapture extends ExistingEditCheckpointCapture {
 interface ExistingEditSaveFlight {
   capture: ExistingEditSaveLaneCapture
   closeAfterSave: boolean
-  promise?: Promise<QuickNoteExistingEditSaveResult>
+  promise: Promise<QuickNoteExistingEditSaveResult>
 }
 
 const RESTORING_STATE: QuickNoteExistingEditState = {
@@ -655,7 +655,7 @@ export function createQuickNoteExistingEditSessionController(
         return
       }
 
-      rememberRecoveryOwner({
+      resetRecoveryOwners({
         kind: 'v1',
         editId: capture.editId,
         revision: capture.revision,
@@ -706,6 +706,13 @@ export function createQuickNoteExistingEditSessionController(
       && snapshot.phase !== 'failed'
     ) return
     identity = { ...identity, revision: identity.revision + 1 }
+    const capture: ExistingEditCheckpointCapture = {
+      epoch,
+      editId: identity.editId,
+      revision: identity.revision,
+      content,
+    }
+    scheduleTrailingWork(capture)
     publish({
       ...snapshot,
       phase: 'dirty',
@@ -714,8 +721,6 @@ export function createQuickNoteExistingEditSessionController(
       conflict: null,
       issue: null,
     })
-    const capture = captureCurrentRevision()
-    if (capture) scheduleTrailingWork(capture)
   }
 
   async function runSave(
@@ -755,7 +760,7 @@ export function createQuickNoteExistingEditSessionController(
 
     try {
       await adapter.checkpoint(recovery)
-      rememberRecoveryOwner(attemptedOwner)
+      resetRecoveryOwners(attemptedOwner)
     } catch {
       checkpointIssue = createIssue('checkpoint-failed', 'memory-only')
     }
@@ -885,6 +890,7 @@ export function createQuickNoteExistingEditSessionController(
     if (cleanupResult === 'cleared' || cleanupResult === 'absent') {
       resetRecoveryOwners()
       if (hasNewerSameEditRevision(capture) && identity !== null) {
+        const successorBaseGeneration = identity.baseGeneration
         const successor: QuickNoteExistingEditSnapshotV1 = {
           version: 1,
           editId: identity.editId,
@@ -895,21 +901,35 @@ export function createQuickNoteExistingEditSessionController(
           draft: snapshot.draft,
           updatedAt: nowIso(),
         }
+        const successorCapture: ExistingEditCheckpointCapture = {
+          epoch: capture.epoch,
+          editId: successor.editId,
+          revision: successor.revision,
+          content: successor.draft,
+        }
         try {
           await adapter.checkpoint(successor)
-          rememberRecoveryOwner({
+          resetRecoveryOwners({
             kind: 'v1',
             editId: successor.editId,
             revision: successor.revision,
           })
-        } catch {
-          const successorCapture: ExistingEditCheckpointCapture = {
-            epoch: capture.epoch,
-            editId: successor.editId,
-            revision: successor.revision,
-            content: successor.draft,
+          if (
+            isCurrentCapture(successorCapture)
+            && identity?.baseGeneration === successorBaseGeneration
+          ) {
+            publish({
+              ...snapshot,
+              phase: 'dirty',
+              durability: 'recovery-durable',
+              issue: null,
+            })
           }
-          if (isCurrentCapture(successorCapture)) {
+        } catch {
+          if (
+            isCurrentCapture(successorCapture)
+            && identity?.baseGeneration === successorBaseGeneration
+          ) {
             const issue = createIssue('checkpoint-failed', 'memory-only')
             publish({
               ...snapshot,
@@ -991,7 +1011,7 @@ export function createQuickNoteExistingEditSessionController(
       && saveFlight.capture.content === snapshot.draft
     ) {
       saveFlight.closeAfterSave ||= closeAfterSave
-      return saveFlight.promise as Promise<QuickNoteExistingEditSaveResult>
+      return saveFlight.promise
     }
 
     if (snapshot.phase === 'saved') {
@@ -1022,9 +1042,11 @@ export function createQuickNoteExistingEditSessionController(
       content: snapshot.draft,
       owners: [...recoveryOwners],
     }
+    const promise = append(() => runSave(flight))
     const flight: ExistingEditSaveFlight = {
       capture,
       closeAfterSave,
+      promise,
     }
     saveFlight = flight
     if (isCurrentCapture(capture)) {
@@ -1034,8 +1056,6 @@ export function createQuickNoteExistingEditSessionController(
         issue: null,
       })
     }
-    const promise = append(() => runSave(flight))
-    flight.promise = promise
     void promise.then(
       () => {
         if (saveFlight === flight) saveFlight = null
