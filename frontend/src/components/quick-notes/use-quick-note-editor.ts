@@ -46,6 +46,7 @@ export function useQuickNoteEditor({
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve())
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
+  const lifecycleEpochRef = useRef(0)
   const draft = editingId === null ? session.draft : editingDraft
   const draftSaveState =
     session.issue?.code === 'projection-failed' && !session.draft.trim()
@@ -85,10 +86,17 @@ export function useQuickNoteEditor({
 
   useEffect(() => {
     mountedRef.current = true
-    const unsubscribeSwitch = spaceDBManager.onSwitch(invalidateExistingEdit)
+    const unsubscribeSwitch = spaceDBManager.onSwitch(() => {
+      lifecycleEpochRef.current += 1
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+      typingTimerRef.current = null
+      setIsTyping(false)
+      invalidateExistingEdit()
+    })
 
     return () => {
       mountedRef.current = false
+      lifecycleEpochRef.current += 1
       saveSequenceRef.current += 1
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
@@ -290,7 +298,9 @@ export function useQuickNoteEditor({
       typingTimerRef.current = null
     }
     setIsTyping(false)
+    const lifecycleEpoch = lifecycleEpochRef.current
     const result = await session.record()
+    if (!mountedRef.current || lifecycleEpochRef.current !== lifecycleEpoch) return false
     switch (result.kind) {
       case 'recorded':
         if (result.visibility === 'pending') {
@@ -317,7 +327,9 @@ export function useQuickNoteEditor({
 
   const discardNewDraft = useCallback(async () => {
     if (editingIdRef.current !== null) return
+    const lifecycleEpoch = lifecycleEpochRef.current
     const result = await session.discard()
+    if (!mountedRef.current || lifecycleEpochRef.current !== lifecycleEpoch) return
     switch (result.kind) {
       case 'discarded':
         if (typingTimerRef.current) {
