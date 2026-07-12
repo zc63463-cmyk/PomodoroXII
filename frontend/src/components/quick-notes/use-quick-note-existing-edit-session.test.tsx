@@ -1870,4 +1870,267 @@ describe('QuickNote existing-edit session controller', () => {
     expect(onSaved).toHaveBeenCalledOnce()
   })
 
+  it('rebases a successor save that was queued before the older commit', async () => {
+    const firstUpdate = createDeferred<ExistingEditUpdateResult>()
+    const firstCommitted = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    const secondCommitted = makeQuickNote({
+      content: 'revision two',
+      updated_at: '2026-07-12T04:00:03.000Z',
+    })
+    adapter.updateEffects.push(
+      () => firstUpdate.promise,
+      async () => {
+        const capture = adapter.updateCalls.at(-1)
+        if (
+          capture?.baseContent !== firstCommitted.content
+          || capture.baseUpdatedAt !== firstCommitted.updated_at
+        ) return { kind: 'conflict', note: firstCommitted }
+        return { kind: 'updated', note: secondCommitted }
+      },
+    )
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const olderSave = controller.save()
+    await flushMicrotasks()
+
+    controller.change('revision two')
+    const successorSave = controller.save()
+    expect(adapter.updateCalls).toHaveLength(1)
+    firstUpdate.resolve({ kind: 'updated', note: firstCommitted })
+
+    await expect(olderSave).resolves.toMatchObject({ kind: 'saved' })
+    await expect(successorSave).resolves.toEqual({
+      kind: 'saved',
+      note: secondCommitted,
+      visibility: 'refreshed',
+    })
+    expect(adapter.updateCalls[1]).toEqual({
+      noteId: 'quick-note-1',
+      baseContent: 'revision one',
+      baseUpdatedAt: '2026-07-12T04:00:02.000Z',
+      draft: 'revision two',
+    })
+  })
+
+  it('materializes each owned base across multiple queued successor saves', async () => {
+    const firstUpdate = createDeferred<ExistingEditUpdateResult>()
+    const committed = [
+      makeQuickNote({
+        content: 'revision one',
+        updated_at: '2026-07-12T04:00:02.000Z',
+      }),
+      makeQuickNote({
+        content: 'revision two',
+        updated_at: '2026-07-12T04:00:03.000Z',
+      }),
+      makeQuickNote({
+        content: 'revision three',
+        updated_at: '2026-07-12T04:00:04.000Z',
+      }),
+    ]
+    adapter.updateEffects.push(
+      () => firstUpdate.promise,
+      async () => ({ kind: 'updated', note: committed[1]! }),
+      async () => ({ kind: 'updated', note: committed[2]! }),
+    )
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const saves = [controller.save()]
+    await flushMicrotasks()
+
+    controller.change('revision two')
+    saves.push(controller.save())
+    controller.change('revision three')
+    saves.push(controller.save())
+    firstUpdate.resolve({ kind: 'updated', note: committed[0]! })
+    await Promise.all(saves)
+
+    expect(adapter.updateCalls).toEqual([
+      {
+        noteId: 'quick-note-1',
+        baseContent: 'base',
+        baseUpdatedAt: BASE_UPDATED_AT,
+        draft: 'revision one',
+      },
+      {
+        noteId: 'quick-note-1',
+        baseContent: 'revision one',
+        baseUpdatedAt: '2026-07-12T04:00:02.000Z',
+        draft: 'revision two',
+      },
+      {
+        noteId: 'quick-note-1',
+        baseContent: 'revision two',
+        baseUpdatedAt: '2026-07-12T04:00:03.000Z',
+        draft: 'revision three',
+      },
+    ])
+  })
+
+  it('merges owners that become durable after a save was queued', async () => {
+    const olderCheckpoint = createDeferred<void>()
+    const updated = makeQuickNote({
+      content: 'revision two',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.checkpointEffects.push(() => olderCheckpoint.promise)
+    adapter.updateResult = { kind: 'updated', note: updated }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    await vi.advanceTimersByTimeAsync(500)
+
+    controller.change('revision two')
+    adapter.checkpointEffects.push(() => Promise.reject(new Error('blocked')))
+    const save = controller.save()
+    expect(adapter.clearCalls).toEqual([])
+    olderCheckpoint.resolve()
+    const result = await save
+
+    expect(result).toEqual({
+      kind: 'saved',
+      note: updated,
+      visibility: 'refreshed',
+    })
+    expect(adapter.clearCalls).toEqual([[
+      { kind: 'v1', editId: 'edit-1', revision: 1 },
+      { kind: 'v1', editId: 'edit-1', revision: 2 },
+    ]])
+    expect(adapter.stored).toBeNull()
+  })
+
+  it('rechecks synchronous subscriber input before cleanup', async () => {
+    const committed = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: committed }
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    let changed = false
+    controller.subscribe(() => {
+      if (
+        !changed
+        && controller.state.phase === 'saving'
+        && controller.state.durability === 'entity-durable'
+      ) {
+        changed = true
+        controller.change('revision two from subscriber')
+      }
+    })
+
+    await expect(controller.save()).resolves.toMatchObject({ kind: 'saved' })
+
+    expect(changed).toBe(true)
+    expect(adapter.clearCalls).toEqual([])
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      editingNote: committed,
+      draft: 'revision two from subscriber',
+    })
+  })
+
+  it('does not cleanup after deactivation hides a newer memory-only revision', async () => {
+    const update = createDeferred<ExistingEditUpdateResult>()
+    const committed = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateEffects.push(() => update.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const save = controller.save()
+    await flushMicrotasks()
+
+    controller.change('revision two before deactivation')
+    const beforeDeactivate = controller.getSnapshot()
+    controller.deactivate()
+    update.resolve({ kind: 'updated', note: committed })
+    await save
+
+    expect(adapter.clearCalls).toEqual([])
+    expect(controller.getSnapshot()).toBe(beforeDeactivate)
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'revision two before deactivation',
+    })
+  })
+
+  it('restores a successor checkpoint when cleanup clears during newer input', async () => {
+    const clear = createDeferred<'cleared' | 'absent' | 'different-edit'>()
+    const committed = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    adapter.updateResult = { kind: 'updated', note: committed }
+    adapter.clearEffects.push(() => clear.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const save = controller.save()
+    await flushMicrotasks()
+    expect(adapter.clearCalls).toHaveLength(1)
+    expect(controller.state).toMatchObject({
+      phase: 'saving',
+      durability: 'entity-durable',
+    })
+
+    controller.change('revision two during cleanup')
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      draft: 'revision two during cleanup',
+    })
+    clear.resolve('cleared')
+    await save
+
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'memory-only',
+      editingNote: committed,
+      draft: 'revision two during cleanup',
+    })
+    expect(adapter.clearCalls).toHaveLength(1)
+    expect(adapter.checkpointCalls).toHaveLength(2)
+    expect(adapter.checkpointCalls[1]).toMatchObject({
+      editId: 'edit-1',
+      revision: 2,
+      noteId: 'quick-note-1',
+      baseContent: 'revision one',
+      baseUpdatedAt: '2026-07-12T04:00:02.000Z',
+      draft: 'revision two during cleanup',
+    })
+    expect(adapter.stored).toMatchObject({
+      revision: 2,
+      draft: 'revision two during cleanup',
+    })
+  })
+
 })

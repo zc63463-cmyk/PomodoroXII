@@ -139,6 +139,7 @@ interface ExistingEditSaveLaneCapture extends ExistingEditCheckpointCapture {
   noteId: string
   baseContent: string
   baseUpdatedAt: string
+  baseGeneration: number
   owners: readonly ExistingEditRowOwner[]
 }
 
@@ -292,13 +293,18 @@ export function createQuickNoteExistingEditSessionController(
     if (owner) rememberRecoveryOwner(owner)
   }
 
-  function withOwner(
-    owners: readonly ExistingEditRowOwner[],
-    owner: ExistingEditRowOwner,
+  function mergeOwners(
+    ...ownerGroups: ReadonlyArray<readonly ExistingEditRowOwner[]>
   ): ExistingEditRowOwner[] {
-    const next = [...owners]
-    const key = ownerKey(owner)
-    if (!next.some((candidate) => ownerKey(candidate) === key)) next.push(owner)
+    const next: ExistingEditRowOwner[] = []
+    ownerGroups.forEach((owners) => {
+      owners.forEach((owner) => {
+        const key = ownerKey(owner)
+        if (!next.some((candidate) => ownerKey(candidate) === key)) {
+          next.push(owner)
+        }
+      })
+    })
     return next
   }
 
@@ -315,9 +321,15 @@ export function createQuickNoteExistingEditSessionController(
   }
 
   function isSameEdit(capture: ExistingEditCheckpointCapture): boolean {
+    return identity?.editId === capture.editId
+  }
+
+  function hasNewerSameEditRevision(
+    capture: ExistingEditCheckpointCapture,
+  ): boolean {
     return (
-      epoch === capture.epoch
-      && identity?.editId === capture.editId
+      identity?.editId === capture.editId
+      && identity.revision > capture.revision
     )
   }
 
@@ -710,19 +722,32 @@ export function createQuickNoteExistingEditSessionController(
     flight: ExistingEditSaveFlight,
   ): Promise<QuickNoteExistingEditSaveResult> {
     const { capture } = flight
+    let baseContent = capture.baseContent
+    let baseUpdatedAt = capture.baseUpdatedAt
+    if (
+      identity?.editId === capture.editId
+      && identity.baseGeneration > capture.baseGeneration
+    ) {
+      baseContent = identity.baseContent
+      baseUpdatedAt = identity.baseUpdatedAt
+    }
     const attemptedOwner: ExistingEditRowOwner = {
       kind: 'v1',
       editId: capture.editId,
       revision: capture.revision,
     }
-    const cleanupOwners = withOwner(capture.owners, attemptedOwner)
+    const cleanupOwners = mergeOwners(
+      capture.owners,
+      [...recoveryOwners],
+      [attemptedOwner],
+    )
     const recovery: QuickNoteExistingEditSnapshotV1 = {
       version: 1,
       editId: capture.editId,
       revision: capture.revision,
       noteId: capture.noteId,
-      baseContent: capture.baseContent,
-      baseUpdatedAt: capture.baseUpdatedAt,
+      baseContent,
+      baseUpdatedAt,
       draft: capture.content,
       updatedAt: nowIso(),
     }
@@ -753,8 +778,8 @@ export function createQuickNoteExistingEditSessionController(
     try {
       update = await adapter.updateEntity({
         noteId: capture.noteId,
-        baseContent: capture.baseContent,
-        baseUpdatedAt: capture.baseUpdatedAt,
+        baseContent,
+        baseUpdatedAt,
         draft: capture.content,
       })
     } catch {
@@ -808,11 +833,7 @@ export function createQuickNoteExistingEditSessionController(
       return { kind: 'unavailable', lifecycle: update.lifecycle }
     }
 
-    const newerRevision = (
-      isSameEdit(capture)
-      && identity !== null
-      && identity.revision > capture.revision
-    )
+    const newerRevisionAtCommit = hasNewerSameEditRevision(capture)
     if (isSameEdit(capture) && identity !== null) {
       identity = {
         ...identity,
@@ -820,7 +841,7 @@ export function createQuickNoteExistingEditSessionController(
         baseUpdatedAt: update.note.updated_at,
         baseGeneration: identity.baseGeneration + 1,
       }
-      if (newerRevision) {
+      if (newerRevisionAtCommit) {
         publish({
           ...snapshot,
           phase: 'dirty',
@@ -844,7 +865,8 @@ export function createQuickNoteExistingEditSessionController(
     let cleanupResult: 'cleared' | 'absent' | 'different-edit' | 'skipped' =
       'skipped'
     let cleanupIssue: QuickNoteExistingEditIssue | null = null
-    if (!newerRevision) {
+    const newerRevisionBeforeCleanup = hasNewerSameEditRevision(capture)
+    if (!newerRevisionBeforeCleanup) {
       try {
         cleanupResult = await adapter.clearIfOwned(cleanupOwners)
         if (cleanupResult === 'different-edit') {
@@ -862,6 +884,42 @@ export function createQuickNoteExistingEditSessionController(
     }
     if (cleanupResult === 'cleared' || cleanupResult === 'absent') {
       resetRecoveryOwners()
+      if (hasNewerSameEditRevision(capture) && identity !== null) {
+        const successor: QuickNoteExistingEditSnapshotV1 = {
+          version: 1,
+          editId: identity.editId,
+          revision: identity.revision,
+          noteId: identity.noteId,
+          baseContent: identity.baseContent,
+          baseUpdatedAt: identity.baseUpdatedAt,
+          draft: snapshot.draft,
+          updatedAt: nowIso(),
+        }
+        try {
+          await adapter.checkpoint(successor)
+          rememberRecoveryOwner({
+            kind: 'v1',
+            editId: successor.editId,
+            revision: successor.revision,
+          })
+        } catch {
+          const successorCapture: ExistingEditCheckpointCapture = {
+            epoch: capture.epoch,
+            editId: successor.editId,
+            revision: successor.revision,
+            content: successor.draft,
+          }
+          if (isCurrentCapture(successorCapture)) {
+            const issue = createIssue('checkpoint-failed', 'memory-only')
+            publish({
+              ...snapshot,
+              phase: 'failed',
+              durability: 'memory-only',
+              issue,
+            })
+          }
+        }
+      }
     }
 
     let visibility: 'refreshed' | 'pending' = 'pending'
@@ -960,6 +1018,7 @@ export function createQuickNoteExistingEditSessionController(
       noteId: identity.noteId,
       baseContent: identity.baseContent,
       baseUpdatedAt: identity.baseUpdatedAt,
+      baseGeneration: identity.baseGeneration,
       content: snapshot.draft,
       owners: [...recoveryOwners],
     }
