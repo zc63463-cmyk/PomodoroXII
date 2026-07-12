@@ -5,7 +5,10 @@ import type {
   QuickNoteDraftIssue,
   QuickNoteDraftRecordResult,
 } from '@/components/quick-notes/use-quick-note-draft-session'
-import type { QuickNoteDraftSaveState } from '@/lib/quick-notes/quick-note-editor-status'
+import {
+  QUICK_NOTE_TYPING_IDLE_MS,
+  type QuickNoteDraftSaveState,
+} from '@/lib/quick-notes/quick-note-editor-status'
 import type { QuickNoteUpdateInput } from '@/lib/quick-notes/quick-note-repository'
 import { PomodoroXIDB } from '@/services/database'
 import { db, spaceDBManager } from '@/services/space-db'
@@ -85,6 +88,14 @@ function makeQuickNote(overrides: Partial<QuickNote> = {}): QuickNote {
 
 function submitEvent() {
   return { preventDefault: vi.fn() } as unknown as React.FormEvent<HTMLFormElement>
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
 }
 
 describe('useQuickNoteEditor', () => {
@@ -266,6 +277,40 @@ describe('useQuickNoteEditor', () => {
     expect(result.current.draft).toBe('preserve failed record input')
   })
 
+  it('returns false without mapping a late old-Space record result', async () => {
+    const record = createDeferred<QuickNoteDraftRecordResult>()
+    sessionMocks.session.draft = 'record in Space A'
+    sessionMocks.session.record.mockReturnValueOnce(record.promise)
+    const { result } = renderHook(() => useQuickNoteEditor(createOptions()))
+
+    let submitPromise: Promise<boolean> | null = null
+    act(() => {
+      submitPromise = result.current.submitDraft(submitEvent())
+    })
+    await waitFor(() => expect(sessionMocks.session.record).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      await spaceDBManager.switchTo(`quick-note-editor-record-target-${crypto.randomUUID()}`)
+    })
+    act(() => result.current.setDraft('typing in Space B'))
+    expect(result.current.isTyping).toBe(true)
+
+    let submitted = true
+    await act(async () => {
+      record.resolve({
+        kind: 'recorded',
+        note: makeQuickNote({ content: 'record in Space A' }),
+        visibility: 'pending',
+      })
+      submitted = await submitPromise!
+    })
+
+    expect(submitted).toBe(false)
+    expect(result.current.isTyping).toBe(true)
+    expect(toastMock).not.toHaveBeenCalled()
+    expect(toastMock.error).not.toHaveBeenCalled()
+  })
+
   it('does nothing when discard is superseded by newer input', async () => {
     sessionMocks.session.draft = 'newer input survives'
     sessionMocks.session.discard.mockResolvedValueOnce({ kind: 'superseded' })
@@ -338,6 +383,77 @@ describe('useQuickNoteEditor', () => {
     expect(result.current.draft).toBe('preserve failed discard input')
   })
 
+  it.each<{
+    label: string
+    result: QuickNoteDraftDiscardResult
+  }>([
+    { label: 'discarded', result: { kind: 'discarded' } },
+    { label: 'busy', result: { kind: 'busy', operation: 'record' } },
+    {
+      label: 'failed',
+      result: {
+        kind: 'failed',
+        issue: { code: 'discard-failed', retryable: true },
+      },
+    },
+  ])(
+    'does not map a late old-Space $label discard result or clear new-Space typing',
+    async ({ result: discardResult }) => {
+      const discard = createDeferred<QuickNoteDraftDiscardResult>()
+      sessionMocks.session.draft = 'discard in Space A'
+      sessionMocks.session.discard.mockReturnValueOnce(discard.promise)
+      const { result } = renderHook(() => useQuickNoteEditor(createOptions()))
+
+      let discardPromise: Promise<void> | null = null
+      act(() => {
+        discardPromise = result.current.discardNewDraft()
+      })
+      await waitFor(() => expect(sessionMocks.session.discard).toHaveBeenCalledTimes(1))
+
+      await act(async () => {
+        await spaceDBManager.switchTo(`quick-note-editor-discard-target-${crypto.randomUUID()}`)
+      })
+      act(() => result.current.setDraft('typing in Space B'))
+      expect(result.current.isTyping).toBe(true)
+
+      await act(async () => {
+        discard.resolve(discardResult)
+        await discardPromise!
+      })
+
+      expect(result.current.isTyping).toBe(true)
+      expect(toastMock).not.toHaveBeenCalled()
+      expect(toastMock.error).not.toHaveBeenCalled()
+    },
+  )
+
+  it('returns false without mapping a new-draft record result after unmount', async () => {
+    const record = createDeferred<QuickNoteDraftRecordResult>()
+    sessionMocks.session.draft = 'record before unmount'
+    sessionMocks.session.record.mockReturnValueOnce(record.promise)
+    const { result, unmount } = renderHook(() => useQuickNoteEditor(createOptions()))
+
+    let submitPromise: Promise<boolean> | null = null
+    act(() => {
+      submitPromise = result.current.submitDraft(submitEvent())
+    })
+    await waitFor(() => expect(sessionMocks.session.record).toHaveBeenCalledTimes(1))
+
+    unmount()
+    let submitted = true
+    await act(async () => {
+      record.resolve({
+        kind: 'failed',
+        issue: { code: 'record-failed', retryable: true },
+      })
+      submitted = await submitPromise!
+    })
+
+    expect(submitted).toBe(false)
+    expect(toastMock).not.toHaveBeenCalled()
+    expect(toastMock.error).not.toHaveBeenCalled()
+  })
+
   it('invalidates an in-flight existing-note save that resolves after unmount', async () => {
     let releaseUpdate: (() => void) | null = null
     const updateGate = new Promise<void>((resolve) => {
@@ -401,6 +517,52 @@ describe('useQuickNoteEditor', () => {
     expect(submitted).toBe(false)
     expect(toastMock).not.toHaveBeenCalled()
     expect(toastMock.error).not.toHaveBeenCalled()
+  })
+
+  it('clears new-draft typing and its old timer after a successful Space switch', async () => {
+    sessionMocks.session.draft = 'draft in Space A'
+    const { result, rerender } = renderHook(() => useQuickNoteEditor(createOptions()))
+
+    act(() => result.current.setDraft('typing in Space A'))
+    expect(result.current.isTyping).toBe(true)
+
+    sessionMocks.session.draft = 'restored draft in Space B'
+    await act(async () => {
+      await spaceDBManager.switchTo(`quick-note-editor-typing-target-${crypto.randomUUID()}`)
+    })
+    rerender()
+
+    expect(result.current.draft).toBe('restored draft in Space B')
+    expect(result.current.isTyping).toBe(false)
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, QUICK_NOTE_TYPING_IDLE_MS + 25))
+    })
+    expect(result.current.isTyping).toBe(false)
+  })
+
+  it('keeps new-draft typing and its timer when target Space open fails', async () => {
+    sessionMocks.session.draft = 'draft in Space A'
+    const { result } = renderHook(() => useQuickNoteEditor(createOptions()))
+
+    act(() => result.current.setDraft('typing in Space A'))
+    expect(result.current.isTyping).toBe(true)
+    vi.spyOn(PomodoroXIDB.prototype, 'open').mockRejectedValueOnce(
+      new Error('target open failed'),
+    )
+
+    await act(async () => {
+      await expect(
+        spaceDBManager.switchTo(`quick-note-editor-typing-failed-${crypto.randomUUID()}`),
+      ).rejects.toThrow('target open failed')
+    })
+
+    expect(result.current.draft).toBe('draft in Space A')
+    expect(result.current.isTyping).toBe(true)
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, QUICK_NOTE_TYPING_IDLE_MS + 25))
+    })
+    expect(result.current.isTyping).toBe(false)
   })
 
   it('invalidates a queued existing-note save after a successful Space switch', async () => {
