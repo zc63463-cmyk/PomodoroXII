@@ -907,6 +907,9 @@ describe('QuickNote existing-edit session controller', () => {
     )
 
     await flushMicrotasks()
+    expect(adapter.clearCalls).toEqual([[
+      { kind: 'v1', editId: 'recovered-edit-1', revision: 1 },
+    ]])
     controller.start(makeQuickNote({ id: 'first', content: 'first content' }))
     controller.start(makeQuickNote({ id: 'latest', content: 'latest content' }))
 
@@ -921,7 +924,6 @@ describe('QuickNote existing-edit session controller', () => {
       editingNote: { id: 'latest' },
       draft: 'latest content',
     })
-    expect(adapter.clearCalls).toHaveLength(1)
   })
 
   it('grants edit ownership only to the latest start intent during recovery-read retry', async () => {
@@ -976,8 +978,8 @@ describe('QuickNote existing-edit session controller', () => {
     expect(adapter.clearCalls).toEqual([])
   })
 
-  it('preserves the complete stored snapshot when recovery cleanup rejects and clears once', async () => {
-    const stored = makeSnapshot({
+  it('preserves the complete stored snapshot when recovery cleanup rejects and attempts cleanup once', async () => {
+    const expectedStored = makeSnapshot({
       editId: 'stored-edit',
       revision: 7,
       noteId: 'stored-note',
@@ -986,13 +988,15 @@ describe('QuickNote existing-edit session controller', () => {
       draft: 'stored base',
       updatedAt: '2026-07-12T03:30:00.000Z',
     })
-    adapter.stored = stored
+    const storedClone = { ...expectedStored }
+    const loadClone = { ...expectedStored }
+    adapter.stored = storedClone
     adapter.loadResult = validRecoveredLoad({
-      snapshot: stored,
+      snapshot: loadClone,
       note: makeQuickNote({
-        id: stored.noteId,
-        content: stored.baseContent,
-        updated_at: stored.baseUpdatedAt,
+        id: expectedStored.noteId,
+        content: expectedStored.baseContent,
+        updated_at: expectedStored.baseUpdatedAt,
       }),
     })
     adapter.clearEffects.push(() => Promise.reject(new Error('cleanup failed')))
@@ -1009,9 +1013,14 @@ describe('QuickNote existing-edit session controller', () => {
       draft: 'stored base',
       issue: { code: 'recovery-cleanup-failed' },
     })
-    expect(adapter.stored).toEqual(stored)
+    expect(adapter.stored).toEqual(expectedStored)
+    expect(adapter.stored).not.toBe(expectedStored)
     expect(adapter.clearCalls).toEqual([[
-      { kind: 'v1', editId: stored.editId, revision: stored.revision },
+      {
+        kind: 'v1',
+        editId: expectedStored.editId,
+        revision: expectedStored.revision,
+      },
     ]])
   })
 
@@ -1021,8 +1030,17 @@ describe('QuickNote existing-edit session controller', () => {
     const controller = createQuickNoteExistingEditSessionController(
       controllerOptions(adapter),
     )
+    const listener = vi.fn()
+    controller.subscribe(listener)
+    const before = controller.getSnapshot()
 
     controller.change('must not replace recovery')
+
+    expect(controller.getSnapshot()).toBe(before)
+    expect(controller.state.phase).toBe('restoring')
+    expect(controller.state.draft).toBe('')
+    expect(listener).not.toHaveBeenCalled()
+
     load.resolve(validRecoveredLoad({ snapshot: { draft: 'recovered content' } }))
     await flushMicrotasks()
 
@@ -1031,6 +1049,7 @@ describe('QuickNote existing-edit session controller', () => {
       durability: 'recovery-durable',
       draft: 'recovered content',
     })
+    expect(listener).toHaveBeenCalledOnce()
   })
 
   it('drains only after deferred recovery cleanup completes', async () => {
@@ -1044,6 +1063,9 @@ describe('QuickNote existing-edit session controller', () => {
     const drain = controller.drainBeforeSwitch().then(drained)
 
     await flushMicrotasks()
+    expect(adapter.clearCalls).toEqual([[
+      { kind: 'v1', editId: 'recovered-edit-1', revision: 1 },
+    ]])
     expect(drained).not.toHaveBeenCalled()
     clear.resolve('cleared')
     await drain
