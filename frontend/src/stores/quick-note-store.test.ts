@@ -1,6 +1,38 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as quickNoteRepository from '@/lib/quick-notes/quick-note-repository'
 import { db, spaceDBManager } from '@/services/space-db'
 import { useQuickNoteStore } from '@/stores/quick-note-store'
+import type { QuickNote } from '@/types'
+
+function makeQuickNote(overrides: Partial<QuickNote> = {}): QuickNote {
+  const now = '2026-07-11T04:00:00.000Z'
+  return {
+    id: 'projected',
+    content: 'projected note',
+    mood: null,
+    tags: [],
+    pinned: false,
+    archived_at: null,
+    archive_file_path: null,
+    session_id: null,
+    folder_id: null,
+    trashed_at: null,
+    migrated_to_note_id: null,
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  }
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done
+    reject = fail
+  })
+  return { promise, reject, resolve }
+}
 
 describe('useQuickNoteStore', () => {
   beforeEach(async () => {
@@ -9,9 +41,177 @@ describe('useQuickNoteStore', () => {
   })
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     useQuickNoteStore.getState().reset()
     await db.delete()
     spaceDBManager.close()
+  })
+
+  it('projects a recorded QuickNote synchronously through current filters without reads', () => {
+    const repositoryReads = [
+      vi.spyOn(quickNoteRepository, 'listQuickNotes'),
+      vi.spyOn(quickNoteRepository, 'listTrashedQuickNotes'),
+      vi.spyOn(quickNoteRepository, 'listQuickNoteSyncStates'),
+      vi.spyOn(quickNoteRepository, 'listQuickNoteLifecycleStates'),
+    ]
+    const quickNotesTable = spaceDBManager.current.quickNotes
+    const tableRead = vi.spyOn(quickNotesTable, 'toArray')
+    const directTableReads = [
+      vi.spyOn(quickNotesTable, 'get'),
+      vi.spyOn(quickNotesTable, 'count'),
+      vi.spyOn(quickNotesTable, 'where'),
+    ]
+    useQuickNoteStore.setState({
+      allQuickNotes: [],
+      quickNotes: [],
+      searchQuery: 'release',
+      selectedTagFilters: ['work'],
+      selectedDate: '2026-07-11',
+    })
+    const first = makeQuickNote({
+      content: 'release plan #work',
+      tags: ['work'],
+    })
+
+    const result = useQuickNoteStore.getState().projectRecordedQuickNote(first)
+
+    expect(result).toBeUndefined()
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      allQuickNotes: [first],
+      quickNotes: [first],
+      lifecycleStateById: { projected: 'active' },
+      syncStatusById: { projected: 'pending' },
+      error: null,
+    })
+
+    const replacement = makeQuickNote({
+      content: 'personal note',
+      tags: ['personal'],
+      updated_at: '2026-07-11T04:01:00.000Z',
+    })
+
+    expect(
+      useQuickNoteStore.getState().projectRecordedQuickNote(replacement),
+    ).toBeUndefined()
+    expect(useQuickNoteStore.getState().allQuickNotes).toEqual([replacement])
+    expect(useQuickNoteStore.getState().quickNotes).toEqual([])
+    for (const repositoryRead of repositoryReads) {
+      expect(repositoryRead).not.toHaveBeenCalled()
+    }
+    expect(tableRead).not.toHaveBeenCalled()
+    for (const directTableRead of directTableReads) {
+      expect(directTableRead).not.toHaveBeenCalled()
+    }
+  })
+
+  it('reruns a stale same-epoch refresh before publishing over a recorded projection', async () => {
+    const realListQuickNotes = quickNoteRepository.listQuickNotes
+    const staleReadCaptured = createDeferred<void>()
+    const releaseStaleRead = createDeferred<void>()
+    const listQuickNotes = vi
+      .spyOn(quickNoteRepository, 'listQuickNotes')
+      .mockImplementation(async (query = '') => {
+        const notes = await realListQuickNotes(query)
+        if (listQuickNotes.mock.calls.length === 1) {
+          staleReadCaptured.resolve(undefined)
+          await releaseStaleRead.promise
+        }
+        return notes
+      })
+
+    const refresh = useQuickNoteStore.getState().refreshQuickNotesFromRepository()
+    await staleReadCaptured.promise
+
+    const note = await quickNoteRepository.createQuickNote({
+      id: 'recorded-during-refresh',
+      content: 'recorded while an old refresh is gated',
+    })
+    useQuickNoteStore.getState().projectRecordedQuickNote(note)
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      allQuickNotes: [note],
+      quickNotes: [note],
+      lifecycleStateById: { [note.id]: 'active' },
+      syncStatusById: { [note.id]: 'pending' },
+    })
+
+    releaseStaleRead.resolve(undefined)
+    await refresh
+
+    expect(listQuickNotes).toHaveBeenCalledTimes(2)
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      allQuickNotes: [note],
+      quickNotes: [note],
+      lifecycleStateById: { [note.id]: 'active' },
+      syncStatusById: { [note.id]: 'pending' },
+      error: null,
+    })
+  })
+
+  it('discards a stale refresh result after reset establishes a new epoch', async () => {
+    const existing = await quickNoteRepository.createQuickNote({
+      id: 'old-epoch-note',
+      content: 'must not cross reset',
+    })
+    const realListQuickNotes = quickNoteRepository.listQuickNotes
+    const staleReadCaptured = createDeferred<void>()
+    const releaseStaleRead = createDeferred<void>()
+    vi.spyOn(quickNoteRepository, 'listQuickNotes').mockImplementationOnce(
+      async (query = '') => {
+        const notes = await realListQuickNotes(query)
+        staleReadCaptured.resolve(undefined)
+        await releaseStaleRead.promise
+        return notes
+      },
+    )
+
+    const load = useQuickNoteStore.getState().loadQuickNotes({ query: 'old epoch' })
+    await staleReadCaptured.promise
+    useQuickNoteStore.getState().reset()
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      allQuickNotes: [],
+      quickNotes: [],
+      isLoading: false,
+      error: null,
+      searchQuery: '',
+    })
+
+    releaseStaleRead.resolve(undefined)
+    await load
+
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      allQuickNotes: [],
+      quickNotes: [],
+      trashedQuickNotes: [],
+      syncStatusById: {},
+      lifecycleStateById: {},
+      isLoading: false,
+      error: null,
+      searchQuery: '',
+    })
+    expect(useQuickNoteStore.getState().allQuickNotes).not.toContainEqual(existing)
+  })
+
+  it('does not publish or rethrow a stale refresh failure after reset', async () => {
+    const readEntered = createDeferred<void>()
+    const staleFailure = createDeferred<QuickNote[]>()
+    vi.spyOn(quickNoteRepository, 'listQuickNotes').mockImplementationOnce(async () => {
+      readEntered.resolve(undefined)
+      return staleFailure.promise
+    })
+
+    const load = useQuickNoteStore.getState().loadQuickNotes({ query: 'old epoch' })
+    await readEntered.promise
+    useQuickNoteStore.getState().reset()
+
+    staleFailure.reject(new Error('late old-Space read failure'))
+    await expect(load).resolves.toBeUndefined()
+    expect(useQuickNoteStore.getState()).toMatchObject({
+      allQuickNotes: [],
+      quickNotes: [],
+      isLoading: false,
+      error: null,
+      searchQuery: '',
+    })
   })
 
   it('loads active notes filtered by search and sorted by pinned/updated', async () => {

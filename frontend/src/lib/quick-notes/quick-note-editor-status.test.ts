@@ -36,6 +36,24 @@ describe('quick-note-editor-status', () => {
     })
   })
 
+  it('distinguishes local new-draft persistence from created QuickNote save state', () => {
+    expect(getQuickNoteEditorStatusMeta('draft-saved')).toMatchObject({
+      text: '草稿已保存到本机',
+      tone: 'success',
+      ariaLive: 'polite',
+    })
+    expect(getQuickNoteEditorStatusMeta('draft-restored')).toMatchObject({
+      text: '已恢复未保存草稿',
+      tone: 'info',
+      ariaLive: 'polite',
+    })
+    expect(getQuickNoteEditorStatusMeta('draft-failed')).toMatchObject({
+      text: '本机草稿保存失败，将继续保留输入',
+      tone: 'danger',
+      ariaLive: 'polite',
+    })
+  })
+
   it('keeps the legacy text helper backed by the same labels', () => {
     expect(getQuickNoteEditorStatusText('saved')).toBe(
       getQuickNoteEditorStatusMeta('saved').text,

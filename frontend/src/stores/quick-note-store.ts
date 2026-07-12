@@ -9,6 +9,7 @@ import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import {
   isActiveQuickNote,
+  selectActiveQuickNotes,
   selectQuickNotesForExplorer,
 } from '@/lib/quick-notes/quick-note-selectors'
 import {
@@ -62,6 +63,7 @@ interface QuickNoteActions {
   loadQuickNotes: (opts?: { query?: string }) => Promise<void>
   loadTrashedQuickNotes: () => Promise<void>
   refreshQuickNotesFromRepository: () => Promise<void>
+  projectRecordedQuickNote: (note: QuickNote) => undefined
   createQuickNote: (data: QuickNoteCreateInput) => Promise<QuickNote>
   updateQuickNote: (id: string, data: QuickNoteUpdateInput) => Promise<void>
   deleteQuickNote: (id: string) => Promise<void>
@@ -83,6 +85,12 @@ interface QuickNoteActions {
 }
 
 type QuickNoteStore = QuickNoteState & QuickNoteActions
+
+interface QuickNoteListFilters {
+  query: string
+  selectedTagFilters: string[]
+  selectedDate: string | null
+}
 
 async function refreshLists(
   query: string,
@@ -128,7 +136,94 @@ function normalizeFilterTag(tag: string): string {
 
 export const useQuickNoteStore = create<QuickNoteStore>()(
   devtools(
-    (set, get) => ({
+    (set, get) => {
+      let storeEpoch = 0
+      let projectionRevision = 0
+
+      const getCurrentFilters = (): QuickNoteListFilters => {
+        const state = get()
+        return {
+          query: state.searchQuery,
+          selectedTagFilters: state.selectedTagFilters,
+          selectedDate: state.selectedDate,
+        }
+      }
+
+      const publishIfStable = (
+        actionEpoch: number,
+        revision: number,
+        createUpdate: () => Partial<QuickNoteStore>,
+      ): 'published' | 'retry' | 'stale' => {
+        let outcome: 'published' | 'retry' | 'stale' = 'published'
+        set((state) => {
+          if (actionEpoch !== storeEpoch) {
+            outcome = 'stale'
+            return state
+          }
+          if (revision !== projectionRevision) {
+            outcome = 'retry'
+            return state
+          }
+          return createUpdate()
+        })
+        return outcome
+      }
+
+      const readStableLists = async (
+        actionEpoch: number,
+        getFilters: () => QuickNoteListFilters,
+        publish: (
+          lists: Awaited<ReturnType<typeof refreshLists>>,
+          filters: QuickNoteListFilters,
+        ) => Partial<QuickNoteStore>,
+        publishFailure?: (error: unknown) => Partial<QuickNoteStore>,
+      ): Promise<boolean> => {
+        if (actionEpoch !== storeEpoch) return false
+
+        while (true) {
+          const revision = projectionRevision
+          const filters = getFilters()
+          let lists: Awaited<ReturnType<typeof refreshLists>>
+
+          try {
+            lists = await refreshLists(
+              filters.query,
+              filters.selectedTagFilters,
+              filters.selectedDate,
+            )
+          } catch (error) {
+            if (actionEpoch !== storeEpoch) return false
+            if (revision !== projectionRevision) continue
+            if (!publishFailure) throw error
+
+            const outcome = publishIfStable(actionEpoch, revision, () =>
+              publishFailure(error),
+            )
+            if (outcome === 'stale') return false
+            if (outcome === 'retry') continue
+            throw error
+          }
+
+          const outcome = publishIfStable(actionEpoch, revision, () => {
+            const currentFilters = getFilters()
+            const currentLists = {
+              ...lists,
+              quickNotes: deriveVisibleQuickNotes(
+                lists.allQuickNotes,
+                currentFilters.query,
+                currentFilters.selectedTagFilters,
+                currentFilters.selectedDate,
+              ),
+            }
+            return publish(currentLists, currentFilters)
+          })
+          if (outcome === 'stale') return false
+          if (outcome === 'retry') continue
+          return true
+        }
+      }
+
+      return {
       allQuickNotes: [],
       quickNotes: [],
       trashedQuickNotes: [],
@@ -144,124 +239,147 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
       selectedQuickNoteId: null,
 
       loadQuickNotes: async (opts) => {
+        const actionEpoch = storeEpoch
         const query = opts?.query ?? get().searchQuery
         set({ isLoading: true, error: null, searchQuery: query })
-        try {
-          const lists = await refreshLists(
-            query,
-            get().selectedTagFilters,
-            get().selectedDate,
-          )
-          set({ ...lists, isLoading: false })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Failed to load quick notes'
-          set({ error: message, isLoading: false })
-          throw error
-        }
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, isLoading: false }),
+          (error) => ({
+            error: error instanceof Error ? error.message : 'Failed to load quick notes',
+            isLoading: false,
+          }),
+        )
       },
 
       loadTrashedQuickNotes: async () => {
+        const actionEpoch = storeEpoch
         set({ isLoading: true, error: null })
-        try {
-          const lists = await refreshLists(
-            get().searchQuery,
-            get().selectedTagFilters,
-            get().selectedDate,
-          )
-          set({ ...lists, isLoading: false })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Failed to load trashed quick notes'
-          set({ error: message, isLoading: false })
-          throw error
-        }
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, isLoading: false }),
+          (error) => ({
+            error:
+              error instanceof Error ? error.message : 'Failed to load trashed quick notes',
+            isLoading: false,
+          }),
+        )
       },
 
       refreshQuickNotesFromRepository: async () => {
-        try {
-          const lists = await refreshLists(
-            get().searchQuery,
-            get().selectedTagFilters,
-            get().selectedDate,
-          )
-          set({ ...lists, error: null })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Failed to refresh quick notes'
-          set({ error: message })
-          throw error
-        }
+        const actionEpoch = storeEpoch
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, error: null }),
+          (error) => ({
+            error: error instanceof Error ? error.message : 'Failed to refresh quick notes',
+          }),
+        )
+      },
+
+      projectRecordedQuickNote: (note) => {
+        projectionRevision += 1
+        set((state) => {
+          const allQuickNotes = selectActiveQuickNotes([
+            ...state.allQuickNotes.filter((item) => item.id !== note.id),
+            note,
+          ])
+          return {
+            allQuickNotes,
+            quickNotes: deriveVisibleQuickNotes(
+              allQuickNotes,
+              state.searchQuery,
+              state.selectedTagFilters,
+              state.selectedDate,
+            ),
+            lifecycleStateById: {
+              ...state.lifecycleStateById,
+              [note.id]: 'active',
+            },
+            syncStatusById: {
+              ...state.syncStatusById,
+              [note.id]: 'pending',
+            },
+            error: null,
+          }
+        })
+        return undefined
       },
 
       createQuickNote: async (data) => {
+        const actionEpoch = storeEpoch
         const note = await createQuickNote(data)
-        const lists = await refreshLists(
-          get().searchQuery,
-          get().selectedTagFilters,
-          get().selectedDate,
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, error: null }),
         )
-        set({ ...lists, error: null })
         return note
       },
 
       updateQuickNote: async (id, data) => {
+        const actionEpoch = storeEpoch
         await updateQuickNote(id, data)
-        const lists = await refreshLists(
-          get().searchQuery,
-          get().selectedTagFilters,
-          get().selectedDate,
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, error: null }),
         )
-        set({ ...lists, error: null })
       },
 
       deleteQuickNote: async (id) => {
+        const actionEpoch = storeEpoch
         await moveQuickNoteToTrash(id)
-        const lists = await refreshLists(
-          get().searchQuery,
-          get().selectedTagFilters,
-          get().selectedDate,
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, error: null }),
         )
-        set({ ...lists, error: null })
       },
 
       restoreQuickNote: async (id) => {
+        const actionEpoch = storeEpoch
         await restoreQuickNote(id)
-        const lists = await refreshLists(
-          get().searchQuery,
-          get().selectedTagFilters,
-          get().selectedDate,
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, error: null }),
         )
-        set({ ...lists, error: null })
       },
 
       purgeQuickNote: async (id) => {
+        const actionEpoch = storeEpoch
         await purgeQuickNote(id)
-        const lists = await refreshLists(
-          get().searchQuery,
-          get().selectedTagFilters,
-          get().selectedDate,
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, error: null }),
         )
-        set({ ...lists, error: null })
       },
 
       togglePin: async (id) => {
+        const actionEpoch = storeEpoch
         const note = get().allQuickNotes.find((item) => item.id === id)
         if (!note) return
         await updateQuickNote(id, { pinned: !note.pinned })
-        const lists = await refreshLists(
-          get().searchQuery,
-          get().selectedTagFilters,
-          get().selectedDate,
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, error: null }),
         )
-        set({ ...lists, error: null })
       },
 
       migrateToNote: async (id) => {
+        const actionEpoch = storeEpoch
         const result = await convertQuickNoteToNote(id)
-        const lists = await refreshLists(
-          get().searchQuery,
-          get().selectedTagFilters,
-          get().selectedDate,
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists) => ({ ...lists, error: null }),
         )
-        set({ ...lists, error: null })
         return result.noteId
       },
 
@@ -270,11 +388,19 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
         const toTag = normalizeQuickNoteTag(to)
         if (!fromTag || !toTag) return
 
+        const actionEpoch = storeEpoch
         const state = get()
-        const selectedTagFilters =
-          fromTag === toTag
-            ? normalizeFilterTags(state.selectedTagFilters)
-            : renameQuickNoteTagInList(state.selectedTagFilters, fromTag, toTag)
+        const getRenamedFilters = (): QuickNoteListFilters => {
+          const currentState = get()
+          return {
+            query: currentState.searchQuery,
+            selectedTagFilters:
+              fromTag === toTag
+                ? normalizeFilterTags(currentState.selectedTagFilters)
+                : renameQuickNoteTagInList(currentState.selectedTagFilters, fromTag, toTag),
+            selectedDate: currentState.selectedDate,
+          }
+        }
 
         if (fromTag !== toTag) {
           const activeNotes = state.allQuickNotes.filter(isActiveQuickNote)
@@ -297,15 +423,19 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
           }
         }
 
-        const lists = await refreshLists(
-          state.searchQuery,
-          selectedTagFilters,
-          state.selectedDate,
+        await readStableLists(
+          actionEpoch,
+          getRenamedFilters,
+          (lists, filters) => ({
+            ...lists,
+            selectedTagFilters: filters.selectedTagFilters,
+            error: null,
+          }),
         )
-        set({ ...lists, selectedTagFilters, error: null })
       },
 
       cleanupQuickNoteTags: async () => {
+        const actionEpoch = storeEpoch
         const state = get()
         let changedCount = 0
 
@@ -316,26 +446,27 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
           changedCount += 1
         }
 
-        const lists = await refreshLists(
-          state.searchQuery,
-          state.selectedTagFilters,
-          state.selectedDate,
+        await readStableLists(
+          actionEpoch,
+          getCurrentFilters,
+          (lists, filters) => {
+            const selectedTagFilters = keepExistingFilterTags(
+              filters.selectedTagFilters,
+              lists.allQuickNotes,
+            )
+            return {
+              ...lists,
+              selectedTagFilters,
+              quickNotes: deriveVisibleQuickNotes(
+                lists.allQuickNotes,
+                filters.query,
+                selectedTagFilters,
+                filters.selectedDate,
+              ),
+              error: null,
+            }
+          },
         )
-        const selectedTagFilters = keepExistingFilterTags(
-          state.selectedTagFilters,
-          lists.allQuickNotes,
-        )
-        set({
-          ...lists,
-          selectedTagFilters,
-          quickNotes: deriveVisibleQuickNotes(
-            lists.allQuickNotes,
-            state.searchQuery,
-            selectedTagFilters,
-            state.selectedDate,
-          ),
-          error: null,
-        })
         return changedCount
       },
 
@@ -442,7 +573,9 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
           selectedQuickNoteId: null,
         })
       },
-      reset: () =>
+      reset: () => {
+        storeEpoch += 1
+        projectionRevision += 1
         set({
           allQuickNotes: [],
           quickNotes: [],
@@ -457,8 +590,10 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
           selectedDate: null,
           focusMode: 'normal',
           selectedQuickNoteId: null,
-        }),
-    }),
+        })
+      },
+      }
+    },
     { name: 'quick-note-store' },
   ),
 )

@@ -25,6 +25,7 @@ vi.mock('@/lib/query-client', () => ({
 // Mock spaceDBManager
 vi.mock('@/services/space-db', () => ({
   spaceDBManager: {
+    flushBeforeClose: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
   },
 }))
@@ -102,10 +103,27 @@ describe('performLogout', () => {
     expect(useBootstrapStore.getState().phase).toBe('pending')
   })
 
-  it('calls spaceDBManager.close and metaDB.clearSpaces', async () => {
+  it('flushes the current Space before closing it and clearing Space metadata', async () => {
+    const order: string[] = []
+    vi.mocked(spaceDBManager.flushBeforeClose).mockImplementationOnce(async () => {
+      order.push('flush')
+    })
+    vi.mocked(syncEngine.destroy).mockImplementationOnce(() => {
+      order.push('destroy')
+    })
+    vi.mocked(spaceDBManager.close).mockImplementationOnce(() => {
+      order.push('close')
+    })
+    vi.mocked(metaDB.clearSpaces).mockImplementationOnce(async () => {
+      order.push('clear-spaces')
+    })
+
     await performLogout()
+
+    expect(spaceDBManager.flushBeforeClose).toHaveBeenCalledTimes(1)
     expect(spaceDBManager.close).toHaveBeenCalledTimes(1)
     expect(metaDB.clearSpaces).toHaveBeenCalledTimes(1)
+    expect(order).toEqual(['flush', 'destroy', 'close', 'clear-spaces'])
   })
 
   it('calls tokenStorage.clearAll', async () => {

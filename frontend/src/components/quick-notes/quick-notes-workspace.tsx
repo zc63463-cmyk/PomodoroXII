@@ -5,7 +5,11 @@ import { SearchIcon, XIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { QuickNoteComposer, type QuickNoteSaveState } from '@/components/quick-notes/quick-note-composer'
+import {
+  QuickNoteComposer,
+  type QuickNoteDraftSaveState,
+  type QuickNoteSaveState,
+} from '@/components/quick-notes/quick-note-composer'
 import { QuickNoteConflictPanel, type QuickNoteDraftConflict } from '@/components/quick-notes/quick-note-conflict-panel'
 import { QuickNoteExplorer } from '@/components/quick-notes/quick-note-explorer'
 import { QuickNoteReadView } from '@/components/quick-notes/quick-note-read-view'
@@ -50,6 +54,7 @@ interface QuickNotesWorkspaceProps {
   selectedQuickNoteId: string | null
   draft: string
   draftConflict: QuickNoteDraftConflict | null
+  draftSaveState: QuickNoteDraftSaveState
   editingNote: QuickNote | null
   isTyping: boolean
   saveState: QuickNoteSaveState
@@ -57,6 +62,7 @@ interface QuickNotesWorkspaceProps {
   trashPendingById: Record<string, 'restore' | 'purge'>
   timelinePendingById: Record<string, 'delete' | 'pin' | 'migrate'>
   onDraftChange: (value: string) => void
+  onDiscardDraft: () => void | Promise<void>
   onCancelEdit: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => boolean | Promise<boolean>
   onKeepLocalDraft: () => void
@@ -101,6 +107,7 @@ export function QuickNotesWorkspace({
   selectedQuickNoteId,
   draft,
   draftConflict,
+  draftSaveState,
   editingNote,
   isTyping,
   saveState,
@@ -108,6 +115,7 @@ export function QuickNotesWorkspace({
   trashPendingById,
   timelinePendingById,
   onDraftChange,
+  onDiscardDraft,
   onCancelEdit,
   onSubmit,
   onKeepLocalDraft,
@@ -380,9 +388,11 @@ export function QuickNotesWorkspace({
       hasConflict: draftConflict !== null,
       isTyping,
       onDraftChange,
+      onDiscardDraft,
       onCancelEdit,
       onSubmit: handleComposerSubmit,
       saveState,
+      draftSaveState,
       variant: isFocusEditing ? 'focus' : 'compact',
       isFocusMode: isFocusEditing,
       onToggleFocus: onToggleFocusEdit,
