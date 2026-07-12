@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
+from pathlib import Path
 
 import pytest
+
+from app.file_system.engine.base import (
+    WindowsPathTooLongError,
+    _is_windows_path_too_long_error,
+)
 
 
 def _note_path(fs_instance, note_id):
@@ -24,6 +31,151 @@ def _db_content_hash(fs_instance, note_id):
 
 def _sha256(content):
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+class TestAtomicWrite:
+    @pytest.mark.parametrize("error_code", [errno.ENAMETOOLONG, None])
+    def test_explicit_path_too_long_error_does_not_require_260_characters(
+        self, monkeypatch: pytest.MonkeyPatch, error_code: int | None
+    ):
+        error = OSError(error_code or errno.ENOENT, "path too long")
+        if error_code is None:
+            error.winerror = 206
+        monkeypatch.setattr("app.file_system.engine.base.os.name", "nt")
+
+        assert _is_windows_path_too_long_error(error, Path("short-component"))
+
+    @pytest.mark.parametrize("winerror", [3, 123])
+    def test_ambiguous_windows_error_is_not_classified_as_path_too_long(
+        self, monkeypatch: pytest.MonkeyPatch, winerror: int
+    ):
+        error = OSError(errno.ENOENT, "path not found")
+        error.winerror = winerror
+        monkeypatch.setattr("app.file_system.engine.base.os.name", "nt")
+
+        assert not _is_windows_path_too_long_error(error, Path("nested" * 50))
+
+    def test_success_replaces_target(self, fs_instance):
+        target = fs_instance.root / "notes" / "atomic.md"
+
+        fs_instance._atomic_write(target, "first")
+        fs_instance._atomic_write(target, "second")
+
+        assert target.read_text(encoding="utf-8") == "second"
+        assert not (target.parent / f".{target.name}.tmp").exists()
+
+    def test_windows_long_path_error_has_actionable_diagnostic(
+        self, fs_instance, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = fs_instance.root / ("nested" * 50) / "note.md"
+        original = FileNotFoundError(errno.ENOENT, "path not found")
+        original.winerror = 206
+
+        monkeypatch.setattr("app.file_system.engine.base.os.name", "nt")
+
+        def fail_mkdir(self, *args, **kwargs):
+            raise original
+
+        monkeypatch.setattr(Path, "mkdir", fail_mkdir)
+
+        with pytest.raises(WindowsPathTooLongError) as raised:
+            fs_instance._atomic_write(target, "content")
+
+        message = str(raised.value)
+        assert str(target) in message
+        assert f"target length={len(str(target))}" in message
+        assert "Windows long path" in message
+        assert "shorten the space/test data directory" in message
+        assert raised.value.__cause__ is original
+
+    def test_cleanup_failure_does_not_hide_long_path_diagnostic(
+        self, fs_instance, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = fs_instance.root / ("nested" * 50) / "note.md"
+        original = FileNotFoundError(errno.ENOENT, "path not found")
+        original.winerror = 206
+
+        monkeypatch.setattr("app.file_system.engine.base.os.name", "nt")
+
+        def fail_mkdir(self, *args, **kwargs):
+            raise original
+
+        def fail_unlink(self, *args, **kwargs):
+            raise PermissionError("cleanup failed")
+
+        monkeypatch.setattr(Path, "mkdir", fail_mkdir)
+        monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+        with pytest.raises(WindowsPathTooLongError) as raised:
+            fs_instance._atomic_write(target, "content")
+
+        assert raised.value.__cause__ is original
+
+    def test_ordinary_file_not_found_keeps_original_semantics(
+        self, fs_instance, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = fs_instance.root / "notes" / "ordinary.md"
+        original = FileNotFoundError(errno.ENOENT, "ordinary missing file")
+
+        monkeypatch.setattr("app.file_system.engine.base.os.name", "nt")
+
+        def fail_write_text(self, *args, **kwargs):
+            raise original
+
+        monkeypatch.setattr(Path, "write_text", fail_write_text)
+
+        with pytest.raises(FileNotFoundError) as raised:
+            fs_instance._atomic_write(target, "content")
+
+        assert raised.value is original
+        assert not isinstance(raised.value, WindowsPathTooLongError)
+
+
+class TestStoragePathContract:
+    async def test_root_and_current_path_are_space_relative(self, fs_instance):
+        note = await fs_instance.create_note(
+            title="Path Contract",
+            content="content",
+            external_id="n_pathcontract",
+        )
+
+        with fs_instance._connect() as conn:
+            current_path = conn.execute(
+                "SELECT current_path FROM notes WHERE note_id = ?", (note.id,)
+            ).fetchone()[0]
+
+        relative_path = Path(current_path)
+        assert not relative_path.is_absolute()
+        assert relative_path.parts[0] == "notes"
+        assert relative_path.name.startswith(f"{note.id}-")
+        assert relative_path.suffix == ".md"
+        assert (fs_instance.root / relative_path).is_file()
+        assert (fs_instance.root / "notes").is_dir()
+        assert (fs_instance.root / ".trash").is_dir()
+        assert (fs_instance.root / ".meta").is_dir()
+
+    async def test_trash_and_version_paths_remain_below_space_root(self, fs_instance):
+        note = await fs_instance.create_note(
+            title="Managed Paths",
+            content="before",
+            external_id="n_managedpaths",
+        )
+        await fs_instance.edit_note(note.id, "after")
+        version = (await fs_instance.list_versions(note.id))[0]
+
+        assert (
+            fs_instance.root / ".meta" / "version_backups" / f"{version.version_id}.md"
+        ).is_file()
+
+        await fs_instance.delete_note(note.id)
+        with fs_instance._connect() as conn:
+            current_path = conn.execute(
+                "SELECT current_path FROM notes WHERE note_id = ?", (note.id,)
+            ).fetchone()[0]
+
+        assert current_path.startswith(".trash/")
+        assert not Path(current_path).is_absolute()
+        assert (fs_instance.root / current_path).is_file()
 
 
 class TestFullFlow:

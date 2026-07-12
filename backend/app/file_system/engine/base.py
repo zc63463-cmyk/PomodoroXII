@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -49,6 +50,18 @@ def _make_filename(note_id: str, title: str) -> str:
     """生成笔记文件名: <note_id>-<slug>.md"""
     slug = slugify(title, max_length=30) or "untitled"
     return f"{note_id}-{slug}.md"
+
+
+class WindowsPathTooLongError(OSError):
+    """A filesystem operation exceeded the traditional Windows path limit."""
+
+
+def _is_windows_path_too_long_error(exc: OSError, path: Path) -> bool:
+    """Return whether *exc* and *path* indicate a Windows path-length limit."""
+    if os.name != "nt":
+        return False
+    winerror = getattr(exc, "winerror", None)
+    return exc.errno == errno.ENAMETOOLONG or winerror == 206
 
 
 class StorageBase:
@@ -119,14 +132,24 @@ class StorageBase:
 
     def _atomic_write(self, path: Path, content: str) -> None:
         """原子写入：先写临时文件，再 os.replace 覆盖。"""
-        path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.parent / f".{path.name}.tmp"
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             temp_path.write_text(content, encoding="utf-8")
             os.replace(str(temp_path), str(path))
-        except Exception:
-            if temp_path.exists():
-                temp_path.unlink()
+        except OSError as exc:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            diagnostic_path = temp_path if len(str(temp_path)) >= len(str(path)) else path
+            if _is_windows_path_too_long_error(exc, diagnostic_path):
+                raise WindowsPathTooLongError(
+                    "Atomic write failed because the Windows path is too long: "
+                    f"target={path} (target length={len(str(path))}, "
+                    f"temporary length={len(str(temp_path))}). Enable Windows long path "
+                    "support or shorten the space/test data directory."
+                ) from exc
             raise
 
     def _update_fts_content(self, conn: sqlite3.Connection, note_id: str, content: str) -> None:
