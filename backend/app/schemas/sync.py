@@ -84,6 +84,8 @@ class SyncPullResponse(BaseModel):
     tombstones: list[dict[str, Any]] = Field(default_factory=list)
     next_cursor: int | None = Field(default=None, ge=0)
     cursor_version: int | None = None
+    snapshot_token: str | None = None
+    snapshot_offset: int | None = Field(default=None, ge=0)
 
 
 class SyncFullResponse(SyncPullResponse):
@@ -98,3 +100,11 @@ class SyncStatusResponse(BaseModel):
     server_time: str
     entity_counts: dict[str, int]
     tombstone_count: int
+
+
+class SyncLedgerStatsResponse(BaseModel):
+    """Response body for GET /api/v1/sync/ledger-stats (H2-E monitoring)."""
+
+    total_events: int
+    min_id: int | None = None
+    max_id: int | None = None

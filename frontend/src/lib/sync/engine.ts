@@ -71,7 +71,7 @@ export class RealSyncEngine implements SyncEngine {
       async () => {
         if (this.destroyed) return
         const meta = await loadSyncMeta(this.db)
-        const isFull = meta.since === ''
+        const isFull = meta.since === '' && meta.cursor == null
         await this.runSyncCycle(isFull)
       },
       () => this.scheduleSync(RESYNC_DELAY_MS),
@@ -97,9 +97,19 @@ export class RealSyncEngine implements SyncEngine {
   async resolveConflict(
     outboxId: number,
     resolution: 'accept-remote' | 'keep-local',
+    target?: { entityType: string; entityId: string },
   ): Promise<void> {
     if (this.destroyed) return
-    const conflict = this.conflicts.find((c) => c.outboxId === outboxId)
+    const conflict = this.conflicts.find(
+      (candidate) =>
+        candidate.outboxId === outboxId
+        && (outboxId >= 0
+          || !target
+          || (
+            candidate.entityType === target.entityType
+            && candidate.entityId === target.entityId
+          )),
+    )
     if (!conflict) return
 
     if (outboxId < 0) {
@@ -117,22 +127,23 @@ export class RealSyncEngine implements SyncEngine {
             >
           )[tableName]
           if (table) {
-            await table.put({
-              ...(conflict.remoteVersion as Record<string, unknown>),
-              _dirty: false,
+            await this.db.transaction('rw', [this.db.table(tableName), this.db.outbox], async () => {
+              await table.put({
+                ...(conflict.remoteVersion as Record<string, unknown>),
+                _dirty: false,
+              })
+              const matches = await this.db.outbox
+                .where('entityId')
+                .equals(conflict.entityId)
+                .and((e) => e.entityType === conflict.entityType && !e.synced)
+                .toArray()
+              if (matches.length > 0) {
+                await this.db.outbox.bulkDelete(
+                  matches.map((e) => e.id as number),
+                )
+              }
             })
           }
-        }
-        // 删匹配 outbox 行（若存在 pre-push 已入队但尚未 push 的 dirty 行）
-        const matches = await this.db.outbox
-          .where('entityId')
-          .equals(conflict.entityId)
-          .and((e) => e.entityType === conflict.entityType && !e.synced)
-          .toArray()
-        if (matches.length > 0) {
-          await this.db.outbox.bulkDelete(
-            matches.map((e) => e.id as number),
-          )
         }
       }
       // keep-local：保留 _dirty + outbox，no-op
@@ -245,14 +256,32 @@ export class RealSyncEngine implements SyncEngine {
     this.listeners.syncComplete.forEach((cb) => cb())
   }
 
+  private requiresFullRestart(err: unknown): boolean {
+    const response = (err as { response?: { status?: number; data?: { error_type?: string } } })
+      ?.response
+    return response?.status === 409 && (
+      response.data?.error_type === 'sync_cursor_expired'
+      || response.data?.error_type === 'sync_snapshot_expired'
+    )
+  }
+
   /** sync/fullSync 共用内核：runPullLoop → pushAllPending（禁止内联 HTTP） */
   private async runSyncCycle(isFull: boolean): Promise<void> {
     if (this.destroyed) return
     this.isSyncing = true
     this.setStatus('syncing')
     try {
-      // 1. Pull（S1-2 runPullLoop 内部已分页 + merge + saveSyncMeta）
-      const pullResult = await runPullLoop(this.db, this.api, { isFull })
+      // 1. Pull；过期 cursor 必须 fail-closed 并恢复为真正 snapshot，恢复前禁止 push。
+      let pullResult
+      try {
+        pullResult = await runPullLoop(this.db, this.api, { isFull })
+      } catch (err) {
+        if (this.requiresFullRestart(err)) {
+          pullResult = await runPullLoop(this.db, this.api, { isFull: true })
+        } else {
+          throw err
+        }
+      }
       if (this.destroyed) return
       // S1-Hard-1：pull dirtyConflicts 统一进 addConflicts
       this.addConflicts(pullResult.dirtyConflicts)

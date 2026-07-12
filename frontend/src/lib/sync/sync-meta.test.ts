@@ -134,4 +134,34 @@ describe('sync-meta', () => {
     const meta = await loadSyncMeta(db)
     expect(meta.lastFullSync).toBe(iso)
   })
+
+  it('SM9: nullable cursor 使用空串编码且 round-trip 保持 null', async () => {
+    db = await openTestDb()
+    await saveSyncMeta(db, { cursor: null, cursorVersion: null })
+
+    expect((await db.syncMeta.get(SYNC_META_KEYS.CURSOR))?.value).toBe('')
+    expect((await db.syncMeta.get(SYNC_META_KEYS.CURSOR_VERSION))?.value).toBe('')
+    const meta = await loadSyncMeta(db)
+    expect(meta.cursor).toBeNull()
+    expect(meta.cursorVersion).toBeNull()
+  })
+
+  it.each([
+    ['null', 'null'],
+    ['NaN', '2'],
+    ['1.5', '2'],
+    ['-1', '2'],
+    ['12', '1'],
+    ['12', 'broken'],
+  ])('SM10: 损坏或不支持的 cursor meta %s/%s fail-closed 到 legacy', async (cursor, version) => {
+    db = await openTestDb()
+    await db.syncMeta.bulkPut([
+      { key: SYNC_META_KEYS.CURSOR, value: cursor },
+      { key: SYNC_META_KEYS.CURSOR_VERSION, value: version },
+    ])
+
+    const meta = await loadSyncMeta(db)
+    expect(meta.cursor).toBeNull()
+    expect(meta.cursorVersion).toBeNull()
+  })
 })
