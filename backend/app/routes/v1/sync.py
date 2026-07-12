@@ -11,10 +11,13 @@ Routes commit; the service only flushes.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.deps import get_file_system, get_space_context, get_space_db
+from app.errors import SyncSnapshotExpiredError
 from app.file_system.interfaces import FileSystem
+from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
 from app.schemas.sync import (
     SyncAckRequest,
     SyncAckResponse,
@@ -114,11 +117,32 @@ async def full_sync(
     ctx: dict = Depends(get_space_context),
 ):
     """Full sync: returns ALL tombstones regardless of since."""
-    result = await SyncService(db, fs).full(
-        since=since, since_id=since_id,
-        tombstone_since_id=tombstone_since_id, limit=limit, cursor=cursor,
-        snapshot_token=snapshot_token, snapshot_offset=snapshot_offset,
-    )
+    try:
+        result = await SyncService(db, fs).full(
+            since=since, since_id=since_id,
+            tombstone_since_id=tombstone_since_id, limit=limit, cursor=cursor,
+            snapshot_token=snapshot_token, snapshot_offset=snapshot_offset,
+        )
+    except SyncSnapshotExpiredError as exc:
+        if exc.expired_snapshot_token is not None:
+            cleanup_factory = async_sessionmaker(
+                bind=db.bind,
+                expire_on_commit=False,
+                autoflush=False,
+            )
+            async with cleanup_factory() as cleanup_db:
+                async with cleanup_db.begin():
+                    await cleanup_db.execute(
+                        delete(SyncSnapshotChunk).where(
+                            SyncSnapshotChunk.snapshot_token == exc.expired_snapshot_token
+                        )
+                    )
+                    await cleanup_db.execute(
+                        delete(SyncSnapshot).where(
+                            SyncSnapshot.token == exc.expired_snapshot_token
+                        )
+                    )
+        raise
     await db.commit()
     return result
 
