@@ -85,7 +85,7 @@ export const useSpaceStore = create<SpaceState & SpaceActions>()(
           const token = await get().issueSpaceToken(spaceId, spacePassword)
           tokenStorage.setSpaceToken(token)
           tokenStorage.setCurrentSpaceId(spaceId)
-          await spaceDBManager.switchTo(spaceId)
+          await spaceDBManager.switchTo(spaceId, { dispatchEvent: false })
           set({ currentSpaceId: spaceId, spaceToken: token, isLoading: false })
           // S31-1: 用户主动选空间成功 → bootstrap 门控放行
           useBootstrapStore.getState().setReady()

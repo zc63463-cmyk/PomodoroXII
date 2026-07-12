@@ -4,18 +4,19 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import type { QuickNoteSaveState } from '@/components/quick-notes/quick-note-composer'
 import type { QuickNoteDraftConflict } from '@/components/quick-notes/quick-note-conflict-panel'
+import { useQuickNoteDraftSession } from '@/components/quick-notes/use-quick-note-draft-session'
 import type { QuickNote } from '@/types'
 import type {
-  QuickNoteCreateInput,
   QuickNoteLifecycleState,
   QuickNoteUpdateInput,
 } from '@/lib/quick-notes/quick-note-repository'
 import { QUICK_NOTE_TYPING_IDLE_MS } from '@/lib/quick-notes/quick-note-editor-status'
+import { spaceDBManager } from '@/services/space-db'
 
 interface UseQuickNoteEditorOptions {
   quickNotes: QuickNote[]
   trashedQuickNotes: QuickNote[]
-  createQuickNote: (data: QuickNoteCreateInput) => Promise<QuickNote>
+  projectRecordedQuickNote: (note: QuickNote) => undefined
   updateQuickNote: (id: string, data: QuickNoteUpdateInput) => Promise<void>
   describeQuickNoteError: (error: unknown, fallback: string) => string
   lifecycleStateById?: Record<string, QuickNoteLifecycleState>
@@ -24,12 +25,13 @@ interface UseQuickNoteEditorOptions {
 export function useQuickNoteEditor({
   quickNotes,
   trashedQuickNotes,
-  createQuickNote,
+  projectRecordedQuickNote,
   updateQuickNote,
   describeQuickNoteError,
   lifecycleStateById = {},
 }: UseQuickNoteEditorOptions) {
-  const [draft, setDraft] = useState('')
+  const session = useQuickNoteDraftSession({ onRecorded: projectRecordedQuickNote })
+  const [editingDraft, setEditingDraft] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingNoteSnapshot, setEditingNoteSnapshot] = useState<QuickNote | null>(null)
   const [editingBaseContent, setEditingBaseContent] = useState('')
@@ -38,39 +40,69 @@ export function useQuickNoteEditor({
   const [saveState, setSaveState] = useState<QuickNoteSaveState>('saved')
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const draftConflictRef = useRef<QuickNoteDraftConflict | null>(null)
-  const latestDraftRef = useRef(draft)
+  const latestEditingDraftRef = useRef('')
+  const editingIdRef = useRef<string | null>(null)
   const saveSequenceRef = useRef(0)
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve())
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(true)
+  const lifecycleEpochRef = useRef(0)
+  const draft = editingId === null ? session.draft : editingDraft
+  const draftSaveState =
+    session.issue?.code === 'projection-failed' && !session.draft.trim()
+      ? 'idle'
+      : session.saveState
   draftConflictRef.current = draftConflict
+  editingIdRef.current = editingId
 
   const editingNote =
     (editingNoteSnapshot?.id === editingId ? editingNoteSnapshot : null) ??
     quickNotes.find((note) => note.id === editingId) ??
     null
 
-  const cancelEdit = useCallback(() => {
-    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
-    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+  const invalidateExistingEdit = useCallback(() => {
+    if (editingIdRef.current === null) return
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current)
+      typingTimerRef.current = null
+    }
     saveSequenceRef.current += 1
+    editingIdRef.current = null
+    latestEditingDraftRef.current = ''
     setEditingId(null)
     setEditingNoteSnapshot(null)
     setEditingBaseContent('')
+    setEditingDraft('')
     setDraftConflict(null)
     setIsTyping(false)
-    setDraft('')
     setSaveState('saved')
   }, [])
 
-  useEffect(() => {
-    latestDraftRef.current = draft
-  }, [draft])
+  const cancelEdit = invalidateExistingEdit
 
   useEffect(() => {
-    return () => {
+    mountedRef.current = true
+    const unsubscribeSwitch = spaceDBManager.onSwitch(() => {
+      lifecycleEpochRef.current += 1
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+      typingTimerRef.current = null
+      setIsTyping(false)
+      invalidateExistingEdit()
+    })
+
+    return () => {
+      mountedRef.current = false
+      lifecycleEpochRef.current += 1
+      saveSequenceRef.current += 1
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+      unsubscribeSwitch()
     }
-  }, [])
+  }, [invalidateExistingEdit])
 
   useEffect(() => {
     if (!editingId) return
@@ -84,7 +116,8 @@ export function useQuickNoteEditor({
       return
     }
 
-    const draftHasLocalChanges = latestDraftRef.current.trim() !== editingBaseContent.trim()
+    const draftHasLocalChanges =
+      latestEditingDraftRef.current.trim() !== editingBaseContent.trim()
     const remoteChanged =
       editingNoteSnapshot?.id === editingId &&
       (refreshedNote.content !== editingNoteSnapshot.content ||
@@ -96,19 +129,21 @@ export function useQuickNoteEditor({
       setIsTyping(false)
       setDraftConflict({
         note: refreshedNote,
-        localDraft: latestDraftRef.current,
+        localDraft: latestEditingDraftRef.current,
         remoteContent: refreshedNote.content,
       })
       setSaveState('unsaved')
       return
     }
 
-    const shouldAdoptRemoteDraft = latestDraftRef.current.trim() === editingBaseContent.trim()
+    const shouldAdoptRemoteDraft =
+      latestEditingDraftRef.current.trim() === editingBaseContent.trim()
     setEditingNoteSnapshot(refreshedNote)
     setEditingBaseContent(refreshedNote.content)
     setDraftConflict(null)
     if (shouldAdoptRemoteDraft) {
-      setDraft(refreshedNote.content)
+      latestEditingDraftRef.current = refreshedNote.content
+      setEditingDraft(refreshedNote.content)
     }
   }, [editingBaseContent, editingId, editingNoteSnapshot, quickNotes])
 
@@ -137,7 +172,7 @@ export function useQuickNoteEditor({
   const saveEditedDraft = useCallback(
     async ({ closeAfterSave }: { closeAfterSave: boolean }) => {
       if (!editingNote) return false
-      const content = latestDraftRef.current.trim()
+      const content = latestEditingDraftRef.current.trim()
       if (!content) {
         setSaveState('unsaved')
         setIsTyping(false)
@@ -154,15 +189,15 @@ export function useQuickNoteEditor({
 
       const queuedSave = saveQueueRef.current
         .then(async () => {
-          if (saveSequenceRef.current !== saveSequence) return false
-          if (latestDraftRef.current.trim() !== content) {
+          if (!mountedRef.current || saveSequenceRef.current !== saveSequence) return false
+          if (latestEditingDraftRef.current.trim() !== content) {
             setSaveState('unsaved')
             return false
           }
 
           await updateQuickNote(editingNote.id, { content })
-          if (saveSequenceRef.current !== saveSequence) return false
-          if (latestDraftRef.current.trim() !== content) {
+          if (!mountedRef.current || saveSequenceRef.current !== saveSequence) return false
+          if (latestEditingDraftRef.current.trim() !== content) {
             setSaveState('unsaved')
             return false
           }
@@ -177,17 +212,13 @@ export function useQuickNoteEditor({
           setSaveState('saved')
 
           if (closeAfterSave) {
-            setEditingId(null)
-            setEditingNoteSnapshot(null)
-            setEditingBaseContent('')
-            setDraft('')
-            return true
+            invalidateExistingEdit()
           }
 
           return true
         })
         .catch((error: unknown) => {
-          if (saveSequenceRef.current === saveSequence) {
+          if (mountedRef.current && saveSequenceRef.current === saveSequence) {
             setSaveState('failed')
             toast.error('小记保存失败', {
               description: describeQuickNoteError(error, '请稍后重试'),
@@ -200,7 +231,7 @@ export function useQuickNoteEditor({
       saveQueueRef.current = queuedSave.then(() => undefined, () => undefined)
       return queuedSave
     },
-    [describeQuickNoteError, editingNote, updateQuickNote],
+    [describeQuickNoteError, editingNote, invalidateExistingEdit, updateQuickNote],
   )
 
   useEffect(() => {
@@ -211,7 +242,7 @@ export function useQuickNoteEditor({
       return
     }
 
-    if (draft.trim() === editingNote.content.trim()) {
+    if (editingDraft.trim() === editingNote.content.trim()) {
       setSaveState('saved')
       return
     }
@@ -225,58 +256,115 @@ export function useQuickNoteEditor({
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
     }
-  }, [draft, editingNote, saveEditedDraft])
+  }, [editingDraft, editingNote, saveEditedDraft])
 
   function updateDraft(value: string) {
-    setDraft(value)
-    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current)
+      typingTimerRef.current = null
+    }
     const hasDraft = value.trim().length > 0
     setIsTyping(hasDraft)
     if (hasDraft) {
       typingTimerRef.current = setTimeout(() => {
-        setIsTyping(false)
+        if (mountedRef.current) setIsTyping(false)
       }, QUICK_NOTE_TYPING_IDLE_MS)
     }
+
+    if (editingIdRef.current === null) {
+      session.change(value)
+      return
+    }
+
+    latestEditingDraftRef.current = value
+    setEditingDraft(value)
   }
 
   async function submitDraft(event: FormEvent<HTMLFormElement>): Promise<boolean> {
     event.preventDefault()
-    const content = draft.trim()
-    if (!content) {
-      setIsTyping(false)
-      toast.error(editingNote ? '小记内容不能为空' : '先写点内容再记录')
-      return false
-    }
 
     if (editingNote) {
+      if (!latestEditingDraftRef.current.trim()) {
+        setIsTyping(false)
+        toast.error('小记内容不能为空')
+        return false
+      }
       if (draftConflict) return false
       return saveEditedDraft({ closeAfterSave: false })
-    } else {
-      try {
-        await createQuickNote({ content })
-        if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
-        setIsTyping(false)
-        setDraft('')
+    }
+
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current)
+      typingTimerRef.current = null
+    }
+    setIsTyping(false)
+    const lifecycleEpoch = lifecycleEpochRef.current
+    const result = await session.record()
+    if (!mountedRef.current || lifecycleEpochRef.current !== lifecycleEpoch) return false
+    switch (result.kind) {
+      case 'recorded':
+        if (result.visibility === 'pending') {
+          toast('小记已记录，列表将在稍后刷新')
+        }
         return true
-      } catch (error) {
+      case 'empty':
+        toast.error('先写点内容再记录')
+        return false
+      case 'busy':
+        toast.error('草稿正在丢弃，请稍后再记录')
+        return false
+      case 'failed':
         toast.error('小记创建失败', {
-          description: describeQuickNoteError(error, '请稍后重试'),
+          description: '草稿仍保留在本机，请稍后重试',
         })
         return false
+      default: {
+        const exhaustiveResult: never = result
+        return exhaustiveResult
       }
     }
   }
+
+  const discardNewDraft = useCallback(async () => {
+    if (editingIdRef.current !== null) return
+    const lifecycleEpoch = lifecycleEpochRef.current
+    const result = await session.discard()
+    if (!mountedRef.current || lifecycleEpochRef.current !== lifecycleEpoch) return
+    switch (result.kind) {
+      case 'discarded':
+        if (typingTimerRef.current) {
+          clearTimeout(typingTimerRef.current)
+          typingTimerRef.current = null
+        }
+        setIsTyping(false)
+        return
+      case 'superseded':
+        return
+      case 'busy':
+        toast.error('草稿正在记录，请稍后再丢弃')
+        return
+      case 'failed':
+        toast.error('丢弃草稿失败，输入已保留')
+        return
+      default: {
+        const exhaustiveResult: never = result
+        return exhaustiveResult
+      }
+    }
+  }, [session])
 
   function startEdit(note: QuickNote) {
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
     saveSequenceRef.current += 1
+    editingIdRef.current = note.id
+    latestEditingDraftRef.current = note.content
     setIsTyping(false)
     setEditingId(note.id)
     setEditingNoteSnapshot(note)
     setEditingBaseContent(note.content)
     setDraftConflict(null)
-    setDraft(note.content)
+    setEditingDraft(note.content)
     setSaveState('saved')
   }
 
@@ -290,9 +378,10 @@ export function useQuickNoteEditor({
     if (!draftConflict) return
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
     setIsTyping(false)
+    latestEditingDraftRef.current = draftConflict.remoteContent
     setEditingNoteSnapshot(draftConflict.note)
     setEditingBaseContent(draftConflict.remoteContent)
-    setDraft(draftConflict.remoteContent)
+    setEditingDraft(draftConflict.remoteContent)
     setDraftConflict(null)
     setSaveState('saved')
   }
@@ -307,16 +396,19 @@ export function useQuickNoteEditor({
       '--- 远端版本 ---',
       draftConflict.remoteContent.trim(),
     ].join('\n')
+    latestEditingDraftRef.current = merged
     setEditingNoteSnapshot(draftConflict.note)
     setEditingBaseContent(draftConflict.remoteContent)
-    setDraft(merged)
+    setEditingDraft(merged)
     setDraftConflict(null)
     setSaveState('unsaved')
   }
 
   return {
     cancelEdit,
+    discardNewDraft,
     draftConflict,
+    draftSaveState,
     draft,
     editingId,
     editingNote,
