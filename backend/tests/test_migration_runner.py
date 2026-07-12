@@ -25,6 +25,7 @@ SPACE_TABLES = {
     "sessions",
     "settings",
     "sync_audit_log",
+    "sync_clients",
     "sync_outbox",
     "sync_snapshots",
     "sync_state",
@@ -169,7 +170,7 @@ def test_legacy_schema_with_partial_index_predicate_drift_fails_closed(tmp_path:
         run_migrations("space", path)
 
 
-def test_managed_space_007_upgrades_to_008_with_existing_outbox_cursor(tmp_path: Path) -> None:
+def test_managed_space_007_upgrades_to_latest_with_existing_outbox_cursor(tmp_path: Path) -> None:
     from app.db.migrations import _config, run_migrations
 
     path = tmp_path / "managed-space-007.db"
@@ -195,14 +196,49 @@ def test_managed_space_007_upgrades_to_008_with_existing_outbox_cursor(tmp_path:
 
     engine = create_engine(_sqlite_url(path))
     try:
-        assert {"sync_state", "sync_snapshots"}.issubset(inspect(engine).get_table_names())
+        assert {"sync_state", "sync_snapshots", "sync_clients"}.issubset(
+            inspect(engine).get_table_names()
+        )
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT current_cursor FROM sync_state WHERE id = 1")
             ).scalar_one() == 2
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_008_sync_retention_snapshot"
+            ).scalar_one() == "space_009_sync_clients"
+    finally:
+        engine.dispose()
+
+
+def test_managed_space_008_upgrades_to_009_sync_clients(tmp_path: Path) -> None:
+    from app.db.migrations import _config, run_migrations
+
+    path = tmp_path / "managed-space-008.db"
+    engine = create_engine(_sqlite_url(path))
+    config = _config("space")
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "space_008_sync_retention_snapshot")
+    finally:
+        engine.dispose()
+
+    run_migrations("space", path)
+
+    engine = create_engine(_sqlite_url(path))
+    try:
+        inspector = inspect(engine)
+        columns = {column["name"] for column in inspector.get_columns("sync_clients")}
+        assert {
+            "client_id", "user_id", "display_name", "ack_cursor", "last_seen_at",
+            "lease_expires_at", "created_at", "revoked_at", "snapshot_required",
+        } == columns
+        indexes = {index["name"] for index in inspector.get_indexes("sync_clients")}
+        assert indexes == {"ix_sync_clients_user_revoked", "ix_sync_clients_watermark"}
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version_space")
+            ).scalar_one() == "space_009_sync_clients"
     finally:
         engine.dispose()
 
@@ -235,7 +271,7 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
             ).scalar_one() == "2026-01-01T00:00:00.000Z"
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_008_sync_retention_snapshot"
+            ).scalar_one() == "space_009_sync_clients"
     finally:
         engine.dispose()
 

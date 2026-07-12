@@ -1,7 +1,16 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { PomodoroXIDB } from '@/services/database'
 import { SYNC_META_KEYS } from './types'
-import { loadSyncMeta, saveSyncMeta, clearSyncCursors, touchLastSyncAt, touchLastFullSync } from './sync-meta'
+import {
+  clearPendingAck,
+  clearSyncCursors,
+  ensureClientId,
+  loadSyncMeta,
+  recordPendingAck,
+  saveSyncMeta,
+  touchLastFullSync,
+  touchLastSyncAt,
+} from './sync-meta'
 
 /**
  * sync-meta.ts 单测（SM1–SM6）。
@@ -163,5 +172,56 @@ describe('sync-meta', () => {
     const meta = await loadSyncMeta(db)
     expect(meta.cursor).toBeNull()
     expect(meta.cursorVersion).toBeNull()
+  })
+
+  it('SM11: ensureClientId 生成并稳定复用合法 UUID', async () => {
+    db = await openTestDb()
+
+    const first = await ensureClientId(db)
+    const second = await ensureClientId(db)
+
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(second).toBe(first)
+    expect((await loadSyncMeta(db)).clientId).toBe(first)
+  })
+
+  it('SM12: ensureClientId 遇损坏值时替换为新 UUID 并稳定复用', async () => {
+    db = await openTestDb()
+    await db.syncMeta.put({ key: SYNC_META_KEYS.CLIENT_ID, value: 'broken-client-id' })
+
+    const repaired = await ensureClientId(db)
+
+    expect(repaired).not.toBe('broken-client-id')
+    expect(await ensureClientId(db)).toBe(repaired)
+  })
+
+  it('SM13: clearSyncCursors 保留 clientId 与 pending ACK', async () => {
+    db = await openTestDb()
+    await saveSyncMeta(db, {
+      cursor: 12,
+      cursorVersion: 2,
+      clientId: '123e4567-e89b-42d3-a456-426614174000',
+      pendingAckCursor: 11,
+    })
+
+    await clearSyncCursors(db)
+
+    const meta = await loadSyncMeta(db)
+    expect(meta.cursor).toBeNull()
+    expect(meta.clientId).toBe('123e4567-e89b-42d3-a456-426614174000')
+    expect(meta.pendingAckCursor).toBe(11)
+  })
+
+  it('SM14: recordPendingAck 只保留最大值，clearPendingAck 不误删更新后的更大值', async () => {
+    db = await openTestDb()
+
+    await recordPendingAck(db, 20)
+    await recordPendingAck(db, 10)
+    expect((await loadSyncMeta(db)).pendingAckCursor).toBe(20)
+
+    await clearPendingAck(db, 19)
+    expect((await loadSyncMeta(db)).pendingAckCursor).toBe(20)
+    await clearPendingAck(db, 20)
+    expect((await loadSyncMeta(db)).pendingAckCursor).toBeNull()
   })
 })

@@ -123,6 +123,8 @@ export const SYNC_META_KEYS = {
   LAST_SYNC_AT: 'last_sync_at',
   CURSOR: 'cursor',
   CURSOR_VERSION: 'cursor_version',
+  CLIENT_ID: 'client_id',
+  PENDING_ACK_CURSOR: 'pending_ack_cursor',
 } as const
 
 /** syncMeta 快照（camelCase 字段名，与 SYNC_META_KEYS 的 snake_case 值有映射关系） */
@@ -137,6 +139,10 @@ export interface SyncMetaSnapshot {
   cursor: number | null
   /** H2-D: cursor 协议版本（2 = 事件账本） */
   cursorVersion: number | null
+  /** H2-F1: 当前浏览器安装实例的稳定 UUID。 */
+  clientId: string
+  /** H2-F1: 已本地持久化、尚未被服务端确认的最大 cursor。 */
+  pendingAckCursor: number | null
 }
 
 /** outbox merge 矩阵动作 */
@@ -157,6 +163,21 @@ import type { components } from '@/types/api-generated'
 export type ApiSyncPullResponse = components['schemas']['SyncPullResponse']
 export type ApiSyncPushResponse = components['schemas']['SyncPushResponse']
 export type ApiSyncEvent = components['schemas']['SyncEvent']
+
+export interface SyncClientRegistrationResponse {
+  client_id: string
+  display_name: string | null
+  ack_cursor: number
+  lease_expires_at: string
+  snapshot_required: boolean
+}
+
+export interface SyncAckResponse {
+  ack_cursor: number
+  lease_expires_at: string
+  retention_floor: number
+  current_cursor: number
+}
 
 /** 14 个 pull_key（复数，与 PULL_KEY_TO_TABLE 键的并集子集） */
 export const SYNC_PULL_KEYS = [

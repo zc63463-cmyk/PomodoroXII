@@ -25,6 +25,7 @@ SPACE_TABLES = {
     "sessions",
     "settings",
     "sync_audit_log",
+    "sync_clients",
     "sync_outbox",
     "sync_snapshots",
     "sync_state",

@@ -21,6 +21,14 @@ const FIELD_TO_KEY: Record<keyof SyncMetaSnapshot, string> = {
   lastSyncAt: SYNC_META_KEYS.LAST_SYNC_AT,
   cursor: SYNC_META_KEYS.CURSOR,
   cursorVersion: SYNC_META_KEYS.CURSOR_VERSION,
+  clientId: SYNC_META_KEYS.CLIENT_ID,
+  pendingAckCursor: SYNC_META_KEYS.PENDING_ACK_CURSOR,
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function isUuid(value: string): boolean {
+  return UUID_PATTERN.test(value)
 }
 
 /** 从 syncMeta 表读取全部游标（缺失为空串/null） */
@@ -41,6 +49,11 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
     Number.isSafeInteger(parsedCursor) &&
     parsedCursor >= 0 &&
     parsedVersion === 2
+  const pendingAckStr = map.get(SYNC_META_KEYS.PENDING_ACK_CURSOR) ?? ''
+  const parsedPendingAck = Number(pendingAckStr)
+  const validPendingAck = pendingAckStr !== ''
+    && Number.isSafeInteger(parsedPendingAck)
+    && parsedPendingAck >= 0
   return {
     since: map.get(SYNC_META_KEYS.SINCE) ?? '',
     sinceId: map.get(SYNC_META_KEYS.SINCE_ID) ?? '',
@@ -50,6 +63,8 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
     lastSyncAt: map.get(SYNC_META_KEYS.LAST_SYNC_AT) ?? '',
     cursor: validCursor ? parsedCursor : null,
     cursorVersion: validCursor ? 2 : null,
+    clientId: map.get(SYNC_META_KEYS.CLIENT_ID) ?? '',
+    pendingAckCursor: validPendingAck ? parsedPendingAck : null,
   }
 }
 
@@ -67,7 +82,41 @@ export async function saveSyncMeta(
   if (entries.length > 0) await db.syncMeta.bulkPut(entries)
 }
 
-/** 清空所有游标（since/since_id/tombstone_since_id/cursor/cursor_version），保留 serverTime/lastFullSync/lastSyncAt */
+/** 在 Dexie 事务中读取或生成稳定 UUID，并复读已持久化值。 */
+export async function ensureClientId(db: PomodoroXIDB): Promise<string> {
+  return db.transaction('rw', db.syncMeta, async () => {
+    const existing = (await db.syncMeta.get(SYNC_META_KEYS.CLIENT_ID))?.value ?? ''
+    if (isUuid(existing)) return existing.toLowerCase()
+    await db.syncMeta.put({
+      key: SYNC_META_KEYS.CLIENT_ID,
+      value: crypto.randomUUID().toLowerCase(),
+    })
+    const persisted = (await db.syncMeta.get(SYNC_META_KEYS.CLIENT_ID))?.value ?? ''
+    if (!isUuid(persisted)) throw new Error('failed to persist sync client UUID')
+    return persisted.toLowerCase()
+  })
+}
+
+/** 仅保留最大的待 ACK cursor；调用方可处于现有 Dexie 事务中。 */
+export async function recordPendingAck(db: PomodoroXIDB, cursor: number): Promise<void> {
+  if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error('invalid pending ACK cursor')
+  const row = await db.syncMeta.get(SYNC_META_KEYS.PENDING_ACK_CURSOR)
+  const current = Number(row?.value ?? '')
+  if (Number.isSafeInteger(current) && current >= cursor) return
+  await db.syncMeta.put({ key: SYNC_META_KEYS.PENDING_ACK_CURSOR, value: String(cursor) })
+}
+
+export async function clearPendingAck(db: PomodoroXIDB, acknowledged: number): Promise<void> {
+  await db.transaction('rw', db.syncMeta, async () => {
+    const row = await db.syncMeta.get(SYNC_META_KEYS.PENDING_ACK_CURSOR)
+    const current = Number(row?.value ?? '')
+    if (row && Number.isSafeInteger(current) && current <= acknowledged) {
+      await db.syncMeta.delete(SYNC_META_KEYS.PENDING_ACK_CURSOR)
+    }
+  })
+}
+
+/** 清空同步游标，但保留 clientId 与 pendingAckCursor。 */
 export async function clearSyncCursors(db: PomodoroXIDB): Promise<void> {
   await db.syncMeta.bulkPut([
     { key: SYNC_META_KEYS.SINCE, value: '' },

@@ -13,12 +13,19 @@ import type { PomodoroXIDB } from '@/services/database'
 import { spaceApi } from '@/services/api'
 import { runPullLoop } from './pull-loop'
 import { pushAllPending } from './push-batch'
-import { loadSyncMeta, touchLastSyncAt } from './sync-meta'
+import {
+  clearPendingAck,
+  ensureClientId,
+  loadSyncMeta,
+  touchLastSyncAt,
+} from './sync-meta'
 import { countUnsyncedOutbox } from './outbox'
 import { withSyncLock } from './sync-lock'
 import { notifyRemoteWin, notifyCircularRef } from './toast'
 import {
   ENTITY_TYPE_TO_TABLE,
+  type SyncAckResponse,
+  type SyncClientRegistrationResponse,
   type SyncEngine,
   type SyncConflict,
   type SyncOp,
@@ -265,12 +272,44 @@ export class RealSyncEngine implements SyncEngine {
     )
   }
 
-  /** sync/fullSync 共用内核：runPullLoop → pushAllPending（禁止内联 HTTP） */
+  private async registerClient(clientId: string): Promise<boolean> {
+    const response = await this.api.post<SyncClientRegistrationResponse>('/sync/clients', {
+      client_id: clientId,
+    })
+    if (response.data.client_id !== clientId) {
+      throw new Error('sync client registration returned a different client_id')
+    }
+    return response.data.snapshot_required
+  }
+
+  private async sendPendingAck(clientId: string, cursor: number): Promise<void> {
+    const response = await this.api.post<SyncAckResponse>('/sync/ack', {
+      client_id: clientId,
+      ack_cursor: cursor,
+      cursor_version: 2,
+    })
+    if (response.data.ack_cursor < cursor) {
+      throw new Error('sync ACK response did not acknowledge the pending cursor')
+    }
+    await clearPendingAck(this.db, response.data.ack_cursor)
+  }
+
+  /** sync/fullSync 共用内核：注册/ACK → runPullLoop → ACK → pushAllPending。 */
   private async runSyncCycle(isFull: boolean): Promise<void> {
     if (this.destroyed) return
     this.isSyncing = true
     this.setStatus('syncing')
     try {
+      const clientId = await ensureClientId(this.db)
+      const snapshotRequired = await this.registerClient(clientId)
+      if (snapshotRequired) isFull = true
+
+      const pendingBeforePull = (await loadSyncMeta(this.db)).pendingAckCursor
+      if (!snapshotRequired && pendingBeforePull != null) {
+        await this.sendPendingAck(clientId, pendingBeforePull)
+      }
+      if (this.destroyed) return
+
       // 1. Pull；过期 cursor 必须 fail-closed 并恢复为真正 snapshot，恢复前禁止 push。
       let pullResult
       try {
@@ -287,6 +326,12 @@ export class RealSyncEngine implements SyncEngine {
       this.addConflicts(pullResult.dirtyConflicts)
       // DR-10：onPullComplete 每周期一次（循环外）
       this.listeners.pull.forEach((cb) => cb())
+
+      const pendingAfterPull = (await loadSyncMeta(this.db)).pendingAckCursor
+      if (pendingAfterPull != null) {
+        await this.sendPendingAck(clientId, pendingAfterPull)
+      }
+      if (this.destroyed) return
 
       // 2. Push（S1-2 pushAllPending 内部已分批 + 遇冲突停止）
       const pushResult = await pushAllPending(this.db, this.api)

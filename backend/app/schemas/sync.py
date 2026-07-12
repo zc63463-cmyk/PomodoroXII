@@ -79,6 +79,32 @@ class SyncPushResponse(BaseModel):
     server_time: str
 
 
+class SyncClientRegistrationRequest(BaseModel):
+    client_id: str = Field(..., min_length=36, max_length=36)
+    display_name: str | None = Field(default=None, max_length=80)
+
+
+class SyncClientRegistrationResponse(BaseModel):
+    client_id: str
+    display_name: str | None = None
+    ack_cursor: int = Field(..., ge=0)
+    lease_expires_at: str
+    snapshot_required: bool
+
+
+class SyncAckRequest(BaseModel):
+    client_id: str = Field(..., min_length=36, max_length=36)
+    ack_cursor: int = Field(..., ge=0)
+    cursor_version: int
+
+
+class SyncAckResponse(BaseModel):
+    ack_cursor: int = Field(..., ge=0)
+    lease_expires_at: str
+    retention_floor: int = Field(..., ge=0)
+    current_cursor: int = Field(..., ge=0)
+
+
 class SyncPullResponse(BaseModel):
     """Response body for GET /api/v1/sync/pull.
 

@@ -16,6 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.deps import get_file_system, get_space_context, get_space_db
 from app.file_system.interfaces import FileSystem
 from app.schemas.sync import (
+    SyncAckRequest,
+    SyncAckResponse,
+    SyncClientRegistrationRequest,
+    SyncClientRegistrationResponse,
     SyncFullResponse,
     SyncLedgerStatsResponse,
     SyncPullResponse,
@@ -24,9 +28,41 @@ from app.schemas.sync import (
     SyncStatusResponse,
 )
 from app.services.sync import SyncService
+from app.services.sync_clients import SyncClientService
 from app.services.sync_outbox import get_ledger_stats
 
 router = APIRouter()
+
+
+@router.post("/clients", response_model=SyncClientRegistrationResponse)
+async def register_sync_client(
+    body: SyncClientRegistrationRequest,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    result = await SyncClientService(db).register(
+        client_id=body.client_id,
+        user_id=ctx["user_id"],
+        display_name=body.display_name,
+    )
+    await db.commit()
+    return result
+
+
+@router.post("/ack", response_model=SyncAckResponse)
+async def acknowledge_sync_cursor(
+    body: SyncAckRequest,
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    result = await SyncClientService(db).acknowledge(
+        client_id=body.client_id,
+        user_id=ctx["user_id"],
+        ack_cursor=body.ack_cursor,
+        cursor_version=body.cursor_version,
+    )
+    await db.commit()
+    return result
 
 
 @router.post("/push", response_model=SyncPushResponse)

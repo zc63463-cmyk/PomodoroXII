@@ -19,6 +19,7 @@ from app.models.session import Session
 from app.models.session_quick_note import SessionQuickNote
 from app.models.setting import Setting
 from app.models.sync_audit_log import SyncAuditLog
+from app.models.sync_client import SyncClient
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncSnapshot, SyncState
 from app.models.task import Task
@@ -45,6 +46,7 @@ __all__ = [
     "Tombstone",
     "Setting",
     "SyncOutbox",
+    "SyncClient",
     "SyncState",
     "SyncSnapshot",
     "SyncAuditLog",
