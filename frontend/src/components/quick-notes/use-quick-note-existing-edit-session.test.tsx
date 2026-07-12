@@ -2453,4 +2453,77 @@ describe('QuickNote existing-edit session controller', () => {
     expect(onSaved).toHaveBeenCalledOnce()
   })
 
+  it('reports latest recovery durability when an older skipped save fails', async () => {
+    const firstCleanup = createDeferred<
+      'cleared' | 'absent' | 'different-edit'
+    >()
+    const thirdUpdate = createDeferred<ExistingEditUpdateResult>()
+    const committedOne = makeQuickNote({
+      content: 'revision one',
+      updated_at: '2026-07-12T04:00:02.000Z',
+    })
+    const committedThree = makeQuickNote({
+      content: 'revision three',
+      updated_at: '2026-07-12T04:00:04.000Z',
+    })
+    adapter.clearEffects.push(() => firstCleanup.promise)
+    adapter.updateEffects.push(
+      async () => ({ kind: 'updated', note: committedOne }),
+      () => Promise.reject(new Error('revision two update failed')),
+      () => thirdUpdate.promise,
+    )
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+    controller.start(makeQuickNote())
+    controller.change('revision one')
+    const firstSave = controller.save()
+    await flushMicrotasks()
+    expect(adapter.clearCalls).toHaveLength(1)
+
+    controller.change('revision two')
+    const secondSave = controller.save()
+    controller.change('revision three')
+    const thirdSave = controller.save()
+    firstCleanup.resolve('cleared')
+
+    const secondResult = await secondSave
+
+    expect(secondResult).toEqual({
+      kind: 'failed',
+      issue: {
+        code: 'entity-save-failed',
+        retryable: true,
+        durability: 'recovery-durable',
+      },
+    })
+    expect(adapter.checkpointCalls.some((call) => (
+      call.revision === 2 && call.draft === 'revision two'
+    ))).toBe(false)
+    expect(adapter.stored).toMatchObject({
+      editId: 'edit-1',
+      revision: 3,
+      draft: 'revision three',
+    })
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'recovery-durable',
+      editingNote: committedOne,
+      draft: 'revision three',
+      issue: null,
+    })
+
+    thirdUpdate.resolve({ kind: 'updated', note: committedThree })
+    await expect(firstSave).resolves.toMatchObject({ kind: 'saved' })
+    await expect(thirdSave).resolves.toMatchObject({ kind: 'saved' })
+    expect(controller.state).toMatchObject({
+      phase: 'saved',
+      durability: 'entity-durable',
+      editingNote: committedThree,
+      draft: 'revision three',
+    })
+    expect(adapter.stored).toBeNull()
+  })
+
 })

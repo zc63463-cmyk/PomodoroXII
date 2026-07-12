@@ -314,7 +314,15 @@ export function createQuickNoteExistingEditSessionController(
     return (
       active
       && epoch === capture.epoch
-      && identity?.editId === capture.editId
+      && isLatestAcceptedCapture(capture)
+    )
+  }
+
+  function isLatestAcceptedCapture(
+    capture: ExistingEditCheckpointCapture,
+  ): boolean {
+    return (
+      identity?.editId === capture.editId
       && identity.revision === capture.revision
       && snapshot.draft === capture.content
     )
@@ -804,11 +812,16 @@ export function createQuickNoteExistingEditSessionController(
         draft: capture.content,
       })
     } catch {
-      const issue = checkpointIssue
-        ?? createIssue(
-          'entity-save-failed',
-          captureRecoveryDurable ? 'recovery-durable' : 'memory-only',
-        )
+      const ownDurability: ExistingEditDurability = captureRecoveryDurable
+        ? 'recovery-durable'
+        : 'memory-only'
+      const issueDurability = isLatestAcceptedCapture(capture)
+        ? ownDurability
+        : snapshot.durability
+      const issue = createIssue(
+        checkpointIssue ? 'checkpoint-failed' : 'entity-save-failed',
+        issueDurability,
+      )
       if (isCurrentCapture(capture)) {
         publish({
           ...snapshot,
