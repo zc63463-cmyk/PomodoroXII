@@ -28,6 +28,7 @@ SPACE_TABLES = {
     "sync_clients",
     "sync_outbox",
     "sync_snapshots",
+    "sync_snapshot_chunks",
     "sync_state",
     "task_quick_notes",
     "tasks",
@@ -196,7 +197,7 @@ def test_managed_space_007_upgrades_to_latest_with_existing_outbox_cursor(tmp_pa
 
     engine = create_engine(_sqlite_url(path))
     try:
-        assert {"sync_state", "sync_snapshots", "sync_clients"}.issubset(
+        assert {"sync_state", "sync_snapshots", "sync_snapshot_chunks", "sync_clients"}.issubset(
             inspect(engine).get_table_names()
         )
         with engine.connect() as connection:
@@ -205,7 +206,7 @@ def test_managed_space_007_upgrades_to_latest_with_existing_outbox_cursor(tmp_pa
             ).scalar_one() == 2
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_009_sync_clients"
+            ).scalar_one() == "space_010_sync_snapshot_chunks"
     finally:
         engine.dispose()
 
@@ -238,7 +239,46 @@ def test_managed_space_008_upgrades_to_009_sync_clients(tmp_path: Path) -> None:
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_009_sync_clients"
+            ).scalar_one() == "space_010_sync_snapshot_chunks"
+    finally:
+        engine.dispose()
+
+
+def test_managed_space_009_upgrades_to_010_snapshot_chunks(tmp_path: Path) -> None:
+    from app.db.migrations import _config, run_migrations
+
+    path = tmp_path / "managed-space-009.db"
+    engine = create_engine(_sqlite_url(path))
+    config = _config("space")
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "space_009_sync_clients")
+            connection.execute(
+                text(
+                    "INSERT INTO sync_snapshots (token, cursor, payload, created_at) "
+                    "VALUES ('legacy-token', 7, '[]', '2026-01-01T00:00:00Z')"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    run_migrations("space", path)
+
+    engine = create_engine(_sqlite_url(path))
+    try:
+        inspector = inspect(engine)
+        assert "sync_snapshot_chunks" in inspector.get_table_names()
+        columns = {column["name"] for column in inspector.get_columns("sync_snapshots")}
+        assert {"format", "status", "item_count", "chunk_count", "expires_at"}.issubset(columns)
+        with engine.connect() as connection:
+            legacy = connection.execute(
+                text("SELECT format, status, payload FROM sync_snapshots WHERE token='legacy-token'")
+            ).one()
+            assert legacy == ("legacy-json-v1", "ready", "[]")
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version_space")
+            ).scalar_one() == "space_010_sync_snapshot_chunks"
     finally:
         engine.dispose()
 
@@ -271,7 +311,7 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
             ).scalar_one() == "2026-01-01T00:00:00.000Z"
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_009_sync_clients"
+            ).scalar_one() == "space_010_sync_snapshot_chunks"
     finally:
         engine.dispose()
 

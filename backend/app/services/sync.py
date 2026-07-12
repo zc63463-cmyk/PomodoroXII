@@ -10,13 +10,16 @@ Iron rules:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import pickle
+import tempfile
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
@@ -26,7 +29,7 @@ from app.errors import (
 )
 from app.models.note import Note
 from app.models.sync_outbox import SyncOutbox
-from app.models.sync_state import SyncSnapshot
+from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
 from app.models.tombstone import Tombstone
 from app.registry.sync_registry import build_sync_registry
 from app.services.serializers import serialize_entity
@@ -43,12 +46,22 @@ from app.services.sync_safety import (
     sanitize_zero_time,
     strip_client_fields,
 )
+from app.services.sync_snapshot_chunks import (
+    EncodedSnapshotChunk,
+    SnapshotChunkEncoder,
+    decode_snapshot_chunk,
+)
 from app.services.time import utc_now, utc_now_iso
 from app.services.tombstone import TombstoneService
 
 logger = logging.getLogger(__name__)
 
 SYNC_SNAPSHOT_TTL = timedelta(hours=1)
+SNAPSHOT_SCAN_MAX_ATTEMPTS = 3
+
+
+class _NoteSnapshotConflict(Exception):
+    """The note body changed relative to the pinned database snapshot."""
 
 
 # --------------------------------------------------------------------------- #
@@ -779,20 +792,48 @@ class SyncService:
             snapshot = await self.db.get(SyncSnapshot, snapshot_token)
             if snapshot is None:
                 raise SyncSnapshotExpiredError()
-            cutoff = (utc_now() - SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
-            if snapshot.created_at < cutoff:
-                await self.db.delete(snapshot)
+            now_dt = utc_now()
+            now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            if snapshot.expires_at:
+                expires_at = snapshot.expires_at
+            else:
+                created_at = datetime.strptime(
+                    snapshot.created_at, "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=timezone.utc)
+                expires_at = (created_at + SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if expires_at <= now:
+                await self.db.execute(
+                    delete(SyncSnapshotChunk).where(
+                        SyncSnapshotChunk.snapshot_token == snapshot.token
+                    )
+                )
+                await self.db.execute(
+                    delete(SyncSnapshot).where(SyncSnapshot.token == snapshot.token)
+                )
                 await self.db.flush()
                 raise SyncSnapshotExpiredError()
 
-        items = json.loads(snapshot.payload)
+        if snapshot.status != "ready":
+            raise SyncSnapshotExpiredError()
         if snapshot_offset < 0:
             raise ValidationError("snapshot_offset must be non-negative")
-        if snapshot_offset > len(items):
-            raise ValidationError("snapshot_offset exceeds snapshot size")
-        page_items = items[snapshot_offset:snapshot_offset + limit]
+        if snapshot.format == "legacy-json-v1":
+            items = json.loads(snapshot.payload)
+            if snapshot_offset > len(items):
+                raise ValidationError("snapshot_offset exceeds snapshot size")
+            page_items = items[snapshot_offset:snapshot_offset + limit]
+            total_items = len(items)
+        else:
+            if snapshot_offset > snapshot.item_count:
+                raise ValidationError("snapshot_offset exceeds snapshot size")
+            page_items = await self._read_chunk_page(
+                snapshot=snapshot,
+                offset=snapshot_offset,
+                limit=limit,
+            )
+            total_items = snapshot.item_count
         next_offset = snapshot_offset + len(page_items)
-        has_more = next_offset < len(items)
+        has_more = next_offset < total_items
         result: dict[str, Any] = {
             "server_time": utc_now_iso(),
             "has_more": has_more,
@@ -816,60 +857,327 @@ class SyncService:
                 result[item["pull_key"]].append(item["payload"])
         return result
 
-    async def _create_snapshot(self) -> SyncSnapshot:
-        """Materialize one stable snapshot and capture its incremental cursor."""
-        cutoff = (utc_now() - SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
-        await self.db.execute(
-            delete(SyncSnapshot).where(SyncSnapshot.created_at < cutoff)
-        )
-        # Anchor the SQLite read transaction before scanning entity tables.
-        # Later commits receive a cursor greater than this snapshot cursor and
-        # are therefore delivered by the following incremental pull.
-        snapshot_cursor = await get_current_cursor(self.db)
-        items: list[dict[str, Any]] = []
-        for entry in ENTITY_REGISTRY.values():
-            rows = (
-                await self.db.execute(
-                    select(entry["model"]).order_by(entry["model"].id.asc())
-                )
-            ).scalars().all()
-            serialized = [serialize_entity(row) for row in rows]
-            if entry["model"] is Note and serialized:
-                contents = (
-                    await self.fs.read_notes_batch([row.id for row in rows])
-                    if self.fs is not None
-                    else [None] * len(rows)
-                )
-                for payload, body in zip(serialized, contents):
-                    payload["content"] = body or ""
-                    payload["content_missing"] = body is None
-            items.extend({
-                "kind": "entity",
-                "pull_key": entry["pull_key"],
-                "payload": payload,
-            } for payload in serialized)
-
-        tombstones = (
+    async def _read_chunk_page(
+        self,
+        *,
+        snapshot: SyncSnapshot,
+        offset: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        manifest_totals = (
             await self.db.execute(
-                select(Tombstone).order_by(Tombstone.id.asc())
+                select(
+                    func.count(SyncSnapshotChunk.chunk_index),
+                    func.coalesce(func.sum(SyncSnapshotChunk.item_count), 0),
+                    func.coalesce(func.sum(SyncSnapshotChunk.uncompressed_bytes), 0),
+                    func.coalesce(func.sum(SyncSnapshotChunk.compressed_bytes), 0),
+                    func.min(SyncSnapshotChunk.chunk_index),
+                    func.max(SyncSnapshotChunk.chunk_index),
+                ).where(SyncSnapshotChunk.snapshot_token == snapshot.token)
+            )
+        ).one()
+        if (
+            manifest_totals[0] != snapshot.chunk_count
+            or manifest_totals[1] != snapshot.item_count
+            or manifest_totals[2] != snapshot.uncompressed_bytes
+            or manifest_totals[3] != snapshot.compressed_bytes
+            or (
+                snapshot.chunk_count > 0
+                and (manifest_totals[4] != 0 or manifest_totals[5] != snapshot.chunk_count - 1)
+            )
+            or (snapshot.chunk_count == 0 and snapshot.item_count != 0)
+        ):
+            raise SyncSnapshotExpiredError()
+        if offset == snapshot.item_count:
+            return []
+        start_index = await self.db.scalar(
+            select(SyncSnapshotChunk.chunk_index)
+            .where(
+                SyncSnapshotChunk.snapshot_token == snapshot.token,
+                SyncSnapshotChunk.item_start <= offset,
+            )
+            .order_by(SyncSnapshotChunk.item_start.desc())
+            .limit(1)
+        )
+        if start_index is None:
+            raise SyncSnapshotExpiredError()
+        # A size-sealed chunk may contain only one large item, so the strict
+        # upper bound for a page is one chunk per requested item plus one edge.
+        max_chunks = limit + 1
+        rows = (
+            await self.db.execute(
+                select(SyncSnapshotChunk)
+                .where(
+                    SyncSnapshotChunk.snapshot_token == snapshot.token,
+                    SyncSnapshotChunk.chunk_index >= start_index,
+                )
+                .order_by(SyncSnapshotChunk.chunk_index)
+                .limit(max_chunks)
             )
         ).scalars().all()
-        items.extend({
-            "kind": "tombstone",
-            "payload": {
-                "entity_type": tombstone.entity_type,
-                "entity_id": tombstone.entity_id,
-                "deleted_at": normalize_timestamp(tombstone.deleted_at or ""),
-            },
-        } for tombstone in tombstones)
-        snapshot = SyncSnapshot(
-            token=str(uuid.uuid4()),
-            cursor=snapshot_cursor,
-            payload=json.dumps(items, ensure_ascii=False, allow_nan=False),
-        )
-        self.db.add(snapshot)
-        await self.db.flush()
-        return snapshot
+        page: list[dict[str, Any]] = []
+        try:
+            expected_position = offset
+            for chunk in rows:
+                chunk_end = chunk.item_start + chunk.item_count
+                if not chunk.item_start <= expected_position < chunk_end:
+                    raise ValueError("snapshot page chunk sequence mismatch")
+                items = decode_snapshot_chunk(
+                    compressed_payload=chunk.compressed_payload,
+                    checksum=chunk.checksum,
+                    expected_uncompressed_bytes=chunk.uncompressed_bytes,
+                    expected_compressed_bytes=chunk.compressed_bytes,
+                    expected_item_count=chunk.item_count,
+                )
+                start = expected_position - chunk.item_start
+                end = min(offset + limit - chunk.item_start, chunk.item_count)
+                page.extend(items[start:end])
+                expected_position = chunk.item_start + end
+                if expected_position >= offset + limit:
+                    break
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning("snapshot chunk validation failed", exc_info=exc)
+            raise SyncSnapshotExpiredError() from exc
+        if len(page) != min(limit, snapshot.item_count - offset):
+            raise SyncSnapshotExpiredError()
+        return page
+
+    async def _create_snapshot(self) -> SyncSnapshot:
+        """Spool one stable read-only scan, then publish it in a short write phase."""
+        spool = None
+        try:
+            for attempt in range(SNAPSHOT_SCAN_MAX_ATTEMPTS):
+                candidate_spool = tempfile.TemporaryFile()
+                encoder = SnapshotChunkEncoder()
+                manifest_hasher = hashlib.sha256()
+                chunk_count = 0
+                item_count = 0
+                uncompressed_bytes = 0
+                compressed_bytes = 0
+
+                def spool_chunk(encoded: EncodedSnapshotChunk) -> None:
+                    nonlocal chunk_count, uncompressed_bytes, compressed_bytes
+                    pickle.dump(encoded, candidate_spool, protocol=pickle.HIGHEST_PROTOCOL)
+                    manifest_hasher.update(encoded.checksum.encode("ascii"))
+                    chunk_count += 1
+                    uncompressed_bytes += encoded.uncompressed_bytes
+                    compressed_bytes += encoded.compressed_bytes
+
+                def append_item(item: dict[str, Any]) -> None:
+                    nonlocal item_count
+                    sealed = encoder.add(item)
+                    item_count += 1
+                    if sealed is not None:
+                        spool_chunk(sealed)
+
+                scan_db = AsyncSession(
+                    bind=self.db.bind,
+                    expire_on_commit=False,
+                    autoflush=False,
+                )
+                try:
+                    try:
+                        # aiosqlite's deferred transactions do not pin a read snapshot
+                        # until an explicit BEGIN is issued. All paged SELECTs below must
+                        # observe the same database generation as snapshot_cursor.
+                        await scan_db.execute(text("BEGIN"))
+                        snapshot_cursor = await get_current_cursor(scan_db)
+                        batch_size = 200
+                        for entry in ENTITY_REGISTRY.values():
+                            last_id = ""
+                            while True:
+                                rows = (
+                                    await scan_db.execute(
+                                        select(entry["model"])
+                                        .where(entry["model"].id > last_id)
+                                        .order_by(entry["model"].id.asc())
+                                        .limit(batch_size)
+                                    )
+                                ).scalars().all()
+                                if not rows:
+                                    break
+                                serialized = [serialize_entity(row) for row in rows]
+                                if entry["model"] is Note:
+                                    contents = (
+                                        await self.fs.read_notes_batch([row.id for row in rows])
+                                        if self.fs is not None
+                                        else [None] * len(rows)
+                                    )
+                                    for row, payload, body in zip(rows, serialized, contents):
+                                        payload["content"] = body or ""
+                                        payload["content_missing"] = body is None
+                                        if body is not None and row.content_hash:
+                                            actual_hash = hashlib.sha256(
+                                                body.encode("utf-8")
+                                            ).hexdigest()
+                                            if actual_hash != row.content_hash:
+                                                raise _NoteSnapshotConflict(row.id)
+                                for payload in serialized:
+                                    append_item({
+                                        "kind": "entity",
+                                        "pull_key": entry["pull_key"],
+                                        "payload": payload,
+                                    })
+                                last_id = rows[-1].id
+
+                        last_tombstone_id = 0
+                        while True:
+                            tombstones = (
+                                await scan_db.execute(
+                                    select(Tombstone)
+                                    .where(Tombstone.id > last_tombstone_id)
+                                    .order_by(Tombstone.id.asc())
+                                    .limit(batch_size)
+                                )
+                            ).scalars().all()
+                            if not tombstones:
+                                break
+                            for tombstone in tombstones:
+                                append_item({
+                                    "kind": "tombstone",
+                                    "payload": {
+                                        "entity_type": tombstone.entity_type,
+                                        "entity_id": tombstone.entity_id,
+                                        "deleted_at": normalize_timestamp(
+                                            tombstone.deleted_at or ""
+                                        ),
+                                    },
+                                })
+                            last_tombstone_id = tombstones[-1].id
+                    finally:
+                        await scan_db.close()
+                except _NoteSnapshotConflict as exc:
+                    candidate_spool.close()
+                    if attempt + 1 == SNAPSHOT_SCAN_MAX_ATTEMPTS:
+                        raise SyncSnapshotExpiredError() from exc
+                    continue
+                except BaseException:
+                    candidate_spool.close()
+                    raise
+
+                spool = candidate_spool
+                final_chunk = encoder.finish()
+                if final_chunk is not None:
+                    spool_chunk(final_chunk)
+                break
+
+            created_at = utc_now()
+            now = created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+            cutoff = (created_at - SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+            snapshot = SyncSnapshot(
+                token=str(uuid.uuid4()),
+                cursor=snapshot_cursor,
+                payload="",
+                format="gzip-chunks-v1",
+                status="building",
+                item_count=item_count,
+                chunk_count=chunk_count,
+                uncompressed_bytes=uncompressed_bytes,
+                compressed_bytes=compressed_bytes,
+                checksum=manifest_hasher.hexdigest(),
+                created_at=now,
+                expires_at=(created_at + SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            publish_db = AsyncSession(
+                bind=self.db.bind,
+                expire_on_commit=False,
+                autoflush=False,
+            )
+            try:
+                async with publish_db.begin():
+                    stale_tokens = list((await publish_db.scalars(
+                        select(SyncSnapshot.token).where(
+                            or_(
+                                and_(SyncSnapshot.expires_at != "", SyncSnapshot.expires_at <= now),
+                                and_(SyncSnapshot.expires_at == "", SyncSnapshot.created_at < cutoff),
+                                and_(SyncSnapshot.status != "ready", SyncSnapshot.created_at < cutoff),
+                            )
+                        )
+                    )).all())
+                    if stale_tokens:
+                        await publish_db.execute(
+                            delete(SyncSnapshotChunk).where(
+                                SyncSnapshotChunk.snapshot_token.in_(stale_tokens)
+                            )
+                        )
+                        await publish_db.execute(
+                            delete(SyncSnapshot).where(SyncSnapshot.token.in_(stale_tokens))
+                        )
+
+                    publish_db.add(snapshot)
+                    await publish_db.flush()
+
+                    spool.seek(0)
+                    pending_chunks: list[SyncSnapshotChunk] = []
+                    for chunk_index in range(chunk_count):
+                        encoded = pickle.load(spool)
+                        pending_chunks.append(
+                            SyncSnapshotChunk(
+                                snapshot_token=snapshot.token,
+                                chunk_index=chunk_index,
+                                item_start=encoded.item_start,
+                                item_count=encoded.item_count,
+                                compressed_payload=encoded.compressed_payload,
+                                uncompressed_bytes=encoded.uncompressed_bytes,
+                                compressed_bytes=encoded.compressed_bytes,
+                                checksum=encoded.checksum,
+                            )
+                        )
+                        if len(pending_chunks) == 100:
+                            publish_db.add_all(pending_chunks)
+                            await publish_db.flush()
+                            for chunk in pending_chunks:
+                                publish_db.expunge(chunk)
+                            pending_chunks = []
+                    if pending_chunks:
+                        publish_db.add_all(pending_chunks)
+                        await publish_db.flush()
+                        for chunk in pending_chunks:
+                            publish_db.expunge(chunk)
+
+                    # Validate the persisted manifest before publishing it as ready.
+                    metadata = (
+                        await publish_db.execute(
+                            select(
+                                SyncSnapshotChunk.chunk_index,
+                                SyncSnapshotChunk.item_start,
+                                SyncSnapshotChunk.item_count,
+                                SyncSnapshotChunk.uncompressed_bytes,
+                                SyncSnapshotChunk.compressed_bytes,
+                                SyncSnapshotChunk.checksum,
+                            )
+                            .where(SyncSnapshotChunk.snapshot_token == snapshot.token)
+                            .order_by(SyncSnapshotChunk.chunk_index)
+                        )
+                    ).all()
+                    if len(metadata) != chunk_count:
+                        raise ValueError("snapshot chunk count mismatch before publish")
+                    expected_start = 0
+                    persisted_hasher = hashlib.sha256()
+                    persisted_uncompressed_bytes = 0
+                    persisted_compressed_bytes = 0
+                    for expected_index, chunk in enumerate(metadata):
+                        if chunk.chunk_index != expected_index or chunk.item_start != expected_start:
+                            raise ValueError("snapshot chunk sequence mismatch before publish")
+                        expected_start += chunk.item_count
+                        persisted_uncompressed_bytes += chunk.uncompressed_bytes
+                        persisted_compressed_bytes += chunk.compressed_bytes
+                        persisted_hasher.update(chunk.checksum.encode("ascii"))
+                    if (
+                        expected_start != item_count
+                        or persisted_uncompressed_bytes != uncompressed_bytes
+                        or persisted_compressed_bytes != compressed_bytes
+                        or persisted_hasher.hexdigest() != snapshot.checksum
+                    ):
+                        raise ValueError("snapshot manifest mismatch before publish")
+                    snapshot.status = "ready"
+                    await publish_db.flush()
+            finally:
+                await publish_db.close()
+            return snapshot
+        finally:
+            if spool is not None:
+                spool.close()
 
     # ----------------------------------------------------------------- #
     # status
