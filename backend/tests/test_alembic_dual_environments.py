@@ -26,6 +26,8 @@ SPACE_TABLES = {
     "settings",
     "sync_audit_log",
     "sync_outbox",
+    "sync_snapshots",
+    "sync_state",
     "task_quick_notes",
     "tasks",
     "time_blocks",

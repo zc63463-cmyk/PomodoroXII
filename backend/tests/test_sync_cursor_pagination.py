@@ -632,6 +632,204 @@ async def test_tombstones_same_timestamp_5_rows_three_pages_with_since_id(space_
 
 
 @pytest.mark.asyncio
+async def test_full_cursor_zero_is_current_state_snapshot_not_ledger_replay(space_session):
+    """历史实体即使从未写入账本，也必须出现在 cursor v2 full snapshot。"""
+    from app.models.quick_note import QuickNote
+    from app.models.task import Task
+    from app.services.sync import SyncService
+    from app.services.sync_outbox import record_sync_event
+
+    space_session.add(Task(id="historical", title="before-h2"))
+    space_session.add(QuickNote(id="ledger-only", content="current", tags="[]"))
+    await space_session.flush()
+    await record_sync_event(
+        space_session,
+        entity_type="quickNote",
+        entity_id="ledger-only",
+        action="create",
+        payload={"id": "ledger-only", "content": "current", "tags": "[]"},
+    )
+
+    page = await SyncService(space_session).full(cursor=0, limit=100)
+
+    assert {item["id"] for item in page["tasks"]} == {"historical"}
+    assert {item["id"] for item in page["quickNotes"]} == {"ledger-only"}
+    assert page["cursor_version"] == 2
+    assert page["snapshot_token"]
+    assert page["next_cursor"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_full_snapshot_pages_all_entity_groups_and_tombstones_with_one_offset(space_session):
+    from app.models.task import Task
+    from app.models.tombstone import Tombstone
+    from app.services.sync import SyncService
+
+    space_session.add_all([
+        Task(id="snap-task-1", title="one"),
+        Task(id="snap-task-2", title="two"),
+        Tombstone(entity_type="task", entity_id="deleted-task"),
+    ])
+    await space_session.flush()
+
+    service = SyncService(space_session)
+    first = await service.full(cursor=0, limit=1)
+    second = await service.full(
+        cursor=0,
+        limit=1,
+        snapshot_token=first["snapshot_token"],
+        snapshot_offset=first["snapshot_offset"],
+    )
+    third = await service.full(
+        cursor=0,
+        limit=1,
+        snapshot_token=second["snapshot_token"],
+        snapshot_offset=second["snapshot_offset"],
+    )
+
+    all_task_ids = {
+        item["id"] for page in (first, second, third) for item in page["tasks"]
+    }
+    all_tombstone_ids = {
+        item["entity_id"]
+        for page in (first, second, third)
+        for item in page["tombstones"]
+    }
+    assert all_task_ids == {"snap-task-1", "snap-task-2"}
+    assert all_tombstone_ids == {"deleted-task"}
+    assert [first["has_more"], second["has_more"], third["has_more"]] == [True, True, False]
+    assert first["next_cursor"] == second["next_cursor"] == third["next_cursor"]
+
+
+@pytest.mark.asyncio
+async def test_full_snapshot_rejects_offset_without_token_and_offset_past_end(space_session):
+    from app.errors import ValidationError
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    service = SyncService(space_session)
+    with pytest.raises(ValidationError, match="snapshot_offset requires"):
+        await service.full(cursor=0, snapshot_offset=1, limit=10)
+
+    space_session.add(Task(id="snapshot-bounds", title="bounds"))
+    await space_session.flush()
+    first = await service.full(cursor=0, limit=10)
+    with pytest.raises(ValidationError, match="non-negative"):
+        await service.full(
+            cursor=0,
+            snapshot_token=first["snapshot_token"],
+            snapshot_offset=-1,
+            limit=10,
+        )
+    with pytest.raises(ValidationError, match="exceeds snapshot size"):
+        await service.full(
+            cursor=0,
+            snapshot_token=first["snapshot_token"],
+            snapshot_offset=999,
+            limit=10,
+        )
+
+
+@pytest.mark.asyncio
+async def test_existing_expired_snapshot_is_rejected(space_session):
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.sync_state import SyncSnapshot
+    from app.services.sync import SyncService
+
+    space_session.add(
+        SyncSnapshot(
+            token="expired-existing-snapshot",
+            cursor=0,
+            payload="[]",
+            created_at="2000-01-01T00:00:00Z",
+        )
+    )
+    await space_session.flush()
+
+    with pytest.raises(SyncSnapshotExpiredError, match="snapshot expired"):
+        await SyncService(space_session).full(
+            cursor=0,
+            snapshot_token="expired-existing-snapshot",
+            snapshot_offset=0,
+            limit=10,
+        )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_continuation_rejects_expired_token_with_stable_error(space_session):
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.sync_state import SyncSnapshot
+    from app.services.sync import SyncService
+
+    space_session.add(SyncSnapshot(
+        token="expired-continuation",
+        cursor=0,
+        payload="[]",
+        created_at="2000-01-01T00:00:00Z",
+    ))
+    await space_session.flush()
+
+    with pytest.raises(SyncSnapshotExpiredError) as raised:
+        await SyncService(space_session).full(
+            cursor=0,
+            snapshot_token="expired-continuation",
+            snapshot_offset=0,
+            limit=10,
+        )
+
+    assert raised.value.error_type == "sync_snapshot_expired"
+    assert await space_session.get(SyncSnapshot, "expired-continuation") is None
+
+
+@pytest.mark.asyncio
+async def test_new_snapshot_prunes_expired_materialized_snapshots(space_session):
+    from app.models.sync_state import SyncSnapshot
+    from app.services.sync import SyncService
+
+    space_session.add(
+        SyncSnapshot(
+            token="expired-snapshot",
+            cursor=0,
+            payload="[]",
+            created_at="2000-01-01T00:00:00Z",
+        )
+    )
+    await space_session.flush()
+
+    await SyncService(space_session).full(cursor=0, limit=10)
+
+    assert await space_session.get(SyncSnapshot, "expired-snapshot") is None
+
+
+@pytest.mark.asyncio
+async def test_full_after_prune_recovers_new_device_from_current_state(space_session):
+    from app.models.task import Task
+    from app.services.sync import SyncService
+    from app.services.sync_outbox import (
+        advance_retention_floor,
+        prune_sync_events,
+        record_sync_event,
+    )
+
+    space_session.add(Task(id="survives-prune", title="current"))
+    await space_session.flush()
+    event = await record_sync_event(
+        space_session,
+        entity_type="task",
+        entity_id="survives-prune",
+        action="create",
+        payload={"id": "survives-prune", "title": "current"},
+    )
+    await advance_retention_floor(space_session, floor=event.id)
+
+    await prune_sync_events(space_session, before_id=event.id)
+
+    page = await SyncService(space_session).full(cursor=0, limit=100)
+    assert {item["id"] for item in page["tasks"]} == {"survives-prune"}
+    assert page["next_cursor"] == event.id
+
+
+@pytest.mark.asyncio
 async def test_tombstone_since_id_backward_compatible(space_session):
     """Omitting tombstone_since_id (default empty string) preserves old behaviour.
 
