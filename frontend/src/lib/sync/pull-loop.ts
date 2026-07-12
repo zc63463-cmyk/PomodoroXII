@@ -13,7 +13,12 @@
 import type { AxiosInstance } from 'axios'
 import type { PomodoroXIDB } from '@/services/database'
 import { applyMerge } from './merge'
-import { loadSyncMeta, saveSyncMeta, touchLastFullSync } from './sync-meta'
+import {
+  loadSyncMeta,
+  recordPendingAck,
+  saveSyncMeta,
+  touchLastFullSync,
+} from './sync-meta'
 import {
   ENTITY_TYPE_TO_TABLE,
   type ApiSyncPullResponse,
@@ -168,9 +173,9 @@ export async function runPullLoop(
     if (snapshotSeenIds) collectSnapshotSeenIds(snapshotSeenIds, page)
     pages++
     lastServerTime = page.server_time
-    pendingSnapshotCursor = usesCursorProtocol(page)
-      ? page.next_cursor ?? pendingSnapshotCursor ?? 0
-      : pendingSnapshotCursor
+    if (usesCursorProtocol(page)) {
+      pendingSnapshotCursor = Math.max(pendingSnapshotCursor ?? 0, page.next_cursor ?? 0)
+    }
 
     if (isFull && snapshotProtocol === 'materialized' && isLastPage) {
       const terminalConflicts: SyncConflict[] = []
@@ -186,32 +191,41 @@ export async function runPullLoop(
           tombstoneSinceId: '',
         })
         await touchLastFullSync(db, lastServerTime)
+        await recordPendingAck(db, pendingSnapshotCursor ?? 0)
       })
       dirtyConflicts.push(...terminalConflicts)
     } else {
-      await applyMerge(db, page, dirtyConflicts)
-      if (usesCursorProtocol(page)) {
-        if (!isFull) {
+      await db.transaction('rw', db.tables, async () => {
+        const pageConflicts: SyncConflict[] = []
+        await applyMerge(db, page, pageConflicts)
+        if (usesCursorProtocol(page)) {
+          if (!isFull) {
+            await saveSyncMeta(db, {
+              cursor: pendingSnapshotCursor,
+              cursorVersion: 2,
+              serverTime: page.server_time,
+              since: '',
+              sinceId: '',
+              tombstoneSinceId: '',
+            })
+            await recordPendingAck(db, pendingSnapshotCursor ?? 0)
+          }
+        } else {
           await saveSyncMeta(db, {
-            cursor: pendingSnapshotCursor,
-            cursorVersion: 2,
+            since: page.next_since,
+            sinceId: page.next_since_id,
+            tombstoneSinceId: page.next_tombstone_since_id,
             serverTime: page.server_time,
-            since: '',
-            sinceId: '',
-            tombstoneSinceId: '',
+            cursor: null,
+            cursorVersion: null,
           })
+          if (isFull && isLastPage) {
+            await reconcileFullSnapshot(db, snapshotSeenIds!)
+            await touchLastFullSync(db, lastServerTime)
+          }
         }
-      } else {
-        await saveSyncMeta(db, {
-          since: page.next_since,
-          sinceId: page.next_since_id,
-          tombstoneSinceId: page.next_tombstone_since_id,
-          serverTime: page.server_time,
-          cursor: null,
-          cursorVersion: null,
-        })
-        if (isFull && isLastPage) await touchLastFullSync(db, lastServerTime)
-      }
+        dirtyConflicts.push(...pageConflicts)
+      })
     }
 
     // 3. F1-D3: 终止条件 has_more || tombstones_has_more

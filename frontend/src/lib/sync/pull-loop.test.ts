@@ -411,7 +411,7 @@ describe('pull-loop', () => {
     expect(await db.tasks.get('clean-ghost')).toBeDefined()
   })
 
-  it('PL18: legacy full 只 merge，不按缺失删除本地 clean 实体', async () => {
+  it('PL18: legacy full 也按权威快照删除缺失的本地 clean 实体', async () => {
     db = await openTestDb()
     await db.tasks.put(taskRow('legacy-local', false))
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
@@ -420,7 +420,7 @@ describe('pull-loop', () => {
 
     await runPullLoop(db, spaceApi, { isFull: true })
 
-    expect(await db.tasks.get('legacy-local')).toBeDefined()
+    expect(await db.tasks.get('legacy-local')).toBeUndefined()
   })
 
   it('PL19: materialized snapshot reconcile 保护 unsynced outbox 引用', async () => {

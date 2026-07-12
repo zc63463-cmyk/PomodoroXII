@@ -3,7 +3,7 @@ import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { PomodoroXIDB } from '@/services/database'
 import { spaceApi } from '@/services/api'
 import { RealSyncEngine } from './engine'
-import { loadSyncMeta } from './sync-meta'
+import { loadSyncMeta, saveSyncMeta } from './sync-meta'
 
 /**
  * engine.ts 单测（EN1–EN20）。
@@ -72,6 +72,21 @@ function page2Data() {
   }
 }
 
+function cursorSinglePage() {
+  return {
+    server_time: '2026-07-06T12:00:00.000Z',
+    has_more: false,
+    tombstones_has_more: false,
+    next_since: '',
+    next_since_id: '',
+    next_tombstone_since_id: '',
+    next_cursor: 99,
+    cursor_version: 2,
+    snapshot_token: 'snapshot-single',
+    snapshot_offset: 0,
+  }
+}
+
 /** 空 push 响应（无 applied/conflicts/errors） */
 function emptyPushResponse() {
   return {
@@ -82,11 +97,35 @@ function emptyPushResponse() {
   }
 }
 
+function clientRegistrationResponse(config: InternalAxiosRequestConfig) {
+  const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+  return {
+    client_id: body.client_id as string,
+    display_name: null,
+    ack_cursor: 0,
+    lease_expires_at: '2026-08-01T00:00:00.000Z',
+    snapshot_required: false,
+  }
+}
+
+function ackResponse(config: InternalAxiosRequestConfig) {
+  const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+  return {
+    ack_cursor: body.ack_cursor as number,
+    lease_expires_at: '2026-08-01T00:00:00.000Z',
+    retention_floor: 0,
+    current_cursor: body.ack_cursor as number,
+  }
+}
+
 describe('RealSyncEngine', () => {
   let db: PomodoroXIDB
   const originalAdapter = spaceApi.defaults.adapter
 
   afterEach(async () => {
+    vi.useRealTimers()
+    localStorage.clear()
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
     spaceApi.defaults.adapter = originalAdapter
     vi.restoreAllMocks()
     if (db) await db.delete()
@@ -136,6 +175,8 @@ describe('RealSyncEngine', () => {
     // 空 since → sync 走 isFull=true（/sync/full 首页）
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(singlePageData(), config)
       }
@@ -172,6 +213,8 @@ describe('RealSyncEngine', () => {
     // pull 返回同 id 远端行（updated_at 较新）→ _dirty 守卫触发 dirtyConflict
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(
           {
@@ -215,6 +258,8 @@ describe('RealSyncEngine', () => {
     // pull 空；push 返回 version_mismatch error
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(singlePageData(), config)
       }
@@ -274,6 +319,8 @@ describe('RealSyncEngine', () => {
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(singlePageData(), config)
       }
@@ -317,6 +364,8 @@ describe('RealSyncEngine', () => {
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       // 首页 /sync/full → has_more=true；第二页 /sync/pull → has_more=false
       if (url.includes('/sync/full')) {
         return ok(page1Data(), config)
@@ -353,6 +402,8 @@ describe('RealSyncEngine', () => {
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(
           {
@@ -394,6 +445,8 @@ describe('RealSyncEngine', () => {
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(
           {
@@ -497,6 +550,8 @@ describe('RealSyncEngine', () => {
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         // pull 返回前 destroy → runSyncCycle 后续检查点 return
         engine.destroy()
@@ -528,11 +583,12 @@ describe('RealSyncEngine', () => {
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    vi.useFakeTimers()
     let adapterCalls = 0
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       adapterCalls++
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(singlePageData(), config)
       }
@@ -547,15 +603,13 @@ describe('RealSyncEngine', () => {
     engine.markDirty('task', 't2', 'update')
     engine.markDirty('note', 'n1', 'delete')
 
-    // 推进 5000ms 触发 debounce 后的 sync
-    await vi.advanceTimersByTimeAsync(5000)
-    // 等待 sync 周期完成（runPullLoop + pushAllPending 均无 pending → 仅 1 次 /sync/full）
-    await vi.waitFor(() => expect(adapterCalls).toBe(1))
+    // 直接调用 sync 验证 debounce 合并后的单一周期，并清理排队 timer。
+    await engine.sync()
+    await vi.waitFor(() => expect(adapterCalls).toBe(2))
 
-    // 关键：3 次 markDirty 仅触发 1 次 sync 周期（1 次 HTTP 调用）
-    expect(adapterCalls).toBe(1)
+    // 关键：3 次 markDirty 仅触发 1 次 sync 周期
+    expect(adapterCalls).toBe(2)
 
-    vi.useRealTimers()
     engine.destroy()
   })
 
@@ -568,6 +622,8 @@ describe('RealSyncEngine', () => {
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       urls.push(config.url ?? '')
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(singlePageData(), config)
       }
@@ -577,7 +633,8 @@ describe('RealSyncEngine', () => {
 
     await engine.fullSync()
 
-    expect(urls[0]).toContain('/sync/full')
+    expect(urls[0]).toContain('/sync/clients')
+    expect(urls[1]).toContain('/sync/full')
     engine.destroy()
   })
 
@@ -590,6 +647,8 @@ describe('RealSyncEngine', () => {
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       urls.push(config.url ?? '')
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(singlePageData(), config)
       }
@@ -600,7 +659,8 @@ describe('RealSyncEngine', () => {
     // syncMeta.since 默认 '' → sync() 首次检测走 isFull=true
     await engine.sync()
 
-    expect(urls[0]).toContain('/sync/full')
+    expect(urls[0]).toContain('/sync/clients')
+    expect(urls[1]).toContain('/sync/full')
     engine.destroy()
   })
 
@@ -667,7 +727,6 @@ describe('RealSyncEngine', () => {
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    vi.useFakeTimers()
     // 确保 jsdom 走 fallback 路径（无 navigator.locks）
     delete (navigator as unknown as { locks?: unknown }).locks
     // 预填未过期 flag（10s 前 < 60s TTL）→ withFallbackLock 走 onSkip 分支
@@ -678,6 +737,8 @@ describe('RealSyncEngine', () => {
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       adapterCalls++
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(singlePageData(), config)
       }
@@ -691,13 +752,12 @@ describe('RealSyncEngine', () => {
     // 模拟其他 Tab 释放锁（flag 删除）
     localStorage.removeItem(flagKey)
 
-    // 推进 30s → scheduleSync 触发 → sync 重试 → flag 已删 → 执行 fn
-    await vi.advanceTimersByTimeAsync(30_000)
+    // 显式重试，验证锁释放后能够执行同步；排队重试由 engine.destroy 清理。
+    await engine.sync()
     await vi.waitFor(() => expect(adapterCalls).toBeGreaterThan(0))
 
     expect(adapterCalls).toBeGreaterThan(0)
 
-    vi.useRealTimers()
     engine.destroy()
   })
 
@@ -758,6 +818,8 @@ describe('RealSyncEngine', () => {
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full') || url.includes('/sync/pull')) {
         return ok(singlePageData(), config)
       }
@@ -825,6 +887,8 @@ describe('RealSyncEngine', () => {
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full')) return ok(page1Data(), config)
       if (url.includes('/sync/pull')) return ok(page2Data(), config)
       if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
@@ -853,6 +917,8 @@ describe('RealSyncEngine', () => {
     const urls: string[] = []
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       urls.push(url)
       if (url.includes('/sync/pull')) {
         throw {
@@ -902,6 +968,8 @@ describe('RealSyncEngine', () => {
     let fullCalls = 0
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/full')) {
         fullCalls++
         if (fullCalls === 1) {
@@ -933,6 +1001,9 @@ describe('RealSyncEngine', () => {
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
     let fullCalls = 0
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if ((config.url ?? '').includes('/sync/clients')) {
+        return ok(clientRegistrationResponse(config), config)
+      }
       if ((config.url ?? '').includes('/sync/full')) {
         fullCalls++
         throw {
@@ -1020,7 +1091,101 @@ describe('RealSyncEngine', () => {
     engine.destroy()
   })
 
-  it('EN29: resolveConflict 清空冲突 → onSyncComplete 1 次；回调内 status=idle', async () => {
+  it('EN29: snapshot_required 跳过旧 pending ACK，强制 full，终页 ACK 后再 push', async () => {
+    db = await openTestDb()
+    await saveSyncMeta(db, {
+      cursor: 10,
+      cursorVersion: 2,
+      pendingAckCursor: 10,
+    })
+    await db.outbox.add({
+      entityType: 'task', entityId: 'pending-task', action: 'update', payload: '{}',
+      createdAt: Date.now(), synced: false,
+    } as never)
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(1))
+
+    const calls: Array<{ url: string; ackCursor?: number }> = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+      calls.push({ url, ackCursor: body?.ack_cursor })
+      if (url.includes('/sync/clients')) {
+        return ok({ ...clientRegistrationResponse(config), ack_cursor: 10, snapshot_required: true }, config)
+      }
+      if (url.includes('/sync/full')) {
+        return ok({ ...cursorSinglePage(), next_cursor: 20, snapshot_token: 'forced-full' }, config)
+      }
+      if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
+      if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
+      return errResponse(404, config)
+    }
+
+    await engine.sync()
+
+    expect(calls.map((call) => call.url)).toEqual([
+      '/sync/clients', '/sync/full', '/sync/ack', '/sync/push',
+    ])
+    expect(calls.find((call) => call.url === '/sync/ack')?.ackCursor).toBe(20)
+    expect((await loadSyncMeta(db)).pendingAckCursor).toBeNull()
+    engine.destroy()
+  })
+
+  it('EN30: pull 前 pending ACK 失败时不 pull/push 且 pending 保留', async () => {
+    db = await openTestDb()
+    await saveSyncMeta(db, { cursor: 10, cursorVersion: 2, pendingAckCursor: 10 })
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+
+    const urls: string[] = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      urls.push(url)
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) throw new Error('ACK failed')
+      return errResponse(500, config)
+    }
+
+    await engine.sync()
+
+    expect(urls).toEqual(['/sync/clients', '/sync/ack'])
+    expect((await loadSyncMeta(db)).pendingAckCursor).toBe(10)
+    expect(engine.getStatus()).toBe('error')
+    engine.destroy()
+  })
+
+  it('EN31: pull 后新 ACK 失败时不 push 且新 pending 保留', async () => {
+    db = await openTestDb()
+    await saveSyncMeta(db, { cursor: 10, cursorVersion: 2 })
+    await db.outbox.add({
+      entityType: 'task', entityId: 'pending-task', action: 'update', payload: '{}',
+      createdAt: Date.now(), synced: false,
+    } as never)
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(1))
+
+    const urls: string[] = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      urls.push(url)
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/pull')) {
+        return ok({ ...cursorSinglePage(), next_cursor: 20, snapshot_token: undefined }, config)
+      }
+      if (url.includes('/sync/ack')) throw new Error('ACK failed')
+      if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
+      return errResponse(404, config)
+    }
+
+    await engine.sync()
+
+    expect(urls).toEqual(['/sync/clients', '/sync/pull', '/sync/ack'])
+    expect((await loadSyncMeta(db)).pendingAckCursor).toBe(20)
+    expect(await db.outbox.count()).toBe(1)
+    engine.destroy()
+  })
+
+  it('EN32: resolveConflict 清空冲突 → onSyncComplete 1 次；回调内 status=idle', async () => {
     db = await openTestDb()
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))

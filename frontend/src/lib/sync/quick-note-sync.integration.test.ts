@@ -185,9 +185,16 @@ describe('quick-note sync integration smoke', () => {
 
     const tombstoned = await db.quickNotes.get(note.id)
     expect(tombstoned).toBeDefined()
-    expect(tombstoned!.deletion_state).toBe('deleted')
-    expect(tombstoned!._dirty).toBe(false)
+    // 本地存在未同步编辑时，远端 tombstone 必须触发 pre-push 冲突，
+    // 不能静默覆盖或清除 dirty 状态。
+    expect(tombstoned!.deletion_state).toBe('active')
+    expect(tombstoned!._dirty).toBe(true)
     expect(tombstoned!.content).toBe('same note on another local snapshot')
-    expect(dirtyConflicts).toHaveLength(0)
+    expect(dirtyConflicts).toHaveLength(1)
+    expect(dirtyConflicts[0]).toMatchObject({
+      outboxId: -1,
+      entityType: 'quickNote',
+      entityId: note.id,
+    })
   })
 })
