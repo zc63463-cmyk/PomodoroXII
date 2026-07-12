@@ -12,7 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import ConflictError, NotFoundError, ValidationError
 from app.models.sync_client import SyncClient
 from app.models.sync_state import SyncState
-from app.services.sync_outbox import get_current_cursor, get_retention_floor
+from app.services.sync_outbox import (
+    advance_retention_floor,
+    get_current_cursor,
+    get_retention_floor,
+    prune_sync_events,
+)
 from app.services.time import utc_now
 
 CLIENT_LEASE = timedelta(days=30)
@@ -50,6 +55,15 @@ class SyncClientService:
     ) -> dict[str, object]:
         canonical_id = _canonical_client_id(client_id)
         now, lease_expires_at = _lease_times()
+        # Serialize renewal with floor advancement. Otherwise an expired client
+        # could be renewed against a stale floor and briefly re-enter the active
+        # minimum without being forced through snapshot recovery.
+        await self.db.execute(
+            update(SyncState)
+            .where(SyncState.id == 1)
+            .values(current_cursor=SyncState.current_cursor)
+        )
+        floor = await get_retention_floor(self.db)
         existing = await self.db.get(SyncClient, canonical_id)
         if existing is not None:
             if existing.user_id != user_id:
@@ -65,17 +79,14 @@ class SyncClientService:
             existing.display_name = display_name
             existing.last_seen_at = now
             existing.lease_expires_at = lease_expires_at
+            if existing.ack_cursor < floor:
+                existing.ack_cursor = floor
+                existing.snapshot_required = True
             await self.db.flush()
             return self._registration_result(existing)
 
-        # Force SQLite to acquire the write lock before quota counting. The
-        # no-op conditional update serializes concurrent registrations across
+        # The writer lock above also serializes concurrent quota checks across
         # workers without relying on an in-process mutex.
-        await self.db.execute(
-            update(SyncState)
-            .where(SyncState.id == 1)
-            .values(current_cursor=SyncState.current_cursor)
-        )
         active_count = await self.db.scalar(
             select(func.count())
             .select_from(SyncClient)
@@ -90,7 +101,6 @@ class SyncClientService:
                 "sync client quota exceeded",
                 error_type="sync_client_quota_exceeded",
             )
-        floor = await get_retention_floor(self.db)
         client = SyncClient(
             client_id=canonical_id,
             user_id=user_id,
@@ -125,7 +135,15 @@ class SyncClientService:
                 "cursor_version must be 2",
                 error_type="sync_ack_cursor_version_invalid",
             )
-        client = await self.db.get(SyncClient, canonical_id)
+        # Acquire SQLite's database write lock before reading client state or
+        # cursor bounds. This serializes ACK with registration, renewal,
+        # revocation, floor advancement, and event pruning across workers.
+        await self.db.execute(
+            update(SyncState)
+            .where(SyncState.id == 1)
+            .values(current_cursor=SyncState.current_cursor)
+        )
+        client = await self.db.get(SyncClient, canonical_id, populate_existing=True)
         if client is None or client.user_id != user_id:
             raise NotFoundError(
                 "sync client not found",
@@ -137,14 +155,6 @@ class SyncClientService:
                 error_type="sync_client_revoked",
             )
 
-        # Acquire SQLite's database write lock before reading the cursor bounds.
-        # This keeps the bounds check and conditional ACK update in one serialized
-        # writer transaction across workers and processes.
-        await self.db.execute(
-            update(SyncState)
-            .where(SyncState.id == 1)
-            .values(current_cursor=SyncState.current_cursor)
-        )
         floor = await get_retention_floor(self.db)
         current = await get_current_cursor(self.db)
         if ack_cursor < floor:
@@ -157,7 +167,11 @@ class SyncClientService:
                 "ack_cursor exceeds current cursor",
                 error_type="sync_ack_above_current",
             )
-        if client.snapshot_required and ack_cursor <= floor:
+        # A snapshot-required client cannot prove it has reconstructed events in
+        # (floor, current] by merely echoing the floor. Equality is only complete
+        # when the ledger has no newer cursor; the frontend emits this ACK after
+        # its authoritative full-reconcile transaction commits.
+        if client.snapshot_required and ack_cursor == floor and floor < current:
             raise ConflictError(
                 "full snapshot must be completed before acknowledging this client",
                 error_type="sync_snapshot_required",
@@ -184,11 +198,79 @@ class SyncClientService:
                 error_type="sync_ack_regression",
             )
         await self.db.flush()
+        maintenance = await self.advance_safe_retention_floor(lock_acquired=True)
         return {
             "ack_cursor": ack_cursor,
             "lease_expires_at": lease_expires_at,
-            "retention_floor": floor,
+            **maintenance,
+        }
+
+    async def advance_safe_retention_floor(
+        self,
+        *,
+        lock_acquired: bool = False,
+        evaluated_at: str | None = None,
+    ) -> dict[str, int]:
+        """Advance to the minimum durable ACK of every active client.
+
+        The write lock must be acquired before computing the candidate so a
+        concurrent registration cannot appear after the minimum ACK query and
+        before old events are pruned. With no active clients, maintenance is a
+        deliberate no-op.
+        """
+        if not lock_acquired:
+            await self.db.execute(
+                update(SyncState)
+                .where(SyncState.id == 1)
+                .values(current_cursor=SyncState.current_cursor)
+            )
+        now = evaluated_at or utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        row = (
+            await self.db.execute(
+                select(
+                    func.count(SyncClient.client_id),
+                    func.min(SyncClient.ack_cursor),
+                ).where(
+                    SyncClient.revoked_at.is_(None),
+                    SyncClient.lease_expires_at > now,
+                    SyncClient.snapshot_required.is_(False),
+                )
+            )
+        ).one()
+        active_client_count = int(row[0] or 0)
+        floor = await get_retention_floor(self.db)
+        current = await get_current_cursor(self.db)
+        if active_client_count == 0:
+            return {
+                "retention_floor": floor,
+                "current_cursor": current,
+                "active_client_count": 0,
+                "pruned_events": 0,
+            }
+
+        candidate = int(row[1])
+        if candidate <= floor:
+            return {
+                "retention_floor": floor,
+                "current_cursor": current,
+                "active_client_count": active_client_count,
+                "pruned_events": 0,
+            }
+        if candidate > current:
+            raise RuntimeError("active client ACK exceeds current cursor")
+
+        await advance_retention_floor(
+            self.db,
+            floor=candidate,
+            active_client_count=active_client_count,
+            reason="active_client_min_ack",
+        )
+        pruned_events = await prune_sync_events(self.db, before_id=candidate)
+        return {
+            "retention_floor": candidate,
             "current_cursor": current,
+            "active_client_count": active_client_count,
+            "pruned_events": pruned_events,
         }
 
     @staticmethod

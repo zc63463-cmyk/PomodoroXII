@@ -74,8 +74,14 @@ async def record_sync_event(
     return event
 
 
-async def advance_retention_floor(db: AsyncSession, *, floor: int) -> None:
-    """Internal maintenance boundary; never expose through a client route."""
+async def advance_retention_floor(
+    db: AsyncSession,
+    *,
+    floor: int,
+    active_client_count: int | None = None,
+    reason: str | None = None,
+) -> None:
+    """Advance the persisted floor and append one auditable decision record."""
     if floor < 0:
         raise ValueError("retention floor must be >= 0")
     current_cursor = await get_current_cursor(db)
@@ -98,7 +104,16 @@ async def advance_retention_floor(db: AsyncSession, *, floor: int) -> None:
             entity_type="sync_outbox",
             entity_id=str(floor),
             details=json.dumps(
-                {"previous_floor": current_floor, "new_floor": floor},
+                {
+                    "previous_floor": current_floor,
+                    "new_floor": floor,
+                    **(
+                        {"active_client_count": active_client_count}
+                        if active_client_count is not None
+                        else {}
+                    ),
+                    **({"reason": reason} if reason is not None else {}),
+                },
                 sort_keys=True,
             ),
         )
