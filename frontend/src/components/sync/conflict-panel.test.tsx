@@ -72,7 +72,11 @@ describe('ConflictPanel', () => {
     mockUseSync.mockReturnValue({ status: 'conflict', conflicts: [conflict], resolveConflict })
     render(createElement(ConflictPanel))
     fireEvent.click(screen.getByRole('button', { name: /接受远端/ }))
-    expect(resolveConflict).toHaveBeenCalledWith(1, 'accept-remote')
+    expect(resolveConflict).toHaveBeenCalledWith(
+      1,
+      'accept-remote',
+      { entityType: 'task', entityId: 't1' },
+    )
   })
 
   it('CP4: outboxId=-1（pre-push dirty）按钮可点（S1-Hard-3）', () => {

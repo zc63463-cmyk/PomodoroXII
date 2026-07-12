@@ -65,7 +65,11 @@ export function ConflictPanel() {
                 {
                   size: 'sm',
                   variant: 'default',
-                  onClick: () => resolveConflict(c.outboxId, 'accept-remote'),
+                  onClick: () => resolveConflict(
+                    c.outboxId,
+                    'accept-remote',
+                    { entityType: c.entityType, entityId: c.entityId },
+                  ),
                 },
                 '接受远端',
               ),
@@ -74,7 +78,11 @@ export function ConflictPanel() {
                 {
                   size: 'sm',
                   variant: 'outline',
-                  onClick: () => resolveConflict(c.outboxId, 'keep-local'),
+                  onClick: () => resolveConflict(
+                    c.outboxId,
+                    'keep-local',
+                    { entityType: c.entityType, entityId: c.entityId },
+                  ),
                 },
                 '保留本地',
               ),

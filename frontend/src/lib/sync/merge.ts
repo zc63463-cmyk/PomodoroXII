@@ -84,17 +84,38 @@ export async function applyMerge(
     const table = (
       db as unknown as Record<
         string,
-        { update: (id: string, changes: Record<string, unknown>) => Promise<unknown> }
+        {
+          get: (id: string) => Promise<Record<string, unknown> | undefined>
+          update: (id: string, changes: Record<string, unknown>) => Promise<unknown>
+        }
       >
     )[tableName]
     if (!table) continue
-    try {
-      await table.update(String(tomb.entity_id), {
-        deletion_state: 'deleted',
-        _dirty: false,
-      })
-    } catch {
-      // 实体不存在 → no-op（tombstone 指向已不存在的实体）
+    const entityId = String(tomb.entity_id)
+    const localRow = await table.get(entityId)
+    if (!localRow) continue
+    const pendingOutbox = await db.outbox
+      .where('entityId')
+      .equals(entityId)
+      .and((event) => event.entityType === tombEntityType && !event.synced)
+      .first()
+    if (localRow._dirty === true || pendingOutbox) {
+      dirtyConflicts.push(buildPrePushConflict(
+        localRow,
+        {
+          ...localRow,
+          id: entityId,
+          deletion_state: 'deleted',
+          updated_at: tomb.deleted_at,
+          _dirty: false,
+        },
+        tombEntityType,
+      ))
+      continue
     }
+    await table.update(entityId, {
+      deletion_state: 'deleted',
+      _dirty: false,
+    })
   }
 }
