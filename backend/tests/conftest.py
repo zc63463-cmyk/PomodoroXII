@@ -24,8 +24,40 @@ from pathlib import Path
 import pytest
 
 _tests_dir = Path(__file__).resolve().parent
-_artifacts_root = (_tests_dir.parent / ".test-artifacts").resolve()
-_RUN_ROOT_PATTERN = re.compile(r"run-[0-9a-f]{32}\Z")
+_backend_dir = _tests_dir.parent
+_project_root = _backend_dir.parent
+_DEFAULT_ARTIFACTS_ROOT = (_backend_dir / ".test-artifacts").resolve()
+_EXTERNAL_ARTIFACTS_ROOT_PATTERN = re.compile(r"pomodoroxii-test-artifacts\Z", re.IGNORECASE)
+_RUN_ROOT_PATTERN = re.compile(r"run-[0-9a-f]{16}\Z")
+
+
+def _resolve_artifacts_root(configured_root: str | Path | None = None) -> Path:
+    """Resolve and approve the dedicated root used for persistent test artifacts.
+
+    The default remains ``backend/.test-artifacts``. An environment override must
+    resolve outside the source tree, must not be a drive root or home directory,
+    and must use the explicit ``pomodoroxii-test-artifacts`` directory name.
+    """
+    if configured_root is None:
+        configured_root = os.environ.get("POMODOROXII_TEST_ARTIFACTS_ROOT")
+    if configured_root is None:
+        return _DEFAULT_ARTIFACTS_ROOT
+
+    resolved = Path(configured_root).expanduser().resolve()
+    home = Path.home().resolve()
+    if resolved == resolved.parent or resolved == home or resolved in home.parents:
+        raise RuntimeError(f"Refusing broad test artifacts root: {resolved}")
+    if resolved == _project_root or _project_root in resolved.parents:
+        raise RuntimeError(f"Refusing test artifacts root inside project source: {resolved}")
+    if not _EXTERNAL_ARTIFACTS_ROOT_PATTERN.fullmatch(resolved.name):
+        raise RuntimeError(
+            "Configured test artifacts root must be a dedicated directory named "
+            f"'pomodoroxii-test-artifacts': {resolved}"
+        )
+    return resolved
+
+
+_artifacts_root = _resolve_artifacts_root()
 
 
 def _sanitize_nodeid(nodeid: str) -> str:
@@ -39,7 +71,7 @@ def _sanitize_nodeid(nodeid: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", nodeid)
     safe = safe.strip("_")
     short_hash = hashlib.sha256(nodeid.encode()).hexdigest()[:16]
-    return f"{safe[:24]}_{short_hash}"
+    return f"{safe[:8]}_{short_hash}"
 
 
 def _validate_run_root(run_root: Path) -> Path:
@@ -54,7 +86,7 @@ def _validate_run_root(run_root: Path) -> Path:
 def _allocate_run_root() -> Path:
     """Create a unique run root directly below the approved artifacts directory."""
     _artifacts_root.mkdir(parents=True, exist_ok=True)
-    run_root = _artifacts_root / f"run-{uuid.uuid4().hex}"
+    run_root = _artifacts_root / f"run-{uuid.uuid4().hex[:16]}"
     run_root.mkdir(parents=False, exist_ok=False)
     return _validate_run_root(run_root)
 
@@ -69,11 +101,12 @@ def _test_path_for_nodeid(run_root: Path, nodeid: str) -> Path:
 
 @pytest.fixture(scope="session")
 def test_run_root() -> Path:
-    """Create one repository-local run root without recursive in-suite cleanup.
+    """Create one approved short run root without recursive in-suite cleanup.
 
-    The Windows/Trae environment cannot reliably create deeply nested FileSystem
-    test files under the standard OS temp directory. A unique backend-local root
-    preserves isolation while leaving lifecycle cleanup to CI/workspace tooling.
+    By default artifacts stay under ``backend/.test-artifacts``. Set
+    ``POMODOROXII_TEST_ARTIFACTS_ROOT`` to an external, dedicated directory named
+    ``pomodoroxii-test-artifacts`` when a shorter Windows path is required.
+    Lifecycle cleanup remains the responsibility of CI/workspace tooling.
     """
     return _allocate_run_root()
 
@@ -149,7 +182,6 @@ def _isolate_env(
     import app.db.base as db_base_module
     importlib.reload(db_base_module)
     import app.db.metadata as db_metadata_module
-    import app.db.models as models_module
     import app.db.models.meta as models_meta_module  # noqa: F401
     importlib.reload(db_metadata_module)
     import app.db.session as db_session_module
