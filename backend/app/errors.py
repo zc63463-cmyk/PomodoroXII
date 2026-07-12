@@ -75,18 +75,40 @@ class AuthorizationError(AppError):
     error_type = "authorization_error"
 
 
+class SyncCursorExpiredError(AppError):
+    detail = "Sync cursor expired; perform a full sync"
+    status_code = 409
+    error_type = "sync_cursor_expired"
+
+    def __init__(self, *, floor: int, current_cursor: int) -> None:
+        super().__init__()
+        self.floor = floor
+        self.current_cursor = current_cursor
+        self.recovery_action = "full_sync"
+
+
+class SyncSnapshotExpiredError(AppError):
+    detail = "Sync snapshot expired; restart full sync"
+    status_code = 409
+    error_type = "sync_snapshot_expired"
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Register handlers for AppError subclasses and a catch-all 500."""
 
     @app.exception_handler(AppError)
     async def _handle_app_error(request: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "detail": exc.detail,
-                "error_type": exc.error_type,
-            },
-        )
+        content = {
+            "detail": exc.detail,
+            "error_type": exc.error_type,
+        }
+        if isinstance(exc, SyncCursorExpiredError):
+            content.update({
+                "floor": exc.floor,
+                "current_cursor": exc.current_cursor,
+                "recovery_action": exc.recovery_action,
+            })
+        return JSONResponse(status_code=exc.status_code, content=content)
 
     @app.exception_handler(RequestValidationError)
     async def _handle_request_validation(

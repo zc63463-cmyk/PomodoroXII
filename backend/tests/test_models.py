@@ -16,12 +16,13 @@ class TestModelRegistration:
             "schedules", "time_blocks", "memo_comments",
             "session_quick_notes", "schedule_quick_notes", "task_quick_notes",
             "tombstones", "settings", "sync_outbox", "sync_audit_log",
+            "sync_state", "sync_snapshots",
         }
 
         assert meta_tables == {"spaces", "meta_settings"}
         assert space_tables == expected_space_tables
         assert meta_tables.isdisjoint(space_tables)
-        assert len(meta_tables | space_tables) == 20
+        assert len(meta_tables | space_tables) == 22
 
     def test_all_models_import_from_db_base(self):
         """No model should import from app.database — only app.db.base."""
