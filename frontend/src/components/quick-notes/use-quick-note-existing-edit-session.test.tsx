@@ -898,6 +898,160 @@ describe('QuickNote existing-edit session controller', () => {
     expect(controller.getSnapshot()).toBe(before)
   })
 
+  it('grants edit ownership only to the latest start intent while recovery cleanup is pending', async () => {
+    const clear = createDeferred<'cleared' | 'absent' | 'different-edit'>()
+    adapter.loadResult = validRecoveredLoad({ snapshot: { draft: 'base' } })
+    adapter.clearEffects.push(() => clear.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+
+    await flushMicrotasks()
+    controller.start(makeQuickNote({ id: 'first', content: 'first content' }))
+    controller.start(makeQuickNote({ id: 'latest', content: 'latest content' }))
+
+    expect(controller.state.phase).toBe('restoring')
+    expect(controller.state.editingNote).toBeNull()
+    clear.resolve('cleared')
+    await flushMicrotasks()
+
+    expect(controller.state).toMatchObject({
+      phase: 'saved',
+      durability: 'entity-durable',
+      editingNote: { id: 'latest' },
+      draft: 'latest content',
+    })
+    expect(adapter.clearCalls).toHaveLength(1)
+  })
+
+  it('grants edit ownership only to the latest start intent during recovery-read retry', async () => {
+    adapter.loadEffects.push(
+      () => Promise.reject(new Error('read failed')),
+      async () => ({ kind: 'absent' }),
+    )
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    await flushMicrotasks()
+
+    controller.start(makeQuickNote({ id: 'first', content: 'first content' }))
+    controller.start(makeQuickNote({ id: 'latest', content: 'latest content' }))
+    await flushMicrotasks()
+
+    expect(controller.state).toMatchObject({
+      phase: 'saved',
+      durability: 'entity-durable',
+      editingNote: { id: 'latest' },
+      draft: 'latest content',
+    })
+    expect(adapter.operationLog).toEqual(['load', 'load'])
+  })
+
+  it('classifies an updated_at-only entity change as a base change', async () => {
+    const remote = makeQuickNote({
+      content: 'base',
+      updated_at: '2026-07-12T05:00:00.000Z',
+    })
+    adapter.loadResult = validRecoveredLoad({
+      snapshot: { draft: 'local content' },
+      note: remote,
+    })
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+
+    await flushMicrotasks()
+
+    expect(controller.state).toMatchObject({
+      phase: 'conflict',
+      durability: 'recovery-durable',
+      editingNote: remote,
+      draft: 'local content',
+      conflict: {
+        note: remote,
+        localDraft: 'local content',
+        remoteContent: 'base',
+      },
+    })
+    expect(adapter.clearCalls).toEqual([])
+  })
+
+  it('preserves the complete stored snapshot when recovery cleanup rejects and clears once', async () => {
+    const stored = makeSnapshot({
+      editId: 'stored-edit',
+      revision: 7,
+      noteId: 'stored-note',
+      baseContent: 'stored base',
+      baseUpdatedAt: '2026-07-12T03:00:00.000Z',
+      draft: 'stored base',
+      updatedAt: '2026-07-12T03:30:00.000Z',
+    })
+    adapter.stored = stored
+    adapter.loadResult = validRecoveredLoad({
+      snapshot: stored,
+      note: makeQuickNote({
+        id: stored.noteId,
+        content: stored.baseContent,
+        updated_at: stored.baseUpdatedAt,
+      }),
+    })
+    adapter.clearEffects.push(() => Promise.reject(new Error('cleanup failed')))
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+
+    await flushMicrotasks()
+
+    expect(controller.state).toMatchObject({
+      phase: 'failed',
+      durability: 'recovery-durable',
+      editingNote: { id: 'stored-note' },
+      draft: 'stored base',
+      issue: { code: 'recovery-cleanup-failed' },
+    })
+    expect(adapter.stored).toEqual(stored)
+    expect(adapter.clearCalls).toEqual([[
+      { kind: 'v1', editId: stored.editId, revision: stored.revision },
+    ]])
+  })
+
+  it('ignores change while restoring so recovered content remains authoritative', async () => {
+    const load = createDeferred<ExistingEditLoadResult>()
+    adapter.loadEffects.push(() => load.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+
+    controller.change('must not replace recovery')
+    load.resolve(validRecoveredLoad({ snapshot: { draft: 'recovered content' } }))
+    await flushMicrotasks()
+
+    expect(controller.state).toMatchObject({
+      phase: 'dirty',
+      durability: 'recovery-durable',
+      draft: 'recovered content',
+    })
+  })
+
+  it('drains only after deferred recovery cleanup completes', async () => {
+    const clear = createDeferred<'cleared' | 'absent' | 'different-edit'>()
+    adapter.loadResult = validRecoveredLoad({ snapshot: { draft: 'base' } })
+    adapter.clearEffects.push(() => clear.promise)
+    const controller = createQuickNoteExistingEditSessionController(
+      controllerOptions(adapter),
+    )
+    const drained = vi.fn()
+    const drain = controller.drainBeforeSwitch().then(drained)
+
+    await flushMicrotasks()
+    expect(drained).not.toHaveBeenCalled()
+    clear.resolve('cleared')
+    await drain
+
+    expect(drained).toHaveBeenCalledOnce()
+    expectIdle(controller.state)
+  })
+
   it('observes expected asynchronous rejections without an unhandled event', async () => {
     const onUnhandled = vi.fn((event: PromiseRejectionEvent) => {
       event.preventDefault()
