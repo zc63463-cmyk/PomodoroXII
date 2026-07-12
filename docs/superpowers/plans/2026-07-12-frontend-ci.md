@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an independent GitHub Actions workflow that runs the frontend lint, typecheck, test, and production build gates for relevant pull requests and main-branch pushes.
+**Goal:** Add an independent GitHub Actions workflow that runs the frontend lint, typecheck, test, and production build gates for every pull request targeting `main` and every push to `main`.
 
-**Architecture:** Keep backend CI untouched and add one `Frontend CI` workflow. A single Ubuntu validation job installs the locked frontend dependencies once, then runs four named commands in fail-fast order. The workflow has read-only repository permissions, npm cache support, path filters, and ref-level cancellation.
+**Architecture:** Keep backend CI untouched and add one `Frontend CI` workflow. A single Ubuntu validation job installs the locked frontend dependencies once, then runs four named commands in fail-fast order. The workflow has read-only repository permissions, npm cache support, and ref-level cancellation. It intentionally has no workflow-level path filters because the check is intended to be a stable required status for every main-targeted pull request.
 
 **Tech Stack:** GitHub Actions, `actions/checkout@v4`, `actions/setup-node@v4`, Node.js 20, npm lockfile v3, Next.js 15.5, ESLint, TypeScript, Vitest, and Turbopack.
 
@@ -14,7 +14,8 @@
 - Dependency installation must use `npm ci` from `frontend` and `frontend/package-lock.json`.
 - The gate commands must run in this order: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`.
 - The workflow must grant only `contents: read` and require no repository secrets.
-- The workflow must trigger only for `main` pull requests, `main` pushes, manual dispatches, and changes under `frontend/**` or the workflow file.
+- The workflow must trigger for every `main` pull request, every `main` push, and manual dispatches.
+- The workflow must not use workflow-level path filters: skipping a required run on documentation-only or backend-only changes can leave branch protection waiting on a check that never reports.
 - The implementation must not change backend CI, frontend source, package manifests, or test configuration.
 - The branch must be pushed and opened as a Ready PR; no merge operation is part of this plan.
 
@@ -59,14 +60,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - "frontend/**"
-      - ".github/workflows/frontend-ci.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "frontend/**"
-      - ".github/workflows/frontend-ci.yml"
 
 permissions:
   contents: read
@@ -128,16 +123,8 @@ const workflow = yaml.load(
   fs.readFileSync('../.github/workflows/frontend-ci.yml', 'utf8'),
 )
 assert.equal(workflow.name, 'Frontend CI')
-assert.deepEqual(workflow.on.pull_request.branches, ['main'])
-assert.deepEqual(workflow.on.push.branches, ['main'])
-assert.deepEqual(workflow.on.pull_request.paths, [
-  'frontend/**',
-  '.github/workflows/frontend-ci.yml',
-])
-assert.deepEqual(workflow.on.push.paths, [
-  'frontend/**',
-  '.github/workflows/frontend-ci.yml',
-])
+assert.deepEqual(workflow.on.pull_request, { branches: ['main'] })
+assert.deepEqual(workflow.on.push, { branches: ['main'] })
 assert.deepEqual(workflow.permissions, { contents: 'read' })
 assert.equal(workflow.concurrency['cancel-in-progress'], true)
 const job = workflow.jobs.validate
@@ -259,7 +246,7 @@ Expected: the remote branch is created and tracks the local branch.
 - [ ] **Step 8: Create a Ready PR without merging**
 
 ```powershell
-gh pr create --base main --head codex/frontend-ci-gate --title "ci: add frontend quality gate" --body "Adds an independent Frontend CI workflow for lint, typecheck, Vitest, and production build. Uses Node 20, npm ci, lockfile-backed caching, read-only permissions, path filters, and ref cancellation. QN-S1.2 remains a separate follow-up."
+gh pr create --base main --head codex/frontend-ci-gate --title "ci: add frontend quality gate" --body "Adds an independent Frontend CI workflow for lint, typecheck, Vitest, and production build. Uses Node 20, npm ci, lockfile-backed caching, read-only permissions, and ref cancellation. It runs on every main-targeted pull request so the required check always reports; QN-S1.2 remains a separate follow-up."
 ```
 
 Expected: GitHub returns a non-draft pull request URL targeting `main`; do not

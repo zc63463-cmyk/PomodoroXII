@@ -25,8 +25,8 @@ frontend workflow as technical debt.
 
 ## Goals
 
-1. Run the four documented frontend gates automatically for relevant pull
-   requests and main-branch pushes.
+1. Run the four documented frontend gates automatically for every pull request
+   targeting `main` and every push to `main`.
 2. Keep frontend validation independent from backend tests and image publishing.
 3. Use the committed lockfile as the dependency contract.
 4. Produce one stable required check suitable for branch protection.
@@ -55,10 +55,10 @@ cost while still exposing each command as a separate log section.
 
 ### B. Add a frontend job to the existing backend workflow
 
-This avoids a second workflow file, but couples path filters, permissions, check
-status, and future changes to a workflow that also publishes a backend image.
-Workflow-only edits could trigger unrelated backend work. Rejected because file
-count is not a useful trade for lifecycle coupling.
+This avoids a second workflow file, but couples permissions, check status, and
+future changes to a workflow that also publishes a backend image. Workflow-only
+edits could trigger unrelated backend work. Rejected because file count is not a
+useful trade for lifecycle coupling.
 
 ### C. Use four parallel jobs
 
@@ -75,12 +75,15 @@ Create `.github/workflows/frontend-ci.yml` with display name `Frontend CI`.
 The workflow supports these events:
 
 - manual `workflow_dispatch` for diagnosis;
-- `pull_request` targeting `main` when `frontend/**` or the workflow file changes;
-- `push` to `main` with the same path filters.
+- every `pull_request` targeting `main`;
+- every `push` to `main`.
 
-The workflow file includes itself in the path filters so changes to the gate are
-validated by the proposed gate. Documentation-only and backend-only changes do
-not consume a frontend runner.
+There are intentionally no workflow-level path filters. This workflow is a
+required branch-protection check, so it must publish a result for every
+main-targeted pull request; a filtered workflow can leave the required check
+pending when a documentation-only or backend-only change skips the run and can
+block an otherwise mergeable change. The extra runner cost on those changes is
+accepted in exchange for a stable required-check contract.
 
 The workflow grants only:
 
@@ -147,8 +150,8 @@ The Frontend CI change is complete when:
 
 1. `.github/workflows/frontend-ci.yml` is the only implementation file added or
    changed;
-2. relevant pull requests and pushes start `Frontend CI`, while backend-only
-   changes do not;
+2. every pull request targeting `main` and every push to `main` starts
+   `Frontend CI`, with manual dispatch also available;
 3. the job uses Node.js 20, `npm ci`, and the lockfile-backed npm cache;
 4. lint, typecheck, test, and build appear as four named ordered steps;
 5. any failed gate makes the workflow fail;
