@@ -14,8 +14,11 @@ import type { AxiosInstance } from 'axios'
 import type { PomodoroXIDB } from '@/services/database'
 import { applyMerge } from './merge'
 import {
+  clearSnapshotRecovery,
+  loadSnapshotContinuation,
   loadSyncMeta,
   recordPendingAck,
+  saveSnapshotContinuation,
   saveSyncMeta,
   touchLastFullSync,
 } from './sync-meta'
@@ -27,6 +30,15 @@ import {
 } from './types'
 
 export const DEFAULT_PULL_LIMIT = 1000
+
+export class SnapshotRecoveryError extends Error {
+  readonly recoveryAction = 'restart_full_sync'
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'SnapshotRecoveryError'
+  }
+}
 
 /** 单页增量 pull（GET /sync/pull） — cursor 优先 */
 export async function fetchPullPage(
@@ -79,6 +91,27 @@ function collectSnapshotSeenIds(seenIds: SnapshotSeenIds, page: ApiSyncPullRespo
   }
 }
 
+function snapshotSeenRows(token: string, page: ApiSyncPullResponse) {
+  const rows: Array<{ snapshotToken: string; tableName: string; entityId: string }> = []
+  for (const tableName of Object.values(ENTITY_TYPE_TO_TABLE)) {
+    const entities = page[tableName] as Array<Record<string, unknown>> | undefined
+    for (const entity of entities ?? []) {
+      rows.push({ snapshotToken: token, tableName, entityId: String(entity.id) })
+    }
+  }
+  return rows
+}
+
+async function loadPersistedSnapshotSeenIds(
+  db: PomodoroXIDB,
+  token: string,
+): Promise<SnapshotSeenIds> {
+  const seenIds = createSnapshotSeenIds()
+  const rows = await db.snapshotSeen.where('snapshotToken').equals(token).toArray()
+  for (const row of rows) seenIds[row.tableName]?.add(row.entityId)
+  return seenIds
+}
+
 async function reconcileFullSnapshot(db: PomodoroXIDB, seenIds: SnapshotSeenIds): Promise<void> {
   const pendingOutbox = (await db.outbox.toArray()).filter((event) => event.synced === false)
   const protectedEntities = new Set(
@@ -117,9 +150,17 @@ export async function runPullLoop(
   const isFull = options?.isFull ?? false
   const limit = options?.limit ?? DEFAULT_PULL_LIMIT
   const dirtyConflicts: SyncConflict[] = []
-  const snapshotSeenIds = isFull ? createSnapshotSeenIds() : null
-  let snapshotProtocol: 'legacy' | 'materialized' | null = null
-  let snapshotToken: string | null = null
+  const continuation = isFull ? await loadSnapshotContinuation(db) : null
+  if (isFull && continuation === null) {
+    // Invalid/partial continuation is exposed as null by strict parsing. Clear
+    // every residual meta/Seen row before starting a new authoritative snapshot.
+    await clearSnapshotRecovery(db)
+  }
+  const snapshotSeenIds = isFull && continuation === null ? createSnapshotSeenIds() : null
+  let snapshotProtocol: 'legacy' | 'materialized' | null = continuation ? 'materialized' : null
+  let snapshotToken: string | null = continuation?.token ?? null
+  let expectedSnapshotOffset = continuation?.offset ?? 0
+  let materializedSnapshotCursor: number | null = continuation?.cursor ?? null
   let pages = 0
 
   // 首页：isFull 用 /sync/full，否则用 /sync/pull + 已存游标
@@ -130,7 +171,12 @@ export async function runPullLoop(
 
   let page: ApiSyncPullResponse
   if (isFull) {
-    page = await fetchFullPage(api, { cursor: 0, limit })
+    page = await fetchFullPage(api, {
+      cursor: 0,
+      limit,
+      snapshot_token: continuation?.token,
+      snapshot_offset: continuation?.offset,
+    })
   } else if (useCursor) {
     page = await fetchPullPage(api, {
       since: meta.since,
@@ -155,17 +201,34 @@ export async function runPullLoop(
   while (true) {
     if (isFull) {
       if (usesCursorProtocol(page) && !page.snapshot_token) {
-        throw new Error('cursor v2 full response requires snapshot_token')
+        throw new SnapshotRecoveryError('cursor v2 full response requires snapshot_token')
       }
       const pageProtocol = usesCursorProtocol(page) ? 'materialized' : 'legacy'
       if (snapshotProtocol === null) {
         snapshotProtocol = pageProtocol
         snapshotToken = pageProtocol === 'materialized' ? page.snapshot_token ?? null : null
+        expectedSnapshotOffset = 0
       } else if (
         pageProtocol !== snapshotProtocol
         || (pageProtocol === 'materialized' && page.snapshot_token !== snapshotToken)
       ) {
-        throw new Error('sync snapshot protocol changed during pagination')
+        throw new SnapshotRecoveryError('sync snapshot protocol changed during pagination')
+      }
+      if (pageProtocol === 'materialized') {
+        const pageOffset = page.snapshot_offset
+        const pageCursor = page.next_cursor
+        if (materializedSnapshotCursor === null && Number.isSafeInteger(pageCursor)) {
+          materializedSnapshotCursor = pageCursor!
+        }
+        if (
+          !Number.isSafeInteger(pageOffset)
+          || (page.has_more && (pageOffset ?? -1) <= expectedSnapshotOffset)
+          || (!page.has_more && (pageOffset ?? -1) < expectedSnapshotOffset)
+          || !Number.isSafeInteger(pageCursor)
+          || pageCursor !== materializedSnapshotCursor
+        ) {
+          throw new SnapshotRecoveryError('sync snapshot continuation did not advance or changed cursor')
+        }
       }
     }
 
@@ -177,23 +240,39 @@ export async function runPullLoop(
       pendingSnapshotCursor = Math.max(pendingSnapshotCursor ?? 0, page.next_cursor ?? 0)
     }
 
-    if (isFull && snapshotProtocol === 'materialized' && isLastPage) {
-      const terminalConflicts: SyncConflict[] = []
+    if (isFull && snapshotProtocol === 'materialized') {
+      const token = snapshotToken!
+      const nextOffset = page.snapshot_offset!
+      const snapshotCursor = page.next_cursor!
+      const pageConflicts: SyncConflict[] = []
       await db.transaction('rw', db.tables, async () => {
-        await applyMerge(db, page, terminalConflicts)
-        await reconcileFullSnapshot(db, snapshotSeenIds!)
-        await saveSyncMeta(db, {
-          cursor: pendingSnapshotCursor,
-          cursorVersion: 2,
-          serverTime: page.server_time,
-          since: '',
-          sinceId: '',
-          tombstoneSinceId: '',
-        })
-        await touchLastFullSync(db, lastServerTime)
-        await recordPendingAck(db, pendingSnapshotCursor ?? 0)
+        await applyMerge(db, page, pageConflicts)
+        await db.snapshotSeen.bulkPut(snapshotSeenRows(token, page))
+        if (isLastPage) {
+          const persistedSeenIds = await loadPersistedSnapshotSeenIds(db, token)
+          await reconcileFullSnapshot(db, persistedSeenIds)
+          await saveSyncMeta(db, {
+            cursor: snapshotCursor,
+            cursorVersion: 2,
+            serverTime: page.server_time,
+            since: '',
+            sinceId: '',
+            tombstoneSinceId: '',
+          })
+          await touchLastFullSync(db, lastServerTime)
+          await recordPendingAck(db, snapshotCursor)
+          await clearSnapshotRecovery(db)
+        } else {
+          await saveSnapshotContinuation(db, {
+            token,
+            offset: nextOffset,
+            cursor: snapshotCursor,
+            version: 1,
+          })
+        }
       })
-      dirtyConflicts.push(...terminalConflicts)
+      expectedSnapshotOffset = nextOffset
+      dirtyConflicts.push(...pageConflicts)
     } else {
       await db.transaction('rw', db.tables, async () => {
         const pageConflicts: SyncConflict[] = []

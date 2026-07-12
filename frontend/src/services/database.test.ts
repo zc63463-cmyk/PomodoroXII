@@ -30,11 +30,11 @@ describe('PomodoroXIDB', () => {
     await db.delete()
   })
 
-  it('latest database version is 16', async () => {
+  it('latest database version is 17', async () => {
     const dbName = 'pomodoroxi-ver-' + crypto.randomUUID()
     const db = new PomodoroXIDB(dbName)
     await db.open()
-    expect(db.verno).toBe(16)
+    expect(db.verno).toBe(17)
     await db.delete()
   })
 
@@ -107,6 +107,49 @@ describe('PomodoroXIDB', () => {
       expect(raw.version).toBe(1)
     }
 
+    await db.delete()
+  })
+
+  it('v16 to v17 upgrade preserves existing rows and adds snapshotSeen indexes', async () => {
+    const dbName = 'pomodoroxi-v17-upgrade-' + crypto.randomUUID()
+    const oldDb = new Dexie(dbName)
+    oldDb.version(16).stores({
+      tasks: 'id, status, created_at, updated_at, due_date, _dirty, content_hash',
+      syncMeta: 'key',
+    })
+    await oldDb.open()
+    await oldDb.table('tasks').put({ id: 'kept-task', title: 'kept', status: 'todo' })
+    await oldDb.table('syncMeta').put({ key: 'cursor', value: '12' })
+    await oldDb.close()
+
+    const db = new PomodoroXIDB(dbName)
+    await db.open()
+
+    expect((await db.tasks.get('kept-task'))?.id).toBe('kept-task')
+    expect((await db.syncMeta.get('cursor'))?.value).toBe('12')
+    expect(db.snapshotSeen.schema.primKey.keyPath).toEqual([
+      'snapshotToken',
+      'tableName',
+      'entityId',
+    ])
+    expect(db.snapshotSeen.schema.indexes.map((index) => index.keyPath)).toEqual(
+      expect.arrayContaining(['snapshotToken', 'tableName']),
+    )
+    await db.delete()
+  })
+
+  it('v17 adds the dedicated snapshotSeen recovery table', async () => {
+    const dbName = 'pomodoroxi-v17-' + crypto.randomUUID()
+    const db = new PomodoroXIDB(dbName)
+    await db.open()
+
+    expect(db.tables.some((table) => table.name === 'snapshotSeen')).toBe(true)
+    await db.snapshotSeen.put({
+      snapshotToken: '123e4567-e89b-42d3-a456-426614174000',
+      tableName: 'tasks',
+      entityId: 'task-1',
+    })
+    expect(await db.snapshotSeen.count()).toBe(1)
     await db.delete()
   })
 

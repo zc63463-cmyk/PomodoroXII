@@ -35,6 +35,7 @@ import type {
   SyncedFocusPattern,
   OutboxEvent,
   SyncMeta,
+  SnapshotSeenEntity,
   DailyReport,
   ReportTemplate,
   Habit,
@@ -90,6 +91,7 @@ export class PomodoroXIDB extends Dexie {
   outbox!: Table<OutboxEvent>
   settings!: Table<{ key: string; value: string }>
   syncMeta!: Table<SyncMeta>
+  snapshotSeen!: Table<SnapshotSeenEntity, [string, string, string]>
 
   // v6 tables: daily reports, report templates, habits, time blocks
   reports!: Table<SyncedDailyReport>
@@ -244,6 +246,11 @@ export class PomodoroXIDB extends Dexie {
           }
         })
       }
+    })
+    // version(17): crash-safe materialized snapshot continuation.
+    // Seen IDs live in a dedicated table to avoid one oversized syncMeta JSON row.
+    this.version(17).stores({
+      snapshotSeen: '[snapshotToken+tableName+entityId], snapshotToken, tableName',
     })
   }
 }

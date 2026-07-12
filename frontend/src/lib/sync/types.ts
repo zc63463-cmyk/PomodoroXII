@@ -125,6 +125,10 @@ export const SYNC_META_KEYS = {
   CURSOR_VERSION: 'cursor_version',
   CLIENT_ID: 'client_id',
   PENDING_ACK_CURSOR: 'pending_ack_cursor',
+  SNAPSHOT_TOKEN: 'snapshot_token',
+  SNAPSHOT_OFFSET: 'snapshot_offset',
+  SNAPSHOT_CURSOR: 'snapshot_cursor',
+  SNAPSHOT_RECOVERY_VERSION: 'snapshot_recovery_version',
 } as const
 
 /** syncMeta 快照（camelCase 字段名，与 SYNC_META_KEYS 的 snake_case 值有映射关系） */
@@ -143,6 +147,18 @@ export interface SyncMetaSnapshot {
   clientId: string
   /** H2-F1: 已本地持久化、尚未被服务端确认的最大 cursor。 */
   pendingAckCursor: number | null
+  /** H2-F4: 可恢复 materialized snapshot continuation；四字段必须整体有效。 */
+  snapshotToken: string | null
+  snapshotOffset: number | null
+  snapshotCursor: number | null
+  snapshotRecoveryVersion: number | null
+}
+
+export interface SnapshotContinuation {
+  token: string
+  offset: number
+  cursor: number
+  version: 1
 }
 
 /** outbox merge 矩阵动作 */

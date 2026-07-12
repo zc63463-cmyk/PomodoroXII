@@ -78,7 +78,7 @@ function cursorPage1() {
     next_tombstone_since_id: '',
     next_cursor: 42,
     cursor_version: 2,
-    snapshot_token: 'snapshot-stable',
+    snapshot_token: '11111111-1111-4111-8111-111111111111',
     snapshot_offset: 1,
   }
 }
@@ -93,7 +93,7 @@ function cursorPage2() {
     next_tombstone_since_id: '',
     next_cursor: 84,
     cursor_version: 2,
-    snapshot_token: 'snapshot-stable',
+    snapshot_token: '11111111-1111-4111-8111-111111111111',
     snapshot_offset: 2,
   }
 }
@@ -108,7 +108,7 @@ function cursorSinglePage() {
     next_tombstone_since_id: '',
     next_cursor: 99,
     cursor_version: 2,
-    snapshot_token: 'snapshot-single',
+    snapshot_token: '22222222-2222-4222-8222-222222222222',
     snapshot_offset: 0,
   }
 }
@@ -350,8 +350,8 @@ describe('pull-loop', () => {
       call++
       return ok(
         call === 1
-          ? { ...cursorPage1(), next_cursor: 200, snapshot_token: 'snap-200', snapshot_offset: 1 }
-          : { ...cursorPage2(), next_cursor: 200, snapshot_token: 'snap-200', snapshot_offset: 2 },
+          ? { ...cursorPage1(), next_cursor: 200, snapshot_token: '33333333-3333-4333-8333-333333333333', snapshot_offset: 1 }
+          : { ...cursorPage2(), next_cursor: 200, snapshot_token: '33333333-3333-4333-8333-333333333333', snapshot_offset: 2 },
         config,
       )
     }
@@ -360,7 +360,7 @@ describe('pull-loop', () => {
 
     expect(captured[0]!.url).toContain('/sync/full')
     expect(captured[1]!.url).toContain('/sync/full')
-    expect((captured[1]!.params as Record<string, unknown>).snapshot_token).toBe('snap-200')
+    expect((captured[1]!.params as Record<string, unknown>).snapshot_token).toBe('33333333-3333-4333-8333-333333333333')
     expect((captured[1]!.params as Record<string, unknown>).snapshot_offset).toBe(1)
     expect((await loadSyncMeta(db)).cursor).toBe(200)
   })
@@ -396,7 +396,7 @@ describe('pull-loop', () => {
       if (call === 1) {
         return ok({
           ...cursorPage1(),
-          snapshot_token: 'snap-interrupted',
+          snapshot_token: '44444444-4444-4444-8444-444444444444',
           snapshot_offset: 1,
           tasks: [],
         }, config)
@@ -409,6 +409,154 @@ describe('pull-loop', () => {
     )
 
     expect(await db.tasks.get('clean-ghost')).toBeDefined()
+  })
+
+  it('PL22: materialized snapshot 每页原子保存 merge、seen 与 continuation', async () => {
+    db = await openTestDb()
+    const token = '77777777-7777-4777-8777-777777777777'
+    let call = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      call++
+      if (call === 1) {
+        return ok({
+          ...cursorPage1(),
+          next_cursor: 200,
+          snapshot_token: token,
+          snapshot_offset: 1,
+          tasks: [{
+            id: 'page-one', title: 'one', status: 'todo',
+            updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
+          }],
+        }, config)
+      }
+      throw new Error('browser stopped after committed page')
+    }
+
+    await expect(runPullLoop(db, spaceApi, { isFull: true, limit: 1 })).rejects.toThrow(
+      'browser stopped',
+    )
+
+    const meta = await loadSyncMeta(db)
+    expect(await db.tasks.get('page-one')).toBeDefined()
+    expect(meta.snapshotToken).toBe(token)
+    expect(meta.snapshotOffset).toBe(1)
+    expect(meta.snapshotCursor).toBe(200)
+    expect(await db.snapshotSeen.get([token, 'tasks', 'page-one'])).toBeDefined()
+    expect(meta.cursor).toBeNull()
+  })
+
+  it('PL23: 浏览器重启后从 continuation 继续并使用持久化 Seen IDs 完成 reconcile', async () => {
+    db = await openTestDb()
+    const token = '88888888-8888-4888-8888-888888888888'
+    await db.tasks.bulkPut([taskRow('page-one', false), taskRow('clean-ghost', false)])
+    await db.snapshotSeen.put({ snapshotToken: token, tableName: 'tasks', entityId: 'page-one' })
+    await saveSyncMeta(db, {
+      snapshotToken: token,
+      snapshotOffset: 1,
+      snapshotCursor: 200,
+      snapshotRecoveryVersion: 1,
+    })
+    let captured: Record<string, unknown> = {}
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      captured = config.params as Record<string, unknown>
+      return ok({
+        ...cursorPage2(),
+        next_cursor: 200,
+        snapshot_token: token,
+        snapshot_offset: 2,
+        tasks: [{
+          id: 'page-two', title: 'two', status: 'todo',
+          updated_at: '2026-07-06T12:01:00.000Z', deletion_state: 'active', version: 1,
+        }],
+      }, config)
+    }
+
+    await runPullLoop(db, spaceApi, { isFull: true, limit: 1 })
+
+    expect(captured.snapshot_token).toBe(token)
+    expect(captured.snapshot_offset).toBe(1)
+    expect(await db.tasks.get('page-one')).toBeDefined()
+    expect(await db.tasks.get('page-two')).toBeDefined()
+    expect(await db.tasks.get('clean-ghost')).toBeUndefined()
+    expect((await loadSyncMeta(db)).cursor).toBe(200)
+    expect((await loadSyncMeta(db)).snapshotToken).toBeNull()
+    expect(await db.snapshotSeen.where('snapshotToken').equals(token).count()).toBe(0)
+  })
+
+  it('PL24: continuation 事务失败会回滚本页 merge、Seen IDs 与 offset', async () => {
+    db = await openTestDb()
+    const token = '99999999-9999-4999-8999-999999999999'
+    const originalBulkPut = db.snapshotSeen.bulkPut.bind(db.snapshotSeen)
+    vi.spyOn(db.snapshotSeen, 'bulkPut').mockRejectedValue(new Error('seen write failed'))
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => ok({
+      ...cursorPage1(),
+      next_cursor: 300,
+      snapshot_token: token,
+      snapshot_offset: 1,
+      tasks: [{
+        id: 'rolled-back', title: 'rollback', status: 'todo',
+        updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
+      }],
+    }, config)
+
+    await expect(runPullLoop(db, spaceApi, { isFull: true, limit: 1 })).rejects.toThrow(
+      'seen write failed',
+    )
+
+    expect(await db.tasks.get('rolled-back')).toBeUndefined()
+    expect((await loadSyncMeta(db)).snapshotToken).toBeNull()
+    expect(await db.snapshotSeen.count()).toBe(0)
+    db.snapshotSeen.bulkPut = originalBulkPut
+  })
+
+  it('PL25: materialized snapshot 非终页 offset 必须严格前进', async () => {
+    db = await openTestDb()
+    const token = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => ok({
+      ...cursorPage1(), snapshot_token: token, snapshot_offset: 0, next_cursor: 50,
+    }, config)
+
+    await expect(runPullLoop(db, spaceApi, { isFull: true })).rejects.toThrow('did not advance')
+    expect((await loadSyncMeta(db)).snapshotToken).toBeNull()
+  })
+
+  it('PL26: materialized snapshot 所有分页必须保持同一 snapshot cursor', async () => {
+    db = await openTestDb()
+    const token = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    let call = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      call++
+      return ok(call === 1
+        ? { ...cursorPage1(), snapshot_token: token, snapshot_offset: 1, next_cursor: 50 }
+        : { ...cursorPage2(), snapshot_token: token, snapshot_offset: 2, next_cursor: 51 }, config)
+    }
+
+    await expect(runPullLoop(db, spaceApi, { isFull: true })).rejects.toThrow('changed cursor')
+    const meta = await loadSyncMeta(db)
+    expect(meta.snapshotCursor).toBe(50)
+    expect(meta.cursor).toBeNull()
+  })
+
+  it('PL27: 非法 continuation 启动新快照前清理残留 meta 与 Seen IDs', async () => {
+    db = await openTestDb()
+    const staleToken = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+    await db.syncMeta.bulkPut([
+      { key: 'snapshot_token', value: staleToken },
+      { key: 'snapshot_offset', value: '-1' },
+      { key: 'snapshot_cursor', value: '20' },
+      { key: 'snapshot_recovery_version', value: '1' },
+    ])
+    await db.snapshotSeen.put({ snapshotToken: staleToken, tableName: 'tasks', entityId: 'stale' })
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => ok({
+      ...cursorSinglePage(), next_cursor: 30,
+      snapshot_token: 'ffffffff-ffff-4fff-8fff-ffffffffffff', snapshot_offset: 0,
+    }, config)
+
+    await runPullLoop(db, spaceApi, { isFull: true })
+
+    expect(await db.snapshotSeen.where('snapshotToken').equals(staleToken).count()).toBe(0)
+    expect((await loadSyncMeta(db)).snapshotToken).toBeNull()
+    expect((await loadSyncMeta(db)).cursor).toBe(30)
   })
 
   it('PL18: legacy full 也按权威快照删除缺失的本地 clean 实体', async () => {
@@ -447,8 +595,8 @@ describe('pull-loop', () => {
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       call++
       return ok(call === 1
-        ? { ...cursorPage1(), snapshot_token: 'stable-a' }
-        : { ...cursorPage2(), snapshot_token: 'changed-b' }, config)
+        ? { ...cursorPage1(), snapshot_token: '55555555-5555-4555-8555-555555555555' }
+        : { ...cursorPage2(), snapshot_token: '66666666-6666-4666-8666-666666666666' }, config)
     }
 
     await expect(runPullLoop(db, spaceApi, { isFull: true, limit: 1 })).rejects.toThrow(

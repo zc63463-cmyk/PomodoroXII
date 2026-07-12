@@ -1,12 +1,16 @@
+import Dexie from 'dexie'
 import { describe, it, expect, afterEach } from 'vitest'
 import { PomodoroXIDB } from '@/services/database'
 import { SYNC_META_KEYS } from './types'
 import {
   clearPendingAck,
+  clearSnapshotRecovery,
   clearSyncCursors,
   ensureClientId,
+  loadSnapshotContinuation,
   loadSyncMeta,
   recordPendingAck,
+  saveSnapshotContinuation,
   saveSyncMeta,
   touchLastFullSync,
   touchLastSyncAt,
@@ -223,5 +227,103 @@ describe('sync-meta', () => {
     expect((await loadSyncMeta(db)).pendingAckCursor).toBe(20)
     await clearPendingAck(db, 20)
     expect((await loadSyncMeta(db)).pendingAckCursor).toBeNull()
+  })
+
+  it('SM15: snapshot continuation 四字段合法时完整 round-trip', async () => {
+    db = await openTestDb()
+    const continuation = {
+      token: '123e4567-e89b-42d3-a456-426614174000',
+      offset: 500,
+      cursor: 42,
+      version: 1 as const,
+    }
+
+    await saveSnapshotContinuation(db, continuation)
+
+    expect(await loadSnapshotContinuation(db)).toEqual(continuation)
+    const meta = await loadSyncMeta(db)
+    expect(meta.snapshotToken).toBe(continuation.token)
+    expect(meta.snapshotOffset).toBe(500)
+    expect(meta.snapshotCursor).toBe(42)
+    expect(meta.snapshotRecoveryVersion).toBe(1)
+  })
+
+  it.each([
+    ['', '0', '1', '1'],
+    ['broken', '0', '1', '1'],
+    ['123e4567-e89b-42d3-a456-426614174000', '', '1', '1'],
+    ['123e4567-e89b-42d3-a456-426614174000', '   ', '1', '1'],
+    ['123e4567-e89b-42d3-a456-426614174000', '01', '1', '1'],
+    ['123e4567-e89b-42d3-a456-426614174000', '-1', '1', '1'],
+    ['123e4567-e89b-42d3-a456-426614174000', '1.5', '1', '1'],
+    ['123e4567-e89b-42d3-a456-426614174000', '0', 'NaN', '1'],
+    ['123e4567-e89b-42d3-a456-426614174000', '0', '1', '2'],
+  ])('SM16: 损坏 continuation %s/%s/%s/%s 整体 fail-closed', async (
+    token,
+    offset,
+    cursor,
+    version,
+  ) => {
+    db = await openTestDb()
+    await db.syncMeta.bulkPut([
+      { key: SYNC_META_KEYS.SNAPSHOT_TOKEN, value: token },
+      { key: SYNC_META_KEYS.SNAPSHOT_OFFSET, value: offset },
+      { key: SYNC_META_KEYS.SNAPSHOT_CURSOR, value: cursor },
+      { key: SYNC_META_KEYS.SNAPSHOT_RECOVERY_VERSION, value: version },
+    ])
+
+    expect(await loadSnapshotContinuation(db)).toBeNull()
+    const meta = await loadSyncMeta(db)
+    expect(meta.snapshotToken).toBeNull()
+    expect(meta.snapshotOffset).toBeNull()
+    expect(meta.snapshotCursor).toBeNull()
+    expect(meta.snapshotRecoveryVersion).toBeNull()
+  })
+
+  it('SM17: clearSnapshotRecovery 原子清理 continuation 与当前 token seen IDs', async () => {
+    db = await openTestDb()
+    const token = '123e4567-e89b-42d3-a456-426614174000'
+    await saveSnapshotContinuation(db, { token, offset: 2, cursor: 9, version: 1 })
+    await db.snapshotSeen.bulkPut([
+      { snapshotToken: token, tableName: 'tasks', entityId: 't1' },
+      { snapshotToken: token, tableName: 'notes', entityId: 'n1' },
+    ])
+
+    await clearSnapshotRecovery(db)
+
+    expect(await loadSnapshotContinuation(db)).toBeNull()
+    expect(await db.snapshotSeen.count()).toBe(0)
+  })
+
+  it('SM18: clearSnapshotRecovery 中途失败时 seen 与 meta 共同回滚', async () => {
+    db = await openTestDb()
+    const token = '123e4567-e89b-42d3-a456-426614174000'
+    await saveSnapshotContinuation(db, { token, offset: 2, cursor: 9, version: 1 })
+    await db.snapshotSeen.put({ snapshotToken: token, tableName: 'tasks', entityId: 't1' })
+    const originalBulkDelete = db.syncMeta.bulkDelete.bind(db.syncMeta)
+    db.syncMeta.bulkDelete = (() => Dexie.Promise.reject(
+      new Error('injected cleanup failure'),
+    )) as typeof db.syncMeta.bulkDelete
+
+    await expect(clearSnapshotRecovery(db)).rejects.toThrow('injected cleanup failure')
+
+    db.syncMeta.bulkDelete = originalBulkDelete
+    expect(await loadSnapshotContinuation(db)).toEqual({ token, offset: 2, cursor: 9, version: 1 })
+    expect(await db.snapshotSeen.count()).toBe(1)
+  })
+
+  it('SM19: clearSyncCursors 保留合法 snapshot continuation', async () => {
+    db = await openTestDb()
+    const continuation = {
+      token: '123e4567-e89b-42d3-a456-426614174000',
+      offset: 10,
+      cursor: 12,
+      version: 1 as const,
+    }
+    await saveSnapshotContinuation(db, continuation)
+
+    await clearSyncCursors(db)
+
+    expect(await loadSnapshotContinuation(db)).toEqual(continuation)
   })
 })

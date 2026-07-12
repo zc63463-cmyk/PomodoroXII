@@ -9,7 +9,11 @@
  */
 
 import type { PomodoroXIDB } from '@/services/database'
-import { SYNC_META_KEYS, type SyncMetaSnapshot } from './types'
+import {
+  SYNC_META_KEYS,
+  type SnapshotContinuation,
+  type SyncMetaSnapshot,
+} from './types'
 
 /** SyncMetaSnapshot camelCase 字段 → SYNC_META_KEYS snake_case 值 */
 const FIELD_TO_KEY: Record<keyof SyncMetaSnapshot, string> = {
@@ -23,6 +27,10 @@ const FIELD_TO_KEY: Record<keyof SyncMetaSnapshot, string> = {
   cursorVersion: SYNC_META_KEYS.CURSOR_VERSION,
   clientId: SYNC_META_KEYS.CLIENT_ID,
   pendingAckCursor: SYNC_META_KEYS.PENDING_ACK_CURSOR,
+  snapshotToken: SYNC_META_KEYS.SNAPSHOT_TOKEN,
+  snapshotOffset: SYNC_META_KEYS.SNAPSHOT_OFFSET,
+  snapshotCursor: SYNC_META_KEYS.SNAPSHOT_CURSOR,
+  snapshotRecoveryVersion: SYNC_META_KEYS.SNAPSHOT_RECOVERY_VERSION,
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -54,6 +62,22 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
   const validPendingAck = pendingAckStr !== ''
     && Number.isSafeInteger(parsedPendingAck)
     && parsedPendingAck >= 0
+  const snapshotToken = map.get(SYNC_META_KEYS.SNAPSHOT_TOKEN) ?? ''
+  const snapshotOffsetStr = map.get(SYNC_META_KEYS.SNAPSHOT_OFFSET) ?? ''
+  const snapshotCursorStr = map.get(SYNC_META_KEYS.SNAPSHOT_CURSOR) ?? ''
+  const snapshotVersionStr = map.get(SYNC_META_KEYS.SNAPSHOT_RECOVERY_VERSION) ?? ''
+  const parsedSnapshotOffset = Number(snapshotOffsetStr)
+  const parsedSnapshotCursor = Number(snapshotCursorStr)
+  const parsedSnapshotVersion = Number(snapshotVersionStr)
+  const isCanonicalNonNegativeInteger = (value: string, parsed: number): boolean =>
+    /^(0|[1-9]\d*)$/.test(value)
+    && Number.isSafeInteger(parsed)
+    && parsed >= 0
+  const validSnapshot = isUuid(snapshotToken)
+    && isCanonicalNonNegativeInteger(snapshotOffsetStr, parsedSnapshotOffset)
+    && isCanonicalNonNegativeInteger(snapshotCursorStr, parsedSnapshotCursor)
+    && snapshotVersionStr === '1'
+    && parsedSnapshotVersion === 1
   return {
     since: map.get(SYNC_META_KEYS.SINCE) ?? '',
     sinceId: map.get(SYNC_META_KEYS.SINCE_ID) ?? '',
@@ -65,6 +89,10 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
     cursorVersion: validCursor ? 2 : null,
     clientId: map.get(SYNC_META_KEYS.CLIENT_ID) ?? '',
     pendingAckCursor: validPendingAck ? parsedPendingAck : null,
+    snapshotToken: validSnapshot ? snapshotToken.toLowerCase() : null,
+    snapshotOffset: validSnapshot ? parsedSnapshotOffset : null,
+    snapshotCursor: validSnapshot ? parsedSnapshotCursor : null,
+    snapshotRecoveryVersion: validSnapshot ? 1 : null,
   }
 }
 
@@ -116,7 +144,64 @@ export async function clearPendingAck(db: PomodoroXIDB, acknowledged: number): P
   })
 }
 
-/** 清空同步游标，但保留 clientId 与 pendingAckCursor。 */
+export async function loadSnapshotContinuation(
+  db: PomodoroXIDB,
+): Promise<SnapshotContinuation | null> {
+  const meta = await loadSyncMeta(db)
+  if (
+    meta.snapshotToken == null
+    || meta.snapshotOffset == null
+    || meta.snapshotCursor == null
+    || meta.snapshotRecoveryVersion !== 1
+  ) return null
+  return {
+    token: meta.snapshotToken,
+    offset: meta.snapshotOffset,
+    cursor: meta.snapshotCursor,
+    version: 1,
+  }
+}
+
+/** 调用方可处于包含 syncMeta 的既有 Dexie 事务中。 */
+export async function saveSnapshotContinuation(
+  db: PomodoroXIDB,
+  continuation: SnapshotContinuation,
+): Promise<void> {
+  if (
+    !isUuid(continuation.token)
+    || !Number.isSafeInteger(continuation.offset)
+    || continuation.offset < 0
+    || !Number.isSafeInteger(continuation.cursor)
+    || continuation.cursor < 0
+    || continuation.version !== 1
+  ) throw new Error('invalid snapshot continuation')
+  await saveSyncMeta(db, {
+    snapshotToken: continuation.token.toLowerCase(),
+    snapshotOffset: continuation.offset,
+    snapshotCursor: continuation.cursor,
+    snapshotRecoveryVersion: 1,
+  })
+}
+
+/** 原子清理 continuation 与对应 Seen IDs；无合法 token 时清理全部孤儿 seen。 */
+export async function clearSnapshotRecovery(db: PomodoroXIDB): Promise<void> {
+  await db.transaction('rw', [db.syncMeta, db.snapshotSeen], async () => {
+    const token = (await db.syncMeta.get(SYNC_META_KEYS.SNAPSHOT_TOKEN))?.value ?? ''
+    if (isUuid(token)) {
+      await db.snapshotSeen.where('snapshotToken').equals(token.toLowerCase()).delete()
+    } else {
+      await db.snapshotSeen.clear()
+    }
+    await db.syncMeta.bulkDelete([
+      SYNC_META_KEYS.SNAPSHOT_TOKEN,
+      SYNC_META_KEYS.SNAPSHOT_OFFSET,
+      SYNC_META_KEYS.SNAPSHOT_CURSOR,
+      SYNC_META_KEYS.SNAPSHOT_RECOVERY_VERSION,
+    ])
+  })
+}
+
+/** 清空同步游标，但保留 clientId、pendingAckCursor 与 Snapshot continuation。 */
 export async function clearSyncCursors(db: PomodoroXIDB): Promise<void> {
   await db.syncMeta.bulkPut([
     { key: SYNC_META_KEYS.SINCE, value: '' },
