@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PomodoroXIDB } from '@/services/database'
 import { db, spaceDBManager } from '@/services/space-db'
+import type { CachedQuickNote } from '@/types'
 import {
   configureQuickNoteOutboxHook,
   convertQuickNoteToNote,
   createQuickNote,
   createQuickNoteInTransaction,
+  getQuickNoteLifecycleState,
   getQuickNoteRepositoryUserMessage,
   listQuickNoteLifecycleStates,
   listQuickNotes,
@@ -16,6 +18,7 @@ import {
   resetQuickNoteOutboxHook,
   restoreQuickNote,
   updateQuickNote,
+  updateQuickNoteInTransaction,
   type QuickNoteMutationContext,
 } from '@/lib/quick-notes/quick-note-repository'
 
@@ -81,6 +84,120 @@ describe('quick-note-repository', () => {
     }
   })
 
+  it('updates only the supplied transaction database with repository invariants', async () => {
+    const databaseA = new PomodoroXIDB(
+      `quick-note-repo-update-concrete-${crypto.randomUUID()}`,
+    )
+    const databaseB = spaceDBManager.current
+    const source = await createQuickNote({
+      id: 'concrete-update',
+      content: 'source #draft',
+    })
+    const sourceRow = await databaseB.quickNotes.get(source.id)
+    expect(sourceRow).toBeDefined()
+
+    try {
+      await databaseA.quickNotes.put(sourceRow!)
+      await databaseA.outbox.clear()
+
+      await databaseA.transaction(
+        'rw',
+        databaseA.quickNotes,
+        databaseA.outbox,
+        () => updateQuickNoteInTransaction(databaseA, sourceRow!, {
+          content: '  updated content #Shipped  ',
+        }),
+      )
+
+      expect(await databaseA.quickNotes.get(source.id)).toMatchObject({
+        content: 'updated content #Shipped',
+        tags: ['shipped'],
+        version: (sourceRow?.version ?? 1) + 1,
+        _dirty: true,
+      })
+      expect(await databaseA.outbox.where('entityId').equals(source.id).count()).toBe(1)
+      expect(await databaseB.quickNotes.get(source.id)).toEqual(sourceRow)
+    } finally {
+      await databaseA.delete()
+    }
+  })
+
+  it('rolls back the supplied database update when a custom Outbox hook rejects', async () => {
+    const isolatedDB = new PomodoroXIDB(
+      `quick-note-repo-update-rollback-${crypto.randomUUID()}`,
+    )
+    const source = await createQuickNote({
+      id: 'concrete-update-rollback',
+      content: 'before rollback',
+    })
+    const sourceRow = await db.quickNotes.get(source.id)
+    expect(sourceRow).toBeDefined()
+
+    try {
+      await isolatedDB.quickNotes.put(sourceRow!)
+      await isolatedDB.outbox.clear()
+      const before = await isolatedDB.quickNotes.get(source.id)
+      configureQuickNoteOutboxHook(async () => {
+        throw new Error('update hook failed')
+      })
+
+      await expect(
+        isolatedDB.transaction(
+          'rw',
+          isolatedDB.quickNotes,
+          isolatedDB.outbox,
+          () => updateQuickNoteInTransaction(isolatedDB, sourceRow!, {
+            content: 'after rollback',
+          }),
+        ),
+      ).rejects.toThrow('update hook failed')
+
+      expect(await isolatedDB.quickNotes.get(source.id)).toEqual(before)
+    } finally {
+      await isolatedDB.delete()
+    }
+  })
+
+  it('classifies cached lifecycle with converted precedence', () => {
+    const row: CachedQuickNote = {
+      id: 'lifecycle-precedence',
+      content: 'lifecycle',
+      mood: null,
+      tags: [],
+      pinned: false,
+      archived_at: null,
+      archive_file_path: null,
+      session_id: null,
+      folder_id: null,
+      trashed_at: null,
+      migrated_to_note_id: null,
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      content_hash: undefined,
+      deletion_state: 'active',
+      version: 1,
+      _dirty: false,
+    }
+    const deleted = { ...row, deletion_state: 'deleted' as const }
+    const trashed = {
+      ...deleted,
+      trashed_at: '2026-01-02T00:00:00.000Z',
+    }
+    const archived = {
+      ...trashed,
+      archived_at: '2026-01-03T00:00:00.000Z',
+    }
+
+    expect(getQuickNoteLifecycleState(row)).toBe('active')
+    expect(getQuickNoteLifecycleState(deleted)).toBe('sync-deleted')
+    expect(getQuickNoteLifecycleState(trashed)).toBe('trashed')
+    expect(getQuickNoteLifecycleState(archived)).toBe('archived')
+    expect(getQuickNoteLifecycleState({
+      ...archived,
+      migrated_to_note_id: 'converted-note',
+    })).toBe('converted')
+  })
+
   it('can disable the outbox hook for explicitly local-only tests', async () => {
     configureQuickNoteOutboxHook(null)
     const note = await createQuickNote({ content: 'local create #draft' })
@@ -118,6 +235,19 @@ describe('quick-note-repository', () => {
     } finally {
       currentSpy.mockRestore()
       database.quickNotes.hook('updating').unsubscribe(markEntityWrite)
+    }
+  })
+
+  it('evaluates the current database getter exactly once for public updates', async () => {
+    const database = spaceDBManager.current
+    const note = await createQuickNote({ content: 'single current lookup' })
+    const currentSpy = vi.spyOn(spaceDBManager, 'current', 'get').mockReturnValue(database)
+
+    try {
+      await updateQuickNote(note.id, { pinned: true })
+      expect(currentSpy).toHaveBeenCalledOnce()
+    } finally {
+      currentSpy.mockRestore()
     }
   })
 

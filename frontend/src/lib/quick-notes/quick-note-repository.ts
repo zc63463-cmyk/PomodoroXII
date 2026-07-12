@@ -184,15 +184,19 @@ export async function listQuickNoteLifecycleStates(): Promise<
   const rows = await db.quickNotes.toArray()
 
   return Object.fromEntries(
-    rows.map((row) => {
-      const note = stripSyncFields(row)
-      if (isConvertedQuickNote(note)) return [row.id, 'converted' as const]
-      if (note.archived_at !== null) return [row.id, 'archived' as const]
-      if (isTrashedQuickNote(note)) return [row.id, 'trashed' as const]
-      if (row.deletion_state === 'deleted') return [row.id, 'sync-deleted' as const]
-      return [row.id, 'active' as const]
-    }),
+    rows.map((row) => [row.id, getQuickNoteLifecycleState(row)]),
   )
+}
+
+export function getQuickNoteLifecycleState(
+  row: CachedQuickNote,
+): QuickNoteLifecycleState {
+  const note = stripSyncFields(row)
+  if (isConvertedQuickNote(note)) return 'converted'
+  if (note.archived_at !== null) return 'archived'
+  if (isTrashedQuickNote(note)) return 'trashed'
+  if (row.deletion_state === 'deleted') return 'sync-deleted'
+  return 'active'
 }
 
 export async function createQuickNote(
@@ -250,27 +254,52 @@ export async function updateQuickNote(
   id: string,
   input: QuickNoteUpdateInput,
 ): Promise<QuickNote> {
+  const database = spaceDBManager.current
+
+  return database.transaction(
+    'rw',
+    database.quickNotes,
+    database.outbox,
+    async () => {
+      const existing = await database.quickNotes.get(id)
+      if (!existing) {
+        throw new QuickNoteRepositoryError('not_found')
+      }
+
+      return updateQuickNoteInTransaction(database, existing, input)
+    },
+  )
+}
+
+/** @internal Call only from an rw transaction containing quickNotes and outbox. */
+export async function updateQuickNoteInTransaction(
+  database: PomodoroXIDB,
+  existing: CachedQuickNote,
+  input: QuickNoteUpdateInput,
+): Promise<QuickNote> {
   const patch = normalizeUpdateInput(input)
+  assertActiveForUpdate(stripSyncFields(existing))
+  const updatedAt = patch.updated_at ?? new Date().toISOString()
+  const row: CachedQuickNote = {
+    ...existing,
+    ...patch,
+    id: existing.id,
+    updated_at: updatedAt,
+    deletion_state: deletionStateFor(existing),
+    version: (existing.version ?? 1) + 1,
+    _dirty: true,
+  }
 
-  return runQuickNoteMutation({ action: 'update', entityId: id }, async () => {
-    const existing = await getExistingQuickNote(id)
-    assertActiveForUpdate(stripSyncFields(existing))
-
-    const updatedAt = patch.updated_at ?? new Date().toISOString()
-    const row: CachedQuickNote = {
-      ...existing,
-      ...patch,
-      id,
-      updated_at: updatedAt,
-      deletion_state: deletionStateFor(existing),
-      version: (existing.version ?? 1) + 1,
-      _dirty: true,
-    }
-
-    await db.quickNotes.put(row)
-    const note = stripSyncFields(row)
-    return { result: note, payload: note }
+  await database.quickNotes.put(row)
+  const note = stripSyncFields(row)
+  await runConfiguredQuickNoteOutbox(database, {
+    entityType: 'quickNote',
+    entityId: row.id,
+    action: 'update',
+    payload: note,
   })
+
+  return note
 }
 
 export async function moveQuickNoteToTrash(id: string): Promise<QuickNote> {
