@@ -417,6 +417,13 @@ export interface SyncMeta {
   value: string
 }
 
+/** H2-F4: materialized snapshot 恢复期间的 authoritative seen-id 暂存行。 */
+export interface SnapshotSeenEntity {
+  snapshotToken: string
+  tableName: string
+  entityId: string
+}
+
 // Sync engine state
 export interface SyncState {
   status: 'idle' | 'syncing' | 'error' | 'conflict' | 'infra-error'

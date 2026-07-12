@@ -11,10 +11,11 @@
 import type { AxiosInstance } from 'axios'
 import type { PomodoroXIDB } from '@/services/database'
 import { spaceApi } from '@/services/api'
-import { runPullLoop } from './pull-loop'
+import { runPullLoop, SnapshotRecoveryError } from './pull-loop'
 import { pushAllPending } from './push-batch'
 import {
   clearPendingAck,
+  clearSnapshotRecovery,
   ensureClientId,
   loadSyncMeta,
   touchLastSyncAt,
@@ -78,7 +79,7 @@ export class RealSyncEngine implements SyncEngine {
       async () => {
         if (this.destroyed) return
         const meta = await loadSyncMeta(this.db)
-        const isFull = meta.since === '' && meta.cursor == null
+        const isFull = meta.snapshotToken != null || (meta.since === '' && meta.cursor == null)
         await this.runSyncCycle(isFull)
       },
       () => this.scheduleSync(RESYNC_DELAY_MS),
@@ -264,6 +265,14 @@ export class RealSyncEngine implements SyncEngine {
   }
 
   private requiresFullRestart(err: unknown): boolean {
+    const localError = err as { name?: string; message?: string; recoveryAction?: string }
+    if (
+      err instanceof SnapshotRecoveryError
+      || localError?.name === 'SnapshotRecoveryError'
+      || localError?.recoveryAction === 'restart_full_sync'
+      || localError?.message?.startsWith('sync snapshot ')
+      || localError?.message === 'cursor v2 full response requires snapshot_token'
+    ) return true
     const response = (err as { response?: { status?: number; data?: { error_type?: string } } })
       ?.response
     return response?.status === 409 && (
@@ -316,7 +325,15 @@ export class RealSyncEngine implements SyncEngine {
         pullResult = await runPullLoop(this.db, this.api, { isFull })
       } catch (err) {
         if (this.requiresFullRestart(err)) {
-          pullResult = await runPullLoop(this.db, this.api, { isFull: true })
+          await clearSnapshotRecovery(this.db)
+          try {
+            pullResult = await runPullLoop(this.db, this.api, { isFull: true })
+          } catch (restartErr) {
+            if (this.requiresFullRestart(restartErr)) {
+              await clearSnapshotRecovery(this.db)
+            }
+            throw restartErr
+          }
         } else {
           throw err
         }

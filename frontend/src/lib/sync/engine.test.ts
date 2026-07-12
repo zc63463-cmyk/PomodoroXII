@@ -980,7 +980,7 @@ describe('RealSyncEngine', () => {
         }
         return ok({
           ...singlePageData(), next_cursor: 20, cursor_version: 2,
-          snapshot_token: 'snap-restarted', snapshot_offset: 0,
+          snapshot_token: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', snapshot_offset: 0,
         }, config)
       }
       if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
@@ -1026,6 +1026,101 @@ describe('RealSyncEngine', () => {
 
     expect(fullCalls).toBe(2)
     expect(engine.getStatus()).toBe('error')
+    engine.destroy()
+  })
+
+  it('EN33: 本地检测到 snapshot 损坏后清理旧恢复态并仅重启一次，ACK 前不 push', async () => {
+    db = await openTestDb()
+    const staleToken = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    await saveSyncMeta(db, {
+      snapshotToken: staleToken,
+      snapshotOffset: 1,
+      snapshotCursor: 20,
+      snapshotRecoveryVersion: 1,
+    })
+    await db.snapshotSeen.put({ snapshotToken: staleToken, tableName: 'tasks', entityId: 'old' })
+    await db.outbox.add({
+      entityType: 'task', entityId: 'pending', action: 'update', payload: '{}',
+      createdAt: Date.now(), synced: false,
+    } as never)
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(1))
+
+    const calls: Array<{ url: string; token?: unknown }> = []
+    let fullCalls = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      const params = config.params as Record<string, unknown> | undefined
+      calls.push({ url, token: params?.snapshot_token })
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/full')) {
+        fullCalls++
+        if (fullCalls === 1) {
+          throw {
+            response: { status: 409, data: { error_type: 'sync_snapshot_expired' }, config },
+            message: 'snapshot chunk is damaged', config, isAxiosError: true, name: 'AxiosError',
+          }
+        }
+        return ok({
+          ...cursorSinglePage(), next_cursor: 30,
+          snapshot_token: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', snapshot_offset: 0,
+        }, config)
+      }
+      if (url.includes('/sync/ack')) return ok({ ...ackResponse(config), ack_cursor: 30 }, config)
+      if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
+      return errResponse(404, config)
+    }
+
+    await engine.fullSync()
+
+    expect(calls.map((call) => call.url)).toEqual([
+      '/sync/clients', '/sync/full', '/sync/full', '/sync/ack', '/sync/push',
+    ])
+    expect(calls[1]?.token).toBe(staleToken)
+    expect(calls[2]?.token).toBeUndefined()
+    expect(await db.snapshotSeen.where('snapshotToken').equals(staleToken).count()).toBe(0)
+    expect((await loadSyncMeta(db)).pendingAckCursor).toBeNull()
+    expect(engine.getStatus()).toBe('idle')
+    engine.destroy()
+  })
+
+  it('EN34: 普通 sync 检测到 continuation 时优先恢复 full，不走增量 pull', async () => {
+    db = await openTestDb()
+    const token = 'abababab-abab-4bab-8bab-abababababab'
+    await saveSyncMeta(db, {
+      cursor: 10,
+      cursorVersion: 2,
+      snapshotToken: token,
+      snapshotOffset: 1,
+      snapshotCursor: 20,
+      snapshotRecoveryVersion: 1,
+    })
+    await db.snapshotSeen.put({ snapshotToken: token, tableName: 'tasks', entityId: 'page-one' })
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
+
+    const calls: Array<{ url: string; token?: unknown; offset?: unknown }> = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      const params = config.params as Record<string, unknown> | undefined
+      calls.push({ url, token: params?.snapshot_token, offset: params?.snapshot_offset })
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/full')) return ok({
+        ...cursorSinglePage(), next_cursor: 20, snapshot_token: token, snapshot_offset: 2,
+      }, config)
+      if (url.includes('/sync/ack')) return ok({ ...ackResponse(config), ack_cursor: 20 }, config)
+      if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
+      return errResponse(404, config)
+    }
+
+    await engine.sync()
+
+    expect(calls.map((call) => call.url)).toEqual([
+      '/sync/clients', '/sync/full', '/sync/ack',
+    ])
+    expect(calls[1]?.token).toBe(token)
+    expect(calls[1]?.offset).toBe(1)
+    expect((await loadSyncMeta(db)).snapshotToken).toBeNull()
     engine.destroy()
   })
 
