@@ -508,7 +508,7 @@ function assertNoExternalCss(tokens) {
     const uncommentedCss = css.replace(/\/\*[\s\S]*?\*\//g, '');
     assert.doesNotMatch(
       uncommentedCss,
-      /&(?:#(?:x[0-9a-f]+|[0-9]+)|[a-z][a-z0-9]+);/i,
+      /&(?:#(?:x[0-9a-f]+|[0-9]+);?|[a-z][a-z0-9]+;)/i,
       'HTML entities are not allowed in CSS',
     );
     assert.doesNotMatch(
@@ -726,6 +726,8 @@ function verifyHardeningSelfTests() {
     '.fixture { background: url(https://example.invalid/remote.png); }',
     String.raw`@media print { .fixture { background: u\72l(file:///C:/print.png); } }`,
     '.fixture:hover { background: u&#114;l(file:///C:/hover.png); }',
+    '.fixture:hover { background: u&#114l(file:///C:/decimal-no-semicolon.png); }',
+    '.fixture:hover { background: u&#x72l(file:///C:/hex-no-semicolon.png); }',
   ];
   for (const css of rejectedCssResources) {
     const cssTokens = tokenizeStartTags(`<style>${css}</style>`);
@@ -733,6 +735,18 @@ function verifyHardeningSelfTests() {
       () => assertNoExternalCss(cssTokens),
       /CSS imports are not allowed|CSS resource dependency is not allowed|HTML entities are not allowed in CSS/,
       `CSS dependency must be rejected: ${css}`,
+    );
+  }
+
+  const allowedCssText = [
+    '.fixture::before { content: "R&D #114 line"; color: #114477; }',
+    '.fixture::before { content: "u&114l(file:///not-an-entity)"; }',
+  ];
+  for (const css of allowedCssText) {
+    const cssTokens = tokenizeStartTags(`<style>${css}</style>`);
+    assert.doesNotThrow(
+      () => assertNoExternalCss(cssTokens),
+      `ordinary CSS text must remain allowed: ${css}`,
     );
   }
 
