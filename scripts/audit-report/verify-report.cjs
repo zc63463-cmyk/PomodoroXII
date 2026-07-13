@@ -76,20 +76,13 @@ const requiredFacts = [
   '588.35s',
   '541 passed',
   '1 failed',
-  '11',
-  '156',
-  '24',
-  '653',
-  '2',
-  '476',
-  '12',
-  '526',
-  '1',
-  '701',
-  '3',
-  '648',
-  '2',
-  '176',
+  '11,156',
+  '24,653',
+  '2,476',
+  '12,526',
+  '1,701',
+  '3,648',
+  '2,176',
   '423.7 MiB',
   '7 个占位',
   '14 个 no-op',
@@ -155,18 +148,20 @@ function verifyStatic(mode = 'all') {
   }
 
   const html = fs.readFileSync(reportPath, 'utf8');
-  const allTags = html.match(/<[a-z][^>]*>/gi) || [];
   const htmlTag = tagsNamed(html, 'html')[0];
 
   assert.match(html, /^\uFEFF?\s*<!doctype html>/i, 'HTML doctype is required');
   assert.ok(htmlTag, 'html element is required');
   assert.equal(attributeValue(htmlTag, 'lang'), 'zh-CN', 'html lang must be zh-CN');
   assert.ok(
-    allTags.some((tag) => hasAttribute(tag, 'data-report-shell')),
-    'data-report-shell is required',
+    tagsNamed(html, 'main').some(
+      (tag) =>
+        hasAttribute(tag, 'data-report-shell') &&
+        attributeValue(tag, 'data-local-commit') === '65e2382' &&
+        attributeValue(tag, 'data-remote-commit') === '1e4f0fc',
+    ),
+    'main report shell contract is required',
   );
-  assert.ok(html.includes('65e2382'), 'local revision 65e2382 is required');
-  assert.ok(html.includes('1e4f0fc'), 'remote revision 1e4f0fc is required');
 
   const scriptTags = tagsNamed(html, 'script');
   const imageTags = tagsNamed(html, 'img');
