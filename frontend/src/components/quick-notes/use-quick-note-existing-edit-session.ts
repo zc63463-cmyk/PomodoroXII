@@ -96,6 +96,10 @@ export interface QuickNoteExistingEditSessionController {
   save(options?: {
     closeAfterSave?: boolean
   }): Promise<QuickNoteExistingEditSaveResult>
+  cancel(): Promise<QuickNoteExistingEditCancelResult>
+  resolveConflict(
+    strategy: 'keep-local' | 'use-remote' | 'merge',
+  ): Promise<QuickNoteExistingEditConflictResult>
   getSnapshot(): QuickNoteExistingEditState
   subscribe(listener: () => void): () => void
   observeProjection(input: ExistingEditProjection): void
@@ -143,11 +147,40 @@ interface ExistingEditSaveLaneCapture extends ExistingEditCheckpointCapture {
   owners: readonly ExistingEditRowOwner[]
 }
 
-interface ExistingEditSaveFlight {
+interface ExistingEditSaveAttempt {
   capture: ExistingEditSaveLaneCapture
   closeAfterSave: boolean
+}
+
+interface ExistingEditSaveFlight extends ExistingEditSaveAttempt {
   promise: Promise<QuickNoteExistingEditSaveResult>
 }
+
+interface CleanupPendingReceipt {
+  editId: string
+  revision: number
+  content: string
+  owners: readonly ExistingEditRowOwner[]
+  note: QuickNote
+  closeAfterCleanup: boolean
+  visibility: 'refreshed' | 'pending'
+  cleanupPending: boolean
+}
+
+interface ExistingEditCancelFlight {
+  kind: 'cancel'
+  promise: Promise<QuickNoteExistingEditCancelResult>
+}
+
+interface ExistingEditConflictFlight {
+  kind: 'resolve-conflict'
+  strategy: 'keep-local' | 'use-remote' | 'merge'
+  promise: Promise<QuickNoteExistingEditConflictResult>
+}
+
+type ExistingEditTerminalFlight =
+  | ExistingEditCancelFlight
+  | ExistingEditConflictFlight
 
 const RESTORING_STATE: QuickNoteExistingEditState = {
   phase: 'restoring',
@@ -245,6 +278,10 @@ export function createQuickNoteExistingEditSessionController(
   let checkpointTimer: ReturnType<typeof setTimeout> | null = null
   let autosaveTimer: ReturnType<typeof setTimeout> | null = null
   let saveFlight: ExistingEditSaveFlight | null = null
+  const saveFlights = new Set<ExistingEditSaveFlight>()
+  let cleanupReceipt: CleanupPendingReceipt | null = null
+  let terminalFlight: ExistingEditTerminalFlight | null = null
+  let unavailableLifecycle: QuickNoteLifecycleState | 'missing' | null = null
   let snapshot = RESTORING_STATE
 
   function append<T>(work: () => Promise<T>): Promise<T> {
@@ -351,10 +388,50 @@ export function createQuickNoteExistingEditSessionController(
     ))
   }
 
+  function hasCurrentDurableRecoveryOwner(): boolean {
+    return identity !== null && recoveryOwners.some((owner) => (
+      owner.kind === 'v1'
+      && owner.editId === identity?.editId
+      && owner.revision === identity.revision
+    ))
+  }
+
+  function isCurrentReceipt(receipt: CleanupPendingReceipt): boolean {
+    return (
+      active
+      && identity?.editId === receipt.editId
+      && identity.revision === receipt.revision
+      && snapshot.draft === receipt.content
+    )
+  }
+
+  function latestDurability(
+    capture?: ExistingEditCheckpointCapture,
+    captureDurability?: ExistingEditDurability,
+  ): ExistingEditDurability {
+    if (capture && isLatestAcceptedCapture(capture) && captureDurability) {
+      return captureDurability
+    }
+    return snapshot.durability
+  }
+
+  function closeCurrentEdit(): void {
+    cancelTrailingTimers()
+    identity = null
+    blockedRecoveryOwner = null
+    cleanupReceipt = null
+    unavailableLifecycle = null
+    resetRecoveryOwners()
+    publish(IDLE_STATE)
+  }
+
   function activate(note: QuickNote): void {
     if (!active) return
     cancelTrailingTimers()
     saveFlight = null
+    cleanupReceipt = null
+    terminalFlight = null
+    unavailableLifecycle = null
     blockedRecoveryOwner = null
     resetRecoveryOwners()
     identity = {
@@ -379,6 +456,9 @@ export function createQuickNoteExistingEditSessionController(
     if (!isCurrentRestore(generation)) return
     cancelTrailingTimers()
     saveFlight = null
+    cleanupReceipt = null
+    terminalFlight = null
+    unavailableLifecycle = null
     blockedRecoveryOwner = null
     identity = null
     resetRecoveryOwners()
@@ -397,10 +477,13 @@ export function createQuickNoteExistingEditSessionController(
     phase: 'dirty' | 'conflict' | 'target-unavailable',
     editingNote: QuickNote,
     conflict: QuickNoteDraftConflict | null,
+    lifecycle: QuickNoteLifecycleState | 'missing' | null = null,
   ): void {
     if (!isCurrentRestore(generation)) return
     pendingStart = null
     blockedRecoveryOwner = null
+    cleanupReceipt = null
+    unavailableLifecycle = lifecycle
     resetRecoveryOwners(loaded.owner)
     identity = { ...makeIdentity(loaded.snapshot), baseGeneration: 0 }
     publish({
@@ -420,6 +503,8 @@ export function createQuickNoteExistingEditSessionController(
     if (!isCurrentRestore(generation)) return
     pendingStart = null
     identity = null
+    cleanupReceipt = null
+    unavailableLifecycle = null
     resetRecoveryOwners()
     blockedRecoveryOwner = owner
     publish({
@@ -439,6 +524,8 @@ export function createQuickNoteExistingEditSessionController(
     if (!isCurrentRestore(generation)) return
     pendingStart = null
     blockedRecoveryOwner = loaded.owner
+    cleanupReceipt = null
+    unavailableLifecycle = loaded.lifecycle
     resetRecoveryOwners(loaded.owner)
     identity = { ...makeIdentity(loaded.snapshot), baseGeneration: 0 }
     publish({
@@ -531,6 +618,7 @@ export function createQuickNoteExistingEditSessionController(
         'target-unavailable',
         loaded.note ?? makeMissingTargetDisplayNote(recovered),
         null,
+        loaded.lifecycle,
       )
       return
     }
@@ -572,6 +660,8 @@ export function createQuickNoteExistingEditSessionController(
           pendingStart = null
           blockedRecoveryOwner = null
           identity = null
+          cleanupReceipt = null
+          unavailableLifecycle = null
           publish({
             phase: 'failed',
             durability: 'unknown',
@@ -645,7 +735,11 @@ export function createQuickNoteExistingEditSessionController(
         draft: capture.content,
         updatedAt: nowIso(),
       }
-      if (snapshot.phase !== 'saving') {
+      if (
+        snapshot.phase !== 'saving'
+        && snapshot.phase !== 'conflict'
+        && snapshot.phase !== 'target-unavailable'
+      ) {
         publish({
           ...snapshot,
           phase: 'checkpointing',
@@ -663,11 +757,14 @@ export function createQuickNoteExistingEditSessionController(
           && snapshot.phase !== 'saving'
         ) {
           const issue = createIssue('checkpoint-failed', 'memory-only')
+          const preserveDomainPhase =
+            snapshot.phase === 'conflict'
+            || snapshot.phase === 'target-unavailable'
           publish({
             ...snapshot,
-            phase: 'failed',
+            phase: preserveDomainPhase ? snapshot.phase : 'failed',
             durability: 'memory-only',
-            issue,
+            issue: preserveDomainPhase ? null : issue,
           })
         }
         return
@@ -682,9 +779,15 @@ export function createQuickNoteExistingEditSessionController(
         isCurrentCapture(capture)
         && identity?.baseGeneration === baseGeneration
       ) {
+        const phase =
+          snapshot.phase === 'saving'
+          || snapshot.phase === 'conflict'
+          || snapshot.phase === 'target-unavailable'
+            ? snapshot.phase
+            : 'dirty'
         publish({
           ...snapshot,
-          phase: snapshot.phase === 'saving' ? 'saving' : 'dirty',
+          phase,
           durability: 'recovery-durable',
           issue: null,
         })
@@ -724,6 +827,8 @@ export function createQuickNoteExistingEditSessionController(
       && snapshot.phase !== 'failed'
     ) return
     identity = { ...identity, revision: identity.revision + 1 }
+    cleanupReceipt = null
+    unavailableLifecycle = null
     const capture: ExistingEditCheckpointCapture = {
       epoch,
       editId: identity.editId,
@@ -741,8 +846,65 @@ export function createQuickNoteExistingEditSessionController(
     })
   }
 
+  async function preserveSuccessorAfterCleanup(
+    capture: ExistingEditCheckpointCapture,
+  ): Promise<void> {
+    resetRecoveryOwners()
+    if (!hasNewerSameEditRevision(capture) || identity === null) return
+
+    const successorBaseGeneration = identity.baseGeneration
+    const successor: QuickNoteExistingEditSnapshotV1 = {
+      version: 1,
+      editId: identity.editId,
+      revision: identity.revision,
+      noteId: identity.noteId,
+      baseContent: identity.baseContent,
+      baseUpdatedAt: identity.baseUpdatedAt,
+      draft: snapshot.draft,
+      updatedAt: nowIso(),
+    }
+    const successorCapture: ExistingEditCheckpointCapture = {
+      epoch: capture.epoch,
+      editId: successor.editId,
+      revision: successor.revision,
+      content: successor.draft,
+    }
+    try {
+      await adapter.checkpoint(successor)
+      resetRecoveryOwners({
+        kind: 'v1',
+        editId: successor.editId,
+        revision: successor.revision,
+      })
+      if (
+        isCurrentCapture(successorCapture)
+        && identity?.baseGeneration === successorBaseGeneration
+      ) {
+        publish({
+          ...snapshot,
+          phase: 'dirty',
+          durability: 'recovery-durable',
+          issue: null,
+        })
+      }
+    } catch {
+      if (
+        isCurrentCapture(successorCapture)
+        && identity?.baseGeneration === successorBaseGeneration
+      ) {
+        const issue = createIssue('checkpoint-failed', 'memory-only')
+        publish({
+          ...snapshot,
+          phase: 'failed',
+          durability: 'memory-only',
+          issue,
+        })
+      }
+    }
+  }
+
   async function runSave(
-    flight: ExistingEditSaveFlight,
+    flight: ExistingEditSaveAttempt,
   ): Promise<QuickNoteExistingEditSaveResult> {
     const { capture } = flight
     let baseContent = capture.baseContent
@@ -782,6 +944,16 @@ export function createQuickNoteExistingEditSessionController(
         await adapter.checkpoint(recovery)
         resetRecoveryOwners(attemptedOwner)
         captureRecoveryDurable = true
+        if (
+          isCurrentCapture(capture)
+          && snapshot.phase === 'saving'
+          && snapshot.durability !== 'recovery-durable'
+        ) {
+          publish({
+            ...snapshot,
+            durability: 'recovery-durable',
+          })
+        }
       } catch {
         checkpointIssue = createIssue('checkpoint-failed', 'memory-only')
       }
@@ -815,12 +987,9 @@ export function createQuickNoteExistingEditSessionController(
       const ownDurability: ExistingEditDurability = captureRecoveryDurable
         ? 'recovery-durable'
         : 'memory-only'
-      const issueDurability = isLatestAcceptedCapture(capture)
-        ? ownDurability
-        : snapshot.durability
       const issue = createIssue(
         checkpointIssue ? 'checkpoint-failed' : 'entity-save-failed',
-        issueDurability,
+        latestDurability(capture, ownDurability),
       )
       if (isCurrentCapture(capture)) {
         publish({
@@ -843,6 +1012,7 @@ export function createQuickNoteExistingEditSessionController(
         remoteContent: update.note.content,
       }
       if (isCurrentCapture(capture)) {
+        unavailableLifecycle = null
         publish({
           ...snapshot,
           phase: 'conflict',
@@ -858,6 +1028,7 @@ export function createQuickNoteExistingEditSessionController(
 
     if (update.kind === 'unavailable') {
       if (isCurrentCapture(capture)) {
+        unavailableLifecycle = update.lifecycle
         publish({
           ...snapshot,
           phase: 'target-unavailable',
@@ -872,6 +1043,7 @@ export function createQuickNoteExistingEditSessionController(
 
     const newerRevisionAtCommit = hasNewerSameEditRevision(capture)
     if (isSameEdit(capture) && identity !== null) {
+      unavailableLifecycle = null
       identity = {
         ...identity,
         baseContent: update.note.content,
@@ -901,77 +1073,18 @@ export function createQuickNoteExistingEditSessionController(
 
     let cleanupResult: 'cleared' | 'absent' | 'different-edit' | 'skipped' =
       'skipped'
-    let cleanupIssue: QuickNoteExistingEditIssue | null = null
+    let cleanupFailed = false
     const newerRevisionBeforeCleanup = hasNewerSameEditRevision(capture)
     if (!newerRevisionBeforeCleanup) {
       try {
         cleanupResult = await adapter.clearIfOwned(cleanupOwners)
-        if (cleanupResult === 'different-edit') {
-          cleanupIssue = createIssue(
-            'recovery-cleanup-failed',
-            'entity-durable',
-          )
-        }
+        cleanupFailed = cleanupResult === 'different-edit'
       } catch {
-        cleanupIssue = createIssue(
-          'recovery-cleanup-failed',
-          'entity-durable',
-        )
+        cleanupFailed = true
       }
     }
     if (cleanupResult === 'cleared' || cleanupResult === 'absent') {
-      resetRecoveryOwners()
-      if (hasNewerSameEditRevision(capture) && identity !== null) {
-        const successorBaseGeneration = identity.baseGeneration
-        const successor: QuickNoteExistingEditSnapshotV1 = {
-          version: 1,
-          editId: identity.editId,
-          revision: identity.revision,
-          noteId: identity.noteId,
-          baseContent: identity.baseContent,
-          baseUpdatedAt: identity.baseUpdatedAt,
-          draft: snapshot.draft,
-          updatedAt: nowIso(),
-        }
-        const successorCapture: ExistingEditCheckpointCapture = {
-          epoch: capture.epoch,
-          editId: successor.editId,
-          revision: successor.revision,
-          content: successor.draft,
-        }
-        try {
-          await adapter.checkpoint(successor)
-          resetRecoveryOwners({
-            kind: 'v1',
-            editId: successor.editId,
-            revision: successor.revision,
-          })
-          if (
-            isCurrentCapture(successorCapture)
-            && identity?.baseGeneration === successorBaseGeneration
-          ) {
-            publish({
-              ...snapshot,
-              phase: 'dirty',
-              durability: 'recovery-durable',
-              issue: null,
-            })
-          }
-        } catch {
-          if (
-            isCurrentCapture(successorCapture)
-            && identity?.baseGeneration === successorBaseGeneration
-          ) {
-            const issue = createIssue('checkpoint-failed', 'memory-only')
-            publish({
-              ...snapshot,
-              phase: 'failed',
-              durability: 'memory-only',
-              issue,
-            })
-          }
-        }
-      }
+      await preserveSuccessorAfterCleanup(capture)
     }
 
     let visibility: 'refreshed' | 'pending' = 'pending'
@@ -985,12 +1098,28 @@ export function createQuickNoteExistingEditSessionController(
       }
     }
 
-    if (cleanupIssue) {
+    const receipt: CleanupPendingReceipt = {
+      editId: capture.editId,
+      revision: capture.revision,
+      content: capture.content,
+      owners: cleanupOwners,
+      note: update.note,
+      closeAfterCleanup: flight.closeAfterSave,
+      visibility,
+      cleanupPending: cleanupFailed,
+    }
+
+    if (cleanupFailed) {
+      cleanupReceipt = receipt
+      const cleanupIssue = createIssue(
+        'recovery-cleanup-failed',
+        latestDurability(capture, 'entity-durable'),
+      )
       if (isCurrentCapture(capture)) {
         publish({
           ...snapshot,
           phase: 'failed',
-          durability: 'entity-durable',
+          durability: cleanupIssue.durability,
           editingNote: update.note,
           draft: capture.content,
           conflict: null,
@@ -999,6 +1128,12 @@ export function createQuickNoteExistingEditSessionController(
       }
       return { kind: 'failed', issue: cleanupIssue }
     }
+
+    if (projectionIssue) cleanupReceipt = receipt
+    else if (
+      cleanupReceipt?.editId === capture.editId
+      && cleanupReceipt.revision === capture.revision
+    ) cleanupReceipt = null
 
     if (isCurrentCapture(capture) && !flight.closeAfterSave) {
       publish({
@@ -1016,14 +1151,95 @@ export function createQuickNoteExistingEditSessionController(
       && flight.closeAfterSave
       && (cleanupResult === 'cleared' || cleanupResult === 'absent')
     ) {
-      cancelTrailingTimers()
-      identity = null
-      blockedRecoveryOwner = null
-      resetRecoveryOwners()
-      publish(IDLE_STATE)
+      closeCurrentEdit()
     }
 
     return { kind: 'saved', note: update.note, visibility }
+  }
+
+  function captureSaveLane(): ExistingEditSaveLaneCapture | null {
+    if (!active || identity === null) return null
+    return {
+      epoch,
+      editId: identity.editId,
+      revision: identity.revision,
+      noteId: identity.noteId,
+      baseContent: identity.baseContent,
+      baseUpdatedAt: identity.baseUpdatedAt,
+      baseGeneration: identity.baseGeneration,
+      content: snapshot.draft,
+      owners: [...recoveryOwners],
+    }
+  }
+
+  function trackSaveFlight(flight: ExistingEditSaveFlight): void {
+    saveFlight = flight
+    saveFlights.add(flight)
+    void flight.promise.then(
+      () => {
+        saveFlights.delete(flight)
+        if (saveFlight === flight) saveFlight = null
+      },
+      () => {
+        saveFlights.delete(flight)
+        if (saveFlight === flight) saveFlight = null
+      },
+    )
+  }
+
+  async function runCleanupReceipt(
+    flight: ExistingEditSaveAttempt,
+    receipt: CleanupPendingReceipt,
+  ): Promise<QuickNoteExistingEditSaveResult> {
+    receipt.closeAfterCleanup ||= flight.closeAfterSave
+    let cleanupResult: 'cleared' | 'absent' | 'different-edit'
+    try {
+      cleanupResult = await adapter.clearIfOwned(receipt.owners)
+    } catch {
+      const issue = createIssue(
+        'recovery-cleanup-failed',
+        latestDurability(flight.capture, 'entity-durable'),
+      )
+      return { kind: 'failed', issue }
+    }
+
+    if (cleanupResult === 'different-edit') {
+      const issue = createIssue(
+        'recovery-cleanup-failed',
+        latestDurability(flight.capture, 'entity-durable'),
+      )
+      return { kind: 'failed', issue }
+    }
+
+    receipt.cleanupPending = false
+    await preserveSuccessorAfterCleanup(flight.capture)
+    if (cleanupReceipt === receipt) {
+      cleanupReceipt = receipt.visibility === 'pending' ? receipt : null
+    }
+
+    if (isCurrentReceipt(receipt)) {
+      if (receipt.closeAfterCleanup || flight.closeAfterSave) {
+        closeCurrentEdit()
+      } else {
+        publish({
+          ...snapshot,
+          phase: 'saved',
+          durability: 'entity-durable',
+          editingNote: receipt.note,
+          draft: receipt.content,
+          conflict: null,
+          issue: receipt.visibility === 'pending'
+            ? createIssue('projection-failed', 'entity-durable')
+            : null,
+        })
+      }
+    }
+
+    return {
+      kind: 'saved',
+      note: receipt.note,
+      visibility: receipt.visibility,
+    }
   }
 
   function save(options: {
@@ -1035,6 +1251,13 @@ export function createQuickNoteExistingEditSessionController(
       return Promise.resolve({ kind: 'busy', operation: 'save' })
     }
 
+    if (terminalFlight?.kind === 'cancel') {
+      return Promise.resolve({ kind: 'busy', operation: 'cancel' })
+    }
+    if (terminalFlight?.kind === 'resolve-conflict') {
+      return Promise.resolve({ kind: 'busy', operation: 'save' })
+    }
+
     if (
       saveFlight
       && saveFlight.capture.epoch === epoch
@@ -1043,7 +1266,45 @@ export function createQuickNoteExistingEditSessionController(
       && saveFlight.capture.content === snapshot.draft
     ) {
       saveFlight.closeAfterSave ||= closeAfterSave
+      if (cleanupReceipt && isCurrentReceipt(cleanupReceipt)) {
+        cleanupReceipt.closeAfterCleanup ||= closeAfterSave
+      }
       return saveFlight.promise
+    }
+
+    if (cleanupReceipt && isCurrentReceipt(cleanupReceipt)) {
+      cleanupReceipt.closeAfterCleanup ||= closeAfterSave
+      if (!cleanupReceipt.cleanupPending) {
+        const receipt = cleanupReceipt
+        if (receipt.closeAfterCleanup) closeCurrentEdit()
+        return Promise.resolve({
+          kind: 'saved',
+          note: receipt.note,
+          visibility: receipt.visibility,
+        })
+      }
+
+      const receipt = cleanupReceipt
+      const capture = captureSaveLane()
+      if (!capture) {
+        return Promise.resolve({ kind: 'busy', operation: 'save' })
+      }
+      const promise = append(() => runCleanupReceipt(flight, receipt))
+      const flight: ExistingEditSaveFlight = {
+        capture,
+        closeAfterSave,
+        promise,
+      }
+      trackSaveFlight(flight)
+      return promise
+    }
+    cleanupReceipt = null
+
+    if (snapshot.phase === 'target-unavailable' && unavailableLifecycle) {
+      return Promise.resolve({
+        kind: 'unavailable',
+        lifecycle: unavailableLifecycle,
+      })
     }
 
     if (snapshot.phase === 'saved') {
@@ -1052,9 +1313,7 @@ export function createQuickNoteExistingEditSessionController(
         return Promise.resolve({ kind: 'empty' })
       }
       if (closeAfterSave) {
-        identity = null
-        resetRecoveryOwners()
-        publish(IDLE_STATE)
+        closeCurrentEdit()
       }
       return Promise.resolve({
         kind: 'saved',
@@ -1063,6 +1322,108 @@ export function createQuickNoteExistingEditSessionController(
       })
     }
 
+    const capture = captureSaveLane()
+    if (!capture) {
+      return Promise.resolve({ kind: 'busy', operation: 'save' })
+    }
+    const promise = append(() => runSave(flight))
+    const flight: ExistingEditSaveFlight = {
+      capture,
+      closeAfterSave,
+      promise,
+    }
+    trackSaveFlight(flight)
+    if (isCurrentCapture(capture)) {
+      publish({
+        ...snapshot,
+        phase: 'saving',
+        issue: null,
+      })
+    }
+    return promise
+  }
+
+  async function runCancel(): Promise<QuickNoteExistingEditCancelResult> {
+    if (!active || identity === null) return { kind: 'cancelled' }
+    const capture: ExistingEditCheckpointCapture = {
+      epoch,
+      editId: identity.editId,
+      revision: identity.revision,
+      content: snapshot.draft,
+    }
+    const receiptOwners = cleanupReceipt?.editId === capture.editId
+      ? cleanupReceipt.owners
+      : []
+    const owners = mergeOwners([...recoveryOwners], receiptOwners)
+    let cleanupResult: 'cleared' | 'absent' | 'different-edit'
+    try {
+      cleanupResult = await adapter.clearIfOwned(owners)
+    } catch {
+      const issue = createIssue(
+        'recovery-cleanup-failed',
+        latestDurability(),
+      )
+      return { kind: 'failed', issue }
+    }
+
+    if (cleanupResult === 'different-edit') {
+      const issue = createIssue(
+        'recovery-cleanup-failed',
+        latestDurability(),
+      )
+      return { kind: 'failed', issue }
+    }
+
+    if (cleanupReceipt?.editId === capture.editId) cleanupReceipt = null
+    await preserveSuccessorAfterCleanup(capture)
+    if (isCurrentCapture(capture)) closeCurrentEdit()
+    return { kind: 'cancelled' }
+  }
+
+  function cancel(): Promise<QuickNoteExistingEditCancelResult> {
+    cancelTrailingTimers()
+    if (terminalFlight?.kind === 'cancel') return terminalFlight.promise
+    if (saveFlights.size > 0 || terminalFlight?.kind === 'resolve-conflict') {
+      return Promise.resolve({ kind: 'busy', operation: 'save' })
+    }
+    if (!active || identity === null) {
+      return Promise.resolve({ kind: 'cancelled' })
+    }
+
+    const promise = append(runCancel)
+    const flight: ExistingEditCancelFlight = {
+      kind: 'cancel',
+      promise,
+    }
+    terminalFlight = flight
+    void promise.then(
+      () => {
+        if (terminalFlight === flight) terminalFlight = null
+      },
+      () => {
+        if (terminalFlight === flight) terminalFlight = null
+      },
+    )
+    return promise
+  }
+
+  function preserveCurrentConflict(): QuickNoteExistingEditConflictResult {
+    if (snapshot.conflict) {
+      return { kind: 'conflict', conflict: snapshot.conflict }
+    }
+    if (unavailableLifecycle) {
+      return { kind: 'unavailable', lifecycle: unavailableLifecycle }
+    }
+    return {
+      kind: 'failed',
+      issue: createIssue('entity-save-failed', snapshot.durability),
+    }
+  }
+
+  async function runConflictResolution(
+    strategy: 'keep-local' | 'use-remote' | 'merge',
+  ): Promise<QuickNoteExistingEditConflictResult> {
+    if (!active || identity === null) return preserveCurrentConflict()
     const capture: ExistingEditSaveLaneCapture = {
       epoch,
       editId: identity.editId,
@@ -1072,31 +1433,273 @@ export function createQuickNoteExistingEditSessionController(
       baseUpdatedAt: identity.baseUpdatedAt,
       baseGeneration: identity.baseGeneration,
       content: snapshot.draft,
-      owners: [...recoveryOwners],
+      owners: mergeOwners(
+        [...recoveryOwners],
+        cleanupReceipt?.editId === identity.editId
+          ? cleanupReceipt.owners
+          : [],
+      ),
     }
-    const promise = append(() => runSave(flight))
-    const flight: ExistingEditSaveFlight = {
-      capture,
-      closeAfterSave,
-      promise,
+    let target: Awaited<ReturnType<
+      QuickNoteExistingEditStorageAdapter['readTarget']
+    >>
+    try {
+      target = await adapter.readTarget(capture.noteId)
+    } catch {
+      return {
+        kind: 'failed',
+        issue: createIssue('entity-save-failed', latestDurability()),
+      }
     }
-    saveFlight = flight
-    if (isCurrentCapture(capture)) {
+
+    const lifecycle = target.lifecycle === 'active' && target.note === null
+      ? 'missing'
+      : target.lifecycle
+    if (lifecycle !== 'active' || target.note === null) {
+      unavailableLifecycle = lifecycle
+      return { kind: 'unavailable', lifecycle }
+    }
+    const remote = target.note
+
+    if (strategy === 'use-remote') {
+      let cleanupResult: 'cleared' | 'absent' | 'different-edit'
+      try {
+        cleanupResult = await adapter.clearIfOwned(capture.owners)
+      } catch {
+        return {
+          kind: 'failed',
+          issue: createIssue('recovery-cleanup-failed', latestDurability()),
+        }
+      }
+      if (cleanupResult === 'different-edit') {
+        return {
+          kind: 'failed',
+          issue: createIssue('recovery-cleanup-failed', latestDurability()),
+        }
+      }
+
+      cleanupReceipt = null
+      await preserveSuccessorAfterCleanup(capture)
+      if (isCurrentCapture(capture) && identity !== null) {
+        let projectionIssue: QuickNoteExistingEditIssue | null = null
+        try {
+          onSaved(remote)
+        } catch {
+          projectionIssue = createIssue('projection-failed', 'entity-durable')
+        }
+        identity = {
+          ...identity,
+          baseContent: remote.content,
+          baseUpdatedAt: remote.updated_at,
+          baseGeneration: identity.baseGeneration + 1,
+        }
+        unavailableLifecycle = null
+        publish({
+          phase: 'saved',
+          durability: 'entity-durable',
+          editingNote: remote,
+          draft: remote.content,
+          conflict: null,
+          issue: projectionIssue,
+        })
+      }
+      return { kind: 'resolved', strategy }
+    }
+
+    if (strategy === 'merge') {
+      if (!isCurrentCapture(capture) || identity === null) {
+        return preserveCurrentConflict()
+      }
+      const merged = `${capture.content.trimEnd()}\n\n--- 远端版本 ---\n${remote.content.trim()}`
+      identity = {
+        ...identity,
+        revision: identity.revision + 1,
+        baseContent: remote.content,
+        baseUpdatedAt: remote.updated_at,
+        baseGeneration: identity.baseGeneration + 1,
+      }
+      cleanupReceipt = null
+      unavailableLifecycle = null
+      const mergedCapture: ExistingEditCheckpointCapture = {
+        epoch,
+        editId: identity.editId,
+        revision: identity.revision,
+        content: merged,
+      }
+      scheduleTrailingWork(mergedCapture)
       publish({
-        ...snapshot,
-        phase: 'saving',
+        phase: 'dirty',
+        durability: 'memory-only',
+        editingNote: remote,
+        draft: merged,
+        conflict: null,
         issue: null,
       })
+      return { kind: 'resolved', strategy }
     }
+
+    if (!isCurrentCapture(capture) || identity === null) {
+      return preserveCurrentConflict()
+    }
+    identity = {
+      ...identity,
+      baseContent: remote.content,
+      baseUpdatedAt: remote.updated_at,
+      baseGeneration: identity.baseGeneration + 1,
+    }
+    unavailableLifecycle = null
+    publish({
+      ...snapshot,
+      phase: 'dirty',
+      editingNote: remote,
+      conflict: null,
+      issue: null,
+    })
+    const keepLocalCapture = captureSaveLane()
+    if (!keepLocalCapture) return preserveCurrentConflict()
+    const saveResult = await runSave({
+      capture: keepLocalCapture,
+      closeAfterSave: false,
+    })
+    switch (saveResult.kind) {
+      case 'saved':
+      case 'empty':
+        return { kind: 'resolved', strategy }
+      case 'conflict':
+        return saveResult
+      case 'unavailable':
+        return saveResult
+      case 'failed':
+        return saveResult
+      case 'busy':
+        return {
+          kind: 'failed',
+          issue: createIssue('entity-save-failed', snapshot.durability),
+        }
+    }
+  }
+
+  function resolveConflict(
+    strategy: 'keep-local' | 'use-remote' | 'merge',
+  ): Promise<QuickNoteExistingEditConflictResult> {
+    cancelTrailingTimers()
+    if (
+      terminalFlight?.kind === 'resolve-conflict'
+      && terminalFlight.strategy === strategy
+    ) return terminalFlight.promise
+    if (terminalFlight !== null || saveFlights.size > 0) {
+      return Promise.resolve(preserveCurrentConflict())
+    }
+    if (!active || identity === null) {
+      return Promise.resolve(preserveCurrentConflict())
+    }
+
+    const promise = append(() => runConflictResolution(strategy))
+    const flight: ExistingEditConflictFlight = {
+      kind: 'resolve-conflict',
+      strategy,
+      promise,
+    }
+    terminalFlight = flight
     void promise.then(
       () => {
-        if (saveFlight === flight) saveFlight = null
+        if (terminalFlight === flight) terminalFlight = null
       },
       () => {
-        if (saveFlight === flight) saveFlight = null
+        if (terminalFlight === flight) terminalFlight = null
       },
     )
     return promise
+  }
+
+  function observeProjection(input: ExistingEditProjection): void {
+    if (!active || identity === null) return
+    const noteId = identity.noteId
+    const activeNote = input.quickNotes.find((note) => note.id === noteId)
+    const trashedNote = input.trashedQuickNotes.find(
+      (note) => note.id === noteId,
+    )
+    const recordedLifecycle = input.lifecycleStateById[noteId]
+    const lifecycle: QuickNoteLifecycleState | 'missing' = activeNote
+      ? 'active'
+      : trashedNote
+        ? recordedLifecycle ?? 'trashed'
+        : recordedLifecycle ?? 'missing'
+
+    if (lifecycle === 'active' && !activeNote) return
+    if (lifecycle === 'active' && activeNote) {
+      const baseChanged =
+        activeNote.content !== identity.baseContent
+        || activeNote.updated_at !== identity.baseUpdatedAt
+      if (!baseChanged) return
+
+      const hasLocalWork =
+        snapshot.phase === 'dirty'
+        || snapshot.phase === 'checkpointing'
+        || snapshot.phase === 'saving'
+        || snapshot.phase === 'failed'
+        || snapshot.phase === 'conflict'
+        || snapshot.phase === 'target-unavailable'
+      cancelTrailingTimers()
+      unavailableLifecycle = null
+      if (hasLocalWork) {
+        const durability = hasCurrentDurableRecoveryOwner()
+          ? 'recovery-durable'
+          : snapshot.durability
+        const conflict: QuickNoteDraftConflict = {
+          note: activeNote,
+          localDraft: snapshot.draft,
+          remoteContent: activeNote.content,
+        }
+        publish({
+          ...snapshot,
+          phase: 'conflict',
+          durability,
+          editingNote: activeNote,
+          conflict,
+          issue: null,
+        })
+        return
+      }
+
+      identity = {
+        ...identity,
+        baseContent: activeNote.content,
+        baseUpdatedAt: activeNote.updated_at,
+        baseGeneration: identity.baseGeneration + 1,
+      }
+      cleanupReceipt = null
+      publish({
+        phase: 'saved',
+        durability: 'entity-durable',
+        editingNote: activeNote,
+        draft: activeNote.content,
+        conflict: null,
+        issue: null,
+      })
+      return
+    }
+
+    const hasLocalWork =
+      snapshot.phase === 'dirty'
+      || snapshot.phase === 'checkpointing'
+      || snapshot.phase === 'saving'
+      || snapshot.phase === 'failed'
+      || snapshot.phase === 'conflict'
+      || snapshot.phase === 'target-unavailable'
+    if (!hasLocalWork) {
+      closeCurrentEdit()
+      return
+    }
+
+    cancelTrailingTimers()
+    unavailableLifecycle = lifecycle
+    publish({
+      ...snapshot,
+      phase: 'target-unavailable',
+      conflict: null,
+      issue: null,
+    })
   }
 
   const controller: QuickNoteExistingEditSessionController = {
@@ -1107,15 +1710,15 @@ export function createQuickNoteExistingEditSessionController(
     start,
     change,
     save,
+    cancel,
+    resolveConflict,
     getSnapshot: () => snapshot,
     subscribe(listener) {
       if (!active) return () => undefined
       listeners.add(listener)
       return () => listeners.delete(listener)
     },
-    observeProjection(input) {
-      void input
-    },
+    observeProjection,
     async drainBeforeSwitch() {
       if (!active) return
       await initialRestoreReady
