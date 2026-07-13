@@ -6,50 +6,331 @@
   <meta name="color-scheme" content="light dark">
   <title>PomodoroXII 子模块深度审查报告 · 2026-07-13</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f8; --surface: #ffffff; --surface-muted: #eef1f4;
+      --text: #172026; --muted: #5f6b73; --line: #d7dde2;
+      --accent: #087f5b; --accent-soft: #dff3eb;
+      --warn: #9a6700; --warn-soft: #fff3bf;
+      --danger: #b42318; --danger-soft: #fee4e2;
+      --info: #285f9e; --info-soft: #e7f0fa;
+      --rail-width: 248px; --content-max: 1180px;
+    }
+    html[data-theme='dark'] {
+      color-scheme: dark;
+      --bg: #15191c; --surface: #1d2327; --surface-muted: #252d32;
+      --text: #edf1f3; --muted: #a9b3b9; --line: #39444a;
+      --accent: #63d3ad; --accent-soft: #173f34;
+      --warn: #f0bd5b; --warn-soft: #453715;
+      --danger: #ff8a80; --danger-soft: #4b2422;
+      --info: #8bbbea; --info-soft: #20374d;
+    }
     * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body { margin: 0; font: 15px/1.6 system-ui, sans-serif; }
-    a { color: inherit; }
-    code { overflow-wrap: anywhere; }
-    .skip-link { position: absolute; left: -999px; top: 8px; }
-    .skip-link:focus { left: 8px; }
-    .rail { padding: 20px; border-bottom: 1px solid currentColor; }
-    .rail-kicker { margin: 0 0 12px; font-weight: 700; }
-    .rail nav { display: flex; flex-wrap: wrap; gap: 12px; }
-    main { width: min(100% - 32px, 1180px); margin: 0 auto; }
-    section { padding: 32px 0; border-bottom: 1px solid currentColor; }
-    .verdict { font-size: 1.1rem; font-weight: 700; }
-    .snapshot { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 24px 0 0; }
-    .snapshot div { min-width: 0; padding: 12px; border: 1px solid currentColor; }
-    .snapshot dt { font-size: 0.85rem; }
-    .snapshot dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
-    .table-scroll { overflow-x: auto; }
+    html { min-width: 0; scroll-behavior: smooth; background: var(--bg); }
+    body {
+      min-width: 0;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      transition: background-color 120ms ease, color 120ms ease;
+    }
+    a { color: var(--info); text-underline-offset: 0.16em; }
+    a:hover { text-decoration-thickness: 2px; }
+    :where(a, button, select, summary, [tabindex]):focus-visible {
+      outline: 3px solid var(--accent);
+      outline-offset: 3px;
+    }
+    code, pre, samp, kbd, .evidence-link { overflow-wrap: anywhere; word-break: break-word; }
+    button, select { font: inherit; }
+    button { cursor: pointer; }
+    h1, h2, h3, p, ul, ol, dl { overflow-wrap: anywhere; }
+    h1 { max-width: 28ch; margin: 0 0 12px; font-size: 2rem; line-height: 1.18; }
+    h2 { margin: 0 0 14px; font-size: 1.35rem; line-height: 1.3; }
+    h3 { margin: 22px 0 10px; font-size: 1rem; line-height: 1.4; }
+    p { margin: 0 0 14px; }
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      left: 12px;
+      top: 12px;
+      padding: 9px 12px;
+      transform: translateY(-160%);
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--text);
+      transition: transform 120ms ease;
+    }
+    .skip-link:focus { transform: translateY(0); }
+    .rail {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .rail-kicker { margin: 0 0 8px; color: var(--muted); font-size: 0.78rem; font-weight: 750; }
+    .rail nav { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+    .rail nav a {
+      display: inline-flex;
+      min-height: 34px;
+      align-items: center;
+      border-bottom: 2px solid transparent;
+      color: var(--muted);
+      font-size: 0.9rem;
+      text-decoration: none;
+    }
+    .rail nav a:hover { color: var(--text); }
+    .rail nav a[aria-current='location'] {
+      border-bottom-color: var(--accent);
+      color: var(--accent);
+      font-weight: 700;
+    }
+    main { width: min(calc(100% - 32px), var(--content-max)); min-width: 0; margin: 0 auto; }
+    section { min-width: 0; padding: 32px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 88px; }
+    .eyebrow { margin-bottom: 8px; color: var(--accent); font-size: 0.78rem; font-weight: 750; }
+    .verdict {
+      max-width: 76ch;
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-left: 4px solid var(--danger);
+      background: var(--danger-soft);
+      color: var(--text);
+      font-size: 1.05rem;
+      font-weight: 700;
+    }
+    .snapshot {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin: 24px 0 14px;
+      border-block: 1px solid var(--line);
+    }
+    .snapshot div { min-width: 0; padding: 12px 14px; border-right: 1px solid var(--line); }
+    .snapshot div:last-child { border-right: 0; }
+    .snapshot dt { color: var(--muted); font-size: 0.78rem; }
+    .snapshot dd { margin: 2px 0 0; font-weight: 750; overflow-wrap: anywhere; }
+    .table-scroll {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: auto;
+      overscroll-behavior-inline: contain;
+      border-block: 1px solid var(--line);
+      background: var(--surface);
+    }
     table { width: 100%; min-width: 720px; border-collapse: collapse; }
-    th, td { padding: 9px 10px; border-bottom: 1px solid currentColor; text-align: left; vertical-align: top; }
-    .architecture-map { border-top: 1px solid currentColor; }
-    .architecture-layer { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 16px; padding: 16px 0; border-bottom: 1px solid currentColor; }
-    .architecture-layer h3 { margin: 5px 0 0; }
+    th, td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    thead th { background: var(--surface-muted); color: var(--muted); font-size: 0.8rem; font-weight: 750; }
+    tbody tr:last-child > * { border-bottom: 0; }
+    tbody tr:hover > * { background: var(--accent-soft); }
+    .architecture-map { border-top: 1px solid var(--line); }
+    .architecture-layer {
+      display: grid;
+      grid-template-columns: 100px minmax(0, 1fr);
+      gap: 16px;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .architecture-layer h3 { margin: 5px 0 0; color: var(--muted); }
     .node-flow { display: flex; flex-wrap: wrap; align-items: center; margin: 0; padding: 0; list-style: none; }
     .node-flow li { display: flex; min-width: 0; align-items: center; }
-    .node-flow li + li::before { content: "→"; padding: 0 8px; }
+    .node-flow li + li::before { content: "→"; padding: 0 8px; color: var(--muted); }
     .node-flow.additive li + li::before { content: "+"; }
-    .node { min-width: 0; padding: 5px 8px; border: 1px solid currentColor; border-radius: 4px; overflow-wrap: anywhere; }
+    .node {
+      min-width: 0;
+      padding: 5px 8px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--surface);
+      overflow-wrap: anywhere;
+    }
     .edge-labels { display: flex; flex-wrap: wrap; gap: 10px 24px; margin: 20px 0 0; padding-left: 20px; }
-    .top-risks { margin-top: 24px; padding-top: 16px; border-top: 1px solid currentColor; }
+    .top-risks { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
     .top-risks h2 { margin: 0 0 8px; font-size: 1rem; }
     .top-risks ol { margin: 0 0 8px; padding-left: 22px; }
-    .score-note, .scope-note { max-width: 80ch; }
+    .score-note, .scope-note { max-width: 80ch; color: var(--muted); }
     .module-table th:nth-child(n+3), .module-table td:nth-child(n+3) { white-space: nowrap; }
-    .evidence-link { overflow-wrap: anywhere; }
-    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    .finding-tools {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      align-items: end;
+      margin: 20px 0 16px;
+      padding: 12px;
+      border-block: 1px solid var(--line);
+      background: var(--surface-muted);
+    }
+    .finding-tools label { display: grid; min-width: 0; gap: 4px; color: var(--muted); font-size: 0.78rem; font-weight: 700; }
+    .finding-tools select,
+    .finding-tools button {
+      width: 100%;
+      min-width: 0;
+      min-height: 40px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--text);
+    }
+    .finding-tools button:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .finding-tools output {
+      display: flex;
+      min-height: 40px;
+      align-items: center;
+      justify-content: flex-end;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      font-weight: 750;
+    }
+    .finding {
+      margin: 10px 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .finding[hidden] { display: none; }
+    .finding summary {
+      display: flex;
+      min-height: 52px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 11px 14px;
+      cursor: pointer;
+      list-style-position: inside;
+    }
+    .finding summary:hover { background: var(--surface-muted); }
+    .finding-title { min-width: 0; }
+    .finding-meta { flex: 0 0 auto; color: var(--muted); font-size: 0.82rem; }
+    .finding-body { padding: 0 14px 14px; border-top: 1px solid var(--line); }
+    .finding-grid { margin: 0; }
+    .finding-grid > div {
+      display: grid;
+      grid-template-columns: minmax(130px, 0.25fr) minmax(0, 1fr);
+      gap: 16px;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .finding-grid > div:last-child { border-bottom: 0; }
+    .finding-grid dt { color: var(--muted); font-size: 0.82rem; font-weight: 750; }
+    .finding-grid dd { min-width: 0; margin: 0; }
+    .copy-path {
+      display: inline-flex;
+      min-height: 32px;
+      align-items: center;
+      margin: 6px 0 0 8px;
+      padding: 4px 9px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--surface-muted);
+      color: var(--text);
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+    .copy-path:hover { border-color: var(--accent); color: var(--accent); }
+    .action-horizons > li { padding: 10px 0 16px; border-bottom: 1px solid var(--line); }
+    .action-horizons > li:last-child { border-bottom: 0; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    @media (min-width: 1080px) {
+      body { padding-left: var(--rail-width); }
+      .rail {
+        position: fixed;
+        inset: 0 auto 0 0;
+        width: var(--rail-width);
+        overflow-y: auto;
+        padding: 24px 18px;
+        border-right: 1px solid var(--line);
+        border-bottom: 0;
+      }
+      .rail-kicker { margin-bottom: 18px; }
+      .rail nav { display: grid; gap: 2px; }
+      .rail nav a { min-height: 38px; padding: 0 8px; border-bottom: 0; border-left: 3px solid transparent; }
+      .rail nav a[aria-current='location'] { border-left-color: var(--accent); background: var(--accent-soft); }
+      main { width: min(calc(100% - 64px), var(--content-max)); }
+      section { scroll-margin-top: 16px; }
+    }
+    @media (max-width: 780px) {
+      .finding-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .finding-tools output { justify-content: flex-start; }
+      .finding summary { align-items: flex-start; flex-direction: column; gap: 4px; }
+      .finding-meta { white-space: normal; }
+      .finding-grid > div { grid-template-columns: 1fr; gap: 3px; }
+    }
     @media (max-width: 640px) {
+      .rail { position: static; }
+      section { scroll-margin-top: 12px; }
       .snapshot { grid-template-columns: 1fr 1fr; }
+      .snapshot div:nth-child(2) { border-right: 0; }
+      .snapshot div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
       .architecture-layer { grid-template-columns: 1fr; gap: 8px; }
       .node-flow { flex-direction: column; align-items: stretch; }
       .node-flow li { display: grid; }
-      .node-flow li + li::before { content: "↓"; padding: 4px 0; text-align: center; }
+      .node-flow li + li::before { content: "↓"; padding: 4px 0; text-align: center; color: var(--muted); }
       .node-flow.additive li + li::before { content: "+"; }
+    }
+    @media (max-width: 520px) {
+      main { width: min(calc(100% - 24px), var(--content-max)); }
+      section { padding: 26px 0; }
+      h1 { font-size: 1.7rem; }
+      .rail { padding-inline: 12px; }
+      .rail nav { gap-inline: 10px; }
+      .finding-tools { grid-template-columns: 1fr; }
+      .finding-tools output { min-height: 28px; }
+      .copy-path { display: flex; width: max-content; max-width: 100%; margin-left: 0; white-space: normal; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+    @media print {
+      :root, html[data-theme='dark'] {
+        color-scheme: light;
+        --bg: #ffffff;
+        --surface: #ffffff;
+        --surface-muted: #ffffff;
+        --text: #000000;
+        --muted: #333333;
+        --line: #a9a9a9;
+        --accent: #000000;
+        --accent-soft: #ffffff;
+        --warn: #000000;
+        --warn-soft: #ffffff;
+        --danger: #000000;
+        --danger-soft: #ffffff;
+        --info: #000000;
+        --info-soft: #ffffff;
+      }
+      body { padding: 0; background: #ffffff; color: #000000; font-size: 10pt; }
+      .rail, .skip-link, .finding-tools, .copy-path { display: none !important; }
+      main { width: 100%; max-width: none; margin: 0; }
+      section { padding: 18px 0; break-inside: auto; }
+      a { color: #000000; text-decoration: underline; }
+      .verdict, .table-scroll, .finding, .node { background: #ffffff; }
+      .table-scroll { overflow: visible; }
+      table { min-width: 0; }
+      details.finding { break-inside: avoid; }
+      details.finding[hidden] { display: block !important; }
+      details.finding:not([open]) > .finding-body { display: block !important; }
+      .finding summary { break-after: avoid; }
+      .finding-body { display: block !important; }
+      tr, .finding-grid > div { break-inside: avoid; }
     }
   </style>
 </head>
@@ -182,9 +463,9 @@
         <table>
           <thead><tr><th scope="col">扫描项</th><th scope="col">结果</th><th scope="col">本地来源与口径</th></tr></thead>
           <tbody>
-            <tr><th scope="row">REST decorators</th><td><strong>83</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/app/routes/v1/auth.py#L31">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\routes\v1\auth.py:31</a><br><code>@router.get/post/put/patch/delete</code> 源码扫描，不计 <code>app.main</code> 的单独 health decorator。</td></tr>
-            <tr><th scope="row">MCP decorators</th><td><strong>19</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/app/mcp/server.py#L98">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\mcp\server.py:98</a><br>13 tools + 4 resources + 2 prompts。</td></tr>
-            <tr><th scope="row">Backend test files</th><td><strong>79</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/tests/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\</a><br>递归计数 <code>test_*.py</code>。</td></tr>
+            <tr><th scope="row">REST decorators</th><td><strong>83</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/app/routes/v1/auth.py#L31">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\routes\v1\auth.py:31</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\routes\v1\auth.py:31" aria-label="复制证据路径：auth.py:31">复制路径</button><br><code>@router.get/post/put/patch/delete</code> 源码扫描，不计 <code>app.main</code> 的单独 health decorator。</td></tr>
+            <tr><th scope="row">MCP decorators</th><td><strong>19</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/app/mcp/server.py#L98">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\mcp\server.py:98</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\mcp\server.py:98" aria-label="复制证据路径：server.py:98">复制路径</button><br>13 tools + 4 resources + 2 prompts。</td></tr>
+            <tr><th scope="row">Backend test files</th><td><strong>79</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/tests/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\" aria-label="复制证据路径：backend tests 目录">复制路径</button><br>递归计数 <code>test_*.py</code>。</td></tr>
           </tbody>
         </table>
       </div>
@@ -216,14 +497,14 @@
         <table>
           <thead><tr><th scope="col">域</th><th scope="col">冻结值</th><th scope="col">本地来源与口径</th></tr></thead>
           <tbody>
-            <tr><th scope="row">App Router</th><td>15 个 pages，<strong>7 个占位</strong> business pages</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/app/(app)/tasks/page.tsx#L1">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\app\(app)\tasks\page.tsx:1</a><br><code>page.tsx</code> 递归扫描；7 页导入 <code>PlaceholderPage</code>。</td></tr>
-            <tr><th scope="row">Frontend tests</th><td>47 个 test files</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\</a><br>递归 tracked-file 扫描 <code>\.(test|spec)\.(ts|tsx|js|jsx)$</code>。</td></tr>
+            <tr><th scope="row">App Router</th><td>15 个 pages，<strong>7 个占位</strong> business pages</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/app/(app)/tasks/page.tsx#L1">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\app\(app)\tasks\page.tsx:1</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\app\(app)\tasks\page.tsx:1" aria-label="复制证据路径：tasks/page.tsx:1">复制路径</button><br><code>page.tsx</code> 递归扫描；7 页导入 <code>PlaceholderPage</code>。</td></tr>
+            <tr><th scope="row">Frontend tests</th><td>47 个 test files</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\" aria-label="复制证据路径：frontend src 目录">复制路径</button><br>递归 tracked-file 扫描 <code>\.(test|spec)\.(ts|tsx|js|jsx)$</code>。</td></tr>
             <!-- plan-mandated 旧口径 `14 个 no-op` 已被本轮源码复核否决；不可作为事实展示。 -->
-            <tr><th scope="row">Store 口径</th><td><strong>14 个自标 S0 stub</strong>；其中 <strong>10 个显式 no-op</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/stores/app-store.ts#L4">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\stores\app-store.ts:4</a><br>14 个文件仍带 <code>S0 stub / actions are no-ops</code> 自述；源码细分为 10 个显式 no-op/空对象 store，4 个已有局部状态或持久化更新。</td></tr>
-            <tr><th scope="row">QuickNote component domain</th><td>24 个 TypeScript/TSX files，10,349 行（约 10.3k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\</a></td></tr>
-            <tr><th scope="row">Sync library</th><td>22 个 files，4,862 行（约 4.9k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/lib/sync/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\</a></td></tr>
-            <tr><th scope="row"><code>createQuickNoteDraftSessionController</code></th><td>cyclomatic 85，cognitive 143</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
-            <tr><th scope="row"><code>useQuickNoteEditor</code></th><td>cyclomatic 65，cognitive 85</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
+            <tr><th scope="row">Store 口径</th><td><strong>14 个自标 S0 stub</strong>；其中 <strong>10 个显式 no-op</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/stores/app-store.ts#L4">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\stores\app-store.ts:4</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\stores\app-store.ts:4" aria-label="复制证据路径：app-store.ts:4">复制路径</button><br>14 个文件仍带 <code>S0 stub / actions are no-ops</code> 自述；源码细分为 10 个显式 no-op/空对象 store，4 个已有局部状态或持久化更新。</td></tr>
+            <tr><th scope="row">QuickNote component domain</th><td>24 个 TypeScript/TSX files，10,349 行（约 10.3k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\" aria-label="复制证据路径：quick-notes 目录">复制路径</button></td></tr>
+            <tr><th scope="row">Sync library</th><td>22 个 files，4,862 行（约 4.9k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/lib/sync/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\" aria-label="复制证据路径：sync 目录">复制路径</button></td></tr>
+            <tr><th scope="row"><code>createQuickNoteDraftSessionController</code></th><td>cyclomatic 85，cognitive 143</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163" aria-label="复制证据路径：use-quick-note-draft-session.ts:163">复制路径</button><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
+            <tr><th scope="row"><code>useQuickNoteEditor</code></th><td>cyclomatic 65，cognitive 85</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25" aria-label="复制证据路径：use-quick-note-editor.ts:25">复制路径</button><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
           </tbody>
         </table>
       </div>
@@ -231,13 +512,33 @@
     <section id="findings" data-report-section>
       <h2>Findings</h2>
       <p class="scope-note">按严重度排列。主结论仅使用本地 65e2382 的源码与运行证据；远端修正只改变 status，不伪装成本地行为。</p>
+      <div class="finding-tools" role="group" aria-label="Finding 筛选">
+        <label>严重度<select id="severity-filter">
+          <option value="all">全部</option><option value="P1">P1</option>
+          <option value="P2">P2</option><option value="P3">P3</option>
+        </select></label>
+        <label>状态<select id="status-filter">
+          <option value="all">全部</option><option value="open">Open</option>
+          <option value="fixed-on-origin">Fixed on origin</option>
+        </select></label>
+        <label>证据<select id="evidence-filter">
+          <option value="all">全部</option><option value="runtime-verified">运行验证</option>
+          <option value="source-verified">源码确认</option>
+          <option value="remote-delta-verified">远端差异</option>
+          <option value="unverified">未验证</option>
+        </select></label>
+        <button id="expand-all" type="button">展开全部</button>
+        <button id="theme-toggle" type="button" aria-pressed="false">切换主题</button>
+        <button id="print-report" type="button">打印</button>
+        <output id="finding-count" aria-live="polite">7 条</output>
+      </div>
       <details class="finding" id="finding-f001" data-finding-id="F-001" data-severity="P1" data-status="open" data-evidence="source-verified" open>
         <summary><span class="finding-title"><strong>F-001 · P1</strong> · <code>NEXT_PUBLIC_API_BASE</code> 未进入 rewrite</span><span class="finding-meta">open · source-verified</span></summary>
         <div class="finding-body"><dl class="finding-grid">
           <div><dt>Observed behavior</dt><dd><code>.env.local.example</code> 声明 API origin 可配置，但 <code>next.config.ts</code> 把 <code>/api/:path*</code> 始终转发到 <code>http://localhost:8000</code>。</dd></div>
           <div><dt>Impact</dt><dd>非本地后端的生产构建无法通过环境配置选择 origin，发布后 API 请求会被转发到错误目标。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/next.config.ts#L11">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\next.config.ts:11</a></dd></div>
-          <div><dt>Verification</dt><dd><code>source-verified</code>；与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/.env.local.example#L7">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\.env.local.example:7</a> 的文档契约对照。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/next.config.ts#L11">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\next.config.ts:11</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\next.config.ts:11" aria-label="复制证据路径：next.config.ts:11">复制路径</button></dd></div>
+          <div><dt>Verification</dt><dd><code>source-verified</code>；与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/.env.local.example#L7">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\.env.local.example:7</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\.env.local.example:7" aria-label="复制证据路径：.env.local.example:7">复制路径</button> 的文档契约对照。</dd></div>
           <div><dt>Recommendation</dt><dd>在 Next 配置评估期读取受控 origin，校验 URL，并为非本地值增加构建产物断言。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>build with a non-local API origin and assert routes manifest uses it</code></dd></div>
         </dl></div>
@@ -247,7 +548,7 @@
         <div class="finding-body"><dl class="finding-grid">
           <div><dt>Observed behavior</dt><dd>本地 65e2382 落后 <code>origin/main@1e4f0fc</code> 11 commits；本地 QuickNote tombstone 集成测试仍期望 dirty 实体被删除，实际合并契约是保留本地并生成冲突。保存的 audit-time run 记录为 <code>541 passed, 1 failed</code>，Task 3 未重跑该 suite。</dd></div>
           <div><dt>Impact</dt><dd>保存的本地 frontend gate 为红，无法作为可发布绿色基线；在未分类 2,176 个未跟踪路径前协调基线，会扩大冲突与本地工作遗失风险。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/lib/sync/quick-note-sync.integration.test.ts#L188">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\quick-note-sync.integration.test.ts:188</a></dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/lib/sync/quick-note-sync.integration.test.ts#L188">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\quick-note-sync.integration.test.ts:188</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\quick-note-sync.integration.test.ts:188" aria-label="复制证据路径：quick-note-sync.integration.test.ts:188">复制路径</button></dd></div>
           <div><dt>Verification</dt><dd><code>remote-delta-verified</code>；<code>fixed-on-origin</code> 是 remote-sensitive source status，不是本地修复或运行证明。远端细节仅见 <a href="#remote-delta">Remote Delta</a>。</dd></div>
           <div><dt>Recommendation</dt><dd>先盘点并保护未跟踪工作，再协调本地与 <code>origin/main</code>，最后在新基线重跑全量 gate。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>reconcile origin, run npm test, require 542/542</code></dd></div>
@@ -258,8 +559,8 @@
         <div class="finding-body"><dl class="finding-grid">
           <div><dt>Observed behavior</dt><dd>fixture 为每次 suite 分配新 run root，并明确不在 fixture 或 session teardown 递归删除。审计冻结值为 <strong>423.7 MiB</strong> 保留产物，全量测试用时 <code>588.35s</code>。</dd></div>
           <div><dt>Impact</dt><dd>每次 full run 持续增长 SQLite/space 文件，占用磁盘并放大 IO；每测试重绑定模块也使反馈接近 10 分钟。报告生成期 live recheck 已增至 459.0 MiB，该值不回写冻结评分；尚未约定数字化 full-suite 预算。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/tests/conftest.py#L104">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\conftest.py:104</a></dd></div>
-          <div><dt>Verification</dt><dd><code>runtime-verified</code>；<a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/tests/test_test_isolation.py#L172">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\test_test_isolation.py:172</a> 还以 AST 回归防止 <code>rmtree</code> 进入 fixture。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/tests/conftest.py#L104">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\conftest.py:104</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\conftest.py:104" aria-label="复制证据路径：conftest.py:104">复制路径</button></dd></div>
+          <div><dt>Verification</dt><dd><code>runtime-verified</code>；<a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/tests/test_test_isolation.py#L172">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\test_test_isolation.py:172</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\test_test_isolation.py:172" aria-label="复制证据路径：test_test_isolation.py:172">复制路径</button> 还以 AST 回归防止 <code>rmtree</code> 进入 fixture。</dd></div>
           <div><dt>Recommendation</dt><dd>保留 per-test 隔离，但在 CI/workspace 外层实现边界可验证的 run-root retention，并建立 full-suite 时间预算。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>two full runs leave no prior run root and stay within an agreed budget</code></dd></div>
         </dl></div>
@@ -269,7 +570,7 @@
         <div class="finding-body"><dl class="finding-grid">
           <div><dt>Observed behavior</dt><dd><code>git status --short --untracked-files=all</code> 运行时摘要为恰好 <strong>2,176</strong> 行，全部是 <code>??</code>；其中包含 graph artifact、报告、文档与临时树。该命令计数没有伪造为某个源码行。</dd></div>
           <div><dt>Impact</dt><dd>Git 审核面与 root graph 输入被生成物/文档放大，令变更审查、基线协调与代码级图结论失真。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///C:/Users/20564/.codex/sessions/2026/07/13/rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl#L493">C:\Users\20564\.codex\sessions\2026\07\13\rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl:493</a> 保存审计时 2,176 行命令记录；<a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.codebase-memory/artifact.json#L4">E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4</a> 只证明 stale graph artifact，不承载该路径数。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///C:/Users/20564/.codex/sessions/2026/07/13/rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl#L493">C:\Users\20564\.codex\sessions\2026\07\13\rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl:493</a><button class="copy-path" type="button" data-copy-path="C:\Users\20564\.codex\sessions\2026\07\13\rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl:493" aria-label="复制证据路径：rollout JSONL:493">复制路径</button> 保存审计时 2,176 行命令记录；<a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.codebase-memory/artifact.json#L4">E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4" aria-label="复制证据路径：root artifact.json:4">复制路径</button> 只证明 stale graph artifact，不承载该路径数。</dd></div>
           <div><dt>Verification</dt><dd><code>runtime-verified</code> untracked command summary；root graph 组成使用 saved audit-time evidence，本轮未重查 service，当前 readiness/composition 为 limited。</dd></div>
           <div><dt>Recommendation</dt><dd>先分类和保护有价值 untracked 工作，再 ignore 或移出 generated output，之后从干净边界重建 root graph。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>classify or ignore generated output, then clean reindex</code></dd></div>
@@ -280,7 +581,7 @@
         <div class="finding-body"><dl class="finding-grid">
           <div><dt>Observed behavior</dt><dd>README 仍声明 backend 621 tests、frontend 333 tests 与过时 commit <code>2db8cdd</code>，而冻结 gate 是 backend 783 passed 与 frontend 542 总数。交付状态文字没有绑定 ref/date，因此不能跨本地与远端快照使用。</dd></div>
           <div><dt>Impact</dt><dd>代理与所有者无法从入口文档得到可信的当前 gate、CI 范围和产品完整度，容易选错交付基线。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/README.md#L53">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:53</a> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/README.md#L76">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:76</a> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/README.md#L169">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:169</a> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/README.md#L239">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\README.md:239</a></dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/README.md#L53">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:53</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:53" aria-label="复制证据路径：README.md:53">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/README.md#L76">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:76</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:76" aria-label="复制证据路径：README.md:76">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/README.md#L169">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:169</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:169" aria-label="复制证据路径：README.md:169">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/README.md#L239">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\README.md:239</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\README.md:239" aria-label="复制证据路径：frontend README.md:239">复制路径</button></dd></div>
           <div><dt>Verification</dt><dd><code>source-verified</code> 本地文档矛盾；remote-sensitive 差异细节仅见 <a href="#remote-delta">Remote Delta</a>。</dd></div>
           <div><dt>Recommendation</dt><dd>从实际 gate/route/file scan 生成状态值，或在 CI 中检查 README 数值与当前基线一致。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>docs values generated or checked against current gates</code></dd></div>
@@ -291,7 +592,7 @@
         <div class="finding-body"><dl class="finding-grid">
           <div><dt>Observed behavior</dt><dd>保存审计度量记录 <code>createQuickNoteDraftSessionController</code> 为 cyclomatic 85 / cognitive 143，<code>useQuickNoteEditor</code> 为 cyclomatic 65 / cognitive 85；两者同时承担生命周期、并发、冲突和 UI 编排。</dd></div>
           <div><dt>Impact</dt><dd>QuickNote 已是前端主导实现域，过高分支与状态耦合使小改动容易破坏 autosave、flush、remote conflict 或 focus/read 切换。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a></dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163" aria-label="复制证据路径：use-quick-note-draft-session.ts:163">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25" aria-label="复制证据路径：use-quick-note-editor.ts:25">复制路径</button></dd></div>
           <div><dt>Verification</dt><dd><code>source-verified</code> 函数边界与责任集中；复杂度数值使用保存审计度量，当前树未发现其原始产物，因此不声称本轮已重算。</dd></div>
           <div><dt>Recommendation</dt><dd>按 draft lane、persistence/flush、conflict decision 与 editor presentation 分拆责任，保留现有 focused regression tests。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>split responsibilities and keep focused tests green</code></dd></div>
@@ -302,8 +603,8 @@
         <div class="finding-body"><dl class="finding-grid">
           <div><dt>Observed behavior</dt><dd>brief 的“Next 内嵌 PostCSS 命中两个 moderate advisory”是旧口径。<code>npm audit --omit=dev</code> 实际返回 2 moderate vulnerability entries（Next + transitive PostCSS）、0 high、0 critical；它们对应 1 个独立 advisory <code>GHSA-qx2v-qp2m-jg93</code>，锁文件将 Next 内嵌 PostCSS 固定为 <code>8.4.31</code>。</dd></div>
           <div><dt>Impact</dt><dd>产品依赖树保留已知 advisory，尽管严重度不是 high/critical，仍阻断“无已知产品依赖漏洞”的发布声明。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/package-lock.json#L9576">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9576</a></dd></div>
-          <div><dt>Verification</dt><dd><code>runtime-verified</code>；生产依赖 audit 与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/package-lock.json#L9514">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9514</a> 的 Next dependency path 对照。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/package-lock.json#L9576">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9576</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9576" aria-label="复制证据路径：package-lock.json:9576">复制路径</button></dd></div>
+          <div><dt>Verification</dt><dd><code>runtime-verified</code>；生产依赖 audit 与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/package-lock.json#L9514">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9514</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9514" aria-label="复制证据路径：package-lock.json:9514">复制路径</button> 的 Next dependency path 对照。</dd></div>
           <div><dt>Recommendation</dt><dd>升级到包含 PostCSS ≥ 8.5.10 的受支持 Next dependency graph；不盲从 npm 的 downgrade 建议。若暂时不可升级，记录具有适用性与到期条件的例外。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>npm audit --omit=dev returns no known advisory or documented exception</code></dd></div>
         </dl></div>
@@ -333,8 +634,8 @@
             <tr><th scope="row">Frontend static/build</th><td>ESLint passed；TypeScript passed；production build passed，19 routes</td><td>构建绿</td><td><code>runtime-verified</code></td></tr>
             <tr><th scope="row">Frontend tests</th><td><code>541 passed, 1 failed</code><br>saved audit-time run; Task 3 未重跑</td><td>保存的本地基线红</td><td><code>runtime-verified</code> with freshness limit</td></tr>
             <tr><th scope="row">Production dependency audit</th><td>2 moderate，0 high，0 critical</td><td>需升级或例外记录</td><td><code>runtime-verified</code></td></tr>
-            <tr><th scope="row">Local workflow source</th><td>pytest + Ruff；main push 后 Docker build/push；<code>/api/health</code> smoke</td><td>只覆盖 backend 与 liveness</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/.github/workflows/ci.yml#L41">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\.github\workflows\ci.yml:41</a></td></tr>
-            <tr><th scope="row">Docker/runtime</th><td>non-root user，data volume，Compose healthcheck</td><td>有本地部署基座；本地只验证 liveness</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/Dockerfile#L37">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\Dockerfile:37</a></td></tr>
+            <tr><th scope="row">Local workflow source</th><td>pytest + Ruff；main push 后 Docker build/push；<code>/api/health</code> smoke</td><td>只覆盖 backend 与 liveness</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/.github/workflows/ci.yml#L41">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\.github\workflows\ci.yml:41</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\.github\workflows\ci.yml:41" aria-label="复制证据路径：ci.yml:41">复制路径</button></td></tr>
+            <tr><th scope="row">Docker/runtime</th><td>non-root user，data volume，Compose healthcheck</td><td>有本地部署基座；本地只验证 liveness</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/Dockerfile#L37">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\Dockerfile:37</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\Dockerfile:37" aria-label="复制证据路径：Dockerfile:37">复制路径</button></td></tr>
             <tr><th scope="row">GitHub live run</th><td>未查证，<code>gh</code> 未认证</td><td>不声称外部 CI 绿</td><td><code>unverified</code></td></tr>
           </tbody>
         </table>
@@ -350,7 +651,7 @@
             <tr><th scope="row">Saved audit-time root graph</th><td>11,156</td><td>24,653</td><td>ready at audit time / current limited</td><td>定位与全局关联；文档/报告稀释明显</td></tr>
             <tr><th scope="row">Saved audit-time backend graph</th><td>2,476</td><td>12,526</td><td>ready at audit time / current limited</td><td>后端 code claims</td></tr>
             <tr><th scope="row">Saved audit-time frontend graph</th><td>1,701</td><td>3,648</td><td>ready at audit time / current limited</td><td>前端 code claims</td></tr>
-            <tr><th scope="row">Repository artifact</th><td>2,391</td><td>10,081</td><td>stale · 2026-07-05</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.codebase-memory/artifact.json#L4">E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4</a></td></tr>
+            <tr><th scope="row">Repository artifact</th><td>2,391</td><td>10,081</td><td>stale · 2026-07-05</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.codebase-memory/artifact.json#L4">E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4" aria-label="复制证据路径：root artifact.json:4">复制路径</button></td></tr>
           </tbody>
         </table>
       </div>
@@ -408,6 +709,144 @@
       </ul>
     </section>
   </main>
-  <script>document.documentElement.dataset.theme = 'light'</script>
+  <script>
+    (() => {
+      const root = document.documentElement
+      const findings = [...document.querySelectorAll('[data-finding-id]')]
+      const severity = document.querySelector('#severity-filter')
+      const status = document.querySelector('#status-filter')
+      const evidence = document.querySelector('#evidence-filter')
+      const count = document.querySelector('#finding-count')
+      const expand = document.querySelector('#expand-all')
+      const theme = document.querySelector('#theme-toggle')
+
+      const syncExpandButton = () => {
+        const visibleFindings = findings.filter((finding) => !finding.hidden)
+        const shouldOpen = visibleFindings.some((finding) => !finding.open)
+        expand.textContent = visibleFindings.length && !shouldOpen ? '收起全部' : '展开全部'
+      }
+
+      const applyFilters = () => {
+        let visible = 0
+        for (const finding of findings) {
+          const show =
+            (severity.value === 'all' || finding.dataset.severity === severity.value) &&
+            (status.value === 'all' || finding.dataset.status === status.value) &&
+            (evidence.value === 'all' || finding.dataset.evidence === evidence.value)
+          finding.hidden = !show
+          if (show) visible += 1
+        }
+        count.textContent = visible + ' 条'
+        syncExpandButton()
+      }
+
+      for (const control of [severity, status, evidence]) {
+        control.addEventListener('change', applyFilters)
+      }
+
+      // Keep the source fully expanded without JavaScript; enhance to a compact workbench when it runs.
+      for (const finding of findings) finding.addEventListener('toggle', syncExpandButton)
+      for (const finding of findings) finding.open = false
+
+      expand.addEventListener('click', () => {
+        const shouldOpen = findings.some((finding) => !finding.open && !finding.hidden)
+        for (const finding of findings) if (!finding.hidden) finding.open = shouldOpen
+        syncExpandButton()
+      })
+
+      let savedTheme
+      try {
+        savedTheme = localStorage.getItem('pxii-audit-theme')
+      } catch {
+        savedTheme = undefined
+      }
+      if (savedTheme === 'dark' || savedTheme === 'light') root.dataset.theme = savedTheme
+      theme.setAttribute('aria-pressed', String(root.dataset.theme === 'dark'))
+
+      theme.addEventListener('click', () => {
+        const next = root.dataset.theme === 'dark' ? 'light' : 'dark'
+        root.dataset.theme = next
+        theme.setAttribute('aria-pressed', String(next === 'dark'))
+        try {
+          localStorage.setItem('pxii-audit-theme', next)
+        } catch {
+          // Restricted file origins can deny storage; the in-page theme still works.
+        }
+      })
+
+      document.querySelector('#print-report').addEventListener('click', () => window.print())
+
+      const copyButtons = [...document.querySelectorAll('[data-copy-path]')]
+      for (const button of copyButtons) {
+        const defaultLabel = button.getAttribute('aria-label') || '复制证据路径'
+        const defaultText = button.textContent
+        let feedbackTimer
+        button.addEventListener('click', () => {
+          const path = button.dataset.copyPath
+          if (!path) return
+          try {
+            const clipboard = navigator.clipboard
+            if (!clipboard || typeof clipboard.writeText !== 'function') return
+            clipboard.writeText(path).then(() => {
+              window.clearTimeout(feedbackTimer)
+              button.setAttribute('aria-label', '已复制')
+              button.textContent = '已复制'
+              feedbackTimer = window.setTimeout(() => {
+                button.setAttribute('aria-label', defaultLabel)
+                button.textContent = defaultText
+              }, 1600)
+            }).catch(() => {
+              // Copy failure leaves the adjacent selectable path unchanged.
+            })
+          } catch {
+            // Clipboard access can throw on file origins; report content remains available.
+          }
+        })
+      }
+
+      const navLinks = [...document.querySelectorAll('.rail nav a[href^="#"]')]
+      const sections = [...document.querySelectorAll('[data-report-section]')]
+      const setActiveNavigation = (sectionId) => {
+        for (const link of navLinks) {
+          const isActive = link.getAttribute('href') === '#' + sectionId
+          if (isActive) link.setAttribute('aria-current', 'location')
+          else link.removeAttribute('aria-current')
+        }
+      }
+      const updateActiveNavigation = () => {
+        const scrollTop = window.pageYOffset || root.scrollTop || 0
+        const atDocumentEnd = scrollTop + window.innerHeight >= root.scrollHeight - 2
+        if (atDocumentEnd && sections.length) {
+          setActiveNavigation(sections[sections.length - 1].id)
+          return
+        }
+        const marker = Math.min(180, window.innerHeight * 0.28)
+        let active = sections[0]
+        for (const section of sections) {
+          if (section.getBoundingClientRect().top <= marker) active = section
+          else break
+        }
+        if (active) setActiveNavigation(active.id)
+      }
+      let navigationUpdatePending = false
+      const scheduleNavigationUpdate = () => {
+        if (navigationUpdatePending) return
+        navigationUpdatePending = true
+        const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16))
+        schedule(() => {
+          navigationUpdatePending = false
+          updateActiveNavigation()
+        })
+      }
+      for (const link of navLinks) {
+        link.addEventListener('click', () => setActiveNavigation(link.getAttribute('href').slice(1)))
+      }
+      window.addEventListener('scroll', scheduleNavigationUpdate, false)
+      window.addEventListener('resize', scheduleNavigationUpdate, false)
+
+      applyFilters()
+      updateActiveNavigation()
+    })()
+  </script>
 </body>
 </html>
