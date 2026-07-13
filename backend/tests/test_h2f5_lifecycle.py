@@ -155,7 +155,22 @@ async def test_h2f5_snapshot_damage_returns_stable_http_recovery_and_reclaims_on
 
     session = await get_space_engine_manager().get_session(space_id)
     try:
-        snapshot = await session.get(SyncSnapshot, snapshot_token)
+        assert await session.get(SyncSnapshot, snapshot_token) is None
+        remaining = await session.scalar(
+            select(func.count()).select_from(SyncSnapshotChunk).where(
+                SyncSnapshotChunk.snapshot_token == snapshot_token
+            )
+        )
+        assert remaining == 0
+    finally:
+        await session.close()
+
+    fresh = await client.get("/api/v1/sync/full?cursor=0&limit=1", headers=headers)
+    assert fresh.status_code == 200
+    expired_token = fresh.json()["snapshot_token"]
+    session = await get_space_engine_manager().get_session(space_id)
+    try:
+        snapshot = await session.get(SyncSnapshot, expired_token)
         assert snapshot is not None
         snapshot.expires_at = "2000-01-01T00:00:00Z"
         await session.commit()
@@ -167,7 +182,7 @@ async def test_h2f5_snapshot_damage_returns_stable_http_recovery_and_reclaims_on
         params={
             "cursor": 0,
             "limit": 1,
-            "snapshot_token": snapshot_token,
+            "snapshot_token": expired_token,
             "snapshot_offset": 0,
         },
         headers=headers,
@@ -176,10 +191,10 @@ async def test_h2f5_snapshot_damage_returns_stable_http_recovery_and_reclaims_on
 
     session = await get_space_engine_manager().get_session(space_id)
     try:
-        assert await session.get(SyncSnapshot, snapshot_token) is None
+        assert await session.get(SyncSnapshot, expired_token) is None
         remaining = await session.scalar(
             select(func.count()).select_from(SyncSnapshotChunk).where(
-                SyncSnapshotChunk.snapshot_token == snapshot_token
+                SyncSnapshotChunk.snapshot_token == expired_token
             )
         )
         assert remaining == 0

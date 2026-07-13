@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, delete, func, or_, select, text
+from sqlalchemy import and_, delete, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
@@ -793,30 +793,43 @@ class SyncService:
             if snapshot is None:
                 raise SyncSnapshotExpiredError()
             now_dt = utc_now()
-            now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            if snapshot.expires_at:
-                expires_at = snapshot.expires_at
-            else:
-                created_at = datetime.strptime(
-                    snapshot.created_at, "%Y-%m-%dT%H:%M:%SZ"
-                ).replace(tzinfo=timezone.utc)
-                expires_at = (created_at + SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
-            if expires_at <= now:
+            try:
+                if snapshot.expires_at:
+                    expires_at = datetime.strptime(
+                        snapshot.expires_at, "%Y-%m-%dT%H:%M:%SZ"
+                    ).replace(tzinfo=timezone.utc)
+                else:
+                    created_at = datetime.strptime(
+                        snapshot.created_at, "%Y-%m-%dT%H:%M:%SZ"
+                    ).replace(tzinfo=timezone.utc)
+                    expires_at = created_at + SYNC_SNAPSHOT_TTL
+            except ValueError as exc:
+                raise SyncSnapshotExpiredError(
+                    expired_snapshot_token=snapshot.token
+                ) from exc
+            if expires_at <= now_dt:
                 # Report the expired token without mutating the caller's session.
                 # The HTTP boundary performs cleanup in a dedicated transaction.
                 raise SyncSnapshotExpiredError(expired_snapshot_token=snapshot.token)
 
         if snapshot.status != "ready":
-            raise SyncSnapshotExpiredError()
+            raise SyncSnapshotExpiredError(expired_snapshot_token=snapshot.token)
         if snapshot_offset < 0:
             raise ValidationError("snapshot_offset must be non-negative")
         if snapshot.format == "legacy-json-v1":
-            items = json.loads(snapshot.payload)
+            try:
+                items = json.loads(snapshot.payload)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise SyncSnapshotExpiredError(
+                    expired_snapshot_token=snapshot.token
+                ) from exc
+            if not isinstance(items, list):
+                raise SyncSnapshotExpiredError(expired_snapshot_token=snapshot.token)
             if snapshot_offset > len(items):
                 raise ValidationError("snapshot_offset exceeds snapshot size")
             page_items = items[snapshot_offset:snapshot_offset + limit]
             total_items = len(items)
-        else:
+        elif snapshot.format == "gzip-chunks-v1":
             if snapshot_offset > snapshot.item_count:
                 raise ValidationError("snapshot_offset exceeds snapshot size")
             page_items = await self._read_chunk_page(
@@ -825,6 +838,8 @@ class SyncService:
                 limit=limit,
             )
             total_items = snapshot.item_count
+        else:
+            raise SyncSnapshotExpiredError(expired_snapshot_token=snapshot.token)
         next_offset = snapshot_offset + len(page_items)
         has_more = next_offset < total_items
         result: dict[str, Any] = {
@@ -843,11 +858,25 @@ class SyncService:
         }
         for entry in ENTITY_REGISTRY.values():
             result[entry["pull_key"]] = []
-        for item in page_items:
-            if item["kind"] == "tombstone":
-                result["tombstones"].append(item["payload"])
-            else:
-                result[item["pull_key"]].append(item["payload"])
+        valid_pull_keys = {entry["pull_key"] for entry in ENTITY_REGISTRY.values()}
+        try:
+            for item in page_items:
+                if not isinstance(item, dict) or not isinstance(item.get("payload"), dict):
+                    raise ValueError("snapshot item must contain an object payload")
+                kind = item.get("kind")
+                if kind == "tombstone":
+                    result["tombstones"].append(item["payload"])
+                elif kind == "entity":
+                    pull_key = item.get("pull_key")
+                    if pull_key not in valid_pull_keys:
+                        raise ValueError("snapshot entity has an unknown pull_key")
+                    result[pull_key].append(item["payload"])
+                else:
+                    raise ValueError("snapshot item has an unknown kind")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise SyncSnapshotExpiredError(
+                expired_snapshot_token=snapshot.token
+            ) from exc
         return result
 
     async def _read_chunk_page(
@@ -857,30 +886,58 @@ class SyncService:
         offset: int,
         limit: int,
     ) -> list[dict[str, Any]]:
-        manifest_totals = (
-            await self.db.execute(
+        # Validate the complete manifest at the two durable boundaries: before
+        # returning the first page and before returning the terminal page. This
+        # keeps continuation requests page-bounded while ensuring a client can
+        # never complete and ACK a snapshot whose manifest root is invalid.
+        validate_manifest = offset == 0 or offset + limit >= snapshot.item_count
+        if validate_manifest:
+            manifest_rows = await self.db.stream(
                 select(
-                    func.count(SyncSnapshotChunk.chunk_index),
-                    func.coalesce(func.sum(SyncSnapshotChunk.item_count), 0),
-                    func.coalesce(func.sum(SyncSnapshotChunk.uncompressed_bytes), 0),
-                    func.coalesce(func.sum(SyncSnapshotChunk.compressed_bytes), 0),
-                    func.min(SyncSnapshotChunk.chunk_index),
-                    func.max(SyncSnapshotChunk.chunk_index),
-                ).where(SyncSnapshotChunk.snapshot_token == snapshot.token)
+                    SyncSnapshotChunk.chunk_index,
+                    SyncSnapshotChunk.item_start,
+                    SyncSnapshotChunk.item_count,
+                    SyncSnapshotChunk.uncompressed_bytes,
+                    SyncSnapshotChunk.compressed_bytes,
+                    SyncSnapshotChunk.checksum,
+                )
+                .where(SyncSnapshotChunk.snapshot_token == snapshot.token)
+                .order_by(SyncSnapshotChunk.chunk_index)
             )
-        ).one()
-        if (
-            manifest_totals[0] != snapshot.chunk_count
-            or manifest_totals[1] != snapshot.item_count
-            or manifest_totals[2] != snapshot.uncompressed_bytes
-            or manifest_totals[3] != snapshot.compressed_bytes
-            or (
-                snapshot.chunk_count > 0
-                and (manifest_totals[4] != 0 or manifest_totals[5] != snapshot.chunk_count - 1)
-            )
-            or (snapshot.chunk_count == 0 and snapshot.item_count != 0)
-        ):
-            raise SyncSnapshotExpiredError()
+            manifest_hasher = hashlib.sha256()
+            manifest_valid = True
+            chunk_count = item_count = expected_start = 0
+            uncompressed_bytes = compressed_bytes = 0
+            try:
+                async for row in manifest_rows:
+                    checksum = row.checksum
+                    if (
+                        row.chunk_index != chunk_count
+                        or row.item_start != expected_start
+                        or not isinstance(checksum, str)
+                        or len(checksum) != 64
+                        or any(character not in "0123456789abcdef" for character in checksum)
+                    ):
+                        manifest_valid = False
+                        break
+                    chunk_count += 1
+                    item_count += row.item_count
+                    expected_start += row.item_count
+                    uncompressed_bytes += row.uncompressed_bytes
+                    compressed_bytes += row.compressed_bytes
+                    manifest_hasher.update(checksum.encode("ascii"))
+            except (TypeError, UnicodeEncodeError):
+                manifest_valid = False
+            if (
+                not manifest_valid
+                or chunk_count != snapshot.chunk_count
+                or item_count != snapshot.item_count
+                or uncompressed_bytes != snapshot.uncompressed_bytes
+                or compressed_bytes != snapshot.compressed_bytes
+                or manifest_hasher.hexdigest() != snapshot.checksum
+                or (snapshot.chunk_count == 0 and snapshot.item_count != 0)
+            ):
+                raise SyncSnapshotExpiredError(expired_snapshot_token=snapshot.token)
         if offset == snapshot.item_count:
             return []
         start_index = await self.db.scalar(
@@ -893,7 +950,7 @@ class SyncService:
             .limit(1)
         )
         if start_index is None:
-            raise SyncSnapshotExpiredError()
+            raise SyncSnapshotExpiredError(expired_snapshot_token=snapshot.token)
         # A size-sealed chunk may contain only one large item, so the strict
         # upper bound for a page is one chunk per requested item plus one edge.
         max_chunks = limit + 1
@@ -930,9 +987,11 @@ class SyncService:
                     break
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             logger.warning("snapshot chunk validation failed", exc_info=exc)
-            raise SyncSnapshotExpiredError() from exc
+            raise SyncSnapshotExpiredError(
+                expired_snapshot_token=snapshot.token
+            ) from exc
         if len(page) != min(limit, snapshot.item_count - offset):
-            raise SyncSnapshotExpiredError()
+            raise SyncSnapshotExpiredError(expired_snapshot_token=snapshot.token)
         return page
 
     async def _create_snapshot(self) -> SyncSnapshot:

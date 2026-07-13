@@ -21,6 +21,7 @@ The cursor contract:
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 
 import pytest
@@ -1014,6 +1015,185 @@ async def test_missing_snapshot_continuation_uses_stable_expired_error(space_ses
 
     assert raised.value.error_type == "sync_snapshot_expired"
     assert raised.value.recovery_action == "restart_full_sync"
+
+
+async def _assert_snapshot_expired_with_token(space_session, snapshot) -> None:
+    from app.errors import SyncSnapshotExpiredError
+    from app.services.sync import SyncService
+
+    space_session.add(snapshot)
+    await space_session.flush()
+
+    with pytest.raises(SyncSnapshotExpiredError) as raised:
+        await SyncService(space_session).full(
+            cursor=0,
+            snapshot_token=snapshot.token,
+            snapshot_offset=0,
+            limit=10,
+        )
+
+    assert raised.value.expired_snapshot_token == snapshot.token
+
+
+@pytest.mark.asyncio
+async def test_snapshot_unknown_format_fails_closed_with_token(space_session):
+    from app.models.sync_state import SyncSnapshot
+
+    await _assert_snapshot_expired_with_token(
+        space_session,
+        SyncSnapshot(
+            token="unknown-format-snapshot",
+            cursor=0,
+            payload="[]",
+            format="future-format-v2",
+            status="ready",
+            created_at="2026-07-13T00:00:00Z",
+            expires_at="2999-07-13T00:00:00Z",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("created_at", "expires_at"),
+    [
+        ("not-a-timestamp", ""),
+        ("2026-07-13T00:00:00Z", "not-a-timestamp"),
+    ],
+)
+async def test_snapshot_malformed_timestamp_fails_closed_with_token(
+    space_session, created_at, expires_at
+):
+    from app.models.sync_state import SyncSnapshot
+
+    await _assert_snapshot_expired_with_token(
+        space_session,
+        SyncSnapshot(
+            token=f"malformed-time-{uuid.uuid4()}",
+            cursor=0,
+            payload="[]",
+            format="legacy-json-v1",
+            status="ready",
+            created_at=created_at,
+            expires_at=expires_at,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{malformed-json",
+        json.dumps({"kind": "entity"}),
+        json.dumps(["not-an-object"]),
+        json.dumps([{}]),
+        json.dumps([{"kind": "unknown", "payload": {}}]),
+        json.dumps([{"kind": "entity", "payload": {}}]),
+        json.dumps([{"kind": "entity", "pull_key": "tasks"}]),
+        json.dumps([{"kind": "entity", "pull_key": "unknown", "payload": {}}]),
+        json.dumps([{"kind": "tombstone", "payload": "not-an-object"}]),
+    ],
+)
+async def test_legacy_snapshot_malformed_payload_fails_closed_with_token(
+    space_session, payload
+):
+    from app.models.sync_state import SyncSnapshot
+
+    await _assert_snapshot_expired_with_token(
+        space_session,
+        SyncSnapshot(
+            token=f"malformed-legacy-{uuid.uuid4()}",
+            cursor=0,
+            payload=payload,
+            format="legacy-json-v1",
+            status="ready",
+            created_at="2026-07-13T00:00:00Z",
+            expires_at="2999-07-13T00:00:00Z",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_chunk_payload_and_checksum_tampering_breaks_snapshot_manifest(space_session):
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
+    from app.models.task import Task
+    from app.services.sync import SyncService
+    from app.services.sync_snapshot_chunks import encode_snapshot_chunks
+
+    space_session.add(Task(id="manifest-binding", title="original"))
+    await space_session.commit()
+    service = SyncService(space_session)
+    first = await service.full(cursor=0, limit=1)
+    token = first["snapshot_token"]
+    snapshot = await space_session.get(SyncSnapshot, token)
+    chunk = await space_session.get(SyncSnapshotChunk, (token, 0))
+    assert snapshot is not None and chunk is not None
+    original_snapshot_checksum = snapshot.checksum
+
+    replacement = encode_snapshot_chunks([
+        {
+            "kind": "entity",
+            "pull_key": "tasks",
+            "payload": {"id": "manifest-binding", "title": "tampered"},
+        }
+    ])[0]
+    chunk.compressed_payload = replacement.compressed_payload
+    chunk.checksum = replacement.checksum
+    chunk.item_count = replacement.item_count
+    chunk.uncompressed_bytes = replacement.uncompressed_bytes
+    chunk.compressed_bytes = replacement.compressed_bytes
+    snapshot.item_count = replacement.item_count
+    snapshot.uncompressed_bytes = replacement.uncompressed_bytes
+    snapshot.compressed_bytes = replacement.compressed_bytes
+    await space_session.flush()
+    replacement_manifest_checksum = hashlib.sha256(
+        replacement.checksum.encode("ascii")
+    ).hexdigest()
+    assert snapshot.checksum == original_snapshot_checksum
+    assert replacement_manifest_checksum != original_snapshot_checksum
+
+    with pytest.raises(SyncSnapshotExpiredError) as raised:
+        await service.full(
+            cursor=0,
+            snapshot_token=token,
+            snapshot_offset=0,
+            limit=1,
+        )
+
+    assert raised.value.expired_snapshot_token == token
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checksum", ["坏" * 32, "abc", "G" * 64])
+async def test_chunk_manifest_invalid_checksum_encoding_fails_closed(
+    space_session, checksum
+):
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.sync_state import SyncSnapshotChunk
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    space_session.add(Task(id=f"checksum-{uuid.uuid4()}", title="checksum"))
+    await space_session.commit()
+    service = SyncService(space_session)
+    first = await service.full(cursor=0, limit=1)
+    token = first["snapshot_token"]
+    chunk = await space_session.get(SyncSnapshotChunk, (token, 0))
+    assert chunk is not None
+    chunk.checksum = checksum
+    await space_session.flush()
+
+    with pytest.raises(SyncSnapshotExpiredError) as raised:
+        await service.full(
+            cursor=0,
+            snapshot_token=token,
+            snapshot_offset=0,
+            limit=1,
+        )
+
+    assert raised.value.expired_snapshot_token == token
 
 
 @pytest.mark.asyncio
