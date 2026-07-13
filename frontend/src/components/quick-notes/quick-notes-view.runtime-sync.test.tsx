@@ -103,6 +103,15 @@ function wireFakeSyncEngine(engine: FakeSyncEngine): void {
   )
 }
 
+async function renderRuntimeView() {
+  let view!: ReturnType<typeof render>
+  await act(async () => {
+    view = render(createElement(QuickNotesView))
+    await useQuickNoteStore.getState().refreshQuickNotesFromRepository()
+  })
+  return view
+}
+
 describe('QuickNotesView runtime sync refresh', () => {
   beforeEach(async () => {
     useQuickNoteStore.getState().reset()
@@ -113,8 +122,11 @@ describe('QuickNotesView runtime sync refresh', () => {
   })
 
   afterEach(async () => {
-    useQuickNoteStore.getState().reset()
-    useSyncStore.getState().reset()
+    await act(async () => {
+      useQuickNoteStore.getState().reset()
+      useSyncStore.getState().reset()
+      await Promise.resolve()
+    })
     await db.delete()
     spaceDBManager.close()
   })
@@ -127,7 +139,7 @@ describe('QuickNotesView runtime sync refresh', () => {
       updated_at: '2026-07-07T13:00:00.000Z',
     })
 
-    render(createElement(QuickNotesView))
+    await renderRuntimeView()
 
     expect(await screen.findByRole('button', { name: /真实运行时卡片/ })).toBeInTheDocument()
     expect(screen.getByText('待同步')).toBeInTheDocument()
@@ -141,7 +153,7 @@ describe('QuickNotesView runtime sync refresh', () => {
       updated_at: '2026-07-07T13:00:00.000Z',
     })
 
-    render(createElement(QuickNotesView))
+    await renderRuntimeView()
 
     expect(
       await screen.findByRole('button', { name: /会被 pull tombstone 移除的卡片/ }),
@@ -174,7 +186,7 @@ describe('QuickNotesView runtime sync refresh', () => {
     const engine = makeFakeSyncEngine()
     wireFakeSyncEngine(engine)
 
-    render(createElement(QuickNotesView))
+    await renderRuntimeView()
 
     expect(
       await screen.findByRole('button', { name: /通过 sync callback 移除的卡片/ }),
@@ -204,7 +216,7 @@ describe('QuickNotesView runtime sync refresh', () => {
       updated_at: '2026-07-07T13:00:00.000Z',
     })
 
-    render(createElement(QuickNotesView))
+    await renderRuntimeView()
 
     expect(
       await screen.findByRole('button', { name: /同步软删后进入回收站/ }),
@@ -238,7 +250,7 @@ describe('QuickNotesView runtime sync refresh', () => {
       updated_at: '2026-07-07T13:00:00.000Z',
     })
 
-    render(createElement(QuickNotesView))
+    await renderRuntimeView()
 
     expect(await screen.findByRole('button', { name: /push 完成后状态消失/ })).toBeInTheDocument()
     expect(screen.getByText('待同步')).toBeInTheDocument()
@@ -271,7 +283,7 @@ describe('QuickNotesView runtime sync refresh', () => {
     const engine = makeFakeSyncEngine('infra-error')
     wireFakeSyncEngine(engine)
 
-    render(createElement(QuickNotesView))
+    await renderRuntimeView()
 
     expect(await screen.findByRole('button', { name: /同步失败后显示失败状态/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /仍然只是待同步状态/ })).toBeInTheDocument()
