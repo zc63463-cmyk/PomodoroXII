@@ -165,6 +165,8 @@ interface CleanupPendingReceipt {
   closeAfterCleanup: boolean
   visibility: 'refreshed' | 'pending'
   cleanupPending: boolean
+  recovery: QuickNoteExistingEditSnapshotV1
+  recoveryBaseGeneration: number
 }
 
 interface ExistingEditCancelFlight {
@@ -925,6 +927,65 @@ export function createQuickNoteExistingEditSessionController(
     }
   }
 
+  async function compensateRecoveryAfterCleanup(
+    recovery: QuickNoteExistingEditSnapshotV1,
+    baseGeneration: number,
+    capture: ExistingEditCheckpointCapture,
+  ): Promise<boolean> {
+    let effectiveRecovery = recovery
+    let effectiveBaseGeneration = baseGeneration
+    let effectiveCapture = capture
+    if (
+      identity?.editId === capture.editId
+      && identity.revision > capture.revision
+    ) {
+      effectiveRecovery = {
+        version: 1,
+        editId: identity.editId,
+        revision: identity.revision,
+        noteId: identity.noteId,
+        baseContent: identity.baseContent,
+        baseUpdatedAt: identity.baseUpdatedAt,
+        draft: snapshot.draft,
+        updatedAt: nowIso(),
+      }
+      effectiveBaseGeneration = identity.baseGeneration
+      effectiveCapture = {
+        epoch: capture.epoch,
+        editId: identity.editId,
+        revision: identity.revision,
+        content: snapshot.draft,
+      }
+    }
+    try {
+      await adapter.checkpoint(effectiveRecovery)
+      resetRecoveryOwners(
+        {
+          kind: 'v1',
+          editId: effectiveRecovery.editId,
+          revision: effectiveRecovery.revision,
+        },
+        effectiveBaseGeneration,
+      )
+      if (isCurrentCapture(effectiveCapture)) {
+        publish({
+          ...snapshot,
+          durability: 'recovery-durable',
+        })
+      }
+      return true
+    } catch {
+      resetRecoveryOwners()
+      if (isCurrentCapture(effectiveCapture)) {
+        publish({
+          ...snapshot,
+          durability: 'memory-only',
+        })
+      }
+      return false
+    }
+  }
+
   async function runSave(
     flight: ExistingEditSaveAttempt,
   ): Promise<QuickNoteExistingEditSaveResult> {
@@ -999,6 +1060,7 @@ export function createQuickNoteExistingEditSessionController(
     let update: Awaited<ReturnType<
       QuickNoteExistingEditStorageAdapter['updateEntity']
     >>
+    const projectionGenerationBeforeUpdate = projectionGeneration
     try {
       update = await adapter.updateEntity({
         noteId: capture.noteId,
@@ -1023,6 +1085,30 @@ export function createQuickNoteExistingEditSessionController(
         })
       }
       return { kind: 'failed', issue }
+    }
+
+    if (
+      update.kind !== 'unavailable'
+      && projectionGeneration !== projectionGenerationBeforeUpdate
+      && isTargetUnavailable()
+    ) {
+      const projectedLifecycle = unavailableLifecycle ?? 'missing'
+      let target: Awaited<ReturnType<
+        QuickNoteExistingEditStorageAdapter['readTarget']
+      >>
+      try {
+        target = await adapter.readTarget(capture.noteId)
+      } catch {
+        return { kind: 'unavailable', lifecycle: projectedLifecycle }
+      }
+      const lifecycle = target.lifecycle === 'active' && target.note === null
+        ? 'missing'
+        : target.lifecycle
+      if (lifecycle !== 'active' || target.note === null) {
+        unavailableLifecycle = lifecycle
+        return { kind: 'unavailable', lifecycle }
+      }
+      unavailableLifecycle = null
     }
 
     const checkpointDurability: ExistingEditDurability = captureRecoveryDurable
@@ -1131,6 +1217,8 @@ export function createQuickNoteExistingEditSessionController(
       closeAfterCleanup: flight.closeAfterSave,
       visibility,
       cleanupPending: cleanupFailed,
+      recovery,
+      recoveryBaseGeneration,
     }
 
     if (cleanupFailed) {
@@ -1221,6 +1309,7 @@ export function createQuickNoteExistingEditSessionController(
     receipt: CleanupPendingReceipt,
   ): Promise<QuickNoteExistingEditSaveResult> {
     receipt.closeAfterCleanup ||= flight.closeAfterSave
+    const projectionGenerationBeforeCleanup = projectionGeneration
     let cleanupResult: 'cleared' | 'absent' | 'different-edit'
     try {
       cleanupResult = await adapter.clearIfOwned(receipt.owners)
@@ -1238,6 +1327,19 @@ export function createQuickNoteExistingEditSessionController(
         latestDurability(flight.capture, 'entity-durable'),
       )
       return { kind: 'failed', issue }
+    }
+
+    if (
+      projectionGeneration !== projectionGenerationBeforeCleanup
+      && isTargetUnavailable()
+    ) {
+      const lifecycle = unavailableLifecycle ?? 'missing'
+      await compensateRecoveryAfterCleanup(
+        receipt.recovery,
+        receipt.recoveryBaseGeneration,
+        flight.capture,
+      )
+      return { kind: 'unavailable', lifecycle }
     }
 
     receipt.cleanupPending = false
@@ -1714,6 +1816,17 @@ export function createQuickNoteExistingEditSessionController(
         )
         if (capture && owners.length > 0) {
           const unavailableAtStart = unavailableLifecycle
+          const recoveryBaseGeneration = identity.baseGeneration
+          const recovery: QuickNoteExistingEditSnapshotV1 = {
+            version: 1,
+            editId: capture.editId,
+            revision: capture.revision,
+            noteId: identity.noteId,
+            baseContent: identity.baseContent,
+            baseUpdatedAt: identity.baseUpdatedAt,
+            draft: capture.content,
+            updatedAt: nowIso(),
+          }
           observeBackgroundWork(append(async () => {
             let cleanupResult: 'cleared' | 'absent' | 'different-edit'
             try {
@@ -1723,10 +1836,18 @@ export function createQuickNoteExistingEditSessionController(
             }
             if (cleanupResult === 'different-edit') return
 
+            if (projectionGeneration !== observedGeneration) {
+              await compensateRecoveryAfterCleanup(
+                recovery,
+                recoveryBaseGeneration,
+                capture,
+              )
+              return
+            }
+
             resetRecoveryOwners()
             if (
               !isCurrentCapture(capture)
-              || projectionGeneration !== observedGeneration
               || snapshot.phase !== 'target-unavailable'
               || unavailableLifecycle !== unavailableAtStart
             ) return
