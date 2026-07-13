@@ -172,6 +172,11 @@ interface ExistingEditCancelFlight {
   promise: Promise<QuickNoteExistingEditCancelResult>
 }
 
+interface ExistingEditCancelAttempt {
+  capture: ExistingEditCheckpointCapture
+  owners: readonly ExistingEditRowOwner[]
+}
+
 interface ExistingEditConflictFlight {
   kind: 'resolve-conflict'
   strategy: 'keep-local' | 'use-remote' | 'merge'
@@ -946,7 +951,6 @@ export function createQuickNoteExistingEditSessionController(
         captureRecoveryDurable = true
         if (
           isCurrentCapture(capture)
-          && snapshot.phase === 'saving'
           && snapshot.durability !== 'recovery-durable'
         ) {
           publish({
@@ -1343,18 +1347,10 @@ export function createQuickNoteExistingEditSessionController(
     return promise
   }
 
-  async function runCancel(): Promise<QuickNoteExistingEditCancelResult> {
-    if (!active || identity === null) return { kind: 'cancelled' }
-    const capture: ExistingEditCheckpointCapture = {
-      epoch,
-      editId: identity.editId,
-      revision: identity.revision,
-      content: snapshot.draft,
-    }
-    const receiptOwners = cleanupReceipt?.editId === capture.editId
-      ? cleanupReceipt.owners
-      : []
-    const owners = mergeOwners([...recoveryOwners], receiptOwners)
+  async function runCancel(
+    attempt: ExistingEditCancelAttempt,
+  ): Promise<QuickNoteExistingEditCancelResult> {
+    const { capture, owners } = attempt
     let cleanupResult: 'cleared' | 'absent' | 'different-edit'
     try {
       cleanupResult = await adapter.clearIfOwned(owners)
@@ -1390,7 +1386,23 @@ export function createQuickNoteExistingEditSessionController(
       return Promise.resolve({ kind: 'cancelled' })
     }
 
-    const promise = append(runCancel)
+    const capture: ExistingEditCheckpointCapture = {
+      epoch,
+      editId: identity.editId,
+      revision: identity.revision,
+      content: snapshot.draft,
+    }
+    const receiptOwners = cleanupReceipt?.editId === capture.editId
+      ? cleanupReceipt.owners
+      : []
+    const attemptedOwner: ExistingEditRowOwner[] = capture.revision > 0
+      ? [{ kind: 'v1', editId: capture.editId, revision: capture.revision }]
+      : []
+    const attempt: ExistingEditCancelAttempt = {
+      capture,
+      owners: mergeOwners([...recoveryOwners], receiptOwners, attemptedOwner),
+    }
+    const promise = append(() => runCancel(attempt))
     const flight: ExistingEditCancelFlight = {
       kind: 'cancel',
       promise,
@@ -1457,6 +1469,14 @@ export function createQuickNoteExistingEditSessionController(
       : target.lifecycle
     if (lifecycle !== 'active' || target.note === null) {
       unavailableLifecycle = lifecycle
+      if (isCurrentCapture(capture)) {
+        publish({
+          ...snapshot,
+          phase: 'target-unavailable',
+          conflict: null,
+          issue: null,
+        })
+      }
       return { kind: 'unavailable', lifecycle }
     }
     const remote = target.note
@@ -1551,6 +1571,7 @@ export function createQuickNoteExistingEditSessionController(
     publish({
       ...snapshot,
       phase: 'dirty',
+      durability: 'memory-only',
       editingNote: remote,
       conflict: null,
       issue: null,
@@ -1582,6 +1603,12 @@ export function createQuickNoteExistingEditSessionController(
   function resolveConflict(
     strategy: 'keep-local' | 'use-remote' | 'merge',
   ): Promise<QuickNoteExistingEditConflictResult> {
+    if (snapshot.phase === 'target-unavailable' && unavailableLifecycle) {
+      return Promise.resolve({
+        kind: 'unavailable',
+        lifecycle: unavailableLifecycle,
+      })
+    }
     cancelTrailingTimers()
     if (
       terminalFlight?.kind === 'resolve-conflict'
@@ -1631,7 +1658,36 @@ export function createQuickNoteExistingEditSessionController(
       const baseChanged =
         activeNote.content !== identity.baseContent
         || activeNote.updated_at !== identity.baseUpdatedAt
-      if (!baseChanged) return
+      if (!baseChanged) {
+        if (snapshot.phase !== 'target-unavailable') return
+
+        unavailableLifecycle = null
+        const hasLocalWork =
+          normalizeContent(snapshot.draft) !== normalizeContent(identity.baseContent)
+        if (hasLocalWork) {
+          const capture = captureCurrentRevision()
+          if (capture) scheduleTrailingWork(capture)
+          publish({
+            ...snapshot,
+            phase: 'dirty',
+            editingNote: activeNote,
+            conflict: null,
+            issue: null,
+          })
+          return
+        }
+
+        cleanupReceipt = null
+        publish({
+          phase: 'saved',
+          durability: 'entity-durable',
+          editingNote: activeNote,
+          draft: activeNote.content,
+          conflict: null,
+          issue: null,
+        })
+        return
+      }
 
       const hasLocalWork =
         snapshot.phase === 'dirty'
