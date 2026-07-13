@@ -2719,6 +2719,334 @@ describe('QuickNote existing-edit session controller', () => {
       expectIdle(controller.state)
     })
 
+    it.each(['succeeds', 'rejects'] as const)(
+      'compensates first-save cleanup after removal when checkpoint %s',
+      async (compensation) => {
+        const cleanup = createDeferred<
+          'cleared' | 'absent' | 'different-edit'
+        >()
+        const committed = makeQuickNote({
+          content: 'first cleanup removed recovery',
+          updated_at: '2026-07-12T04:00:02.000Z',
+        })
+        const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
+        adapter.updateResult = { kind: 'updated', note: committed }
+        adapter.clearEffects.push(() => cleanup.promise)
+        adapter.readTargetResult = { note: null, lifecycle: 'missing' }
+        const controller = createQuickNoteExistingEditSessionController(
+          controllerOptions(adapter, onSaved),
+        )
+        await flushMicrotasks()
+        controller.start(makeQuickNote())
+        controller.change('first cleanup removed recovery')
+        const save = controller.save()
+        await flushMicrotasks()
+        expect(adapter.clearCalls).toHaveLength(1)
+        const recoveryBeforeCleanup = adapter.stored
+        controller.observeProjection(
+          projectionFor(committed.id, 'missing', null),
+        )
+        if (compensation === 'rejects') {
+          adapter.checkpointEffects.push(
+            () => Promise.reject(new Error('first-save compensation blocked')),
+          )
+        }
+        cleanup.resolve('cleared')
+
+        await expect(save).resolves.toEqual({
+          kind: 'unavailable',
+          lifecycle: 'missing',
+        })
+        expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
+        expect(adapter.checkpointCalls).toHaveLength(2)
+        expect(adapter.updateCalls).toHaveLength(1)
+        expect(adapter.clearCalls).toHaveLength(1)
+        expect(onSaved).not.toHaveBeenCalled()
+        expect(controller.state).toMatchObject({
+          phase: 'target-unavailable',
+          durability: compensation === 'succeeds'
+            ? 'recovery-durable'
+            : 'memory-only',
+          editingNote: committed,
+          draft: 'first cleanup removed recovery',
+        })
+        if (compensation === 'succeeds') {
+          expect(adapter.stored).toEqual({
+            ...recoveryBeforeCleanup,
+            baseContent: committed.content,
+            baseUpdatedAt: committed.updated_at,
+          })
+        } else {
+          expect(adapter.stored).toBeNull()
+        }
+      },
+    )
+
+    it('compensates the latest successor after first-save cleanup and removal', async () => {
+      const cleanup = createDeferred<
+        'cleared' | 'absent' | 'different-edit'
+      >()
+      const committed = makeQuickNote({
+        content: 'first cleanup committed base',
+        updated_at: '2026-07-12T04:00:02.000Z',
+      })
+      adapter.updateResult = { kind: 'updated', note: committed }
+      adapter.clearEffects.push(() => cleanup.promise)
+      adapter.readTargetResult = { note: null, lifecycle: 'missing' }
+      const controller = createQuickNoteExistingEditSessionController(
+        controllerOptions(adapter),
+      )
+      await flushMicrotasks()
+      controller.start(makeQuickNote())
+      controller.change('first cleanup committed base')
+      const save = controller.save()
+      await flushMicrotasks()
+      controller.change('successor during first cleanup')
+      controller.observeProjection(
+        projectionFor(committed.id, 'missing', null),
+      )
+      cleanup.resolve('cleared')
+
+      await expect(save).resolves.toEqual({
+        kind: 'unavailable',
+        lifecycle: 'missing',
+      })
+      expect(adapter.stored).toMatchObject({
+        editId: 'edit-1',
+        revision: 2,
+        baseContent: committed.content,
+        baseUpdatedAt: committed.updated_at,
+        draft: 'successor during first cleanup',
+      })
+      expect(controller.state).toMatchObject({
+        phase: 'target-unavailable',
+        durability: 'recovery-durable',
+        editingNote: committed,
+        draft: 'successor during first cleanup',
+      })
+      expect(adapter.updateCalls).toHaveLength(1)
+      expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
+    })
+
+    it.each(['succeeds', 'rejects'] as const)(
+      'reconciles first-save cleanup against active v2 when compensation %s',
+      async (compensation) => {
+        const cleanup = createDeferred<
+          'cleared' | 'absent' | 'different-edit'
+        >()
+        const committedV1 = makeQuickNote({
+          content: 'first cleanup committed v1',
+          updated_at: '2026-07-12T04:00:02.000Z',
+        })
+        const remoteV2 = makeQuickNote({
+          content: 'first cleanup authoritative v2',
+          updated_at: '2026-07-12T04:00:03.000Z',
+        })
+        const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
+        adapter.updateResult = { kind: 'updated', note: committedV1 }
+        adapter.clearEffects.push(() => cleanup.promise)
+        adapter.readTargetResult = { note: remoteV2, lifecycle: 'active' }
+        const controller = createQuickNoteExistingEditSessionController(
+          controllerOptions(adapter, onSaved),
+        )
+        await flushMicrotasks()
+        controller.start(makeQuickNote())
+        controller.change('first cleanup committed v1')
+        const save = controller.save()
+        await flushMicrotasks()
+        controller.observeProjection(
+          projectionFor(remoteV2.id, 'active', remoteV2),
+        )
+        if (compensation === 'rejects') {
+          adapter.checkpointEffects.push(
+            () => Promise.reject(new Error('first active compensation blocked')),
+          )
+        }
+        cleanup.resolve('cleared')
+
+        await expect(save).resolves.toEqual({
+          kind: 'conflict',
+          conflict: {
+            note: remoteV2,
+            localDraft: 'first cleanup committed v1',
+            remoteContent: remoteV2.content,
+          },
+        })
+        expect(controller.state).toMatchObject({
+          phase: 'conflict',
+          durability: compensation === 'succeeds'
+            ? 'recovery-durable'
+            : 'memory-only',
+          editingNote: remoteV2,
+          draft: 'first cleanup committed v1',
+        })
+        expect(adapter.updateCalls).toHaveLength(1)
+        expect(adapter.clearCalls).toEqual([[
+          { kind: 'v1', editId: 'edit-1', revision: 1 },
+        ]])
+        expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
+        expect(onSaved).not.toHaveBeenCalled()
+        if (compensation === 'succeeds') {
+          expect(adapter.stored).toMatchObject({
+            editId: 'edit-1',
+            revision: 1,
+            baseContent: committedV1.content,
+            baseUpdatedAt: committedV1.updated_at,
+            draft: 'first cleanup committed v1',
+          })
+        } else {
+          expect(adapter.stored).toBeNull()
+        }
+      },
+    )
+
+    it('preserves a first-save projected conflict when authority read fails after cleanup', async () => {
+      const cleanup = createDeferred<
+        'cleared' | 'absent' | 'different-edit'
+      >()
+      const committedV1 = makeQuickNote({
+        content: 'first cleanup read failure v1',
+        updated_at: '2026-07-12T04:00:02.000Z',
+      })
+      const projectedV2 = makeQuickNote({
+        content: 'first cleanup projected v2',
+        updated_at: '2026-07-12T04:00:03.000Z',
+      })
+      adapter.updateResult = { kind: 'updated', note: committedV1 }
+      adapter.clearEffects.push(() => cleanup.promise)
+      adapter.readTargetEffects.push(
+        () => Promise.reject(new Error('first cleanup authority blocked')),
+      )
+      const controller = createQuickNoteExistingEditSessionController(
+        controllerOptions(adapter),
+      )
+      await flushMicrotasks()
+      controller.start(makeQuickNote())
+      controller.change('first cleanup read failure v1')
+      const save = controller.save()
+      await flushMicrotasks()
+      controller.observeProjection(
+        projectionFor(projectedV2.id, 'active', projectedV2),
+      )
+      cleanup.resolve('cleared')
+
+      await expect(save).resolves.toEqual({
+        kind: 'conflict',
+        conflict: {
+          note: projectedV2,
+          localDraft: 'first cleanup read failure v1',
+          remoteContent: projectedV2.content,
+        },
+      })
+      expect(controller.state).toMatchObject({
+        phase: 'conflict',
+        durability: 'recovery-durable',
+        editingNote: projectedV2,
+      })
+      expect(adapter.stored).toMatchObject({
+        revision: 1,
+        baseContent: committedV1.content,
+        baseUpdatedAt: committedV1.updated_at,
+      })
+      expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
+    })
+
+    it('compensates the latest successor after first-save cleanup and active v2', async () => {
+      const cleanup = createDeferred<
+        'cleared' | 'absent' | 'different-edit'
+      >()
+      const committedV1 = makeQuickNote({
+        content: 'successor active committed v1',
+        updated_at: '2026-07-12T04:00:02.000Z',
+      })
+      const remoteV2 = makeQuickNote({
+        content: 'successor authoritative v2',
+        updated_at: '2026-07-12T04:00:03.000Z',
+      })
+      adapter.updateResult = { kind: 'updated', note: committedV1 }
+      adapter.clearEffects.push(() => cleanup.promise)
+      adapter.readTargetResult = { note: remoteV2, lifecycle: 'active' }
+      const controller = createQuickNoteExistingEditSessionController(
+        controllerOptions(adapter),
+      )
+      await flushMicrotasks()
+      controller.start(makeQuickNote())
+      controller.change('successor active committed v1')
+      const save = controller.save()
+      await flushMicrotasks()
+      controller.change('latest successor against active v2')
+      controller.observeProjection(
+        projectionFor(remoteV2.id, 'active', remoteV2),
+      )
+      cleanup.resolve('cleared')
+
+      await expect(save).resolves.toEqual({
+        kind: 'conflict',
+        conflict: {
+          note: remoteV2,
+          localDraft: 'latest successor against active v2',
+          remoteContent: remoteV2.content,
+        },
+      })
+      expect(adapter.stored).toMatchObject({
+        editId: 'edit-1',
+        revision: 2,
+        baseContent: committedV1.content,
+        baseUpdatedAt: committedV1.updated_at,
+        draft: 'latest successor against active v2',
+      })
+      expect(controller.state).toMatchObject({
+        phase: 'conflict',
+        durability: 'recovery-durable',
+        editingNote: remoteV2,
+        draft: 'latest successor against active v2',
+      })
+      expect(adapter.updateCalls).toHaveLength(1)
+      expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
+    })
+
+    it('drops first-save recovery durability while post-cleanup authority read is pending', async () => {
+      const cleanup = createDeferred<
+        'cleared' | 'absent' | 'different-edit'
+      >()
+      const authorityRead = createDeferred<ControlledReadTargetResult>()
+      const committedV1 = makeQuickNote({
+        content: 'first pending authority v1',
+        updated_at: '2026-07-12T04:00:02.000Z',
+      })
+      const remoteV2 = makeQuickNote({
+        content: 'first pending authority v2',
+        updated_at: '2026-07-12T04:00:03.000Z',
+      })
+      adapter.updateResult = { kind: 'updated', note: committedV1 }
+      adapter.clearEffects.push(() => cleanup.promise)
+      const controller = createQuickNoteExistingEditSessionController(
+        controllerOptions(adapter),
+      )
+      await flushMicrotasks()
+      controller.start(makeQuickNote())
+      controller.change('first pending authority v1')
+      const save = controller.save()
+      await flushMicrotasks()
+      controller.observeProjection(
+        projectionFor(remoteV2.id, 'active', remoteV2),
+      )
+      adapter.readTargetEffects.push(() => authorityRead.promise)
+      cleanup.resolve('cleared')
+      await flushMicrotasks()
+
+      expect(adapter.stored).toBeNull()
+      expect(controller.state).toMatchObject({
+        phase: 'conflict',
+        durability: 'memory-only',
+        draft: 'first pending authority v1',
+        conflict: { note: remoteV2 },
+      })
+      authorityRead.resolve({ note: remoteV2, lifecycle: 'active' })
+      await expect(save).resolves.toMatchObject({ kind: 'conflict' })
+      expect(controller.state.durability).toBe('recovery-durable')
+    })
+
     it('caches projection-pending visibility without replaying entity or projection', async () => {
       const committed = makeQuickNote({
         content: 'projection pending',
@@ -2861,6 +3189,7 @@ describe('QuickNote existing-edit session controller', () => {
         })
         const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
         adapter.updateResult = { kind: 'updated', note: committed }
+        adapter.readTargetResult = { note: null, lifecycle: 'missing' }
         adapter.clearEffects.push(
           () => Promise.reject(new Error('first cleanup blocked')),
           () => retryCleanup.promise,
@@ -2904,7 +3233,11 @@ describe('QuickNote existing-edit session controller', () => {
           issue: null,
         })
         if (compensation === 'succeeds') {
-          expect(adapter.stored).toEqual(recoveryBeforeRetry)
+          expect(adapter.stored).toEqual({
+            ...recoveryBeforeRetry,
+            baseContent: committed.content,
+            baseUpdatedAt: committed.updated_at,
+          })
         } else {
           expect(adapter.stored).toBeNull()
         }
@@ -2924,6 +3257,7 @@ describe('QuickNote existing-edit session controller', () => {
         updated_at: '2026-07-12T04:00:02.000Z',
       })
       adapter.updateResult = { kind: 'updated', note: committed }
+      adapter.readTargetResult = { note: null, lifecycle: 'missing' }
       adapter.clearEffects.push(
         () => Promise.reject(new Error('first cleanup blocked')),
         () => retryCleanup.promise,
@@ -2961,6 +3295,189 @@ describe('QuickNote existing-edit session controller', () => {
         editingNote: committed,
         draft: 'latest successor before removal',
       })
+    })
+
+    it.each(['succeeds', 'rejects'] as const)(
+      'reconciles receipt cleanup against active v2 when compensation %s',
+      async (compensation) => {
+        const retryCleanup = createDeferred<
+          'cleared' | 'absent' | 'different-edit'
+        >()
+        const committedV1 = makeQuickNote({
+          content: 'receipt committed v1',
+          updated_at: '2026-07-12T04:00:02.000Z',
+        })
+        const remoteV2 = makeQuickNote({
+          content: 'receipt authoritative v2',
+          updated_at: '2026-07-12T04:00:03.000Z',
+        })
+        const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
+        adapter.updateResult = { kind: 'updated', note: committedV1 }
+        adapter.clearEffects.push(
+          () => Promise.reject(new Error('first cleanup blocked')),
+          () => retryCleanup.promise,
+        )
+        adapter.readTargetResult = { note: remoteV2, lifecycle: 'active' }
+        const controller = createQuickNoteExistingEditSessionController(
+          controllerOptions(adapter, onSaved),
+        )
+        await flushMicrotasks()
+        controller.start(makeQuickNote())
+        controller.change('receipt committed v1')
+        await controller.save()
+
+        const retry = controller.save()
+        await flushMicrotasks()
+        controller.observeProjection(
+          projectionFor(remoteV2.id, 'active', remoteV2),
+        )
+        if (compensation === 'rejects') {
+          adapter.checkpointEffects.push(
+            () => Promise.reject(new Error('receipt compensation blocked')),
+          )
+        }
+        retryCleanup.resolve('cleared')
+
+        await expect(retry).resolves.toEqual({
+          kind: 'conflict',
+          conflict: {
+            note: remoteV2,
+            localDraft: 'receipt committed v1',
+            remoteContent: remoteV2.content,
+          },
+        })
+        expect(adapter.updateCalls).toHaveLength(1)
+        expect(adapter.clearCalls).toEqual([
+          [{ kind: 'v1', editId: 'edit-1', revision: 1 }],
+          [{ kind: 'v1', editId: 'edit-1', revision: 1 }],
+        ])
+        expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
+        expect(onSaved).toHaveBeenCalledTimes(1)
+        expect(controller.state).toMatchObject({
+          phase: 'conflict',
+          durability: compensation === 'succeeds'
+            ? 'recovery-durable'
+            : 'memory-only',
+          editingNote: remoteV2,
+          draft: 'receipt committed v1',
+        })
+        if (compensation === 'succeeds') {
+          expect(adapter.stored).toMatchObject({
+            editId: 'edit-1',
+            revision: 1,
+            baseContent: committedV1.content,
+            baseUpdatedAt: committedV1.updated_at,
+            draft: 'receipt committed v1',
+          })
+        } else {
+          expect(adapter.stored).toBeNull()
+        }
+      },
+    )
+
+    it('preserves observed receipt conflict when post-cleanup authority read fails', async () => {
+      const retryCleanup = createDeferred<
+        'cleared' | 'absent' | 'different-edit'
+      >()
+      const committedV1 = makeQuickNote({
+        content: 'receipt read failure v1',
+        updated_at: '2026-07-12T04:00:02.000Z',
+      })
+      const projectedV2 = makeQuickNote({
+        content: 'projected v2 before failed read',
+        updated_at: '2026-07-12T04:00:03.000Z',
+      })
+      adapter.updateResult = { kind: 'updated', note: committedV1 }
+      adapter.clearEffects.push(
+        () => Promise.reject(new Error('first cleanup blocked')),
+        () => retryCleanup.promise,
+      )
+      adapter.readTargetEffects.push(
+        () => Promise.reject(new Error('authority read blocked')),
+      )
+      const controller = createQuickNoteExistingEditSessionController(
+        controllerOptions(adapter),
+      )
+      await flushMicrotasks()
+      controller.start(makeQuickNote())
+      controller.change('receipt read failure v1')
+      await controller.save()
+
+      const retry = controller.save()
+      await flushMicrotasks()
+      controller.observeProjection(
+        projectionFor(projectedV2.id, 'active', projectedV2),
+      )
+      retryCleanup.resolve('cleared')
+
+      await expect(retry).resolves.toEqual({
+        kind: 'conflict',
+        conflict: {
+          note: projectedV2,
+          localDraft: 'receipt read failure v1',
+          remoteContent: projectedV2.content,
+        },
+      })
+      expect(controller.state).toMatchObject({
+        phase: 'conflict',
+        durability: 'recovery-durable',
+        editingNote: projectedV2,
+        draft: 'receipt read failure v1',
+      })
+      expect(adapter.stored).toMatchObject({
+        editId: 'edit-1',
+        revision: 1,
+        baseContent: committedV1.content,
+        baseUpdatedAt: committedV1.updated_at,
+      })
+      expect(adapter.updateCalls).toHaveLength(1)
+      expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
+    })
+
+    it('drops receipt recovery durability while post-cleanup authority read is pending', async () => {
+      const cleanup = createDeferred<
+        'cleared' | 'absent' | 'different-edit'
+      >()
+      const authorityRead = createDeferred<ControlledReadTargetResult>()
+      const committedV1 = makeQuickNote({
+        content: 'receipt pending authority v1',
+        updated_at: '2026-07-12T04:00:02.000Z',
+      })
+      const remoteV2 = makeQuickNote({
+        content: 'receipt pending authority v2',
+        updated_at: '2026-07-12T04:00:03.000Z',
+      })
+      adapter.updateResult = { kind: 'updated', note: committedV1 }
+      adapter.clearEffects.push(
+        () => Promise.reject(new Error('first cleanup blocked')),
+        () => cleanup.promise,
+      )
+      const controller = createQuickNoteExistingEditSessionController(
+        controllerOptions(adapter),
+      )
+      await flushMicrotasks()
+      controller.start(makeQuickNote())
+      controller.change('receipt pending authority v1')
+      await controller.save()
+      const retry = controller.save()
+      await flushMicrotasks()
+      controller.observeProjection(
+        projectionFor(remoteV2.id, 'active', remoteV2),
+      )
+      adapter.readTargetEffects.push(() => authorityRead.promise)
+      cleanup.resolve('cleared')
+      await flushMicrotasks()
+
+      expect(adapter.stored).toBeNull()
+      expect(controller.state).toMatchObject({
+        phase: 'conflict',
+        durability: 'memory-only',
+        draft: 'receipt pending authority v1',
+        conflict: { note: remoteV2 },
+      })
+      authorityRead.resolve({ note: remoteV2, lifecycle: 'active' })
+      await expect(retry).resolves.toMatchObject({ kind: 'conflict' })
+      expect(controller.state.durability).toBe('recovery-durable')
     })
 
     it('reports latest memory durability when older committed cleanup rejects', async () => {
@@ -3720,6 +4237,202 @@ describe('QuickNote existing-edit session controller', () => {
       })
     })
 
+    it.each(
+      (['active-v3', 'missing'] as const).flatMap((authority) => (
+        (['succeeds', 'rejects'] as const).map(
+          (compensation) => [authority, compensation] as const,
+        )
+      )),
+    )(
+      'reconciles use-remote cleanup against %s when compensation %s',
+      async (authority, compensation) => {
+        const cleanup = createDeferred<
+          'cleared' | 'absent' | 'different-edit'
+        >()
+        const compensationCheckpoint = createDeferred<void>()
+        const initialRemote = makeQuickNote({
+          content: 'initial conflict remote',
+          updated_at: '2026-07-12T05:00:00.000Z',
+        })
+        const remoteV2 = makeQuickNote({
+          content: 'selected remote v2',
+          updated_at: '2026-07-12T06:00:00.000Z',
+        })
+        const remoteV3 = makeQuickNote({
+          content: 'authoritative remote v3',
+          updated_at: '2026-07-12T06:00:01.000Z',
+        })
+        const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
+        const controller = await enterConflict(adapter, {
+          remote: initialRemote,
+          onSaved,
+        })
+        const recoveryBeforeCleanup = adapter.stored
+        adapter.readTargetResult = { note: remoteV2, lifecycle: 'active' }
+        adapter.clearEffects.push(() => cleanup.promise)
+
+        const resolution = controller.resolveConflict('use-remote')
+        await flushMicrotasks()
+        expect(adapter.clearCalls).toEqual([[
+          { kind: 'v1', editId: 'edit-1', revision: 1 },
+        ]])
+
+        adapter.readTargetResult = authority === 'active-v3'
+          ? { note: remoteV3, lifecycle: 'active' }
+          : { note: null, lifecycle: 'missing' }
+        controller.observeProjection(authority === 'active-v3'
+          ? projectionFor(remoteV3.id, 'active', remoteV3)
+          : projectionFor(remoteV2.id, 'missing', null))
+        adapter.checkpointEffects.push(() => compensationCheckpoint.promise)
+        cleanup.resolve('cleared')
+        await flushMicrotasks()
+
+        expect(adapter.stored).toBeNull()
+        expect(controller.state).toMatchObject({
+          phase: authority === 'active-v3'
+            ? 'conflict'
+            : 'target-unavailable',
+          durability: 'memory-only',
+          draft: 'local revision',
+        })
+        if (compensation === 'succeeds') {
+          compensationCheckpoint.resolve()
+        } else {
+          compensationCheckpoint.reject(new Error('compensation blocked'))
+        }
+
+        if (authority === 'active-v3') {
+          await expect(resolution).resolves.toEqual({
+            kind: 'conflict',
+            conflict: {
+              note: remoteV3,
+              localDraft: 'local revision',
+              remoteContent: remoteV3.content,
+            },
+          })
+          expect(controller.state).toMatchObject({
+            phase: 'conflict',
+            editingNote: remoteV3,
+            conflict: { note: remoteV3 },
+          })
+        } else {
+          await expect(resolution).resolves.toEqual({
+            kind: 'unavailable',
+            lifecycle: 'missing',
+          })
+          expect(controller.state).toMatchObject({
+            phase: 'target-unavailable',
+            editingNote: initialRemote,
+            conflict: null,
+          })
+        }
+        expect(controller.state.durability).toBe(
+          compensation === 'succeeds'
+            ? 'recovery-durable'
+            : 'memory-only',
+        )
+        expect(adapter.readTargetCalls).toEqual([
+          'quick-note-1',
+          'quick-note-1',
+        ])
+        expect(adapter.checkpointCalls).toHaveLength(2)
+        expect(adapter.checkpointCalls[1]).toEqual(recoveryBeforeCleanup)
+        expect(adapter.updateCalls).toHaveLength(1)
+        expect(onSaved).not.toHaveBeenCalled()
+        if (compensation === 'succeeds') {
+          expect(adapter.stored).toEqual(recoveryBeforeCleanup)
+        } else {
+          expect(adapter.stored).toBeNull()
+        }
+      },
+    )
+
+    it('reconciles use-remote when projection changes during its initial read', async () => {
+      const initialRead = createDeferred<ControlledReadTargetResult>()
+      const cleanup = createDeferred<
+        'cleared' | 'absent' | 'different-edit'
+      >()
+      const remoteV2 = makeQuickNote({
+        content: 'stale read remote v2',
+        updated_at: '2026-07-12T06:00:00.000Z',
+      })
+      const remoteV3 = makeQuickNote({
+        content: 'projection during read v3',
+        updated_at: '2026-07-12T06:00:01.000Z',
+      })
+      const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
+      const controller = await enterConflict(adapter, { onSaved })
+      adapter.readTargetEffects.push(() => initialRead.promise)
+      adapter.clearEffects.push(() => cleanup.promise)
+
+      const resolution = controller.resolveConflict('use-remote')
+      await flushMicrotasks()
+      controller.observeProjection(
+        projectionFor(remoteV3.id, 'active', remoteV3),
+      )
+      adapter.readTargetResult = { note: remoteV3, lifecycle: 'active' }
+      initialRead.resolve({ note: remoteV2, lifecycle: 'active' })
+      await flushMicrotasks()
+      cleanup.resolve('cleared')
+
+      await expect(resolution).resolves.toEqual({
+        kind: 'conflict',
+        conflict: {
+          note: remoteV3,
+          localDraft: 'local revision',
+          remoteContent: remoteV3.content,
+        },
+      })
+      expect(adapter.readTargetCalls).toEqual([
+        'quick-note-1',
+        'quick-note-1',
+      ])
+      expect(adapter.checkpointCalls).toHaveLength(2)
+      expect(adapter.stored).toMatchObject({
+        editId: 'edit-1',
+        revision: 1,
+        draft: 'local revision',
+      })
+      expect(onSaved).not.toHaveBeenCalled()
+    })
+
+    it('drops use-remote recovery durability while post-cleanup authority read is pending', async () => {
+      const cleanup = createDeferred<
+        'cleared' | 'absent' | 'different-edit'
+      >()
+      const authorityRead = createDeferred<ControlledReadTargetResult>()
+      const remoteV2 = makeQuickNote({
+        content: 'use-remote pending authority v2',
+        updated_at: '2026-07-12T06:00:00.000Z',
+      })
+      const remoteV3 = makeQuickNote({
+        content: 'use-remote pending authority v3',
+        updated_at: '2026-07-12T06:00:01.000Z',
+      })
+      const controller = await enterConflict(adapter)
+      adapter.readTargetResult = { note: remoteV2, lifecycle: 'active' }
+      adapter.clearEffects.push(() => cleanup.promise)
+      const resolution = controller.resolveConflict('use-remote')
+      await flushMicrotasks()
+      controller.observeProjection(
+        projectionFor(remoteV3.id, 'active', remoteV3),
+      )
+      adapter.readTargetEffects.push(() => authorityRead.promise)
+      cleanup.resolve('cleared')
+      await flushMicrotasks()
+
+      expect(adapter.stored).toBeNull()
+      expect(controller.state).toMatchObject({
+        phase: 'conflict',
+        durability: 'memory-only',
+        draft: 'local revision',
+        conflict: { note: remoteV3 },
+      })
+      authorityRead.resolve({ note: remoteV3, lifecycle: 'active' })
+      await expect(resolution).resolves.toMatchObject({ kind: 'conflict' })
+      expect(controller.state.durability).toBe('recovery-durable')
+    })
+
     it.each(['rejected', 'different-edit'] as const)(
       'preserves exact controlled conflict when use-remote cleanup is %s',
       async (cleanupFailure) => {
@@ -4286,6 +4999,38 @@ describe('QuickNote existing-edit session controller', () => {
       },
     )
 
+    it('keeps an in-flight save single-flight after target removal', async () => {
+      const update = createDeferred<ExistingEditUpdateResult>()
+      const committed = makeQuickNote({
+        content: 'single-flight after removal',
+        updated_at: '2026-07-12T05:00:01.000Z',
+      })
+      adapter.updateEffects.push(() => update.promise)
+      adapter.readTargetResult = { note: null, lifecycle: 'missing' }
+      const controller = createQuickNoteExistingEditSessionController(
+        controllerOptions(adapter),
+      )
+      await flushMicrotasks()
+      controller.start(makeQuickNote())
+      controller.change('single-flight after removal')
+      const first = controller.save()
+      await flushMicrotasks()
+      controller.observeProjection(
+        projectionFor('quick-note-1', 'missing', null),
+      )
+
+      const second = controller.save()
+
+      expect(second).toBe(first)
+      update.resolve({ kind: 'updated', note: committed })
+      await expect(first).resolves.toEqual({
+        kind: 'unavailable',
+        lifecycle: 'missing',
+      })
+      expect(adapter.updateCalls).toHaveLength(1)
+      expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
+    })
+
     it.each(['active', 'missing'] as const)(
       'reconciles an in-flight conflict against authoritative %s target',
       async (authority) => {
@@ -4337,6 +5082,68 @@ describe('QuickNote existing-edit session controller', () => {
         expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
         expect(adapter.clearCalls).toEqual([])
         expect(adapter.stored).toBe(stored)
+      },
+    )
+
+    it.each(['updated', 'conflict'] as const)(
+      'uses authoritative active v2 after an in-flight %s result',
+      async (updateOutcome) => {
+        const update = createDeferred<ExistingEditUpdateResult>()
+        const resultV1 = makeQuickNote({
+          content: `${updateOutcome} result v1`,
+          updated_at: '2026-07-12T05:00:01.000Z',
+        })
+        const authoritativeV2 = makeQuickNote({
+          content: 'authoritative active v2',
+          updated_at: '2026-07-12T05:00:02.000Z',
+        })
+        const onSaved = vi.fn((_note: QuickNote): undefined => undefined)
+        adapter.updateEffects.push(() => update.promise)
+        adapter.readTargetResult = {
+          note: authoritativeV2,
+          lifecycle: 'active',
+        }
+        const controller = createQuickNoteExistingEditSessionController(
+          controllerOptions(adapter, onSaved),
+        )
+        await flushMicrotasks()
+        controller.start(makeQuickNote())
+        controller.change('local before active v2')
+        const save = controller.save()
+        await flushMicrotasks()
+        controller.observeProjection(
+          projectionFor('quick-note-1', 'missing', null),
+        )
+        const stored = adapter.stored
+
+        update.resolve(updateOutcome === 'updated'
+          ? { kind: 'updated', note: resultV1 }
+          : { kind: 'conflict', note: resultV1 })
+
+        await expect(save).resolves.toEqual({
+          kind: 'conflict',
+          conflict: {
+            note: authoritativeV2,
+            localDraft: 'local before active v2',
+            remoteContent: authoritativeV2.content,
+          },
+        })
+        expect(controller.state).toMatchObject({
+          phase: 'conflict',
+          durability: 'recovery-durable',
+          editingNote: authoritativeV2,
+          draft: 'local before active v2',
+          conflict: {
+            note: authoritativeV2,
+            localDraft: 'local before active v2',
+            remoteContent: authoritativeV2.content,
+          },
+        })
+        expect(adapter.readTargetCalls).toEqual(['quick-note-1'])
+        expect(adapter.updateCalls).toHaveLength(1)
+        expect(adapter.clearCalls).toEqual([])
+        expect(adapter.stored).toBe(stored)
+        expect(onSaved).not.toHaveBeenCalled()
       },
     )
 
@@ -4545,6 +5352,229 @@ describe('QuickNote existing-edit session controller', () => {
         visibility: 'refreshed',
       })
     })
+
+    it.each(['succeeds', 'rejects'] as const)(
+      'waits for a pending clean checkpoint before reactivation when it %s',
+      async (checkpointOutcome) => {
+        const checkpoint = createDeferred<void>()
+        const cleanup = createDeferred<
+          'cleared' | 'absent' | 'different-edit'
+        >()
+        const base = makeQuickNote()
+        adapter.checkpointEffects.push(() => checkpoint.promise)
+        adapter.clearEffects.push(() => cleanup.promise)
+        const controller = createQuickNoteExistingEditSessionController(
+          controllerOptions(adapter),
+        )
+        await flushMicrotasks()
+        controller.start(base)
+        controller.change(base.content)
+        await vi.advanceTimersByTimeAsync(500)
+        expect(adapter.checkpointCalls).toHaveLength(1)
+
+        controller.observeProjection(projectionFor(base.id, 'missing', null))
+        controller.observeProjection(
+          projectionFor(base.id, 'active', { ...base }),
+        )
+
+        expect(controller.state).toMatchObject({
+          phase: 'target-unavailable',
+          durability: 'memory-only',
+          draft: base.content,
+        })
+        expect(adapter.clearCalls).toEqual([])
+        if (checkpointOutcome === 'succeeds') checkpoint.resolve()
+        else checkpoint.reject(new Error('clean checkpoint blocked'))
+        await flushMicrotasks()
+
+        expect(adapter.clearCalls).toEqual([[
+          { kind: 'v1', editId: 'edit-1', revision: 1 },
+        ]])
+        expect(controller.state).toMatchObject({
+          phase: 'target-unavailable',
+          durability: checkpointOutcome === 'succeeds'
+            ? 'recovery-durable'
+            : 'memory-only',
+        })
+        if (checkpointOutcome === 'succeeds') {
+          expect(adapter.stored).toMatchObject({
+            editId: 'edit-1',
+            revision: 1,
+            draft: base.content,
+          })
+          cleanup.resolve('cleared')
+        } else {
+          expect(adapter.stored).toBeNull()
+          cleanup.resolve('absent')
+        }
+        await flushMicrotasks()
+
+        expect(adapter.stored).toBeNull()
+        expect(controller.state).toEqual({
+          phase: 'saved',
+          durability: 'entity-durable',
+          editingNote: base,
+          draft: base.content,
+          conflict: null,
+          issue: null,
+        })
+      },
+    )
+
+    it('merges a pending checkpoint owner at clean-reactivation lane start', async () => {
+      const checkpointV2 = createDeferred<void>()
+      const cleanup = createDeferred<
+        'cleared' | 'absent' | 'different-edit'
+      >()
+      const base = makeQuickNote()
+      const controller = createQuickNoteExistingEditSessionController(
+        controllerOptions(adapter),
+      )
+      await flushMicrotasks()
+      controller.start(base)
+      controller.change('temporary revision one')
+      await vi.advanceTimersByTimeAsync(500)
+      expect(adapter.stored).toMatchObject({ revision: 1 })
+
+      controller.change(base.content)
+      adapter.checkpointEffects.push(() => checkpointV2.promise)
+      adapter.clearEffects.push(() => cleanup.promise)
+      await vi.advanceTimersByTimeAsync(500)
+      controller.observeProjection(projectionFor(base.id, 'missing', null))
+      controller.observeProjection(
+        projectionFor(base.id, 'active', { ...base }),
+      )
+      expect(adapter.clearCalls).toEqual([])
+
+      checkpointV2.resolve()
+      await flushMicrotasks()
+
+      expect(adapter.stored).toMatchObject({ revision: 2, draft: base.content })
+      expect(adapter.clearCalls).toEqual([[
+        { kind: 'v1', editId: 'edit-1', revision: 1 },
+        { kind: 'v1', editId: 'edit-1', revision: 2 },
+      ]])
+      cleanup.resolve('cleared')
+      await flushMicrotasks()
+      expect(adapter.stored).toBeNull()
+      expect(controller.state.phase).toBe('saved')
+    })
+
+    it.each(['succeeds', 'rejects'] as const)(
+      'drops clean-reactivation durability while compensation %s',
+      async (compensation) => {
+        const initialCheckpoint = createDeferred<void>()
+        const cleanup = createDeferred<
+          'cleared' | 'absent' | 'different-edit'
+        >()
+        const compensationCheckpoint = createDeferred<void>()
+        const base = makeQuickNote()
+        const remoteV2 = makeQuickNote({
+          content: 'remote v2 during pending clean reactivation',
+          updated_at: '2026-07-12T06:00:00.000Z',
+        })
+        adapter.checkpointEffects.push(() => initialCheckpoint.promise)
+        adapter.clearEffects.push(() => cleanup.promise)
+        const controller = createQuickNoteExistingEditSessionController(
+          controllerOptions(adapter),
+        )
+        await flushMicrotasks()
+        controller.start(base)
+        controller.change(base.content)
+        await vi.advanceTimersByTimeAsync(500)
+        controller.observeProjection(projectionFor(base.id, 'missing', null))
+        controller.observeProjection(
+          projectionFor(base.id, 'active', { ...base }),
+        )
+        initialCheckpoint.resolve()
+        await flushMicrotasks()
+        const recoveryBeforeCleanup = adapter.stored
+        expect(adapter.clearCalls).toHaveLength(1)
+
+        controller.observeProjection(
+          projectionFor(remoteV2.id, 'active', remoteV2),
+        )
+        adapter.checkpointEffects.push(() => compensationCheckpoint.promise)
+        cleanup.resolve('cleared')
+        await flushMicrotasks()
+
+        expect(adapter.stored).toBeNull()
+        expect(controller.state).toMatchObject({
+          phase: 'conflict',
+          durability: 'memory-only',
+          draft: base.content,
+          conflict: { note: remoteV2 },
+        })
+        if (compensation === 'succeeds') compensationCheckpoint.resolve()
+        else compensationCheckpoint.reject(new Error('compensation blocked'))
+        await flushMicrotasks()
+
+        expect(controller.state).toMatchObject({
+          phase: 'conflict',
+          durability: compensation === 'succeeds'
+            ? 'recovery-durable'
+            : 'memory-only',
+          draft: base.content,
+          conflict: { note: remoteV2 },
+        })
+        expect(adapter.checkpointCalls).toHaveLength(2)
+        if (compensation === 'succeeds') {
+          expect(adapter.stored).toEqual(recoveryBeforeCleanup)
+        } else {
+          expect(adapter.stored).toBeNull()
+        }
+      },
+    )
+
+    it.each(['different-edit', 'rejects'] as const)(
+      'preserves clean-reactivation recovery when cleanup %s after a remote change',
+      async (cleanupOutcome) => {
+        const initialCheckpoint = createDeferred<void>()
+        const cleanup = createDeferred<
+          'cleared' | 'absent' | 'different-edit'
+        >()
+        const base = makeQuickNote()
+        const remoteV2 = makeQuickNote({
+          content: 'remote v2 before failed cleanup',
+          updated_at: '2026-07-12T06:00:00.000Z',
+        })
+        adapter.checkpointEffects.push(() => initialCheckpoint.promise)
+        adapter.clearEffects.push(() => cleanup.promise)
+        const controller = createQuickNoteExistingEditSessionController(
+          controllerOptions(adapter),
+        )
+        await flushMicrotasks()
+        controller.start(base)
+        controller.change(base.content)
+        await vi.advanceTimersByTimeAsync(500)
+        controller.observeProjection(projectionFor(base.id, 'missing', null))
+        controller.observeProjection(
+          projectionFor(base.id, 'active', { ...base }),
+        )
+        initialCheckpoint.resolve()
+        await flushMicrotasks()
+        const recoveryBeforeCleanup = adapter.stored
+        controller.observeProjection(
+          projectionFor(remoteV2.id, 'active', remoteV2),
+        )
+
+        if (cleanupOutcome === 'different-edit') cleanup.resolve('different-edit')
+        else cleanup.reject(new Error('reactivation cleanup blocked'))
+        await flushMicrotasks()
+
+        expect(adapter.clearCalls).toEqual([[
+          { kind: 'v1', editId: 'edit-1', revision: 1 },
+        ]])
+        expect(adapter.checkpointCalls).toHaveLength(1)
+        expect(adapter.stored).toBe(recoveryBeforeCleanup)
+        expect(controller.state).toMatchObject({
+          phase: 'conflict',
+          durability: 'recovery-durable',
+          draft: base.content,
+          conflict: { note: remoteV2 },
+        })
+      },
+    )
 
     it.each(['rejected', 'different-edit'] as const)(
       'preserves clean unavailable recovery when reactivation cleanup is %s',
