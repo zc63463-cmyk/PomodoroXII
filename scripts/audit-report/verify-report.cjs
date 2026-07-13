@@ -53,6 +53,28 @@ const requiredModuleIds = [
   'x-repo-index',
 ];
 
+const requiredBusinessModuleDetailIds = [
+  'be-runtime-auth',
+  'be-data-migrations',
+  'be-registry-meta',
+  'be-entities',
+  'be-sync-push',
+  'be-sync-pull',
+  'be-notes-fs',
+  'be-deploy',
+  'be-mcp',
+  'fe-shell',
+  'fe-auth-space',
+  'fe-dexie',
+  'fe-api-contract',
+  'fe-sync',
+  'fe-quicknote-data',
+  'fe-quicknote-ux',
+  'fe-settings',
+  'fe-business-pages',
+  'fe-build-deploy',
+];
+
 const requiredFindingIds = [
   'F-001',
   'F-002',
@@ -61,6 +83,24 @@ const requiredFindingIds = [
   'F-005',
   'F-006',
   'F-007',
+];
+
+const requiredFindingSubsystems = new Map([
+  ['F-001', 'fe-build-deploy'],
+  ['F-002', 'fe-sync'],
+  ['F-003', 'x-test-infra'],
+  ['F-004', 'x-repo-index'],
+  ['F-005', 'x-docs'],
+  ['F-006', 'fe-quicknote-ux'],
+  ['F-007', 'fe-build-deploy'],
+]);
+
+const requiredModuleDetailFields = [
+  'module-responsibility',
+  'module-evidence',
+  'module-strengths',
+  'module-risks',
+  'module-next-gate',
 ];
 
 const requiredEvidenceTypes = [
@@ -87,6 +127,7 @@ const requiredFacts = [
   '7 个占位',
   '14 个自标 S0 stub',
   '10 个显式 no-op',
+  '2 moderate vulnerability entries / 1 distinct advisory (GHSA)',
 ];
 
 const forbiddenFacts = [
@@ -96,6 +137,10 @@ const forbiddenFacts = [
 function isWhitespace(character) {
   return character === ' ' || character === '\n' || character === '\r' ||
     character === '\t' || character === '\f';
+}
+
+function isRawTextEndTagDelimiter(character) {
+  return isWhitespace(character) || character === '/' || character === '>';
 }
 
 function findTagEnd(html, start) {
@@ -235,6 +280,8 @@ function tokenizeStartTags(html) {
       name,
       attributes: parseAttributes(html, nameEnd, tagEnd),
       rawText: '',
+      start: opening,
+      end: tagEnd + 1,
     };
     tokens.push(token);
     cursor = tagEnd + 1;
@@ -243,8 +290,7 @@ function tokenizeStartTags(html) {
       let closing = lowerHtml.indexOf(`</${name}`, cursor);
       while (
         closing !== -1 &&
-        !isWhitespace(html[closing + name.length + 2]) &&
-        html[closing + name.length + 2] !== '>'
+        !isRawTextEndTagDelimiter(html[closing + name.length + 2])
       ) {
         closing = lowerHtml.indexOf(`</${name}`, closing + name.length + 2);
       }
@@ -276,6 +322,17 @@ function hasAttribute(token, attributeName) {
   return token.attributes.has(attributeName.toLowerCase());
 }
 
+function hasClass(token, className) {
+  const value = attributeValue(token, 'class');
+  return typeof value === 'string' && value.split(/\s+/).includes(className);
+}
+
+function elementInnerHtml(html, token) {
+  const closingStart = html.toLowerCase().indexOf(`</${token.name}`, token.end);
+  assert.notEqual(closingStart, -1, `${token.name} element must have a closing tag`);
+  return html.slice(token.end, closingStart);
+}
+
 function attributeValues(tokens, attributeName) {
   return tokens
     .filter((token) => hasAttribute(token, attributeName))
@@ -295,6 +352,68 @@ function assertExactAttributeValues(tokens, attributeName, expected) {
   );
   assert.equal(new Set(actual).size, actual.length, `${attributeName} values must be unique`);
   assert.deepEqual(sorted(actual), sorted(expected), `${attributeName} values do not match`);
+}
+
+function assertEvidenceLinkPairs(tokens) {
+  const evidenceLinks = tokens.filter(
+    (token) => token.name === 'a' && hasClass(token, 'evidence-link'),
+  );
+  const copyButtons = tokens.filter(
+    (token) => token.name === 'button' && hasClass(token, 'copy-path'),
+  );
+  assert.equal(copyButtons.length, evidenceLinks.length, 'every evidence link needs one copy button');
+
+  for (const link of evidenceLinks) {
+    const linkIndex = tokens.indexOf(link);
+    const button = tokens[linkIndex + 1];
+    assert.ok(
+      button && button.name === 'button' && hasClass(button, 'copy-path'),
+      'every evidence link must be immediately paired with a copy button',
+    );
+    assert.equal(attributeValue(button, 'type'), 'button', 'copy control must be a button');
+    assert.ok(attributeValue(button, 'data-copy-path'), 'copy button needs a non-empty path');
+    assert.ok(attributeValue(button, 'aria-label'), 'copy button needs a distinguishable label');
+  }
+}
+
+function assertBusinessModuleDetails(html, tokens) {
+  const detailTokens = tokens.filter((token) => hasAttribute(token, 'data-module-detail-for'));
+  assertExactAttributeValues(
+    detailTokens,
+    'data-module-detail-for',
+    requiredBusinessModuleDetailIds,
+  );
+
+  for (const detail of detailTokens) {
+    const detailId = attributeValue(detail, 'data-module-detail-for');
+    const innerTokens = tokenizeStartTags(elementInnerHtml(html, detail));
+    for (const fieldClass of requiredModuleDetailFields) {
+      assert.equal(
+        innerTokens.filter((token) => hasClass(token, fieldClass)).length,
+        1,
+        `${detailId} must contain exactly one .${fieldClass}`,
+      );
+    }
+    assert.ok(
+      innerTokens.some((token) => token.name === 'a' && hasClass(token, 'evidence-link')),
+      `${detailId} must contain at least one evidence link`,
+    );
+  }
+}
+
+function assertFindingSubsystems(html, tokens) {
+  const findingTokens = tokens.filter((token) => hasAttribute(token, 'data-finding-id'));
+  for (const finding of findingTokens) {
+    const findingId = attributeValue(finding, 'data-finding-id');
+    const innerTokens = tokenizeStartTags(elementInnerHtml(html, finding));
+    const fields = innerTokens.filter((token) => hasClass(token, 'affected-subsystem'));
+    assert.equal(fields.length, 1, `${findingId} must contain one affected-subsystem field`);
+    assert.equal(
+      attributeValue(fields[0], 'data-affected-subsystem'),
+      requiredFindingSubsystems.get(findingId),
+      `${findingId} affected subsystem does not match`,
+    );
+  }
 }
 
 const resourceAttributes = {
@@ -332,22 +451,22 @@ function assertNoExternalResources(tokens) {
   }
 }
 
-function assertNoNetworkCss(tokens) {
+function assertNoExternalCss(tokens) {
   const cssSources = [
     ...tagsNamed(tokens, 'style').map((token) => token.rawText),
     ...attributeValues(tokens, 'style').filter((value) => typeof value === 'string'),
   ];
   for (const css of cssSources) {
+    const uncommentedCss = css.replace(/\/\*[\s\S]*?\*\//g, '');
     assert.doesNotMatch(
-      css,
-      /\burl\s*\(\s*(?:["']\s*)?(?:https?:)?\/\//i,
-      'remote CSS url is not allowed',
+      uncommentedCss,
+      /@import\b/i,
+      'CSS imports are not allowed',
     );
-    assert.doesNotMatch(
-      css,
-      /@import\s+(?:url\(\s*)?(?:["']\s*)?(?:https?:)?\/\//i,
-      'remote style imports are not allowed',
-    );
+    for (const match of uncommentedCss.matchAll(/\burl\s*\(\s*(?:(["'])(.*?)\1|([^)]*))\s*\)/gis)) {
+      const value = (match[2] ?? match[3] ?? '').trim();
+      assert.ok(isInlineResource(value), `CSS resource dependency is not allowed: ${value}`);
+    }
   }
 }
 
@@ -417,8 +536,14 @@ function verifyStatic(mode = 'all') {
   );
   assert.equal(attributeValues(tokens, 'srcset').length, 0, 'srcset is not allowed');
   assertNoExternalResources(tokens);
-  assertNoNetworkCss(tokens);
+  assertNoExternalCss(tokens);
   assertNoInlineNetworkCalls(scriptTags);
+  assertEvidenceLinkPairs(tokens);
+  assert.ok(
+    !html.includes('.worktrees/deep-audit-html-implementation') &&
+      !html.includes('.worktrees\\deep-audit-html-implementation'),
+    'temporary implementation-worktree evidence paths are not allowed',
+  );
 
   const ids = attributeValues(tokens, 'id');
   const idSet = new Set(ids);
@@ -457,6 +582,8 @@ function verifyStatic(mode = 'all') {
   if (mode === 'content' || mode === 'all') {
     assertExactAttributeValues(tokens, 'data-module-id', requiredModuleIds);
     assertExactAttributeValues(tokens, 'data-finding-id', requiredFindingIds);
+    assertBusinessModuleDetails(html, tokens);
+    assertFindingSubsystems(html, tokens);
 
     const evidenceTypes = new Set(attributeValues(tokens, 'data-evidence'));
     assert.deepEqual(
@@ -483,15 +610,60 @@ function verifyStatic(mode = 'all') {
   }
 }
 
-function collectUnexpectedRequests(context) {
+function collectUnexpectedRequests(context, allowedDocumentUrl) {
   const unexpectedRequests = [];
   context.on('request', (request) => {
     const url = request.url();
-    if (!/^(?:file|data|blob|about):/i.test(url)) {
+    if (url !== allowedDocumentUrl) {
       unexpectedRequests.push(url);
     }
   });
   return unexpectedRequests;
+}
+
+function verifyHardeningSelfTests() {
+  const rawTextTokens = tokenizeStartTags(
+    '<script>void 0</script/><img src="https://example.invalid/remote.png">',
+  );
+  assert.equal(tagsNamed(rawTextTokens, 'img').length, 1, 'raw-text slash close must expose tags');
+  assert.throws(
+    () => assertNoExternalResources(rawTextTokens),
+    /external resource is not allowed/,
+    'remote resources after a raw-text slash close must be rejected',
+  );
+
+  const rejectedCssResources = [
+    '@import "local.css";',
+    '.fixture { background: url(./relative.png); }',
+    '.fixture { background: url(/root-absolute.png); }',
+    '.fixture { background: url(file:///C:/secret.png); }',
+    '.fixture { background: url(https://example.invalid/remote.png); }',
+  ];
+  for (const css of rejectedCssResources) {
+    const cssTokens = tokenizeStartTags(`<style>${css}</style>`);
+    assert.throws(
+      () => assertNoExternalCss(cssTokens),
+      /CSS imports are not allowed|CSS resource dependency is not allowed/,
+      `CSS dependency must be rejected: ${css}`,
+    );
+  }
+
+  let requestListener;
+  const unexpectedRequests = collectUnexpectedRequests({
+    on(eventName, listener) {
+      if (eventName === 'request') {
+        requestListener = listener;
+      }
+    },
+  }, 'file:///C:/report.html');
+  assert.equal(typeof requestListener, 'function', 'request self-test listener must be installed');
+  requestListener({ url: () => 'file:///C:/report.html' });
+  requestListener({ url: () => 'file:///C:/secondary.txt' });
+  assert.deepEqual(
+    unexpectedRequests,
+    ['file:///C:/secondary.txt'],
+    'only the exact report document file URL may be requested',
+  );
 }
 
 function assertNoUnexpectedRequests(unexpectedRequests, label) {
@@ -513,7 +685,19 @@ async function assertVisibleElements(locator, expectedCount, label) {
 }
 
 async function verifyBrowser() {
-  const { chromium } = require('playwright');
+  let chromium;
+  try {
+    ({ chromium } = require('playwright'));
+  } catch (error) {
+    if (error && error.code === 'MODULE_NOT_FOUND') {
+      throw new Error(
+        'Playwright is unavailable. NODE_PATH must contain both ' +
+        '<bundled-node_modules> and <bundled-node_modules>\\.pnpm\\node_modules.',
+        { cause: error },
+      );
+    }
+    throw error;
+  }
   const browser = await chromium.launch({ headless: true });
   const reportUrl = pathToFileURL(reportPath).href;
   const viewports = [
@@ -529,7 +713,7 @@ async function verifyBrowser() {
         viewport: { width: viewport.width, height: viewport.height },
       });
       try {
-        const unexpectedRequests = collectUnexpectedRequests(context);
+        const unexpectedRequests = collectUnexpectedRequests(context, reportUrl);
         const page = await context.newPage();
         await page.goto(reportUrl, { waitUntil: 'load' });
         assertNoUnexpectedRequests(unexpectedRequests, `${viewport.name} page load`);
@@ -593,12 +777,32 @@ async function verifyBrowser() {
             path: path.join(os.tmpdir(), 'pomodoroxii-deep-audit-desktop.png'),
             fullPage: true,
           });
+          await page.evaluate(() => {
+            const previousBehavior = document.documentElement.style.scrollBehavior;
+            document.documentElement.style.scrollBehavior = 'auto';
+            window.scrollTo(0, 0);
+            document.documentElement.style.scrollBehavior = previousBehavior;
+          });
+          await page.waitForFunction(() => window.scrollY === 0);
+          await page.screenshot({
+            path: path.join(os.tmpdir(), 'pomodoroxii-deep-audit-desktop-viewport.png'),
+          });
         }
 
         if (viewport.name === 'mobile') {
           await page.screenshot({
             path: path.join(os.tmpdir(), 'pomodoroxii-deep-audit-mobile.png'),
             fullPage: true,
+          });
+          await page.evaluate(() => {
+            const previousBehavior = document.documentElement.style.scrollBehavior;
+            document.documentElement.style.scrollBehavior = 'auto';
+            window.scrollTo(0, 0);
+            document.documentElement.style.scrollBehavior = previousBehavior;
+          });
+          await page.waitForFunction(() => window.scrollY === 0);
+          await page.screenshot({
+            path: path.join(os.tmpdir(), 'pomodoroxii-deep-audit-mobile-viewport.png'),
           });
         }
 
@@ -613,7 +817,7 @@ async function verifyBrowser() {
       viewport: { width: 1440, height: 900 },
     });
     try {
-      const unexpectedRequests = collectUnexpectedRequests(noScriptContext);
+      const unexpectedRequests = collectUnexpectedRequests(noScriptContext, reportUrl);
       const page = await noScriptContext.newPage();
       await page.goto(reportUrl, { waitUntil: 'load' });
       assertNoUnexpectedRequests(unexpectedRequests, 'no-script page load');
@@ -633,6 +837,11 @@ async function verifyBrowser() {
         requiredModuleIds.length,
         'no-script modules',
       );
+      await assertVisibleElements(
+        page.locator('[data-module-detail-for]'),
+        requiredBusinessModuleDetailIds.length,
+        'no-script module details',
+      );
       assert.match(
         await page.locator('#verdict').innerText(),
         /不具备发布条件/,
@@ -649,6 +858,7 @@ async function verifyBrowser() {
 
 async function main() {
   const { mode, browser } = parseCli(process.argv.slice(2));
+  verifyHardeningSelfTests();
   verifyStatic(mode);
   if (browser) {
     await verifyBrowser();

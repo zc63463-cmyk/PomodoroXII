@@ -157,6 +157,18 @@
     .top-risks ol { margin: 0 0 8px; padding-left: 22px; }
     .score-note, .scope-note { max-width: 80ch; color: var(--muted); }
     .module-table th:nth-child(n+3), .module-table td:nth-child(n+3) { white-space: nowrap; }
+    .module-details { margin-top: 22px; border-top: 1px solid var(--line); }
+    .module-detail { padding: 18px 0; border-bottom: 1px solid var(--line); }
+    .module-detail > h3 { margin: 0 0 8px; }
+    .module-detail-grid { margin: 0; }
+    .module-detail-grid > div {
+      display: grid;
+      grid-template-columns: minmax(120px, 0.2fr) minmax(0, 1fr);
+      gap: 16px;
+      padding: 7px 0;
+    }
+    .module-detail-grid dt { color: var(--muted); font-size: 0.82rem; font-weight: 750; }
+    .module-detail-grid dd { min-width: 0; margin: 0; }
     .finding-tools {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -292,6 +304,7 @@
       .finding summary { align-items: flex-start; flex-direction: column; gap: 4px; }
       .finding-meta { white-space: normal; }
       .finding-grid > div { grid-template-columns: 1fr; gap: 3px; }
+      .module-detail-grid > div { grid-template-columns: 1fr; gap: 3px; }
     }
     @media (max-width: 640px) {
       .rail { position: static; }
@@ -350,7 +363,7 @@
       details.finding:not([open]) > .finding-body { display: block !important; }
       .finding summary { break-after: avoid; }
       .finding-body { display: block !important; }
-      tr, .finding-grid > div { break-inside: avoid; }
+      tr, .finding-grid > div, .module-detail { break-inside: avoid; }
     }
   </style>
 </head>
@@ -379,7 +392,7 @@
         <div><dt>分支漂移</dt><dd>behind 11</dd></div>
         <div><dt>发布结论</dt><dd>NO-GO</dd></div>
       </dl>
-      <p class="scope-note">相对本地保存的 origin/main@1e4f0fc 落后 11 commits。</p>
+      <p class="scope-note">审计对象 <code>main@65e2382</code>，保存时间 2026-07-13 Asia/Shanghai；本地 remote-tracking <code>origin/main@1e4f0fc</code> 领先 11 commits，报告任务未 fetch。</p>
       <div class="top-risks" aria-labelledby="top-risks-title">
         <h2 id="top-risks-title">Top three risks</h2>
         <ol>
@@ -478,14 +491,106 @@
         </table>
       </div>
       <p class="score-note">Maturity 与 Health 是由表内五个 0–20 审计判断维度可重现计算的复合值，不是运行时 telemetry。</p>
+      <div class="module-details" aria-label="后端业务模块详细审查">
+        <article class="module-detail" data-module-detail-for="be-runtime-auth">
+          <h3><code>be-runtime-auth</code> · 生命周期、配置与鉴权</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>装配 FastAPI 生命周期与配置，并用 master/space 两类 JWT dependency 划分 meta 层与单 Space 访问边界。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/deps.py#L50">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\deps.py:50</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\deps.py:50" aria-label="复制证据路径：deps.py:50">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>Space token 会回查 meta DB 中的 Space，伪造或已删除的 <code>space_id</code> 在取得 engine/FS 前失败；生产环境拒绝已知弱 JWT secret。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>本地 login/setup 无密码长度策略、登录节流或 token 撤销/轮换标识；origin-only rate/body hardening 不能算作本地缓解。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>协调 origin hardening 后，覆盖密码边界、连续失败限流、secret/password 轮换后旧 token 失效及 master/space 越权矩阵。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="be-data-migrations">
+          <h3><code>be-data-migrations</code> · 双库与迁移</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>管理 meta DB 与各 Space DB 的独立 Alembic 链、版本表、engine 初始化及旧库安全接管。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/db/migrations.py#L220">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\db\migrations.py:220</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\db\migrations.py:220" aria-label="复制证据路径：migrations.py:220">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>迁移器要求单 head、精确 schema fingerprint 与唯一 version row；混合/未知 schema fail closed，失败保持原库字节不变。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd><code>alembic.ini</code> 与镜像仍保留默认单链，未指定环境的 CLI 可能绕开应用实际使用的 <code>alembic:meta</code> / <code>alembic:space</code>。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>退役默认单链；用真实旧库副本验证 fresh、managed、legacy、注入失败与回滚恢复，部署文档只保留受支持命令。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="be-registry-meta">
+          <h3><code>be-registry-meta</code> · Registry 与 Meta API</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>以冻结的 <code>EntitySpec</code> 描述实体存储、同步、路由、schema 与删除策略，并供 sync、MetaService 与 Meta API 使用。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/registry/entities.py#L53">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\registry\entities.py:53</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\registry\entities.py:53" aria-label="复制证据路径：entities.py:53">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>Sync 映射从 registry 派生，ORM、schema、sync、route 与 MCP/stats parity tests 能暴露声明漂移；Meta API 受 master token 保护。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>对外 <code>EntitySpecOut</code> 未公开 service/schema/route、<code>delete_strategy</code> 与 <code>mcp_schema_enabled</code>，外部生成器无法重建真实能力边界。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>给 Meta contract 定版本，补齐受支持 capability metadata 或显式声明排除项，并以序列化完整性与兼容性测试锁定。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="be-entities">
+          <h3><code>be-entities</code> · 业务实体 API 与 Service</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>承载业务实体 ORM、Pydantic schema、Space-scoped REST routes 与 service CRUD，并统一写入 sync outbox/tombstone。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/services/base.py#L24">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\base.py:24</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\base.py:24" aria-label="复制证据路径：base.py:24">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>Service 无 FastAPI 依赖且只 flush，由 route 控制 commit，便于 REST/MCP 复用；领域约束由 folder、relation、Note 等专用 service 承担。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>v1 router 仍手工 import/include；现有 route parity 主要检查 prefix，不能证明 verb、auth、status/response、commit/outbox/tombstone 与 registry 同步。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>从 registry 生成逐实体 capability contract，验证 HTTP 方法、鉴权、schema、事务提交、outbox 与删除传播，任一列缺失即阻断。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="be-sync-push">
+          <h3><code>be-sync-push</code> · Push、冲突与事件</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>接收批量远端事件，规范化实体类型，并按 LWW、tombstone、防循环引用及 Note FS+DB 专用路径逐事件应用。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/services/sync.py#L84">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\sync.py:84</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\sync.py:84" aria-label="复制证据路径：sync.py:84">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>每个事件使用独立 SAVEPOINT，单条失败不击穿整批；remote-wins 分类正确，成功事件同步写 ledger/outbox 与批量 audit。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>本地 push request 没有事件数量或 UTF-8 payload 字节上限；1..500 与 256 KiB 校验只存在于 origin-only 变更。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>协调边界后验证 0/1/500/501 条及相邻 UTF-8 字节边界，并为最大合法批次设定事务时延与内存预算。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="be-sync-pull">
+          <h3><code>be-sync-pull</code> · Cursor、Snapshot 与 Recovery</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>提供 legacy <code>(since, since_id)</code> 拉取、cursor v2 ledger、retention-floor 过期错误与稳定 full snapshot 分页恢复。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/services/sync.py#L455">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\sync.py:455</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\sync.py:455" aria-label="复制证据路径：sync.py:455">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>Cursor v2 用单调 outbox id 跨实体分页，过期 cursor 有稳定恢复错误；full v2 固定 snapshot cursor，避免页间状态漂移。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>Legacy 每实体各取 <code>limit</code> 却返回全局时间戳游标，较新实体可推进游标越过仍被截断的旧实体；strict xfail 已记录漏行。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>让一方客户端与 MCP 默认 cursor v2/full snapshot；退役 legacy，或改为每实体 cursor，并把跨实体错位 strict xfail 转绿。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="be-notes-fs">
+          <h3><code>be-notes-fs</code> · Notes、FTS 与 Trash</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>协调 Note ORM metadata、Markdown 正文、FTS/index、版本备份、trash/restore 与 sync event，保持 FS+DB split 可恢复。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/services/note.py#L49">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\note.py:49</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\note.py:49" aria-label="复制证据路径：note.py:49">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>文件层以临时文件加 <code>os.replace</code> 原子写；DB flush 失败会删除孤儿或恢复旧正文，并覆盖 consistency repair、版本与 trash 流程。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>Saga 只补偿调用内抛错，外层 SAVEPOINT 在成功 flush 后回滚不会撤销 FS 改动，DB 可恢复而 Markdown 可能保留新正文。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>引入 transaction-aware FS journal 或 commit/rollback hook；outer transaction 与 SAVEPOINT 回滚后断言 DB、index、正文、版本、outbox 一致。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="be-deploy">
+          <h3><code>be-deploy</code> · Backup、Health 与 Ingress</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>提供冻结依赖的容器、GHCR/Compose 运行面、持久数据卷、启动备份与 CI 镜像 smoke 路径。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/Dockerfile#L21">E:\Development\MyAwesomeApp\PomodoroXII\backend\Dockerfile:21</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\Dockerfile:21" aria-label="复制证据路径：Dockerfile:21">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>镜像采用 multi-stage、<code>uv sync --frozen --no-dev</code> 与 non-root runtime；CI 产出 commit-SHA tag 并启动容器 smoke。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>本地 Compose 使用可变 <code>latest</code> 且只探测 liveness；备份仍是手工 tar，无可重复 restore/rollback 演练，readiness 仅属 origin-only。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>以 digest/SHA 部署，经数据库读写 readiness 后切流，并自动执行 SQLite-safe backup、restore 校验与旧镜像/旧数据回滚演练。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="be-mcp">
+          <h3><code>be-mcp</code> · FastMCP 与 REST Parity</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>以 FastMCP 公开 Space discovery、统计、registry 与 sync tools/resources/prompts，并管理 stdio/HTTP transport 生命周期。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/mcp/server.py#L82">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\mcp\server.py:82</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\mcp\server.py:82" aria-label="复制证据路径：server.py:82">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>MCP 复用无 FastAPI 依赖的 service；测试通过真实 <code>FastMCP.list_tools()</code> 与 stats 双向 parity 核对注册表，transport 生命周期有门禁。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd><code>sync_pull</code> 仅暴露 legacy 参数且未注入 FileSystem，Note 正文可退化为 <code>content_missing</code>；HTTP transport 未在此文件配置认证。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>校验 Space 并注入 FileSystem，公开 cursor v2/full recovery；建立全能力 REST parity，并要求 HTTP 鉴权、跨 Space 拒绝与远程 smoke。</dd></div>
+          </dl>
+        </article>
+      </div>
       <h3>规模与覆盖事实</h3>
       <div class="table-scroll" role="region" aria-label="后端规模事实" tabindex="0">
         <table>
           <thead><tr><th scope="col">扫描项</th><th scope="col">结果</th><th scope="col">本地来源与口径</th></tr></thead>
           <tbody>
-            <tr><th scope="row">REST decorators</th><td><strong>83</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/app/routes/v1/auth.py#L31">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\routes\v1\auth.py:31</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\routes\v1\auth.py:31" aria-label="复制证据路径：auth.py:31">复制路径</button><br><code>@router.get/post/put/patch/delete</code> 源码扫描，不计 <code>app.main</code> 的单独 health decorator。</td></tr>
-            <tr><th scope="row">MCP decorators</th><td><strong>19</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/app/mcp/server.py#L98">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\mcp\server.py:98</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\app\mcp\server.py:98" aria-label="复制证据路径：server.py:98">复制路径</button><br>13 tools + 4 resources + 2 prompts。</td></tr>
-            <tr><th scope="row">Backend test files</th><td><strong>79</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/tests/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\" aria-label="复制证据路径：backend tests 目录">复制路径</button><br>递归计数 <code>test_*.py</code>。</td></tr>
+            <tr><th scope="row">REST decorators</th><td><strong>83</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/routes/v1/auth.py#L31">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\routes\v1\auth.py:31</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\routes\v1\auth.py:31" aria-label="复制证据路径：auth.py:31">复制路径</button><br><code>@router.get/post/put/patch/delete</code> 源码扫描，不计 <code>app.main</code> 的单独 health decorator。</td></tr>
+            <tr><th scope="row">MCP decorators</th><td><strong>19</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/mcp/server.py#L98">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\mcp\server.py:98</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\mcp\server.py:98" aria-label="复制证据路径：server.py:98">复制路径</button><br>13 tools + 4 resources + 2 prompts。</td></tr>
+            <tr><th scope="row">Backend test files</th><td><strong>79</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/">E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\" aria-label="复制证据路径：backend tests 目录">复制路径</button><br>递归计数 <code>test_*.py</code>。</td></tr>
           </tbody>
         </table>
       </div>
@@ -512,18 +617,120 @@
         </table>
       </div>
       <p class="score-note">同一公式适用于前端：Maturity 只组合完整度与合同/数据完整性，Health 只组合验证、可运维和可维护性。</p>
+      <div class="module-details" aria-label="前端业务模块详细审查">
+        <article class="module-detail" data-module-detail-for="fe-shell">
+          <h3><code>fe-shell</code> · Shell、Guard 与 Navigation</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>承担受保护应用壳、桌面/移动导航、Space 切换、同步/冲突状态、快捷键与退出，并按 guard 决策等待、重定向或渲染。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/layout/app-shell.tsx#L26">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\layout\app-shell.tsx:26</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\layout\app-shell.tsx:26" aria-label="复制证据路径：app-shell.tsx:26">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>Shell 集中导航、同步、冲突与退出生命周期；路由判断另拆纯决策函数，可覆盖 master/space/bootstrap 状态表。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>全局搜索仍是禁用的 <code>CommandPaletteStub</code>；退出失败仅恢复按钮，不向用户暴露错误，壳层失败反馈未闭环。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>浏览器覆盖未登录重定向、Space 选择、桌面/移动导航及退出成败；<code>Ctrl+K</code> 必须返回真实搜索结果。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="fe-auth-space">
+          <h3><code>fe-auth-space</code> · Login、Space 与 Bootstrap</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>串联登录/初始化、master JWT、Space 列表与 space JWT、当前 Space DB 恢复，以及 DB 就绪后的同步引擎启动。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/lib/space-bootstrap.tsx#L26">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\space-bootstrap.tsx:26</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\space-bootstrap.tsx:26" aria-label="复制证据路径：space-bootstrap.tsx:26">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>冷启动按 auth hydrate → space hydrate → DB switch → sync bootstrap 门控；失败进入明确 phase，而非在 DB 未就绪时渲染业务壳。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>D8 仍是保留接口：<code>has_password</code> 固定 false 且 Space 密码参数被忽略，密码保护 Space 无真实选择、重发与恢复路径。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>后端契约就绪后端到端覆盖有/无密码 Space、401 单飞重发、错误回退与冷启动恢复，失败不得进入错误 Space DB。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="fe-dexie">
+          <h3><code>fe-dexie</code> · Dexie 与 Space DB</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>管理按 Space 隔离的 Dexie 实例、schema 版本、切换队列、切换前 flush 及供 repository/store 使用的稳定 DB proxy。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/services/space-db.ts#L16">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\services\space-db.ts:16</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\services\space-db.ts:16" aria-label="复制证据路径：space-db.ts:16">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd><code>switchTo</code> 串行化并先打开目标库再关闭旧库，切换前 listener 仍能写旧库；proxy 防止调用方持有过期实例。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>切换前 listener 使用 <code>Promise.allSettled</code> 且不传播拒绝，flush 失败后仍关闭/切换；未自行记录的耐久性失败会被静默吞掉。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>注入 rejected/timeout listener 验收 Space A→B 与 logout，要求失败可观测且草稿已持久化，否则阻止关闭旧库。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="fe-api-contract">
+          <h3><code>fe-api-contract</code> · REST Client 与 API Types</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>提供 master/space 双 Axios 客户端、JWT 注入与重发、Cloudflare 错误重试，以及 REST/OpenAPI 类型边界。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/services/api.ts#L36">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\services\api.ts:36</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\services\api.ts:36" aria-label="复制证据路径：api.ts:36">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>Master 与 Space token 隔离；Space 401 使用 single-flight 重发，401 guard 与 Cloudflare retry counter 分离，避免重发风暴。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>生成的 OpenAPI 类型主要只被 sync 直接消费；auth/spaces wrapper 仍手写响应接口，后端 schema 漂移不能统一阻断。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>对固定后端 ref 生成 API 类型并要求 <code>git diff --exit-code</code>，所有 wrapper 消费生成类型并通过鉴权与重试 contract tests。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="fe-sync">
+          <h3><code>fe-sync</code> · Sync Engine、Merge 与 Outbox</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>编排跨 tab 锁、pull 分页/游标恢复、十四实体 merge、outbox 分批 push、冲突裁决与同步状态通知。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/lib/sync/engine.ts#L31">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\sync\engine.ts:31</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\sync\engine.ts:31" aria-label="复制证据路径：engine.ts:31">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>同步周期坚持 pull-before-push；cursor/snapshot 过期 fail closed 后 full pull，dirty/outbox 遇远端 tombstone 会保留本地并生成冲突。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>本地 <code>65e2382</code> 的 QuickNote tombstone 集成断言仍期待删除 dirty 行，与 production merge 契约冲突，不能宣称本地全绿。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>先对齐“保留 dirty 本地 + 生成冲突”断言，再运行完整 <code>npm test</code> 与 merge/outbox/pull focused suites，全绿才认证基线。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="fe-quicknote-data">
+          <h3><code>fe-quicknote-data</code> · Repository、Store 与 Trash</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>提供 QuickNote repository mutation、Zustand 投影、草稿/回收站生命周期、转 Note 及与 outbox 的事务绑定。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/lib/quick-notes/quick-note-repository.ts#L198">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\quick-notes\quick-note-repository.ts:198</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\quick-notes\quick-note-repository.ts:198" aria-label="复制证据路径：quick-note-repository.ts:198">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>Create/update/trash/restore/purge 在 Dexie transaction 内同时写实体与 outbox；epoch/revision 防止旧 Space 投影回写新状态。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>Trash 保留本地行并更新 <code>deletion_state</code>，purge 则物理删除加 delete outbox；混同二者会破坏 restore/conflict/pull 语义。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>以真实 repository + outbox + pull merge 验收 create→update→trash→restore→purge→convert，并断言行、dirty、版本与 outbox action。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="fe-quicknote-ux">
+          <h3><code>fe-quicknote-ux</code> · Draft、Editor、Read 与 Tags</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>承担编辑/自动保存、草稿恢复与 Space 切换 flush、冲突决策、focus/read/detail 模式、Markdown 与标签交互。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163" aria-label="复制证据路径：use-quick-note-draft-session.ts:163">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>Draft controller 显式建模串行 lane、forced flush deadline、record/discard、恢复迁移和失效；关键失败路径已有 focused tests。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>Draft controller 从 163 行延伸至 777 行，editor 也跨 400 个物理行；生命周期、并发、持久化与 UI 编排高度耦合。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>按 draft lane、persistence/flush、conflict decision、editor presentation 拆分，保持 draft/editor/focus/remote-conflict suites 全绿。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="fe-settings">
+          <h3><code>fe-settings</code> · Settings 与 Theme</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>管理主题、语言、番茄时长、自动启动与声音偏好，并把主题同步到 <code>next-themes</code> 和根元素 class。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/stores/settings-store.ts#L78">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\stores\settings-store.ts:78</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\stores\settings-store.ts:78" aria-label="复制证据路径：settings-store.ts:78">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>主题已有 SSR-safe 初值、即时持久化与真实 UI；reset 刻意保留全局 theme/language，不随 Space 切换清除。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd><code>update</code> 持久化全部 key，但 <code>load</code> 只恢复 theme，其余值刷新后不 hydrate；Settings 页面也只交付主题控件。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>为全部 key 增加校验式 hydrate，以 reload、Space switch、reset 证明全局/Space 策略，再接入其余真实控件。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="fe-business-pages">
+          <h3><code>fe-business-pages</code> · Remaining Business UI</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>覆盖 Timer、Tasks、Schedules、Stats、Reflections、Notes、Habits 等尚未形成真实纵切面的业务页面与 stores。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/app/(app)/tasks/page.tsx#L4">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\app\(app)\tasks\page.tsx:4</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\app\(app)\tasks\page.tsx:4" aria-label="复制证据路径：tasks/page.tsx:4">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd>App Router 路由、统一 Placeholder 与 typed Zustand 边界已就位，导航信息架构稳定，可按单域纵切面替换。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>七个业务 route 仍直接返回 Placeholder；14 个文件头自标 S0 stub 中只有 10 个含显式空 action/空对象返回，不能把全部 store 都误报为 no-op。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>逐域交付 page→store/repository→API/sync→loading/error/empty UX→tests；每域 route 脱离 Placeholder 且 store 清除显式 no-op。</dd></div>
+          </dl>
+        </article>
+        <article class="module-detail" data-module-detail-for="fe-build-deploy">
+          <h3><code>fe-build-deploy</code> · Build 与 Runtime Config</h3>
+          <dl class="module-detail-grid">
+            <div class="module-responsibility"><dt>责任</dt><dd>管理 Next build/rewrite、lint/typegen/test scripts、开发预览入口与生产依赖锁定，是前端发布配置边界。</dd></div>
+            <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/next.config.ts#L11">E:\Development\MyAwesomeApp\PomodoroXII\frontend\next.config.ts:11</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\next.config.ts:11" aria-label="复制证据路径：next.config.ts:11">复制路径</button></dd></div>
+            <div class="module-strengths"><dt>优势</dt><dd><code>package.json</code> 提供 lint、typegen+tsc、Vitest 与 Turbopack build 独立门，预览脚本固定可复现本地入口。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>Rewrite 硬编码 <code>localhost:8000</code>，<code>NEXT_PUBLIC_API_BASE</code> 未进入 executable config；锁文件仍含已知 PostCSS advisory。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>用非本地 API origin 构建并断言 routes manifest；同时要求 <code>npm audit --omit=dev</code> 无 advisory 或有含责任人和到期日的例外。</dd></div>
+          </dl>
+        </article>
+      </div>
       <h3>产品完整度与复杂度事实</h3>
       <div class="table-scroll" role="region" aria-label="前端产品事实" tabindex="0">
         <table>
           <thead><tr><th scope="col">域</th><th scope="col">冻结值</th><th scope="col">本地来源与口径</th></tr></thead>
           <tbody>
-            <tr><th scope="row">App Router</th><td>15 个 pages，<strong>7 个占位</strong> business pages</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/app/(app)/tasks/page.tsx#L1">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\app\(app)\tasks\page.tsx:1</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\app\(app)\tasks\page.tsx:1" aria-label="复制证据路径：tasks/page.tsx:1">复制路径</button><br><code>page.tsx</code> 递归扫描；7 页导入 <code>PlaceholderPage</code>。</td></tr>
-            <tr><th scope="row">Frontend tests</th><td>47 个 test files</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\" aria-label="复制证据路径：frontend src 目录">复制路径</button><br>递归 tracked-file 扫描 <code>\.(test|spec)\.(ts|tsx|js|jsx)$</code>。</td></tr>
-            <tr><th scope="row">Store 口径</th><td><strong>14 个自标 S0 stub</strong>；其中 <strong>10 个显式 no-op</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/stores/app-store.ts#L4">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\stores\app-store.ts:4</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\stores\app-store.ts:4" aria-label="复制证据路径：app-store.ts:4">复制路径</button><br>14 个文件仍带 <code>S0 stub / actions are no-ops</code> 自述；源码细分为 10 个显式 no-op/空对象 store，4 个已有局部状态或持久化更新。</td></tr>
-            <tr><th scope="row">QuickNote component domain</th><td>24 个 TypeScript/TSX files，10,349 行（约 10.3k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\" aria-label="复制证据路径：quick-notes 目录">复制路径</button></td></tr>
-            <tr><th scope="row">Sync library</th><td>22 个 files，4,862 行（约 4.9k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/lib/sync/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\" aria-label="复制证据路径：sync 目录">复制路径</button></td></tr>
-            <tr><th scope="row"><code>createQuickNoteDraftSessionController</code></th><td>cyclomatic 85，cognitive 143</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163" aria-label="复制证据路径：use-quick-note-draft-session.ts:163">复制路径</button><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
-            <tr><th scope="row"><code>useQuickNoteEditor</code></th><td>cyclomatic 65，cognitive 85</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25" aria-label="复制证据路径：use-quick-note-editor.ts:25">复制路径</button><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
+            <tr><th scope="row">App Router</th><td>15 个 pages，<strong>7 个占位</strong> business pages</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/app/(app)/tasks/page.tsx#L1">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\app\(app)\tasks\page.tsx:1</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\app\(app)\tasks\page.tsx:1" aria-label="复制证据路径：tasks/page.tsx:1">复制路径</button><br><code>page.tsx</code> 递归扫描；7 页导入 <code>PlaceholderPage</code>。</td></tr>
+            <tr><th scope="row">Frontend tests</th><td>47 个 test files</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\" aria-label="复制证据路径：frontend src 目录">复制路径</button><br>递归 tracked-file 扫描 <code>\.(test|spec)\.(ts|tsx|js|jsx)$</code>。</td></tr>
+            <tr><th scope="row">Store 口径</th><td><strong>14 个自标 S0 stub</strong>；其中 <strong>10 个显式 no-op</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/stores/app-store.ts#L4">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\stores\app-store.ts:4</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\stores\app-store.ts:4" aria-label="复制证据路径：app-store.ts:4">复制路径</button><br>14 个文件仍带 <code>S0 stub / actions are no-ops</code> 自述；源码细分为 10 个显式 no-op/空对象 store，4 个已有局部状态或持久化更新。</td></tr>
+            <tr><th scope="row">QuickNote component domain</th><td>24 个 TypeScript/TSX files，10,349 行（约 10.3k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\" aria-label="复制证据路径：quick-notes 目录">复制路径</button></td></tr>
+            <tr><th scope="row">Sync library</th><td>22 个 files，4,862 行（约 4.9k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/lib/sync/">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\sync\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\sync\" aria-label="复制证据路径：sync 目录">复制路径</button></td></tr>
+            <tr><th scope="row"><code>createQuickNoteDraftSessionController</code></th><td>cyclomatic 85，cognitive 143</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163" aria-label="复制证据路径：use-quick-note-draft-session.ts:163">复制路径</button><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
+            <tr><th scope="row"><code>useQuickNoteEditor</code></th><td>cyclomatic 65，cognitive 85</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-editor.ts:25" aria-label="复制证据路径：use-quick-note-editor.ts:25">复制路径</button><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
           </tbody>
         </table>
       </div>
@@ -554,10 +761,11 @@
       <details class="finding" id="finding-f001" data-finding-id="F-001" data-severity="P1" data-status="open" data-evidence="source-verified" open>
         <summary><span class="disclosure-indicator" aria-hidden="true"></span><span class="finding-title"><strong>F-001 · P1</strong> · <code>NEXT_PUBLIC_API_BASE</code> 未进入 rewrite</span><span class="finding-meta">open · source-verified</span></summary>
         <div class="finding-body"><dl class="finding-grid">
+          <div class="affected-subsystem" data-affected-subsystem="fe-build-deploy"><dt>Affected subsystem</dt><dd><code>fe-build-deploy</code> · Next build / runtime config</dd></div>
           <div><dt>Observed behavior</dt><dd><code>.env.local.example</code> 声明 API origin 可配置，但 <code>next.config.ts</code> 把 <code>/api/:path*</code> 始终转发到 <code>http://localhost:8000</code>。</dd></div>
           <div><dt>Impact</dt><dd>非本地后端的生产构建无法通过环境配置选择 origin，发布后 API 请求会被转发到错误目标。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/next.config.ts#L11">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\next.config.ts:11</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\next.config.ts:11" aria-label="复制证据路径：next.config.ts:11">复制路径</button></dd></div>
-          <div><dt>Verification</dt><dd><code>source-verified</code>；与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/.env.local.example#L7">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\.env.local.example:7</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\.env.local.example:7" aria-label="复制证据路径：.env.local.example:7">复制路径</button> 的文档契约对照。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/next.config.ts#L11">E:\Development\MyAwesomeApp\PomodoroXII\frontend\next.config.ts:11</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\next.config.ts:11" aria-label="复制证据路径：next.config.ts:11">复制路径</button></dd></div>
+          <div><dt>Verification</dt><dd><code>source-verified</code>；与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/.env.local.example#L7">E:\Development\MyAwesomeApp\PomodoroXII\frontend\.env.local.example:7</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\.env.local.example:7" aria-label="复制证据路径：.env.local.example:7">复制路径</button> 的文档契约对照。</dd></div>
           <div><dt>Recommendation</dt><dd>在 Next 配置评估期读取受控 origin，校验 URL，并为非本地值增加构建产物断言。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>build with a non-local API origin and assert routes manifest uses it</code></dd></div>
         </dl></div>
@@ -565,9 +773,10 @@
       <details class="finding" id="finding-f002" data-finding-id="F-002" data-severity="P1" data-status="fixed-on-origin" data-evidence="remote-delta-verified" open>
         <summary><span class="disclosure-indicator" aria-hidden="true"></span><span class="finding-title"><strong>F-002 · P1</strong> · 本地基线落后且携带过时失败断言</span><span class="finding-meta">fixed-on-origin · remote-delta-verified</span></summary>
         <div class="finding-body"><dl class="finding-grid">
+          <div class="affected-subsystem" data-affected-subsystem="fe-sync"><dt>Affected subsystem</dt><dd><code>fe-sync</code> · local baseline recovery</dd></div>
           <div><dt>Observed behavior</dt><dd>本地 65e2382 落后 <code>origin/main@1e4f0fc</code> 11 commits；本地 QuickNote tombstone 集成测试仍期望 dirty 实体被删除，实际合并契约是保留本地并生成冲突。保存的 audit-time run 记录为 <code>541 passed, 1 failed</code>，Task 3 未重跑该 suite。</dd></div>
           <div><dt>Impact</dt><dd>保存的本地 frontend gate 为红，无法作为可发布绿色基线；在未分类 2,176 个未跟踪路径前协调基线，会扩大冲突与本地工作遗失风险。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/lib/sync/quick-note-sync.integration.test.ts#L188">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\quick-note-sync.integration.test.ts:188</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\quick-note-sync.integration.test.ts:188" aria-label="复制证据路径：quick-note-sync.integration.test.ts:188">复制路径</button></dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/lib/sync/quick-note-sync.integration.test.ts#L188">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\sync\quick-note-sync.integration.test.ts:188</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\sync\quick-note-sync.integration.test.ts:188" aria-label="复制证据路径：quick-note-sync.integration.test.ts:188">复制路径</button></dd></div>
           <div><dt>Verification</dt><dd><code>remote-delta-verified</code>；<code>fixed-on-origin</code> 是 remote-sensitive source status，不是本地修复或运行证明。远端细节仅见 <a href="#remote-delta">Remote Delta</a>。</dd></div>
           <div><dt>Recommendation</dt><dd>先盘点并保护未跟踪工作，再协调本地与 <code>origin/main</code>，最后在新基线重跑全量 gate。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>reconcile origin, run npm test, require 542/542</code></dd></div>
@@ -576,10 +785,11 @@
       <details class="finding" id="finding-f003" data-finding-id="F-003" data-severity="P2" data-status="open" data-evidence="runtime-verified" open>
         <summary><span class="disclosure-indicator" aria-hidden="true"></span><span class="finding-title"><strong>F-003 · P2</strong> · 后端测试沙箱无限保留且反馈过慢</span><span class="finding-meta">open · runtime-verified</span></summary>
         <div class="finding-body"><dl class="finding-grid">
+          <div class="affected-subsystem" data-affected-subsystem="x-test-infra"><dt>Affected subsystem</dt><dd><code>x-test-infra</code> · backend test lifecycle</dd></div>
           <div><dt>Observed behavior</dt><dd>fixture 为每次 suite 分配新 run root，并明确不在 fixture 或 session teardown 递归删除。审计冻结值为 <strong>423.7 MiB</strong> 保留产物，全量测试用时 <code>588.35s</code>。</dd></div>
           <div><dt>Impact</dt><dd>每次 full run 持续增长 SQLite/space 文件，占用磁盘并放大 IO；每测试重绑定模块也使反馈接近 10 分钟。报告生成期 live recheck 已增至 459.0 MiB，该值不回写冻结评分；尚未约定数字化 full-suite 预算。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/tests/conftest.py#L104">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\conftest.py:104</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\conftest.py:104" aria-label="复制证据路径：conftest.py:104">复制路径</button></dd></div>
-          <div><dt>Verification</dt><dd><code>runtime-verified</code>；<a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/tests/test_test_isolation.py#L172">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\test_test_isolation.py:172</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\tests\test_test_isolation.py:172" aria-label="复制证据路径：test_test_isolation.py:172">复制路径</button> 还以 AST 回归防止 <code>rmtree</code> 进入 fixture。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/conftest.py#L104">E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\conftest.py:104</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\conftest.py:104" aria-label="复制证据路径：conftest.py:104">复制路径</button></dd></div>
+          <div><dt>Verification</dt><dd><code>runtime-verified</code>；<a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/test_test_isolation.py#L172">E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\test_test_isolation.py:172</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\test_test_isolation.py:172" aria-label="复制证据路径：test_test_isolation.py:172">复制路径</button> 还以 AST 回归防止 <code>rmtree</code> 进入 fixture。</dd></div>
           <div><dt>Recommendation</dt><dd>保留 per-test 隔离，但在 CI/workspace 外层实现边界可验证的 run-root retention，并建立 full-suite 时间预算。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>two full runs leave no prior run root and stay within an agreed budget</code></dd></div>
         </dl></div>
@@ -587,6 +797,7 @@
       <details class="finding" id="finding-f004" data-finding-id="F-004" data-severity="P2" data-status="open" data-evidence="runtime-verified" open>
         <summary><span class="disclosure-indicator" aria-hidden="true"></span><span class="finding-title"><strong>F-004 · P2</strong> · 2,176 个未跟踪路径污染工作区与根图</span><span class="finding-meta">open · runtime-verified</span></summary>
         <div class="finding-body"><dl class="finding-grid">
+          <div class="affected-subsystem" data-affected-subsystem="x-repo-index"><dt>Affected subsystem</dt><dd><code>x-repo-index</code> · repository and graph hygiene</dd></div>
           <div><dt>Observed behavior</dt><dd><code>git status --short --untracked-files=all</code> 运行时摘要为恰好 <strong>2,176</strong> 行，全部是 <code>??</code>；其中包含 graph artifact、报告、文档与临时树。该命令计数没有伪造为某个源码行。</dd></div>
           <div><dt>Impact</dt><dd>Git 审核面与 root graph 输入被生成物/文档放大，令变更审查、基线协调与代码级图结论失真。</dd></div>
           <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///C:/Users/20564/.codex/sessions/2026/07/13/rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl#L493">C:\Users\20564\.codex\sessions\2026\07\13\rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl:493</a><button class="copy-path" type="button" data-copy-path="C:\Users\20564\.codex\sessions\2026\07\13\rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl:493" aria-label="复制证据路径：rollout JSONL:493">复制路径</button> 保存审计时 2,176 行命令记录；<a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.codebase-memory/artifact.json#L4">E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4" aria-label="复制证据路径：root artifact.json:4">复制路径</button> 只证明 stale graph artifact，不承载该路径数。</dd></div>
@@ -598,9 +809,10 @@
       <details class="finding" id="finding-f005" data-finding-id="F-005" data-severity="P2" data-status="open" data-evidence="source-verified" open>
         <summary><span class="disclosure-indicator" aria-hidden="true"></span><span class="finding-title"><strong>F-005 · P2</strong> · README 测试、CI、提交状态失真</span><span class="finding-meta">open · source-verified</span></summary>
         <div class="finding-body"><dl class="finding-grid">
+          <div class="affected-subsystem" data-affected-subsystem="x-docs"><dt>Affected subsystem</dt><dd><code>x-docs</code> · status truth across CI/delivery</dd></div>
           <div><dt>Observed behavior</dt><dd>README 仍声明 backend 621 tests、frontend 333 tests 与过时 commit <code>2db8cdd</code>，而冻结 gate 是 backend 783 passed 与 frontend 542 总数。交付状态文字没有绑定 ref/date，因此不能跨本地与远端快照使用。</dd></div>
           <div><dt>Impact</dt><dd>代理与所有者无法从入口文档得到可信的当前 gate、CI 范围和产品完整度，容易选错交付基线。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/README.md#L53">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:53</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:53" aria-label="复制证据路径：README.md:53">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/README.md#L76">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:76</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:76" aria-label="复制证据路径：README.md:76">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/README.md#L169">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:169</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\README.md:169" aria-label="复制证据路径：README.md:169">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/README.md#L239">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\README.md:239</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\README.md:239" aria-label="复制证据路径：frontend README.md:239">复制路径</button></dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/README.md#L53">E:\Development\MyAwesomeApp\PomodoroXII\README.md:53</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\README.md:53" aria-label="复制证据路径：README.md:53">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/README.md#L76">E:\Development\MyAwesomeApp\PomodoroXII\README.md:76</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\README.md:76" aria-label="复制证据路径：README.md:76">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/README.md#L169">E:\Development\MyAwesomeApp\PomodoroXII\README.md:169</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\README.md:169" aria-label="复制证据路径：README.md:169">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/README.md#L239">E:\Development\MyAwesomeApp\PomodoroXII\frontend\README.md:239</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\README.md:239" aria-label="复制证据路径：frontend README.md:239">复制路径</button></dd></div>
           <div><dt>Verification</dt><dd><code>source-verified</code> 本地文档矛盾；remote-sensitive 差异细节仅见 <a href="#remote-delta">Remote Delta</a>。</dd></div>
           <div><dt>Recommendation</dt><dd>从实际 gate/route/file scan 生成状态值，或在 CI 中检查 README 数值与当前基线一致。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>docs values generated or checked against current gates</code></dd></div>
@@ -609,21 +821,23 @@
       <details class="finding" id="finding-f006" data-finding-id="F-006" data-severity="P2" data-status="open" data-evidence="source-verified" open>
         <summary><span class="disclosure-indicator" aria-hidden="true"></span><span class="finding-title"><strong>F-006 · P2</strong> · QuickNote draft/editor 结构复杂度过高</span><span class="finding-meta">open · source-verified</span></summary>
         <div class="finding-body"><dl class="finding-grid">
+          <div class="affected-subsystem" data-affected-subsystem="fe-quicknote-ux"><dt>Affected subsystem</dt><dd><code>fe-quicknote-ux</code> · draft/editor state machines</dd></div>
           <div><dt>Observed behavior</dt><dd>保存审计度量记录 <code>createQuickNoteDraftSessionController</code> 为 cyclomatic 85 / cognitive 143，<code>useQuickNoteEditor</code> 为 cyclomatic 65 / cognitive 85；两者同时承担生命周期、并发、冲突和 UI 编排。</dd></div>
           <div><dt>Impact</dt><dd>QuickNote 已是前端主导实现域，过高分支与状态耦合使小改动容易破坏 autosave、flush、remote conflict 或 focus/read 切换。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163" aria-label="复制证据路径：use-quick-note-draft-session.ts:163">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\use-quick-note-editor.ts:25" aria-label="复制证据路径：use-quick-note-editor.ts:25">复制路径</button></dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163" aria-label="复制证据路径：use-quick-note-draft-session.ts:163">复制路径</button> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-editor.ts:25" aria-label="复制证据路径：use-quick-note-editor.ts:25">复制路径</button></dd></div>
           <div><dt>Verification</dt><dd><code>source-verified</code> 函数边界与责任集中；复杂度数值使用保存审计度量，当前树未发现其原始产物，因此不声称本轮已重算。</dd></div>
           <div><dt>Recommendation</dt><dd>按 draft lane、persistence/flush、conflict decision 与 editor presentation 分拆责任，保留现有 focused regression tests。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>split responsibilities and keep focused tests green</code></dd></div>
         </dl></div>
       </details>
       <details class="finding" id="finding-f007" data-finding-id="F-007" data-severity="P3" data-status="open" data-evidence="runtime-verified" open>
-        <summary><span class="disclosure-indicator" aria-hidden="true"></span><span class="finding-title"><strong>F-007 · P3</strong> · Next 内嵌 PostCSS：2 moderate vulnerability entries / 1 distinct GHSA</span><span class="finding-meta">open · runtime-verified</span></summary>
+        <summary><span class="disclosure-indicator" aria-hidden="true"></span><span class="finding-title"><strong>F-007 · P3</strong> · Next 内嵌 PostCSS：2 moderate vulnerability entries / 1 distinct advisory (GHSA)</span><span class="finding-meta">open · runtime-verified</span></summary>
         <div class="finding-body"><dl class="finding-grid">
+          <div class="affected-subsystem" data-affected-subsystem="fe-build-deploy"><dt>Affected subsystem</dt><dd><code>fe-build-deploy</code> · production dependency lock</dd></div>
           <div><dt>Observed behavior</dt><dd>brief 的“Next 内嵌 PostCSS 命中两个 moderate advisory”是旧口径。<code>npm audit --omit=dev</code> 实际返回 2 moderate vulnerability entries（Next + transitive PostCSS）、0 high、0 critical；它们对应 1 个独立 advisory <code>GHSA-qx2v-qp2m-jg93</code>，锁文件将 Next 内嵌 PostCSS 固定为 <code>8.4.31</code>。</dd></div>
           <div><dt>Impact</dt><dd>产品依赖树保留已知 advisory，尽管严重度不是 high/critical，仍阻断“无已知产品依赖漏洞”的发布声明。</dd></div>
-          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/package-lock.json#L9576">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9576</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9576" aria-label="复制证据路径：package-lock.json:9576">复制路径</button></dd></div>
-          <div><dt>Verification</dt><dd><code>runtime-verified</code>；生产依赖 audit 与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/package-lock.json#L9514">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9514</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\package-lock.json:9514" aria-label="复制证据路径：package-lock.json:9514">复制路径</button> 的 Next dependency path 对照。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/package-lock.json#L9576">E:\Development\MyAwesomeApp\PomodoroXII\frontend\package-lock.json:9576</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\package-lock.json:9576" aria-label="复制证据路径：package-lock.json:9576">复制路径</button></dd></div>
+          <div><dt>Verification</dt><dd><code>runtime-verified</code>；生产依赖 audit 与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/package-lock.json#L9514">E:\Development\MyAwesomeApp\PomodoroXII\frontend\package-lock.json:9514</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\frontend\package-lock.json:9514" aria-label="复制证据路径：package-lock.json:9514">复制路径</button> 的 Next dependency path 对照。</dd></div>
           <div><dt>Recommendation</dt><dd>升级到包含 PostCSS ≥ 8.5.10 的受支持 Next dependency graph；不盲从 npm 的 downgrade 建议。若暂时不可升级，记录具有适用性与到期条件的例外。</dd></div>
           <div><dt>Exact acceptance gate</dt><dd><code>npm audit --omit=dev returns no known advisory or documented exception</code></dd></div>
         </dl></div>
@@ -653,8 +867,8 @@
             <tr><th scope="row">Frontend static/build</th><td>ESLint passed；TypeScript passed；production build passed，19 routes</td><td>构建绿</td><td><code>runtime-verified</code></td></tr>
             <tr><th scope="row">Frontend tests</th><td><code>541 passed, 1 failed</code><br>saved audit-time run; Task 3 未重跑</td><td>保存的本地基线红</td><td><code>runtime-verified</code> with freshness limit</td></tr>
             <tr><th scope="row">Production dependency audit</th><td>2 moderate，0 high，0 critical</td><td>需升级或例外记录</td><td><code>runtime-verified</code></td></tr>
-            <tr><th scope="row">Local workflow source</th><td>pytest + Ruff；main push 后 Docker build/push；<code>/api/health</code> smoke</td><td>只覆盖 backend 与 liveness</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/.github/workflows/ci.yml#L41">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\.github\workflows\ci.yml:41</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\.github\workflows\ci.yml:41" aria-label="复制证据路径：ci.yml:41">复制路径</button></td></tr>
-            <tr><th scope="row">Docker/runtime</th><td>non-root user，data volume，Compose healthcheck</td><td>有本地部署基座；本地只验证 liveness</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/backend/Dockerfile#L37">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\Dockerfile:37</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\backend\Dockerfile:37" aria-label="复制证据路径：Dockerfile:37">复制路径</button></td></tr>
+            <tr><th scope="row">Local workflow source</th><td>pytest + Ruff；main push 后 Docker build/push；<code>/api/health</code> smoke</td><td>只覆盖 backend 与 liveness</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.github/workflows/ci.yml#L41">E:\Development\MyAwesomeApp\PomodoroXII\.github\workflows\ci.yml:41</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.github\workflows\ci.yml:41" aria-label="复制证据路径：ci.yml:41">复制路径</button></td></tr>
+            <tr><th scope="row">Docker/runtime</th><td>non-root user，data volume，Compose healthcheck</td><td>有本地部署基座；本地只验证 liveness</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/Dockerfile#L37">E:\Development\MyAwesomeApp\PomodoroXII\backend\Dockerfile:37</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\Dockerfile:37" aria-label="复制证据路径：Dockerfile:37">复制路径</button></td></tr>
             <tr><th scope="row">GitHub live run</th><td>未查证，<code>gh</code> 未认证</td><td>不声称外部 CI 绿</td><td><code>unverified</code></td></tr>
           </tbody>
         </table>
@@ -723,7 +937,9 @@
         <li><code>Maturity = round(((completeness + integrity) / 40) * 100)</code></li>
         <li><code>Health = round(((verification + operability + maintainability) / 60) * 100)</code></li>
         <li>Confidence 反映本次源码、runtime、图与远端差异的交叉验证强度，不是统计置信区间。</li>
-        <li>主快照始终是 local <code>65e2382</code>；<code>origin/main@1e4f0fc</code> 的 11 commits 只出现在 Remote Delta。</li>
+        <li>审计对象始终是 <code>main@65e2382</code>；保存的本地 remote-tracking <code>origin/main@1e4f0fc</code> 未在报告任务中 fetch，其 11 commits 只出现在 Remote Delta。</li>
+        <li>报告 artifact lineage 的 browser-verified baseline 是分支 <code>codex/deep-audit-html-implementation</code> 上的 <code>0181063</code>；后续 final-review corrections 由承载该文件的 current Git HEAD 记录。</li>
+        <li>静态 artifact 无法自嵌最终 carrier hash；以承载 checkout 中的 <code>git rev-parse HEAD</code> 为权威。源码行号只对 <code>65e2382</code> 负责，不可变复核使用 <code>git show 65e2382:&lt;path&gt;</code>。</li>
         <li>证据标签为 <code>runtime-verified</code>、<code>source-verified</code>、<code>remote-delta-verified</code> 或 <code>unverified</code>。历史报告不覆盖当前源码与 gate。</li>
       </ul>
     </section>

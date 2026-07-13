@@ -30,13 +30,22 @@ The output path is:
 
 ## Snapshot Contract
 
-The primary audit subject is the local checkout captured on 2026-07-13:
+The primary audit subject is the local checkout captured on 2026-07-13
+Asia/Shanghai:
 
 - repository: `E:\Development\MyAwesomeApp\PomodoroXII`
-- branch at audit start: `main`
-- local commit: `65e2382`
-- remote reference: `origin/main` at `1e4f0fc`
+- audit subject: `main@65e2382`
+- saved origin reference: local remote-tracking `origin/main@1e4f0fc`
+- origin freshness: no fetch was performed in the report task
 - local branch status: 11 commits behind `origin/main`
+- report artifact lineage: browser-verified baseline `0181063` on
+  `codex/deep-audit-html-implementation`; later final-review corrections are
+  recorded by the carrier's current Git HEAD
+
+A static artifact cannot embed its own final carrier hash. `git rev-parse HEAD`
+in the checkout carrying the report is authoritative. Source line references
+are scoped to audit subject `65e2382`; use `git show 65e2382:<path>` for
+immutable inspection.
 
 The report must never silently merge local and remote states.
 
@@ -176,9 +185,16 @@ The report must clearly identify:
 
 - 15 App Router pages
 - 7 placeholder business pages
-- 14 stores whose actions remain documented no-ops
+- `14 个自标 S0 stub，其中 10 个显式 no-op`
 - QuickNote as the dominant implemented frontend domain
 - the draft-session and editor complexity hotspots
+
+The 19 backend/frontend subsystem detail records each contain responsibility,
+at least one audited-source evidence file/link, strengths, risks, and a next
+gate. They use dense, unframed repeated rows or sections, not cards or nested
+cards. Repository evidence links use the persistent root
+`E:\Development\MyAwesomeApp\PomodoroXII\...` and retain an adjacent,
+distinguishable copy button.
 
 ### 6. Cross-Cutting Findings
 
@@ -208,7 +224,7 @@ At minimum include the confirmed findings from the audit:
 - worktree and root graph are polluted by untracked output and reports
 - README and frontend status claims are stale
 - QuickNote draft/editor modules have extreme structural complexity
-- npm reports two moderate production dependency advisories
+- npm reports `2 moderate vulnerability entries / 1 distinct advisory (GHSA)`
 
 ### 7. Test, CI, And Delivery
 
@@ -323,8 +339,10 @@ wrapping and must not overflow their cells.
   only where relationships become easier to understand.
 - Avoid nested cards, ornamental gradients, decorative blobs, negative letter
   spacing, and oversized marketing typography.
-- All source references use absolute local paths in displayed evidence and
-  clickable `file:///` links where browser support permits.
+- All source references use persistent repository-root paths under
+  `E:\Development\MyAwesomeApp\PomodoroXII\...` in displayed evidence and
+  clickable `file:///` links where browser support permits; temporary worktree
+  paths are not valid report provenance.
 
 ## Verification
 

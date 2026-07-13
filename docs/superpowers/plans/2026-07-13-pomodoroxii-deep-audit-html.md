@@ -10,7 +10,10 @@
 
 ## Global Constraints
 
-- Primary snapshot: local `65e2382`; remote delta: `origin/main` at `1e4f0fc`, 11 commits ahead.
+- Audit subject: `main@65e2382`, saved on 2026-07-13 Asia/Shanghai.
+- Saved origin reference: local remote-tracking `origin/main@1e4f0fc`, 11 commits ahead; the report task did not fetch.
+- Artifact lineage: browser-verified baseline `0181063` on `codex/deep-audit-html-implementation`; later final-review corrections are recorded by current Git HEAD because a static artifact cannot embed its own final carrier hash.
+- Source line references are scoped to audit subject `65e2382`; immutable inspection uses `git show 65e2382:<path>`.
 - Output exactly one standalone report: `output/PomodoroXII-子模块深度审查报告-2026-07-13.html`.
 - No external CDN, font, stylesheet, script, analytics, network request, or build step.
 - Main findings use local source/tests/index evidence; remote fixes appear only in the Remote Delta section.
@@ -40,11 +43,14 @@ The report and verifier share these stable interfaces:
 - Sections: `[data-report-section]` with unique IDs
 - Modules: `[data-module-id][data-maturity][data-health][data-confidence]`
 - Findings: `[data-finding-id][data-severity][data-status][data-evidence]`
+- Business-module details: exactly the 19 backend/frontend IDs in `[data-module-detail-for]`, each with `.module-responsibility`, `.module-evidence`, `.module-strengths`, `.module-risks`, and `.module-next-gate`.
+- Finding affected subsystem: exactly one `.affected-subsystem` inside every finding.
 - Filters: `#severity-filter`, `#status-filter`, `#evidence-filter`
 - Commands: `#theme-toggle`, `#expand-all`, `#print-report`
 - Live result count: `#finding-count[aria-live="polite"]`
 - Finding disclosure: `details.finding`
 - Evidence links: `a.evidence-link[href^="file:///"]`
+- Every evidence link is paired with a distinguishable `button.copy-path[data-copy-path]`; repository evidence uses the persistent root `E:\Development\MyAwesomeApp\PomodoroXII\...`, never a temporary worktree path.
 
 ---
 
@@ -145,9 +151,14 @@ function verifyStatic() {
     for (const fact of [
       '783 passed', '1 xfailed', '588.35s', '541 passed', '1 failed',
       '11,156', '24,653', '2,476', '12,526', '1,701', '3,648',
-      '2,176', '423.7 MiB', '7 个占位', '14 个 no-op',
+      '2,176', '423.7 MiB', '7 个占位',
+      '14 个自标 S0 stub', '10 个显式 no-op',
+      '2 moderate vulnerability entries / 1 distinct advisory (GHSA)',
     ]) {
       assert.ok(html.includes(fact), `missing verified fact: ${fact}`)
+    }
+    for (const fact of ['14 个 no-op']) {
+      assert.ok(!html.includes(fact), `forbidden disproved fact: ${fact}`)
     }
     const unfinishedMarkers = [
       String.fromCharCode(84, 66, 68),
@@ -432,6 +443,13 @@ const health = Math.round(((verification + operability + maintainability) / 60) 
 
 Explain below the matrix that maturity and health are reproducible composites of the displayed audit-judgement dimensions, not runtime telemetry.
 
+Add one dense, unframed detail row or section for each of the 19 backend and
+frontend module IDs. Every record uses `data-module-detail-for` and contains
+responsibility, at least one audited-source evidence link, strengths, risks,
+and a next gate. Evidence links use the persistent repository root and retain
+their adjacent copy buttons. Do not turn these records into a card mosaic or
+nested cards.
+
 - [ ] **Step 2: Add exactly seven findings**
 
 Use these IDs, severities, statuses, evidence levels, and acceptance gates:
@@ -444,18 +462,19 @@ Use these IDs, severities, statuses, evidence levels, and acceptance gates:
 | F-004 | P2 | 2,176 个未跟踪路径污染工作区与根图 | open | runtime-verified | classify or ignore generated output, then clean reindex |
 | F-005 | P2 | README 测试、CI、提交状态失真 | open | source-verified | docs values generated or checked against current gates |
 | F-006 | P2 | QuickNote draft/editor 结构复杂度过高 | open | source-verified | split responsibilities and keep focused tests green |
-| F-007 | P3 | Next 内嵌 PostCSS 命中两个 moderate advisory | open | runtime-verified | `npm audit --omit=dev` returns no known advisory or documented exception |
+| F-007 | P3 | Next 内嵌 PostCSS：2 moderate vulnerability entries / 1 distinct advisory (GHSA) | open | runtime-verified | `npm audit --omit=dev` returns no known advisory or documented exception |
 
-Each finding must include the observed behavior, impact, absolute source path,
-line number, recommendation, and the exact acceptance gate. F-001 and F-002 are
-the only P1 findings so the browser assertion `visible count == 2` remains valid.
+Each finding must include an explicit affected subsystem, the observed behavior,
+impact, absolute source path, line number, recommendation, and the exact
+acceptance gate. F-001 and F-002 are the only P1 findings so the browser
+assertion `visible count == 2` remains valid.
 
 - [ ] **Step 3: Add product-completeness and complexity facts**
 
 State and source these facts:
 
 - backend: 83 REST decorators, 19 MCP decorators, 79 test files;
-- frontend: 15 App Router pages, 7 placeholder pages, 47 test files, 14 no-op stores;
+- frontend: 15 App Router pages, 7 placeholder pages, 47 test files, `14 个自标 S0 stub，其中 10 个显式 no-op`;
 - QuickNote component domain: 24 TypeScript/TSX files and about 10.3k lines;
 - sync library: 22 files and about 4.9k lines;
 - `createQuickNoteDraftSessionController`: cyclomatic 85, cognitive 143;
@@ -541,6 +560,7 @@ Add stable layout rules:
 - report content `max-width: 1180px` with 32 px desktop gutters;
 - unframed full-width sections separated by 1 px rules;
 - cards only for individual findings and compact evidence records, radius <= 8 px;
+- module detail records remain unframed repeated rows/sections, never cards or nested cards;
 - module matrix and evidence tables scroll inside `.table-scroll`, never the page;
 - mobile controls wrap into two columns and then one column at 520 px;
 - `overflow-wrap:anywhere` for paths and code;
@@ -660,7 +680,8 @@ git commit -m "feat(audit): add responsive report interactions"
 - [ ] **Step 1: Run browser verification with the bundled runtime**
 
 ```powershell
-$env:NODE_PATH='C:\Users\20564\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
+$root='C:\Users\20564\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
+$env:NODE_PATH="$root;$root\.pnpm\node_modules"
 & 'C:\Users\20564\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' scripts/audit-report/verify-report.cjs all --browser
 ```
 
@@ -682,8 +703,9 @@ control wider than the viewport.
 - [ ] **Step 3: Verify JavaScript-disabled readability**
 
 The `verifyBrowser()` implementation from Task 1 creates a second context with
-`javaScriptEnabled: false` and checks all 7 findings, all 23 module rows, and the
-verdict text. Confirm the browser command from Step 1 reaches those assertions.
+`javaScriptEnabled: false` and checks all 7 findings, all 23 module rows, all 19
+business-module detail records, and the verdict text. Confirm the browser
+command from Step 1 reaches those assertions.
 
 Expected: all static findings and module rows remain readable; only filters,
 theme persistence, and command buttons are inactive.
@@ -693,6 +715,8 @@ theme persistence, and command buttons are inactive.
 ```powershell
 git status --short --branch
 git diff --check HEAD
+$root='C:\Users\20564\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
+$env:NODE_PATH="$root;$root\.pnpm\node_modules"
 & 'C:\Users\20564\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' scripts/audit-report/verify-report.cjs all --browser
 ```
 
@@ -701,7 +725,7 @@ Expected:
 - no whitespace errors in report or verifier;
 - verifier passes static and browser gates;
 - unrelated untracked workspace files remain untouched;
-- only planned report/verifier commits appear on `codex/deep-audit-html-report`.
+- only planned report/verifier commits appear on `codex/deep-audit-html-implementation`.
 
 - [ ] **Step 5: Commit verification fixes if any**
 
