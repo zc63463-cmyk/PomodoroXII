@@ -45,7 +45,7 @@
     button, select { font: inherit; }
     button { cursor: pointer; }
     h1, h2, h3, p, ul, ol, dl { overflow-wrap: anywhere; }
-    h1 { max-width: 28ch; margin: 0 0 12px; font-size: 2rem; line-height: 1.18; }
+    h1 { max-width: 28ch; margin: 0 0 12px; font-size: 2rem; line-height: 1.18; word-break: keep-all; }
     h2 { margin: 0 0 14px; font-size: 1.35rem; line-height: 1.3; }
     h3 { margin: 22px 0 10px; font-size: 1rem; line-height: 1.4; }
     p { margin: 0 0 14px; }
@@ -519,7 +519,6 @@
           <tbody>
             <tr><th scope="row">App Router</th><td>15 个 pages，<strong>7 个占位</strong> business pages</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/app/(app)/tasks/page.tsx#L1">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\app\(app)\tasks\page.tsx:1</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\app\(app)\tasks\page.tsx:1" aria-label="复制证据路径：tasks/page.tsx:1">复制路径</button><br><code>page.tsx</code> 递归扫描；7 页导入 <code>PlaceholderPage</code>。</td></tr>
             <tr><th scope="row">Frontend tests</th><td>47 个 test files</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\" aria-label="复制证据路径：frontend src 目录">复制路径</button><br>递归 tracked-file 扫描 <code>\.(test|spec)\.(ts|tsx|js|jsx)$</code>。</td></tr>
-            <!-- plan-mandated 旧口径 `14 个 no-op` 已被本轮源码复核否决；不可作为事实展示。 -->
             <tr><th scope="row">Store 口径</th><td><strong>14 个自标 S0 stub</strong>；其中 <strong>10 个显式 no-op</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/stores/app-store.ts#L4">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\stores\app-store.ts:4</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\stores\app-store.ts:4" aria-label="复制证据路径：app-store.ts:4">复制路径</button><br>14 个文件仍带 <code>S0 stub / actions are no-ops</code> 自述；源码细分为 10 个显式 no-op/空对象 store，4 个已有局部状态或持久化更新。</td></tr>
             <tr><th scope="row">QuickNote component domain</th><td>24 个 TypeScript/TSX files，10,349 行（约 10.3k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/components/quick-notes/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\components\quick-notes\" aria-label="复制证据路径：quick-notes 目录">复制路径</button></td></tr>
             <tr><th scope="row">Sync library</th><td>22 个 files，4,862 行（约 4.9k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.worktrees/deep-audit-html-implementation/frontend/src/lib/sync/">E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.worktrees\deep-audit-html-implementation\frontend\src\lib\sync\" aria-label="复制证据路径：sync 目录">复制路径</button></td></tr>
@@ -793,6 +792,28 @@
           // Restricted file origins can deny storage; the in-page theme still works.
         }
       })
+
+      // Native closed details keep their bodies hidden in print, so disclose them temporarily.
+      let printOpenState = null
+      const prepareFindingsForPrint = () => {
+        if (printOpenState !== null) return
+        printOpenState = findings.map((finding) => finding.open)
+        for (const finding of findings) finding.open = true
+      }
+      const restoreFindingsAfterPrint = () => {
+        if (printOpenState === null) return
+        for (const [index, finding] of findings.entries()) finding.open = printOpenState[index]
+        printOpenState = null
+        syncExpandButton()
+      }
+      window.addEventListener('beforeprint', prepareFindingsForPrint)
+      window.addEventListener('afterprint', restoreFindingsAfterPrint)
+      const printMedia = window.matchMedia('print')
+      printMedia.addEventListener('change', (event) => {
+        if (event.matches) prepareFindingsForPrint()
+        else restoreFindingsAfterPrint()
+      })
+      if (printMedia.matches) prepareFindingsForPrint()
 
       document.querySelector('#print-report').addEventListener('click', () => window.print())
 

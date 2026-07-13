@@ -85,6 +85,11 @@ const requiredFacts = [
   '2,176',
   '423.7 MiB',
   '7 个占位',
+  '14 个自标 S0 stub',
+  '10 个显式 no-op',
+];
+
+const forbiddenFacts = [
   '14 个 no-op',
 ];
 
@@ -462,6 +467,9 @@ function verifyStatic(mode = 'all') {
 
     for (const fact of requiredFacts) {
       assert.ok(html.includes(fact), `required fact is missing: ${fact}`);
+    }
+    for (const fact of forbiddenFacts) {
+      assert.ok(!html.includes(fact), `forbidden fact is present: ${fact}`);
     }
 
     const incompleteMarkers = [
