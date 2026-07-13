@@ -4,6 +4,7 @@ import { PomodoroXIDB } from '@/services/database'
 import { spaceApi } from '@/services/api'
 import { runPullLoop } from './pull-loop'
 import { loadSyncMeta, saveSyncMeta } from './sync-meta'
+import { SYNC_PULL_KEYS } from './types'
 
 /**
  * pull-loop.ts 单测（PL1–PL9 + H2-D cursor 协议 PL10–PL13）。
@@ -19,6 +20,21 @@ async function openTestDb(): Promise<PomodoroXIDB> {
 }
 
 function ok(data: unknown, config: InternalAxiosRequestConfig): AxiosResponse {
+  if (typeof data === 'object' && data !== null && 'server_time' in data) {
+    const page = data as Record<string, unknown>
+    page.tombstones ??= []
+    for (const key of SYNC_PULL_KEYS) page[key] ??= []
+    if ((config.url ?? '').includes('/sync/full')) {
+      page.is_full ??= true
+      if (page.cursor_version === 2) {
+        page.snapshot_token ??= '22222222-2222-4222-8222-222222222222'
+        page.snapshot_offset ??= page.has_more === true || page.tombstones_has_more === true ? 1 : 0
+        if (page.has_more === true || page.tombstones_has_more === true) {
+          page.recovery_continuation ??= 'continuation-page-1'
+        }
+      }
+    }
+  }
   return { data, status: 200, statusText: 'OK', headers: {}, config }
 }
 
@@ -78,9 +94,6 @@ function cursorPage1() {
     next_tombstone_since_id: '',
     next_cursor: 42,
     cursor_version: 2,
-    snapshot_token: '11111111-1111-4111-8111-111111111111',
-    snapshot_offset: 1,
-    recovery_continuation: 'continuation-page-1',
   }
 }
 
@@ -94,9 +107,6 @@ function cursorPage2() {
     next_tombstone_since_id: '',
     next_cursor: 84,
     cursor_version: 2,
-    snapshot_token: '11111111-1111-4111-8111-111111111111',
-    snapshot_offset: 2,
-    recovery_proof: 'terminal-proof',
   }
 }
 
@@ -110,9 +120,6 @@ function cursorSinglePage() {
     next_tombstone_since_id: '',
     next_cursor: 99,
     cursor_version: 2,
-    snapshot_token: '22222222-2222-4222-8222-222222222222',
-    snapshot_offset: 0,
-    recovery_proof: 'terminal-proof',
   }
 }
 
@@ -537,7 +544,7 @@ describe('pull-loop', () => {
         : { ...cursorPage2(), snapshot_token: token, snapshot_offset: 2, next_cursor: 51 }, config)
     }
 
-    await expect(runPullLoop(db, spaceApi, { isFull: true })).rejects.toThrow('changed cursor')
+    await expect(runPullLoop(db, spaceApi, { isFull: true })).rejects.toThrow('cursor changed')
     const meta = await loadSyncMeta(db)
     expect(meta.snapshotCursor).toBe(50)
     expect(meta.cursor).toBeNull()
@@ -661,15 +668,38 @@ describe('pull-loop', () => {
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       call++
       return ok(call === 1
-        ? { ...cursorPage1(), snapshot_token: '55555555-5555-4555-8555-555555555555' }
-        : { ...cursorPage2(), snapshot_token: '66666666-6666-4666-8666-666666666666' }, config)
+        ? { ...cursorPage1(), snapshot_token: '55555555-5555-4555-8555-555555555555', snapshot_offset: 1 }
+        : { ...cursorPage2(), snapshot_token: '66666666-6666-4666-8666-666666666666', snapshot_offset: 2 }, config)
     }
 
     await expect(runPullLoop(db, spaceApi, { isFull: true, limit: 1 })).rejects.toThrow(
-      'protocol changed',
+      'token changed',
     )
     expect(await db.tasks.get('protocol-ghost')).toBeDefined()
     expect((await loadSyncMeta(db)).cursor).toBeNull()
+  })
+
+  it('PL29: 畸形增量页在解析阶段拒绝，不落盘、不推进 cursor 或 pending ACK', async () => {
+    db = await openTestDb()
+    await saveSyncMeta(db, { cursor: 10, cursorVersion: 2 })
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const page = {
+        ...cursorSinglePage(),
+        next_cursor: 20,
+        tasks: [{
+          id: 'must-not-land', title: 'invalid row without updated_at', status: 'todo',
+        }],
+      }
+      for (const key of SYNC_PULL_KEYS) (page as Record<string, unknown>)[key] ??= []
+      return { data: page, status: 200, statusText: 'OK', headers: {}, config }
+    }
+
+    await expect(runPullLoop(db, spaceApi)).rejects.toThrow('invalid structure')
+
+    expect(await db.tasks.get('must-not-land')).toBeUndefined()
+    const meta = await loadSyncMeta(db)
+    expect(meta.cursor).toBe(10)
+    expect(meta.pendingAckCursor).toBeNull()
   })
 
   it('PL21: reconcile 失败会回滚终页 merge、cursor 与 lastFullSync', async () => {

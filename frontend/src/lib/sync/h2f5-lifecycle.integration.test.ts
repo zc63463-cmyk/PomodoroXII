@@ -4,8 +4,15 @@ import { PomodoroXIDB } from '@/services/database'
 import { spaceApi } from '@/services/api'
 import { RealSyncEngine } from './engine'
 import { loadSyncMeta, saveSyncMeta } from './sync-meta'
+import { SYNC_PULL_KEYS } from './types'
 
 function ok(data: unknown, config: InternalAxiosRequestConfig): AxiosResponse {
+  if (typeof data === 'object' && data !== null && 'server_time' in data) {
+    const page = data as Record<string, unknown>
+    page.tombstones ??= []
+    for (const key of SYNC_PULL_KEYS) page[key] ??= []
+    if ((config.url ?? '').includes('/sync/full')) page.is_full ??= true
+  }
   return { data, status: 200, statusText: 'OK', headers: {}, config }
 }
 
@@ -119,6 +126,8 @@ describe('H2-F5 frontend lifecycle integration', () => {
           ...snapshotPage(token, 2, 20, false, 'page-two'),
           snapshot_token: undefined,
           snapshot_offset: undefined,
+          recovery_proof: undefined,
+          recovery_continuation: undefined,
           tasks: [],
         }, config)
       }

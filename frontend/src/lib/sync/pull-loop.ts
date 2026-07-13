@@ -29,17 +29,17 @@ import {
   type PullLoopResult,
   type SyncConflict,
 } from './types'
+import {
+  parseSyncFullResponse,
+  parseSyncPullResponse,
+  SnapshotRecoveryError,
+  type SyncFullParseContext,
+  type SyncPullParseContext,
+} from './protocol'
+
+export { SnapshotRecoveryError } from './protocol'
 
 export const DEFAULT_PULL_LIMIT = 1000
-
-export class SnapshotRecoveryError extends Error {
-  readonly recoveryAction = 'restart_full_sync'
-
-  constructor(message: string) {
-    super(message)
-    this.name = 'SnapshotRecoveryError'
-  }
-}
 
 /** 单页增量 pull（GET /sync/pull） — cursor 优先 */
 export async function fetchPullPage(
@@ -52,14 +52,20 @@ export async function fetchPullPage(
     limit?: number
   },
 ): Promise<ApiSyncPullResponse> {
-  const res = await api.get<ApiSyncPullResponse>('/sync/pull', { params })
-  return res.data
+  const res = await api.get<unknown>('/sync/pull', { params })
+  const context: SyncPullParseContext = {
+    requestCursor: params.cursor ?? null,
+    since: params.since,
+    sinceId: params.since_id,
+    tombstoneSinceId: params.tombstone_since_id,
+  }
+  return parseSyncPullResponse(res.data, context)
 }
 
 /** 单页 full pull（GET /sync/full，首次 / 手动 fullSync 首页） */
 export async function fetchFullPage(
   api: AxiosInstance,
-  params?: {
+  params: {
     cursor?: number | null
     limit?: number
     snapshot_token?: string | null
@@ -67,9 +73,10 @@ export async function fetchFullPage(
     client_id?: string
     recovery_continuation?: string
   },
+  context: SyncFullParseContext,
 ): Promise<ApiSyncFullResponse> {
-  const res = await api.get<ApiSyncFullResponse>('/sync/full', { params })
-  return res.data
+  const res = await api.get<unknown>('/sync/full', { params })
+  return parseSyncFullResponse(res.data, context)
 }
 
 /** 判断响应是否使用新版 cursor 协议 */
@@ -183,6 +190,12 @@ export async function runPullLoop(
       snapshot_offset: continuation?.offset,
       client_id: clientId,
       recovery_continuation: continuation?.recoveryContinuation,
+    }, {
+      protocol: snapshotProtocol,
+      snapshotToken,
+      expectedSnapshotOffset,
+      snapshotCursor: materializedSnapshotCursor,
+      recoveryRequired: snapshotRequired,
     })
   } else if (useCursor) {
     page = await fetchPullPage(api, {
@@ -341,6 +354,12 @@ export async function runPullLoop(
         recovery_continuation: typeof page.recovery_continuation === 'string'
           ? page.recovery_continuation
           : undefined,
+      }, {
+        protocol: snapshotProtocol,
+        snapshotToken,
+        expectedSnapshotOffset,
+        snapshotCursor: materializedSnapshotCursor,
+        recoveryRequired: snapshotRequired,
       })
     } else if (usesCursorProtocol(page)) {
       page = await fetchPullPage(api, {

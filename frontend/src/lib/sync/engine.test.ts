@@ -4,6 +4,7 @@ import { PomodoroXIDB } from '@/services/database'
 import { spaceApi } from '@/services/api'
 import { RealSyncEngine } from './engine'
 import { loadSyncMeta, saveSyncMeta } from './sync-meta'
+import { SYNC_PULL_KEYS } from './types'
 
 /**
  * engine.ts 单测（EN1–EN20）。
@@ -20,6 +21,12 @@ async function openTestDb(): Promise<PomodoroXIDB> {
 }
 
 function ok(data: unknown, config: InternalAxiosRequestConfig): AxiosResponse {
+  if (typeof data === 'object' && data !== null && 'server_time' in data) {
+    const page = data as Record<string, unknown>
+    page.tombstones ??= []
+    for (const key of SYNC_PULL_KEYS) page[key] ??= []
+    if ((config.url ?? '').includes('/sync/full')) page.is_full ??= true
+  }
   return { data, status: 200, statusText: 'OK', headers: {}, config }
 }
 
@@ -1272,7 +1279,12 @@ describe('RealSyncEngine', () => {
       urls.push(url)
       if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
       if (url.includes('/sync/pull')) {
-        return ok({ ...cursorSinglePage(), next_cursor: 20, snapshot_token: undefined }, config)
+        return ok({
+          ...cursorSinglePage(),
+          next_cursor: 20,
+          snapshot_token: undefined,
+          snapshot_offset: undefined,
+        }, config)
       }
       if (url.includes('/sync/ack')) throw new Error('ACK failed')
       if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
