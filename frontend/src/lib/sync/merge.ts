@@ -69,6 +69,14 @@ export async function applyMerge(
         if (remoteTs <= localTs) continue
       }
 
+      // Incremental Note 缺正文时只能合并元数据；不得把空串当作权威正文。
+      if (tableName === 'notes' && remoteRow.content_missing === true) {
+        if (!localRow) throw new Error('missing note content without a local body')
+        const { content: _content, content_missing: _contentMissing, ...metadata } = remoteRow
+        await table.put({ ...localRow, ...metadata, content: localRow.content, _dirty: false })
+        continue
+      }
+
       // 覆盖 / 新增：写入远端行 + _dirty=false（保留远端 version/content_hash/id/created_at）
       await table.put({ ...remoteRow, _dirty: false })
     }

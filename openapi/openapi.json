@@ -4704,6 +4704,45 @@
         ],
         "summary": "Sync Ops Health",
         "operationId": "sync_ops_health_api_v1_sync_ops_health_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -4763,12 +4802,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/sync/clients": {
@@ -4778,6 +4812,45 @@
         ],
         "summary": "List Sync Clients",
         "operationId": "list_sync_clients_api_v1_sync_clients_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -4807,12 +4880,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ]
+        }
       },
       "post": {
         "tags": [
@@ -4820,15 +4888,54 @@
         ],
         "summary": "Register Sync Client",
         "operationId": "register_sync_client_api_v1_sync_clients_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SyncClientRegistrationRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -4859,12 +4966,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/sync/clients/{client_id}": {
@@ -4889,6 +4991,38 @@
               "minLength": 36,
               "maxLength": 36,
               "title": "Client Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
             }
           }
         ],
@@ -4961,15 +5095,54 @@
         ],
         "summary": "Acknowledge Sync Cursor",
         "operationId": "acknowledge_sync_cursor_api_v1_sync_ack_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SyncAckRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -5000,12 +5173,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/sync/push": {
@@ -5016,15 +5184,54 @@
         "summary": "Push Events",
         "description": "Apply a batch of sync events.",
         "operationId": "push_events_api_v1_sync_push_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SyncPushRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -5055,12 +5262,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/sync/pull": {
@@ -5143,6 +5345,38 @@
               "title": "Cursor"
             },
             "description": "Global sync ledger cursor"
+          },
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
+            }
           }
         ],
         "responses": {
@@ -5320,6 +5554,38 @@
               ],
               "title": "Recovery Continuation"
             }
+          },
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
+            }
           }
         ],
         "responses": {
@@ -5362,6 +5628,45 @@
         "summary": "Sync Status",
         "description": "Return entity counts + tombstone count.",
         "operationId": "sync_status_api_v1_sync_status_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -5391,12 +5696,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/sync/ledger-stats": {
@@ -5407,6 +5707,45 @@
         "summary": "Ledger Stats",
         "description": "Return sync event ledger size stats (H2-E monitoring).",
         "operationId": "ledger_stats_api_v1_sync_ledger_stats_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Sync-Client-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Id"
+            }
+          },
+          {
+            "name": "X-Sync-Client-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Sync-Client-Token"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -5436,12 +5775,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ]
+        }
       }
     },
     "/api/health": {
@@ -9395,11 +9729,18 @@
               }
             ],
             "title": "Display Name"
+          },
+          "client_token": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 32,
+            "title": "Client Token"
           }
         },
         "type": "object",
         "required": [
-          "client_id"
+          "client_id",
+          "client_token"
         ],
         "title": "SyncClientRegistrationRequest"
       },

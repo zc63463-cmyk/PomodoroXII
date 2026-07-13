@@ -18,6 +18,7 @@ import {
   clearPendingAck,
   clearSnapshotRecovery,
   ensureClientId,
+  ensureClientToken,
   loadPendingAckState,
   loadSyncMeta,
   touchLastSyncAt,
@@ -283,15 +284,20 @@ export class RealSyncEngine implements SyncEngine {
     )
   }
 
-  private async registerClient(clientId: string): Promise<SyncClientRegistrationResponse> {
+  private async registerClient(
+    clientId: string,
+    clientToken: string,
+  ): Promise<SyncClientRegistrationResponse> {
     const response = await this.api.post<unknown>('/sync/clients', {
       client_id: clientId,
+      client_token: clientToken,
     })
     return parseSyncClientRegistrationResponse(response.data, clientId)
   }
 
   private async sendPendingAck(
     clientId: string,
+    clientToken: string,
     pending: { cursor: number; recoveryProof: string | null },
   ): Promise<void> {
     const response = await this.api.post<unknown>('/sync/ack', {
@@ -299,6 +305,11 @@ export class RealSyncEngine implements SyncEngine {
       ack_cursor: pending.cursor,
       cursor_version: 2,
       recovery_proof: pending.recoveryProof,
+    }, {
+      headers: {
+        'X-Sync-Client-Id': clientId,
+        'X-Sync-Client-Token': clientToken,
+      },
     })
     const data: SyncAckResponse = parseSyncAckResponse(response.data, pending.cursor)
     await clearPendingAck(this.db, data.ack_cursor)
@@ -311,21 +322,23 @@ export class RealSyncEngine implements SyncEngine {
     this.setStatus('syncing')
     try {
       const clientId = await ensureClientId(this.db)
-      const registration = await this.registerClient(clientId)
+      const clientToken = await ensureClientToken(this.db)
+      const registration = await this.registerClient(clientId, clientToken)
+      const credentials = { clientId, clientToken }
       let snapshotRequired = registration.snapshot_required
       if (snapshotRequired) isFull = true
 
       const pendingBeforePull = await loadPendingAckState(this.db)
       if (pendingBeforePull) {
         if (snapshotRequired && pendingBeforePull.recoveryProof) {
-          await this.sendPendingAck(clientId, pendingBeforePull)
+          await this.sendPendingAck(clientId, clientToken, pendingBeforePull)
           snapshotRequired = false
           isFull = false
         } else if (!snapshotRequired) {
           if (registration.ack_cursor >= pendingBeforePull.cursor) {
             await clearPendingAck(this.db, registration.ack_cursor)
           } else {
-            await this.sendPendingAck(clientId, pendingBeforePull)
+            await this.sendPendingAck(clientId, clientToken, pendingBeforePull)
           }
         }
       }
@@ -337,6 +350,7 @@ export class RealSyncEngine implements SyncEngine {
         pullResult = await runPullLoop(this.db, this.api, {
           isFull,
           clientId,
+          clientToken,
           snapshotRequired,
         })
       } catch (err) {
@@ -346,6 +360,7 @@ export class RealSyncEngine implements SyncEngine {
             pullResult = await runPullLoop(this.db, this.api, {
               isFull: true,
               clientId,
+              clientToken,
               snapshotRequired,
             })
           } catch (restartErr) {
@@ -366,12 +381,12 @@ export class RealSyncEngine implements SyncEngine {
 
       const pendingAfterPull = await loadPendingAckState(this.db)
       if (pendingAfterPull) {
-        await this.sendPendingAck(clientId, pendingAfterPull)
+        await this.sendPendingAck(clientId, clientToken, pendingAfterPull)
       }
       if (this.destroyed) return
 
       // 2. Push（S1-2 pushAllPending 内部已分批 + 遇冲突停止）
-      const pushResult = await pushAllPending(this.db, this.api)
+      const pushResult = await pushAllPending(this.db, this.api, undefined, credentials)
       if (this.destroyed) return
       this.addConflicts(pushResult.conflicts)
       if (pushResult.remoteWinCount > 0) notifyRemoteWin(pushResult.remoteWinCount)

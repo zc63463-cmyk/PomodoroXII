@@ -27,8 +27,8 @@ import uuid
 import pytest
 
 
-async def _setup_login_and_space_token(client) -> tuple[str, str]:
-    """Setup admin, login, create a space, issue a space token."""
+async def _setup_login_and_sync_headers(client) -> tuple[str, dict[str, str]]:
+    """Setup admin, space auth, and one credentialed sync client."""
     resp = await client.post(
         "/api/v1/auth/setup", json={"password": "test-password-123"}
     )
@@ -51,7 +51,20 @@ async def _setup_login_and_space_token(client) -> tuple[str, str]:
     )
     assert resp.status_code == 200
     space_token = resp.json()["space_token"]
-    return master_token, space_token
+    auth_headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = str(uuid.uuid4())
+    client_token = "cursor-client-token-0123456789abcdef"
+    resp = await client.post(
+        "/api/v1/sync/clients",
+        json={"client_id": client_id, "client_token": client_token},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    return master_token, {
+        **auth_headers,
+        "X-Sync-Client-Id": client_id,
+        "X-Sync-Client-Token": client_token,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -318,8 +331,7 @@ async def test_cursor_pull_folds_repeated_entity_events_to_last_scanned_state(sp
 @pytest.mark.asyncio
 async def test_cursor_pull_empty_ledger_returns_zero_cursor(client):
     """GET /sync/pull?cursor=0 on a fresh space (no events) returns next_cursor=None."""
-    _, space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
+    _, headers = await _setup_login_and_sync_headers(client)
 
     resp = await client.get(
         "/api/v1/sync/pull?cursor=0&limit=10", headers=headers,
@@ -335,8 +347,7 @@ async def test_cursor_pull_empty_ledger_returns_zero_cursor(client):
 @pytest.mark.asyncio
 async def test_cursor_pull_via_http_after_push_returns_events(client):
     """POST /sync/push then GET /sync/pull?cursor=0 returns the pushed events."""
-    _, space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
+    _, headers = await _setup_login_and_sync_headers(client)
 
     eid = uuid.uuid4().hex
     resp = await client.post(
@@ -820,6 +831,62 @@ async def test_create_snapshot_fails_closed_after_three_note_hash_conflicts(spac
         await SyncService(space_session, fs).full(cursor=0, limit=100)
 
     assert fs.calls == 3
+    assert await space_session.scalar(select(func.count()).select_from(SyncSnapshot)) == 0
+    assert await space_session.scalar(select(func.count()).select_from(SyncSnapshotChunk)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("contents", [[None], ["first body", None]])
+async def test_create_snapshot_rejects_any_missing_note_body_without_publishing(
+    space_session, contents
+):
+    from sqlalchemy import func, select
+
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.note import Note
+    from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
+    from app.services.sync import SyncService
+
+    notes = [
+        Note(id=f"missing-body-{index}", title=f"note {index}")
+        for index in range(len(contents))
+    ]
+    space_session.add_all(notes)
+    await space_session.commit()
+
+    class MissingFileSystem:
+        async def read_notes_batch(self, note_ids):
+            assert note_ids == [note.id for note in notes]
+            return contents
+
+    with pytest.raises(SyncSnapshotExpiredError) as raised:
+        await SyncService(space_session, MissingFileSystem()).full(cursor=0, limit=100)
+
+    assert raised.value.error_type == "sync_snapshot_expired"
+    assert await space_session.scalar(select(func.count()).select_from(SyncSnapshot)) == 0
+    assert await space_session.scalar(select(func.count()).select_from(SyncSnapshotChunk)) == 0
+
+
+@pytest.mark.asyncio
+async def test_create_snapshot_normalizes_note_batch_read_failure_without_publishing(space_session):
+    from sqlalchemy import func, select
+
+    from app.errors import SyncSnapshotExpiredError
+    from app.models.note import Note
+    from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
+    from app.services.sync import SyncService
+
+    space_session.add(Note(id="read-failure", title="read failure"))
+    await space_session.commit()
+
+    class FailingFileSystem:
+        async def read_notes_batch(self, note_ids):
+            raise OSError("storage unavailable")
+
+    with pytest.raises(SyncSnapshotExpiredError) as raised:
+        await SyncService(space_session, FailingFileSystem()).full(cursor=0, limit=100)
+
+    assert raised.value.error_type == "sync_snapshot_expired"
     assert await space_session.scalar(select(func.count()).select_from(SyncSnapshot)) == 0
     assert await space_session.scalar(select(func.count()).select_from(SyncSnapshotChunk)) == 0
 

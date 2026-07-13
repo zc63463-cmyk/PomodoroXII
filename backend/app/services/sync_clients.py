@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import uuid
 from datetime import timedelta
 
@@ -9,7 +11,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors import ConflictError, NotFoundError, ValidationError
+from app.errors import AuthenticationError, ConflictError, NotFoundError, ValidationError
 from app.models.sync_client import SyncClient
 from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk, SyncState
 from app.services.sync_outbox import (
@@ -23,6 +25,8 @@ from app.services.time import utc_now
 
 CLIENT_LEASE = timedelta(days=30)
 MAX_ACTIVE_CLIENTS_PER_USER = 20
+def _hash_device_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _canonical_client_id(client_id: str) -> str:
@@ -52,7 +56,9 @@ class SyncClientService:
         *,
         client_id: str,
         user_id: str,
+        client_token: str,
         display_name: str | None = None,
+        authorized_by_client_id: str | None = None,
     ) -> dict[str, object]:
         canonical_id = _canonical_client_id(client_id)
         now, lease_expires_at = _lease_times()
@@ -65,7 +71,7 @@ class SyncClientService:
             .values(current_cursor=SyncState.current_cursor)
         )
         floor = await get_retention_floor(self.db)
-        existing = await self.db.get(SyncClient, canonical_id)
+        existing = await self.db.get(SyncClient, canonical_id, populate_existing=True)
         if existing is not None:
             if existing.user_id != user_id:
                 raise ConflictError(
@@ -77,6 +83,10 @@ class SyncClientService:
                     "revoked client_id cannot be re-registered",
                     error_type="sync_client_revoked",
                 )
+            if existing.token_hash is None:
+                existing.token_hash = _hash_device_token(client_token)
+            else:
+                self._verify_token(existing, client_token)
             existing.display_name = display_name
             existing.last_seen_at = now
             existing.lease_expires_at = lease_expires_at
@@ -86,8 +96,36 @@ class SyncClientService:
             await self.db.flush()
             return self._registration_result(existing)
 
-        # The writer lock above also serializes concurrent quota checks across
-        # workers without relying on an in-process mutex.
+        # The writer lock above serializes bootstrap, authorization, and quota
+        # checks across workers without relying on an in-process mutex.
+        total_count = int(await self.db.scalar(
+            select(func.count())
+            .select_from(SyncClient)
+            .where(SyncClient.user_id == user_id)
+        ) or 0)
+        if total_count > 0 and authorized_by_client_id is None:
+            raise AuthenticationError(
+                "Invalid sync client credentials",
+                error_type="sync_client_credentials_invalid",
+            )
+        if authorized_by_client_id is not None:
+            authorizer = await self.db.get(
+                SyncClient,
+                _canonical_client_id(authorized_by_client_id),
+                populate_existing=True,
+            )
+            if (
+                authorizer is None
+                or authorizer.user_id != user_id
+                or authorizer.revoked_at is not None
+                or authorizer.lease_expires_at <= now
+                or authorizer.snapshot_required
+            ):
+                raise AuthenticationError(
+                    "Invalid sync client credentials",
+                    error_type="sync_client_credentials_invalid",
+                )
+
         active_count = await self.db.scalar(
             select(func.count())
             .select_from(SyncClient)
@@ -111,6 +149,7 @@ class SyncClientService:
             lease_expires_at=lease_expires_at,
             created_at=now,
             snapshot_required=floor > 0,
+            token_hash=_hash_device_token(client_token),
         )
         self.db.add(client)
         try:
@@ -121,6 +160,37 @@ class SyncClientService:
                 error_type="sync_client_registration_conflict",
             ) from exc
         return self._registration_result(client)
+
+    async def authenticate(
+        self,
+        *,
+        client_id: str,
+        client_token: str | None,
+        user_id: str,
+        allow_recovery: bool = True,
+    ) -> SyncClient:
+        canonical_id = _canonical_client_id(client_id)
+        client = await self.db.get(SyncClient, canonical_id, populate_existing=True)
+        if client is None or client.user_id != user_id:
+            raise AuthenticationError(
+                "Invalid sync client credentials",
+                error_type="sync_client_credentials_invalid",
+            )
+        self._verify_token(client, client_token)
+        if client.revoked_at is not None:
+            raise ConflictError("sync client is revoked", error_type="sync_client_revoked")
+        now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        if client.lease_expires_at <= now:
+            raise ConflictError(
+                "sync client lease has expired",
+                error_type="sync_client_lease_expired",
+            )
+        if not allow_recovery and client.snapshot_required:
+            raise ConflictError(
+                "sync client must complete snapshot recovery before push",
+                error_type="sync_client_recovery_required",
+            )
+        return client
 
     async def list_clients(self, *, user_id: str) -> list[dict[str, object]]:
         now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -398,6 +468,15 @@ class SyncClientService:
             "active_client_count": active_client_count,
             "pruned_events": pruned_events,
         }
+
+    @staticmethod
+    def _verify_token(client: SyncClient, client_token: str | None) -> None:
+        supplied_hash = _hash_device_token(client_token or "")
+        if client.token_hash is None or not hmac.compare_digest(client.token_hash, supplied_hash):
+            raise AuthenticationError(
+                "Invalid sync client credentials",
+                error_type="sync_client_credentials_invalid",
+            )
 
     @staticmethod
     def _client_item(client: SyncClient, *, now: str) -> dict[str, object]:

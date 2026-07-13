@@ -2975,6 +2975,8 @@ export interface components {
             client_id: string;
             /** Display Name */
             display_name?: string | null;
+            /** Client Token */
+            client_token: string;
         };
         /** SyncClientRegistrationResponse */
         SyncClientRegistrationResponse: {
@@ -6140,7 +6142,10 @@ export interface operations {
     sync_ops_health_api_v1_sync_ops_health_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6196,7 +6201,10 @@ export interface operations {
     list_sync_clients_api_v1_sync_clients_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6225,7 +6233,10 @@ export interface operations {
     register_sync_client_api_v1_sync_clients_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6258,7 +6269,10 @@ export interface operations {
     revoke_sync_client_api_v1_sync_clients__client_id__delete: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path: {
                 client_id: string;
             };
@@ -6316,7 +6330,10 @@ export interface operations {
     acknowledge_sync_cursor_api_v1_sync_ack_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6349,7 +6366,10 @@ export interface operations {
     push_events_api_v1_sync_push_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6392,7 +6412,10 @@ export interface operations {
                 /** @description Global sync ledger cursor */
                 cursor?: number | null;
             };
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6434,7 +6457,10 @@ export interface operations {
                 client_id?: string | null;
                 recovery_continuation?: string | null;
             };
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6463,7 +6489,10 @@ export interface operations {
     sync_status_api_v1_sync_status_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -6492,7 +6521,10 @@ export interface operations {
     ledger_stats_api_v1_sync_ledger_stats_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "X-Sync-Client-Id"?: string | null;
+                "X-Sync-Client-Token"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };

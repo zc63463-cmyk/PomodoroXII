@@ -12,6 +12,7 @@
 import type { AxiosInstance } from 'axios'
 import type { PomodoroXIDB } from '@/services/database'
 import type { OutboxEvent } from '@/types'
+import type { SyncDeviceCredentials } from './pull-loop'
 import { listUnsyncedOutbox, deleteOutboxByIds, markOutboxEventsFailed } from './outbox'
 import {
   ENTITY_TYPE_TO_TABLE,
@@ -138,6 +139,7 @@ export async function pushBatch(
   db: PomodoroXIDB,
   api: AxiosInstance,
   rows: OutboxEvent[],
+  credentials?: SyncDeviceCredentials,
 ): Promise<HandlePushResult> {
   if (rows.length === 0) {
     return {
@@ -149,7 +151,12 @@ export async function pushBatch(
     }
   }
   const events = buildPushEvents(rows)
-  const res = await api.post<ApiSyncPushResponse>('/sync/push', { events })
+  const res = await api.post<ApiSyncPushResponse>('/sync/push', { events }, {
+    headers: credentials ? {
+      'X-Sync-Client-Id': credentials.clientId,
+      'X-Sync-Client-Token': credentials.clientToken,
+    } : undefined,
+  })
   return handlePushResponse(db, res.data, rows)
 }
 
@@ -158,6 +165,7 @@ export async function pushAllPending(
   db: PomodoroXIDB,
   api: AxiosInstance,
   batchSize?: number,
+  credentials?: SyncDeviceCredentials,
 ): Promise<HandlePushResult> {
   const size = batchSize ?? DEFAULT_PUSH_BATCH_SIZE
   const aggregated: HandlePushResult = {
@@ -173,7 +181,7 @@ export async function pushAllPending(
     if (pending.length === 0) break
 
     const batch = pending.slice(0, size)
-    const result = await pushBatch(db, api, batch)
+    const result = await pushBatch(db, api, batch, credentials)
 
     aggregated.clearedOutboxIds.push(...result.clearedOutboxIds)
     aggregated.conflicts.push(...result.conflicts)

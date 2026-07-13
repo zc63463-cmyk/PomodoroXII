@@ -64,6 +64,10 @@ class _NoteSnapshotConflict(Exception):
     """The note body changed relative to the pinned database snapshot."""
 
 
+class _NoteSnapshotContentUnavailable(Exception):
+    """A materialized snapshot cannot prove a Note body is complete."""
+
+
 # --------------------------------------------------------------------------- #
 # Entity registry — derived from REGISTRY (single source of truth)
 # --------------------------------------------------------------------------- #
@@ -1050,15 +1054,23 @@ class SyncService:
                                     break
                                 serialized = [serialize_entity(row) for row in rows]
                                 if entry["model"] is Note:
-                                    contents = (
-                                        await self.fs.read_notes_batch([row.id for row in rows])
-                                        if self.fs is not None
-                                        else [None] * len(rows)
-                                    )
+                                    if self.fs is None:
+                                        raise _NoteSnapshotContentUnavailable()
+                                    try:
+                                        contents = await self.fs.read_notes_batch(
+                                            [row.id for row in rows]
+                                        )
+                                    except Exception as exc:
+                                        raise _NoteSnapshotContentUnavailable() from exc
+                                    if len(contents) != len(rows) or any(
+                                        body is None for body in contents
+                                    ):
+                                        raise _NoteSnapshotContentUnavailable()
                                     for row, payload, body in zip(rows, serialized, contents):
-                                        payload["content"] = body or ""
-                                        payload["content_missing"] = body is None
-                                        if body is not None and row.content_hash:
+                                        assert body is not None
+                                        payload["content"] = body
+                                        payload["content_missing"] = False
+                                        if row.content_hash:
                                             actual_hash = hashlib.sha256(
                                                 body.encode("utf-8")
                                             ).hexdigest()
@@ -1103,6 +1115,9 @@ class SyncService:
                     if attempt + 1 == SNAPSHOT_SCAN_MAX_ATTEMPTS:
                         raise SyncSnapshotExpiredError() from exc
                     continue
+                except _NoteSnapshotContentUnavailable as exc:
+                    candidate_spool.close()
+                    raise SyncSnapshotExpiredError() from exc
                 except BaseException:
                     candidate_spool.close()
                     raise

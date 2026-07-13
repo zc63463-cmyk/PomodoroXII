@@ -42,6 +42,19 @@ export { SnapshotRecoveryError } from './protocol'
 export const DEFAULT_PULL_LIMIT = 1000
 
 /** 单页增量 pull（GET /sync/pull） — cursor 优先 */
+export interface SyncDeviceCredentials {
+  clientId: string
+  clientToken: string
+}
+
+function deviceHeaders(credentials?: SyncDeviceCredentials): Record<string, string> | undefined {
+  if (!credentials) return undefined
+  return {
+    'X-Sync-Client-Id': credentials.clientId,
+    'X-Sync-Client-Token': credentials.clientToken,
+  }
+}
+
 export async function fetchPullPage(
   api: AxiosInstance,
   params: {
@@ -51,8 +64,12 @@ export async function fetchPullPage(
     cursor?: number | null
     limit?: number
   },
+  credentials?: SyncDeviceCredentials,
 ): Promise<ApiSyncPullResponse> {
-  const res = await api.get<unknown>('/sync/pull', { params })
+  const res = await api.get<unknown>('/sync/pull', {
+    params,
+    headers: deviceHeaders(credentials),
+  })
   const context: SyncPullParseContext = {
     requestCursor: params.cursor ?? null,
     since: params.since,
@@ -74,8 +91,12 @@ export async function fetchFullPage(
     recovery_continuation?: string
   },
   context: SyncFullParseContext,
+  credentials?: SyncDeviceCredentials,
 ): Promise<ApiSyncFullResponse> {
-  const res = await api.get<unknown>('/sync/full', { params })
+  const res = await api.get<unknown>('/sync/full', {
+    params,
+    headers: deviceHeaders(credentials),
+  })
   return parseSyncFullResponse(res.data, context)
 }
 
@@ -155,11 +176,19 @@ async function reconcileFullSnapshot(db: PomodoroXIDB, seenIds: SnapshotSeenIds)
 export async function runPullLoop(
   db: PomodoroXIDB,
   api: AxiosInstance,
-  options?: { isFull?: boolean; limit?: number; clientId?: string; snapshotRequired?: boolean },
+  options?: {
+    isFull?: boolean
+    limit?: number
+    clientId?: string
+    clientToken?: string
+    snapshotRequired?: boolean
+  },
 ): Promise<PullLoopResult> {
   const isFull = options?.isFull ?? false
   const limit = options?.limit ?? DEFAULT_PULL_LIMIT
   const clientId = options?.clientId
+  const clientToken = options?.clientToken
+  const credentials = clientId && clientToken ? { clientId, clientToken } : undefined
   const snapshotRequired = options?.snapshotRequired ?? false
   const dirtyConflicts: SyncConflict[] = []
   const continuation = isFull ? await loadSnapshotContinuation(db) : null
@@ -196,7 +225,7 @@ export async function runPullLoop(
       expectedSnapshotOffset,
       snapshotCursor: materializedSnapshotCursor,
       recoveryRequired: snapshotRequired,
-    })
+    }, credentials)
   } else if (useCursor) {
     page = await fetchPullPage(api, {
       since: meta.since,
@@ -204,14 +233,14 @@ export async function runPullLoop(
       tombstone_since_id: meta.tombstoneSinceId,
       cursor: meta.cursor,
       limit,
-    })
+    }, credentials)
   } else {
     page = await fetchPullPage(api, {
       since: meta.since,
       since_id: meta.sinceId,
       tombstone_since_id: meta.tombstoneSinceId,
       limit,
-    })
+    }, credentials)
   }
 
   let lastServerTime = ''
@@ -360,7 +389,7 @@ export async function runPullLoop(
         expectedSnapshotOffset,
         snapshotCursor: materializedSnapshotCursor,
         recoveryRequired: snapshotRequired,
-      })
+      }, credentials)
     } else if (usesCursorProtocol(page)) {
       page = await fetchPullPage(api, {
         since: '',
@@ -368,14 +397,14 @@ export async function runPullLoop(
         tombstone_since_id: '',
         cursor: page.next_cursor,
         limit,
-      })
+      }, credentials)
     } else {
       page = await fetchPullPage(api, {
         since: page.next_since,
         since_id: page.next_since_id,
         tombstone_since_id: page.next_tombstone_since_id,
         limit,
-      })
+      }, credentials)
     }
   }
 

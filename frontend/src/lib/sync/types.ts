@@ -124,6 +124,7 @@ export const SYNC_META_KEYS = {
   CURSOR: 'cursor',
   CURSOR_VERSION: 'cursor_version',
   CLIENT_ID: 'client_id',
+  CLIENT_TOKEN: 'client_token',
   PENDING_ACK_CURSOR: 'pending_ack_cursor',
   PENDING_ACK_RECOVERY_PROOF: 'pending_ack_recovery_proof',
   SNAPSHOT_TOKEN: 'snapshot_token',
@@ -147,6 +148,8 @@ export interface SyncMetaSnapshot {
   cursorVersion: number | null
   /** H2-F1: 当前浏览器安装实例的稳定 UUID。 */
   clientId: string
+  /** R6-A: 客户端预生成并持久化、服务端仅保存其 SHA-256 hash 的设备凭证。 */
+  clientToken: string
   /** H2-F1: 已本地持久化、尚未被服务端确认的最大 cursor。 */
   pendingAckCursor: number | null
   pendingAckRecoveryProof: string | null

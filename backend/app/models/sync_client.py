@@ -28,3 +28,4 @@ class SyncClient(Base):
     created_at: Mapped[str] = mapped_column(String(32), default=utc_now_iso, nullable=False)
     revoked_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     snapshot_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)

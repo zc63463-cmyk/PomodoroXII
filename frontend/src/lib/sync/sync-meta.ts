@@ -27,6 +27,7 @@ const FIELD_TO_KEY: Record<keyof SyncMetaSnapshot, string> = {
   cursor: SYNC_META_KEYS.CURSOR,
   cursorVersion: SYNC_META_KEYS.CURSOR_VERSION,
   clientId: SYNC_META_KEYS.CLIENT_ID,
+  clientToken: SYNC_META_KEYS.CLIENT_TOKEN,
   pendingAckCursor: SYNC_META_KEYS.PENDING_ACK_CURSOR,
   pendingAckRecoveryProof: SYNC_META_KEYS.PENDING_ACK_RECOVERY_PROOF,
   snapshotToken: SYNC_META_KEYS.SNAPSHOT_TOKEN,
@@ -94,6 +95,7 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
     cursor: validCursor ? parsedCursor : null,
     cursorVersion: validCursor ? 2 : null,
     clientId: map.get(SYNC_META_KEYS.CLIENT_ID) ?? '',
+    clientToken: map.get(SYNC_META_KEYS.CLIENT_TOKEN) ?? '',
     pendingAckCursor: validPendingAck ? parsedPendingAck : null,
     pendingAckRecoveryProof: validPendingAck && pendingAckRecoveryProof.trim() !== ''
       ? pendingAckRecoveryProof
@@ -132,6 +134,24 @@ export async function ensureClientId(db: PomodoroXIDB): Promise<string> {
     const persisted = (await db.syncMeta.get(SYNC_META_KEYS.CLIENT_ID))?.value ?? ''
     if (!isUuid(persisted)) throw new Error('failed to persist sync client UUID')
     return persisted.toLowerCase()
+  })
+}
+
+function isValidClientToken(token: string): boolean {
+  return token.length >= 32 && token.length <= 256 && token.trim() === token
+}
+
+/** 在 Dexie 事务中复用或预生成高熵设备凭证，并在任何注册请求前持久化。 */
+export async function ensureClientToken(db: PomodoroXIDB): Promise<string> {
+  return db.transaction('rw', db.syncMeta, async () => {
+    const existing = (await db.syncMeta.get(SYNC_META_KEYS.CLIENT_TOKEN))?.value ?? ''
+    if (isValidClientToken(existing)) return existing
+    const bytes = crypto.getRandomValues(new Uint8Array(32))
+    const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    await db.syncMeta.put({ key: SYNC_META_KEYS.CLIENT_TOKEN, value: token })
+    const persisted = (await db.syncMeta.get(SYNC_META_KEYS.CLIENT_TOKEN))?.value ?? ''
+    if (!isValidClientToken(persisted)) throw new Error('failed to persist sync client token')
+    return persisted
   })
 }
 

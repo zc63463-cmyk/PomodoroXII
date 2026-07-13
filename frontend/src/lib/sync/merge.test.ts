@@ -259,6 +259,46 @@ describe('merge', () => {
     expect(note!._dirty).toBe(false)
   })
 
+  it('MG-NOTE-MISSING: content_missing 保留已有本地正文并合并元数据', async () => {
+    db = await openTestDb()
+    await db.notes.put({
+      id: 'n-missing',
+      title: 'local title',
+      content: 'local body must survive',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      _dirty: false,
+    } as never)
+    const dirtyConflicts: SyncConflict[] = []
+
+    await applyMerge(db, makePullResponse('notes', [{
+      id: 'n-missing',
+      title: 'remote title',
+      content: '',
+      content_missing: true,
+      updated_at: '2026-07-06T00:00:00.000Z',
+    }]), dirtyConflicts)
+
+    const note = await db.notes.get('n-missing')
+    expect(note!.title).toBe('remote title')
+    expect(note!.content).toBe('local body must survive')
+    expect(note).not.toHaveProperty('content_missing')
+  })
+
+  it('MG-NOTE-MISSING-NEW: content_missing 对本地不存在 Note 拒绝整页', async () => {
+    db = await openTestDb()
+    const dirtyConflicts: SyncConflict[] = []
+
+    await expect(applyMerge(db, makePullResponse('notes', [{
+      id: 'n-unknown',
+      title: 'remote title',
+      content: '',
+      content_missing: true,
+      updated_at: '2026-07-06T00:00:00.000Z',
+    }]), dirtyConflicts)).rejects.toThrow('missing note content')
+
+    expect(await db.notes.get('n-unknown')).toBeUndefined()
+  })
+
   it('MG10: 远端行无 updated_at → normalizeTs 空串不抛错', async () => {
     db = await openTestDb()
     const dirtyConflicts: SyncConflict[] = []

@@ -6,6 +6,16 @@ import pytest
 from sqlalchemy import func, select
 
 
+def _device_headers(
+    headers: dict[str, str], client_id: str, client_token: str
+) -> dict[str, str]:
+    return {
+        "Authorization": headers["Authorization"],
+        "X-Sync-Client-Id": client_id,
+        "X-Sync-Client-Token": client_token,
+    }
+
+
 def _task_event(entity_id: str, title: str) -> dict:
     return {
         "entity_type": "task",
@@ -38,7 +48,21 @@ async def _space_headers(client) -> tuple[dict[str, str], str]:
     token = await client.post(
         f"/api/v1/spaces/{space_id}/token", headers=master_headers
     )
-    return {"Authorization": f"Bearer {token.json()['space_token']}"}, space_id
+    space_token = token.json()["space_token"]
+    auth_headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = str(uuid.uuid4())
+    client_token = "h2f5-bootstrap-client-token-0123456789abcdef"
+    registered = await client.post(
+        "/api/v1/sync/clients",
+        json={"client_id": client_id, "client_token": client_token},
+        headers=auth_headers,
+    )
+    assert registered.status_code == 200
+    return {
+        **auth_headers,
+        "X-Sync-Client-Id": client_id,
+        "X-Sync-Client-Token": client_token,
+    }, space_id
 
 
 @pytest.mark.asyncio
@@ -65,20 +89,29 @@ async def test_h2f5_multi_device_ack_floor_and_expired_cursor_http_lifecycle(cli
 
     slow_client = str(uuid.uuid4())
     fast_client = str(uuid.uuid4())
+    client_headers = {}
     for client_id in (slow_client, fast_client):
+        client_token = f"h2f5-{client_id}-client-token"
         registered = await client.post(
             "/api/v1/sync/clients",
-            json={"client_id": client_id},
+            json={"client_id": client_id, "client_token": client_token},
             headers=headers,
         )
         assert registered.status_code == 200
         assert registered.json()["ack_cursor"] == 0
         assert registered.json()["snapshot_required"] is False
+        client_headers[client_id] = _device_headers(headers, client_id, client_token)
+
+    bootstrap_id = headers["X-Sync-Client-Id"]
+    revoked_bootstrap = await client.delete(
+        f"/api/v1/sync/clients/{bootstrap_id}", headers=headers
+    )
+    assert revoked_bootstrap.status_code == 200
 
     fast_ack = await client.post(
         "/api/v1/sync/ack",
         json={"client_id": fast_client, "ack_cursor": current_cursor, "cursor_version": 2},
-        headers=headers,
+        headers=client_headers[fast_client],
     )
     assert fast_ack.status_code == 200
     assert fast_ack.json()["retention_floor"] == 0
@@ -87,12 +120,14 @@ async def test_h2f5_multi_device_ack_floor_and_expired_cursor_http_lifecycle(cli
     slow_ack = await client.post(
         "/api/v1/sync/ack",
         json={"client_id": slow_client, "ack_cursor": slow_ack_cursor, "cursor_version": 2},
-        headers=headers,
+        headers=client_headers[slow_client],
     )
     assert slow_ack.status_code == 200
     assert slow_ack.json()["retention_floor"] == slow_ack_cursor
 
-    expired = await client.get("/api/v1/sync/pull?cursor=0&limit=10", headers=headers)
+    expired = await client.get(
+        "/api/v1/sync/pull?cursor=0&limit=10", headers=client_headers[fast_client]
+    )
     assert expired.status_code == 409
     assert expired.json()["error_type"] == "sync_cursor_expired"
     assert expired.json()["floor"] == slow_ack_cursor
@@ -131,11 +166,16 @@ async def test_recovery_proof_is_terminal_bound_and_single_use_over_http(client)
         await session.close()
 
     client_id = str(uuid.uuid4())
+    client_token = "recovery-client-token-0123456789abcdef"
     registered = await client.post(
-        "/api/v1/sync/clients", json={"client_id": client_id}, headers=headers
+        "/api/v1/sync/clients",
+        json={"client_id": client_id, "client_token": client_token},
+        headers=headers,
     )
     assert registered.status_code == 200
     assert registered.json()["snapshot_required"] is True
+    recovery_headers = _device_headers(headers, client_id, client_token)
+    headers = recovery_headers
 
     first_response = await client.get(
         "/api/v1/sync/full",
@@ -298,7 +338,14 @@ async def test_deleted_snapshot_invalidates_recovery_proof(client):
         await session.close()
 
     client_id = str(uuid.uuid4())
-    await client.post("/api/v1/sync/clients", json={"client_id": client_id}, headers=headers)
+    client_token = "deleted-client-token-0123456789abcdef"
+    registered = await client.post(
+        "/api/v1/sync/clients",
+        json={"client_id": client_id, "client_token": client_token},
+        headers=headers,
+    )
+    assert registered.status_code == 200
+    headers = _device_headers(headers, client_id, client_token)
     terminal = (
         await client.get(
             "/api/v1/sync/full",

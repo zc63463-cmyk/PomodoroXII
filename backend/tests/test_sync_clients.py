@@ -9,6 +9,28 @@ from sqlalchemy import select
 from app.errors import ConflictError, NotFoundError, ValidationError
 from app.services.time import utc_now
 
+CLIENT_TOKEN = "unit-test-client-token-0123456789abcdef"
+
+
+async def _register(service, *, client_token: str = CLIENT_TOKEN, **kwargs):
+    from app.models.sync_client import SyncClient
+
+    user_id = kwargs["user_id"]
+    now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    authorizer_id = await service.db.scalar(
+        select(SyncClient.client_id).where(
+            SyncClient.user_id == user_id,
+            SyncClient.revoked_at.is_(None),
+            SyncClient.lease_expires_at > now,
+            SyncClient.snapshot_required.is_(False),
+        ).limit(1)
+    )
+    return await service.register(
+        client_token=client_token,
+        authorized_by_client_id=authorizer_id,
+        **kwargs,
+    )
+
 
 @pytest.mark.asyncio
 async def test_register_validates_uuid_and_uses_floor(space_session):
@@ -22,10 +44,10 @@ async def test_register_validates_uuid_and_uses_floor(space_session):
     await advance_retention_floor(space_session, floor=event.id)
     service = SyncClientService(space_session)
     with pytest.raises(ValidationError, match="UUID"):
-        await service.register(client_id="not-a-uuid", user_id="user-a")
+        await _register(service, client_id="not-a-uuid", user_id="user-a")
 
     client_id = str(uuid.uuid4())
-    result = await service.register(client_id=client_id, user_id="user-a")
+    result = await _register(service, client_id=client_id, user_id="user-a")
     row = await space_session.get(SyncClient, client_id)
     assert result["ack_cursor"] == event.id
     assert result["snapshot_required"] is True
@@ -40,9 +62,9 @@ async def test_register_is_user_scoped_revoked_and_quota_limited(space_session):
 
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    await service.register(client_id=client_id, user_id="user-a")
+    await _register(service, client_id=client_id, user_id="user-a")
     with pytest.raises(ConflictError) as owner_error:
-        await service.register(client_id=client_id, user_id="user-b")
+        await _register(service, client_id=client_id, user_id="user-b")
     assert owner_error.value.error_type == "sync_client_owner_conflict"
 
     row = await space_session.get(SyncClient, client_id)
@@ -50,13 +72,13 @@ async def test_register_is_user_scoped_revoked_and_quota_limited(space_session):
     row.revoked_at = "2026-07-12T00:00:00Z"
     await space_session.flush()
     with pytest.raises(ConflictError) as revoked_error:
-        await service.register(client_id=client_id, user_id="user-a")
+        await _register(service, client_id=client_id, user_id="user-a")
     assert revoked_error.value.error_type == "sync_client_revoked"
 
     for _ in range(20):
-        await service.register(client_id=str(uuid.uuid4()), user_id="quota-user")
+        await _register(service, client_id=str(uuid.uuid4()), user_id="quota-user")
     with pytest.raises(ConflictError) as quota_error:
-        await service.register(client_id=str(uuid.uuid4()), user_id="quota-user")
+        await _register(service, client_id=str(uuid.uuid4()), user_id="quota-user")
     assert quota_error.value.error_type == "sync_client_quota_exceeded"
 
 
@@ -75,7 +97,7 @@ async def test_ack_boundaries_monotonic_idempotent_and_renews_lease(space_sessio
     await advance_retention_floor(space_session, floor=first.id)
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    registered = await service.register(client_id=client_id, user_id="user-a")
+    registered = await _register(service, client_id=client_id, user_id="user-a")
 
     with pytest.raises(ValidationError):
         await service.acknowledge(
@@ -135,7 +157,7 @@ async def test_ack_rejects_expired_lease_without_mutating_client_or_floor(space_
     )
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    await service.register(client_id=client_id, user_id="user-a")
+    await _register(service, client_id=client_id, user_id="user-a")
     row = await space_session.get(SyncClient, client_id)
     assert row is not None
     row.lease_expires_at = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -173,7 +195,7 @@ async def test_ack_rejects_cross_user_missing_and_revoked_clients(space_session)
     await advance_retention_floor(space_session, floor=event.id)
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    await service.register(client_id=client_id, user_id="user-a")
+    await _register(service, client_id=client_id, user_id="user-a")
     for unauthorized_cursor in (event.id - 1, event.id + 1):
         with pytest.raises(NotFoundError) as unauthorized:
             await service.acknowledge(
@@ -215,8 +237,8 @@ async def test_ack_advances_floor_to_minimum_active_ack_and_prunes(space_session
     service = SyncClientService(space_session)
     slow_client = str(uuid.uuid4())
     fast_client = str(uuid.uuid4())
-    await service.register(client_id=slow_client, user_id="user-a")
-    await service.register(client_id=fast_client, user_id="user-a")
+    await _register(service, client_id=slow_client, user_id="user-a")
+    await _register(service, client_id=fast_client, user_id="user-a")
 
     first_ack = await service.acknowledge(
         client_id=fast_client,
@@ -269,7 +291,7 @@ async def test_expired_revoked_and_snapshot_required_clients_do_not_block_floor(
     revoked_id = str(uuid.uuid4())
     recovering_id = str(uuid.uuid4())
     for client_id in (active_id, expired_id, revoked_id, recovering_id):
-        await service.register(client_id=client_id, user_id="user-a")
+        await _register(service, client_id=client_id, user_id="user-a")
 
     expired = await space_session.get(SyncClient, expired_id)
     revoked = await space_session.get(SyncClient, revoked_id)
@@ -305,7 +327,7 @@ async def test_snapshot_required_client_cannot_ack_floor_when_newer_events_exist
     await advance_retention_floor(space_session, floor=first.id)
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    await service.register(client_id=client_id, user_id="user-a")
+    await _register(service, client_id=client_id, user_id="user-a")
 
     with pytest.raises(ConflictError) as blocked:
         await service.acknowledge(
@@ -331,13 +353,16 @@ async def test_expired_client_renewal_below_advanced_floor_requires_snapshot(spa
     ]
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    await service.register(client_id=client_id, user_id="user-a")
+    await _register(service, client_id=client_id, user_id="user-a")
+    client_token = CLIENT_TOKEN
     client = await space_session.get(SyncClient, client_id)
     assert client is not None
     client.lease_expires_at = "2000-01-01T00:00:00Z"
     await advance_retention_floor(space_session, floor=events[-1].id)
 
-    renewed = await service.register(client_id=client_id, user_id="user-a")
+    renewed = await _register(
+        service, client_id=client_id, user_id="user-a", client_token=client_token
+    )
     assert renewed["ack_cursor"] == events[-1].id
     assert renewed["snapshot_required"] is True
 
@@ -363,7 +388,7 @@ async def test_snapshot_required_client_rejects_bare_ack_at_every_valid_cursor(
     await advance_retention_floor(space_session, floor=events[0].id)
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    registered = await service.register(client_id=client_id, user_id="user-a")
+    registered = await _register(service, client_id=client_id, user_id="user-a")
     assert registered["snapshot_required"] is True
     cursors = {
         "floor": events[0].id,
@@ -400,8 +425,8 @@ async def test_lease_expiration_boundary_is_strictly_greater_than_now(space_sess
     service = SyncClientService(space_session)
     expired_at_boundary = str(uuid.uuid4())
     active_after_boundary = str(uuid.uuid4())
-    await service.register(client_id=expired_at_boundary, user_id="user-a")
-    await service.register(client_id=active_after_boundary, user_id="user-a")
+    await _register(service, client_id=expired_at_boundary, user_id="user-a")
+    await _register(service, client_id=active_after_boundary, user_id="user-a")
     first = await space_session.get(SyncClient, expired_at_boundary)
     second = await space_session.get(SyncClient, active_after_boundary)
     assert first is not None and second is not None
@@ -429,7 +454,7 @@ async def test_no_active_clients_never_advances_floor_or_prunes(space_session):
     )
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    await service.register(client_id=client_id, user_id="user-a")
+    await _register(service, client_id=client_id, user_id="user-a")
     client = await space_session.get(SyncClient, client_id)
     assert client is not None
     client.lease_expires_at = "2000-01-01T00:00:00Z"
@@ -454,8 +479,8 @@ async def test_list_clients_is_user_scoped_stably_sorted_and_reports_status(spac
     service = SyncClientService(space_session)
     client_ids = [str(uuid.uuid4()) for _ in range(5)]
     for client_id in client_ids:
-        await service.register(client_id=client_id, user_id="user-a", display_name=client_id[-4:])
-    await service.register(client_id=str(uuid.uuid4()), user_id="user-b", display_name="hidden")
+        await _register(service, client_id=client_id, user_id="user-a", display_name=client_id[-4:])
+    await _register(service, client_id=str(uuid.uuid4()), user_id="user-b", display_name="hidden")
 
     active, expired, recovering, revoked, tie = [
         await space_session.get(SyncClient, client_id) for client_id in client_ids
@@ -502,7 +527,7 @@ async def test_revoke_is_owner_scoped_idempotent_and_blocks_client_lifecycle(spa
 
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    await service.register(client_id=client_id, user_id="user-a")
+    await _register(service, client_id=client_id, user_id="user-a")
 
     for requester in ("user-b", "user-a"):
         target = client_id if requester == "user-b" else str(uuid.uuid4())
@@ -516,7 +541,7 @@ async def test_revoke_is_owner_scoped_idempotent_and_blocks_client_lifecycle(spa
     assert revoked["revoked_at"]
 
     with pytest.raises(ConflictError) as register_error:
-        await service.register(client_id=client_id, user_id="user-a")
+        await _register(service, client_id=client_id, user_id="user-a")
     assert register_error.value.error_type == "sync_client_revoked"
     with pytest.raises(ConflictError) as ack_error:
         await service.acknowledge(
@@ -548,8 +573,8 @@ async def test_revoke_slow_client_advances_floor_and_prunes_in_same_transaction(
     ]
     service = SyncClientService(space_session)
     slow_id, fast_id = str(uuid.uuid4()), str(uuid.uuid4())
-    await service.register(client_id=slow_id, user_id="user-a")
-    await service.register(client_id=fast_id, user_id="user-a")
+    await _register(service, client_id=slow_id, user_id="user-a")
+    await _register(service, client_id=fast_id, user_id="user-a")
     fast = await space_session.get(SyncClient, fast_id)
     assert fast is not None
     fast.ack_cursor = events[-1].id
@@ -577,7 +602,7 @@ async def test_revoke_last_active_client_does_not_advance_floor_or_delete_unboun
     )
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
-    await service.register(client_id=client_id, user_id="user-a")
+    await _register(service, client_id=client_id, user_id="user-a")
     token = str(uuid.uuid4())
     space_session.add(
         SyncSnapshot(

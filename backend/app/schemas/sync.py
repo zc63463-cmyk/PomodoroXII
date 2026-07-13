@@ -82,6 +82,7 @@ class SyncPushResponse(BaseModel):
 class SyncClientRegistrationRequest(BaseModel):
     client_id: str = Field(..., min_length=36, max_length=36)
     display_name: str | None = Field(default=None, max_length=80)
+    client_token: str = Field(..., min_length=32, max_length=256)
 
 
 class SyncClientRegistrationResponse(BaseModel):
