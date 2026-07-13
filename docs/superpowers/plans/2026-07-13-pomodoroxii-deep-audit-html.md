@@ -17,6 +17,7 @@
 - Output exactly one standalone report: `output/PomodoroXII-子模块深度审查报告-2026-07-13.html`.
 - No external CDN, font, stylesheet, script, analytics, network request, or build step.
 - Main findings use local source/tests/index evidence; remote fixes appear only in the Remote Delta section.
+- Business-module details describe only local `65e2382` behavior and gaps; concrete remote commits, fixes, and bounds appear only in Remote Delta. Details may link there without repeating them.
 - Scores expose maturity and health separately and are labelled audit judgement.
 - Report text is Chinese; source paths, commands, IDs, and code identifiers retain their original spelling.
 - No decorative gradients, blobs, nested cards, card mosaics, negative letter spacing, or viewport-scaled fonts.
@@ -227,7 +228,17 @@ async function verifyBrowser() {
     const noJsPage = await noJsContext.newPage()
     await noJsPage.goto(url, { waitUntil: 'load' })
     assert.equal(await noJsPage.locator('[data-finding-id]').count(), 7)
+    assert.equal(await noJsPage.locator('details.finding[open]').count(), 7)
+    const noJsBodies = noJsPage.locator('.finding-body')
+    assert.equal(await noJsBodies.count(), 7)
+    for (let index = 0; index < 7; index += 1) {
+      assert.ok(await noJsBodies.nth(index).isVisible())
+      const box = await noJsBodies.nth(index).boundingBox()
+      assert.ok(box && box.width > 0 && box.height > 0)
+      assert.ok((await noJsBodies.nth(index).innerText()).trim())
+    }
     assert.equal(await noJsPage.locator('[data-module-id]').count(), 23)
+    assert.equal(await noJsPage.locator('[data-module-detail-for]').count(), 19)
     assert.match(await noJsPage.locator('#verdict').innerText(), /不具备发布条件/)
     await noJsContext.close()
   } finally {
@@ -707,7 +718,8 @@ The `verifyBrowser()` implementation from Task 1 creates a second context with
 business-module detail records, and the verdict text. Confirm the browser
 command from Step 1 reaches those assertions.
 
-Expected: all static findings and module rows remain readable; only filters,
+Expected: exactly 7 source-open findings and 7 visible, non-empty finding bodies,
+plus all 23 module rows and 19 module details, remain readable. Only filters,
 theme persistence, and command buttons are inactive.
 
 - [ ] **Step 4: Re-run source-of-truth checks**

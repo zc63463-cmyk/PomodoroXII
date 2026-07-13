@@ -498,8 +498,8 @@
             <div class="module-responsibility"><dt>责任</dt><dd>装配 FastAPI 生命周期与配置，并用 master/space 两类 JWT dependency 划分 meta 层与单 Space 访问边界。</dd></div>
             <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/deps.py#L50">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\deps.py:50</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\deps.py:50" aria-label="复制证据路径：deps.py:50">复制路径</button></dd></div>
             <div class="module-strengths"><dt>优势</dt><dd>Space token 会回查 meta DB 中的 Space，伪造或已删除的 <code>space_id</code> 在取得 engine/FS 前失败；生产环境拒绝已知弱 JWT secret。</dd></div>
-            <div class="module-risks"><dt>风险</dt><dd>本地 login/setup 无密码长度策略、登录节流或 token 撤销/轮换标识；origin-only rate/body hardening 不能算作本地缓解。</dd></div>
-            <div class="module-next-gate"><dt>下一门禁</dt><dd>协调 origin hardening 后，覆盖密码边界、连续失败限流、secret/password 轮换后旧 token 失效及 master/space 越权矩阵。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>本地 login/setup 无密码长度策略、登录节流或 token 撤销/轮换标识；已签发 token 在到期前不能随密码或权限变化失效。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>覆盖密码边界、连续失败限流、secret/password 轮换后旧 token 失效及 master/space 越权矩阵。<a href="#remote-delta">远端状态见 Remote Delta</a>。</dd></div>
           </dl>
         </article>
         <article class="module-detail" data-module-detail-for="be-data-migrations">
@@ -538,8 +538,8 @@
             <div class="module-responsibility"><dt>责任</dt><dd>接收批量远端事件，规范化实体类型，并按 LWW、tombstone、防循环引用及 Note FS+DB 专用路径逐事件应用。</dd></div>
             <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/services/sync.py#L84">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\sync.py:84</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\sync.py:84" aria-label="复制证据路径：sync.py:84">复制路径</button></dd></div>
             <div class="module-strengths"><dt>优势</dt><dd>每个事件使用独立 SAVEPOINT，单条失败不击穿整批；remote-wins 分类正确，成功事件同步写 ledger/outbox 与批量 audit。</dd></div>
-            <div class="module-risks"><dt>风险</dt><dd>本地 push request 没有事件数量或 UTF-8 payload 字节上限；1..500 与 256 KiB 校验只存在于 origin-only 变更。</dd></div>
-            <div class="module-next-gate"><dt>下一门禁</dt><dd>协调边界后验证 0/1/500/501 条及相邻 UTF-8 字节边界，并为最大合法批次设定事务时延与内存预算。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>本地 push request 没有事件数量或 UTF-8 payload 字节上限，认证客户端可制造高内存与长事务批次。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>为事件数量与 UTF-8 payload 建立边界测试，并为最大合法批次设定事务时延与内存预算。<a href="#remote-delta">远端状态见 Remote Delta</a>。</dd></div>
           </dl>
         </article>
         <article class="module-detail" data-module-detail-for="be-sync-pull">
@@ -568,8 +568,8 @@
             <div class="module-responsibility"><dt>责任</dt><dd>提供冻结依赖的容器、GHCR/Compose 运行面、持久数据卷、启动备份与 CI 镜像 smoke 路径。</dd></div>
             <div class="module-evidence"><dt>审计证据</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/Dockerfile#L21">E:\Development\MyAwesomeApp\PomodoroXII\backend\Dockerfile:21</a><button class="copy-path" type="button" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\Dockerfile:21" aria-label="复制证据路径：Dockerfile:21">复制路径</button></dd></div>
             <div class="module-strengths"><dt>优势</dt><dd>镜像采用 multi-stage、<code>uv sync --frozen --no-dev</code> 与 non-root runtime；CI 产出 commit-SHA tag 并启动容器 smoke。</dd></div>
-            <div class="module-risks"><dt>风险</dt><dd>本地 Compose 使用可变 <code>latest</code> 且只探测 liveness；备份仍是手工 tar，无可重复 restore/rollback 演练，readiness 仅属 origin-only。</dd></div>
-            <div class="module-next-gate"><dt>下一门禁</dt><dd>以 digest/SHA 部署，经数据库读写 readiness 后切流，并自动执行 SQLite-safe backup、restore 校验与旧镜像/旧数据回滚演练。</dd></div>
+            <div class="module-risks"><dt>风险</dt><dd>本地 Compose 使用可变 <code>latest</code> 且只探测总是返回 ok 的 liveness；备份仍是手工 tar，无可重复 restore/rollback 演练。</dd></div>
+            <div class="module-next-gate"><dt>下一门禁</dt><dd>以 digest/SHA 部署，通过数据库可读写的接流门禁后切流，并自动执行 SQLite-safe backup、restore 校验与旧镜像/旧数据回滚演练。<a href="#remote-delta">远端状态见 Remote Delta</a>。</dd></div>
           </dl>
         </article>
         <article class="module-detail" data-module-detail-for="be-mcp">
@@ -903,7 +903,8 @@
           <thead><tr><th scope="col">远端新增</th><th scope="col">变更</th><th scope="col">证据</th><th scope="col">本地处理</th></tr></thead>
           <tbody>
             <tr><th scope="row">Frontend CI</th><td>新增 frontend quality workflow，并保证 required check 始终汇报</td><td><code>d50c27c</code> + <code>751a9dc</code> · remote-delta-verified</td><td>本地 workflow 仍只作 backend 结论</td></tr>
-            <tr><th scope="row">Production ingress hardening</th><td>新增 body-size limit、rate limit 与 production settings/ingress 加固</td><td><code>402769c</code> · remote-delta-verified</td><td>不提升本地 <code>be-deploy</code> 评分</td></tr>
+            <tr><th scope="row">Production ingress hardening</th><td>新增 body-size limit、rate limit 与 production settings/ingress 加固，覆盖认证与生产入口</td><td><code>402769c</code> · remote-delta-verified</td><td>不提升本地 <code>be-runtime-auth</code> / <code>be-deploy</code> 评分</td></tr>
+            <tr><th scope="row">Sync push request bounds</th><td>事件数限制为 1..500，单事件 UTF-8 payload 限制为 256 KiB；边界覆盖 0/1/500/501</td><td><code>402769c</code> · remote-delta-verified</td><td>不提升本地 <code>be-sync-push</code> 评分</td></tr>
             <tr><th scope="row">Readiness smoke</th><td>远端区分 readiness 与 liveness，并增加 production hardening tests/smoke</td><td><code>402769c</code> · remote-delta-verified</td><td>本地仍只有 <code>/api/health</code> smoke</td></tr>
             <tr><th scope="row">QuickNote tombstone assertion</th><td>改为保留 dirty local entity 并断言 one version conflict</td><td><code>787f4ee</code> · remote-delta-verified</td><td>F-002 标记 <code>fixed-on-origin</code>，本地 gate 仍是 541/1</td></tr>
           </tbody>
