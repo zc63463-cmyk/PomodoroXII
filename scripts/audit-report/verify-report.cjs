@@ -177,6 +177,17 @@ function parseAttributes(html, start, end) {
   return attributes;
 }
 
+const rawTextElementNames = new Set([
+  'script',
+  'style',
+  'textarea',
+  'title',
+  'iframe',
+  'xmp',
+  'noembed',
+  'noframes',
+]);
+
 function tokenizeStartTags(html) {
   const tokens = [];
   const lowerHtml = html.toLowerCase();
@@ -223,7 +234,7 @@ function tokenizeStartTags(html) {
     tokens.push(token);
     cursor = tagEnd + 1;
 
-    if (name === 'script' || name === 'style') {
+    if (rawTextElementNames.has(name)) {
       let closing = lowerHtml.indexOf(`</${name}`, cursor);
       while (
         closing !== -1 &&
@@ -399,6 +410,7 @@ function verifyStatic(mode = 'all') {
     }),
     'stylesheet links are not allowed',
   );
+  assert.equal(attributeValues(tokens, 'srcset').length, 0, 'srcset is not allowed');
   assertNoExternalResources(tokens);
   assertNoNetworkCss(tokens);
   assertNoInlineNetworkCalls(scriptTags);
