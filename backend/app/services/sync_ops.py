@@ -23,8 +23,12 @@ class SyncOpsService:
 
     async def health(self) -> dict[str, object]:
         now = utc_now()
-        now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        audit_floor = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now_iso = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        audit_floor = (
+            (now - timedelta(hours=24))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
 
         state = await self.db.get(SyncState, 1)
         retention_floor = state.retention_floor if state is not None else 0

@@ -81,9 +81,9 @@ async def test_pull_with_milliseconds_precision_db_does_not_repeat(space_session
     2. pull(since="") returns the row; next_since = "2026-07-04T10:00:00.000Z".
     3. pull(since=next_since) should NOT return the row again.
 
-    Note: seconds-precision historical rows are migrated to ms precision by
-    alembic 006 (tested separately). After migration, all DB rows are ms
-    precision, so the cursor comparison is lexicographically consistent.
+    Note: historical rows are canonicalized to fixed 3-digit millisecond UTC
+    text by Alembic 012 (tested separately). Direct service tests therefore use
+    migration-postcondition data so indexed text comparison stays consistent.
     """
     from app.models.task import Task
     from app.services.sync import SyncService
@@ -114,6 +114,144 @@ async def test_pull_with_milliseconds_precision_db_does_not_repeat(space_session
     assert "ms-precision-1" not in second_ids, (
         "row was re-emitted after cursor advanced past its timestamp"
     )
+
+
+@pytest.mark.asyncio
+async def test_legacy_pull_does_not_repeat_equivalent_instant_with_different_offset(
+    space_session,
+):
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    space_session.add(
+        Task(
+            id="offset-equivalent",
+            title="Equivalent instant",
+            status="todo",
+            priority="medium",
+            tags="[]",
+            updated_at="2026-07-04T10:00:00.123Z",
+        )
+    )
+    await space_session.flush()
+
+    result = await SyncService(space_session).pull(
+        since="2026-07-04T11:00:00.123456+01:00",
+        limit=100,
+    )
+
+    assert "offset-equivalent" not in {item["id"] for item in result["tasks"]}
+
+
+@pytest.mark.asyncio
+async def test_legacy_pull_accepts_naive_cursor_as_utc(space_session):
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    space_session.add(
+        Task(
+            id="naive-equivalent",
+            title="Naive UTC cursor",
+            status="todo",
+            priority="medium",
+            tags="[]",
+            updated_at="2026-07-04T10:00:00.000Z",
+        )
+    )
+    await space_session.flush()
+
+    result = await SyncService(space_session).pull(
+        since="2026-07-04T10:00:00.000",
+        limit=100,
+    )
+
+    assert "naive-equivalent" not in {item["id"] for item in result["tasks"]}
+    assert result["next_since"] == "2026-07-04T10:00:00.000Z"
+
+
+@pytest.mark.asyncio
+async def test_sync_push_normalizes_offset_timestamp_before_storage(space_session):
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    result = await SyncService(space_session).push([
+        {
+            "entity_type": "task",
+            "entity_id": "normalized-write",
+            "action": "create",
+            "payload": {
+                "title": "Canonical UTC storage",
+                "status": "todo",
+                "priority": "medium",
+                "tags": "[]",
+            },
+            "client_updated_at": "2026-07-04T11:00:00.123456+01:00",
+        }
+    ])
+
+    assert result["errors"] == []
+    stored = await space_session.get(Task, "normalized-write")
+    assert stored is not None
+    assert stored.updated_at == "2026-07-04T10:00:00.123Z"
+
+
+@pytest.mark.asyncio
+async def test_legacy_pull_rejects_invalid_cursor(space_session):
+    from app.errors import ValidationError
+    from app.services.sync import SyncService
+
+    with pytest.raises(ValidationError, match="valid ISO-8601"):
+        await SyncService(space_session).pull(since="not-a-timestamp", limit=100)
+
+
+@pytest.mark.asyncio
+async def test_legacy_pull_pages_canonical_same_millisecond_by_id_without_repeating(
+    space_session,
+):
+    from app.models.task import Task
+    from app.services.sync import SyncService
+
+    timestamp = "2026-07-04T10:00:00.123Z"
+    space_session.add_all([
+        Task(
+            id="same-millisecond-b",
+            title="Second",
+            status="todo",
+            priority="medium",
+            tags="[]",
+            updated_at=timestamp,
+        ),
+        Task(
+            id="same-millisecond-a",
+            title="First",
+            status="todo",
+            priority="medium",
+            tags="[]",
+            updated_at=timestamp,
+        ),
+    ])
+    await space_session.flush()
+
+    service = SyncService(space_session)
+    first = await service.pull(since="", limit=1)
+    second = await service.pull(
+        since=first["next_since"],
+        since_id=first["next_since_id"],
+        limit=1,
+    )
+    third = await service.pull(
+        since=second["next_since"],
+        since_id=second["next_since_id"],
+        limit=1,
+    )
+
+    assert [item["id"] for item in first["tasks"]] == ["same-millisecond-a"]
+    assert first["next_since"] == timestamp
+    assert first["next_since_id"] == "same-millisecond-a"
+    assert [item["id"] for item in second["tasks"]] == ["same-millisecond-b"]
+    assert second["next_since"] == timestamp
+    assert second["next_since_id"] == "same-millisecond-b"
+    assert third["tasks"] == []
 
 
 # --------------------------------------------------------------------------- #

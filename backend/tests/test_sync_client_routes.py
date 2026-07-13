@@ -189,7 +189,7 @@ async def test_sync_client_list_and_revoke_routes(client):
 
     listed = await client.get("/api/v1/sync/clients", headers=device_headers)
     assert listed.status_code == 200
-    assert [item["client_id"] for item in listed.json()["clients"]] == [first_id, second_id]
+    assert [item["client_id"] for item in listed.json()["clients"]] == [second_id, first_id]
     assert set(listed.json()["clients"][0]) == {
         "client_id", "display_name", "ack_cursor", "last_seen_at", "lease_expires_at",
         "created_at", "snapshot_required", "revoked_at", "status",

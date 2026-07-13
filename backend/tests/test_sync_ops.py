@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 
+from tests.test_sync_client_routes import _device_headers, _registration_body
 from tests.test_sync_routes import _setup_login_and_space_token
 
 EXPECTED_FIELDS = {
@@ -191,7 +192,15 @@ async def test_sync_ops_health_route_auth_privacy_failure_and_openapi(client, mo
     )
     assert master.status_code == 403
 
-    headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = str(uuid.uuid4())
+    client_token = "ops-health-client-token-0123456789abcdef"
+    registered = await client.post(
+        "/api/v1/sync/clients",
+        json=_registration_body(client_id, client_token, "Ops Health"),
+        headers={"Authorization": f"Bearer {space_token}"},
+    )
+    assert registered.status_code == 200
+    headers = _device_headers(space_token, client_id, client_token)
     healthy = await client.get("/api/v1/sync/ops/health", headers=headers)
     assert healthy.status_code == 200
     _assert_fixed_private_shape(healthy.json())

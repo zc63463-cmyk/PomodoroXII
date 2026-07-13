@@ -21,7 +21,7 @@ from app.services.sync_outbox import (
     prune_sync_events,
 )
 from app.services.sync_recovery import verify_recovery_proof
-from app.services.time import utc_now
+from app.services.time import utc_now, utc_now_iso
 
 CLIENT_LEASE = timedelta(days=30)
 MAX_ACTIVE_CLIENTS_PER_USER = 20
@@ -42,8 +42,10 @@ def _canonical_client_id(client_id: str) -> str:
 def _lease_times() -> tuple[str, str]:
     now = utc_now()
     return (
-        now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        (now + CLIENT_LEASE).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        (now + CLIENT_LEASE)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
     )
 
 
@@ -179,7 +181,7 @@ class SyncClientService:
         self._verify_token(client, client_token)
         if client.revoked_at is not None:
             raise ConflictError("sync client is revoked", error_type="sync_client_revoked")
-        now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        now = utc_now_iso()
         if client.lease_expires_at <= now:
             raise ConflictError(
                 "sync client lease has expired",
@@ -193,7 +195,7 @@ class SyncClientService:
         return client
 
     async def list_clients(self, *, user_id: str) -> list[dict[str, object]]:
-        now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        now = utc_now_iso()
         clients = list(
             await self.db.scalars(
                 select(SyncClient)
@@ -234,7 +236,7 @@ class SyncClientService:
                 **maintenance,
             }
 
-        now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        now = utc_now_iso()
         client.revoked_at = now
         client.last_seen_at = now
         await self.db.flush()
@@ -306,7 +308,7 @@ class SyncClientService:
                 "sync client is revoked",
                 error_type="sync_client_revoked",
             )
-        now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        now = utc_now_iso()
         if client.lease_expires_at <= now:
             raise ConflictError(
                 "sync client lease has expired",
@@ -420,7 +422,7 @@ class SyncClientService:
                 .where(SyncState.id == 1)
                 .values(current_cursor=SyncState.current_cursor)
             )
-        now = evaluated_at or utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        now = evaluated_at or utc_now_iso()
         row = (
             await self.db.execute(
                 select(

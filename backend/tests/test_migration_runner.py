@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -35,10 +36,54 @@ SPACE_TABLES = {
     "time_blocks",
     "tombstones",
 }
+SYNC_SAFETY_REVISIONS = (
+    "009_sync_clients.py",
+    "010_sync_snapshot_chunks.py",
+    "011_sync_client_credentials.py",
+    "012_sync_timestamp_canonical.py",
+)
 
 
 def _sqlite_url(path: Path) -> str:
     return f"sqlite:///{path.as_posix()}"
+
+
+def _space_head() -> str:
+    head = migrations_module._single_head(migrations_module._config("space"))
+    assert head == "space_012_sync_timestamp_canonical"
+    return head
+
+
+@pytest.mark.parametrize("revision_file", SYNC_SAFETY_REVISIONS)
+def test_sync_safety_revisions_reject_downgrade_without_drops(
+    revision_file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revision_path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic_space"
+        / "versions"
+        / revision_file
+    )
+    spec = importlib.util.spec_from_file_location(
+        f"test_migration_{revision_path.stem}", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+
+    def fail_drop(*_args, **_kwargs) -> None:
+        pytest.fail("forward-only sync safety downgrade attempted a drop operation")
+
+    drop_operations = [name for name in dir(revision.op) if name.startswith("drop_")]
+    assert drop_operations
+    for operation_name in drop_operations:
+        monkeypatch.setattr(revision.op, operation_name, fail_drop)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"synchronization safety and recovery state.*lose data.*backup",
+    ):
+        revision.downgrade()
 
 
 def _create_legacy_schema(path: Path, database_kind: str) -> None:
@@ -206,7 +251,7 @@ def test_managed_space_007_upgrades_to_latest_with_existing_outbox_cursor(tmp_pa
             ).scalar_one() == 2
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_010_sync_snapshot_chunks"
+            ).scalar_one() == _space_head()
     finally:
         engine.dispose()
 
@@ -231,15 +276,23 @@ def test_managed_space_008_upgrades_to_009_sync_clients(tmp_path: Path) -> None:
         inspector = inspect(engine)
         columns = {column["name"] for column in inspector.get_columns("sync_clients")}
         assert {
-            "client_id", "user_id", "display_name", "ack_cursor", "last_seen_at",
-            "lease_expires_at", "created_at", "revoked_at", "snapshot_required",
+            "client_id",
+            "user_id",
+            "display_name",
+            "ack_cursor",
+            "last_seen_at",
+            "lease_expires_at",
+            "created_at",
+            "revoked_at",
+            "snapshot_required",
+            "token_hash",
         } == columns
         indexes = {index["name"] for index in inspector.get_indexes("sync_clients")}
         assert indexes == {"ix_sync_clients_user_revoked", "ix_sync_clients_watermark"}
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_010_sync_snapshot_chunks"
+            ).scalar_one() == _space_head()
     finally:
         engine.dispose()
 
@@ -278,7 +331,215 @@ def test_managed_space_009_upgrades_to_010_snapshot_chunks(tmp_path: Path) -> No
             assert legacy == ("legacy-json-v1", "ready", "[]")
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_010_sync_snapshot_chunks"
+            ).scalar_one() == _space_head()
+    finally:
+        engine.dispose()
+
+
+def test_managed_space_011_canonicalizes_all_sync_timestamps_to_milliseconds(
+    tmp_path: Path,
+) -> None:
+    from app.db.migrations import _config
+
+    path = tmp_path / "managed-space-011-timestamps.db"
+    engine = create_engine(_sqlite_url(path))
+    config = _config("space")
+    timestamp_cases = {
+        "offset": ("2026-07-04T11:00:00.123456+01:00", "2026-07-04T10:00:00.123Z"),
+        "naive": ("2026-07-04T10:00:01", "2026-07-04T10:00:01.000Z"),
+        "seconds": ("2026-07-04T10:00:02Z", "2026-07-04T10:00:02.000Z"),
+        "micro-a": ("2026-07-04T10:00:03.123123Z", "2026-07-04T10:00:03.123Z"),
+        "micro-b": ("2026-07-04T10:00:03.123456Z", "2026-07-04T10:00:03.123Z"),
+    }
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "space_011_sync_client_credentials")
+            connection.execute(
+                text(
+                    "INSERT INTO settings (key, value, updated_at) "
+                    "VALUES (:key, 'value', :timestamp)"
+                ),
+                [
+                    {"key": key, "timestamp": source}
+                    for key, (source, _expected) in timestamp_cases.items()
+                ],
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO tombstones (entity_type, entity_id, deleted_at) "
+                    "VALUES ('task', :entity_id, :timestamp)"
+                ),
+                [
+                    {"entity_id": key, "timestamp": source}
+                    for key, (source, _expected) in timestamp_cases.items()
+                ],
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO tasks "
+                    "(id, title, description, status, priority, tags, plan, completion, "
+                    "estimated_pomodoros, actual_pomodoros, created_at, updated_at, version) "
+                    "VALUES ('canonical-task', 'task', '', 'todo', 'medium', '[]', '', '', "
+                    "1, 0, '2026-07-04T11:00:04+01:00', "
+                    "'2026-07-04T10:00:04.987654Z', 1)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO sync_outbox "
+                    "(entity_type, entity_id, action, payload, created_at, synced_at) "
+                    "VALUES ('task', 'canonical-task', 'update', '{}', "
+                    "'2026-07-04T10:00:05Z', '2026-07-04T10:00:05.654321Z')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO sync_clients "
+                    "(client_id, user_id, ack_cursor, last_seen_at, lease_expires_at, "
+                    "created_at, revoked_at, snapshot_required, token_hash) VALUES "
+                    "('client', 'user', 0, '2026-07-04T11:00:06+01:00', "
+                    "'2026-08-04T10:00:06', '2026-07-04T10:00:06Z', "
+                    "'2026-07-05T10:00:06.111999Z', 0, NULL)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO sync_snapshots "
+                    "(token, cursor, payload, created_at, expires_at) VALUES "
+                    "('snapshot', 0, '[]', '2026-07-04T10:00:07', "
+                    "'2026-07-04T12:00:07.222999+02:00')"
+                )
+            )
+
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+            command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            settings = dict(connection.execute(
+                text("SELECT key, updated_at FROM settings")
+            ).all())
+            tombstones = dict(connection.execute(
+                text("SELECT entity_id, deleted_at FROM tombstones")
+            ).all())
+            expected = {key: value for key, (_source, value) in timestamp_cases.items()}
+            assert settings == expected
+            assert tombstones == expected
+            assert connection.execute(
+                text("SELECT created_at, updated_at FROM tasks WHERE id='canonical-task'")
+            ).one() == (
+                "2026-07-04T10:00:04.000Z",
+                "2026-07-04T10:00:04.987Z",
+            )
+            assert connection.execute(
+                text("SELECT created_at, synced_at FROM sync_outbox")
+            ).one() == (
+                "2026-07-04T10:00:05.000Z",
+                "2026-07-04T10:00:05.654Z",
+            )
+            assert connection.execute(
+                text(
+                    "SELECT last_seen_at, lease_expires_at, created_at, revoked_at, "
+                    "snapshot_required FROM sync_clients WHERE client_id='client'"
+                )
+            ).one() == (
+                "2026-07-04T10:00:06.000Z",
+                "2026-08-04T10:00:06.000Z",
+                "2026-07-04T10:00:06.000Z",
+                "2026-07-05T10:00:06.111Z",
+                1,
+            )
+            assert connection.execute(
+                text("SELECT created_at, expires_at FROM sync_snapshots WHERE token='snapshot'")
+            ).one() == (
+                "2026-07-04T10:00:07.000Z",
+                "2026-07-04T10:00:07.222Z",
+            )
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version_space")
+            ).scalar_one() == "space_012_sync_timestamp_canonical"
+    finally:
+        engine.dispose()
+
+
+def test_managed_space_011_invalid_timestamp_fails_closed_without_changes(
+    tmp_path: Path,
+) -> None:
+    from app.db.migrations import _config
+
+    path = tmp_path / "managed-space-011-invalid-timestamp.db"
+    engine = create_engine(_sqlite_url(path))
+    config = _config("space")
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "space_011_sync_client_credentials")
+            connection.execute(
+                text(
+                    "INSERT INTO settings (key, value, updated_at) VALUES "
+                    "('valid-before-invalid', 'value', '2026-07-04T10:00:00Z'), "
+                    "('invalid', 'value', 'not-a-timestamp')"
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="rejected invalid timestamp.*settings.updated_at"):
+            with engine.begin() as connection:
+                config.attributes["connection"] = connection
+                command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            assert dict(connection.execute(
+                text("SELECT key, updated_at FROM settings")
+            ).all()) == {
+                "valid-before-invalid": "2026-07-04T10:00:00Z",
+                "invalid": "not-a-timestamp",
+            }
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version_space")
+            ).scalar_one() == "space_011_sync_client_credentials"
+    finally:
+        engine.dispose()
+
+
+def test_space_012_upgrade_is_directly_idempotent(tmp_path: Path) -> None:
+    from app.db.migrations import _config
+
+    revision_path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic_space"
+        / "versions"
+        / "012_sync_timestamp_canonical.py"
+    )
+    spec = importlib.util.spec_from_file_location("test_space_012_idempotent", revision_path)
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+
+    path = tmp_path / "space-012-direct-idempotent.db"
+    engine = create_engine(_sqlite_url(path))
+    config = _config("space")
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "space_011_sync_client_credentials")
+            connection.execute(
+                text(
+                    "INSERT INTO settings (key, value, updated_at) "
+                    "VALUES ('direct', 'value', '2026-07-04T10:00:00.123456Z')"
+                )
+            )
+            original_get_bind = revision.op.get_bind
+            revision.op.get_bind = lambda: connection
+            try:
+                revision.upgrade()
+                revision.upgrade()
+            finally:
+                revision.op.get_bind = original_get_bind
+            assert connection.execute(
+                text("SELECT updated_at FROM settings WHERE key='direct'")
+            ).scalar_one() == "2026-07-04T10:00:00.123Z"
     finally:
         engine.dispose()
 
@@ -311,7 +572,7 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
             ).scalar_one() == "2026-01-01T00:00:00.000Z"
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_010_sync_snapshot_chunks"
+            ).scalar_one() == _space_head()
     finally:
         engine.dispose()
 

@@ -48,6 +48,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_sync_clients_user_revoked", table_name="sync_clients")
-    op.drop_index("ix_sync_clients_watermark", table_name="sync_clients")
-    op.drop_table("sync_clients")
+    raise RuntimeError(
+        "space_009_sync_clients contains synchronization safety and recovery state; "
+        "downgrading would lose data. Restore from a backup taken before the downgrade."
+    )

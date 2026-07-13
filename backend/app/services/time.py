@@ -10,11 +10,8 @@ from datetime import datetime, timezone
 
 
 def utc_now_iso() -> str:
-    """Return current UTC time as ISO 8601 string with Z suffix, seconds precision.
-
-    Format: 2026-07-02T10:30:45Z
-    """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Return current UTC time in canonical 3-digit millisecond UTC form."""
+    return utc_now_iso_ms()
 
 
 def utc_now_iso_ms() -> str:

@@ -16,7 +16,7 @@ class SyncMixin:
 
     Columns provided:
       - id: UUID hex string primary key (auto-generated on insert)
-      - created_at: UTC ISO timestamp (auto-set on insert, seconds precision)
+      - created_at: UTC ISO timestamp (auto-set on insert, millisecond precision)
       - updated_at: UTC ISO timestamp (auto-set on insert/update,
         millisecond precision for sync cursor consistency)
       - version: integer version counter for optimistic concurrency control

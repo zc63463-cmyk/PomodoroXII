@@ -12,15 +12,14 @@ class TestUtcNowIso:
         assert ts.endswith("Z"), f"Expected Z suffix, got: {ts}"
         assert "+" not in ts, f"Expected no timezone offset, got: {ts}"
 
-    def test_seconds_precision(self):
-        """utc_now_iso should return seconds precision (no microseconds)."""
+    def test_millisecond_precision(self):
+        """utc_now_iso should return canonical 3-digit milliseconds."""
         from app.services.time import utc_now_iso
 
         ts = utc_now_iso()
-        # Format: 2026-07-02T10:30:45Z
         time_part = ts.split("T")[1].rstrip("Z")
-        assert len(time_part) == 8, f"Expected HH:MM:SS (8 chars), got: {time_part}"
-        assert "." not in time_part, f"Expected no microseconds, got: {time_part}"
+        assert len(time_part) == 12, f"Expected HH:MM:SS.mmm, got: {time_part}"
+        assert len(time_part.split(".")[1]) == 3
 
     def test_utc_now_returns_timezone_aware(self):
         """utc_now should return a timezone-aware datetime."""

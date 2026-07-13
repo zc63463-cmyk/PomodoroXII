@@ -60,6 +60,32 @@ SYNC_SNAPSHOT_TTL = timedelta(hours=1)
 SNAPSHOT_SCAN_MAX_ATTEMPTS = 3
 
 
+def _parse_legacy_cursor(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValidationError(
+            "Legacy sync cursor must be a valid ISO-8601 timestamp"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _utc_cursor(value: datetime) -> str:
+    value = value.astimezone(timezone.utc)
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _require_legacy_timestamp(value: str) -> datetime:
+    parsed = _parse_legacy_cursor(value)
+    if parsed is None:
+        raise ValidationError("Stored sync timestamp must be a valid ISO-8601 timestamp")
+    return parsed
+
+
 class _NoteSnapshotConflict(Exception):
     """The note body changed relative to the pinned database snapshot."""
 
@@ -502,7 +528,8 @@ class SyncService:
         if cursor is not None:
             return await self._pull_by_cursor(cursor=cursor, limit=limit)
 
-        since_n = normalize_timestamp(since)
+        since_dt = _parse_legacy_cursor(since)
+        since_n = _utc_cursor(since_dt) if since_dt is not None else ""
         result: dict[str, Any] = {
             "server_time": utc_now_iso(),
             "has_more": False,
@@ -512,15 +539,18 @@ class SyncService:
             "tombstones": [],
         }
         max_ts = since_n
+        max_dt = since_dt
         # P1 hotfix: track the latest timestamp/id seen from *entities* separately
         # from the global max_ts (which may be advanced by tombstones). This keeps
         # next_since_id alive across multiple pages that all share the same
         # updated_at, instead of dropping it whenever max_ts == since_n.
         latest_entity_ts = ""
+        latest_entity_dt: datetime | None = None
         latest_entity_id = ""
         # Track tombstone cursor separately so next_tombstone_since_id stays
         # alive across multiple pages sharing the same deleted_at.
         latest_tomb_ts = ""
+        latest_tomb_dt: datetime | None = None
         latest_tomb_id = ""
 
         for entry in ENTITY_REGISTRY.values():
@@ -561,14 +591,18 @@ class SyncService:
                         note_payload["content_missing"] = False
             result[pull_key] = serialized
             for r in rows:
-                ts = normalize_timestamp(r.updated_at or "")
-                if ts and ts > max_ts:
+                row_dt = _require_legacy_timestamp(r.updated_at or "")
+                ts = _utc_cursor(row_dt)
+                if max_dt is None or row_dt > max_dt:
+                    max_dt = row_dt
                     max_ts = ts
-                if ts and (
-                    ts > latest_entity_ts
-                    or (ts == latest_entity_ts and r.id > latest_entity_id)
+                if (
+                    latest_entity_dt is None
+                    or row_dt > latest_entity_dt
+                    or (row_dt == latest_entity_dt and r.id > latest_entity_id)
                 ):
                     latest_entity_ts = ts
+                    latest_entity_dt = row_dt
                     latest_entity_id = r.id
 
         # Tombstones — use override if provided, else honour *since*.
@@ -582,7 +616,7 @@ class SyncService:
             {
                 "entity_type": t.entity_type,
                 "entity_id": t.entity_id,
-                "deleted_at": normalize_timestamp(t.deleted_at or ""),
+                "deleted_at": _utc_cursor(_require_legacy_timestamp(t.deleted_at or "")),
             }
             for t in tombstones
         ]
@@ -592,14 +626,18 @@ class SyncService:
         if tomb_has_more:
             result["has_more"] = True
         for t in tombstones:
-            ts = normalize_timestamp(t.deleted_at or "")
-            if ts and ts > max_ts:
+            row_dt = _require_legacy_timestamp(t.deleted_at or "")
+            ts = _utc_cursor(row_dt)
+            if max_dt is None or row_dt > max_dt:
+                max_dt = row_dt
                 max_ts = ts
-            if ts and (
-                ts > latest_tomb_ts
-                or (ts == latest_tomb_ts and t.entity_id > latest_tomb_id)
+            if (
+                latest_tomb_dt is None
+                or row_dt > latest_tomb_dt
+                or (row_dt == latest_tomb_dt and t.entity_id > latest_tomb_id)
             ):
                 latest_tomb_ts = ts
+                latest_tomb_dt = row_dt
                 latest_tomb_id = t.entity_id
 
         result["next_since"] = max_ts
@@ -737,14 +775,18 @@ class SyncService:
         If *since* is empty (or unnormalizable to a non-empty string),
         returns ALL tombstones — used by ``full()``.
         """
-        since_n = normalize_timestamp(since) if since else ""
+        since_dt = _parse_legacy_cursor(since)
+        since_n = _utc_cursor(since_dt) if since_dt is not None else ""
         tq = select(Tombstone)
         if since_n:
             if since_id:
                 tq = tq.where(
                     or_(
                         Tombstone.deleted_at > since_n,
-                        and_(Tombstone.deleted_at == since_n, Tombstone.entity_id > since_id),
+                        and_(
+                            Tombstone.deleted_at == since_n,
+                            Tombstone.entity_id > since_id,
+                        ),
                     )
                 )
             else:
@@ -753,7 +795,9 @@ class SyncService:
             # No timestamp constraint (e.g. full() with override=""), but
             # entity_id cursor still lets clients page through all tombstones.
             tq = tq.where(Tombstone.entity_id > since_id)
-        tq = tq.order_by(Tombstone.deleted_at.asc(), Tombstone.entity_id.asc()).limit(limit + 1)
+        tq = tq.order_by(Tombstone.deleted_at.asc(), Tombstone.entity_id.asc()).limit(
+            limit + 1
+        )
         rows = (await self.db.execute(tq)).scalars().all()
         has_more = len(rows) > limit
         if has_more:
@@ -799,15 +843,15 @@ class SyncService:
             now_dt = utc_now()
             try:
                 if snapshot.expires_at:
-                    expires_at = datetime.strptime(
-                        snapshot.expires_at, "%Y-%m-%dT%H:%M:%SZ"
-                    ).replace(tzinfo=timezone.utc)
+                    expires_at = _parse_legacy_cursor(snapshot.expires_at)
+                    if expires_at is None:
+                        raise ValueError("snapshot expires_at is empty")
                 else:
-                    created_at = datetime.strptime(
-                        snapshot.created_at, "%Y-%m-%dT%H:%M:%SZ"
-                    ).replace(tzinfo=timezone.utc)
+                    created_at = _parse_legacy_cursor(snapshot.created_at)
+                    if created_at is None:
+                        raise ValueError("snapshot created_at is empty")
                     expires_at = created_at + SYNC_SNAPSHOT_TTL
-            except ValueError as exc:
+            except (ValueError, ValidationError) as exc:
                 raise SyncSnapshotExpiredError(
                     expired_snapshot_token=snapshot.token
                 ) from exc
@@ -1129,8 +1173,8 @@ class SyncService:
                 break
 
             created_at = utc_now()
-            now = created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-            cutoff = (created_at - SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+            now = _utc_cursor(created_at)
+            cutoff = _utc_cursor(created_at - SYNC_SNAPSHOT_TTL)
             snapshot = SyncSnapshot(
                 token=str(uuid.uuid4()),
                 cursor=snapshot_cursor,
@@ -1143,7 +1187,7 @@ class SyncService:
                 compressed_bytes=compressed_bytes,
                 checksum=manifest_hasher.hexdigest(),
                 created_at=now,
-                expires_at=(created_at + SYNC_SNAPSHOT_TTL).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                expires_at=_utc_cursor(created_at + SYNC_SNAPSHOT_TTL),
             )
             publish_db = AsyncSession(
                 bind=self.db.bind,

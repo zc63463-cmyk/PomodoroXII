@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import jwt
@@ -45,9 +45,7 @@ def issue_recovery_proof(
 ) -> str:
     now = utc_now()
     try:
-        expires_at = datetime.strptime(
-            snapshot_expires_at, "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=timezone.utc)
+        expires_at = datetime.fromisoformat(snapshot_expires_at.replace("Z", "+00:00"))
     except ValueError as exc:
         raise _invalid_proof() from exc
     if expires_at <= now:
@@ -78,9 +76,7 @@ def issue_recovery_continuation(
 ) -> str:
     now = utc_now()
     try:
-        expires_at = datetime.strptime(
-            snapshot_expires_at, "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=timezone.utc)
+        expires_at = datetime.fromisoformat(snapshot_expires_at.replace("Z", "+00:00"))
     except ValueError as exc:
         raise _invalid_proof() from exc
     if expires_at <= now:

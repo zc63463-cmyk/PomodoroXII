@@ -55,18 +55,28 @@ def test_upgrade_head_is_isolated_and_idempotent(
 
 
 @pytest.mark.parametrize("schema", ["meta", "space"])
-def test_downgrade_base_removes_only_chain_tables(tmp_path: Path, schema: str) -> None:
+def test_downgrade_base_respects_environment_policy(tmp_path: Path, schema: str) -> None:
     engine = migration_engine(tmp_path, schema)
     cfg = alembic_config(schema)
     try:
         with engine.begin() as connection:
             cfg.attributes["connection"] = connection
             command.upgrade(cfg, "head")
-            command.downgrade(cfg, "base")
 
-        assert set(inspect(engine).get_table_names()) <= {
-            cfg.get_main_option("version_table")
-        }
+        if schema == "space":
+            before = set(inspect(engine).get_table_names())
+            with pytest.raises(RuntimeError, match="synchronization safety"):
+                with engine.begin() as connection:
+                    cfg.attributes["connection"] = connection
+                    command.downgrade(cfg, "base")
+            assert set(inspect(engine).get_table_names()) == before
+        else:
+            with engine.begin() as connection:
+                cfg.attributes["connection"] = connection
+                command.downgrade(cfg, "base")
+            assert set(inspect(engine).get_table_names()) <= {
+                cfg.get_main_option("version_table")
+            }
     finally:
         engine.dispose()
 

@@ -221,51 +221,89 @@ def test_mixed_legacy_database_fails_closed_without_schema_changes(
 # ─── Downgrade / Roundtrip ─────────────────────────────────
 
 
-@pytest.mark.parametrize("environment", ["meta", "space"])
-def test_downgrade_to_base_then_upgrade_head_roundtrip(tmp_path: Path, environment: str) -> None:
-    """head → base → head roundtrip must succeed and restore the full schema."""
-    db_path = tmp_path / f"roundtrip_{environment}.db"
-    engine = _upgrade(environment, db_path)
-    config = _config(environment)
-    script = ScriptDirectory.from_config(config)
-    head = script.get_heads()[0]
+def test_meta_downgrade_to_base_then_upgrade_head_roundtrip(tmp_path: Path) -> None:
+    """Meta remains reversible: head → base → head restores the full schema."""
+    db_path = tmp_path / "roundtrip_meta.db"
+    engine = _upgrade("meta", db_path)
+    config = _config("meta")
+    head = ScriptDirectory.from_config(config).get_heads()[0]
 
     try:
-        # Downgrade to base (before any revision)
         with engine.begin() as connection:
             config.attributes["connection"] = connection
             command.downgrade(config, "base")
-        after_down = set(inspect(engine).get_table_names())
-        # Only the (now-empty) version table may remain; all business tables must be gone
-        business_tables = (META_TABLES if environment == "meta" else SPACE_TABLES)
-        assert after_down.isdisjoint(business_tables)
+        assert set(inspect(engine).get_table_names()).isdisjoint(META_TABLES)
 
-        # Upgrade back to head
         with engine.begin() as connection:
             config.attributes["connection"] = connection
             command.upgrade(config, head)
-        after_up = set(inspect(engine).get_table_names())
-        expected = business_tables | {VERSION_TABLES[environment]}
-        assert after_up == expected
+        assert set(inspect(engine).get_table_names()) == META_TABLES | {
+            VERSION_TABLES["meta"]
+        }
     finally:
         engine.dispose()
 
 
-@pytest.mark.parametrize("environment", ["meta", "space"])
-def test_downgrade_leaves_no_residual_tables(tmp_path: Path, environment: str) -> None:
-    """After full downgrade to base, no business tables should remain as orphans."""
-    db_path = tmp_path / f"residual_{environment}.db"
-    engine = _upgrade(environment, db_path)
-    config = _config(environment)
+def test_meta_downgrade_leaves_no_residual_tables(tmp_path: Path) -> None:
+    db_path = tmp_path / "residual_meta.db"
+    engine = _upgrade("meta", db_path)
+    config = _config("meta")
 
     try:
         with engine.begin() as connection:
             config.attributes["connection"] = connection
             command.downgrade(config, "base")
-        tables = set(inspect(engine).get_table_names())
-        # Only the (now-empty) version table may remain; no business tables
-        business_tables = (META_TABLES if environment == "meta" else SPACE_TABLES)
-        assert tables.isdisjoint(business_tables)
+        assert set(inspect(engine).get_table_names()).isdisjoint(META_TABLES)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "space_011_sync_client_credentials",
+        "space_010_sync_snapshot_chunks",
+        "space_009_sync_clients",
+        "base",
+    ],
+    ids=["011", "010", "009", "base"],
+)
+def test_space_downgrade_from_head_is_rejected_without_schema_changes(
+    tmp_path: Path, target: str
+) -> None:
+    engine = _upgrade("space", tmp_path / f"forward_only_{target}.db")
+    config = _config("space")
+    version_table = VERSION_TABLES["space"]
+    head = ScriptDirectory.from_config(config).get_current_head()
+    inspector = inspect(engine)
+    before_tables = set(inspector.get_table_names())
+    before_client_columns = {
+        column["name"] for column in inspector.get_columns("sync_clients")
+    }
+    before_snapshot_columns = {
+        column["name"] for column in inspector.get_columns("sync_snapshots")
+    }
+
+    try:
+        with pytest.raises(RuntimeError, match="synchronization safety"):
+            with engine.begin() as connection:
+                config.attributes["connection"] = connection
+                command.downgrade(config, target)
+
+        inspector = inspect(engine)
+        assert set(inspector.get_table_names()) == before_tables
+        assert {
+            column["name"] for column in inspector.get_columns("sync_clients")
+        } == before_client_columns
+        assert {
+            column["name"] for column in inspector.get_columns("sync_snapshots")
+        } == before_snapshot_columns
+        assert "token_hash" in before_client_columns
+        assert "sync_snapshot_chunks" in before_tables
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(f'SELECT version_num FROM "{version_table}"')
+            ).scalar_one() == head
     finally:
         engine.dispose()
 

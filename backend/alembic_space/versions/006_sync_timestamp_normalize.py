@@ -10,14 +10,15 @@ millisecond-precision (``...123Z``) formats, the comparison breaks because
 ``"Z" > "."`` (ASCII 90 > 46), causing seconds-precision rows to be
 re-emitted on every incremental pull.
 
-This migration rewrites historical seconds-precision values to the
-canonical 3-digit millisecond form:
+This migration rewrites historical seconds-precision values to canonical
+UTC text with an explicit fractional component:
     ``2026-07-04T10:00:00Z`` → ``2026-07-04T10:00:00.000Z``
 
 Only rows whose timestamp ends with ``Z`` and contains no ``.`` are
-touched (i.e. seconds-precision Z-suffix values). Microsecond-precision
-values (``...123456Z``) are left untouched — they will be normalized on
-the next update by the new ``utc_now_iso_ms`` default.
+touched (i.e. seconds-precision Z-suffix values). Other historical formats
+are deliberately left untouched by this narrow migration; revision 012
+performs the final fixed-width millisecond UTC canonicalization required for
+indexed text comparison.
 
 Tables covered:
   - 14 sync entities (created_at + updated_at)

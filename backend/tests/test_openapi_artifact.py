@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,24 @@ def rendered() -> str:
 
 def test_committed_openapi_artifact_is_current() -> None:
     assert check_openapi(DEFAULT_OUTPUT)
+
+
+def test_openapi_drift_workflows_share_main_develop_branch_matrix() -> None:
+    root = Path(__file__).resolve().parents[2]
+    expected = {"main", "develop"}
+
+    for workflow_name in ("ci.yml", "frontend-ci.yml"):
+        workflow = (root / ".github" / "workflows" / workflow_name).read_text(
+            encoding="utf-8"
+        )
+        for event in ("push", "pull_request"):
+            match = re.search(
+                rf"(?ms)^  {event}:\n(?:    .+\n)*?    branches: \[([^]]+)\]",
+                workflow,
+            )
+            assert match is not None, f"{workflow_name} missing {event} branches"
+            branches = {branch.strip() for branch in match.group(1).split(",")}
+            assert branches == expected
 
 
 def test_render_does_not_mutate_parent_environment(monkeypatch) -> None:

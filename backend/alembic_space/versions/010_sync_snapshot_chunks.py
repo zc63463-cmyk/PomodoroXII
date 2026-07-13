@@ -76,17 +76,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_sync_snapshot_chunks_offset", table_name="sync_snapshot_chunks")
-    op.drop_table("sync_snapshot_chunks")
-    op.drop_index("ix_sync_snapshots_expiry_status", table_name="sync_snapshots")
-    for column in (
-        "expires_at",
-        "checksum",
-        "compressed_bytes",
-        "uncompressed_bytes",
-        "chunk_count",
-        "item_count",
-        "status",
-        "format",
-    ):
-        op.drop_column("sync_snapshots", column)
+    raise RuntimeError(
+        "space_010_sync_snapshot_chunks contains synchronization safety and recovery state; "
+        "downgrading would lose data. Restore from a backup taken before the downgrade."
+    )

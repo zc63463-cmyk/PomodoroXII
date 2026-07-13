@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from app.errors import ConflictError, NotFoundError, ValidationError
-from app.services.time import utc_now
+from app.services.time import utc_now_iso
 
 CLIENT_TOKEN = "unit-test-client-token-0123456789abcdef"
 
@@ -16,7 +16,7 @@ async def _register(service, *, client_token: str = CLIENT_TOKEN, **kwargs):
     from app.models.sync_client import SyncClient
 
     user_id = kwargs["user_id"]
-    now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = utc_now_iso()
     authorizer_id = await service.db.scalar(
         select(SyncClient.client_id).where(
             SyncClient.user_id == user_id,
@@ -160,7 +160,7 @@ async def test_ack_rejects_expired_lease_without_mutating_client_or_floor(space_
     await _register(service, client_id=client_id, user_id="user-a")
     row = await space_session.get(SyncClient, client_id)
     assert row is not None
-    row.lease_expires_at = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    row.lease_expires_at = utc_now_iso()
     original_ack = row.ack_cursor
     original_seen = row.last_seen_at
     original_floor = await get_retention_floor(space_session)
@@ -179,7 +179,7 @@ async def test_ack_rejects_expired_lease_without_mutating_client_or_floor(space_
     await space_session.refresh(row)
     assert row.ack_cursor == original_ack
     assert row.last_seen_at == original_seen
-    assert row.lease_expires_at <= utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert row.lease_expires_at <= utc_now_iso()
     assert await get_retention_floor(space_session) == original_floor
 
 
@@ -298,7 +298,7 @@ async def test_expired_revoked_and_snapshot_required_clients_do_not_block_floor(
     recovering = await space_session.get(SyncClient, recovering_id)
     assert expired is not None and revoked is not None and recovering is not None
     expired.lease_expires_at = "2000-01-01T00:00:00Z"
-    revoked.revoked_at = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    revoked.revoked_at = utc_now_iso()
     recovering.snapshot_required = True
     await space_session.flush()
 

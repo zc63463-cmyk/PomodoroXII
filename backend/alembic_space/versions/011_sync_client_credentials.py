@@ -27,8 +27,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    columns = {
-        column["name"] for column in inspect(op.get_bind()).get_columns("sync_clients")
-    }
-    if "token_hash" in columns:
-        op.drop_column("sync_clients", "token_hash")
+    raise RuntimeError(
+        "space_011_sync_client_credentials contains synchronization safety and recovery state; "
+        "downgrading would lose data. Restore from a backup taken before the downgrade."
+    )

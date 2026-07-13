@@ -6,7 +6,7 @@
 # Triggers:
 #   - workflow_dispatch (manual)
 #   - push to main / develop
-#   - pull_request to main
+#   - pull_request to main / develop
 #
 # Jobs:
 #   1. test   — pytest + ruff lint
@@ -18,7 +18,7 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [main, master, develop]
+    branches: [main, develop]
     paths:
       - "backend/**"
       - "openapi/**"
@@ -26,7 +26,7 @@ on:
       - ".gitattributes"
       - ".gitignore"
   pull_request:
-    branches: [main, master]
+    branches: [main, develop]
     paths:
       - "backend/**"
       - "openapi/**"
