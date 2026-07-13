@@ -1,0 +1,924 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>PomodoroXII 子模块深度审查报告 · 2026-07-13</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #ffffff;
+      --rail: #f5f7f8;
+      --ink: #17212b;
+      --muted: #5c6873;
+      --line: #d9dfe4;
+      --line-strong: #aeb8c1;
+      --accent: #176b5b;
+      --accent-soft: #eaf4f1;
+      --danger: #a22a32;
+      --danger-soft: #faeeee;
+      --warning: #8a5a00;
+      --warning-soft: #fff5dc;
+      --code: #eef1f3;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--page);
+      color: var(--ink);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.62;
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+    }
+
+    a {
+      color: var(--accent);
+      text-underline-offset: 0.18em;
+    }
+
+    a:focus-visible,
+    button:focus-visible,
+    select:focus-visible {
+      outline: 3px solid #65a99b;
+      outline-offset: 3px;
+    }
+
+    code,
+    kbd,
+    samp,
+    .path {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    code {
+      padding: 0.12em 0.3em;
+      border-radius: 3px;
+      background: var(--code);
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+    }
+
+    .skip-link {
+      position: fixed;
+      z-index: 20;
+      top: 10px;
+      left: 10px;
+      padding: 9px 12px;
+      background: var(--ink);
+      color: #ffffff;
+      transform: translateY(-160%);
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .rail {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      padding: 32px 22px;
+      border-right: 1px solid var(--line);
+      background: var(--rail);
+    }
+
+    .rail-title {
+      margin: 0 0 4px;
+      color: var(--ink);
+      font-size: 1rem;
+      font-weight: 760;
+    }
+
+    .rail-meta {
+      margin: 0 0 24px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+    }
+
+    .rail ol {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .rail li {
+      border-top: 1px solid var(--line);
+    }
+
+    .rail li:last-child {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .rail a {
+      display: block;
+      padding: 9px 4px;
+      color: #34424d;
+      font-size: 0.88rem;
+      text-decoration: none;
+    }
+
+    .rail a:hover {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+
+    main {
+      width: 100%;
+      max-width: 1180px;
+      margin-inline: auto;
+      padding: 42px 48px 72px;
+    }
+
+    section[data-report-section] {
+      padding: 46px 0 52px;
+      border-bottom: 1px solid var(--line-strong);
+      scroll-margin-top: 18px;
+    }
+
+    section[data-report-section]:first-child {
+      padding-top: 10px;
+    }
+
+    section[data-report-section]:last-child {
+      border-bottom: 0;
+    }
+
+    .eyebrow {
+      margin: 0 0 12px;
+      color: var(--accent);
+      font-size: 0.76rem;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      overflow-wrap: anywhere;
+    }
+
+    h1 {
+      max-width: 860px;
+      margin: 0 0 20px;
+      font-size: 2.55rem;
+      line-height: 1.14;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 1.7rem;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 1.05rem;
+      line-height: 1.35;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 14px;
+    }
+
+    .lede {
+      max-width: 900px;
+      margin-bottom: 28px;
+      font-size: 1.16rem;
+      line-height: 1.72;
+    }
+
+    .lede strong {
+      color: var(--danger);
+    }
+
+    .section-intro {
+      max-width: 820px;
+      margin-bottom: 24px;
+      color: var(--muted);
+    }
+
+    .snapshot-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin: 0 0 28px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+    }
+
+    .snapshot-item {
+      min-width: 0;
+      padding: 15px 16px;
+      border-right: 1px solid var(--line);
+    }
+
+    .snapshot-item:last-child {
+      border-right: 0;
+    }
+
+    .snapshot-item dt {
+      margin-bottom: 3px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .snapshot-item dd {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 1.04rem;
+      font-weight: 760;
+      overflow-wrap: anywhere;
+    }
+
+    .snapshot-item .no-go {
+      color: var(--danger);
+    }
+
+    .risk-heading {
+      margin-bottom: 10px;
+      font-size: 0.86rem;
+      text-transform: uppercase;
+    }
+
+    .risk-list,
+    .action-list {
+      margin: 0;
+      padding-left: 1.35rem;
+    }
+
+    .risk-list li,
+    .action-list li {
+      padding: 4px 0 8px 4px;
+    }
+
+    .risk-list strong {
+      color: var(--danger);
+    }
+
+    .table-scroll {
+      width: 100%;
+      overflow-x: auto;
+      border-top: 2px solid var(--ink);
+      border-bottom: 1px solid var(--line-strong);
+    }
+
+    table {
+      width: 100%;
+      min-width: 760px;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    th,
+    td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+
+    th {
+      background: var(--rail);
+      color: #33414c;
+      font-size: 0.76rem;
+      text-transform: uppercase;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .evidence-state {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.8rem;
+      font-weight: 700;
+    }
+
+    [data-evidence="runtime-verified"] .evidence-state {
+      color: var(--accent);
+    }
+
+    [data-evidence="unverified"] {
+      background: var(--warning-soft);
+    }
+
+    [data-evidence="unverified"] .evidence-state {
+      color: var(--warning);
+    }
+
+    .boundary-stack {
+      margin: 28px 0 18px;
+      padding: 0;
+      border-top: 2px solid var(--ink);
+      border-bottom: 1px solid var(--line-strong);
+      list-style: none;
+    }
+
+    .boundary-layer {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 20px;
+      align-items: start;
+      padding: 18px 4px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .boundary-layer:last-child {
+      border-bottom: 0;
+    }
+
+    .layer-name {
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .flow {
+      margin: 0;
+      font-weight: 670;
+      line-height: 1.75;
+    }
+
+    .flow span {
+      display: inline-block;
+      padding: 0 0.3em;
+      color: var(--muted);
+    }
+
+    .boundary-notes {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .boundary-note {
+      min-width: 0;
+      padding: 12px 14px;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .boundary-note.risk {
+      border-left-color: var(--danger);
+      background: var(--danger-soft);
+    }
+
+    .boundary-note b {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 0.76rem;
+      text-transform: uppercase;
+    }
+
+    .summary-lines {
+      margin-top: 24px;
+      border-top: 1px solid var(--line-strong);
+    }
+
+    .summary-line {
+      display: grid;
+      grid-template-columns: minmax(150px, 0.3fr) minmax(0, 1fr);
+      gap: 22px;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .summary-line:last-child {
+      border-bottom: 0;
+    }
+
+    .summary-line h3,
+    .summary-line p {
+      margin: 0;
+    }
+
+    .finding-list {
+      margin-top: 24px;
+      border-top: 2px solid var(--ink);
+    }
+
+    .finding-summary {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr);
+      gap: 18px;
+      padding: 18px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .finding-summary:last-child {
+      border-bottom-color: var(--line-strong);
+    }
+
+    .severity {
+      color: var(--danger);
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.82rem;
+      font-weight: 800;
+    }
+
+    .finding-summary p {
+      margin: 4px 0 0;
+      color: var(--muted);
+    }
+
+    .decision-band {
+      margin: 24px 0;
+      padding: 18px 20px;
+      border-left: 5px solid var(--danger);
+      background: var(--danger-soft);
+    }
+
+    .decision-band strong {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--danger);
+      font-size: 1.08rem;
+    }
+
+    .commit-compare {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin: 22px 0;
+      border-top: 1px solid var(--line-strong);
+      border-bottom: 1px solid var(--line-strong);
+    }
+
+    .commit-compare div {
+      min-width: 0;
+      padding: 14px 16px;
+      border-right: 1px solid var(--line);
+    }
+
+    .commit-compare div:last-child {
+      border-right: 0;
+    }
+
+    .commit-compare b {
+      display: block;
+      color: var(--muted);
+      font-size: 0.74rem;
+      text-transform: uppercase;
+    }
+
+    .commit-compare code {
+      padding: 0;
+      background: transparent;
+      font-weight: 760;
+    }
+
+    .method-list {
+      margin: 22px 0 0;
+      padding: 0;
+      border-top: 1px solid var(--line-strong);
+      list-style: none;
+    }
+
+    .method-list li {
+      display: grid;
+      grid-template-columns: 170px minmax(0, 1fr);
+      gap: 20px;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .method-list strong {
+      font-size: 0.84rem;
+    }
+
+    @media (max-width: 900px) {
+      body {
+        display: block;
+      }
+
+      .rail {
+        position: static;
+        width: 100%;
+        height: auto;
+        padding: 20px 24px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line-strong);
+      }
+
+      .rail-meta {
+        margin-bottom: 12px;
+      }
+
+      .rail ol {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0 14px;
+      }
+
+      main {
+        padding-inline: 30px;
+      }
+
+      .boundary-notes {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .rail {
+        padding-inline: 18px;
+      }
+
+      .rail ol {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      main {
+        padding: 28px 18px 54px;
+      }
+
+      section[data-report-section] {
+        padding: 36px 0 42px;
+      }
+
+      h1 {
+        font-size: 2rem;
+      }
+
+      h2 {
+        font-size: 1.45rem;
+      }
+
+      .snapshot-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .snapshot-item:nth-child(2) {
+        border-right: 0;
+      }
+
+      .snapshot-item:nth-child(-n + 2) {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .boundary-layer,
+      .summary-line,
+      .finding-summary,
+      .method-list li {
+        grid-template-columns: 1fr;
+        gap: 7px;
+      }
+
+      .commit-compare {
+        grid-template-columns: 1fr;
+      }
+
+      .commit-compare div {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .commit-compare div:last-child {
+        border-bottom: 0;
+      }
+    }
+
+    @media print {
+      body {
+        display: block;
+      }
+
+      .rail,
+      .skip-link {
+        display: none;
+      }
+
+      main {
+        max-width: none;
+        padding: 0;
+      }
+
+      section[data-report-section] {
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#report-content">跳至报告正文</a>
+
+  <aside class="rail" aria-label="报告导航">
+    <p class="rail-title">PomodoroXII Audit</p>
+    <p class="rail-meta">Evidence snapshot · 2026-07-13</p>
+    <nav aria-label="报告章节">
+      <ol>
+        <li><a href="#verdict">01 发布结论</a></li>
+        <li><a href="#evidence">02 证据台账</a></li>
+        <li><a href="#architecture">03 系统边界</a></li>
+        <li><a href="#backend">04 后端基线</a></li>
+        <li><a href="#frontend">05 前端基线</a></li>
+        <li><a href="#findings">06 核心发现</a></li>
+        <li><a href="#delivery">07 交付判定</a></li>
+        <li><a href="#index-health">08 索引健康</a></li>
+        <li><a href="#remote-delta">09 远端差异</a></li>
+        <li><a href="#actions">10 行动顺序</a></li>
+        <li><a href="#methodology">11 方法与限制</a></li>
+      </ol>
+    </nav>
+  </aside>
+
+  <main id="report-content" data-report-shell data-local-commit="65e2382" data-remote-commit="1e4f0fc">
+    <section id="verdict" data-report-section>
+      <p class="eyebrow">2026-07-13 · LOCAL EVIDENCE SNAPSHOT</p>
+      <h1>PomodoroXII 子模块深度审查报告</h1>
+      <p class="lede"><strong>后端功能基线健康；当前本地工作区与完整前端产品不具备发布条件。</strong>这是基于本地命令输出、源码边界与 Git 差异得出的 NO-GO 判定，不以构建成功代替集成可发布性。</p>
+
+      <dl class="snapshot-grid" aria-label="审查快照">
+        <div class="snapshot-item">
+          <dt>本地</dt>
+          <dd>65e2382</dd>
+        </div>
+        <div class="snapshot-item">
+          <dt>远端</dt>
+          <dd>1e4f0fc</dd>
+        </div>
+        <div class="snapshot-item">
+          <dt>Behind</dt>
+          <dd>11</dd>
+        </div>
+        <div class="snapshot-item">
+          <dt>发布门禁</dt>
+          <dd class="no-go">NO-GO</dd>
+        </div>
+      </dl>
+
+      <h2 class="risk-heading">三大风险</h2>
+      <ol class="risk-list">
+        <li><strong>API base 失效：</strong>前端 rewrite 当前固定到本机地址，非本地部署无法建立可信的 API 边界。</li>
+        <li><strong>本地漂移：</strong>审查快照落后远端 11 个提交，本地结论不能直接代表远端最新树。</li>
+        <li><strong>测试沙箱：</strong>前端套件仍有 1 个失败，完整门禁尚未全绿。</li>
+      </ol>
+    </section>
+
+    <section id="evidence" data-report-section>
+      <p class="eyebrow">Command ledger</p>
+      <h2>证据台账</h2>
+      <p class="section-intro">下表保留审查快照中的原始结果表述。<code>runtime-verified</code> 表示已从本地命令输出核对；<code>unverified</code> 表示当前没有可用的远端实时证据。</p>
+      <div class="table-scroll" role="region" aria-label="可滚动的验证结果表" tabindex="0">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">验证项</th>
+              <th scope="col">结果</th>
+              <th scope="col">证据类型</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr data-evidence="runtime-verified">
+              <th scope="row">Backend pytest</th>
+              <td><strong>783 passed, 1 xfailed, 2 warnings in 588.35s</strong></td>
+              <td class="evidence-state">runtime-verified</td>
+            </tr>
+            <tr data-evidence="runtime-verified">
+              <th scope="row">Backend Ruff</th>
+              <td><strong>passed</strong></td>
+              <td class="evidence-state">runtime-verified</td>
+            </tr>
+            <tr data-evidence="runtime-verified">
+              <th scope="row">Python compatibility</th>
+              <td><strong>89 compatible packages</strong></td>
+              <td class="evidence-state">runtime-verified</td>
+            </tr>
+            <tr data-evidence="runtime-verified">
+              <th scope="row">Python audit</th>
+              <td><strong>no known vulnerabilities; local package skipped</strong></td>
+              <td class="evidence-state">runtime-verified</td>
+            </tr>
+            <tr data-evidence="runtime-verified">
+              <th scope="row">Frontend tests</th>
+              <td><strong>541 passed, 1 failed</strong></td>
+              <td class="evidence-state">runtime-verified</td>
+            </tr>
+            <tr data-evidence="runtime-verified">
+              <th scope="row">Frontend lint</th>
+              <td><strong>passed</strong></td>
+              <td class="evidence-state">runtime-verified</td>
+            </tr>
+            <tr data-evidence="runtime-verified">
+              <th scope="row">Frontend typecheck</th>
+              <td><strong>passed</strong></td>
+              <td class="evidence-state">runtime-verified</td>
+            </tr>
+            <tr data-evidence="runtime-verified">
+              <th scope="row">Frontend build</th>
+              <td><strong>passed, 19 routes</strong></td>
+              <td class="evidence-state">runtime-verified</td>
+            </tr>
+            <tr data-evidence="runtime-verified">
+              <th scope="row">npm audit</th>
+              <td><strong>2 moderate, 0 high, 0 critical</strong></td>
+              <td class="evidence-state">runtime-verified</td>
+            </tr>
+            <tr data-evidence="unverified">
+              <th scope="row">GitHub live runs</th>
+              <td><strong>not checked; gh unauthenticated</strong></td>
+              <td class="evidence-state">unverified</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="architecture" data-report-section>
+      <p class="eyebrow">System boundaries</p>
+      <h2>四层系统边界</h2>
+      <p class="section-intro">主路径由 Browser 经 API 进入 Storage，Agent 侧通过共享 registry 与 services 复用同一业务核心。同步协议是跨层数据一致性的关键边界。</p>
+
+      <ol class="boundary-stack" aria-label="PomodoroXII 四层架构">
+        <li class="boundary-layer">
+          <div class="layer-name">Browser</div>
+          <p class="flow">Next.js shell <span aria-hidden="true">→</span> Axios dual JWT <span aria-hidden="true">→</span> Dexie <span aria-hidden="true">→</span> Sync engine</p>
+        </li>
+        <li class="boundary-layer">
+          <div class="layer-name">API</div>
+          <p class="flow">FastAPI routes <span aria-hidden="true">→</span> Registry/meta <span aria-hidden="true">→</span> Services <span aria-hidden="true">→</span> SQLAlchemy</p>
+        </li>
+        <li class="boundary-layer">
+          <div class="layer-name">Storage</div>
+          <p class="flow">meta.db <span aria-hidden="true">+</span> per-space DB <span aria-hidden="true">+</span> notes filesystem <span aria-hidden="true">+</span> FTS</p>
+        </li>
+        <li class="boundary-layer">
+          <div class="layer-name">Agent</div>
+          <p class="flow">FastMCP tools/resources/prompts <span aria-hidden="true">→</span> shared registry/services</p>
+        </li>
+      </ol>
+
+      <div class="boundary-notes" aria-label="边界契约与风险">
+        <div class="boundary-note">
+          <b>HTTP contract</b>
+          <code>/api/v1</code>
+        </div>
+        <div class="boundary-note">
+          <b>Sync contract</b>
+          <code>push/pull/cursor/snapshot/tombstone</code>
+        </div>
+        <div class="boundary-note risk">
+          <b>Deployment break</b>
+          <code>rewrite currently fixed to http://localhost:8000</code>
+        </div>
+      </div>
+    </section>
+
+    <section id="backend" data-report-section>
+      <p class="eyebrow">Backend baseline</p>
+      <h2>后端：功能基线健康</h2>
+      <p class="section-intro">pytest 全量套件、Ruff、Python 兼容性与已知漏洞审计均给出健康信号。FastAPI 路由、registry/meta、service 与 SQLAlchemy 形成了可识别的边界，FastMCP 通过共享 registry/services 复用业务核心。</p>
+      <div class="summary-lines">
+        <div class="summary-line">
+          <h3>运行时信号</h3>
+          <p>783 个测试通过，1 个预期失败，没有普通失败；当前不是后端套件阻断发布。</p>
+        </div>
+        <div class="summary-line">
+          <h3>数据边界</h3>
+          <p><code>meta.db</code>、per-space DB、notes filesystem 与 FTS 分担不同持久化责任，发布时需保持迁移与文件存储的一致性。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="frontend" data-report-section>
+      <p class="eyebrow">Frontend baseline</p>
+      <h2>前端：可构建，但尚未可发布</h2>
+      <p class="section-intro">lint、typecheck 与包含 19 条路由的 build 通过，证明 Next.js shell 可编译与生成产物。但测试仍是 541 passed, 1 failed，且 API rewrite 固定到 <code>http://localhost:8000</code>，这两项直接破坏非本地交付的可信度。</p>
+      <div class="summary-lines">
+        <div class="summary-line">
+          <h3>已通过</h3>
+          <p>静态质量门禁与生产构建已通过；npm 审计为 2 moderate、0 high、0 critical。</p>
+        </div>
+        <div class="summary-line">
+          <h3>仍阻断</h3>
+          <p>测试沙箱仍有一个失败，部署时 API base 无法按环境建立正确上游。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="findings" data-report-section>
+      <p class="eyebrow">Risk register</p>
+      <h2>核心发现</h2>
+      <p class="section-intro">当前 NO-GO 由三个独立事实支撑：部署边界断裂、证据快照漂移、前端门禁未全绿。任一项未关闭都不应转为 GO。</p>
+      <div class="finding-list">
+        <article class="finding-summary">
+          <div class="severity">P1</div>
+          <div>
+            <h3>API base 被锁定到 localhost</h3>
+            <p>非本地运行时无法依赖这个地址，构建通过不能证明 API 链路可用。</p>
+          </div>
+        </article>
+        <article class="finding-summary">
+          <div class="severity">P1</div>
+          <div>
+            <h3>审查快照落后远端 11 个提交</h3>
+            <p>必须在对齐远端后重放核心门禁，才能把本地结论升级为当前交付结论。</p>
+          </div>
+        </article>
+        <article class="finding-summary">
+          <div class="severity">P2</div>
+          <div>
+            <h3>前端测试尚有 1 个失败</h3>
+            <p>lint、typecheck 和 build 的绿灯不会抵消测试套件失败，必须隔离并复现沙箱问题。</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="delivery" data-report-section>
+      <p class="eyebrow">Delivery decision</p>
+      <h2>交付判定：NO-GO</h2>
+      <div class="decision-band">
+        <strong>当前不应发布完整前端产品。</strong>
+        后端的健康基线可作为修复与重验的起点，但发布决策必须同时覆盖前端测试、API 环境绑定和远端对齐。
+      </div>
+      <p>最小放行条件是：API base 可配置且在目标环境验证、前端测试全绿、对齐远端后重跑后端与前端门禁。GitHub 实时 runs 当前未核对，不可当作绿灯。</p>
+    </section>
+
+    <section id="index-health" data-report-section>
+      <p class="eyebrow">Index confidence</p>
+      <h2>索引健康：可用于定位，不代替运行时证据</h2>
+      <p class="section-intro">当前代码边界可以通过路由、registry、services、Dexie 与 sync engine 的引用关系进行定位。本报告不把索引命中数当作发布门禁：索引无法抵消前端失败测试，也无法证明远端最新提交已被本地验证。</p>
+      <p>因此，索引在本次审查中的信心等级是“边界导航”，结论信心仍以本地命令输出、源码核对和 Git 差异为主。</p>
+    </section>
+
+    <section id="remote-delta" data-report-section>
+      <p class="eyebrow">Git snapshot</p>
+      <h2>远端差异：本地落后 11 个提交</h2>
+      <div class="commit-compare" aria-label="本地与远端提交对比">
+        <div>
+          <b>本地快照</b>
+          <code>65e2382</code>
+        </div>
+        <div>
+          <b>远端快照</b>
+          <code>1e4f0fc</code>
+        </div>
+        <div>
+          <b>差距</b>
+          <code>behind 11</code>
+        </div>
+      </div>
+      <p>这一差距使当前报告成为可追溯的本地证据快照，而不是对远端最新树的已验收声明。对齐之前应先保留快照，对齐之后应重跑同一组命令并记录结果差异。</p>
+    </section>
+
+    <section id="actions" data-report-section>
+      <p class="eyebrow">Ordered remediation</p>
+      <h2>行动顺序</h2>
+      <ol class="action-list">
+        <li><strong>P0 · 解除 API base 锁定。</strong>让 rewrite 从部署环境取值，并在非 localhost 目标上运行 API 连通性验证。</li>
+        <li><strong>P0 · 对齐远端差异。</strong>审阅 11 个提交的变化面，消解本地漂移，在新树上重放证据台账。</li>
+        <li><strong>P1 · 修复测试沙箱。</strong>单独复现当前失败用例，确认环境与产品行为边界，然后重跑前端全套。</li>
+        <li><strong>P1 · 重做发布判定。</strong>后端、前端、依赖审计与目标环境连通性同时通过后，再将 NO-GO 重评为 GO。</li>
+      </ol>
+    </section>
+
+    <section id="methodology" data-report-section>
+      <p class="eyebrow">Method and limits</p>
+      <h2>方法与限制</h2>
+      <p class="section-intro">审查将“命令已验证”、“源码可核对”、“远端差异已核对”与“未验证”分开，不由单一绿灯外推整体可发布性。</p>
+      <ul class="method-list">
+        <li>
+          <strong>运行时证据</strong>
+          <span>以 pytest、Ruff、兼容性检查、依赖审计、前端 tests/lint/typecheck/build 的本地输出为准。</span>
+        </li>
+        <li>
+          <strong>源码边界</strong>
+          <span>按 Browser、API、Storage、Agent 四层跟踪路由、registry/services、持久化与同步协议。</span>
+        </li>
+        <li>
+          <strong>Git 证据</strong>
+          <span>本地 <code>65e2382</code> 与远端 <code>1e4f0fc</code> 作为快照边界，behind 11 被视为结论时效性风险。</span>
+        </li>
+        <li>
+          <strong>已知限制</strong>
+          <span>GitHub live runs 未检查，因为 <code>gh</code> 未认证；该缺口明确标记为 <code>unverified</code>。</span>
+        </li>
+      </ul>
+    </section>
+  </main>
+
+  <script>document.documentElement.dataset.theme = 'light'</script>
+</body>
+</html>
