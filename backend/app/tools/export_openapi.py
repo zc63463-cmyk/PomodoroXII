@@ -7,6 +7,7 @@ import difflib
 import os
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
 
@@ -24,6 +25,7 @@ STABLE_ENVIRONMENT = {
 }
 
 
+@lru_cache(maxsize=1)
 def _render_in_clean_process() -> str:
     """Render in a fresh interpreter so prior imports cannot leak settings."""
     environment = {
