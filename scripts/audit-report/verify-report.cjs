@@ -401,6 +401,38 @@ function assertBusinessModuleDetails(html, tokens) {
   }
 }
 
+const forbiddenRemoteDetailPatterns = [
+  ['origin-only label', /\borigin-only\b/i],
+  ['origin ref or hardening', /\borigin(?:\/main| hardening)\b/i],
+  ['sync event bound', /\b1\.\.500\b/i],
+  ['sync payload bound', /\b256\s*KiB\b/i],
+  ['sync boundary cases', /\b0\/1\/500\/501\b/i],
+  ['remote hardening detail', /\b(?:rate\/body|readiness) hardening\b/i],
+];
+const allowedLocalDetailCommitHashes = new Set(['65e2382']);
+const commitHashPattern = /\b[0-9a-f]{7,40}\b/gi;
+
+function assertNoConcreteRemoteDetails(html, tokens) {
+  const detailTokens = tokens.filter((token) => hasAttribute(token, 'data-module-detail-for'));
+  for (const detail of detailTokens) {
+    const detailId = attributeValue(detail, 'data-module-detail-for');
+    const innerHtml = elementInnerHtml(html, detail);
+    for (const [label, pattern] of forbiddenRemoteDetailPatterns) {
+      assert.doesNotMatch(
+        innerHtml,
+        pattern,
+        `${detailId} contains concrete remote-only detail: ${label}`,
+      );
+    }
+    for (const commitHash of innerHtml.match(commitHashPattern) ?? []) {
+      assert.ok(
+        allowedLocalDetailCommitHashes.has(commitHash.toLowerCase()),
+        `${detailId} contains concrete remote-only detail: remote commit hash ${commitHash}`,
+      );
+    }
+  }
+}
+
 function assertFindingSubsystems(html, tokens) {
   const findingTokens = tokens.filter((token) => hasAttribute(token, 'data-finding-id'));
   for (const finding of findingTokens) {
@@ -451,6 +483,22 @@ function assertNoExternalResources(tokens) {
   }
 }
 
+function normalizeCssEscapes(css) {
+  return css.replace(
+    /\\([0-9a-f]{1,6})(?:\r\n|[ \t\r\n\f])?|\\([^\r\n\f])/gi,
+    (match, hexValue, escapedCharacter) => {
+      if (hexValue !== undefined) {
+        const codePoint = Number.parseInt(hexValue, 16);
+        if (codePoint === 0 || codePoint > 0x10FFFF || (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+          return '\uFFFD';
+        }
+        return String.fromCodePoint(codePoint);
+      }
+      return escapedCharacter;
+    },
+  );
+}
+
 function assertNoExternalCss(tokens) {
   const cssSources = [
     ...tagsNamed(tokens, 'style').map((token) => token.rawText),
@@ -460,10 +508,26 @@ function assertNoExternalCss(tokens) {
     const uncommentedCss = css.replace(/\/\*[\s\S]*?\*\//g, '');
     assert.doesNotMatch(
       uncommentedCss,
+      /&(?:#(?:x[0-9a-f]+|[0-9]+)|[a-z][a-z0-9]+);/i,
+      'HTML entities are not allowed in CSS',
+    );
+    assert.doesNotMatch(
+      uncommentedCss,
+      /\\(?:\r\n|[\r\n\f])/,
+      'CSS line-continuation escapes are not allowed',
+    );
+    const normalizedCss = normalizeCssEscapes(uncommentedCss);
+    assert.doesNotMatch(
+      normalizedCss,
+      /\\/,
+      'malformed or nested CSS escapes are not allowed',
+    );
+    assert.doesNotMatch(
+      normalizedCss,
       /@import\b/i,
       'CSS imports are not allowed',
     );
-    for (const match of uncommentedCss.matchAll(/\burl\s*\(\s*(?:(["'])(.*?)\1|([^)]*))\s*\)/gis)) {
+    for (const match of normalizedCss.matchAll(/\burl\s*\(\s*(?:(["'])(.*?)\1|([^)]*))\s*\)/gis)) {
       const value = (match[2] ?? match[3] ?? '').trim();
       assert.ok(isInlineResource(value), `CSS resource dependency is not allowed: ${value}`);
     }
@@ -583,7 +647,14 @@ function verifyStatic(mode = 'all') {
     assertExactAttributeValues(tokens, 'data-module-id', requiredModuleIds);
     assertExactAttributeValues(tokens, 'data-finding-id', requiredFindingIds);
     assertBusinessModuleDetails(html, tokens);
+    assertNoConcreteRemoteDetails(html, tokens);
     assertFindingSubsystems(html, tokens);
+
+    const findingTokens = tokens.filter((token) => hasAttribute(token, 'data-finding-id'));
+    assert.ok(
+      findingTokens.every((token) => hasAttribute(token, 'open')),
+      'all findings must be source-open for no-JS readability',
+    );
 
     const evidenceTypes = new Set(attributeValues(tokens, 'data-evidence'));
     assert.deepEqual(
@@ -622,6 +693,20 @@ function collectUnexpectedRequests(context, allowedDocumentUrl) {
 }
 
 function verifyHardeningSelfTests() {
+  const localDetailFixture =
+    '<article data-module-detail-for="fe-sync"><code>65e2382</code></article>';
+  assert.doesNotThrow(
+    () => assertNoConcreteRemoteDetails(localDetailFixture, tokenizeStartTags(localDetailFixture)),
+    'the local audit-subject commit hash must be allowed in module details',
+  );
+  const remoteDetailFixture =
+    '<article data-module-detail-for="fe-sync"><code>1e4f0fc</code></article>';
+  assert.throws(
+    () => assertNoConcreteRemoteDetails(remoteDetailFixture, tokenizeStartTags(remoteDetailFixture)),
+    /remote commit hash 1e4f0fc/,
+    'remote commit hashes must be rejected in module details',
+  );
+
   const rawTextTokens = tokenizeStartTags(
     '<script>void 0</script/><img src="https://example.invalid/remote.png">',
   );
@@ -634,16 +719,19 @@ function verifyHardeningSelfTests() {
 
   const rejectedCssResources = [
     '@import "local.css";',
+    String.raw`@im\70ort "file:///C:/escaped-import.css";`,
     '.fixture { background: url(./relative.png); }',
     '.fixture { background: url(/root-absolute.png); }',
     '.fixture { background: url(file:///C:/secret.png); }',
     '.fixture { background: url(https://example.invalid/remote.png); }',
+    String.raw`@media print { .fixture { background: u\72l(file:///C:/print.png); } }`,
+    '.fixture:hover { background: u&#114;l(file:///C:/hover.png); }',
   ];
   for (const css of rejectedCssResources) {
     const cssTokens = tokenizeStartTags(`<style>${css}</style>`);
     assert.throws(
       () => assertNoExternalCss(cssTokens),
-      /CSS imports are not allowed|CSS resource dependency is not allowed/,
+      /CSS imports are not allowed|CSS resource dependency is not allowed|HTML entities are not allowed in CSS/,
       `CSS dependency must be rejected: ${css}`,
     );
   }
@@ -832,6 +920,23 @@ async function verifyBrowser() {
         requiredFindingIds.length,
         'no-script findings',
       );
+      await assertVisibleElements(
+        page.locator('details.finding[open]'),
+        requiredFindingIds.length,
+        'no-script source-open findings',
+      );
+      const findingBodies = page.locator('.finding-body');
+      await assertVisibleElements(
+        findingBodies,
+        requiredFindingIds.length,
+        'no-script finding bodies',
+      );
+      for (let index = 0; index < requiredFindingIds.length; index += 1) {
+        assert.ok(
+          (await findingBodies.nth(index).innerText()).trim(),
+          `no-script finding body ${index + 1} must contain text`,
+        );
+      }
       await assertVisibleElements(
         page.locator('[data-module-id]'),
         requiredModuleIds.length,
