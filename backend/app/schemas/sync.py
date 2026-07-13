@@ -181,3 +181,64 @@ class SyncLedgerStatsResponse(BaseModel):
     total_events: int
     min_id: int | None = None
     max_id: int | None = None
+
+
+class _SyncOpsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SyncOpsLedgerHealth(_SyncOpsModel):
+    retained_events: int = Field(..., ge=0)
+    min_id: int | None = Field(default=None, ge=0)
+    max_id: int | None = Field(default=None, ge=0)
+    retention_floor: int = Field(..., ge=0)
+    current_cursor: int = Field(..., ge=0)
+
+
+class SyncOpsClientsHealth(_SyncOpsModel):
+    total: int = Field(..., ge=0)
+    active: int = Field(..., ge=0)
+    expired: int = Field(..., ge=0)
+    recovering: int = Field(..., ge=0)
+    revoked: int = Field(..., ge=0)
+    min_active_ack: int | None = Field(default=None, ge=0)
+    max_active_ack: int | None = Field(default=None, ge=0)
+    max_lag: int = Field(..., ge=0)
+
+
+class SyncOpsSnapshotsHealth(_SyncOpsModel):
+    total: int = Field(..., ge=0)
+    ready: int = Field(..., ge=0)
+    building: int = Field(..., ge=0)
+    expired: int = Field(..., ge=0)
+    ready_items: int = Field(..., ge=0)
+    ready_chunks: int = Field(..., ge=0)
+    ready_compressed_bytes: int = Field(..., ge=0)
+    min_cursor: int | None = Field(default=None, ge=0)
+    max_cursor: int | None = Field(default=None, ge=0)
+
+
+class SyncOpsDataHealth(_SyncOpsModel):
+    entity_rows: int = Field(..., ge=0)
+    tombstones: int = Field(..., ge=0)
+
+
+class SyncOpsAuditHealth(_SyncOpsModel):
+    events_24h: int = Field(..., ge=0)
+    last_event_at: str | None = None
+
+
+class SyncOpsInvariantsHealth(_SyncOpsModel):
+    ledger_bounds_valid: bool
+    active_ack_bounds_valid: bool
+
+
+class SyncOpsHealthResponse(_SyncOpsModel):
+    ledger: SyncOpsLedgerHealth
+    clients: SyncOpsClientsHealth
+    snapshots: SyncOpsSnapshotsHealth
+    data: SyncOpsDataHealth
+    audit: SyncOpsAuditHealth
+    invariants: SyncOpsInvariantsHealth
+    status: Literal["ok", "degraded"]
+    server_time: str

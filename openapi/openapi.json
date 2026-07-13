@@ -4697,6 +4697,80 @@
         ]
       }
     },
+    "/api/v1/sync/ops/health": {
+      "get": {
+        "tags": [
+          "sync"
+        ],
+        "summary": "Sync Ops Health",
+        "operationId": "sync_ops_health_api_v1_sync_ops_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncOpsHealthResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Domain or request validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RequestValidationErrorResponse"
+                    }
+                  ],
+                  "title": "Response 422 Sync Ops Health Api V1 Sync Ops Health Get"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Space access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Sync health unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/sync/clients": {
       "get": {
         "tags": [
@@ -9652,6 +9726,314 @@
         ],
         "title": "SyncLedgerStatsResponse",
         "description": "Response body for GET /api/v1/sync/ledger-stats (H2-E monitoring)."
+      },
+      "SyncOpsAuditHealth": {
+        "properties": {
+          "events_24h": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Events 24H"
+          },
+          "last_event_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Event At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "events_24h"
+        ],
+        "title": "SyncOpsAuditHealth"
+      },
+      "SyncOpsClientsHealth": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total"
+          },
+          "active": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Active"
+          },
+          "expired": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Expired"
+          },
+          "recovering": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Recovering"
+          },
+          "revoked": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Revoked"
+          },
+          "min_active_ack": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Active Ack"
+          },
+          "max_active_ack": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Active Ack"
+          },
+          "max_lag": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Lag"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "total",
+          "active",
+          "expired",
+          "recovering",
+          "revoked",
+          "max_lag"
+        ],
+        "title": "SyncOpsClientsHealth"
+      },
+      "SyncOpsDataHealth": {
+        "properties": {
+          "entity_rows": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Entity Rows"
+          },
+          "tombstones": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Tombstones"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "entity_rows",
+          "tombstones"
+        ],
+        "title": "SyncOpsDataHealth"
+      },
+      "SyncOpsHealthResponse": {
+        "properties": {
+          "ledger": {
+            "$ref": "#/components/schemas/SyncOpsLedgerHealth"
+          },
+          "clients": {
+            "$ref": "#/components/schemas/SyncOpsClientsHealth"
+          },
+          "snapshots": {
+            "$ref": "#/components/schemas/SyncOpsSnapshotsHealth"
+          },
+          "data": {
+            "$ref": "#/components/schemas/SyncOpsDataHealth"
+          },
+          "audit": {
+            "$ref": "#/components/schemas/SyncOpsAuditHealth"
+          },
+          "invariants": {
+            "$ref": "#/components/schemas/SyncOpsInvariantsHealth"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded"
+            ],
+            "title": "Status"
+          },
+          "server_time": {
+            "type": "string",
+            "title": "Server Time"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "ledger",
+          "clients",
+          "snapshots",
+          "data",
+          "audit",
+          "invariants",
+          "status",
+          "server_time"
+        ],
+        "title": "SyncOpsHealthResponse"
+      },
+      "SyncOpsInvariantsHealth": {
+        "properties": {
+          "ledger_bounds_valid": {
+            "type": "boolean",
+            "title": "Ledger Bounds Valid"
+          },
+          "active_ack_bounds_valid": {
+            "type": "boolean",
+            "title": "Active Ack Bounds Valid"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "ledger_bounds_valid",
+          "active_ack_bounds_valid"
+        ],
+        "title": "SyncOpsInvariantsHealth"
+      },
+      "SyncOpsLedgerHealth": {
+        "properties": {
+          "retained_events": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Retained Events"
+          },
+          "min_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Id"
+          },
+          "max_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Id"
+          },
+          "retention_floor": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Retention Floor"
+          },
+          "current_cursor": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Current Cursor"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "retained_events",
+          "retention_floor",
+          "current_cursor"
+        ],
+        "title": "SyncOpsLedgerHealth"
+      },
+      "SyncOpsSnapshotsHealth": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total"
+          },
+          "ready": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Ready"
+          },
+          "building": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Building"
+          },
+          "expired": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Expired"
+          },
+          "ready_items": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Ready Items"
+          },
+          "ready_chunks": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Ready Chunks"
+          },
+          "ready_compressed_bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Ready Compressed Bytes"
+          },
+          "min_cursor": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Cursor"
+          },
+          "max_cursor": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Cursor"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "total",
+          "ready",
+          "building",
+          "expired",
+          "ready_items",
+          "ready_chunks",
+          "ready_compressed_bytes"
+        ],
+        "title": "SyncOpsSnapshotsHealth"
       },
       "SyncPullResponse": {
         "properties": {

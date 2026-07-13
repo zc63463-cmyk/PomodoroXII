@@ -1100,6 +1100,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sync/ops/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sync Ops Health */
+        get: operations["sync_ops_health_api_v1_sync_ops_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sync/clients": {
         parameters: {
             query?: never;
@@ -3099,6 +3116,96 @@ export interface components {
             min_id?: number | null;
             /** Max Id */
             max_id?: number | null;
+        };
+        /** SyncOpsAuditHealth */
+        SyncOpsAuditHealth: {
+            /** Events 24H */
+            events_24h: number;
+            /** Last Event At */
+            last_event_at?: string | null;
+        };
+        /** SyncOpsClientsHealth */
+        SyncOpsClientsHealth: {
+            /** Total */
+            total: number;
+            /** Active */
+            active: number;
+            /** Expired */
+            expired: number;
+            /** Recovering */
+            recovering: number;
+            /** Revoked */
+            revoked: number;
+            /** Min Active Ack */
+            min_active_ack?: number | null;
+            /** Max Active Ack */
+            max_active_ack?: number | null;
+            /** Max Lag */
+            max_lag: number;
+        };
+        /** SyncOpsDataHealth */
+        SyncOpsDataHealth: {
+            /** Entity Rows */
+            entity_rows: number;
+            /** Tombstones */
+            tombstones: number;
+        };
+        /** SyncOpsHealthResponse */
+        SyncOpsHealthResponse: {
+            ledger: components["schemas"]["SyncOpsLedgerHealth"];
+            clients: components["schemas"]["SyncOpsClientsHealth"];
+            snapshots: components["schemas"]["SyncOpsSnapshotsHealth"];
+            data: components["schemas"]["SyncOpsDataHealth"];
+            audit: components["schemas"]["SyncOpsAuditHealth"];
+            invariants: components["schemas"]["SyncOpsInvariantsHealth"];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ok" | "degraded";
+            /** Server Time */
+            server_time: string;
+        };
+        /** SyncOpsInvariantsHealth */
+        SyncOpsInvariantsHealth: {
+            /** Ledger Bounds Valid */
+            ledger_bounds_valid: boolean;
+            /** Active Ack Bounds Valid */
+            active_ack_bounds_valid: boolean;
+        };
+        /** SyncOpsLedgerHealth */
+        SyncOpsLedgerHealth: {
+            /** Retained Events */
+            retained_events: number;
+            /** Min Id */
+            min_id?: number | null;
+            /** Max Id */
+            max_id?: number | null;
+            /** Retention Floor */
+            retention_floor: number;
+            /** Current Cursor */
+            current_cursor: number;
+        };
+        /** SyncOpsSnapshotsHealth */
+        SyncOpsSnapshotsHealth: {
+            /** Total */
+            total: number;
+            /** Ready */
+            ready: number;
+            /** Building */
+            building: number;
+            /** Expired */
+            expired: number;
+            /** Ready Items */
+            ready_items: number;
+            /** Ready Chunks */
+            ready_chunks: number;
+            /** Ready Compressed Bytes */
+            ready_compressed_bytes: number;
+            /** Min Cursor */
+            min_cursor?: number | null;
+            /** Max Cursor */
+            max_cursor?: number | null;
         };
         /**
          * SyncPullResponse
@@ -6026,6 +6133,62 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                };
+            };
+        };
+    };
+    sync_ops_health_api_v1_sync_ops_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncOpsHealthResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Space access denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                };
+            };
+            /** @description Sync health unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

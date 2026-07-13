@@ -10,7 +10,10 @@ Routes commit; the service only flushes.
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Path, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -28,6 +31,7 @@ from app.schemas.sync import (
     SyncClientRevokeResponse,
     SyncFullResponse,
     SyncLedgerStatsResponse,
+    SyncOpsHealthResponse,
     SyncPullResponse,
     SyncPushRequest,
     SyncPushResponse,
@@ -35,9 +39,37 @@ from app.schemas.sync import (
 )
 from app.services.sync import SyncService
 from app.services.sync_clients import SyncClientService
+from app.services.sync_ops import SyncOpsService
 from app.services.sync_outbox import get_ledger_stats
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+@router.get(
+    "/ops/health",
+    response_model=SyncOpsHealthResponse,
+    responses={
+        401: {"model": ErrorResponse, "description": "Authentication required"},
+        403: {"model": ErrorResponse, "description": "Space access denied"},
+        503: {"model": ErrorResponse, "description": "Sync health unavailable"},
+    },
+)
+async def sync_ops_health(
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    try:
+        return await SyncOpsService(db).health()
+    except Exception as exc:
+        logger.error("Sync ops health failed: %s", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "Sync health unavailable",
+                "error_type": "sync_health_unavailable",
+            },
+        )
 
 
 @router.get("/clients", response_model=SyncClientListResponse)
