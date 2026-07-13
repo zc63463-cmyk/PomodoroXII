@@ -7,7 +7,9 @@ Validates that:
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,133 @@ def _fresh_create_app():
     from app.main import create_app
 
     return create_app
+
+
+def test_create_backup_same_timestamp_preserves_both_database_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.file_system import backup as backup_module
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 13, 12, 34, 56, 123000, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(backup_module, "datetime", FrozenDateTime)
+    source_path = tmp_path / "source.db"
+    backup_dir = tmp_path / "backups"
+    with sqlite3.connect(source_path) as connection:
+        connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO marker VALUES ('old')")
+
+    first_name = backup_module.BackupService.create_backup(source_path, backup_dir)
+    assert first_name is not None
+
+    with sqlite3.connect(source_path) as connection:
+        connection.execute("UPDATE marker SET value = 'new'")
+
+    second_name = backup_module.BackupService.create_backup(source_path, backup_dir)
+    assert second_name is not None
+    assert first_name != second_name
+    assert len(list(backup_dir.glob("index_*.db"))) == 2
+
+    with sqlite3.connect(first_name) as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone() == ("old",)
+    with sqlite3.connect(second_name) as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone() == ("new",)
+
+
+def test_create_backup_rejects_failed_integrity_check_and_closes_connections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.file_system import backup as backup_module
+
+    connections: list[FakeConnection] = []
+    source_path = tmp_path / "source.db"
+    source_path.write_bytes(b"source exists")
+
+    class FakeCursor:
+        @staticmethod
+        def fetchone() -> tuple[str]:
+            return ("database disk image is malformed",)
+
+    class FakeConnection:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.closed = False
+
+        def backup(self, destination: FakeConnection) -> None:
+            destination.path.write_bytes(b"corrupt backup")
+
+        @staticmethod
+        def execute(_sql: str) -> FakeCursor:
+            return FakeCursor()
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_connect(path: str, **_kwargs) -> FakeConnection:
+        connection = FakeConnection(
+            source_path if path.startswith("file:") else Path(path)
+        )
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(backup_module.sqlite3, "connect", fake_connect)
+
+    backup_dir = tmp_path / "backups"
+    result = backup_module.BackupService.create_backup(source_path, backup_dir)
+
+    assert result is None
+    assert connections and all(connection.closed for connection in connections)
+    assert not list(backup_dir.glob(".index_*.tmp"))
+    assert not list(backup_dir.glob("index_*.db"))
+
+
+def test_create_backup_missing_source_fails_without_creating_database(
+    tmp_path: Path,
+) -> None:
+    from app.file_system.backup import BackupService
+
+    source_path = tmp_path / "missing.db"
+    backup_dir = tmp_path / "backups"
+
+    assert BackupService.create_backup(source_path, backup_dir) is None
+    assert not source_path.exists()
+    assert not list(backup_dir.glob("index_*.db"))
+    assert not list(backup_dir.glob(".index_*.tmp"))
+
+
+def test_create_backup_cleanup_failure_does_not_hide_published_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.file_system.backup import BackupService
+
+    source_path = tmp_path / "source.db"
+    backup_dir = tmp_path / "backups"
+    with sqlite3.connect(source_path) as connection:
+        connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO marker VALUES ('preserved')")
+
+    def fail_cleanup(_cls, _backup_dir: Path) -> None:
+        raise PermissionError("injected cleanup failure")
+
+    monkeypatch.setattr(
+        BackupService,
+        "_cleanup_old_backups",
+        classmethod(fail_cleanup),
+    )
+
+    backup_name = BackupService.create_backup(source_path, backup_dir)
+
+    assert backup_name is not None
+    backup_path = Path(backup_name)
+    assert backup_path.is_file()
+    with sqlite3.connect(backup_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("SELECT value FROM marker").fetchone() == (
+            "preserved",
+        )
 
 
 @pytest.mark.asyncio

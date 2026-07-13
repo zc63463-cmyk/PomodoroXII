@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import importlib.util
+import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -52,6 +56,214 @@ def _space_head() -> str:
     head = migrations_module._single_head(migrations_module._config("space"))
     assert head == "space_012_sync_timestamp_canonical"
     return head
+
+
+def _read_space_backup_state(path: Path) -> dict[str, object]:
+    engine = create_engine(_sqlite_url(path))
+    try:
+        with engine.connect() as connection:
+            return {
+                "integrity": connection.execute(text("PRAGMA integrity_check")).scalar_one(),
+                "revision": connection.execute(
+                    text("SELECT version_num FROM alembic_version_space")
+                ).scalar_one(),
+                "settings": tuple(
+                    connection.execute(
+                        text("SELECT key, value, updated_at FROM settings ORDER BY key")
+                    ).all()
+                ),
+                "client": tuple(
+                    connection.execute(
+                        text(
+                            "SELECT client_id, user_id, display_name, ack_cursor, "
+                            "last_seen_at, lease_expires_at, created_at, revoked_at, "
+                            "snapshot_required, token_hash FROM sync_clients "
+                            "WHERE client_id = 'r6-f1-client'"
+                        )
+                    ).one()
+                ),
+                "snapshot": tuple(
+                    connection.execute(
+                        text(
+                            "SELECT token, cursor, payload, format, status, item_count, "
+                            "chunk_count, uncompressed_bytes, compressed_bytes, checksum, "
+                            "created_at, expires_at FROM sync_snapshots "
+                            "WHERE token = 'r6-f1-snapshot'"
+                        )
+                    ).one()
+                ),
+                "chunk": tuple(
+                    connection.execute(
+                        text(
+                            "SELECT snapshot_token, chunk_index, item_start, item_count, "
+                            "compressed_payload, uncompressed_bytes, compressed_bytes, "
+                            "checksum FROM sync_snapshot_chunks "
+                            "WHERE snapshot_token = 'r6-f1-snapshot' AND chunk_index = 0"
+                        )
+                    ).one()
+                ),
+                "marker": tuple(
+                    connection.execute(
+                        text(
+                            "SELECT id, title, description, status, priority, tags, plan, "
+                            "completion, estimated_pomodoros, actual_pomodoros, created_at, "
+                            "updated_at, version FROM tasks WHERE id = 'r6-f1-marker'"
+                        )
+                    ).one()
+                ),
+            }
+    finally:
+        engine.dispose()
+
+
+def _create_space_011_backup_fixture(
+    path: Path, *, invalid_timestamp: bool = False
+) -> dict[str, object]:
+    from app.db.migrations import _config
+
+    raw_payload = b'{"kind":"entity","payload":{"id":"r6-f1-marker"}}\n'
+    compressed_payload = gzip.compress(raw_payload, mtime=0)
+    chunk_checksum = hashlib.sha256(compressed_payload).hexdigest()
+    manifest_checksum = hashlib.sha256(chunk_checksum.encode("ascii")).hexdigest()
+    second_setting_timestamp = "not-a-timestamp" if invalid_timestamp else "2026-07-04T10:00:01Z"
+
+    engine = create_engine(_sqlite_url(path))
+    config = _config("space")
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "space_011_sync_client_credentials")
+            connection.execute(
+                text(
+                    "INSERT INTO settings (key, value, updated_at) VALUES "
+                    "('r6-f1-sync-enabled', 'true', "
+                    "'2026-07-04T11:00:00.123456+01:00'), "
+                    "('r6-f1-theme', 'dark', :second_timestamp)"
+                ),
+                {"second_timestamp": second_setting_timestamp},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO sync_clients "
+                    "(client_id, user_id, display_name, ack_cursor, last_seen_at, "
+                    "lease_expires_at, created_at, revoked_at, snapshot_required, token_hash) "
+                    "VALUES ('r6-f1-client', 'r6-f1-user', 'R6 F1 Client', 41, "
+                    "'2026-07-04T11:00:02+01:00', '2026-08-04T10:00:02', "
+                    "'2026-07-04T10:00:02.987654Z', NULL, 0, :token_hash)"
+                ),
+                {"token_hash": "ab" * 32},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO sync_snapshots "
+                    "(token, cursor, payload, format, status, item_count, chunk_count, "
+                    "uncompressed_bytes, compressed_bytes, checksum, created_at, expires_at) "
+                    "VALUES ('r6-f1-snapshot', 41, '', 'gzip-chunks-v1', 'ready', 1, 1, "
+                    ":uncompressed_bytes, :compressed_bytes, :checksum, "
+                    "'2026-07-04T10:00:03Z', '2026-07-05T12:00:03.456789+02:00')"
+                ),
+                {
+                    "uncompressed_bytes": len(raw_payload),
+                    "compressed_bytes": len(compressed_payload),
+                    "checksum": manifest_checksum,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO sync_snapshot_chunks "
+                    "(snapshot_token, chunk_index, item_start, item_count, compressed_payload, "
+                    "uncompressed_bytes, compressed_bytes, checksum) VALUES "
+                    "('r6-f1-snapshot', 0, 0, 1, :compressed_payload, "
+                    ":uncompressed_bytes, :compressed_bytes, :checksum)"
+                ),
+                {
+                    "compressed_payload": compressed_payload,
+                    "uncompressed_bytes": len(raw_payload),
+                    "compressed_bytes": len(compressed_payload),
+                    "checksum": chunk_checksum,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO tasks "
+                    "(id, title, description, status, priority, tags, plan, completion, "
+                    "estimated_pomodoros, actual_pomodoros, created_at, updated_at, version) "
+                    "VALUES ('r6-f1-marker', 'backup marker', 'must survive restore', 'todo', "
+                    "'high', '[\"r6-f1\"]', 'plan', '0%', 3, 1, "
+                    "'2026-07-04T10:00:04Z', '2026-07-04T11:00:04.654321+01:00', 7)"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    return _read_space_backup_state(path)
+
+
+def _assert_space_backup_state(
+    path: Path, expected: dict[str, object], *, revision: str
+) -> None:
+    actual = _read_space_backup_state(path)
+    assert actual["integrity"] == "ok"
+    assert actual["revision"] == revision
+    assert actual == expected
+
+
+def _assert_space_012_state(path: Path, before: dict[str, object]) -> None:
+    actual = _read_space_backup_state(path)
+    assert actual["integrity"] == "ok"
+    assert actual["revision"] == _space_head()
+    assert actual["settings"] == (
+        ("r6-f1-sync-enabled", before["settings"][0][1], "2026-07-04T10:00:00.123Z"),
+        ("r6-f1-theme", before["settings"][1][1], "2026-07-04T10:00:01.000Z"),
+    )
+    assert actual["client"] == (
+        "r6-f1-client",
+        "r6-f1-user",
+        "R6 F1 Client",
+        41,
+        "2026-07-04T10:00:02.000Z",
+        "2026-08-04T10:00:02.000Z",
+        "2026-07-04T10:00:02.987Z",
+        None,
+        1,
+        "ab" * 32,
+    )
+    assert actual["snapshot"] == (
+        "r6-f1-snapshot",
+        41,
+        "",
+        "gzip-chunks-v1",
+        "ready",
+        1,
+        1,
+        before["snapshot"][7],
+        before["snapshot"][8],
+        before["snapshot"][9],
+        "2026-07-04T10:00:03.000Z",
+        "2026-07-05T10:00:03.456Z",
+    )
+    assert actual["chunk"] == before["chunk"]
+    assert actual["marker"] == (
+        "r6-f1-marker",
+        "backup marker",
+        "must survive restore",
+        "todo",
+        "high",
+        '["r6-f1"]',
+        "plan",
+        "0%",
+        3,
+        1,
+        "2026-07-04T10:00:04.000Z",
+        "2026-07-04T10:00:04.654Z",
+        7,
+    )
+
+
+def _restore_backup_copy(backup_path: Path, restored_path: Path) -> None:
+    assert backup_path.resolve() != restored_path.resolve()
+    assert not restored_path.exists()
+    shutil.copy2(backup_path, restored_path)
 
 
 @pytest.mark.parametrize("revision_file", SYNC_SAFETY_REVISIONS)
@@ -786,3 +998,98 @@ def test_legacy_single_chain_wrong_or_multiple_versions_fail_closed(
             ).scalars().all() == version_rows
     finally:
         engine.dispose()
+
+
+def test_space_011_online_backup_restores_sync_state_after_012_upgrade(
+    tmp_path: Path,
+) -> None:
+    from app.db.migrations import run_migrations
+    from app.file_system.backup import BackupService
+
+    source_path = tmp_path / "source-011.db"
+    backup_dir = tmp_path / "online-backup"
+    restored_path = tmp_path / "restored-011.db"
+    expected = _create_space_011_backup_fixture(source_path)
+
+    wal_connection = sqlite3.connect(source_path)
+    try:
+        assert wal_connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        wal_connection.execute("PRAGMA wal_autocheckpoint=0")
+        wal_connection.execute(
+            "UPDATE settings SET value = 'from-wal' WHERE key = 'r6-f1-theme'"
+        )
+        wal_connection.commit()
+        assert Path(f"{source_path}-wal").stat().st_size > 0
+        expected = _read_space_backup_state(source_path)
+
+        backup_name = BackupService.create_backup(source_path, backup_dir)
+        assert backup_name is not None
+        backup_path = Path(backup_name)
+        assert backup_path.is_file()
+        assert backup_path.stat().st_size > 0
+        _assert_space_backup_state(
+            backup_path, expected, revision="space_011_sync_client_credentials"
+        )
+    finally:
+        wal_connection.close()
+
+    run_migrations("space", source_path)
+    _assert_space_012_state(source_path, expected)
+
+    _restore_backup_copy(backup_path, restored_path)
+    _assert_space_backup_state(
+        restored_path,
+        expected,
+        revision="space_011_sync_client_credentials",
+    )
+
+    run_migrations("space", restored_path)
+    _assert_space_012_state(restored_path, expected)
+
+
+def test_space_011_invalid_timestamp_keeps_source_and_backup_restorable(
+    tmp_path: Path,
+) -> None:
+    from app.db.migrations import MigrationSafetyError, run_migrations
+    from app.file_system.backup import BackupService
+
+    source_path = tmp_path / "invalid-source-011.db"
+    backup_dir = tmp_path / "invalid-online-backup"
+    restored_path = tmp_path / "invalid-restored-011.db"
+    expected = _create_space_011_backup_fixture(source_path, invalid_timestamp=True)
+
+    backup_name = BackupService.create_backup(source_path, backup_dir)
+    assert backup_name is not None
+    backup_path = Path(backup_name)
+    assert backup_path.is_file()
+    assert backup_path.stat().st_size > 0
+    source_before = source_path.read_bytes()
+    backup_before = backup_path.read_bytes()
+
+    with pytest.raises(MigrationSafetyError, match="failed to migrate space database"):
+        run_migrations("space", source_path)
+
+    assert not list(source_path.parent.glob(f".{source_path.name}.migration-*.db"))
+    assert source_path.read_bytes() == source_before
+    assert backup_path.read_bytes() == backup_before
+    _assert_space_backup_state(backup_path, expected, revision="space_011_sync_client_credentials")
+
+    _restore_backup_copy(backup_path, restored_path)
+    assert restored_path.read_bytes() == backup_before
+    _assert_space_backup_state(
+        restored_path,
+        expected,
+        revision="space_011_sync_client_credentials",
+    )
+
+    restored_before = restored_path.read_bytes()
+    with pytest.raises(MigrationSafetyError, match="failed to migrate space database"):
+        run_migrations("space", restored_path)
+
+    assert not list(restored_path.parent.glob(f".{restored_path.name}.migration-*.db"))
+    assert restored_path.read_bytes() == restored_before
+    _assert_space_backup_state(
+        restored_path,
+        expected,
+        revision="space_011_sync_client_credentials",
+    )
