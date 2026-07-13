@@ -122,6 +122,59 @@ class SyncClientService:
             ) from exc
         return self._registration_result(client)
 
+    async def list_clients(self, *, user_id: str) -> list[dict[str, object]]:
+        now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        clients = list(
+            await self.db.scalars(
+                select(SyncClient)
+                .where(SyncClient.user_id == user_id)
+                .order_by(SyncClient.created_at, SyncClient.client_id)
+            )
+        )
+        return [self._client_item(client, now=now) for client in clients]
+
+    async def revoke(
+        self,
+        *,
+        client_id: str,
+        user_id: str,
+    ) -> dict[str, object]:
+        canonical_id = _canonical_client_id(client_id)
+        await self.db.execute(
+            update(SyncState)
+            .where(SyncState.id == 1)
+            .values(current_cursor=SyncState.current_cursor)
+        )
+        client = await self.db.scalar(
+            select(SyncClient).where(
+                SyncClient.client_id == canonical_id,
+                SyncClient.user_id == user_id,
+            )
+        )
+        if client is None:
+            raise NotFoundError(
+                "sync client not found",
+                error_type="sync_client_not_found",
+            )
+        if client.revoked_at is not None:
+            maintenance = await self.advance_safe_retention_floor(lock_acquired=True)
+            return {
+                "client_id": client.client_id,
+                "revoked_at": client.revoked_at,
+                **maintenance,
+            }
+
+        now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        client.revoked_at = now
+        client.last_seen_at = now
+        await self.db.flush()
+        maintenance = await self.advance_safe_retention_floor(lock_acquired=True)
+        return {
+            "client_id": client.client_id,
+            "revoked_at": now,
+            **maintenance,
+        }
+
     async def validate_snapshot_client(
         self,
         *,
@@ -344,6 +397,28 @@ class SyncClientService:
             "current_cursor": current,
             "active_client_count": active_client_count,
             "pruned_events": pruned_events,
+        }
+
+    @staticmethod
+    def _client_item(client: SyncClient, *, now: str) -> dict[str, object]:
+        if client.revoked_at is not None:
+            status = "revoked"
+        elif client.lease_expires_at <= now:
+            status = "expired"
+        elif client.snapshot_required:
+            status = "recovering"
+        else:
+            status = "active"
+        return {
+            "client_id": client.client_id,
+            "display_name": client.display_name,
+            "ack_cursor": client.ack_cursor,
+            "last_seen_at": client.last_seen_at,
+            "lease_expires_at": client.lease_expires_at,
+            "created_at": client.created_at,
+            "snapshot_required": client.snapshot_required,
+            "revoked_at": client.revoked_at,
+            "status": status,
         }
 
     @staticmethod

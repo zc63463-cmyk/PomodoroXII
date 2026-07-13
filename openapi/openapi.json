@@ -4698,6 +4698,48 @@
       }
     },
     "/api/v1/sync/clients": {
+      "get": {
+        "tags": [
+          "sync"
+        ],
+        "summary": "List Sync Clients",
+        "operationId": "list_sync_clients_api_v1_sync_clients_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncClientListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Domain or request validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RequestValidationErrorResponse"
+                    }
+                  ],
+                  "title": "Response 422 List Sync Clients Api V1 Sync Clients Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
       "post": {
         "tags": [
           "sync"
@@ -4749,6 +4791,93 @@
             "HTTPBearer": []
           }
         ]
+      }
+    },
+    "/api/v1/sync/clients/{client_id}": {
+      "delete": {
+        "tags": [
+          "sync"
+        ],
+        "summary": "Revoke Sync Client",
+        "operationId": "revoke_sync_client_api_v1_sync_clients__client_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 36,
+              "maxLength": 36,
+              "title": "Client Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncClientRevokeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Domain or request validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RequestValidationErrorResponse"
+                    }
+                  ],
+                  "title": "Response 422 Revoke Sync Client Api V1 Sync Clients  Client Id  Delete"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Space access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sync client not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/sync/ack": {
@@ -9085,6 +9214,94 @@
         "title": "SyncAppliedItem",
         "description": "An event that was successfully applied."
       },
+      "SyncClientItem": {
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "title": "Client Id"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "ack_cursor": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Ack Cursor"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "title": "Last Seen At"
+          },
+          "lease_expires_at": {
+            "type": "string",
+            "title": "Lease Expires At"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "snapshot_required": {
+            "type": "boolean",
+            "title": "Snapshot Required"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "expired",
+              "recovering",
+              "revoked"
+            ],
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_id",
+          "ack_cursor",
+          "last_seen_at",
+          "lease_expires_at",
+          "created_at",
+          "snapshot_required",
+          "status"
+        ],
+        "title": "SyncClientItem"
+      },
+      "SyncClientListResponse": {
+        "properties": {
+          "clients": {
+            "items": {
+              "$ref": "#/components/schemas/SyncClientItem"
+            },
+            "type": "array",
+            "title": "Clients"
+          }
+        },
+        "type": "object",
+        "required": [
+          "clients"
+        ],
+        "title": "SyncClientListResponse"
+      },
       "SyncClientRegistrationRequest": {
         "properties": {
           "client_id": {
@@ -9151,6 +9368,48 @@
           "snapshot_required"
         ],
         "title": "SyncClientRegistrationResponse"
+      },
+      "SyncClientRevokeResponse": {
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "title": "Client Id"
+          },
+          "revoked_at": {
+            "type": "string",
+            "title": "Revoked At"
+          },
+          "retention_floor": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Retention Floor"
+          },
+          "current_cursor": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Current Cursor"
+          },
+          "active_client_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Active Client Count"
+          },
+          "pruned_events": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Pruned Events"
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_id",
+          "revoked_at",
+          "retention_floor",
+          "current_cursor",
+          "active_client_count",
+          "pruned_events"
+        ],
+        "title": "SyncClientRevokeResponse"
       },
       "SyncConflictItem": {
         "properties": {

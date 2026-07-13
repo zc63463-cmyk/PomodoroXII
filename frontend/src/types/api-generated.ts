@@ -1107,11 +1107,29 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** List Sync Clients */
+        get: operations["list_sync_clients_api_v1_sync_clients_get"];
         put?: never;
         /** Register Sync Client */
         post: operations["register_sync_client_api_v1_sync_clients_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync/clients/{client_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke Sync Client */
+        delete: operations["revoke_sync_client_api_v1_sync_clients__client_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2905,6 +2923,35 @@ export interface components {
             /** Resolution */
             resolution?: string | null;
         };
+        /** SyncClientItem */
+        SyncClientItem: {
+            /** Client Id */
+            client_id: string;
+            /** Display Name */
+            display_name?: string | null;
+            /** Ack Cursor */
+            ack_cursor: number;
+            /** Last Seen At */
+            last_seen_at: string;
+            /** Lease Expires At */
+            lease_expires_at: string;
+            /** Created At */
+            created_at: string;
+            /** Snapshot Required */
+            snapshot_required: boolean;
+            /** Revoked At */
+            revoked_at?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "expired" | "recovering" | "revoked";
+        };
+        /** SyncClientListResponse */
+        SyncClientListResponse: {
+            /** Clients */
+            clients: components["schemas"]["SyncClientItem"][];
+        };
         /** SyncClientRegistrationRequest */
         SyncClientRegistrationRequest: {
             /** Client Id */
@@ -2924,6 +2971,21 @@ export interface components {
             lease_expires_at: string;
             /** Snapshot Required */
             snapshot_required: boolean;
+        };
+        /** SyncClientRevokeResponse */
+        SyncClientRevokeResponse: {
+            /** Client Id */
+            client_id: string;
+            /** Revoked At */
+            revoked_at: string;
+            /** Retention Floor */
+            retention_floor: number;
+            /** Current Cursor */
+            current_cursor: number;
+            /** Active Client Count */
+            active_client_count: number;
+            /** Pruned Events */
+            pruned_events: number;
         };
         /**
          * SyncConflictItem
@@ -5968,6 +6030,35 @@ export interface operations {
             };
         };
     };
+    list_sync_clients_api_v1_sync_clients_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncClientListResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                };
+            };
+        };
+    };
     register_sync_client_api_v1_sync_clients_post: {
         parameters: {
             query?: never;
@@ -5988,6 +6079,64 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SyncClientRegistrationResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                };
+            };
+        };
+    };
+    revoke_sync_client_api_v1_sync_clients__client_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncClientRevokeResponse"];
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Space access denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Sync client not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Domain or request validation error */

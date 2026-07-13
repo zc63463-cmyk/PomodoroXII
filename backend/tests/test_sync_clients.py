@@ -444,3 +444,160 @@ async def test_no_active_clients_never_advances_floor_or_prunes(space_session):
     }
     assert await get_retention_floor(space_session) == 0
     assert list(await space_session.scalars(select(SyncOutbox.id))) == [event.id]
+
+
+@pytest.mark.asyncio
+async def test_list_clients_is_user_scoped_stably_sorted_and_reports_status(space_session):
+    from app.models.sync_client import SyncClient
+    from app.services.sync_clients import SyncClientService
+
+    service = SyncClientService(space_session)
+    client_ids = [str(uuid.uuid4()) for _ in range(5)]
+    for client_id in client_ids:
+        await service.register(client_id=client_id, user_id="user-a", display_name=client_id[-4:])
+    await service.register(client_id=str(uuid.uuid4()), user_id="user-b", display_name="hidden")
+
+    active, expired, recovering, revoked, tie = [
+        await space_session.get(SyncClient, client_id) for client_id in client_ids
+    ]
+    assert all(row is not None for row in (active, expired, recovering, revoked, tie))
+    active.created_at = "2026-01-01T00:00:00Z"
+    expired.created_at = "2026-01-02T00:00:00Z"
+    expired.lease_expires_at = "2000-01-01T00:00:00Z"
+    recovering.created_at = "2026-01-03T00:00:00Z"
+    recovering.snapshot_required = True
+    revoked.created_at = "2026-01-04T00:00:00Z"
+    revoked.revoked_at = "2026-01-05T00:00:00Z"
+    tie.created_at = active.created_at
+    await space_session.flush()
+
+    result = await service.list_clients(user_id="user-a")
+
+    assert [item["client_id"] for item in result] == sorted(
+        client_ids, key=lambda value: (
+            "2026-01-01T00:00:00Z" if value in (active.client_id, tie.client_id) else {
+                expired.client_id: "2026-01-02T00:00:00Z",
+                recovering.client_id: "2026-01-03T00:00:00Z",
+                revoked.client_id: "2026-01-04T00:00:00Z",
+            }[value],
+            value,
+        )
+    )
+    assert {item["status"] for item in result} == {
+        "active", "expired", "recovering", "revoked"
+    }
+    assert all(
+        set(item) == {
+            "client_id", "display_name", "ack_cursor", "last_seen_at",
+            "lease_expires_at", "created_at", "snapshot_required", "revoked_at", "status",
+        }
+        for item in result
+    )
+    assert "hidden" not in {item["display_name"] for item in result}
+
+
+@pytest.mark.asyncio
+async def test_revoke_is_owner_scoped_idempotent_and_blocks_client_lifecycle(space_session):
+    from app.services.sync_clients import SyncClientService
+
+    service = SyncClientService(space_session)
+    client_id = str(uuid.uuid4())
+    await service.register(client_id=client_id, user_id="user-a")
+
+    for requester in ("user-b", "user-a"):
+        target = client_id if requester == "user-b" else str(uuid.uuid4())
+        with pytest.raises(NotFoundError) as missing:
+            await service.revoke(client_id=target, user_id=requester)
+        assert missing.value.error_type == "sync_client_not_found"
+
+    revoked = await service.revoke(client_id=client_id, user_id="user-a")
+    repeated = await service.revoke(client_id=client_id, user_id="user-a")
+    assert repeated == revoked
+    assert revoked["revoked_at"]
+
+    with pytest.raises(ConflictError) as register_error:
+        await service.register(client_id=client_id, user_id="user-a")
+    assert register_error.value.error_type == "sync_client_revoked"
+    with pytest.raises(ConflictError) as ack_error:
+        await service.acknowledge(
+            client_id=client_id, user_id="user-a", ack_cursor=0, cursor_version=2
+        )
+    assert ack_error.value.error_type == "sync_client_revoked"
+    with pytest.raises(ConflictError) as full_error:
+        await service.validate_snapshot_client(client_id=client_id, user_id="user-a")
+    assert full_error.value.error_type == "sync_client_revoked"
+    with pytest.raises(ConflictError) as proof_error:
+        await service.validate_snapshot_client(
+            client_id=client_id, user_id="user-a", require_recovery=True
+        )
+    assert proof_error.value.error_type == "sync_client_revoked"
+
+
+@pytest.mark.asyncio
+async def test_revoke_slow_client_advances_floor_and_prunes_in_same_transaction(space_session):
+    from app.models.sync_client import SyncClient
+    from app.models.sync_outbox import SyncOutbox
+    from app.services.sync_clients import SyncClientService
+    from app.services.sync_outbox import get_retention_floor, record_sync_event
+
+    events = [
+        await record_sync_event(
+            space_session, entity_type="task", entity_id=f"revoke-{index}", action="create"
+        )
+        for index in range(3)
+    ]
+    service = SyncClientService(space_session)
+    slow_id, fast_id = str(uuid.uuid4()), str(uuid.uuid4())
+    await service.register(client_id=slow_id, user_id="user-a")
+    await service.register(client_id=fast_id, user_id="user-a")
+    fast = await space_session.get(SyncClient, fast_id)
+    assert fast is not None
+    fast.ack_cursor = events[-1].id
+    await space_session.flush()
+
+    result = await service.revoke(client_id=slow_id, user_id="user-a")
+
+    assert result["retention_floor"] == events[-1].id
+    assert result["active_client_count"] == 1
+    assert result["pruned_events"] == 3
+    assert await get_retention_floor(space_session) == events[-1].id
+    assert list(await space_session.scalars(select(SyncOutbox.id))) == []
+
+
+@pytest.mark.asyncio
+async def test_revoke_last_active_client_does_not_advance_floor_or_delete_unbound_snapshot(
+    space_session,
+):
+    from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
+    from app.services.sync_clients import SyncClientService
+    from app.services.sync_outbox import get_retention_floor, record_sync_event
+
+    event = await record_sync_event(
+        space_session, entity_type="task", entity_id="last-revoked", action="create"
+    )
+    service = SyncClientService(space_session)
+    client_id = str(uuid.uuid4())
+    await service.register(client_id=client_id, user_id="user-a")
+    token = str(uuid.uuid4())
+    space_session.add(
+        SyncSnapshot(
+            token=token, cursor=event.id, status="ready", expires_at="2099-01-01T00:00:00Z"
+        )
+    )
+    space_session.add(
+        SyncSnapshotChunk(
+            snapshot_token=token, chunk_index=0, item_start=0, item_count=0,
+            compressed_payload=b"", uncompressed_bytes=0, compressed_bytes=0,
+            checksum="0" * 64,
+        )
+    )
+    await space_session.flush()
+
+    result = await service.revoke(client_id=client_id, user_id="user-a")
+
+    assert result["retention_floor"] == 0
+    assert result["active_client_count"] == 0
+    assert result["pruned_events"] == 0
+    assert await get_retention_floor(space_session) == 0
+    assert await space_session.get(SyncSnapshot, token) is not None
+    assert await space_session.get(SyncSnapshotChunk, (token, 0)) is not None

@@ -10,7 +10,7 @@ Routes commit; the service only flushes.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,11 +18,14 @@ from app.deps import get_file_system, get_space_context, get_space_db
 from app.errors import SyncSnapshotExpiredError
 from app.file_system.interfaces import FileSystem
 from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
+from app.schemas.common import ErrorResponse
 from app.schemas.sync import (
     SyncAckRequest,
     SyncAckResponse,
+    SyncClientListResponse,
     SyncClientRegistrationRequest,
     SyncClientRegistrationResponse,
+    SyncClientRevokeResponse,
     SyncFullResponse,
     SyncLedgerStatsResponse,
     SyncPullResponse,
@@ -35,6 +38,36 @@ from app.services.sync_clients import SyncClientService
 from app.services.sync_outbox import get_ledger_stats
 
 router = APIRouter()
+
+
+@router.get("/clients", response_model=SyncClientListResponse)
+async def list_sync_clients(
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    return {"clients": await SyncClientService(db).list_clients(user_id=ctx["user_id"])}
+
+
+@router.delete(
+    "/clients/{client_id}",
+    response_model=SyncClientRevokeResponse,
+    responses={
+        401: {"model": ErrorResponse, "description": "Authentication required"},
+        403: {"model": ErrorResponse, "description": "Space access denied"},
+        404: {"model": ErrorResponse, "description": "Sync client not found"},
+    },
+)
+async def revoke_sync_client(
+    client_id: str = Path(..., min_length=36, max_length=36),
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    result = await SyncClientService(db).revoke(
+        client_id=client_id,
+        user_id=ctx["user_id"],
+    )
+    await db.commit()
+    return result
 
 
 @router.post("/clients", response_model=SyncClientRegistrationResponse)
@@ -121,6 +154,12 @@ async def full_sync(
     ctx: dict = Depends(get_space_context),
 ):
     """Full sync: returns ALL tombstones regardless of since."""
+    recovery_client = None
+    if client_id is not None:
+        recovery_client = await SyncClientService(db).validate_snapshot_client(
+            client_id=client_id,
+            user_id=ctx["user_id"],
+        )
     try:
         result = await SyncService(db, fs).full(
             since=since, since_id=since_id,
@@ -159,10 +198,7 @@ async def full_sync(
             verify_recovery_continuation,
         )
 
-        recovery_client = await SyncClientService(db).validate_snapshot_client(
-            client_id=client_id,
-            user_id=ctx["user_id"],
-        )
+        assert recovery_client is not None
         snapshot = await db.get(SyncSnapshot, result["snapshot_token"])
         if snapshot is None or snapshot.status != "ready":
             raise SyncSnapshotExpiredError()

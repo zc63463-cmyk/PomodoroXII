@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -90,6 +90,31 @@ class SyncClientRegistrationResponse(BaseModel):
     ack_cursor: int = Field(..., ge=0)
     lease_expires_at: str
     snapshot_required: bool
+
+
+class SyncClientItem(BaseModel):
+    client_id: str
+    display_name: str | None = None
+    ack_cursor: int = Field(..., ge=0)
+    last_seen_at: str
+    lease_expires_at: str
+    created_at: str
+    snapshot_required: bool
+    revoked_at: str | None = None
+    status: Literal["active", "expired", "recovering", "revoked"]
+
+
+class SyncClientListResponse(BaseModel):
+    clients: list[SyncClientItem]
+
+
+class SyncClientRevokeResponse(BaseModel):
+    client_id: str
+    revoked_at: str
+    retention_floor: int = Field(..., ge=0)
+    current_cursor: int = Field(..., ge=0)
+    active_client_count: int = Field(..., ge=0)
+    pruned_events: int = Field(..., ge=0)
 
 
 class SyncAckRequest(BaseModel):
