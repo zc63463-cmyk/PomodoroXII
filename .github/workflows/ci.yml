@@ -21,13 +21,17 @@ on:
     branches: [main, master, develop]
     paths:
       - "backend/**"
+      - "openapi/**"
       - ".github/workflows/**"
+      - ".gitattributes"
       - ".gitignore"
   pull_request:
     branches: [main, master]
     paths:
       - "backend/**"
+      - "openapi/**"
       - ".github/workflows/**"
+      - ".gitattributes"
 
 # Cancel in-progress runs of the same ref when a new commit lands.
 concurrency:
@@ -69,6 +73,9 @@ jobs:
 
       - name: Sync dependencies (dev extras included)
         run: uv sync --frozen --extra dev
+
+      - name: Check canonical OpenAPI drift
+        run: uv run python -m app.tools.export_openapi check
 
       - name: Lint with ruff
         run: uv run ruff check app tests

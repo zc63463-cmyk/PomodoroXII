@@ -1,0 +1,6 @@
+/openapi/openapi.json text eol=lf
+/frontend/src/types/api-generated.ts text eol=lf
+/frontend/package.json text eol=lf
+/frontend/package-lock.json text eol=lf
+/frontend/scripts/*.mjs text eol=lf
+/backend/app/tools/*.py text eol=lf

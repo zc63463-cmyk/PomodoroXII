@@ -9,7 +9,9 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
-    "generate:api": "openapi-typescript http://localhost:8000/openapi.json -o src/types/api-generated.ts",
+    "generate:api": "node scripts/openapi-codegen.mjs write",
+    "check:api": "node scripts/openapi-codegen.mjs check",
+    "test:api-codegen": "node --test scripts/openapi-codegen.test.mjs",
     "test": "vitest run"
   },
   "dependencies": {
@@ -49,7 +51,7 @@
     "eslint-config-next": "15.5.20",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
-    "openapi-typescript": "^7.13.0",
+    "openapi-typescript": "7.13.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.9"

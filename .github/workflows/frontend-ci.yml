@@ -40,6 +40,12 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Check generated API type drift
+        run: npm run check:api
+
+      - name: Test API codegen gate
+        run: npm run test:api-codegen
+
       - name: Lint
         run: npm run lint
 

@@ -70,7 +70,8 @@ cd frontend
 npm install
 cp .env.local.example .env.local    # NEXT_PUBLIC_API_BASE=http://localhost:8000
 npm run dev                          # http://localhost:3000
-npm run generate:api                 # 需后端 @ :8000，生成 src/types/api-generated.ts
+npm run generate:api                 # 从已提交的 openapi/openapi.json 离线生成类型
+npm run check:api                    # 检查生成类型是否与 OpenAPI 契约漂移
 ```
 
 Gate：`npm run lint && npm run typecheck && npm run test && npm run build`（333 frontend tests, 19 routes）
