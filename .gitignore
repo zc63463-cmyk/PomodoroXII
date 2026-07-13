@@ -126,6 +126,7 @@ desktop.ini
 # WorkBuddy local state (agent memory, do not commit)
 # -------------------------------------------------------------------
 .workbuddy/
+.worktrees/
 
 # -------------------------------------------------------------------
 # Local uploads (runtime data, do not commit)
