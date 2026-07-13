@@ -595,7 +595,7 @@ def test_fresh_migration_failure_does_not_create_target(
 
 
 def test_existing_migration_failure_restores_exact_database_bytes(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "existing-failure.db"
     migrations_module.run_migrations("meta", path)
@@ -631,6 +631,94 @@ def test_existing_migration_failure_restores_exact_database_bytes(
             assert connection.execute(
                 text("SELECT value FROM meta_settings WHERE id = 'marker'")
             ).scalar_one() == "yes"
+    finally:
+        engine.dispose()
+
+
+def test_existing_space_migration_failure_restores_exact_database_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "existing-space-failure.db"
+    migrations_module.run_migrations("space", path)
+    engine = create_engine(_sqlite_url(path))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO settings (key, value, updated_at) "
+                "VALUES ('preserved', 'yes', '2026-01-01T00:00:00.000Z')"
+            )
+        )
+    engine.dispose()
+    before = path.read_bytes()
+
+    real_upgrade = migrations_module.command.upgrade
+    target_path = path.resolve()
+    injected = False
+
+    def fail_upgrade(config, revision):
+        nonlocal injected
+        connection = config.attributes["connection"]
+        database_path = Path(connection.engine.url.database or "").resolve()
+        if database_path == target_path:
+            real_upgrade(config, revision)
+            return
+        if database_path.name.startswith(f".{path.name}.migration-"):
+            injected = True
+            connection.execute(text("CREATE TABLE migration_pollution (id INTEGER)"))
+            connection.execute(
+                text(
+                    "INSERT INTO settings (key, value, updated_at) "
+                    "VALUES ('pollution', 'committed', '2026-01-02T00:00:00.000Z')"
+                )
+            )
+            connection.commit()
+            raise RuntimeError("injected upgrade failure")
+        real_upgrade(config, revision)
+
+    monkeypatch.setattr(migrations_module.command, "upgrade", fail_upgrade)
+
+    with pytest.raises(migrations_module.MigrationSafetyError, match="failed to migrate"):
+        migrations_module.run_migrations("space", path)
+
+    assert injected is True
+    assert path.read_bytes() == before
+    engine = create_engine(_sqlite_url(path))
+    try:
+        inspector = inspect(engine)
+        assert "migration_pollution" not in inspector.get_table_names()
+        assert {
+            "sync_state",
+            "sync_clients",
+            "sync_snapshots",
+            "sync_snapshot_chunks",
+        }.issubset(inspector.get_table_names())
+        assert {
+            "client_id",
+            "ack_cursor",
+            "snapshot_required",
+            "token_hash",
+        }.issubset(
+            column["name"] for column in inspector.get_columns("sync_clients")
+        )
+        assert {
+            "format",
+            "status",
+            "item_count",
+            "chunk_count",
+            "checksum",
+        }.issubset(
+            column["name"] for column in inspector.get_columns("sync_snapshots")
+        )
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version_space")
+            ).scalar_one() == _space_head()
+            assert connection.execute(
+                text("SELECT value FROM settings WHERE key = 'preserved'")
+            ).scalar_one() == "yes"
+            assert connection.execute(
+                text("SELECT count(*) FROM settings WHERE key = 'pollution'")
+            ).scalar_one() == 0
     finally:
         engine.dispose()
 

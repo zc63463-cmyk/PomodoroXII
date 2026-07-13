@@ -315,6 +315,104 @@ async def test_recovery_proof_is_terminal_bound_and_single_use_over_http(client)
 
 
 @pytest.mark.asyncio
+async def test_snapshot_continues_and_acks_after_engine_manager_reopen(client):
+    from app.models.sync_client import SyncClient
+    from app.models.sync_state import SyncSnapshot
+    from app.services.sync_outbox import advance_retention_floor, get_current_cursor
+    from app.space_manager import (
+        dispose_space_engine_manager,
+        get_space_engine_manager,
+    )
+
+    headers, space_id = await _space_headers(client)
+    pushed = await client.post(
+        "/api/v1/sync/push",
+        json={
+            "events": [
+                _task_event(f"reopen-{index}-{uuid.uuid4().hex[:8]}", f"Reopen {index}")
+                for index in range(2)
+            ]
+        },
+        headers=headers,
+    )
+    assert pushed.status_code == 200
+
+    manager = get_space_engine_manager()
+    session = await manager.get_session(space_id)
+    try:
+        current = await get_current_cursor(session)
+        await advance_retention_floor(session, floor=current)
+        await session.commit()
+    finally:
+        await session.close()
+
+    client_id = str(uuid.uuid4())
+    client_token = "reopen-client-token-0123456789abcdef"
+    registered = await client.post(
+        "/api/v1/sync/clients",
+        json={"client_id": client_id, "client_token": client_token},
+        headers=headers,
+    )
+    assert registered.status_code == 200
+    assert registered.json()["snapshot_required"] is True
+    recovery_headers = _device_headers(headers, client_id, client_token)
+
+    first_response = await client.get(
+        "/api/v1/sync/full",
+        params={"cursor": 0, "limit": 1, "client_id": client_id},
+        headers=recovery_headers,
+    )
+    assert first_response.status_code == 200
+    first = first_response.json()
+    assert first["has_more"] is True
+    assert first["recovery_continuation"]
+
+    await dispose_space_engine_manager()
+    reopened_manager = get_space_engine_manager()
+    assert reopened_manager is not manager
+
+    terminal_response = await client.get(
+        "/api/v1/sync/full",
+        params={
+            "cursor": 0,
+            "limit": 10,
+            "client_id": client_id,
+            "snapshot_token": first["snapshot_token"],
+            "snapshot_offset": first["snapshot_offset"],
+            "recovery_continuation": first["recovery_continuation"],
+        },
+        headers=recovery_headers,
+    )
+    assert terminal_response.status_code == 200
+    terminal = terminal_response.json()
+    assert terminal["has_more"] is False
+    assert terminal["snapshot_token"] == first["snapshot_token"]
+    assert terminal["recovery_proof"]
+
+    acknowledged = await client.post(
+        "/api/v1/sync/ack",
+        json={
+            "client_id": client_id,
+            "ack_cursor": terminal["next_cursor"],
+            "cursor_version": 2,
+            "recovery_proof": terminal["recovery_proof"],
+        },
+        headers=recovery_headers,
+    )
+    assert acknowledged.status_code == 200
+
+    session = await reopened_manager.get_session(space_id)
+    try:
+        assert await session.get(SyncSnapshot, terminal["snapshot_token"]) is None
+        stored_client = await session.get(SyncClient, client_id)
+        assert stored_client is not None
+        assert stored_client.ack_cursor == terminal["next_cursor"]
+        assert stored_client.snapshot_required is False
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_deleted_snapshot_invalidates_recovery_proof(client):
     from sqlalchemy import delete
 
