@@ -36,6 +36,28 @@
     .node-flow.additive li + li::before { content: "+"; }
     .node { min-width: 0; padding: 5px 8px; border: 1px solid currentColor; border-radius: 4px; overflow-wrap: anywhere; }
     .edge-labels { display: flex; flex-wrap: wrap; gap: 10px 24px; margin: 20px 0 0; padding-left: 20px; }
+    .top-risks { margin-top: 24px; padding-top: 16px; border-top: 1px solid currentColor; }
+    .top-risks h2 { margin: 0 0 8px; font-size: 1rem; }
+    .top-risks ol { margin: 0 0 8px; padding-left: 22px; }
+    .score-note, .scope-note { max-width: 80ch; }
+    .module-table th:nth-child(n+3), .module-table td:nth-child(n+3) { white-space: nowrap; }
+    .finding { border-top: 1px solid currentColor; }
+    .finding:last-child { border-bottom: 1px solid currentColor; }
+    .finding summary { display: flex; justify-content: space-between; gap: 16px; padding: 16px 0; cursor: pointer; }
+    .finding-title { min-width: 0; }
+    .finding-meta { flex: 0 0 auto; font-size: 0.85rem; }
+    .finding-body { padding: 0 0 20px; }
+    .finding-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; margin: 0; }
+    .finding-grid div { min-width: 0; }
+    .finding-grid dt { font-size: 0.85rem; font-weight: 700; }
+    .finding-grid dd { margin: 2px 0 0; }
+    .evidence-link { overflow-wrap: anywhere; }
+    .action-horizons { padding-left: 24px; }
+    .action-horizons > li { padding: 8px 0 18px; }
+    .action-horizons h3 { margin: 0 0 8px; }
+    .action-horizons dl { margin: 0; }
+    .action-horizons dt { margin-top: 8px; font-weight: 700; }
+    .action-horizons dd { margin: 0; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     @media (max-width: 640px) {
       .snapshot { grid-template-columns: 1fr 1fr; }
@@ -72,6 +94,15 @@
         <div><dt>分支漂移</dt><dd>behind 11</dd></div>
         <div><dt>发布结论</dt><dd>NO-GO</dd></div>
       </dl>
+      <div class="top-risks" aria-labelledby="top-risks-title">
+        <h2 id="top-risks-title">Top three risks</h2>
+        <ol>
+          <li><a href="#finding-f001">F-001 · 生产 API origin 配置未进入 rewrite</a></li>
+          <li><a href="#finding-f002">F-002 · 本地落后 11 commits 且测试基线为红</a></li>
+          <li><a href="#finding-f003">F-003 · 后端全量测试缓慢并无限保留沙箱</a></li>
+        </ol>
+        <a href="#findings">直达全部 7 条 Findings</a>
+      </div>
     </section>
     <section id="evidence" data-report-section>
       <h2>验证证据</h2>
@@ -86,7 +117,7 @@
             <tr data-evidence="runtime-verified"><th scope="row">Backend Ruff</th><td>passed</td><td><code>runtime-verified</code></td></tr>
             <tr data-evidence="runtime-verified"><th scope="row">Python dependency compatibility</th><td>89 compatible packages</td><td><code>runtime-verified</code></td></tr>
             <tr data-evidence="runtime-verified"><th scope="row">Python vulnerability audit</th><td>no known vulnerabilities; local package skipped</td><td><code>runtime-verified</code></td></tr>
-            <tr data-evidence="runtime-verified"><th scope="row">Frontend tests</th><td><code>541 passed, 1 failed</code></td><td><code>runtime-verified</code></td></tr>
+            <tr data-evidence="runtime-verified"><th scope="row">Frontend tests</th><td><code>541 passed, 1 failed</code><br>saved audit-time run; Task 3 未重跑</td><td><code>runtime-verified</code></td></tr>
             <tr data-evidence="runtime-verified"><th scope="row">Frontend lint</th><td>passed</td><td><code>runtime-verified</code></td></tr>
             <tr data-evidence="runtime-verified"><th scope="row">Frontend typecheck</th><td>passed</td><td><code>runtime-verified</code></td></tr>
             <tr data-evidence="runtime-verified"><th scope="row">Frontend build</th><td>passed, 19 routes</td><td><code>runtime-verified</code></td></tr>
@@ -140,14 +171,256 @@
         <li>Known deployment defect: <code>rewrite currently fixed to localhost:8000</code></li>
       </ul>
     </section>
-    <section id="backend" data-report-section><h2>后端子模块</h2></section>
-    <section id="frontend" data-report-section><h2>前端子模块</h2></section>
-    <section id="findings" data-report-section><h2>Findings</h2></section>
-    <section id="delivery" data-report-section><h2>测试、CI 与交付</h2></section>
-    <section id="index-health" data-report-section><h2>仓库与索引健康</h2></section>
-    <section id="remote-delta" data-report-section><h2>origin/main 差异</h2></section>
-    <section id="actions" data-report-section><h2>优先行动</h2></section>
-    <section id="methodology" data-report-section><h2>评分与证据方法</h2></section>
+    <section id="backend" data-report-section>
+      <h2>后端子模块</h2>
+      <p>后端的核心 REST、双库、同步、Notes/FTS 与 MCP 能力已有完整测试基线；部署操作性与测试产物生命周期仍是主要短板。</p>
+      <div class="table-scroll" role="region" aria-label="后端子模块评分" tabindex="0">
+        <table class="module-table">
+          <caption>后端九个子模块的五维审计评分</caption>
+          <thead><tr><th scope="col">Module</th><th scope="col">能力</th><th scope="col">完整度</th><th scope="col">完整性</th><th scope="col">验证</th><th scope="col">可运维</th><th scope="col">可维护</th><th scope="col">Maturity</th><th scope="col">Health</th><th scope="col">Confidence</th></tr></thead>
+          <tbody>
+            <tr data-module-id="be-runtime-auth" data-maturity="88" data-health="77" data-confidence="high"><th scope="row"><code>be-runtime-auth</code></th><td>生命周期 / 配置 / 鉴权</td><td>18</td><td>17</td><td>17</td><td>14</td><td>15</td><td>88</td><td>77</td><td>high</td></tr>
+            <tr data-module-id="be-data-migrations" data-maturity="95" data-health="80" data-confidence="high"><th scope="row"><code>be-data-migrations</code></th><td>双库 / 引擎 / 迁移</td><td>19</td><td>19</td><td>18</td><td>15</td><td>15</td><td>95</td><td>80</td><td>high</td></tr>
+            <tr data-module-id="be-registry-meta" data-maturity="93" data-health="85" data-confidence="high"><th scope="row"><code>be-registry-meta</code></th><td>Registry / Meta API</td><td>18</td><td>19</td><td>18</td><td>16</td><td>17</td><td>93</td><td>85</td><td>high</td></tr>
+            <tr data-module-id="be-entities" data-maturity="93" data-health="82" data-confidence="high"><th scope="row"><code>be-entities</code></th><td>业务实体 API / Service</td><td>19</td><td>18</td><td>18</td><td>15</td><td>16</td><td>93</td><td>82</td><td>high</td></tr>
+            <tr data-module-id="be-sync-push" data-maturity="93" data-health="75" data-confidence="high"><th scope="row"><code>be-sync-push</code></th><td>Push / 冲突 / 事件</td><td>18</td><td>19</td><td>19</td><td>14</td><td>12</td><td>93</td><td>75</td><td>high</td></tr>
+            <tr data-module-id="be-sync-pull" data-maturity="93" data-health="73" data-confidence="high"><th scope="row"><code>be-sync-pull</code></th><td>Cursor / Snapshot / Recovery</td><td>18</td><td>19</td><td>18</td><td>14</td><td>12</td><td>93</td><td>73</td><td>high</td></tr>
+            <tr data-module-id="be-notes-fs" data-maturity="93" data-health="80" data-confidence="high"><th scope="row"><code>be-notes-fs</code></th><td>Notes / FTS / Trash</td><td>19</td><td>18</td><td>18</td><td>15</td><td>15</td><td>93</td><td>80</td><td>high</td></tr>
+            <tr data-module-id="be-deploy" data-maturity="75" data-health="70" data-confidence="medium"><th scope="row"><code>be-deploy</code></th><td>Backup / Health / Ingress</td><td>14</td><td>16</td><td>17</td><td>11</td><td>14</td><td>75</td><td>70</td><td>medium</td></tr>
+            <tr data-module-id="be-mcp" data-maturity="88" data-health="80" data-confidence="high"><th scope="row"><code>be-mcp</code></th><td>FastMCP / REST parity</td><td>17</td><td>18</td><td>18</td><td>14</td><td>16</td><td>88</td><td>80</td><td>high</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="score-note">Maturity 与 Health 是由表内五个 0–20 审计判断维度可重现计算的复合值，不是运行时 telemetry。</p>
+      <h3>规模与覆盖事实</h3>
+      <div class="table-scroll" role="region" aria-label="后端规模事实" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">扫描项</th><th scope="col">结果</th><th scope="col">本地来源与口径</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">REST decorators</th><td><strong>83</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/routes/v1/auth.py#L31">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\routes\v1\auth.py:31</a><br><code>@router.get/post/put/patch/delete</code> 源码扫描，不计 <code>app.main</code> 的单独 health decorator。</td></tr>
+            <tr><th scope="row">MCP decorators</th><td><strong>19</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/mcp/server.py#L98">E:\Development\MyAwesomeApp\PomodoroXII\backend\app\mcp\server.py:98</a><br>13 tools + 4 resources + 2 prompts。</td></tr>
+            <tr><th scope="row">Backend test files</th><td><strong>79</strong></td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/">E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\</a><br>递归计数 <code>test_*.py</code>。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section id="frontend" data-report-section>
+      <h2>前端子模块</h2>
+      <p>Shell、Dexie、Sync 与 QuickNote 已经形成可用纵切面；剩余业务页面仍以占位页和 S0 store 口径为主，因此前端产品完整度显著低于后端。</p>
+      <div class="table-scroll" role="region" aria-label="前端子模块评分" tabindex="0">
+        <table class="module-table">
+          <caption>前端十个子模块的五维审计评分</caption>
+          <thead><tr><th scope="col">Module</th><th scope="col">能力</th><th scope="col">完整度</th><th scope="col">完整性</th><th scope="col">验证</th><th scope="col">可运维</th><th scope="col">可维护</th><th scope="col">Maturity</th><th scope="col">Health</th><th scope="col">Confidence</th></tr></thead>
+          <tbody>
+            <tr data-module-id="fe-shell" data-maturity="80" data-health="72" data-confidence="high"><th scope="row"><code>fe-shell</code></th><td>Shell / Guard / Navigation</td><td>16</td><td>16</td><td>15</td><td>13</td><td>15</td><td>80</td><td>72</td><td>high</td></tr>
+            <tr data-module-id="fe-auth-space" data-maturity="80" data-health="70" data-confidence="high"><th scope="row"><code>fe-auth-space</code></th><td>Login / Space / Bootstrap</td><td>16</td><td>16</td><td>16</td><td>12</td><td>14</td><td>80</td><td>70</td><td>high</td></tr>
+            <tr data-module-id="fe-dexie" data-maturity="90" data-health="75" data-confidence="high"><th scope="row"><code>fe-dexie</code></th><td>Dexie / Space DB / Meta DB</td><td>18</td><td>18</td><td>17</td><td>13</td><td>15</td><td>90</td><td>75</td><td>high</td></tr>
+            <tr data-module-id="fe-api-contract" data-maturity="70" data-health="63" data-confidence="high"><th scope="row"><code>fe-api-contract</code></th><td>REST Client / API Types</td><td>14</td><td>14</td><td>15</td><td>9</td><td>14</td><td>70</td><td>63</td><td>high</td></tr>
+            <tr data-module-id="fe-sync" data-maturity="88" data-health="72" data-confidence="high"><th scope="row"><code>fe-sync</code></th><td>Sync Engine / Merge / Outbox</td><td>17</td><td>18</td><td>18</td><td>13</td><td>12</td><td>88</td><td>72</td><td>high</td></tr>
+            <tr data-module-id="fe-quicknote-data" data-maturity="90" data-health="77" data-confidence="high"><th scope="row"><code>fe-quicknote-data</code></th><td>Repository / Store / Trash</td><td>18</td><td>18</td><td>18</td><td>14</td><td>14</td><td>90</td><td>77</td><td>high</td></tr>
+            <tr data-module-id="fe-quicknote-ux" data-maturity="88" data-health="63" data-confidence="high"><th scope="row"><code>fe-quicknote-ux</code></th><td>Draft / Editor / Read / Tags</td><td>18</td><td>17</td><td>17</td><td>13</td><td>8</td><td>88</td><td>63</td><td>high</td></tr>
+            <tr data-module-id="fe-settings" data-maturity="70" data-health="65" data-confidence="medium"><th scope="row"><code>fe-settings</code></th><td>Settings / Theme</td><td>13</td><td>15</td><td>14</td><td>11</td><td>14</td><td>70</td><td>65</td><td>medium</td></tr>
+            <tr data-module-id="fe-business-pages" data-maturity="43" data-health="52" data-confidence="high"><th scope="row"><code>fe-business-pages</code></th><td>Remaining Business UI</td><td>5</td><td>12</td><td>10</td><td>8</td><td>13</td><td>43</td><td>52</td><td>high</td></tr>
+            <tr data-module-id="fe-build-deploy" data-maturity="60" data-health="63" data-confidence="high"><th scope="row"><code>fe-build-deploy</code></th><td>Build / Runtime Config</td><td>12</td><td>12</td><td>17</td><td>8</td><td>13</td><td>60</td><td>63</td><td>high</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="score-note">同一公式适用于前端：Maturity 只组合完整度与合同/数据完整性，Health 只组合验证、可运维和可维护性。</p>
+      <h3>产品完整度与复杂度事实</h3>
+      <div class="table-scroll" role="region" aria-label="前端产品事实" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">域</th><th scope="col">冻结值</th><th scope="col">本地来源与口径</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">App Router</th><td>15 个 pages，<strong>7 个占位</strong> business pages</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/app/(app)/tasks/page.tsx#L1">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\app\(app)\tasks\page.tsx:1</a><br><code>page.tsx</code> 递归扫描；7 页导入 <code>PlaceholderPage</code>。</td></tr>
+            <tr><th scope="row">Frontend tests</th><td>47 个 test files</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\</a><br>递归计数 <code>*.test.ts</code> / <code>*.test.tsx</code>。</td></tr>
+            <tr><th scope="row">Store 口径</th><td><strong>14 个 no-op</strong> 旧扫描标签</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/stores/app-store.ts#L4">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\stores\app-store.ts:4</a><br>14 个文件仍带 <code>S0 stub / actions are no-ops</code> 自述；源码细分为 10 个显式 no-op/空对象 store，4 个已有局部状态或持久化更新。</td></tr>
+            <tr><th scope="row">QuickNote component domain</th><td>24 个 TypeScript/TSX files，10,349 行（约 10.3k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\</a></td></tr>
+            <tr><th scope="row">Sync library</th><td>22 个 files，4,862 行（约 4.9k）</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/lib/sync/">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\sync\</a></td></tr>
+            <tr><th scope="row"><code>createQuickNoteDraftSessionController</code></th><td>cyclomatic 85，cognitive 143</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
+            <tr><th scope="row"><code>useQuickNoteEditor</code></th><td>cyclomatic 65，cognitive 85</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a><br>保存的审计度量；当前树未发现可重放的原始 complexity artifact。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section id="findings" data-report-section>
+      <h2>Findings</h2>
+      <p class="scope-note">按严重度排列。主结论仅使用本地 65e2382 的源码与运行证据；远端修正只改变 status，不伪装成本地行为。</p>
+      <details class="finding" id="finding-f001" data-finding-id="F-001" data-severity="P1" data-status="open" data-evidence="source-verified" open>
+        <summary><span class="finding-title"><strong>F-001 · P1</strong> · <code>NEXT_PUBLIC_API_BASE</code> 未进入 rewrite</span><span class="finding-meta">open · source-verified</span></summary>
+        <div class="finding-body"><dl class="finding-grid">
+          <div><dt>Observed behavior</dt><dd><code>.env.local.example</code> 声明 API origin 可配置，但 <code>next.config.ts</code> 把 <code>/api/:path*</code> 始终转发到 <code>http://localhost:8000</code>。</dd></div>
+          <div><dt>Impact</dt><dd>非本地后端的生产构建无法通过环境配置选择 origin，发布后 API 请求会被转发到错误目标。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/next.config.ts#L11">E:\Development\MyAwesomeApp\PomodoroXII\frontend\next.config.ts:11</a></dd></div>
+          <div><dt>Verification</dt><dd><code>source-verified</code>；与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/.env.local.example#L7">E:\Development\MyAwesomeApp\PomodoroXII\frontend\.env.local.example:7</a> 的文档契约对照。</dd></div>
+          <div><dt>Recommendation</dt><dd>在 Next 配置评估期读取受控 origin，校验 URL，并为非本地值增加构建产物断言。</dd></div>
+          <div><dt>Exact acceptance gate</dt><dd><code>build with a non-local API origin and assert routes manifest uses it</code></dd></div>
+        </dl></div>
+      </details>
+      <details class="finding" id="finding-f002" data-finding-id="F-002" data-severity="P1" data-status="fixed-on-origin" data-evidence="remote-delta-verified" open>
+        <summary><span class="finding-title"><strong>F-002 · P1</strong> · 本地基线落后且携带过时失败断言</span><span class="finding-meta">fixed-on-origin · remote-delta-verified</span></summary>
+        <div class="finding-body"><dl class="finding-grid">
+          <div><dt>Observed behavior</dt><dd>本地 65e2382 落后 <code>origin/main@1e4f0fc</code> 11 commits；本地 QuickNote tombstone 集成测试仍期望 dirty 实体被删除，实际合并契约是保留本地并生成冲突。保存的 audit-time run 记录为 <code>541 passed, 1 failed</code>，Task 3 未重跑该 suite。</dd></div>
+          <div><dt>Impact</dt><dd>保存的本地 frontend gate 为红，无法作为可发布绿色基线；在未分类 2,176 个未跟踪路径前协调基线，会扩大冲突与本地工作遗失风险。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/lib/sync/quick-note-sync.integration.test.ts#L188">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\lib\sync\quick-note-sync.integration.test.ts:188</a></dd></div>
+          <div><dt>Verification</dt><dd><code>remote-delta-verified</code>；<code>787f4ee</code> 在远端把断言改为 active + dirty + one conflict，该变化未进入本地主结论。origin 的 542/542 未重跑，因此 <code>fixed-on-origin</code> 只表示 source-level fix，不是运行证明。</dd></div>
+          <div><dt>Recommendation</dt><dd>先盘点并保护未跟踪工作，再协调本地与 <code>origin/main</code>，最后在新基线重跑全量 gate。</dd></div>
+          <div><dt>Exact acceptance gate</dt><dd><code>reconcile origin, run npm test, require 542/542</code></dd></div>
+        </dl></div>
+      </details>
+      <details class="finding" id="finding-f003" data-finding-id="F-003" data-severity="P2" data-status="open" data-evidence="runtime-verified" open>
+        <summary><span class="finding-title"><strong>F-003 · P2</strong> · 后端测试沙箱无限保留且反馈过慢</span><span class="finding-meta">open · runtime-verified</span></summary>
+        <div class="finding-body"><dl class="finding-grid">
+          <div><dt>Observed behavior</dt><dd>fixture 为每次 suite 分配新 run root，并明确不在 fixture 或 session teardown 递归删除。审计冻结值为 <strong>423.7 MiB</strong> 保留产物，全量测试用时 <code>588.35s</code>。</dd></div>
+          <div><dt>Impact</dt><dd>每次 full run 持续增长 SQLite/space 文件，占用磁盘并放大 IO；每测试重绑定模块也使反馈接近 10 分钟。报告生成期 live recheck 已增至 459.0 MiB，该值不回写冻结评分；尚未约定数字化 full-suite 预算。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/conftest.py#L104">E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\conftest.py:104</a></dd></div>
+          <div><dt>Verification</dt><dd><code>runtime-verified</code>；<a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/test_test_isolation.py#L172">E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\test_test_isolation.py:172</a> 还以 AST 回归防止 <code>rmtree</code> 进入 fixture。</dd></div>
+          <div><dt>Recommendation</dt><dd>保留 per-test 隔离，但在 CI/workspace 外层实现边界可验证的 run-root retention，并建立 full-suite 时间预算。</dd></div>
+          <div><dt>Exact acceptance gate</dt><dd><code>two full runs leave no prior run root and stay within an agreed budget</code></dd></div>
+        </dl></div>
+      </details>
+      <details class="finding" id="finding-f004" data-finding-id="F-004" data-severity="P2" data-status="open" data-evidence="runtime-verified" open>
+        <summary><span class="finding-title"><strong>F-004 · P2</strong> · 2,176 个未跟踪路径污染工作区与根图</span><span class="finding-meta">open · runtime-verified</span></summary>
+        <div class="finding-body"><dl class="finding-grid">
+          <div><dt>Observed behavior</dt><dd><code>git status --short --untracked-files=all</code> 运行时摘要为恰好 <strong>2,176</strong> 行，全部是 <code>??</code>；其中包含 graph artifact、报告、文档与临时树。该命令计数没有伪造为某个源码行。</dd></div>
+          <div><dt>Impact</dt><dd>Git 审核面与 root graph 输入被生成物/文档放大，令变更审查、基线协调与代码级图结论失真。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///C:/Users/20564/.codex/sessions/2026/07/13/rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl#L493">C:\Users\20564\.codex\sessions\2026\07\13\rollout-2026-07-13T17-40-42-019f5ad9-9003-7432-92e7-22ef38877970.jsonl:493</a> 保存审计时 2,176 行命令记录；<a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.codebase-memory/artifact.json#L4">E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4</a> 只证明 stale graph artifact，不承载该路径数。</dd></div>
+          <div><dt>Verification</dt><dd><code>runtime-verified</code> untracked command summary；root graph 组成使用 saved audit-time evidence，本轮未重查 service，当前 readiness/composition 为 limited。</dd></div>
+          <div><dt>Recommendation</dt><dd>先分类和保护有价值 untracked 工作，再 ignore 或移出 generated output，之后从干净边界重建 root graph。</dd></div>
+          <div><dt>Exact acceptance gate</dt><dd><code>classify or ignore generated output, then clean reindex</code></dd></div>
+        </dl></div>
+      </details>
+      <details class="finding" id="finding-f005" data-finding-id="F-005" data-severity="P2" data-status="open" data-evidence="source-verified" open>
+        <summary><span class="finding-title"><strong>F-005 · P2</strong> · README 测试、CI、提交状态失真</span><span class="finding-meta">open · source-verified</span></summary>
+        <div class="finding-body"><dl class="finding-grid">
+          <div><dt>Observed behavior</dt><dd>README 仍声明 backend 621 tests、frontend 333 tests 与过时 commit <code>2db8cdd</code>，而冻结 gate 是 backend 783 passed 与 frontend 542 总数。“尚无 frontend job”对 local 65e2382 为真，但文档未标 ref/date，且在已增加 frontend workflow 的 origin/main 上已过时。</dd></div>
+          <div><dt>Impact</dt><dd>代理与所有者无法从入口文档得到可信的当前 gate、CI 范围和产品完整度，容易选错交付基线。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/README.md#L53">E:\Development\MyAwesomeApp\PomodoroXII\README.md:53</a> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/README.md#L76">E:\Development\MyAwesomeApp\PomodoroXII\README.md:76</a> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/README.md#L169">E:\Development\MyAwesomeApp\PomodoroXII\README.md:169</a> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/README.md#L239">E:\Development\MyAwesomeApp\PomodoroXII\frontend\README.md:239</a></dd></div>
+          <div><dt>Verification</dt><dd><code>source-verified</code>；与本报告 evidence ledger、Git snapshot 和 workflow source 对照。</dd></div>
+          <div><dt>Recommendation</dt><dd>从实际 gate/route/file scan 生成状态值，或在 CI 中检查 README 数值与当前基线一致。</dd></div>
+          <div><dt>Exact acceptance gate</dt><dd><code>docs values generated or checked against current gates</code></dd></div>
+        </dl></div>
+      </details>
+      <details class="finding" id="finding-f006" data-finding-id="F-006" data-severity="P2" data-status="open" data-evidence="source-verified" open>
+        <summary><span class="finding-title"><strong>F-006 · P2</strong> · QuickNote draft/editor 结构复杂度过高</span><span class="finding-meta">open · source-verified</span></summary>
+        <div class="finding-body"><dl class="finding-grid">
+          <div><dt>Observed behavior</dt><dd>保存审计度量记录 <code>createQuickNoteDraftSessionController</code> 为 cyclomatic 85 / cognitive 143，<code>useQuickNoteEditor</code> 为 cyclomatic 65 / cognitive 85；两者同时承担生命周期、并发、冲突和 UI 编排。</dd></div>
+          <div><dt>Impact</dt><dd>QuickNote 已是前端主导实现域，过高分支与状态耦合使小改动容易破坏 autosave、flush、remote conflict 或 focus/read 切换。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/use-quick-note-draft-session.ts#L163">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-draft-session.ts:163</a> · <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/src/components/quick-notes/use-quick-note-editor.ts#L25">E:\Development\MyAwesomeApp\PomodoroXII\frontend\src\components\quick-notes\use-quick-note-editor.ts:25</a></dd></div>
+          <div><dt>Verification</dt><dd><code>source-verified</code> 函数边界与责任集中；复杂度数值使用保存审计度量，当前树未发现其原始产物，因此不声称本轮已重算。</dd></div>
+          <div><dt>Recommendation</dt><dd>按 draft lane、persistence/flush、conflict decision 与 editor presentation 分拆责任，保留现有 focused regression tests。</dd></div>
+          <div><dt>Exact acceptance gate</dt><dd><code>split responsibilities and keep focused tests green</code></dd></div>
+        </dl></div>
+      </details>
+      <details class="finding" id="finding-f007" data-finding-id="F-007" data-severity="P3" data-status="open" data-evidence="runtime-verified" open>
+        <summary><span class="finding-title"><strong>F-007 · P3</strong> · Next 内嵌 PostCSS：2 moderate vulnerability entries / 1 distinct GHSA</span><span class="finding-meta">open · runtime-verified</span></summary>
+        <div class="finding-body"><dl class="finding-grid">
+          <div><dt>Observed behavior</dt><dd>brief 的“Next 内嵌 PostCSS 命中两个 moderate advisory”是旧口径。<code>npm audit --omit=dev</code> 实际返回 2 moderate vulnerability entries（Next + transitive PostCSS）、0 high、0 critical；它们对应 1 个独立 advisory <code>GHSA-qx2v-qp2m-jg93</code>，锁文件将 Next 内嵌 PostCSS 固定为 <code>8.4.31</code>。</dd></div>
+          <div><dt>Impact</dt><dd>产品依赖树保留已知 advisory，尽管严重度不是 high/critical，仍阻断“无已知产品依赖漏洞”的发布声明。</dd></div>
+          <div><dt>Source path and line</dt><dd><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/package-lock.json#L9576">E:\Development\MyAwesomeApp\PomodoroXII\frontend\package-lock.json:9576</a></dd></div>
+          <div><dt>Verification</dt><dd><code>runtime-verified</code>；生产依赖 audit 与 <a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/frontend/package-lock.json#L9514">E:\Development\MyAwesomeApp\PomodoroXII\frontend\package-lock.json:9514</a> 的 Next dependency path 对照。</dd></div>
+          <div><dt>Recommendation</dt><dd>升级到包含 PostCSS ≥ 8.5.10 的受支持 Next dependency graph；不盲从 npm 的 downgrade 建议。若暂时不可升级，记录具有适用性与到期条件的例外。</dd></div>
+          <div><dt>Exact acceptance gate</dt><dd><code>npm audit --omit=dev returns no known advisory or documented exception</code></dd></div>
+        </dl></div>
+      </details>
+    </section>
+    <section id="delivery" data-report-section>
+      <h2>测试、CI 与交付</h2>
+      <h3>跨切面评分</h3>
+      <div class="table-scroll" role="region" aria-label="跨切面评分" tabindex="0">
+        <table class="module-table">
+          <thead><tr><th scope="col">Module</th><th scope="col">能力</th><th scope="col">完整度</th><th scope="col">完整性</th><th scope="col">验证</th><th scope="col">可运维</th><th scope="col">可维护</th><th scope="col">Maturity</th><th scope="col">Health</th><th scope="col">Confidence</th></tr></thead>
+          <tbody>
+            <tr data-module-id="x-test-infra" data-maturity="83" data-health="58" data-confidence="high"><th scope="row"><code>x-test-infra</code></th><td>Test Infrastructure</td><td>17</td><td>16</td><td>19</td><td>8</td><td>8</td><td>83</td><td>58</td><td>high</td></tr>
+            <tr data-module-id="x-ci-delivery" data-maturity="73" data-health="68" data-confidence="medium"><th scope="row"><code>x-ci-delivery</code></th><td>CI / Docker / Release</td><td>14</td><td>15</td><td>16</td><td>11</td><td>14</td><td>73</td><td>68</td><td>medium</td></tr>
+            <tr data-module-id="x-docs" data-maturity="50" data-health="47" data-confidence="high"><th scope="row"><code>x-docs</code></th><td>README / Status Truth</td><td>11</td><td>9</td><td>9</td><td>8</td><td>11</td><td>50</td><td>47</td><td>high</td></tr>
+            <tr data-module-id="x-repo-index" data-maturity="60" data-health="50" data-confidence="high"><th scope="row"><code>x-repo-index</code></th><td>Worktree / CBM Artifact</td><td>13</td><td>11</td><td>13</td><td>7</td><td>10</td><td>60</td><td>50</td><td>high</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>本地 gate 与交付覆盖</h3>
+      <div class="table-scroll" role="region" aria-label="本地交付矩阵" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">表面</th><th scope="col">本地 65e2382 结果</th><th scope="col">结论</th><th scope="col">证据</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Backend tests/static</th><td><code>783 passed, 1 xfailed, 2 warnings in 588.35s</code>；Ruff passed</td><td>功能绿，反馈过慢</td><td><code>runtime-verified</code></td></tr>
+            <tr><th scope="row">Python dependencies</th><td>compatibility passed；无已知漏洞，本地未发布 package skipped</td><td>通过，保留 skip 边界</td><td><code>runtime-verified</code></td></tr>
+            <tr><th scope="row">Frontend static/build</th><td>ESLint passed；TypeScript passed；production build passed，19 routes</td><td>构建绿</td><td><code>runtime-verified</code></td></tr>
+            <tr><th scope="row">Frontend tests</th><td><code>541 passed, 1 failed</code><br>saved audit-time run; Task 3 未重跑</td><td>保存的本地基线红</td><td><code>runtime-verified</code> with freshness limit</td></tr>
+            <tr><th scope="row">Production dependency audit</th><td>2 moderate，0 high，0 critical</td><td>需升级或例外记录</td><td><code>runtime-verified</code></td></tr>
+            <tr><th scope="row">Local workflow source</th><td>pytest + Ruff；main push 后 Docker build/push；<code>/api/health</code> smoke</td><td>只覆盖 backend 与 liveness</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.github/workflows/ci.yml#L41">E:\Development\MyAwesomeApp\PomodoroXII\.github\workflows\ci.yml:41</a></td></tr>
+            <tr><th scope="row">Docker/runtime</th><td>non-root user，data volume，Compose healthcheck</td><td>有本地部署基座；readiness 与 ingress hardening 仅在远端差异</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/Dockerfile#L37">E:\Development\MyAwesomeApp\PomodoroXII\backend\Dockerfile:37</a></td></tr>
+            <tr><th scope="row">GitHub live run</th><td>未查证，<code>gh</code> 未认证</td><td>不声称外部 CI 绿</td><td><code>unverified</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section id="index-health" data-report-section>
+      <h2>仓库与索引健康</h2>
+      <p class="scope-note">以下 live graph 数值是审计时保存的 same-day status response；本轮未重查 Codebase Memory service，因此当前时刻的 readiness 为 limited，不作新鲜运行声明。</p>
+      <div class="table-scroll" role="region" aria-label="Codebase Memory 图状态" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">图/产物</th><th scope="col">Nodes</th><th scope="col">Edges</th><th scope="col">状态</th><th scope="col">用途</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Root live graph</th><td>11,156</td><td>24,653</td><td>ready</td><td>定位与全局关联；文档/报告稀释明显</td></tr>
+            <tr><th scope="row">Backend clean graph</th><td>2,476</td><td>12,526</td><td>ready</td><td>后端 code claims</td></tr>
+            <tr><th scope="row">Frontend clean graph</th><td>1,701</td><td>3,648</td><td>ready</td><td>前端 code claims</td></tr>
+            <tr><th scope="row">Repository artifact</th><td>2,391</td><td>10,081</td><td>stale · 2026-07-05</td><td><a class="evidence-link" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.codebase-memory/artifact.json#L4">E:\Development\MyAwesomeApp\PomodoroXII\.codebase-memory\artifact.json:4</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li>审计时 CLI 导出证据：<code>incremental.dump rc=-1</code>；<code>artifact.export err=write_artifact</code>。本轮未重跑 CLI；保存的 live graph ready 不等于 repository artifact 已刷新。</li>
+        <li>审计冻结值包含 <strong>423.7 MiB</strong> retained test artifacts；报告生成期 live recheck 为 459.0 MiB / 6 run roots，说明保留仍在增长。</li>
+        <li>Root graph 吸收大量文档、审计报告与未跟踪输出；本报告的代码级结论使用 clean backend/frontend subgraphs 与 live source 交叉核对。</li>
+        <li>2,176 个 untracked paths 是当时 runtime snapshot；未分类前不删除、不覆盖。</li>
+      </ul>
+    </section>
+    <section id="remote-delta" data-report-section>
+      <h2>origin/main 差异</h2>
+      <p><strong>边界：</strong>以下都是 <code>65e2382..1e4f0fc</code> 的 11-commit Remote Delta，不是本地 65e2382 的行为，不进入本地成熟度和 gate 结论。</p>
+      <div class="table-scroll" role="region" aria-label="远端新增能力" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">远端新增</th><th scope="col">变更</th><th scope="col">证据</th><th scope="col">本地处理</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Frontend CI</th><td>新增 frontend quality workflow，并保证 required check 始终汇报</td><td><code>d50c27c</code> + <code>751a9dc</code> · remote-delta-verified</td><td>本地 workflow 仍只作 backend 结论</td></tr>
+            <tr><th scope="row">Production ingress hardening</th><td>新增 body-size limit、rate limit 与 production settings/ingress 加固</td><td><code>402769c</code> · remote-delta-verified</td><td>不提升本地 <code>be-deploy</code> 评分</td></tr>
+            <tr><th scope="row">Readiness smoke</th><td>远端区分 readiness 与 liveness，并增加 production hardening tests/smoke</td><td><code>402769c</code> · remote-delta-verified</td><td>本地仍只有 <code>/api/health</code> smoke</td></tr>
+            <tr><th scope="row">QuickNote tombstone assertion</th><td>改为保留 dirty local entity 并断言 one version conflict</td><td><code>787f4ee</code> · remote-delta-verified</td><td>F-002 标记 <code>fixed-on-origin</code>，本地 gate 仍是 541/1</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section id="actions" data-report-section>
+      <h2>优先行动</h2>
+      <ol class="action-horizons">
+        <li>
+          <h3>Baseline recovery</h3>
+          <p>保护未跟踪工作，协调 <code>origin/main</code>，重跑全部 gates。</p>
+          <dl><dt>Owner type</dt><dd>Repository maintainer + release integrator</dd><dt>Dependencies</dt><dd>2,176 路径分类清单；Remote Delta review</dd><dt>Acceptance command</dt><dd><code>git status --short --untracked-files=all</code> 对应获批清单；协调后 backend/full frontend gates 全绿，frontend 为 542/542</dd><dt>Expected risk reduction</dt><dd>消除本地/远端双重真相与过时失败基线。</dd></dl>
+        </li>
+        <li>
+          <h3>Release blockers</h3>
+          <p>修复 API origin 配置、测试 artifact 生命周期与 status truth。</p>
+          <dl><dt>Owner type</dt><dd>Frontend/platform + test infrastructure + documentation owners</dd><dt>Dependencies</dt><dd>新基线已协调；定义 retention 边界和 full-suite 预算</dd><dt>Acceptance command</dt><dd>非本地 origin 构建 manifest 断言；连续两次 full pytest 不保留前次 root；README/status check 与实际 gates 一致</dd><dt>Expected risk reduction</dt><dd>将 NO-GO 的发布配置、磁盘增长和信息失真风险转为可重现 gate。</dd></dl>
+        </li>
+        <li>
+          <h3>Architecture debt</h3>
+          <p>分拆 QuickNote state machines，降低 sync hot-path 复杂度，按明确产品 slices 实现业务 UI。</p>
+          <dl><dt>Owner type</dt><dd>Frontend domain + sync architecture owners</dd><dt>Dependencies</dt><dd>发布 blockers 闭环；保留 QuickNote focused regression suite</dd><dt>Acceptance command</dt><dd>QuickNote draft/editor focused tests + sync merge/outbox/pull tests 全绿；每个业务 page slice 有真实 store/repository 验收</dd><dt>Expected risk reduction</dt><dd>缩小 autosave/conflict 回归半径，并使前端完整度按可验收切片增长。</dd></dl>
+        </li>
+      </ol>
+    </section>
+    <section id="methodology" data-report-section>
+      <h2>评分与证据方法</h2>
+      <p>五个显式维度均为 0–20：functional completeness、contract/data integrity、automated verification、operability/delivery、maintainability。</p>
+      <ul>
+        <li><code>Maturity = round(((completeness + integrity) / 40) * 100)</code></li>
+        <li><code>Health = round(((verification + operability + maintainability) / 60) * 100)</code></li>
+        <li>Confidence 反映本次源码、runtime、图与远端差异的交叉验证强度，不是统计置信区间。</li>
+        <li>主快照始终是 local <code>65e2382</code>；<code>origin/main@1e4f0fc</code> 的 11 commits 只出现在 Remote Delta。</li>
+        <li>证据标签为 <code>runtime-verified</code>、<code>source-verified</code>、<code>remote-delta-verified</code> 或 <code>unverified</code>。历史报告不覆盖当前源码与 gate。</li>
+      </ul>
+    </section>
   </main>
   <script>document.documentElement.dataset.theme = 'light'</script>
 </body>
