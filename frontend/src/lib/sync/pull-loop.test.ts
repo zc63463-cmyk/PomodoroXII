@@ -50,6 +50,26 @@ function taskRow(id: string, dirty: boolean) {
   } as unknown as Parameters<PomodoroXIDB['tasks']['put']>[0]
 }
 
+function taskWireRow(id: string, updatedAt = '2026-07-06T12:00:00.000Z') {
+  return {
+    id,
+    title: id,
+    description: '',
+    status: 'todo',
+    priority: 'medium',
+    tags: [],
+    plan: '',
+    completion: '',
+    due_date: null,
+    estimated_pomodoros: 1,
+    actual_pomodoros: 0,
+    archived_at: null,
+    created_at: updatedAt,
+    updated_at: updatedAt,
+    version: 1,
+  }
+}
+
 function page1Data() {
   return {
     server_time: '2026-07-06T12:00:00.000Z',
@@ -433,10 +453,7 @@ describe('pull-loop', () => {
           next_cursor: 200,
           snapshot_token: token,
           snapshot_offset: 1,
-          tasks: [{
-            id: 'page-one', title: 'one', status: 'todo',
-            updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
-          }],
+          tasks: [taskWireRow('page-one')],
         }, config)
       }
       throw new Error('browser stopped after committed page')
@@ -476,10 +493,7 @@ describe('pull-loop', () => {
         next_cursor: 200,
         snapshot_token: token,
         snapshot_offset: 2,
-        tasks: [{
-          id: 'page-two', title: 'two', status: 'todo',
-          updated_at: '2026-07-06T12:01:00.000Z', deletion_state: 'active', version: 1,
-        }],
+        tasks: [taskWireRow('page-two', '2026-07-06T12:01:00.000Z')],
       }, config)
     }
 
@@ -506,10 +520,7 @@ describe('pull-loop', () => {
       next_cursor: 300,
       snapshot_token: token,
       snapshot_offset: 1,
-      tasks: [{
-        id: 'rolled-back', title: 'rollback', status: 'todo',
-        updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
-      }],
+      tasks: [taskWireRow('rolled-back')],
     }, config)
 
     await expect(runPullLoop(db, spaceApi, { isFull: true, limit: 1 })).rejects.toThrow(
@@ -586,10 +597,7 @@ describe('pull-loop', () => {
           next_cursor: 200,
           snapshot_token: token,
           snapshot_offset: 1,
-          tasks: [{
-            id: 'page-one', title: 'one', status: 'todo',
-            updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
-          }],
+          tasks: [taskWireRow('page-one')],
         }, config)
       }
       vi.spyOn(db.syncMeta, 'bulkPut').mockImplementation(((entries: Parameters<typeof db.syncMeta.bulkPut>[0]) => {
@@ -604,10 +612,7 @@ describe('pull-loop', () => {
         snapshot_token: token,
         snapshot_offset: 2,
         recovery_proof: 'terminal-proof-200',
-        tasks: [{
-          id: 'terminal-row', title: 'terminal', status: 'todo',
-          updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
-        }],
+        tasks: [taskWireRow('terminal-row')],
       }, config)
     }
 
@@ -702,6 +707,49 @@ describe('pull-loop', () => {
     expect(meta.pendingAckCursor).toBeNull()
   })
 
+  it('PL30: 中间畸形实体使整页在 transaction 前拒绝且不产生 ACK/proof', async () => {
+    db = await openTestDb()
+    await saveSyncMeta(db, { cursor: 10, cursorVersion: 2 })
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const page = {
+        ...cursorSinglePage(),
+        next_cursor: 20,
+        tasks: [
+          {
+            id: 'valid-before-invalid', title: 'valid', description: '', status: 'todo', priority: 'medium',
+            tags: [], plan: '', completion: '', due_date: null, estimated_pomodoros: 1,
+            actual_pomodoros: 0, archived_at: null, created_at: '2026-07-06T12:00:00.000Z',
+            updated_at: '2026-07-06T12:00:00.000Z', version: 1,
+          },
+          {
+            id: 'invalid-middle', title: 'invalid', description: '', status: 'corrupted', priority: 'medium',
+            tags: [], plan: '', completion: '', due_date: null, estimated_pomodoros: 1,
+            actual_pomodoros: 0, archived_at: null, created_at: '2026-07-06T12:00:00.000Z',
+            updated_at: '2026-07-06T12:00:00.000Z', version: 1,
+          },
+          {
+            id: 'valid-after-invalid', title: 'valid', description: '', status: 'todo', priority: 'medium',
+            tags: [], plan: '', completion: '', due_date: null, estimated_pomodoros: 1,
+            actual_pomodoros: 0, archived_at: null, created_at: '2026-07-06T12:00:00.000Z',
+            updated_at: '2026-07-06T12:00:00.000Z', version: 1,
+          },
+        ],
+      }
+      for (const key of SYNC_PULL_KEYS) (page as Record<string, unknown>)[key] ??= []
+      return { data: page, status: 200, statusText: 'OK', headers: {}, config }
+    }
+
+    await expect(runPullLoop(db, spaceApi)).rejects.toThrow('invalid structure')
+
+    expect(await db.tasks.get('valid-before-invalid')).toBeUndefined()
+    expect(await db.tasks.get('invalid-middle')).toBeUndefined()
+    expect(await db.tasks.get('valid-after-invalid')).toBeUndefined()
+    const meta = await loadSyncMeta(db)
+    expect(meta.cursor).toBe(10)
+    expect(meta.pendingAckCursor).toBeNull()
+    expect(meta.pendingAckRecoveryProof).toBeNull()
+  })
+
   it('PL21: reconcile 失败会回滚终页 merge、cursor 与 lastFullSync', async () => {
     db = await openTestDb()
     await saveSyncMeta(db, { cursor: 7, cursorVersion: 2, lastFullSync: 'old-full' })
@@ -711,10 +759,7 @@ describe('pull-loop', () => {
       throw new Error('reconcile failed')
     })
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => ok({
-      ...cursorSinglePage(), next_cursor: 99, tasks: [{
-        id: 'terminal-row', title: 'terminal', status: 'todo',
-        updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
-      }],
+      ...cursorSinglePage(), next_cursor: 99, tasks: [taskWireRow('terminal-row')],
     }, config)
 
     await expect(runPullLoop(db, spaceApi, { isFull: true })).rejects.toThrow('reconcile failed')

@@ -56,6 +56,27 @@ function singlePageData() {
   }
 }
 
+function taskWireRow(id: string, title = id) {
+  const timestamp = '2026-07-06T12:00:00.000Z'
+  return {
+    id,
+    title,
+    description: '',
+    status: 'todo',
+    priority: 'medium',
+    tags: [],
+    plan: '',
+    completion: '',
+    due_date: null,
+    estimated_pomodoros: 1,
+    actual_pomodoros: 0,
+    archived_at: null,
+    created_at: timestamp,
+    updated_at: timestamp,
+    version: 1,
+  }
+}
+
 /** 两页 pull 响应：page1 has_more=true */
 function page1Data() {
   return {
@@ -226,9 +247,7 @@ describe('RealSyncEngine', () => {
         return ok(
           {
             ...singlePageData(),
-            tasks: [
-              { id: 't1', updated_at: '2026-07-06T12:00:00.000Z', title: 'remote' },
-            ],
+            tasks: [taskWireRow('t1', 'remote')],
           },
           config,
         )
@@ -415,9 +434,7 @@ describe('RealSyncEngine', () => {
         return ok(
           {
             ...singlePageData(),
-            tasks: [
-              { id: 't1', updated_at: '2026-07-06T12:00:00.000Z', title: 'remote' },
-            ],
+            tasks: [taskWireRow('t1', 'remote')],
           },
           config,
         )
@@ -458,9 +475,7 @@ describe('RealSyncEngine', () => {
         return ok(
           {
             ...singlePageData(),
-            tasks: [
-              { id: 't1', updated_at: '2026-07-06T12:00:00.000Z', title: 'remote' },
-            ],
+            tasks: [taskWireRow('t1', 'remote')],
           },
           config,
         )
