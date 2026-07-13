@@ -164,8 +164,7 @@ interface CleanupPendingReceipt {
   note: QuickNote
   closeAfterCleanup: boolean
   visibility: 'refreshed' | 'pending'
-  cleanupPending: boolean
-  authorityPending: boolean
+  stage: 'authority' | 'cleanup' | 'projection'
   recovery: QuickNoteExistingEditSnapshotV1
   recoveryBaseGeneration: number
 }
@@ -309,6 +308,8 @@ export function createQuickNoteExistingEditSessionController(
   let terminalFlight: ExistingEditTerminalFlight | null = null
   let unavailableLifecycle: QuickNoteLifecycleState | 'missing' | null = null
   let projectionGeneration = 0
+  let observedProjectionKey: string | null = null
+  let projectionStage: 'idle' | 'post-update-authority' = 'idle'
   let snapshot = RESTORING_STATE
 
   function append<T>(work: () => Promise<T>): Promise<T> {
@@ -341,6 +342,16 @@ export function createQuickNoteExistingEditSessionController(
     return owner.kind === 'raw'
       ? `raw:${owner.value}`
       : `v1:${owner.editId}:${owner.revision}`
+  }
+
+  function projectionKey(
+    noteId: string,
+    lifecycle: QuickNoteLifecycleState | 'missing',
+    note: QuickNote | null,
+  ): string {
+    return lifecycle === 'active' && note
+      ? `${noteId}:active:${note.content}:${note.updated_at}`
+      : `${noteId}:${lifecycle}`
   }
 
   function rememberRecoveryOwner(owner: ExistingEditRowOwner): void {
@@ -1030,6 +1041,72 @@ export function createQuickNoteExistingEditSessionController(
     }
   }
 
+  function queueNormalizedEqualityCleanup(
+    capture: ExistingEditCheckpointCapture,
+    activeNote: QuickNote,
+  ): void {
+    if (identity === null) return
+    const attemptedOwner: ExistingEditRowOwner = {
+      kind: 'v1',
+      editId: capture.editId,
+      revision: capture.revision,
+    }
+    const owners = mergeOwners(
+      [...recoveryOwners],
+      cleanupReceipt?.editId === capture.editId ? cleanupReceipt.owners : [],
+      [attemptedOwner],
+    )
+
+    observeBackgroundWork(append(async () => {
+      let cleanupResult: 'cleared' | 'absent' | 'different-edit'
+      try {
+        cleanupResult = await adapter.clearIfOwned(owners)
+      } catch {
+        cleanupResult = 'different-edit'
+      }
+      if (cleanupResult === 'different-edit') {
+        if (isCurrentCapture(capture)) {
+          publish({
+            ...snapshot,
+            phase: 'dirty',
+            durability: 'memory-only',
+            issue: createIssue('recovery-cleanup-failed', 'memory-only'),
+          })
+        }
+        return
+      }
+      if (!isCurrentCapture(capture) || identity === null) return
+
+      resetRecoveryOwners()
+      identity = {
+        ...identity,
+        baseContent: activeNote.content,
+        baseUpdatedAt: activeNote.updated_at,
+        baseGeneration: identity.baseGeneration + 1,
+      }
+      unavailableLifecycle = null
+      cleanupReceipt = null
+      publish({
+        phase: 'saved',
+        durability: 'entity-durable',
+        editingNote: activeNote,
+        draft: activeNote.content,
+        conflict: null,
+        issue: null,
+      })
+      try {
+        onSaved(activeNote)
+      } catch {
+        if (isCurrentCapture({ ...capture, content: activeNote.content })) {
+          publish({
+            ...snapshot,
+            issue: createIssue('projection-failed', 'entity-durable'),
+          })
+        }
+      }
+    }))
+  }
+
   function queueCleanReactivation(
     capture: ExistingEditCheckpointCapture,
     activeNote: QuickNote,
@@ -1123,12 +1200,15 @@ export function createQuickNoteExistingEditSessionController(
       }
       return { kind: 'failed' }
     }
-    if (projectionGeneration !== readGeneration) {
-      return { kind: 'superseded' }
-    }
     const lifecycle = target.lifecycle === 'active' && target.note === null
       ? 'missing'
       : target.lifecycle
+    if (
+      projectionGeneration !== readGeneration
+      && projectionKey(noteId, lifecycle, target.note) !== observedProjectionKey
+    ) {
+      return { kind: 'superseded' }
+    }
     if (lifecycle !== 'active' || target.note === null) {
       return { kind: 'unavailable', lifecycle }
     }
@@ -1404,11 +1484,13 @@ export function createQuickNoteExistingEditSessionController(
       ? identity.baseGeneration
       : recoveryBaseGeneration
 
+    projectionStage = 'post-update-authority'
     const authority = await reconcileProjectionChange(
       projectionGenerationBeforeUpdate,
       capture.noteId,
       update.note,
     )
+    projectionStage = 'idle'
     if (authority.kind === 'active-changed') {
       const conflict = publishConflict(
         capture,
@@ -1458,8 +1540,7 @@ export function createQuickNoteExistingEditSessionController(
         note: update.note,
         closeAfterCleanup: flight.closeAfterSave,
         visibility: 'pending',
-        cleanupPending: true,
-        authorityPending: true,
+        stage: 'authority',
         recovery,
         recoveryBaseGeneration: committedRecoveryBaseGeneration,
       }
@@ -1549,8 +1630,7 @@ export function createQuickNoteExistingEditSessionController(
       note: update.note,
       closeAfterCleanup: flight.closeAfterSave,
       visibility,
-      cleanupPending: cleanupFailed,
-      authorityPending: false,
+      stage: cleanupFailed ? 'cleanup' : 'projection',
       recovery,
       recoveryBaseGeneration: committedRecoveryBaseGeneration,
     }
@@ -1643,20 +1723,17 @@ export function createQuickNoteExistingEditSessionController(
     receipt: CleanupPendingReceipt,
   ): Promise<QuickNoteExistingEditSaveResult> {
     receipt.closeAfterCleanup ||= flight.closeAfterSave
-    const wasAuthorityPending = receipt.authorityPending
+    const wasAuthorityPending = receipt.stage === 'authority'
+    let authorityConflict: QuickNote | null = null
 
-    if (receipt.authorityPending) {
+    if (receipt.stage === 'authority') {
       const authority = await readProjectionAuthority(
         flight.capture.noteId,
         receipt.note,
       )
       if (authority.kind === 'active-changed') {
-        const conflict = publishConflict(
-          flight.capture,
-          authority.note,
-          latestDurability(flight.capture, 'entity-durable'),
-        )
-        return { kind: 'conflict', conflict }
+        authorityConflict = authority.note
+        receipt.stage = 'cleanup'
       }
       if (authority.kind === 'unavailable') {
         unavailableLifecycle = authority.lifecycle
@@ -1674,13 +1751,14 @@ export function createQuickNoteExistingEditSessionController(
         return { kind: 'unavailable', lifecycle: authority.lifecycle }
       }
       if (authority.kind === 'failed' || authority.kind === 'superseded') {
+        receipt.stage = 'authority'
         return {
           kind: 'saved',
           note: receipt.note,
           visibility: 'pending',
         }
       }
-      receipt.authorityPending = false
+      receipt.stage = 'cleanup'
     }
 
     const projectionGenerationBeforeCleanup = projectionGeneration
@@ -1701,6 +1779,18 @@ export function createQuickNoteExistingEditSessionController(
         latestDurability(flight.capture, 'entity-durable'),
       )
       return { kind: 'failed', issue }
+    }
+
+    if (authorityConflict) {
+      resetRecoveryOwners()
+      receipt.stage = 'projection'
+      if (cleanupReceipt === receipt) cleanupReceipt = null
+      const conflict = publishConflict(
+        flight.capture,
+        authorityConflict,
+        latestDurability(flight.capture, 'entity-durable'),
+      )
+      return { kind: 'conflict', conflict }
     }
 
     const authority = await reconcileAfterDestructiveCleanup({
@@ -1744,13 +1834,12 @@ export function createQuickNoteExistingEditSessionController(
       return preserveCurrentConflict()
     }
 
-    receipt.cleanupPending = false
+    receipt.stage = 'projection'
     await preserveSuccessorAfterCleanup(flight.capture)
 
     if (
       receipt.visibility === 'pending'
       && wasAuthorityPending
-      && !receipt.authorityPending
     ) {
       try {
         onSaved(receipt.note)
@@ -1827,7 +1916,7 @@ export function createQuickNoteExistingEditSessionController(
 
     if (cleanupReceipt && isCurrentReceipt(cleanupReceipt)) {
       cleanupReceipt.closeAfterCleanup ||= closeAfterSave
-      if (!cleanupReceipt.cleanupPending) {
+      if (cleanupReceipt.stage === 'projection') {
         const receipt = cleanupReceipt
         if (receipt.closeAfterCleanup) closeCurrentEdit()
         return Promise.resolve({
@@ -1842,12 +1931,12 @@ export function createQuickNoteExistingEditSessionController(
       if (!capture) {
         return Promise.resolve({ kind: 'busy', operation: 'save' })
       }
-      const promise = append(() => runCleanupReceipt(flight, receipt))
-      const flight: ExistingEditSaveFlight = {
+      const flight = {
         capture,
         closeAfterSave,
-        promise,
-      }
+      } as ExistingEditSaveFlight
+      const promise = append(() => runCleanupReceipt(flight, receipt))
+      flight.promise = promise
       trackSaveFlight(flight)
       return promise
     }
@@ -1872,12 +1961,12 @@ export function createQuickNoteExistingEditSessionController(
     if (!capture) {
       return Promise.resolve({ kind: 'busy', operation: 'save' })
     }
-    const promise = append(() => runSave(flight))
-    const flight: ExistingEditSaveFlight = {
+    const flight = {
       capture,
       closeAfterSave,
-      promise,
-    }
+    } as ExistingEditSaveFlight
+    const promise = append(() => runSave(flight))
+    flight.promise = promise
     trackSaveFlight(flight)
     if (isCurrentCapture(capture)) {
       publish({
@@ -2231,8 +2320,6 @@ export function createQuickNoteExistingEditSessionController(
 
   function observeProjection(input: ExistingEditProjection): void {
     if (!active || identity === null) return
-    projectionGeneration += 1
-    const observedGeneration = projectionGeneration
     const noteId = identity.noteId
     const activeNote = input.quickNotes.find((note) => note.id === noteId)
     const trashedNote = input.trashedQuickNotes.find(
@@ -2244,9 +2331,32 @@ export function createQuickNoteExistingEditSessionController(
       : trashedNote
         ? recordedLifecycle ?? 'trashed'
         : recordedLifecycle ?? 'missing'
+    const nextProjectionKey = projectionKey(noteId, lifecycle, activeNote ?? trashedNote ?? null)
+    if (nextProjectionKey === observedProjectionKey) return
+    observedProjectionKey = nextProjectionKey
+    projectionGeneration += 1
+    const observedGeneration = projectionGeneration
 
     if (lifecycle === 'active' && !activeNote) return
     if (lifecycle === 'active' && activeNote) {
+      if (
+        projectionStage === 'post-update-authority'
+        && cleanupReceipt === null
+        && snapshot.phase === 'saving'
+      ) {
+        if (normalizeContent(snapshot.draft) !== normalizeContent(activeNote.content)) {
+          return
+        }
+        publish({
+          ...snapshot,
+          phase: 'saved',
+          durability: 'entity-durable',
+          editingNote: activeNote,
+          conflict: null,
+          issue: null,
+        })
+        return
+      }
       const baseChanged =
         activeNote.content !== identity.baseContent
         || activeNote.updated_at !== identity.baseUpdatedAt
@@ -2302,6 +2412,14 @@ export function createQuickNoteExistingEditSessionController(
         || snapshot.phase === 'target-unavailable'
       cancelTrailingTimers()
       unavailableLifecycle = null
+      if (
+        hasLocalWork
+        && normalizeContent(snapshot.draft) === normalizeContent(activeNote.content)
+      ) {
+        const capture = captureCurrentRevision()
+        if (capture) queueNormalizedEqualityCleanup(capture, activeNote)
+        return
+      }
       if (hasLocalWork) {
         const durability = hasCurrentDurableRecoveryOwner()
           ? 'recovery-durable'
