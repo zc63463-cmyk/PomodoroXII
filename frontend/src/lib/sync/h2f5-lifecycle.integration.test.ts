@@ -38,6 +38,8 @@ function snapshotPage(
     cursor_version: 2,
     snapshot_token: token,
     snapshot_offset: offset,
+    recovery_continuation: hasMore ? `continuation-${offset}` : null,
+    recovery_proof: hasMore ? null : `proof-${cursor}`,
     tasks: [{
       id: taskId,
       title: taskId,
@@ -91,10 +93,15 @@ describe('H2-F5 frontend lifecycle integration', () => {
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       const url = config.url ?? ''
       calls.push(url)
-      if (url.includes('/sync/clients')) return ok(registration(config), config)
+      if (url.includes('/sync/clients')) {
+        return ok({ ...registration(config), snapshot_required: true }, config)
+      }
       if (url.includes('/sync/full')) {
         expect((config.params as Record<string, unknown>).snapshot_token).toBe(token)
         expect((config.params as Record<string, unknown>).snapshot_offset).toBe(1)
+        expect((config.params as Record<string, unknown>).recovery_continuation).toBe(
+          'continuation-1',
+        )
         return ok(snapshotPage(token, 2, 20, false, 'page-two'), config)
       }
       if (url.includes('/sync/ack')) {
@@ -157,6 +164,7 @@ describe('H2-F5 frontend lifecycle integration', () => {
       snapshotOffset: 1,
       snapshotCursor: 20,
       snapshotRecoveryVersion: 1,
+      snapshotContinuation: 'damaged-continuation',
     })
     await db.snapshotSeen.put({ snapshotToken: staleToken, tableName: 'tasks', entityId: 'stale' })
     await db.outbox.add({
@@ -172,7 +180,9 @@ describe('H2-F5 frontend lifecycle integration', () => {
         url,
         token: (config.params as Record<string, unknown> | undefined)?.snapshot_token,
       })
-      if (url.includes('/sync/clients')) return ok(registration(config), config)
+      if (url.includes('/sync/clients')) {
+        return ok({ ...registration(config), snapshot_required: true }, config)
+      }
       if (url.includes('/sync/full')) {
         fullCalls++
         throw {

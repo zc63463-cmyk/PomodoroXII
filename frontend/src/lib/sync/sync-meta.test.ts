@@ -216,17 +216,22 @@ describe('sync-meta', () => {
     expect(meta.pendingAckCursor).toBe(11)
   })
 
-  it('SM14: recordPendingAck 只保留最大值，clearPendingAck 不误删更新后的更大值', async () => {
+  it('SM14: pending cursor+proof 原子持久化，且不被较小或无 proof 的同 cursor 覆盖', async () => {
     db = await openTestDb()
 
+    await recordPendingAck(db, 20, 'terminal-proof')
+    await recordPendingAck(db, 10, 'older-proof')
     await recordPendingAck(db, 20)
-    await recordPendingAck(db, 10)
-    expect((await loadSyncMeta(db)).pendingAckCursor).toBe(20)
+    let meta = await loadSyncMeta(db)
+    expect(meta.pendingAckCursor).toBe(20)
+    expect(meta.pendingAckRecoveryProof).toBe('terminal-proof')
 
     await clearPendingAck(db, 19)
     expect((await loadSyncMeta(db)).pendingAckCursor).toBe(20)
     await clearPendingAck(db, 20)
-    expect((await loadSyncMeta(db)).pendingAckCursor).toBeNull()
+    meta = await loadSyncMeta(db)
+    expect(meta.pendingAckCursor).toBeNull()
+    expect(meta.pendingAckRecoveryProof).toBeNull()
   })
 
   it('SM15: snapshot continuation 四字段合法时完整 round-trip', async () => {
@@ -236,6 +241,7 @@ describe('sync-meta', () => {
       offset: 500,
       cursor: 42,
       version: 1 as const,
+      recoveryContinuation: 'opaque-continuation',
     }
 
     await saveSnapshotContinuation(db, continuation)
@@ -270,6 +276,7 @@ describe('sync-meta', () => {
       { key: SYNC_META_KEYS.SNAPSHOT_OFFSET, value: offset },
       { key: SYNC_META_KEYS.SNAPSHOT_CURSOR, value: cursor },
       { key: SYNC_META_KEYS.SNAPSHOT_RECOVERY_VERSION, value: version },
+      { key: SYNC_META_KEYS.SNAPSHOT_CONTINUATION, value: 'opaque-continuation' },
     ])
 
     expect(await loadSnapshotContinuation(db)).toBeNull()
@@ -283,7 +290,13 @@ describe('sync-meta', () => {
   it('SM17: clearSnapshotRecovery 原子清理 continuation 与当前 token seen IDs', async () => {
     db = await openTestDb()
     const token = '123e4567-e89b-42d3-a456-426614174000'
-    await saveSnapshotContinuation(db, { token, offset: 2, cursor: 9, version: 1 })
+    await saveSnapshotContinuation(db, {
+      token,
+      offset: 2,
+      cursor: 9,
+      version: 1,
+      recoveryContinuation: 'opaque-continuation',
+    })
     await db.snapshotSeen.bulkPut([
       { snapshotToken: token, tableName: 'tasks', entityId: 't1' },
       { snapshotToken: token, tableName: 'notes', entityId: 'n1' },
@@ -298,7 +311,13 @@ describe('sync-meta', () => {
   it('SM18: clearSnapshotRecovery 中途失败时 seen 与 meta 共同回滚', async () => {
     db = await openTestDb()
     const token = '123e4567-e89b-42d3-a456-426614174000'
-    await saveSnapshotContinuation(db, { token, offset: 2, cursor: 9, version: 1 })
+    await saveSnapshotContinuation(db, {
+      token,
+      offset: 2,
+      cursor: 9,
+      version: 1,
+      recoveryContinuation: 'opaque-continuation',
+    })
     await db.snapshotSeen.put({ snapshotToken: token, tableName: 'tasks', entityId: 't1' })
     const originalBulkDelete = db.syncMeta.bulkDelete.bind(db.syncMeta)
     db.syncMeta.bulkDelete = (() => Dexie.Promise.reject(
@@ -308,7 +327,13 @@ describe('sync-meta', () => {
     await expect(clearSnapshotRecovery(db)).rejects.toThrow('injected cleanup failure')
 
     db.syncMeta.bulkDelete = originalBulkDelete
-    expect(await loadSnapshotContinuation(db)).toEqual({ token, offset: 2, cursor: 9, version: 1 })
+    expect(await loadSnapshotContinuation(db)).toEqual({
+      token,
+      offset: 2,
+      cursor: 9,
+      version: 1,
+      recoveryContinuation: 'opaque-continuation',
+    })
     expect(await db.snapshotSeen.count()).toBe(1)
   })
 
@@ -319,6 +344,7 @@ describe('sync-meta', () => {
       offset: 10,
       cursor: 12,
       version: 1 as const,
+      recoveryContinuation: 'opaque-continuation',
     }
     await saveSnapshotContinuation(db, continuation)
 

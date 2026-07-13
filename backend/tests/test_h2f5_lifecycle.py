@@ -100,6 +100,243 @@ async def test_h2f5_multi_device_ack_floor_and_expired_cursor_http_lifecycle(cli
 
 
 @pytest.mark.asyncio
+async def test_recovery_proof_is_terminal_bound_and_single_use_over_http(client):
+    import jwt
+
+    from app.models.sync_client import SyncClient
+    from app.models.sync_state import SyncSnapshot
+    from app.services.sync_outbox import advance_retention_floor, get_current_cursor
+    from app.settings import settings
+    from app.space_manager import get_space_engine_manager
+
+    headers, space_id = await _space_headers(client)
+    pushed = await client.post(
+        "/api/v1/sync/push",
+        json={
+            "events": [
+                _task_event(f"proof-{index}-{uuid.uuid4().hex[:8]}", f"Proof {index}")
+                for index in range(2)
+            ]
+        },
+        headers=headers,
+    )
+    assert pushed.status_code == 200
+
+    session = await get_space_engine_manager().get_session(space_id)
+    try:
+        current = await get_current_cursor(session)
+        await advance_retention_floor(session, floor=current)
+        await session.commit()
+    finally:
+        await session.close()
+
+    client_id = str(uuid.uuid4())
+    registered = await client.post(
+        "/api/v1/sync/clients", json={"client_id": client_id}, headers=headers
+    )
+    assert registered.status_code == 200
+    assert registered.json()["snapshot_required"] is True
+
+    first_response = await client.get(
+        "/api/v1/sync/full",
+        params={"cursor": 0, "limit": 1, "client_id": client_id},
+        headers=headers,
+    )
+    assert first_response.status_code == 200
+    first = first_response.json()
+    assert first["has_more"] is True
+    assert first.get("recovery_proof") is None
+    assert first["recovery_continuation"]
+
+    skipped = await client.get(
+        "/api/v1/sync/full",
+        params={
+            "cursor": 0,
+            "limit": 10,
+            "client_id": client_id,
+            "snapshot_token": first["snapshot_token"],
+            "snapshot_offset": first["snapshot_offset"],
+        },
+        headers=headers,
+    )
+    assert skipped.status_code == 409
+
+    terminal_response = await client.get(
+        "/api/v1/sync/full",
+        params={
+            "cursor": 0,
+            "limit": 10,
+            "client_id": client_id,
+            "snapshot_token": first["snapshot_token"],
+            "snapshot_offset": first["snapshot_offset"],
+            "recovery_continuation": first["recovery_continuation"],
+        },
+        headers=headers,
+    )
+    assert terminal_response.status_code == 200
+    terminal = terminal_response.json()
+    assert terminal["has_more"] is False
+    proof = terminal["recovery_proof"]
+    assert proof
+
+    claims = jwt.decode(
+        proof, settings.secret_key, algorithms=[settings.algorithm]
+    )
+    assert claims["typ"] == "sync-recovery"
+    assert claims["ver"] == 1
+    assert claims["space"] == space_id
+    assert claims["user"]
+    assert claims["client"] == client_id
+    assert claims["snapshot"] == terminal["snapshot_token"]
+    assert claims["cursor"] == terminal["next_cursor"]
+
+    invalid_proofs = []
+    for claim, value in (
+        ("client", str(uuid.uuid4())),
+        ("user", "wrong-user"),
+        ("space", str(uuid.uuid4())),
+        ("cursor", terminal["next_cursor"] + 1),
+        ("snapshot", str(uuid.uuid4())),
+    ):
+        changed = {**claims, claim: value}
+        invalid_proofs.append(
+            jwt.encode(changed, settings.secret_key, algorithm=settings.algorithm)
+        )
+    invalid_proofs.extend(
+        [
+            proof[:-1] + ("a" if proof[-1] != "a" else "b"),
+            jwt.encode(
+                {**claims, "iat": 1, "exp": 2},
+                settings.secret_key,
+                algorithm=settings.algorithm,
+            ),
+        ]
+    )
+    for invalid_proof in invalid_proofs:
+        rejected = await client.post(
+            "/api/v1/sync/ack",
+            json={
+                "client_id": client_id,
+                "ack_cursor": terminal["next_cursor"],
+                "cursor_version": 2,
+                "recovery_proof": invalid_proof,
+            },
+            headers=headers,
+        )
+        assert rejected.status_code == 409
+        assert rejected.json()["error_type"] == "sync_recovery_proof_invalid"
+
+    wrong_cursor = await client.post(
+        "/api/v1/sync/ack",
+        json={
+            "client_id": client_id,
+            "ack_cursor": terminal["next_cursor"] - 1,
+            "cursor_version": 2,
+            "recovery_proof": proof,
+        },
+        headers=headers,
+    )
+    assert wrong_cursor.status_code == 409
+    assert wrong_cursor.json()["error_type"] == "sync_recovery_proof_invalid"
+
+    accepted = await client.post(
+        "/api/v1/sync/ack",
+        json={
+            "client_id": client_id,
+            "ack_cursor": terminal["next_cursor"],
+            "cursor_version": 2,
+            "recovery_proof": proof,
+        },
+        headers=headers,
+    )
+    assert accepted.status_code == 200
+
+    session = await get_space_engine_manager().get_session(space_id)
+    try:
+        assert await session.get(SyncSnapshot, terminal["snapshot_token"]) is None
+        stored_client = await session.get(SyncClient, client_id)
+        assert stored_client is not None
+        assert stored_client.snapshot_required is False
+    finally:
+        await session.close()
+
+    replayed = await client.post(
+        "/api/v1/sync/ack",
+        json={
+            "client_id": client_id,
+            "ack_cursor": terminal["next_cursor"],
+            "cursor_version": 2,
+            "recovery_proof": proof,
+        },
+        headers=headers,
+    )
+    assert replayed.status_code == 409
+    assert replayed.json()["error_type"] == "sync_recovery_proof_invalid"
+
+
+@pytest.mark.asyncio
+async def test_deleted_snapshot_invalidates_recovery_proof(client):
+    from sqlalchemy import delete
+
+    from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
+    from app.services.sync_outbox import advance_retention_floor, get_current_cursor
+    from app.space_manager import get_space_engine_manager
+
+    headers, space_id = await _space_headers(client)
+    pushed = await client.post(
+        "/api/v1/sync/push",
+        json={"events": [_task_event(f"deleted-{uuid.uuid4().hex[:8]}", "Deleted")]},
+        headers=headers,
+    )
+    assert pushed.status_code == 200
+    session = await get_space_engine_manager().get_session(space_id)
+    try:
+        current = await get_current_cursor(session)
+        await advance_retention_floor(session, floor=current)
+        await session.commit()
+    finally:
+        await session.close()
+
+    client_id = str(uuid.uuid4())
+    await client.post("/api/v1/sync/clients", json={"client_id": client_id}, headers=headers)
+    terminal = (
+        await client.get(
+            "/api/v1/sync/full",
+            params={"cursor": 0, "limit": 10, "client_id": client_id},
+            headers=headers,
+        )
+    ).json()
+    assert terminal["recovery_proof"]
+
+    session = await get_space_engine_manager().get_session(space_id)
+    try:
+        await session.execute(
+            delete(SyncSnapshotChunk).where(
+                SyncSnapshotChunk.snapshot_token == terminal["snapshot_token"]
+            )
+        )
+        await session.execute(
+            delete(SyncSnapshot).where(SyncSnapshot.token == terminal["snapshot_token"])
+        )
+        await session.commit()
+    finally:
+        await session.close()
+
+    rejected = await client.post(
+        "/api/v1/sync/ack",
+        json={
+            "client_id": client_id,
+            "ack_cursor": terminal["next_cursor"],
+            "cursor_version": 2,
+            "recovery_proof": terminal["recovery_proof"],
+        },
+        headers=headers,
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["error_type"] == "sync_recovery_proof_invalid"
+
+
+@pytest.mark.asyncio
 async def test_h2f5_snapshot_damage_returns_stable_http_recovery_and_reclaims_on_expiry(client):
     from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk
     from app.space_manager import get_space_engine_manager

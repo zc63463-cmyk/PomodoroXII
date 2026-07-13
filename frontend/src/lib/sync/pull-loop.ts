@@ -24,6 +24,7 @@ import {
 } from './sync-meta'
 import {
   ENTITY_TYPE_TO_TABLE,
+  type ApiSyncFullResponse,
   type ApiSyncPullResponse,
   type PullLoopResult,
   type SyncConflict,
@@ -63,9 +64,11 @@ export async function fetchFullPage(
     limit?: number
     snapshot_token?: string | null
     snapshot_offset?: number | null
+    client_id?: string
+    recovery_continuation?: string
   },
-): Promise<ApiSyncPullResponse> {
-  const res = await api.get<ApiSyncPullResponse>('/sync/full', { params })
+): Promise<ApiSyncFullResponse> {
+  const res = await api.get<ApiSyncFullResponse>('/sync/full', { params })
   return res.data
 }
 
@@ -145,10 +148,12 @@ async function reconcileFullSnapshot(db: PomodoroXIDB, seenIds: SnapshotSeenIds)
 export async function runPullLoop(
   db: PomodoroXIDB,
   api: AxiosInstance,
-  options?: { isFull?: boolean; limit?: number },
+  options?: { isFull?: boolean; limit?: number; clientId?: string; snapshotRequired?: boolean },
 ): Promise<PullLoopResult> {
   const isFull = options?.isFull ?? false
   const limit = options?.limit ?? DEFAULT_PULL_LIMIT
+  const clientId = options?.clientId
+  const snapshotRequired = options?.snapshotRequired ?? false
   const dirtyConflicts: SyncConflict[] = []
   const continuation = isFull ? await loadSnapshotContinuation(db) : null
   if (isFull && continuation === null) {
@@ -176,6 +181,8 @@ export async function runPullLoop(
       limit,
       snapshot_token: continuation?.token,
       snapshot_offset: continuation?.offset,
+      client_id: clientId,
+      recovery_continuation: continuation?.recoveryContinuation,
     })
   } else if (useCursor) {
     page = await fetchPullPage(api, {
@@ -244,6 +251,18 @@ export async function runPullLoop(
       const token = snapshotToken!
       const nextOffset = page.snapshot_offset!
       const snapshotCursor = page.next_cursor!
+      const recoveryContinuation = typeof page.recovery_continuation === 'string'
+        ? page.recovery_continuation.trim() || null
+        : null
+      const recoveryProof = typeof page.recovery_proof === 'string'
+        ? page.recovery_proof.trim() || null
+        : null
+      if (!isLastPage && recoveryContinuation === null) {
+        throw new SnapshotRecoveryError('sync snapshot non-terminal page requires recovery_continuation')
+      }
+      if (isLastPage && snapshotRequired && recoveryProof === null) {
+        throw new SnapshotRecoveryError('sync snapshot terminal page requires recovery_proof')
+      }
       const pageConflicts: SyncConflict[] = []
       await db.transaction('rw', db.tables, async () => {
         await applyMerge(db, page, pageConflicts)
@@ -260,7 +279,7 @@ export async function runPullLoop(
             tombstoneSinceId: '',
           })
           await touchLastFullSync(db, lastServerTime)
-          await recordPendingAck(db, snapshotCursor)
+          await recordPendingAck(db, snapshotCursor, recoveryProof)
           await clearSnapshotRecovery(db)
         } else {
           await saveSnapshotContinuation(db, {
@@ -268,6 +287,7 @@ export async function runPullLoop(
             offset: nextOffset,
             cursor: snapshotCursor,
             version: 1,
+            recoveryContinuation: recoveryContinuation!,
           })
         }
       })
@@ -317,6 +337,10 @@ export async function runPullLoop(
         limit,
         snapshot_token: page.snapshot_token,
         snapshot_offset: page.snapshot_offset ?? 0,
+        client_id: clientId,
+        recovery_continuation: typeof page.recovery_continuation === 'string'
+          ? page.recovery_continuation
+          : undefined,
       })
     } else if (usesCursorProtocol(page)) {
       page = await fetchPullPage(api, {

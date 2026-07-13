@@ -80,6 +80,7 @@ function cursorPage1() {
     cursor_version: 2,
     snapshot_token: '11111111-1111-4111-8111-111111111111',
     snapshot_offset: 1,
+    recovery_continuation: 'continuation-page-1',
   }
 }
 
@@ -95,6 +96,7 @@ function cursorPage2() {
     cursor_version: 2,
     snapshot_token: '11111111-1111-4111-8111-111111111111',
     snapshot_offset: 2,
+    recovery_proof: 'terminal-proof',
   }
 }
 
@@ -110,6 +112,7 @@ function cursorSinglePage() {
     cursor_version: 2,
     snapshot_token: '22222222-2222-4222-8222-222222222222',
     snapshot_offset: 0,
+    recovery_proof: 'terminal-proof',
   }
 }
 
@@ -441,6 +444,7 @@ describe('pull-loop', () => {
     expect(meta.snapshotToken).toBe(token)
     expect(meta.snapshotOffset).toBe(1)
     expect(meta.snapshotCursor).toBe(200)
+    expect(meta.snapshotContinuation).toBe('continuation-page-1')
     expect(await db.snapshotSeen.get([token, 'tasks', 'page-one'])).toBeDefined()
     expect(meta.cursor).toBeNull()
   })
@@ -455,6 +459,7 @@ describe('pull-loop', () => {
       snapshotOffset: 1,
       snapshotCursor: 200,
       snapshotRecoveryVersion: 1,
+      snapshotContinuation: 'persisted-continuation',
     })
     let captured: Record<string, unknown> = {}
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
@@ -475,6 +480,7 @@ describe('pull-loop', () => {
 
     expect(captured.snapshot_token).toBe(token)
     expect(captured.snapshot_offset).toBe(1)
+    expect(captured.recovery_continuation).toBe('persisted-continuation')
     expect(await db.tasks.get('page-one')).toBeDefined()
     expect(await db.tasks.get('page-two')).toBeDefined()
     expect(await db.tasks.get('clean-ghost')).toBeUndefined()
@@ -557,6 +563,66 @@ describe('pull-loop', () => {
     expect(await db.snapshotSeen.where('snapshotToken').equals(staleToken).count()).toBe(0)
     expect((await loadSyncMeta(db)).snapshotToken).toBeNull()
     expect((await loadSyncMeta(db)).cursor).toBe(30)
+  })
+
+  it('PL28: terminal proof 写入失败时回滚终页并保留上一页 continuation', async () => {
+    db = await openTestDb()
+    const token = '12121212-1212-4212-8212-121212121212'
+    await db.tasks.put(taskRow('clean-ghost', false))
+    const originalBulkPut = db.syncMeta.bulkPut.bind(db.syncMeta)
+    let call = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      call++
+      if (call === 1) {
+        return ok({
+          ...cursorPage1(),
+          next_cursor: 200,
+          snapshot_token: token,
+          snapshot_offset: 1,
+          tasks: [{
+            id: 'page-one', title: 'one', status: 'todo',
+            updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
+          }],
+        }, config)
+      }
+      vi.spyOn(db.syncMeta, 'bulkPut').mockImplementation(((entries: Parameters<typeof db.syncMeta.bulkPut>[0]) => {
+        if (entries.some((entry) => entry.key === 'pending_ack_recovery_proof')) {
+          return Promise.reject(new Error('proof write failed'))
+        }
+        return originalBulkPut(entries)
+      }) as typeof db.syncMeta.bulkPut)
+      return ok({
+        ...cursorPage2(),
+        next_cursor: 200,
+        snapshot_token: token,
+        snapshot_offset: 2,
+        recovery_proof: 'terminal-proof-200',
+        tasks: [{
+          id: 'terminal-row', title: 'terminal', status: 'todo',
+          updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
+        }],
+      }, config)
+    }
+
+    await expect(runPullLoop(db, spaceApi, {
+      isFull: true,
+      limit: 1,
+      clientId: '34343434-3434-4434-8434-343434343434',
+      snapshotRequired: true,
+    })).rejects.toThrow('proof write failed')
+
+    const meta = await loadSyncMeta(db)
+    expect(await db.tasks.get('page-one')).toBeDefined()
+    expect(await db.tasks.get('terminal-row')).toBeUndefined()
+    expect(await db.tasks.get('clean-ghost')).toBeDefined()
+    expect(meta.cursor).toBeNull()
+    expect(meta.pendingAckCursor).toBeNull()
+    expect(meta.pendingAckRecoveryProof).toBeNull()
+    expect(meta.snapshotToken).toBe(token)
+    expect(meta.snapshotOffset).toBe(1)
+    expect(meta.snapshotContinuation).toBe('continuation-page-1')
+    expect(await db.snapshotSeen.get([token, 'tasks', 'page-one'])).toBeDefined()
+    db.syncMeta.bulkPut = originalBulkPut
   })
 
   it('PL18: legacy full 也按权威快照删除缺失的本地 clean 实体', async () => {

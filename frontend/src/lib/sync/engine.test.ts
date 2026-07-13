@@ -1037,6 +1037,7 @@ describe('RealSyncEngine', () => {
       snapshotOffset: 1,
       snapshotCursor: 20,
       snapshotRecoveryVersion: 1,
+      snapshotContinuation: 'persisted-continuation',
     })
     await db.snapshotSeen.put({ snapshotToken: staleToken, tableName: 'tasks', entityId: 'old' })
     await db.outbox.add({
@@ -1094,6 +1095,7 @@ describe('RealSyncEngine', () => {
       snapshotOffset: 1,
       snapshotCursor: 20,
       snapshotRecoveryVersion: 1,
+      snapshotContinuation: 'persisted-continuation',
     })
     await db.snapshotSeen.put({ snapshotToken: token, tableName: 'tasks', entityId: 'page-one' })
     const engine = new RealSyncEngine(db, 'space-1')
@@ -1209,7 +1211,12 @@ describe('RealSyncEngine', () => {
         return ok({ ...clientRegistrationResponse(config), ack_cursor: 10, snapshot_required: true }, config)
       }
       if (url.includes('/sync/full')) {
-        return ok({ ...cursorSinglePage(), next_cursor: 20, snapshot_token: 'forced-full' }, config)
+        return ok({
+          ...cursorSinglePage(),
+          next_cursor: 20,
+          snapshot_token: 'f0000000-0000-4000-8000-000000000020',
+          recovery_proof: 'recovery-proof-20',
+        }, config)
       }
       if (url.includes('/sync/ack')) return ok(ackResponse(config), config)
       if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
@@ -1277,6 +1284,64 @@ describe('RealSyncEngine', () => {
     expect(urls).toEqual(['/sync/clients', '/sync/pull', '/sync/ack'])
     expect((await loadSyncMeta(db)).pendingAckCursor).toBe(20)
     expect(await db.outbox.count()).toBe(1)
+    engine.destroy()
+  })
+
+  it('EN36: 畸形注册 200 响应不能替代 ACK 或触发 pull/push', async () => {
+    db = await openTestDb()
+    await saveSyncMeta(db, { cursor: 10, cursorVersion: 2, pendingAckCursor: 10 })
+    await db.outbox.add({
+      entityType: 'task', entityId: 'pending-task', action: 'update', payload: '{}',
+      createdAt: Date.now(), synced: false,
+    } as never)
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(1))
+
+    const urls: string[] = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      urls.push(url)
+      if (url.includes('/sync/clients')) {
+        return ok({ ...clientRegistrationResponse(config), ack_cursor: '999' }, config)
+      }
+      return errResponse(500, config)
+    }
+
+    await engine.sync()
+
+    expect(urls).toEqual(['/sync/clients'])
+    expect((await loadSyncMeta(db)).pendingAckCursor).toBe(10)
+    expect(await db.outbox.count()).toBe(1)
+    expect(engine.getStatus()).toBe('error')
+    engine.destroy()
+  })
+
+  it('EN35: 畸形 ACK 200 响应不能解除门禁或触发 push', async () => {
+    db = await openTestDb()
+    await saveSyncMeta(db, { cursor: 10, cursorVersion: 2, pendingAckCursor: 10 })
+    await db.outbox.add({
+      entityType: 'task', entityId: 'pending-task', action: 'update', payload: '{}',
+      createdAt: Date.now(), synced: false,
+    } as never)
+    const engine = new RealSyncEngine(db, 'space-1')
+    await vi.waitFor(() => expect(engine.getPendingCount()).toBe(1))
+
+    const urls: string[] = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const url = config.url ?? ''
+      urls.push(url)
+      if (url.includes('/sync/clients')) return ok(clientRegistrationResponse(config), config)
+      if (url.includes('/sync/ack')) return ok({ ack_cursor: 20, current_cursor: 20, retention_floor: 0, lease_expires_at: '2026-08-01T00:00:00.000Z' }, config)
+      if (url.includes('/sync/push')) return ok(emptyPushResponse(), config)
+      return errResponse(404, config)
+    }
+
+    await engine.sync()
+
+    expect(urls).toEqual(['/sync/clients', '/sync/ack'])
+    expect((await loadSyncMeta(db)).pendingAckCursor).toBe(10)
+    expect(await db.outbox.count()).toBe(1)
+    expect(engine.getStatus()).toBe('error')
     engine.destroy()
   })
 

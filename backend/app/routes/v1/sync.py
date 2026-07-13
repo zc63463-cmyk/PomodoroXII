@@ -61,8 +61,10 @@ async def acknowledge_sync_cursor(
     result = await SyncClientService(db).acknowledge(
         client_id=body.client_id,
         user_id=ctx["user_id"],
+        space_id=ctx["space_id"],
         ack_cursor=body.ack_cursor,
         cursor_version=body.cursor_version,
+        recovery_proof=body.recovery_proof,
     )
     await db.commit()
     return result
@@ -112,6 +114,8 @@ async def full_sync(
     cursor: int | None = Query(None, ge=0, description="Global sync ledger cursor"),
     snapshot_token: str | None = Query(None, min_length=1, max_length=36),
     snapshot_offset: int = Query(0, ge=0),
+    client_id: str | None = Query(None, min_length=36, max_length=36),
+    recovery_continuation: str | None = Query(None, min_length=1, max_length=2048),
     db: AsyncSession = Depends(get_space_db),
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
@@ -143,6 +147,58 @@ async def full_sync(
                         )
                     )
         raise
+    if (
+        client_id is not None
+        and result.get("cursor_version") == 2
+        and result.get("is_full") is True
+        and result.get("snapshot_token")
+    ):
+        from app.services.sync_recovery import (
+            issue_recovery_continuation,
+            issue_recovery_proof,
+            verify_recovery_continuation,
+        )
+
+        recovery_client = await SyncClientService(db).validate_snapshot_client(
+            client_id=client_id,
+            user_id=ctx["user_id"],
+        )
+        snapshot = await db.get(SyncSnapshot, result["snapshot_token"])
+        if snapshot is None or snapshot.status != "ready":
+            raise SyncSnapshotExpiredError()
+        canonical_client_id = recovery_client.client_id
+        if snapshot_offset > 0:
+            if recovery_continuation is None:
+                raise SyncSnapshotExpiredError()
+            verify_recovery_continuation(
+                recovery_continuation,
+                space_id=ctx["space_id"],
+                user_id=ctx["user_id"],
+                client_id=canonical_client_id,
+                snapshot_token=snapshot.token,
+                snapshot_cursor=snapshot.cursor,
+                snapshot_offset=snapshot_offset,
+            )
+        if result.get("has_more") is False:
+            if recovery_client.snapshot_required:
+                result["recovery_proof"] = issue_recovery_proof(
+                    space_id=ctx["space_id"],
+                    user_id=ctx["user_id"],
+                    client_id=canonical_client_id,
+                    snapshot_token=snapshot.token,
+                    snapshot_cursor=snapshot.cursor,
+                    snapshot_expires_at=snapshot.expires_at,
+                )
+        else:
+            result["recovery_continuation"] = issue_recovery_continuation(
+                space_id=ctx["space_id"],
+                user_id=ctx["user_id"],
+                client_id=canonical_client_id,
+                snapshot_token=snapshot.token,
+                snapshot_cursor=snapshot.cursor,
+                expected_offset=result["snapshot_offset"],
+                snapshot_expires_at=snapshot.expires_at,
+            )
     await db.commit()
     return result
 

@@ -11,6 +11,7 @@
 import type { PomodoroXIDB } from '@/services/database'
 import {
   SYNC_META_KEYS,
+  type PendingAckState,
   type SnapshotContinuation,
   type SyncMetaSnapshot,
 } from './types'
@@ -27,10 +28,12 @@ const FIELD_TO_KEY: Record<keyof SyncMetaSnapshot, string> = {
   cursorVersion: SYNC_META_KEYS.CURSOR_VERSION,
   clientId: SYNC_META_KEYS.CLIENT_ID,
   pendingAckCursor: SYNC_META_KEYS.PENDING_ACK_CURSOR,
+  pendingAckRecoveryProof: SYNC_META_KEYS.PENDING_ACK_RECOVERY_PROOF,
   snapshotToken: SYNC_META_KEYS.SNAPSHOT_TOKEN,
   snapshotOffset: SYNC_META_KEYS.SNAPSHOT_OFFSET,
   snapshotCursor: SYNC_META_KEYS.SNAPSHOT_CURSOR,
   snapshotRecoveryVersion: SYNC_META_KEYS.SNAPSHOT_RECOVERY_VERSION,
+  snapshotContinuation: SYNC_META_KEYS.SNAPSHOT_CONTINUATION,
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -62,7 +65,9 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
   const validPendingAck = pendingAckStr !== ''
     && Number.isSafeInteger(parsedPendingAck)
     && parsedPendingAck >= 0
+  const pendingAckRecoveryProof = map.get(SYNC_META_KEYS.PENDING_ACK_RECOVERY_PROOF) ?? ''
   const snapshotToken = map.get(SYNC_META_KEYS.SNAPSHOT_TOKEN) ?? ''
+  const snapshotContinuation = map.get(SYNC_META_KEYS.SNAPSHOT_CONTINUATION) ?? ''
   const snapshotOffsetStr = map.get(SYNC_META_KEYS.SNAPSHOT_OFFSET) ?? ''
   const snapshotCursorStr = map.get(SYNC_META_KEYS.SNAPSHOT_CURSOR) ?? ''
   const snapshotVersionStr = map.get(SYNC_META_KEYS.SNAPSHOT_RECOVERY_VERSION) ?? ''
@@ -74,6 +79,7 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
     && Number.isSafeInteger(parsed)
     && parsed >= 0
   const validSnapshot = isUuid(snapshotToken)
+    && snapshotContinuation.trim() !== ''
     && isCanonicalNonNegativeInteger(snapshotOffsetStr, parsedSnapshotOffset)
     && isCanonicalNonNegativeInteger(snapshotCursorStr, parsedSnapshotCursor)
     && snapshotVersionStr === '1'
@@ -89,10 +95,14 @@ export async function loadSyncMeta(db: PomodoroXIDB): Promise<SyncMetaSnapshot> 
     cursorVersion: validCursor ? 2 : null,
     clientId: map.get(SYNC_META_KEYS.CLIENT_ID) ?? '',
     pendingAckCursor: validPendingAck ? parsedPendingAck : null,
+    pendingAckRecoveryProof: validPendingAck && pendingAckRecoveryProof.trim() !== ''
+      ? pendingAckRecoveryProof
+      : null,
     snapshotToken: validSnapshot ? snapshotToken.toLowerCase() : null,
     snapshotOffset: validSnapshot ? parsedSnapshotOffset : null,
     snapshotCursor: validSnapshot ? parsedSnapshotCursor : null,
     snapshotRecoveryVersion: validSnapshot ? 1 : null,
+    snapshotContinuation: validSnapshot ? snapshotContinuation : null,
   }
 }
 
@@ -125,21 +135,40 @@ export async function ensureClientId(db: PomodoroXIDB): Promise<string> {
   })
 }
 
-/** 仅保留最大的待 ACK cursor；调用方可处于现有 Dexie 事务中。 */
-export async function recordPendingAck(db: PomodoroXIDB, cursor: number): Promise<void> {
+export async function loadPendingAckState(db: PomodoroXIDB): Promise<PendingAckState | null> {
+  const meta = await loadSyncMeta(db)
+  return meta.pendingAckCursor == null
+    ? null
+    : { cursor: meta.pendingAckCursor, recoveryProof: meta.pendingAckRecoveryProof }
+}
+
+/** 调用方可处于包含 syncMeta 的既有 Dexie 事务中。 */
+export async function recordPendingAck(
+  db: PomodoroXIDB,
+  cursor: number,
+  recoveryProof: string | null = null,
+): Promise<void> {
   if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error('invalid pending ACK cursor')
-  const row = await db.syncMeta.get(SYNC_META_KEYS.PENDING_ACK_CURSOR)
-  const current = Number(row?.value ?? '')
-  if (Number.isSafeInteger(current) && current >= cursor) return
-  await db.syncMeta.put({ key: SYNC_META_KEYS.PENDING_ACK_CURSOR, value: String(cursor) })
+  if (recoveryProof !== null && recoveryProof.trim() === '') {
+    throw new Error('invalid pending ACK recovery proof')
+  }
+  const current = await loadPendingAckState(db)
+  if (current && current.cursor > cursor) return
+  if (current && current.cursor === cursor && current.recoveryProof && !recoveryProof) return
+  await db.syncMeta.bulkPut([
+    { key: SYNC_META_KEYS.PENDING_ACK_CURSOR, value: String(cursor) },
+    { key: SYNC_META_KEYS.PENDING_ACK_RECOVERY_PROOF, value: recoveryProof ?? '' },
+  ])
 }
 
 export async function clearPendingAck(db: PomodoroXIDB, acknowledged: number): Promise<void> {
   await db.transaction('rw', db.syncMeta, async () => {
-    const row = await db.syncMeta.get(SYNC_META_KEYS.PENDING_ACK_CURSOR)
-    const current = Number(row?.value ?? '')
-    if (row && Number.isSafeInteger(current) && current <= acknowledged) {
-      await db.syncMeta.delete(SYNC_META_KEYS.PENDING_ACK_CURSOR)
+    const state = await loadPendingAckState(db)
+    if (state && state.cursor <= acknowledged) {
+      await db.syncMeta.bulkDelete([
+        SYNC_META_KEYS.PENDING_ACK_CURSOR,
+        SYNC_META_KEYS.PENDING_ACK_RECOVERY_PROOF,
+      ])
     }
   })
 }
@@ -153,12 +182,14 @@ export async function loadSnapshotContinuation(
     || meta.snapshotOffset == null
     || meta.snapshotCursor == null
     || meta.snapshotRecoveryVersion !== 1
+    || meta.snapshotContinuation == null
   ) return null
   return {
     token: meta.snapshotToken,
     offset: meta.snapshotOffset,
     cursor: meta.snapshotCursor,
     version: 1,
+    recoveryContinuation: meta.snapshotContinuation,
   }
 }
 
@@ -174,12 +205,14 @@ export async function saveSnapshotContinuation(
     || !Number.isSafeInteger(continuation.cursor)
     || continuation.cursor < 0
     || continuation.version !== 1
+    || continuation.recoveryContinuation.trim() === ''
   ) throw new Error('invalid snapshot continuation')
   await saveSyncMeta(db, {
     snapshotToken: continuation.token.toLowerCase(),
     snapshotOffset: continuation.offset,
     snapshotCursor: continuation.cursor,
     snapshotRecoveryVersion: 1,
+    snapshotContinuation: continuation.recoveryContinuation,
   })
 }
 
@@ -197,6 +230,7 @@ export async function clearSnapshotRecovery(db: PomodoroXIDB): Promise<void> {
       SYNC_META_KEYS.SNAPSHOT_OFFSET,
       SYNC_META_KEYS.SNAPSHOT_CURSOR,
       SYNC_META_KEYS.SNAPSHOT_RECOVERY_VERSION,
+      SYNC_META_KEYS.SNAPSHOT_CONTINUATION,
     ])
   })
 }

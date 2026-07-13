@@ -17,6 +17,7 @@ import {
   clearPendingAck,
   clearSnapshotRecovery,
   ensureClientId,
+  loadPendingAckState,
   loadSyncMeta,
   touchLastSyncAt,
 } from './sync-meta'
@@ -281,26 +282,51 @@ export class RealSyncEngine implements SyncEngine {
     )
   }
 
-  private async registerClient(clientId: string): Promise<boolean> {
+  private async registerClient(clientId: string): Promise<SyncClientRegistrationResponse> {
     const response = await this.api.post<SyncClientRegistrationResponse>('/sync/clients', {
       client_id: clientId,
     })
-    if (response.data.client_id !== clientId) {
-      throw new Error('sync client registration returned a different client_id')
+    const data = response.data
+    if (
+      data.client_id !== clientId
+      || !Number.isSafeInteger(data.ack_cursor)
+      || data.ack_cursor < 0
+      || typeof data.snapshot_required !== 'boolean'
+      || typeof data.lease_expires_at !== 'string'
+      || data.lease_expires_at.trim().length === 0
+      || (data.display_name !== null && typeof data.display_name !== 'string')
+    ) {
+      throw new Error('sync client registration returned an invalid response')
     }
-    return response.data.snapshot_required
+    return data
   }
 
-  private async sendPendingAck(clientId: string, cursor: number): Promise<void> {
+  private async sendPendingAck(
+    clientId: string,
+    pending: { cursor: number; recoveryProof: string | null },
+  ): Promise<void> {
     const response = await this.api.post<SyncAckResponse>('/sync/ack', {
       client_id: clientId,
-      ack_cursor: cursor,
+      ack_cursor: pending.cursor,
       cursor_version: 2,
+      recovery_proof: pending.recoveryProof,
     })
-    if (response.data.ack_cursor < cursor) {
-      throw new Error('sync ACK response did not acknowledge the pending cursor')
+    const { ack_cursor: ackCursor, retention_floor: retentionFloor, current_cursor: currentCursor } = response.data
+    if (
+      !Number.isSafeInteger(ackCursor)
+      || !Number.isSafeInteger(retentionFloor)
+      || !Number.isSafeInteger(currentCursor)
+      || typeof response.data.lease_expires_at !== 'string'
+      || response.data.lease_expires_at.length === 0
+      || ackCursor !== pending.cursor
+      || retentionFloor < 0
+      || currentCursor < 0
+      || ackCursor > currentCursor
+      || retentionFloor > ackCursor
+    ) {
+      throw new Error('sync ACK response did not prove the pending cursor was acknowledged')
     }
-    await clearPendingAck(this.db, response.data.ack_cursor)
+    await clearPendingAck(this.db, ackCursor)
   }
 
   /** sync/fullSync 共用内核：注册/ACK → runPullLoop → ACK → pushAllPending。 */
@@ -310,24 +336,43 @@ export class RealSyncEngine implements SyncEngine {
     this.setStatus('syncing')
     try {
       const clientId = await ensureClientId(this.db)
-      const snapshotRequired = await this.registerClient(clientId)
+      const registration = await this.registerClient(clientId)
+      let snapshotRequired = registration.snapshot_required
       if (snapshotRequired) isFull = true
 
-      const pendingBeforePull = (await loadSyncMeta(this.db)).pendingAckCursor
-      if (!snapshotRequired && pendingBeforePull != null) {
-        await this.sendPendingAck(clientId, pendingBeforePull)
+      const pendingBeforePull = await loadPendingAckState(this.db)
+      if (pendingBeforePull) {
+        if (snapshotRequired && pendingBeforePull.recoveryProof) {
+          await this.sendPendingAck(clientId, pendingBeforePull)
+          snapshotRequired = false
+          isFull = false
+        } else if (!snapshotRequired) {
+          if (registration.ack_cursor >= pendingBeforePull.cursor) {
+            await clearPendingAck(this.db, registration.ack_cursor)
+          } else {
+            await this.sendPendingAck(clientId, pendingBeforePull)
+          }
+        }
       }
       if (this.destroyed) return
 
       // 1. Pull；过期 cursor 必须 fail-closed 并恢复为真正 snapshot，恢复前禁止 push。
       let pullResult
       try {
-        pullResult = await runPullLoop(this.db, this.api, { isFull })
+        pullResult = await runPullLoop(this.db, this.api, {
+          isFull,
+          clientId,
+          snapshotRequired,
+        })
       } catch (err) {
         if (this.requiresFullRestart(err)) {
           await clearSnapshotRecovery(this.db)
           try {
-            pullResult = await runPullLoop(this.db, this.api, { isFull: true })
+            pullResult = await runPullLoop(this.db, this.api, {
+              isFull: true,
+              clientId,
+              snapshotRequired,
+            })
           } catch (restartErr) {
             if (this.requiresFullRestart(restartErr)) {
               await clearSnapshotRecovery(this.db)
@@ -344,8 +389,8 @@ export class RealSyncEngine implements SyncEngine {
       // DR-10：onPullComplete 每周期一次（循环外）
       this.listeners.pull.forEach((cb) => cb())
 
-      const pendingAfterPull = (await loadSyncMeta(this.db)).pendingAckCursor
-      if (pendingAfterPull != null) {
+      const pendingAfterPull = await loadPendingAckState(this.db)
+      if (pendingAfterPull) {
         await this.sendPendingAck(clientId, pendingAfterPull)
       }
       if (this.destroyed) return

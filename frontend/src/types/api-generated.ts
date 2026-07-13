@@ -1100,6 +1100,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sync/clients": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Register Sync Client */
+        post: operations["register_sync_client_api_v1_sync_clients_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge Sync Cursor */
+        post: operations["acknowledge_sync_cursor_api_v1_sync_ack_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sync/push": {
         parameters: {
             query?: never;
@@ -1212,6 +1246,46 @@ export interface paths {
          * @description Health check endpoint for orchestrators / load balancers.
          */
         get: operations["health_check_api_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readiness Check
+         * @description Verify meta database connectivity without exposing failures.
+         */
+        get: operations["readiness_check_api_ready_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Metrics
+         * @description Expose minimal Prometheus metrics to authenticated operators.
+         */
+        get: operations["metrics_api_metrics_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2795,6 +2869,28 @@ export interface components {
          * @enum {string}
          */
         StorageType: "db_only" | "fs_db_split" | "system";
+        /** SyncAckRequest */
+        SyncAckRequest: {
+            /** Client Id */
+            client_id: string;
+            /** Ack Cursor */
+            ack_cursor: number;
+            /** Cursor Version */
+            cursor_version: number;
+            /** Recovery Proof */
+            recovery_proof?: string | null;
+        };
+        /** SyncAckResponse */
+        SyncAckResponse: {
+            /** Ack Cursor */
+            ack_cursor: number;
+            /** Lease Expires At */
+            lease_expires_at: string;
+            /** Retention Floor */
+            retention_floor: number;
+            /** Current Cursor */
+            current_cursor: number;
+        };
         /**
          * SyncAppliedItem
          * @description An event that was successfully applied.
@@ -2808,6 +2904,26 @@ export interface components {
             action: string;
             /** Resolution */
             resolution?: string | null;
+        };
+        /** SyncClientRegistrationRequest */
+        SyncClientRegistrationRequest: {
+            /** Client Id */
+            client_id: string;
+            /** Display Name */
+            display_name?: string | null;
+        };
+        /** SyncClientRegistrationResponse */
+        SyncClientRegistrationResponse: {
+            /** Client Id */
+            client_id: string;
+            /** Display Name */
+            display_name?: string | null;
+            /** Ack Cursor */
+            ack_cursor: number;
+            /** Lease Expires At */
+            lease_expires_at: string;
+            /** Snapshot Required */
+            snapshot_required: boolean;
         };
         /**
          * SyncConflictItem
@@ -2903,6 +3019,10 @@ export interface components {
              * @default true
              */
             is_full: boolean;
+            /** Recovery Proof */
+            recovery_proof?: string | null;
+            /** Recovery Continuation */
+            recovery_continuation?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -5848,6 +5968,72 @@ export interface operations {
             };
         };
     };
+    register_sync_client_api_v1_sync_clients_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SyncClientRegistrationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncClientRegistrationResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                };
+            };
+        };
+    };
+    acknowledge_sync_cursor_api_v1_sync_ack_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SyncAckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncAckResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                };
+            };
+        };
+    };
     push_events_api_v1_sync_push_post: {
         parameters: {
             query?: never;
@@ -5933,6 +6119,8 @@ export interface operations {
                 cursor?: number | null;
                 snapshot_token?: string | null;
                 snapshot_offset?: number;
+                client_id?: string | null;
+                recovery_continuation?: string | null;
             };
             header?: never;
             path?: never;
@@ -6034,6 +6222,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    readiness_check_api_ready_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Database unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    metrics_api_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Prometheus metrics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Master token required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

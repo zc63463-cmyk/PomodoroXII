@@ -5,19 +5,20 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ConflictError, NotFoundError, ValidationError
 from app.models.sync_client import SyncClient
-from app.models.sync_state import SyncState
+from app.models.sync_state import SyncSnapshot, SyncSnapshotChunk, SyncState
 from app.services.sync_outbox import (
     advance_retention_floor,
     get_current_cursor,
     get_retention_floor,
     prune_sync_events,
 )
+from app.services.sync_recovery import verify_recovery_proof
 from app.services.time import utc_now
 
 CLIENT_LEASE = timedelta(days=30)
@@ -121,13 +122,41 @@ class SyncClientService:
             ) from exc
         return self._registration_result(client)
 
+    async def validate_snapshot_client(
+        self,
+        *,
+        client_id: str,
+        user_id: str,
+        require_recovery: bool = False,
+    ) -> SyncClient:
+        canonical_id = _canonical_client_id(client_id)
+        client = await self.db.get(SyncClient, canonical_id, populate_existing=True)
+        if client is None or client.user_id != user_id:
+            raise NotFoundError(
+                "sync client not found",
+                error_type="sync_client_not_found",
+            )
+        if client.revoked_at is not None:
+            raise ConflictError(
+                "sync client is revoked",
+                error_type="sync_client_revoked",
+            )
+        if require_recovery and not client.snapshot_required:
+            raise ConflictError(
+                "sync client does not require snapshot recovery",
+                error_type="sync_recovery_proof_invalid",
+            )
+        return client
+
     async def acknowledge(
         self,
         *,
         client_id: str,
         user_id: str,
+        space_id: str = "",
         ack_cursor: int,
         cursor_version: int,
+        recovery_proof: str | None = None,
     ) -> dict[str, object]:
         canonical_id = _canonical_client_id(client_id)
         if cursor_version != 2:
@@ -154,9 +183,48 @@ class SyncClientService:
                 "sync client is revoked",
                 error_type="sync_client_revoked",
             )
+        now = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        if client.lease_expires_at <= now:
+            raise ConflictError(
+                "sync client lease has expired",
+                error_type="sync_client_lease_expired",
+            )
 
         floor = await get_retention_floor(self.db)
         current = await get_current_cursor(self.db)
+        snapshot_token = None
+        if client.snapshot_required:
+            if recovery_proof is None:
+                raise ConflictError(
+                    "recovery proof is required",
+                    error_type="sync_recovery_proof_required",
+                )
+            claims = verify_recovery_proof(
+                recovery_proof,
+                space_id=space_id,
+                user_id=user_id,
+                client_id=canonical_id,
+                ack_cursor=ack_cursor,
+            )
+            snapshot_token = claims["snapshot"]
+            snapshot = await self.db.get(
+                SyncSnapshot, snapshot_token, populate_existing=True
+            )
+            if (
+                snapshot is None
+                or snapshot.status != "ready"
+                or snapshot.expires_at <= now
+                or snapshot.cursor != ack_cursor
+            ):
+                raise ConflictError(
+                    "sync recovery proof is invalid",
+                    error_type="sync_recovery_proof_invalid",
+                )
+        elif recovery_proof is not None:
+            raise ConflictError(
+                "sync recovery proof is invalid",
+                error_type="sync_recovery_proof_invalid",
+            )
         if ack_cursor < floor:
             raise ConflictError(
                 "ack_cursor is below retention floor",
@@ -166,15 +234,6 @@ class SyncClientService:
             raise ConflictError(
                 "ack_cursor exceeds current cursor",
                 error_type="sync_ack_above_current",
-            )
-        # A snapshot-required client cannot prove it has reconstructed events in
-        # (floor, current] by merely echoing the floor. Equality is only complete
-        # when the ledger has no newer cursor; the frontend emits this ACK after
-        # its authoritative full-reconcile transaction commits.
-        if client.snapshot_required and ack_cursor == floor and floor < current:
-            raise ConflictError(
-                "full snapshot must be completed before acknowledging this client",
-                error_type="sync_snapshot_required",
             )
         now, lease_expires_at = _lease_times()
         result = await self.db.execute(
@@ -197,6 +256,20 @@ class SyncClientService:
                 "ack_cursor cannot move backwards",
                 error_type="sync_ack_regression",
             )
+        if snapshot_token is not None:
+            await self.db.execute(
+                delete(SyncSnapshotChunk).where(
+                    SyncSnapshotChunk.snapshot_token == snapshot_token
+                )
+            )
+            deleted = await self.db.execute(
+                delete(SyncSnapshot).where(SyncSnapshot.token == snapshot_token)
+            )
+            if deleted.rowcount != 1:
+                raise ConflictError(
+                    "sync recovery proof is invalid",
+                    error_type="sync_recovery_proof_invalid",
+                )
         await self.db.flush()
         maintenance = await self.advance_safe_retention_floor(lock_acquired=True)
         return {

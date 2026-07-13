@@ -85,19 +85,23 @@ async def test_ack_boundaries_monotonic_idempotent_and_renews_lease(space_sessio
         await service.acknowledge(
             client_id=client_id, user_id="user-a", ack_cursor=first.id - 1, cursor_version=2
         )
-    assert below.value.error_type == "sync_ack_below_floor"
+    assert below.value.error_type == "sync_recovery_proof_required"
     with pytest.raises(ConflictError) as above:
         await service.acknowledge(
             client_id=client_id, user_id="user-a", ack_cursor=second.id + 1, cursor_version=2
         )
-    assert above.value.error_type == "sync_ack_above_current"
+    assert above.value.error_type == "sync_recovery_proof_required"
 
     with pytest.raises(ConflictError) as snapshot_required:
         await service.acknowledge(
             client_id=client_id, user_id="user-a", ack_cursor=first.id, cursor_version=2
         )
-    assert snapshot_required.value.error_type == "sync_snapshot_required"
+    assert snapshot_required.value.error_type == "sync_recovery_proof_required"
 
+    row = await space_session.get(SyncClient, client_id)
+    assert row is not None
+    row.snapshot_required = False
+    await space_session.flush()
     advanced = await service.acknowledge(
         client_id=client_id, user_id="user-a", ack_cursor=second.id, cursor_version=2
     )
@@ -118,6 +122,43 @@ async def test_ack_boundaries_monotonic_idempotent_and_renews_lease(space_sessio
     assert regression.value.error_type == "sync_ack_below_floor"
     row = await space_session.get(SyncClient, client_id)
     assert row is not None and row.ack_cursor == second.id
+
+
+@pytest.mark.asyncio
+async def test_ack_rejects_expired_lease_without_mutating_client_or_floor(space_session):
+    from app.models.sync_client import SyncClient
+    from app.services.sync_clients import SyncClientService
+    from app.services.sync_outbox import get_retention_floor, record_sync_event
+
+    event = await record_sync_event(
+        space_session, entity_type="task", entity_id="expired-ack", action="create"
+    )
+    service = SyncClientService(space_session)
+    client_id = str(uuid.uuid4())
+    await service.register(client_id=client_id, user_id="user-a")
+    row = await space_session.get(SyncClient, client_id)
+    assert row is not None
+    row.lease_expires_at = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    original_ack = row.ack_cursor
+    original_seen = row.last_seen_at
+    original_floor = await get_retention_floor(space_session)
+    await space_session.flush()
+
+    with pytest.raises(ConflictError) as expired:
+        await service.acknowledge(
+            client_id=client_id,
+            user_id="user-a",
+            space_id="space-a",
+            ack_cursor=event.id,
+            cursor_version=2,
+        )
+
+    assert expired.value.error_type == "sync_client_lease_expired"
+    await space_session.refresh(row)
+    assert row.ack_cursor == original_ack
+    assert row.last_seen_at == original_seen
+    assert row.lease_expires_at <= utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert await get_retention_floor(space_session) == original_floor
 
 
 @pytest.mark.asyncio
@@ -273,7 +314,7 @@ async def test_snapshot_required_client_cannot_ack_floor_when_newer_events_exist
             ack_cursor=first.id,
             cursor_version=2,
         )
-    assert blocked.value.error_type == "sync_snapshot_required"
+    assert blocked.value.error_type == "sync_recovery_proof_required"
 
 
 @pytest.mark.asyncio
@@ -302,28 +343,48 @@ async def test_expired_client_renewal_below_advanced_floor_requires_snapshot(spa
 
 
 @pytest.mark.asyncio
-async def test_snapshot_required_client_can_ack_when_floor_equals_current(space_session):
+@pytest.mark.parametrize("cursor_position", ["floor", "floor_plus_one", "current"])
+async def test_snapshot_required_client_rejects_bare_ack_at_every_valid_cursor(
+    space_session, cursor_position
+):
+    from app.models.sync_client import SyncClient
     from app.services.sync_clients import SyncClientService
     from app.services.sync_outbox import advance_retention_floor, record_sync_event
 
-    event = await record_sync_event(
-        space_session, entity_type="task", entity_id="floor-equals-current", action="create"
-    )
-    await advance_retention_floor(space_session, floor=event.id)
+    events = [
+        await record_sync_event(
+            space_session,
+            entity_type="task",
+            entity_id=f"proof-required-{index}",
+            action="create",
+        )
+        for index in range(3)
+    ]
+    await advance_retention_floor(space_session, floor=events[0].id)
     service = SyncClientService(space_session)
     client_id = str(uuid.uuid4())
     registered = await service.register(client_id=client_id, user_id="user-a")
     assert registered["snapshot_required"] is True
+    cursors = {
+        "floor": events[0].id,
+        "floor_plus_one": events[0].id + 1,
+        "current": events[-1].id,
+    }
 
-    acknowledged = await service.acknowledge(
-        client_id=client_id,
-        user_id="user-a",
-        ack_cursor=event.id,
-        cursor_version=2,
-    )
-    assert acknowledged["ack_cursor"] == event.id
-    renewed = await service.register(client_id=client_id, user_id="user-a")
-    assert renewed["snapshot_required"] is False
+    with pytest.raises(ConflictError) as blocked:
+        await service.acknowledge(
+            client_id=client_id,
+            user_id="user-a",
+            space_id="space-a",
+            ack_cursor=cursors[cursor_position],
+            cursor_version=2,
+        )
+
+    assert blocked.value.error_type == "sync_recovery_proof_required"
+    row = await space_session.get(SyncClient, client_id)
+    assert row is not None
+    assert row.ack_cursor == events[0].id
+    assert row.snapshot_required is True
 
 
 @pytest.mark.asyncio

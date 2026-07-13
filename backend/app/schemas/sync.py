@@ -95,7 +95,8 @@ class SyncClientRegistrationResponse(BaseModel):
 class SyncAckRequest(BaseModel):
     client_id: str = Field(..., min_length=36, max_length=36)
     ack_cursor: int = Field(..., ge=0)
-    cursor_version: int
+    cursor_version: int = Field(..., ge=2, le=2)
+    recovery_proof: str | None = Field(default=None, min_length=1, max_length=2048)
 
 
 class SyncAckResponse(BaseModel):
@@ -137,6 +138,8 @@ class SyncFullResponse(SyncPullResponse):
     """Response body for GET /api/v1/sync/full."""
 
     is_full: bool = True
+    recovery_proof: str | None = None
+    recovery_continuation: str | None = None
 
 
 class SyncStatusResponse(BaseModel):
