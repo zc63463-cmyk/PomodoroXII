@@ -1302,7 +1302,11 @@ describe('QuickNotesView', () => {
       }),
     )
 
-    toastOptions?.action?.onClick?.()
+    await act(async () => {
+      toastOptions?.action?.onClick?.()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     expect(storeMocks.restoreQuickNote).toHaveBeenCalledWith('memos')
   })
 
@@ -2221,14 +2225,16 @@ describe('QuickNotesView', () => {
       target: { value: '远端前标题\n\n我要明确覆盖远端的草稿' },
     })
 
-    storeMocks.state.quickNotes = [
-      {
-        ...note,
-        content: '远端前标题\n\n远端已经更新',
-        updated_at: '2026-07-07T13:10:00.000Z',
-      },
-    ]
-    rerender(createElement(QuickNotesView))
+    await act(async () => {
+      storeMocks.state.quickNotes = [
+        {
+          ...note,
+          content: '远端前标题\n\n远端已经更新',
+          updated_at: '2026-07-07T13:10:00.000Z',
+        },
+      ]
+      rerender(createElement(QuickNotesView))
+    })
 
     expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: '保留本地并覆盖' }))
@@ -2243,6 +2249,10 @@ describe('QuickNotesView', () => {
           content: '远端前标题\n\n我要明确覆盖远端的草稿',
         },
       )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
     })
   })
 
