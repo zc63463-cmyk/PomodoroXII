@@ -11,7 +11,7 @@ import { getQuickNoteRepositoryUserMessage } from '@/lib/quick-notes/quick-note-
 import { ensureQuickNotePreviewSpace } from '@/lib/quick-notes/quick-note-preview'
 import { useQuickNoteStore } from '@/stores/quick-note-store'
 
-export function QuickNotesView() {
+export function QuickNotesView({ composeRequestKey }: { composeRequestKey?: string } = {}) {
   const {
     allQuickNotes,
     quickNotes,
@@ -97,6 +97,11 @@ export function QuickNotesView() {
     describeQuickNoteError,
     lifecycleStateById,
   })
+
+  useEffect(() => {
+    if (!composeRequestKey) return
+    cancelEdit()
+  }, [cancelEdit, composeRequestKey])
   const {
     moveToTrashWithUndo,
     migrateToNoteWithPending,
@@ -188,6 +193,7 @@ export function QuickNotesView() {
         selectedDate,
         focusMode,
         selectedQuickNoteId,
+        composeRequestKey,
         draft,
         draftConflict,
         draftSaveState,

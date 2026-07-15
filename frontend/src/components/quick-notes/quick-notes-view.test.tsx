@@ -259,6 +259,12 @@ describe('QuickNotesView', () => {
     )
   })
 
+  it('focuses the existing composer for a new-note request', async () => {
+    render(<QuickNotesView composeRequestKey="palette-request-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('小记内容')).toHaveFocus())
+  })
+
   it('records composer content locally and projects it through the store action', async () => {
     render(createElement(QuickNotesView))
 

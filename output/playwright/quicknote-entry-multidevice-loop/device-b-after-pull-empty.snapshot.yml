@@ -1,0 +1,114 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e2]:
+    - banner [ref=f1e3]:
+      - generic [ref=f1e4]:
+        - generic [ref=f1e5]: PomodoroXII
+        - button "QuickNote MultiDevice Proof" [ref=f1e6]
+      - generic [ref=f1e8]:
+        - button "Sync" [ref=f1e9] [cursor=pointer]
+        - button "退出" [ref=f1e13]
+    - generic [ref=f1e15]:
+      - navigation [ref=f1e16]:
+        - link "番茄钟" [ref=f1e17] [cursor=pointer]:
+          - /url: /timer
+        - link "任务" [ref=f1e22] [cursor=pointer]:
+          - /url: /tasks
+        - link "日程" [ref=f1e27] [cursor=pointer]:
+          - /url: /schedules
+        - link "速记" [ref=f1e31] [cursor=pointer]:
+          - /url: /quick-notes
+        - link "统计" [ref=f1e35] [cursor=pointer]:
+          - /url: /stats
+        - link "反思" [ref=f1e39] [cursor=pointer]:
+          - /url: /reflections
+        - link "笔记" [ref=f1e43] [cursor=pointer]:
+          - /url: /notes
+        - link "习惯" [ref=f1e47] [cursor=pointer]:
+          - /url: /habits
+        - link "回收站" [ref=f1e54] [cursor=pointer]:
+          - /url: /trash
+        - link "设置" [ref=f1e59] [cursor=pointer]:
+          - /url: /settings
+      - main [ref=f1e64]:
+        - main [ref=f1e65]:
+          - generic [ref=f1e66]:
+            - generic [ref=f1e67]:
+              - generic [ref=f1e68]:
+                - text: Quick Notes
+                - heading "速记" [level=1] [ref=f1e69]
+              - button "回收站" [ref=f1e71]
+            - generic [ref=f1e73]:
+              - complementary "小记探索" [ref=f1e75]:
+                - textbox "搜索小记" [ref=f1e80]:
+                  - /placeholder: "搜索内容或 #标签"
+                - generic [ref=f1e81]:
+                  - heading "活动日历" [level=2] [ref=f1e83]
+                  - generic [ref=f1e84]:
+                    - generic [ref=f1e85]:
+                      - button "上个月" [ref=f1e86]: ‹
+                      - generic [ref=f1e87]: 2026 年 7 月
+                      - button "下个月" [ref=f1e88]: ›
+                    - generic [ref=f1e89]:
+                      - generic [ref=f1e90]: 一
+                      - generic [ref=f1e91]: 二
+                      - generic [ref=f1e92]: 三
+                      - generic [ref=f1e93]: 四
+                      - generic [ref=f1e94]: 五
+                      - generic [ref=f1e95]: 六
+                      - generic [ref=f1e96]: 日
+                    - generic [ref=f1e97]:
+                      - button "筛选日期 2026-07-01，无小记" [ref=f1e100]: "1"
+                      - button "筛选日期 2026-07-02，无小记" [ref=f1e101]: "2"
+                      - button "筛选日期 2026-07-03，无小记" [ref=f1e102]: "3"
+                      - button "筛选日期 2026-07-04，无小记" [ref=f1e103]: "4"
+                      - button "筛选日期 2026-07-05，无小记" [ref=f1e104]: "5"
+                      - button "筛选日期 2026-07-06，无小记" [ref=f1e105]: "6"
+                      - button "筛选日期 2026-07-07，无小记" [ref=f1e106]: "7"
+                      - button "筛选日期 2026-07-08，无小记" [ref=f1e107]: "8"
+                      - button "筛选日期 2026-07-09，无小记" [ref=f1e108]: "9"
+                      - button "筛选日期 2026-07-10，无小记" [ref=f1e109]: "10"
+                      - button "筛选日期 2026-07-11，无小记" [ref=f1e110]: "11"
+                      - button "筛选日期 2026-07-12，无小记" [ref=f1e111]: "12"
+                      - button "筛选日期 2026-07-13，无小记" [ref=f1e112]: "13"
+                      - button "筛选日期 2026-07-14，无小记" [ref=f1e113]: "14"
+                      - button "筛选日期 2026-07-15，无小记" [ref=f1e114]: "15"
+                      - button "筛选日期 2026-07-16，无小记" [ref=f1e115]: "16"
+                      - button "筛选日期 2026-07-17，无小记" [ref=f1e116]: "17"
+                      - button "筛选日期 2026-07-18，无小记" [ref=f1e117]: "18"
+                      - button "筛选日期 2026-07-19，无小记" [ref=f1e118]: "19"
+                      - button "筛选日期 2026-07-20，无小记" [ref=f1e119]: "20"
+                      - button "筛选日期 2026-07-21，无小记" [ref=f1e120]: "21"
+                      - button "筛选日期 2026-07-22，无小记" [ref=f1e121]: "22"
+                      - button "筛选日期 2026-07-23，无小记" [ref=f1e122]: "23"
+                      - button "筛选日期 2026-07-24，无小记" [ref=f1e123]: "24"
+                      - button "筛选日期 2026-07-25，无小记" [ref=f1e124]: "25"
+                      - button "筛选日期 2026-07-26，无小记" [ref=f1e125]: "26"
+                      - button "筛选日期 2026-07-27，无小记" [ref=f1e126]: "27"
+                      - button "筛选日期 2026-07-28，无小记" [ref=f1e127]: "28"
+                      - button "筛选日期 2026-07-29，无小记" [ref=f1e128]: "29"
+                      - button "筛选日期 2026-07-30，无小记" [ref=f1e129]: "30"
+                      - button "筛选日期 2026-07-31，无小记" [ref=f1e130]: "31"
+                - generic [ref=f1e131]:
+                  - heading "标签" [level=2] [ref=f1e133]
+                  - generic [ref=f1e134]:
+                    - button "切换为单选标签过滤" [pressed] [ref=f1e135]: 单选
+                    - button "切换为多选标签过滤" [ref=f1e136]: 多选
+                    - button "标签云视图" [pressed] [ref=f1e137]: 云
+                    - button "标签树视图" [ref=f1e138]: 树
+                  - paragraph [ref=f1e139]: "还没有标签，写下 #灵感 试试。"
+              - generic [ref=f1e140]:
+                - generic [ref=f1e142]:
+                  - textbox "小记内容" [ref=f1e144]:
+                    - /placeholder: 随手写下正在想的事...
+                  - generic [ref=f1e145]:
+                    - generic [ref=f1e146]: 新建小记：点击记录保存，Ctrl/Cmd + Enter 快速记录
+                    - generic [ref=f1e150]:
+                      - button "专注" [ref=f1e151]
+                      - button "记录" [disabled]
+                - region "小记时间线" [ref=f1e152]:
+                  - generic [ref=f1e153]:
+                    - heading "还没有小记" [level=2] [ref=f1e154]
+                    - paragraph [ref=f1e155]: 先写一条，给今天留个轻轻的锚点。
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=f1e161] [cursor=pointer]
+  - alert [ref=f1e165]

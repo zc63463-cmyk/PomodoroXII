@@ -1,0 +1,135 @@
+- generic [ref=e1]:
+  - generic [ref=e33]:
+    - banner [ref=e34]:
+      - generic [ref=e35]:
+        - generic [ref=e36]: PomodoroXII
+        - button "QuickNote MultiDevice Proof" [ref=e385]
+      - generic [ref=e39]:
+        - button "已同步 00:51" [ref=e386] [cursor=pointer]
+        - button "退出" [ref=e387]
+    - generic [ref=e46]:
+      - navigation [ref=e47]:
+        - link "番茄钟" [ref=e388] [cursor=pointer]:
+          - /url: /timer
+        - link "任务" [ref=e389] [cursor=pointer]:
+          - /url: /tasks
+        - link "日程" [ref=e390] [cursor=pointer]:
+          - /url: /schedules
+        - link "速记" [ref=e391] [cursor=pointer]:
+          - /url: /quick-notes
+        - link "统计" [ref=e392] [cursor=pointer]:
+          - /url: /stats
+        - link "反思" [ref=e393] [cursor=pointer]:
+          - /url: /reflections
+        - link "笔记" [ref=e394] [cursor=pointer]:
+          - /url: /notes
+        - link "习惯" [ref=e395] [cursor=pointer]:
+          - /url: /habits
+        - link "回收站" [ref=e396] [cursor=pointer]:
+          - /url: /trash
+        - link "设置" [ref=e397] [cursor=pointer]:
+          - /url: /settings
+      - main [ref=e95]:
+        - main [ref=e160]:
+          - generic [ref=e161]:
+            - generic [ref=e162]:
+              - generic [ref=e163]:
+                - text: Quick Notes
+                - heading "速记" [level=1] [ref=e398]
+              - button "回收站" [ref=e399]
+            - generic [ref=e168]:
+              - complementary "小记探索" [ref=e400]:
+                - textbox "搜索小记" [ref=e401]:
+                  - /placeholder: "搜索内容或 #标签"
+                - generic [ref=e176]:
+                  - heading "活动日历" [level=2] [ref=e402]
+                  - generic [ref=e179]:
+                    - generic [ref=e180]:
+                      - button "上个月" [ref=e403]: ‹
+                      - generic [ref=e182]: 2026 年 7 月
+                      - button "下个月" [ref=e404]: ›
+                    - generic [ref=e184]:
+                      - generic [ref=e185]: 一
+                      - generic [ref=e186]: 二
+                      - generic [ref=e187]: 三
+                      - generic [ref=e188]: 四
+                      - generic [ref=e189]: 五
+                      - generic [ref=e190]: 六
+                      - generic [ref=e191]: 日
+                    - generic [ref=e192]:
+                      - button "筛选日期 2026-07-01，无小记" [ref=e405]: "1"
+                      - button "筛选日期 2026-07-02，无小记" [ref=e406]: "2"
+                      - button "筛选日期 2026-07-03，无小记" [ref=e407]: "3"
+                      - button "筛选日期 2026-07-04，无小记" [ref=e408]: "4"
+                      - button "筛选日期 2026-07-05，无小记" [ref=e409]: "5"
+                      - button "筛选日期 2026-07-06，无小记" [ref=e410]: "6"
+                      - button "筛选日期 2026-07-07，无小记" [ref=e411]: "7"
+                      - button "筛选日期 2026-07-08，无小记" [ref=e412]: "8"
+                      - button "筛选日期 2026-07-09，无小记" [ref=e413]: "9"
+                      - button "筛选日期 2026-07-10，无小记" [ref=e414]: "10"
+                      - button "筛选日期 2026-07-11，无小记" [ref=e415]: "11"
+                      - button "筛选日期 2026-07-12，无小记" [ref=e416]: "12"
+                      - button "筛选日期 2026-07-13，无小记" [ref=e417]: "13"
+                      - button "筛选日期 2026-07-14，无小记" [ref=e418]: "14"
+                      - button "筛选日期 2026-07-15，无小记" [ref=e419]: "15"
+                      - button "筛选日期 2026-07-16，1 条小记" [ref=e420]: "16"
+                      - button "筛选日期 2026-07-17，无小记" [ref=e421]: "17"
+                      - button "筛选日期 2026-07-18，无小记" [ref=e422]: "18"
+                      - button "筛选日期 2026-07-19，无小记" [ref=e423]: "19"
+                      - button "筛选日期 2026-07-20，无小记" [ref=e424]: "20"
+                      - button "筛选日期 2026-07-21，无小记" [ref=e425]: "21"
+                      - button "筛选日期 2026-07-22，无小记" [ref=e426]: "22"
+                      - button "筛选日期 2026-07-23，无小记" [ref=e427]: "23"
+                      - button "筛选日期 2026-07-24，无小记" [ref=e428]: "24"
+                      - button "筛选日期 2026-07-25，无小记" [ref=e429]: "25"
+                      - button "筛选日期 2026-07-26，无小记" [ref=e430]: "26"
+                      - button "筛选日期 2026-07-27，无小记" [ref=e431]: "27"
+                      - button "筛选日期 2026-07-28，无小记" [ref=e432]: "28"
+                      - button "筛选日期 2026-07-29，无小记" [ref=e433]: "29"
+                      - button "筛选日期 2026-07-30，无小记" [ref=e434]: "30"
+                      - button "筛选日期 2026-07-31，无小记" [ref=e435]: "31"
+                - generic [ref=e226]:
+                  - generic [ref=e227]:
+                    - heading "标签" [level=2] [ref=e436]
+                    - button "清理标签" [ref=e437]: 清理
+                  - generic [ref=e229]:
+                    - button "切换为单选标签过滤" [pressed] [ref=e438]: 单选
+                    - button "切换为多选标签过滤" [ref=e439]: 多选
+                    - button "标签云视图" [pressed] [ref=e440]: 云
+                    - button "标签树视图" [ref=e441]: 树
+                  - generic [ref=e260]:
+                    - 'button "筛选标签 #sync，1 条小记" [ref=e442]':
+                      - generic [ref=e262]: "#sync"
+                      - generic [ref=e263]: "1"
+                    - 'button "重命名标签 #sync" [ref=e443]': 重命名
+              - generic [ref=e235]:
+                - generic [ref=e237]:
+                  - textbox "小记内容" [active] [ref=e444]:
+                    - /placeholder: 随手写下正在想的事...
+                  - generic [ref=e240]:
+                    - generic [ref=e241]:
+                      - generic [ref=e242]: 新建小记：点击记录保存，Ctrl/Cmd + Enter 快速记录
+                      - generic [ref=e265]:
+                        - generic [ref=e266]: 常用标签
+                        - 'button "插入常用标签 #sync" [ref=e445]': "#sync"
+                    - generic [ref=e245]:
+                      - button "专注" [ref=e446]
+                      - button "记录" [disabled]
+                - region "小记时间线" [ref=e447]:
+                  - generic [ref=e268]:
+                    - generic [ref=e269]: 今天
+                    - article [ref=e270]:
+                      - generic [ref=e271]:
+                        - button [ref=e448]:
+                          - 'heading "Multi-device proof v1 #sync" [level=2] [ref=e449]'
+                          - paragraph [ref=e274]: "Multi-device proof v1 #sync"
+                        - generic [ref=e275]:
+                          - button "置顶" [ref=e450]
+                          - button "更多小记操作" [ref=e451]: ...
+                      - generic [ref=e279]:
+                        - generic [ref=e280]: 7月16日 00:50
+                        - generic [ref=e281]: 同步失败，可稍后重试
+                        - button "#sync" [ref=e452]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e20] [cursor=pointer]
+  - alert [ref=e24]: PomodoroXII

@@ -1,0 +1,46 @@
+{
+  "baseline": "16055a3203af72f714a88c6827396268676a5762",
+  "branch": "codex/quicknote-entry-multidevice-loop",
+  "frontend_origin": "http://127.0.0.1:3000",
+  "backend_origin": "http://127.0.0.1:8000",
+  "entry_evidence": {
+    "desktop_notes": "desktop-notes-empty-authenticated.png",
+    "mobile_notes_390x844": "mobile-notes-390x844.png",
+    "ctrl_k_palette": "ctrl-k-command-palette.png",
+    "new_command_focused": "device-a-new-command-focused-sync-failed.png",
+    "new_command_url_pattern": "/notes?compose=<timestamp>",
+    "new_command_active_element": "textarea[aria-label='小记内容']"
+  },
+  "multi_device_evidence": {
+    "result": "blocked",
+    "sessions": ["device-a", "device-b"],
+    "same_space_id": "4fb3b5f3878a4614b92640e05b648e2a",
+    "device_a_entity_id": "ec1c3110-0d5d-4062-b24f-ca9ab0994c4f",
+    "device_a_content": "Multi-device proof v1 #sync",
+    "device_a_snapshot": "device-a-created.snapshot.yml",
+    "device_a_ui_after_push": "device-a-new-command-focused-sync-failed.png",
+    "push_request": "POST /api/v1/sync/push -> HTTP 200",
+    "push_response": {
+      "applied_count": 0,
+      "conflict_count": 0,
+      "error_count": 1,
+      "error_class": "sqlite3.ProgrammingError",
+      "error_summary": "QuickNote tags list cannot be bound to the SQLite Text column"
+    },
+    "device_b_snapshot": "device-b-after-pull-empty.snapshot.yml",
+    "device_b_ui_after_full_pull": "device-b-after-pull-empty.png",
+    "device_b_observed_content": null
+  },
+  "verified_contract_facts": [
+    "The frontend QuickNote sync integration contract sends tags as a JSON array.",
+    "The backend QuickNote API schema and serializer expose tags as a JSON array.",
+    "QuickNoteService converts tag arrays to JSON text before SQLite writes.",
+    "Generic SyncService applies QuickNote payload fields directly without that conversion."
+  ],
+  "hard_stop": {
+    "triggered": true,
+    "reason": "The existing configured backend cannot propagate a created QuickNote without a backend sync-apply fix. Encoding tags as a string in the client would violate the existing wire contract.",
+    "backend_schema_or_migration_changed": false,
+    "sync_protocol_changed": false
+  }
+}

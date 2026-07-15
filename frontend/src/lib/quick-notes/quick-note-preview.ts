@@ -9,7 +9,7 @@ const PREVIEW_STORAGE_KEY = 'pxii_quick_notes_preview'
 const PREVIEW_SPACE_ID = 'quick-notes-preview'
 const PREVIEW_MASTER_TOKEN = 'quick-note-preview-master-token'
 const PREVIEW_SPACE_TOKEN = 'quick-note-preview-space-token'
-const PREVIEW_ROUTE_ALLOWLIST = new Set(['/quick-notes', '/settings'])
+const PREVIEW_ROUTE_ALLOWLIST = new Set(['/quick-notes', '/notes', '/settings'])
 
 function isDevelopment(): boolean {
   return process.env.NODE_ENV === 'development'
