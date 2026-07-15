@@ -191,4 +191,5 @@ export const quickNoteStyles = {
   cardOverflow: 'relative',
   cardOverflowTrigger: 'flex size-11 cursor-pointer list-none items-center justify-center rounded-md text-[color:var(--qn-muted)] hover:bg-[color:var(--qn-hover)] [&::-webkit-details-marker]:hidden',
   cardOverflowMenu: 'absolute right-0 z-20 mt-1 grid min-w-32 gap-1 rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-panel)] p-1 shadow-[var(--qn-shadow-soft)]',
+  cardOverflowItem: 'min-h-11 rounded-md px-3 text-left text-sm text-[color:var(--qn-text)] hover:bg-[color:var(--qn-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--qn-border-strong)]',
 }
