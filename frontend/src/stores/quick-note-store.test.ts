@@ -417,7 +417,7 @@ describe('useQuickNoteStore', () => {
     expect((await db.quickNotes.get(converted.id))?.tags).toEqual(['', '#converted'])
   })
 
-  it('derives visible notes from created_at date filters and clears filters on reset', async () => {
+  it('derives visible notes from activity date filters and clears filters on reset', async () => {
     await useQuickNoteStore.getState().createQuickNote({
       id: 'day-one',
       content: 'day one memo',
@@ -431,9 +431,9 @@ describe('useQuickNoteStore', () => {
       updated_at: '2026-07-02T10:00:00.000Z',
     })
 
-    useQuickNoteStore.getState().toggleSelectedDate('2026-07-01')
+    useQuickNoteStore.getState().toggleSelectedDate('2026-07-03')
 
-    expect(useQuickNoteStore.getState().selectedDate).toBe('2026-07-01')
+    expect(useQuickNoteStore.getState().selectedDate).toBe('2026-07-03')
     expect(useQuickNoteStore.getState().quickNotes.map((note) => note.id)).toEqual([
       'day-one',
     ])
