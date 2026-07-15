@@ -112,6 +112,51 @@ async def test_full_sync_roundtrip_create_pull(client):
 
 
 @pytest.mark.asyncio
+async def test_quick_note_sync_roundtrip_preserves_array_tags(client):
+    """QuickNote sync accepts wire-format tag arrays and returns them on pull."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+    eid = uuid.uuid4().hex
+
+    pushed = await _push(client, headers, [
+        _make_event(
+            entity_type="quickNote",
+            entity_id=eid,
+            action="create",
+            payload={
+                "id": eid,
+                "content": "Synced quick note",
+                "tags": ["sync", "multi-device"],
+            },
+        )
+    ])
+
+    assert pushed["errors"] == []
+    assert [item["entity_id"] for item in pushed["applied"]] == [eid]
+
+    updated = await _push(client, headers, [
+        _make_event(
+            entity_type="quickNote",
+            entity_id=eid,
+            action="update",
+            payload={
+                "content": "Updated synced quick note",
+                "tags": ["synced"],
+            },
+            client_updated_at="2026-07-04T12:00:00.000Z",
+        )
+    ])
+    assert updated["errors"] == []
+    assert [item["entity_id"] for item in updated["applied"]] == [eid]
+
+    response = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
+    assert response.status_code == 200
+    quick_notes = {item["id"]: item for item in response.json()["quickNotes"]}
+    assert quick_notes[eid]["content"] == "Updated synced quick note"
+    assert quick_notes[eid]["tags"] == ["synced"]
+
+
+@pytest.mark.asyncio
 async def test_full_sync_roundtrip_update_lww(client):
     """push create → push update (newer ts) → pull reflects new title."""
     space_token = await _setup_login_and_space_token(client)
