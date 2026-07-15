@@ -313,6 +313,7 @@ class SyncService:
         )
         if resolution is not None:
             return resolution
+        payload = self._serialize_json_storage_fields(etype, payload)
 
         if action == "create":
             # C3: Folder circular reference detection on create.
@@ -374,6 +375,30 @@ class SyncService:
             return "ok"
 
         raise ValueError(f"Unknown action: {action}")
+
+    @staticmethod
+    def _serialize_json_storage_fields(
+        etype: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Encode registry-declared JSON fields before generic ORM writes.
+
+        Sync payloads carry JSON fields in their API form (lists or objects),
+        while the SQLite models store them in Text columns. Service-specific
+        CRUD methods normally perform this encoding, but generic sync writes
+        bypass those services. The registry is the shared schema source for
+        both shapes, so it determines which payload fields need encoding.
+        """
+        spec = ENTITY_REGISTRY[etype]["spec"]
+        json_fields = {field.name for field in spec.fields if field.type == "json"}
+        if not json_fields:
+            return payload
+
+        normalized = dict(payload)
+        for field in json_fields:
+            value = normalized.get(field)
+            if isinstance(value, (list, dict)):
+                normalized[field] = json.dumps(value, ensure_ascii=False)
+        return normalized
 
     # ----------------------------------------------------------------- #
     # _push_note_event (note-specific event handling via NoteService)
