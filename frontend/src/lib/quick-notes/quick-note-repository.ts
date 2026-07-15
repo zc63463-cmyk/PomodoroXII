@@ -109,6 +109,11 @@ export interface QuickNoteConvertResult {
 
 export type QuickNoteSyncStatus = 'pending' | 'failed'
 
+export type QuickNoteExistingEditCommitResult =
+  | Readonly<{ kind: 'saved'; note: QuickNote }>
+  | Readonly<{ kind: 'conflict'; note: QuickNote }>
+  | Readonly<{ kind: 'missing-or-inactive' }>
+
 export type QuickNoteLifecycleState =
   | 'active'
   | 'trashed'
@@ -270,6 +275,39 @@ export async function updateQuickNote(
     await db.quickNotes.put(row)
     const note = stripSyncFields(row)
     return { result: note, payload: note }
+  })
+}
+
+export async function commitQuickNoteExistingEdit(
+  database: PomodoroXIDB,
+  input: Readonly<{ id: string; expectedUpdatedAt: string; content: string }>,
+): Promise<QuickNoteExistingEditCommitResult> {
+  return database.transaction('rw', database.quickNotes, database.outbox, async () => {
+    const existing = await database.quickNotes.get(input.id)
+    if (!existing) return { kind: 'missing-or-inactive' }
+    const current = stripSyncFields(existing)
+    if (!isActiveQuickNote(current) || isConvertedQuickNote(current)) {
+      return { kind: 'missing-or-inactive' }
+    }
+    if (current.updated_at !== input.expectedUpdatedAt) {
+      return { kind: 'conflict', note: current }
+    }
+
+    const content = normalizeContent(input.content)
+    const row: CachedQuickNote = {
+      ...existing,
+      content,
+      tags: mergeQuickNoteTags(undefined, extractQuickNoteTags(content)),
+      updated_at: new Date().toISOString(),
+      version: (existing.version ?? 1) + 1,
+      _dirty: true,
+    }
+    await database.quickNotes.put(row)
+    const note = stripSyncFields(row)
+    await runConfiguredQuickNoteOutbox(database, {
+      entityType: 'quickNote', entityId: note.id, action: 'update', payload: note,
+    })
+    return { kind: 'saved', note }
   })
 }
 
