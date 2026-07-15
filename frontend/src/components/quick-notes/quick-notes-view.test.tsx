@@ -809,7 +809,7 @@ describe('QuickNotesView', () => {
     expect(screen.getByText('work')).toBeInTheDocument()
   })
 
-  it('renders created_at activity calendar and dispatches date filters', async () => {
+  it('renders activity-date calendar and dispatches date filters', async () => {
     const notes = [
       makeQuickNote({
         id: 'created-july-1',
@@ -826,17 +826,17 @@ describe('QuickNotesView', () => {
     ]
     storeMocks.state.allQuickNotes = notes
     storeMocks.state.quickNotes = notes
-    storeMocks.state.selectedDate = '2026-07-01'
+    storeMocks.state.selectedDate = '2026-07-07'
 
     render(createElement(QuickNotesView))
 
     const createdDate = await screen.findByRole('button', {
-      name: '筛选日期 2026-07-01，1 条小记',
+      name: '筛选日期 2026-07-07，1 条小记',
     })
     expect(createdDate).toHaveAttribute('aria-pressed', 'true')
 
     fireEvent.click(createdDate)
-    expect(storeMocks.toggleSelectedDate).toHaveBeenCalledWith('2026-07-01')
+    expect(storeMocks.toggleSelectedDate).toHaveBeenCalledWith('2026-07-07')
 
     fireEvent.click(screen.getByRole('button', { name: '清除日期筛选' }))
     expect(storeMocks.clearSelectedDate).toHaveBeenCalledTimes(1)
@@ -1736,7 +1736,7 @@ describe('QuickNotesView', () => {
     })
   })
 
-  it('enters focus-edit by expanding only the right column and pushing the timeline down', async () => {
+  it('enters focus-edit as a single editor column without explorer or timeline controls', async () => {
     storeMocks.state.quickNotes = [
       makeQuickNote({
         id: 'focus-edit-note',
@@ -1771,24 +1771,9 @@ describe('QuickNotesView', () => {
     expect(screen.getByText(/专注写作中/)).toHaveClass(
       'text-[color:var(--qn-muted)]',
     )
-    const explorer = screen.getByLabelText('小记探索')
-    const focusGrid = explorer.parentElement
-    const mainColumn = explorer.nextElementSibling
-    const timeline = screen.getByLabelText('小记时间线')
-    const timelineSink = timeline.parentElement
-
-    expect(explorer).toBeInTheDocument()
-    expect(focusGrid).toHaveClass('lg:grid-cols-[18rem_minmax(0,1fr)]')
-    expect(focusGrid?.firstElementChild).toBe(explorer)
-    expect(mainColumn).toContainElement(screen.getByLabelText('小记内容'))
-    expect(mainColumn).toContainElement(timeline)
-    expect(timelineSink).toHaveAttribute('data-focus-edit-timeline-sink', 'true')
-    expect(timelineSink).toHaveClass('quick-note-focus-timeline-sink')
-    expect(screen.getByRole('button', { name: /给专注模式一点背景/ })).toHaveAttribute(
-      'tabIndex',
-      '-1',
-    )
-    expect(screen.getByRole('button', { name: '编辑小记' })).toBeDisabled()
+    expect(screen.queryByLabelText('小记探索')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('小记时间线')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /给专注模式一点背景/ })).not.toBeInTheDocument()
   })
 
   it('returns to normal after a successful focus-edit submit', async () => {
