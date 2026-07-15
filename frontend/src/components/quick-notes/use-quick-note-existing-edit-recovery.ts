@@ -56,12 +56,24 @@ export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession
   }, [])
   const change = useCallback((value: string) => { draftRef.current = value; revisionRef.current += 1; setDraft(value); setSaveState('unsaved'); if (timerRef.current) clearTimeout(timerRef.current); timerRef.current = setTimeout(() => { void checkpoint() }, 500) }, [checkpoint])
   const cancel = useCallback(async () => { if (timerRef.current) clearTimeout(timerRef.current); const note = noteRef.current; const adapter = adapterRef.current; if (note && adapter) await adapter.clearIfOwned(note.id, editIdRef.current, revisionRef.current); noteRef.current = null; setEditingNote(null); setDraft(''); setConflict(null); setSaveState('saved'); return 'cancelled' as const }, [])
-  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current) }, [])
+  useEffect(() => {
+    const unsubscribe = spaceDBManager.onSwitch(() => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+      noteRef.current = null
+      adapterRef.current = null
+      spaceIdRef.current = null
+      setEditingNote(null)
+      setDraft('')
+      setConflict(null)
+      setSaveState('saved')
+    })
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); unsubscribe() }
+  }, [])
   const save = useCallback(async ({ closeAfterSave = false }: { closeAfterSave?: boolean } = {}) => {
     const note = noteRef.current
     const adapter = adapterRef.current
     const spaceId = spaceIdRef.current
-    if (!note || !adapter || !spaceId) return false
+    if (!note || !adapter || !spaceId || spaceDBManager.currentSpaceId !== spaceId) return false
     if (!draftRef.current.trim()) { setSaveState('unsaved'); return false }
     if (timerRef.current) clearTimeout(timerRef.current)
     await checkpoint()

@@ -42,4 +42,18 @@ describe('useQuickNoteExistingEditRecovery', () => {
     expect(hook.result.current).toMatchObject({ draft: 'saved content', saveState: 'saved' })
     expect(await spaceDBManager.current.quickNotes.get(note.id)).toMatchObject({ content: 'saved content' })
   })
+
+  it('does not publish or write into Space B after an A to B switch with the same note ID', async () => {
+    const fixed = '2026-07-15T00:00:00.000Z'
+    const source = await createQuickNote({ id: note.id, content: 'A source', created_at: fixed, updated_at: fixed })
+    const hook = renderHook(() => useQuickNoteExistingEditRecovery())
+    await act(async () => { await hook.result.current.start(source) })
+    act(() => { hook.result.current.change('A local') })
+    await act(async () => { await spaceDBManager.switchTo(`existing-target-${crypto.randomUUID()}`) })
+    await createQuickNote({ id: note.id, content: 'B source', created_at: fixed, updated_at: fixed })
+
+    await expect(hook.result.current.save()).resolves.toBe(false)
+    expect(hook.result.current.editingId).toBeNull()
+    expect(await spaceDBManager.current.quickNotes.get(note.id)).toMatchObject({ content: 'B source' })
+  })
 })
