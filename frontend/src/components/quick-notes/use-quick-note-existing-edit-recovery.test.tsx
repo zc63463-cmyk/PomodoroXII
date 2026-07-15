@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { useQuickNoteExistingEditRecovery } from '@/components/quick-notes/use-quick-note-existing-edit-recovery'
 import type { QuickNote } from '@/types'
 import { spaceDBManager } from '@/services/space-db'
-import { createQuickNote } from '@/lib/quick-notes/quick-note-repository'
+import { createQuickNote, updateQuickNote } from '@/lib/quick-notes/quick-note-repository'
 
 const note: QuickNote = {
   id: 'note-1', content: 'before', mood: null, tags: [], pinned: false,
@@ -55,5 +55,17 @@ describe('useQuickNoteExistingEditRecovery', () => {
     await expect(hook.result.current.save()).resolves.toBe(false)
     expect(hook.result.current.editingId).toBeNull()
     expect(await spaceDBManager.current.quickNotes.get(note.id)).toMatchObject({ content: 'B source' })
+  })
+
+  it('preserves local input on CAS conflict and can adopt the remote version', async () => {
+    const stored = await createQuickNote({ id: note.id, content: note.content })
+    const hook = renderHook(() => useQuickNoteExistingEditRecovery())
+    await act(async () => { await hook.result.current.start(stored) })
+    act(() => { hook.result.current.change('local') })
+    await updateQuickNote(note.id, { content: 'remote' })
+    await act(async () => { await hook.result.current.save() })
+    expect(hook.result.current).toMatchObject({ draft: 'local', conflict: { remoteContent: 'remote' }, saveState: 'unsaved' })
+    await act(async () => { await hook.result.current.useRemote() })
+    expect(hook.result.current).toMatchObject({ draft: 'remote', conflict: null, saveState: 'saved' })
   })
 })
