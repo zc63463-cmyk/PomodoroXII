@@ -47,14 +47,23 @@ export function createDexieQuickNoteExistingEditRecoveryAdapter(database: Pomodo
 
 function key(noteId: string) { return `quickNote:existingEdit:v1:${noteId}` }
 function nonblank(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0 }
+function isoTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  try {
+    return new Date(value).toISOString() === value
+  } catch {
+    return false
+  }
+}
 function decode(raw: string, spaceId: string, noteId: string): QuickNoteExistingEditRecoverySnapshotV1 | null {
   try {
     const value: unknown = JSON.parse(raw)
     if (!value || typeof value !== 'object') return null
     const item = value as Record<string, unknown>
     if (item.version !== 1 || item.spaceId !== spaceId || item.noteId !== noteId || !Number.isInteger(item.revision) || (item.revision as number) < 0) return null
-    const strings = ['editId', 'spaceId', 'noteId', 'baseContent', 'baseUpdatedAt', 'draft', 'checkpointedAt'] as const
-    if (!strings.every((name) => nonblank(item[name]))) return null
+    if (!nonblank(item.editId) || !nonblank(item.spaceId) || !nonblank(item.noteId)) return null
+    if (typeof item.baseContent !== 'string' || typeof item.draft !== 'string') return null
+    if (!isoTimestamp(item.baseUpdatedAt) || !isoTimestamp(item.checkpointedAt)) return null
     return item as unknown as QuickNoteExistingEditRecoverySnapshotV1
   } catch { return null }
 }

@@ -415,6 +415,38 @@ describe('quick-note-repository', () => {
     expect(await db.outbox.count()).toBe(0)
   })
 
+  it('returns missing-or-inactive for absent and sync-deleted rows without writes', async () => {
+    await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+      id: 'missing-existing-edit', expectedUpdatedAt: '2026-07-15T00:00:00.000Z', content: 'local',
+    })).resolves.toEqual({ kind: 'missing-or-inactive' })
+
+    const note = await createQuickNote({ id: 'sync-deleted-existing-edit', content: 'before' })
+    await db.quickNotes.update(note.id, { deletion_state: 'deleted', _dirty: false })
+    const before = await db.quickNotes.get(note.id)
+    await db.outbox.clear()
+
+    await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+      id: note.id, expectedUpdatedAt: note.updated_at, content: 'must not revive',
+    })).resolves.toEqual({ kind: 'missing-or-inactive' })
+    expect(await db.quickNotes.get(note.id)).toEqual(before)
+    expect(await db.outbox.count()).toBe(0)
+  })
+
+  it('rolls back an existing-edit entity write when its Outbox write fails', async () => {
+    const note = await createQuickNote({ id: 'existing-edit-rollback', content: 'before' })
+    const before = await db.quickNotes.get(note.id)
+    await db.outbox.clear()
+    configureQuickNoteOutboxHook(async () => {
+      throw new Error('existing edit Outbox failed')
+    })
+
+    await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+      id: note.id, expectedUpdatedAt: note.updated_at, content: 'after',
+    })).rejects.toThrow('existing edit Outbox failed')
+    expect(await db.quickNotes.get(note.id)).toEqual(before)
+    expect(await db.outbox.count()).toBe(0)
+  })
+
   it('rejects blank creates and exposes stable user and developer messages', async () => {
     await expect(createQuickNote({ content: '   ' })).rejects.toMatchObject({
       code: 'empty_content',

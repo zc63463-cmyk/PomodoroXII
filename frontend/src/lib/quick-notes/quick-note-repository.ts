@@ -286,7 +286,7 @@ export async function commitQuickNoteExistingEdit(
     const existing = await database.quickNotes.get(input.id)
     if (!existing) return { kind: 'missing-or-inactive' }
     const current = stripSyncFields(existing)
-    if (!isActiveQuickNote(current) || isConvertedQuickNote(current)) {
+    if (!isNotSyncDeleted(existing) || !isActiveQuickNote(current) || isConvertedQuickNote(current)) {
       return { kind: 'missing-or-inactive' }
     }
     if (current.updated_at !== input.expectedUpdatedAt) {
