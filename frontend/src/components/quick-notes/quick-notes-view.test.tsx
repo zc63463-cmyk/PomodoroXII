@@ -159,6 +159,19 @@ async function seedActiveQuickNote(note: QuickNote): Promise<void> {
 }
 
 describe('QuickNotesView', () => {
+  it('keeps pin primary and exposes remaining actions from an accessible overflow menu', async () => {
+    const note = makeQuickNote({ id: 'overflow-menu', content: 'Overflow action note' })
+    storeMocks.state.quickNotes = [note]
+    render(createElement(QuickNotesView))
+
+    expect(screen.getByRole('button', { name: '置顶' })).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: '更多小记操作' }))
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: '编辑小记' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: '阅读小记' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: '转为笔记' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: '移到回收站' })).toBeInTheDocument()
+  })
   it('opens mobile filters in an accessible dialog', async () => {
     render(createElement(QuickNotesView))
 
