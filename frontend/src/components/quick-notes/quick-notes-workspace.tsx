@@ -52,6 +52,7 @@ interface QuickNotesWorkspaceProps {
   selectedDate: string | null
   focusMode: QuickNoteFocusMode
   selectedQuickNoteId: string | null
+  composeRequestKey?: string
   draft: string
   draftConflict: QuickNoteDraftConflict | null
   draftSaveState: QuickNoteDraftSaveState
@@ -105,6 +106,7 @@ export function QuickNotesWorkspace({
   selectedDate,
   focusMode,
   selectedQuickNoteId,
+  composeRequestKey,
   draft,
   draftConflict,
   draftSaveState,
@@ -407,6 +409,7 @@ export function QuickNotesWorkspace({
         )
       : null,
     createElement(QuickNoteComposer, {
+      focusRequestKey: composeRequestKey,
       draft,
       editingNote,
       hasConflict: draftConflict !== null,
