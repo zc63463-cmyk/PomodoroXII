@@ -368,17 +368,6 @@ export function QuickNotesWorkspace({
     onToggleDate: onToggleSelectedDate,
     onClearDate: onClearSelectedDate,
   })
-  const timelineSlot = isFocusEditing
-    ? createElement(
-        'div',
-        {
-          className: quickNoteStyles.focusEditTimelineSink,
-          'data-focus-edit-timeline-sink': 'true',
-          'aria-disabled': true,
-        },
-        timeline,
-      )
-    : timeline
   const mainColumn = createElement(
     'div',
     { className: quickNoteStyles.workspaceMain },
@@ -421,7 +410,7 @@ export function QuickNotesWorkspace({
           pendingById: trashPendingById,
         })
       : null,
-    timelineSlot,
+    isFocusEditing ? null : timeline,
   )
 
   return createElement(
@@ -434,7 +423,7 @@ export function QuickNotesWorkspace({
           ? quickNoteStyles.focusEditGrid
           : quickNoteStyles.workspaceGrid,
       },
-      explorer,
+      isFocusEditing ? null : explorer,
       mainColumn,
     ),
   )

@@ -140,7 +140,7 @@ export function QuickNotesView() {
           'div',
           null,
           createElement(
-            'p',
+            'span',
             {
               className: quickNoteStyles.eyebrow,
             },

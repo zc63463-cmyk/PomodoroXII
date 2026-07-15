@@ -8,7 +8,7 @@ import { QuickNoteMarkdown } from '@/components/quick-notes/quick-note-markdown'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
 import {
   getQuickNoteSearchNeedle,
-  getQuickNoteSummary,
+  getQuickNoteSearchSnippet,
   getQuickNoteTitle,
 } from '@/lib/quick-notes/quick-note-selectors'
 import { cn } from '@/lib/utils'
@@ -53,10 +53,7 @@ export function QuickNoteCard({
 
   function togglePreview() {
     if (interactionsDisabled) return
-    if (isExpanded) {
-      onClosePreview()
-      return
-    }
+    if (isExpanded) return
     onOpenPreview(note.id)
   }
 
@@ -77,6 +74,7 @@ export function QuickNoteCard({
         {
           role: 'button',
           tabIndex: interactionsDisabled ? -1 : 0,
+          onClick: togglePreview,
           onDoubleClick: togglePreview,
           onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
             if (event.key !== 'Enter' && event.key !== ' ') return
@@ -99,38 +97,14 @@ export function QuickNoteCard({
               {
                 className: quickNoteStyles.cardBody,
               },
-              renderHighlightedText(getQuickNoteSummary(note), searchQuery),
+              renderHighlightedText(getQuickNoteSearchSnippet(note, searchQuery), searchQuery),
             ),
       ),
       createElement(
         'div',
         { className: 'flex shrink-0 items-center gap-1' },
-        createElement(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            size: 'sm',
-            onClick: () => onEdit(note),
-            disabled: interactionsDisabled,
-            'aria-label': '编辑小记',
-            className: quickNoteStyles.cardAction,
-          },
-          '编辑',
-        ),
-        createElement(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            size: 'sm',
-            onClick: () => onOpenDetail(note.id),
-            disabled: interactionsDisabled,
-            'aria-label': '阅读小记',
-            className: quickNoteStyles.cardAction,
-          },
-          '阅读',
-        ),
+        createElement(Button, { type: 'button', variant: 'ghost', size: 'sm', onClick: () => onEdit(note), disabled: interactionsDisabled, 'aria-label': '编辑小记', className: quickNoteStyles.cardAction }, '编辑'),
+        createElement(Button, { type: 'button', variant: 'ghost', size: 'sm', onClick: () => onOpenDetail(note.id), disabled: interactionsDisabled, 'aria-label': '阅读小记', className: quickNoteStyles.cardAction }, '阅读'),
         isExpanded
           ? createElement(
               Button,
@@ -161,32 +135,8 @@ export function QuickNoteCard({
           },
           createElement(PinIcon),
         ),
-        createElement(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            size: 'icon-sm',
-            onClick: () => onMigrate(note.id),
-            disabled: interactionsDisabled,
-            'aria-label': '转为笔记',
-            className: quickNoteStyles.cardAction,
-          },
-          createElement(FileTextIcon),
-        ),
-        createElement(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            size: 'icon-sm',
-            onClick: () => onDelete(note.id),
-            disabled: interactionsDisabled,
-            'aria-label': '移到回收站',
-            className: quickNoteStyles.cardDangerAction,
-          },
-          createElement(Trash2Icon),
-        ),
+        createElement(Button, { type: 'button', variant: 'ghost', size: 'icon-sm', onClick: () => onMigrate(note.id), disabled: interactionsDisabled, 'aria-label': '转为笔记', className: quickNoteStyles.cardAction }, createElement(FileTextIcon)),
+        createElement(Button, { type: 'button', variant: 'ghost', size: 'icon-sm', onClick: () => onDelete(note.id), disabled: interactionsDisabled, 'aria-label': '移到回收站', className: quickNoteStyles.cardDangerAction }, createElement(Trash2Icon)),
       ),
     ),
     isExpanded
