@@ -1,0 +1,11 @@
+{
+  "code_commit": "49f3f2970738fb6aa5a4f13483013ee48340a100",
+  "seed": "four notes created through quickNotePreview=1 UI",
+  "viewports": [
+    { "viewport": "1440x900", "scrollWidth": 1440, "consoleErrors": 0, "screenshot": "final-49f3f29-seeded-1440x900.png" },
+    { "viewport": "390x844", "scrollWidth": 375, "consoleErrors": 0, "screenshot": "final-49f3f29-seeded-390x844.png" },
+    { "viewport": "844x390", "scrollWidth": 829, "consoleErrors": 0, "screenshot": "final-49f3f29-seeded-844x390.png" }
+  ],
+  "zoom200": { "mechanism": "five Chrome Control+Equal shortcuts", "viewport": "1440x900", "scrollWidth": 1440, "consoleErrors": 0, "screenshot": "final-49f3f29-zoom200-1440x900.png" },
+  "focus": { "entry": "clicked 专注", "activeElement": "textarea[aria-label=小记内容]", "tabSequence": ["textarea", "exit focus", "save"], "excluded": ["小记探索", "小记时间线"], "escape": "restored normal workspace", "screenshot": "final-49f3f29-focus-1440x900.png" }
+}
