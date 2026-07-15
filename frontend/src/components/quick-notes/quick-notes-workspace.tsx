@@ -1,6 +1,6 @@
 'use client'
 
-import { createElement, FormEvent, ReactNode, useEffect, useMemo, useState } from 'react'
+import { createElement, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { SearchIcon, XIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -149,6 +149,32 @@ export function QuickNotesWorkspace({
   )
   const [quickPreviewNoteId, setQuickPreviewNoteId] = useState<string | null>(null)
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false)
+  const mobileFiltersOpenerRef = useRef<HTMLButtonElement | null>(null)
+  const mobileFiltersDialogRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!mobileFiltersOpen) return
+    const dialog = mobileFiltersDialogRef.current
+    const focusables = () => Array.from(dialog?.querySelectorAll<HTMLElement>('button, input, [tabindex]:not([tabindex="-1"])') ?? []).filter((element) => !element.hasAttribute('disabled'))
+    focusables()[0]?.focus()
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setMobileFiltersOpen(false)
+        mobileFiltersOpenerRef.current?.focus()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const items = focusables()
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [mobileFiltersOpen])
   const selectedLifecycleState = selectedQuickNoteId
     ? lifecycleStateById[selectedQuickNoteId]
     : undefined
@@ -377,7 +403,7 @@ export function QuickNotesWorkspace({
           'div',
           { className: 'flex items-center gap-2 lg:hidden' },
           createElement('div', { className: 'min-w-0 flex-1' }, createElement(SearchBox, { searchQuery, onSearchChange, onClearSearch, label: '移动端搜索小记', clearLabel: '清空移动端搜索' })),
-          createElement(Button, { type: 'button', variant: 'outline', onClick: () => setMobileFiltersOpen(true), 'aria-label': '打开筛选', className: 'min-h-11 shrink-0' }, '筛选'),
+          createElement(Button, { ref: mobileFiltersOpenerRef, type: 'button', variant: 'outline', onClick: () => setMobileFiltersOpen(true), 'aria-label': '打开筛选', className: 'min-h-11 shrink-0' }, '筛选'),
         )
       : null,
     createElement(QuickNoteComposer, {
@@ -439,11 +465,11 @@ export function QuickNotesWorkspace({
       mobileFiltersOpen
         ? createElement(
             'div',
-            { role: 'dialog', 'aria-modal': true, 'aria-label': '筛选小记', className: 'fixed inset-0 z-50 overflow-y-auto bg-black/30 p-4 lg:hidden' },
+            { ref: mobileFiltersDialogRef, role: 'dialog', 'aria-modal': true, 'aria-label': '筛选小记', className: 'fixed inset-0 z-50 overflow-y-auto bg-black/30 p-4 lg:hidden' },
             createElement(
               'div',
               { className: 'mx-auto max-w-md bg-[color:var(--qn-panel)] p-3' },
-              createElement(Button, { type: 'button', variant: 'ghost', onClick: () => setMobileFiltersOpen(false), 'aria-label': '关闭筛选', className: 'min-h-11' }, '关闭'),
+              createElement(Button, { type: 'button', variant: 'ghost', onClick: () => { setMobileFiltersOpen(false); mobileFiltersOpenerRef.current?.focus() }, 'aria-label': '关闭筛选', className: 'min-h-11' }, '关闭'),
               explorer,
             ),
           )
