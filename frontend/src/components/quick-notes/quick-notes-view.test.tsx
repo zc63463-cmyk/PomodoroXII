@@ -2504,4 +2504,3 @@ describe('QuickNotesView', () => {
     expect(storeMocks.exitFocus).not.toHaveBeenCalled()
   })
 })
-
