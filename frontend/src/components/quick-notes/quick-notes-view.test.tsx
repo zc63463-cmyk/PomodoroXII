@@ -159,6 +159,14 @@ async function seedActiveQuickNote(note: QuickNote): Promise<void> {
 }
 
 describe('QuickNotesView', () => {
+  it('opens mobile filters in an accessible dialog', async () => {
+    render(createElement(QuickNotesView))
+
+    fireEvent.click(await screen.findByRole('button', { name: '打开筛选' }))
+    expect(screen.getByRole('dialog', { name: '筛选小记' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '关闭筛选' }))
+    expect(screen.queryByRole('dialog', { name: '筛选小记' })).not.toBeInTheDocument()
+  })
   beforeEach(async () => {
     vi.useRealTimers()
     if (!spaceDBManager.hasSpace) {
@@ -645,12 +653,12 @@ describe('QuickNotesView', () => {
     render(createElement(QuickNotesView))
 
     const explorer = await screen.findByLabelText('小记探索')
-    const grid = explorer.parentElement
-    const mainColumn = explorer.nextElementSibling
+    const grid = explorer.parentElement?.parentElement
+    const mainColumn = explorer.parentElement?.nextElementSibling
 
     expect(grid).toHaveClass('grid')
     expect(grid).toHaveClass('lg:grid-cols-[18rem_minmax(0,1fr)]')
-    expect(grid?.firstElementChild).toBe(explorer)
+    expect(grid?.firstElementChild).toContainElement(explorer)
     expect(explorer).toContainElement(screen.getByLabelText('搜索小记'))
     expect(within(explorer).getByText('活动日历')).toBeInTheDocument()
     expect(within(explorer).getByText('标签')).toBeInTheDocument()
