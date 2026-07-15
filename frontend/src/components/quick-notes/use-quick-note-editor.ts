@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import type { QuickNoteSaveState } from '@/components/quick-notes/quick-note-composer'
 import type { QuickNoteDraftConflict } from '@/components/quick-notes/quick-note-conflict-panel'
 import { useQuickNoteDraftSession } from '@/components/quick-notes/use-quick-note-draft-session'
+import { useQuickNoteExistingEditRecovery } from '@/components/quick-notes/use-quick-note-existing-edit-recovery'
 import type { QuickNote } from '@/types'
 import type {
   QuickNoteLifecycleState,
@@ -26,11 +27,12 @@ export function useQuickNoteEditor({
   quickNotes,
   trashedQuickNotes,
   projectRecordedQuickNote,
-  updateQuickNote,
+  updateQuickNote: _updateQuickNote,
   describeQuickNoteError,
   lifecycleStateById = {},
 }: UseQuickNoteEditorOptions) {
   const session = useQuickNoteDraftSession({ onRecorded: projectRecordedQuickNote })
+  const existingEdit = useQuickNoteExistingEditRecovery()
   const [editingDraft, setEditingDraft] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingNoteSnapshot, setEditingNoteSnapshot] = useState<QuickNote | null>(null)
@@ -171,6 +173,13 @@ export function useQuickNoteEditor({
 
   const saveEditedDraft = useCallback(
     async ({ closeAfterSave }: { closeAfterSave: boolean }) => {
+      if (editingIdRef.current !== null) {
+        const lifecycleEpoch = lifecycleEpochRef.current
+        const saved = await existingEdit.save({ closeAfterSave })
+        return mountedRef.current && lifecycleEpochRef.current === lifecycleEpoch
+          ? saved
+          : false
+      }
       if (!editingNote) return false
       const content = latestEditingDraftRef.current.trim()
       if (!content) {
@@ -195,7 +204,7 @@ export function useQuickNoteEditor({
             return false
           }
 
-          await updateQuickNote(editingNote.id, { content })
+          await existingEdit.save({ closeAfterSave })
           if (!mountedRef.current || saveSequenceRef.current !== saveSequence) return false
           if (latestEditingDraftRef.current.trim() !== content) {
             setSaveState('unsaved')
@@ -231,7 +240,7 @@ export function useQuickNoteEditor({
       saveQueueRef.current = queuedSave.then(() => undefined, () => undefined)
       return queuedSave
     },
-    [describeQuickNoteError, editingNote, invalidateExistingEdit, updateQuickNote],
+    [describeQuickNoteError, editingNote, existingEdit, invalidateExistingEdit],
   )
 
   useEffect(() => {
@@ -278,6 +287,7 @@ export function useQuickNoteEditor({
 
     latestEditingDraftRef.current = value
     setEditingDraft(value)
+    existingEdit.change(value)
   }
 
   async function submitDraft(event: FormEvent<HTMLFormElement>): Promise<boolean> {
@@ -354,6 +364,7 @@ export function useQuickNoteEditor({
   }, [session])
 
   function startEdit(note: QuickNote) {
+    void existingEdit.start(note)
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
     saveSequenceRef.current += 1
