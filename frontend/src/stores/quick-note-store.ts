@@ -63,7 +63,7 @@ interface QuickNoteActions {
   loadQuickNotes: (opts?: { query?: string }) => Promise<void>
   loadTrashedQuickNotes: () => Promise<void>
   refreshQuickNotesFromRepository: () => Promise<void>
-  projectRecordedQuickNote: (note: QuickNote) => undefined
+  projectCommittedQuickNote: (note: QuickNote) => undefined
   createQuickNote: (data: QuickNoteCreateInput) => Promise<QuickNote>
   updateQuickNote: (id: string, data: QuickNoteUpdateInput) => Promise<void>
   deleteQuickNote: (id: string) => Promise<void>
@@ -280,7 +280,7 @@ export const useQuickNoteStore = create<QuickNoteStore>()(
         )
       },
 
-      projectRecordedQuickNote: (note) => {
+      projectCommittedQuickNote: (note) => {
         projectionRevision += 1
         set((state) => {
           const allQuickNotes = selectActiveQuickNotes([

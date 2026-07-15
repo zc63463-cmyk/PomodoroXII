@@ -9,7 +9,6 @@ import {
   QUICK_NOTE_TYPING_IDLE_MS,
   type QuickNoteDraftSaveState,
 } from '@/lib/quick-notes/quick-note-editor-status'
-import type { QuickNoteUpdateInput } from '@/lib/quick-notes/quick-note-repository'
 import { PomodoroXIDB } from '@/services/database'
 import { db, spaceDBManager } from '@/services/space-db'
 import type { QuickNote } from '@/types'
@@ -60,8 +59,7 @@ import { useQuickNoteEditor } from '@/components/quick-notes/use-quick-note-edit
 function createOptions(overrides: {
   quickNotes?: QuickNote[]
   trashedQuickNotes?: QuickNote[]
-  projectRecordedQuickNote?: (note: QuickNote) => undefined
-  updateQuickNote?: (id: string, data: QuickNoteUpdateInput) => Promise<void>
+  projectCommittedQuickNote?: (note: QuickNote) => undefined
   describeQuickNoteError?: (error: unknown, fallback: string) => string
   lifecycleStateById?: Record<
     string,
@@ -71,9 +69,8 @@ function createOptions(overrides: {
   return {
     quickNotes: overrides.quickNotes ?? [],
     trashedQuickNotes: overrides.trashedQuickNotes ?? [],
-    projectRecordedQuickNote:
-      overrides.projectRecordedQuickNote ?? vi.fn((_note: QuickNote): undefined => undefined),
-    updateQuickNote: overrides.updateQuickNote ?? vi.fn(async () => undefined),
+    projectCommittedQuickNote:
+      overrides.projectCommittedQuickNote ?? vi.fn((_note: QuickNote): undefined => undefined),
     describeQuickNoteError:
       overrides.describeQuickNoteError ??
       vi.fn((_error: unknown, fallback: string) => fallback),
@@ -149,12 +146,10 @@ describe('useQuickNoteEditor', () => {
 
   it('keeps the session draft separate from an existing-note edit', async () => {
     const existing = makeQuickNote()
-    const updateQuickNote = vi.fn(async () => undefined)
-    const projectRecordedQuickNote = vi.fn((_note: QuickNote): undefined => undefined)
+    const projectCommittedQuickNote = vi.fn((_note: QuickNote): undefined => undefined)
     const options = createOptions({
       quickNotes: [existing],
-      projectRecordedQuickNote,
-      updateQuickNote,
+      projectCommittedQuickNote,
     })
     sessionMocks.session.draft = 'untouched session draft'
     sessionMocks.session.saveState = 'restored'
@@ -164,7 +159,7 @@ describe('useQuickNoteEditor', () => {
     expect(result.current.draft).toBe('untouched session draft')
     expect(result.current.draftSaveState).toBe('restored')
     expect(sessionMocks.useQuickNoteDraftSession).toHaveBeenCalledWith({
-      onRecorded: projectRecordedQuickNote,
+      onRecorded: projectCommittedQuickNote,
     })
 
     act(() => result.current.startEdit(existing))
@@ -178,7 +173,6 @@ describe('useQuickNoteEditor', () => {
       await result.current.submitDraft(submitEvent())
     })
     expect(existingEditMocks.session.save).toHaveBeenCalledWith({ closeAfterSave: false })
-    expect(updateQuickNote).not.toHaveBeenCalled()
     expect(sessionMocks.session.record).not.toHaveBeenCalled()
 
     act(() => result.current.cancelEdit())
@@ -187,10 +181,9 @@ describe('useQuickNoteEditor', () => {
     expect(sessionMocks.session.change).not.toHaveBeenCalled()
   })
 
-  it('delegates existing-note edits to the recovery session instead of updateQuickNote', async () => {
+  it('delegates existing-note edits to the recovery session without a store mutation callback', async () => {
     const existing = makeQuickNote()
-    const updateQuickNote = vi.fn(async () => undefined)
-    const { result } = renderHook(() => useQuickNoteEditor(createOptions({ quickNotes: [existing], updateQuickNote })))
+    const { result } = renderHook(() => useQuickNoteEditor(createOptions({ quickNotes: [existing] })))
 
     act(() => result.current.startEdit(existing))
     expect(existingEditMocks.session.start).toHaveBeenCalledWith(existing)
@@ -198,7 +191,6 @@ describe('useQuickNoteEditor', () => {
     expect(existingEditMocks.session.change).toHaveBeenCalledWith('delegated content')
     await act(async () => { await result.current.submitDraft(submitEvent()) })
     expect(existingEditMocks.session.save).toHaveBeenCalledWith({ closeAfterSave: false })
-    expect(updateQuickNote).not.toHaveBeenCalled()
   })
 
   it('suppresses only projection-failed status for a consumed session draft', () => {

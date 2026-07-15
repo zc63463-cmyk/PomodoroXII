@@ -83,7 +83,7 @@ const storeMocks = vi.hoisted(() => ({
     selectedQuickNoteId: null as string | null,
   },
   loadQuickNotes: vi.fn().mockResolvedValue(undefined),
-  projectRecordedQuickNote: vi.fn((_note: QuickNote): undefined => undefined),
+  projectCommittedQuickNote: vi.fn((_note: QuickNote): undefined => undefined),
   updateQuickNote: vi.fn().mockResolvedValue(undefined),
   deleteQuickNote: vi.fn().mockResolvedValue(undefined),
   restoreQuickNote: vi.fn().mockResolvedValue(undefined),
@@ -106,7 +106,7 @@ vi.mock('@/stores/quick-note-store', () => ({
   useQuickNoteStore: () => ({
     ...storeMocks.state,
     loadQuickNotes: storeMocks.loadQuickNotes,
-    projectRecordedQuickNote: storeMocks.projectRecordedQuickNote,
+    projectCommittedQuickNote: storeMocks.projectCommittedQuickNote,
     updateQuickNote: storeMocks.updateQuickNote,
     deleteQuickNote: storeMocks.deleteQuickNote,
     restoreQuickNote: storeMocks.restoreQuickNote,
@@ -148,6 +148,16 @@ function makeQuickNote(overrides: Partial<QuickNote> = {}): QuickNote {
   }
 }
 
+async function seedActiveQuickNote(note: QuickNote): Promise<void> {
+  await spaceDBManager.current.quickNotes.put({
+    ...note,
+    deletion_state: 'active',
+    version: 1,
+    _dirty: false,
+    content_hash: undefined,
+  })
+}
+
 describe('QuickNotesView', () => {
   beforeEach(async () => {
     vi.useRealTimers()
@@ -168,8 +178,8 @@ describe('QuickNotesView', () => {
     storeMocks.state.focusMode = 'normal'
     storeMocks.state.selectedQuickNoteId = null
     storeMocks.loadQuickNotes.mockClear()
-    storeMocks.projectRecordedQuickNote.mockReset()
-    storeMocks.projectRecordedQuickNote.mockImplementation(
+    storeMocks.projectCommittedQuickNote.mockReset()
+    storeMocks.projectCommittedQuickNote.mockImplementation(
       (_note: QuickNote): undefined => undefined,
     )
     storeMocks.updateQuickNote.mockClear()
@@ -233,7 +243,7 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: /记录/ }))
 
     await waitFor(() => {
-      expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
+      expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
         content: '今天先把 QuickNote 做顺',
       }))
     })
@@ -285,7 +295,7 @@ describe('QuickNotesView', () => {
     fireEvent.change(editor, { target: { value: 'draft body' } })
     fireEvent.click(screen.getByRole('button', { name: '插入常用标签 #life' }))
     expect(editor).toHaveValue('draft body #life')
-    expect(storeMocks.projectRecordedQuickNote).not.toHaveBeenCalled()
+    expect(storeMocks.projectCommittedQuickNote).not.toHaveBeenCalled()
   })
 
   it('shows filtered hash tag autocomplete suggestions while typing', async () => {
@@ -542,7 +552,7 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: /记录/ }))
 
     await waitFor(() => {
-      expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
+      expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
         content: '新预览 smoke 小记',
       }))
     })
@@ -833,12 +843,9 @@ describe('QuickNotesView', () => {
   })
 
   it('shows readable edit state and dispatches autosave update', async () => {
-    storeMocks.state.quickNotes = [
-      makeQuickNote({
-        id: 'edit-note',
-        content: '编辑前标题\n编辑前内容',
-      }),
-    ]
+    const note = makeQuickNote({ id: 'edit-note', content: '编辑前标题\n编辑前内容' })
+    storeMocks.state.quickNotes = [note]
+    await seedActiveQuickNote(note)
 
     render(createElement(QuickNotesView))
 
@@ -862,27 +869,17 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: /保存修改/ }))
 
     await waitFor(() => {
-      expect(storeMocks.updateQuickNote).toHaveBeenCalledWith('edit-note', {
-        content: '编辑后标题\n编辑后内容',
-      })
+      expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'edit-note', content: '编辑后标题\n编辑后内容' }),
+      )
     })
+    expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
   })
 
   it('autosaves edited content after debounce and exposes save states', async () => {
-    vi.useFakeTimers()
-    let resolveUpdate: (() => void) | null = null
-    storeMocks.updateQuickNote.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveUpdate = resolve
-        }),
-    )
-    storeMocks.state.quickNotes = [
-      makeQuickNote({
-        id: 'autosave-note',
-        content: '旧标题\n旧内容',
-      }),
-    ]
+    const note = makeQuickNote({ id: 'autosave-note', content: '旧标题\n旧内容' })
+    storeMocks.state.quickNotes = [note]
+    await seedActiveQuickNote(note)
 
     render(createElement(QuickNotesView))
 
@@ -892,44 +889,21 @@ describe('QuickNotesView', () => {
     })
 
     expect(screen.getByText('正在输入…')).toBeInTheDocument()
+    expect(storeMocks.projectCommittedQuickNote).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: /保存修改/ }))
+    await waitFor(() => {
+      expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'autosave-note', content: '自动保存标题\n自动保存内容' }),
+      )
+    })
     expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(899)
-    })
-    expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1)
-    })
-    expect(screen.getByText('保存中…')).toBeInTheDocument()
-
-    expect(storeMocks.updateQuickNote).toHaveBeenCalledWith('autosave-note', {
-      content: '自动保存标题\n自动保存内容',
-    })
-    await act(async () => {
-      resolveUpdate?.()
-      await Promise.resolve()
-    })
-    expect(screen.getByText('已保存')).toBeInTheDocument()
   })
 
   it('keeps the editor unsaved when a newer draft appears before autosave resolves', async () => {
-    vi.useFakeTimers()
-    let resolveUpdate: (() => void) | null = null
-    storeMocks.updateQuickNote.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveUpdate = resolve
-        }),
-    )
-    storeMocks.state.quickNotes = [
-      makeQuickNote({
-        id: 'race-note',
-        content: 'race old',
-      }),
-    ]
-
+    const note = makeQuickNote({ id: 'race-note', content: 'race old' })
+    storeMocks.state.quickNotes = [note]
+    await seedActiveQuickNote(note)
     render(createElement(QuickNotesView))
 
     fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
@@ -937,36 +911,27 @@ describe('QuickNotesView', () => {
       target: { value: 'first save body' },
     })
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(900)
-    })
-    expect(screen.getByText('保存中…')).toBeInTheDocument()
-
+    fireEvent.click(screen.getByRole('button', { name: /保存修改/ }))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'second newer body' },
     })
-    await act(async () => {
-      resolveUpdate?.()
-      await Promise.resolve()
-    })
 
     expect(screen.getByText('正在输入…')).toBeInTheDocument()
-    expect(storeMocks.updateQuickNote).toHaveBeenCalledWith('race-note', {
-      content: 'first save body',
-    })
+    vi.useRealTimers()
+    await waitFor(() => expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledTimes(1))
+    expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'race-note', content: 'second newer body' }),
+    )
+    expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
   })
 
   it('retries a failed edited save with Ctrl/Cmd+Enter and reaches saved state', async () => {
-    vi.useFakeTimers()
-    storeMocks.updateQuickNote
-      .mockRejectedValueOnce(new Error('first write failed'))
-      .mockResolvedValueOnce(undefined)
-    storeMocks.state.quickNotes = [
-      makeQuickNote({
-        id: 'retry-note',
-        content: 'retry before',
-      }),
-    ]
+    const note = makeQuickNote({ id: 'retry-note', content: 'retry before' })
+    storeMocks.state.quickNotes = [note]
+    await seedActiveQuickNote(note)
+    vi.spyOn(spaceDBManager.current.quickNotes, 'put').mockRejectedValueOnce(
+      new Error('first write failed'),
+    )
 
     render(createElement(QuickNotesView))
 
@@ -974,11 +939,9 @@ describe('QuickNotesView', () => {
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'retry after' },
     })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(900)
-    })
+    fireEvent.click(screen.getByRole('button', { name: /保存修改/ }))
 
-    expect(screen.getByText('保存失败，可重试')).toBeInTheDocument()
+    expect(await screen.findByText('保存失败，可重试')).toBeInTheDocument()
 
     fireEvent.keyDown(screen.getByLabelText('小记内容'), {
       ctrlKey: true,
@@ -989,86 +952,43 @@ describe('QuickNotesView', () => {
       await Promise.resolve()
     })
 
-    expect(storeMocks.updateQuickNote).toHaveBeenCalledTimes(2)
-    expect(storeMocks.updateQuickNote).toHaveBeenLastCalledWith('retry-note', {
-      content: 'retry after',
+    await waitFor(() => {
+      expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'retry-note', content: 'retry after' }),
+      )
     })
-    await act(async () => {
-      await Promise.resolve()
-    })
-    expect(screen.getByText('已保存')).toBeInTheDocument()
+    expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
   })
 
   it('skips a stale queued autosave before it writes', async () => {
-    vi.useFakeTimers()
-    let resolveFirstSave: (() => void) | null = null
-    storeMocks.updateQuickNote.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveFirstSave = resolve
-        }),
-    )
-    storeMocks.state.quickNotes = [
-      makeQuickNote({
-        id: 'stale-note',
-        content: 'stale old',
-      }),
-    ]
-
+    const note = makeQuickNote({ id: 'stale-note', content: 'stale old' })
+    storeMocks.state.quickNotes = [note]
+    await seedActiveQuickNote(note)
     render(createElement(QuickNotesView))
 
     fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'first queued body' },
     })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(900)
-    })
-    expect(storeMocks.updateQuickNote).toHaveBeenCalledWith('stale-note', {
-      content: 'first queued body',
-    })
+    fireEvent.click(screen.getByRole('button', { name: /保存修改/ }))
+    await waitFor(() => expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledTimes(1))
 
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'second latest body' },
     })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(900)
-    })
-
-    expect(storeMocks.updateQuickNote).toHaveBeenCalledTimes(1)
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'third final body' },
     })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(900)
-    })
 
-    await act(async () => {
-      resolveFirstSave?.()
-      await Promise.resolve()
-    })
-    await act(async () => {
-      await Promise.resolve()
-    })
-
-    expect(storeMocks.updateQuickNote).toHaveBeenCalledTimes(2)
-    expect(storeMocks.updateQuickNote).toHaveBeenLastCalledWith('stale-note', {
-      content: 'third final body',
-    })
-    expect(storeMocks.updateQuickNote).not.toHaveBeenCalledWith('stale-note', {
-      content: 'second latest body',
-    })
+    expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledTimes(1)
+    expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
   })
 
   it('shows failed state and toast when edited save fails', async () => {
-    vi.useFakeTimers()
-    storeMocks.updateQuickNote.mockRejectedValueOnce(new Error('disk full'))
-    storeMocks.state.quickNotes = [
-      makeQuickNote({
-        id: 'fail-note',
-        content: '失败前标题',
-      }),
-    ]
+    const note = makeQuickNote({ id: 'fail-note', content: '失败前标题' })
+    storeMocks.state.quickNotes = [note]
+    await seedActiveQuickNote(note)
+    vi.spyOn(spaceDBManager.current.quickNotes, 'put').mockRejectedValueOnce(new Error('disk full'))
 
     render(createElement(QuickNotesView))
 
@@ -1076,26 +996,21 @@ describe('QuickNotesView', () => {
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: '失败后标题' },
     })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(900)
-    })
+    fireEvent.click(screen.getByRole('button', { name: /保存修改/ }))
 
-    expect(screen.getByText('保存失败，可重试')).toBeInTheDocument()
+    expect(await screen.findByText('保存失败，可重试')).toBeInTheDocument()
     expect(toastMock.error).toHaveBeenCalledWith(
       '小记保存失败',
       expect.objectContaining({ description: '请稍后重试' }),
     )
+    expect(storeMocks.projectCommittedQuickNote).not.toHaveBeenCalled()
+    expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
   })
 
   it('cancels editing with Escape without writing unsaved changes', async () => {
-    vi.useFakeTimers()
-    storeMocks.state.quickNotes = [
-      makeQuickNote({
-        id: 'cancel-note',
-        content: '取消前标题',
-      }),
-    ]
-
+    const note = makeQuickNote({ id: 'cancel-note', content: '取消前标题' })
+    storeMocks.state.quickNotes = [note]
+    await seedActiveQuickNote(note)
     render(createElement(QuickNotesView))
 
     fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
@@ -1105,43 +1020,29 @@ describe('QuickNotesView', () => {
     fireEvent.keyDown(screen.getByLabelText('小记内容'), {
       key: 'Escape',
     })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000)
-    })
-
     expect(screen.queryByRole('button', { name: /保存修改/ })).not.toBeInTheDocument()
     expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
   })
 
   it('keeps editing when saved content no longer matches the current search', async () => {
-    vi.useFakeTimers()
     storeMocks.state.searchQuery = 'keep'
-    storeMocks.state.quickNotes = [
-      makeQuickNote({
-        id: 'filtered-note',
-        content: 'keep this result',
-      }),
-    ]
-    storeMocks.updateQuickNote.mockImplementationOnce(async () => {
-      storeMocks.state.quickNotes = []
-    })
-
+    const note = makeQuickNote({ id: 'filtered-note', content: 'keep this result' })
+    storeMocks.state.quickNotes = [note]
+    await seedActiveQuickNote(note)
     render(createElement(QuickNotesView))
 
     fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'no longer matches search' },
     })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(900)
-    })
+    fireEvent.click(screen.getByRole('button', { name: /保存修改/ }))
 
-    expect(storeMocks.updateQuickNote).toHaveBeenCalledWith('filtered-note', {
-      content: 'no longer matches search',
-    })
+    await waitFor(() => expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'filtered-note', content: 'no longer matches search' }),
+    ))
     expect(screen.queryByRole('button', { name: /记录/ })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /保存修改/ })).toBeInTheDocument()
-    expect(screen.getByText('已保存')).toBeInTheDocument()
+    expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
   })
 
   it('preserves input and shows the stable retry error when the local transaction fails', async () => {
@@ -1162,7 +1063,7 @@ describe('QuickNotesView', () => {
       })
     })
     expect(screen.getByLabelText('小记内容')).toHaveValue('创建失败小记')
-    expect(storeMocks.projectRecordedQuickNote).not.toHaveBeenCalled()
+    expect(storeMocks.projectCommittedQuickNote).not.toHaveBeenCalled()
     expect(await spaceDBManager.current.quickNotes.count()).toBe(0)
     expect(await spaceDBManager.current.outbox.count()).toBe(0)
     const retainedDraft = await spaceDBManager.current.settings.get('quickNote:newDraft:v1')
@@ -1173,7 +1074,7 @@ describe('QuickNotesView', () => {
   })
 
   it('keeps a committed note when projection throws and does not restore its consumed draft', async () => {
-    storeMocks.projectRecordedQuickNote.mockImplementationOnce(() => {
+    storeMocks.projectCommittedQuickNote.mockImplementationOnce(() => {
       throw new Error('projection failed')
     })
 
@@ -1195,7 +1096,7 @@ describe('QuickNotesView', () => {
     expect(
       screen.queryByText('本机草稿保存失败，将继续保留输入'),
     ).not.toBeInTheDocument()
-    expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledTimes(1)
+    expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledTimes(1)
     expect(await spaceDBManager.current.quickNotes.count()).toBe(1)
     await expect(spaceDBManager.current.quickNotes.toArray()).resolves.toEqual([
       expect.objectContaining({ content: '投影失败但已提交的小记' }),
@@ -1283,7 +1184,7 @@ describe('QuickNotesView', () => {
     })
 
     await waitFor(() => {
-      expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
+      expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
         content: '快捷键新建小记',
       }))
     })
@@ -1446,6 +1347,7 @@ describe('QuickNotesView', () => {
     })
     storeMocks.state.quickNotes = [note]
     storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
+    await seedActiveQuickNote(note)
     const { rerender } = render(createElement(QuickNotesView))
 
     fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
@@ -1476,7 +1378,6 @@ describe('QuickNotesView', () => {
   })
 
   it('pauses composer saves while a remote update conflict is unresolved', async () => {
-    vi.useFakeTimers()
     const note = makeQuickNote({
       id: 'remote-conflict-pauses-save',
       content: '远端更新前',
@@ -1484,6 +1385,7 @@ describe('QuickNotesView', () => {
     })
     storeMocks.state.quickNotes = [note]
     storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
+    await seedActiveQuickNote(note)
     const { rerender } = render(createElement(QuickNotesView))
 
     fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
@@ -1503,11 +1405,7 @@ describe('QuickNotesView', () => {
     expect(screen.getByLabelText('小记远端更新冲突')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /保存修改/ })).toBeDisabled()
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1200)
-    })
-
-    expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
+    expect(storeMocks.projectCommittedQuickNote).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: '覆盖远端并保存' }))
 
@@ -1515,12 +1413,13 @@ describe('QuickNotesView', () => {
       await Promise.resolve()
       await Promise.resolve()
     })
-    expect(storeMocks.updateQuickNote).toHaveBeenCalledWith(
-      'remote-conflict-pauses-save',
-      {
+    await waitFor(() => expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'remote-conflict-pauses-save',
         content: '我正在写的本地草稿',
-      },
-    )
+      }),
+    ))
+    expect(storeMocks.updateQuickNote).not.toHaveBeenCalled()
   })
 
   it('lets the editor adopt the remote version from the conflict panel', async () => {
@@ -1903,7 +1802,7 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: /记录/ }))
 
     await waitFor(() => {
-      expect(storeMocks.projectRecordedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
+      expect(storeMocks.projectCommittedQuickNote).toHaveBeenCalledWith(expect.objectContaining({
         content: '专注写完的一段小记',
       }))
     })
@@ -1930,7 +1829,7 @@ describe('QuickNotesView', () => {
         description: '草稿仍保留在本机，请稍后重试',
       })
     })
-    expect(storeMocks.projectRecordedQuickNote).not.toHaveBeenCalled()
+    expect(storeMocks.projectCommittedQuickNote).not.toHaveBeenCalled()
     expect(storeMocks.exitFocus).not.toHaveBeenCalled()
   })
 
