@@ -27,7 +27,7 @@ export function QuickNotesView() {
     focusMode,
     selectedQuickNoteId,
     loadQuickNotes,
-    projectRecordedQuickNote,
+    projectCommittedQuickNote,
     updateQuickNote,
     deleteQuickNote,
     restoreQuickNote,
@@ -93,8 +93,7 @@ export function QuickNotesView() {
   } = useQuickNoteEditor({
     quickNotes,
     trashedQuickNotes,
-    projectRecordedQuickNote,
-    updateQuickNote,
+    projectCommittedQuickNote,
     describeQuickNoteError,
     lifecycleStateById,
   })
@@ -140,7 +139,7 @@ export function QuickNotesView() {
           'div',
           null,
           createElement(
-            'p',
+            'span',
             {
               className: quickNoteStyles.eyebrow,
             },

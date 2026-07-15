@@ -1,6 +1,6 @@
 'use client'
 
-import { createElement } from 'react'
+import { createElement, useEffect, useRef, useState } from 'react'
 import { FileTextIcon, PinIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { renderHighlightedText } from '@/components/quick-notes/quick-note-highlight'
@@ -8,7 +8,7 @@ import { QuickNoteMarkdown } from '@/components/quick-notes/quick-note-markdown'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
 import {
   getQuickNoteSearchNeedle,
-  getQuickNoteSummary,
+  getQuickNoteSearchSnippet,
   getQuickNoteTitle,
 } from '@/lib/quick-notes/quick-note-selectors'
 import { cn } from '@/lib/utils'
@@ -50,13 +50,28 @@ export function QuickNoteCard({
   const isTagSearch = searchQuery.trim().startsWith('#')
   const isPending = pendingAction !== undefined
   const interactionsDisabled = isPending || disabledInteractions
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    if (!menuOpen) return
+    const items = () => Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+    items()[0]?.focus()
+    function onKeyDown(event: KeyboardEvent) {
+      const menuItems = items()
+      const index = menuItems.indexOf(document.activeElement as HTMLButtonElement)
+      if (event.key === 'Escape') { event.preventDefault(); setMenuOpen(false); triggerRef.current?.focus(); return }
+      if (event.key === 'Home') { event.preventDefault(); menuItems[0]?.focus(); return }
+      if (event.key === 'End') { event.preventDefault(); menuItems.at(-1)?.focus(); return }
+      if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && index >= 0) { event.preventDefault(); menuItems[(index + (event.key === 'ArrowDown' ? 1 : -1) + menuItems.length) % menuItems.length]?.focus() }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [menuOpen])
 
   function togglePreview() {
     if (interactionsDisabled) return
-    if (isExpanded) {
-      onClosePreview()
-      return
-    }
+    if (isExpanded) return
     onOpenPreview(note.id)
   }
 
@@ -77,6 +92,7 @@ export function QuickNoteCard({
         {
           role: 'button',
           tabIndex: interactionsDisabled ? -1 : 0,
+          onClick: togglePreview,
           onDoubleClick: togglePreview,
           onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
             if (event.key !== 'Enter' && event.key !== ' ') return
@@ -99,38 +115,12 @@ export function QuickNoteCard({
               {
                 className: quickNoteStyles.cardBody,
               },
-              renderHighlightedText(getQuickNoteSummary(note), searchQuery),
+              renderHighlightedText(getQuickNoteSearchSnippet(note, searchQuery), searchQuery),
             ),
       ),
       createElement(
         'div',
         { className: 'flex shrink-0 items-center gap-1' },
-        createElement(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            size: 'sm',
-            onClick: () => onEdit(note),
-            disabled: interactionsDisabled,
-            'aria-label': '编辑小记',
-            className: quickNoteStyles.cardAction,
-          },
-          '编辑',
-        ),
-        createElement(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            size: 'sm',
-            onClick: () => onOpenDetail(note.id),
-            disabled: interactionsDisabled,
-            'aria-label': '阅读小记',
-            className: quickNoteStyles.cardAction,
-          },
-          '阅读',
-        ),
         isExpanded
           ? createElement(
               Button,
@@ -161,31 +151,14 @@ export function QuickNoteCard({
           },
           createElement(PinIcon),
         ),
-        createElement(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            size: 'icon-sm',
-            onClick: () => onMigrate(note.id),
-            disabled: interactionsDisabled,
-            'aria-label': '转为笔记',
-            className: quickNoteStyles.cardAction,
-          },
-          createElement(FileTextIcon),
-        ),
-        createElement(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            size: 'icon-sm',
-            onClick: () => onDelete(note.id),
-            disabled: interactionsDisabled,
-            'aria-label': '移到回收站',
-            className: quickNoteStyles.cardDangerAction,
-          },
-          createElement(Trash2Icon),
+        createElement('div', { className: 'relative' },
+          createElement(Button, { ref: triggerRef, type: 'button', variant: 'ghost', size: 'icon-sm', onClick: () => setMenuOpen((value) => !value), disabled: interactionsDisabled, 'aria-label': '更多小记操作', 'aria-haspopup': 'menu', 'aria-expanded': menuOpen, className: quickNoteStyles.cardAction }, '...'),
+          menuOpen ? createElement('div', { ref: menuRef, role: 'menu', 'aria-label': '小记操作', className: quickNoteStyles.cardOverflowMenu },
+            createElement('button', { type: 'button', role: 'menuitem', disabled: interactionsDisabled, onClick: () => { setMenuOpen(false); onEdit(note) }, className: quickNoteStyles.cardOverflowItem }, '编辑小记'),
+            createElement('button', { type: 'button', role: 'menuitem', disabled: interactionsDisabled, onClick: () => { setMenuOpen(false); onOpenDetail(note.id) }, className: quickNoteStyles.cardOverflowItem }, '阅读小记'),
+            createElement('button', { type: 'button', role: 'menuitem', disabled: interactionsDisabled, onClick: () => { setMenuOpen(false); onMigrate(note.id) }, className: quickNoteStyles.cardOverflowItem }, createElement(FileTextIcon), '转为笔记'),
+            createElement('button', { type: 'button', role: 'menuitem', disabled: interactionsDisabled, onClick: () => { setMenuOpen(false); onDelete(note.id) }, className: quickNoteStyles.cardOverflowItem }, createElement(Trash2Icon), '移到回收站'),
+          ) : null,
         ),
       ),
     ),

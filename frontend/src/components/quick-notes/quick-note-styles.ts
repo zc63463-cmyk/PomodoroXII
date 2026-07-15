@@ -1,34 +1,28 @@
 export const quickNoteStyles = {
   page:
-    'quick-notes-surface relative min-h-full overflow-hidden px-4 py-7 text-[color:var(--qn-page-text)] before:pointer-events-none before:absolute before:inset-0 before:bg-[image:var(--qn-aura)] after:pointer-events-none after:absolute after:inset-0 after:bg-[image:var(--qn-grain)] after:bg-[length:48px_48px] after:opacity-[var(--qn-grain-opacity)] sm:px-6 lg:px-8',
+    'quick-notes-surface relative min-h-full overflow-x-hidden px-3 py-4 text-[color:var(--qn-page-text)] sm:px-5 lg:px-6',
   shell: 'mx-auto flex w-full max-w-5xl flex-col gap-5 transition-[max-width] duration-300 ease-out',
   shellWide: 'mx-auto flex w-full max-w-7xl flex-col gap-5 transition-[max-width] duration-300 ease-out',
-  header: 'flex flex-col gap-4 rounded-[2rem] border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] px-5 py-4 shadow-[var(--qn-shadow-soft)] backdrop-blur-[28px] sm:flex-row sm:items-end sm:justify-between',
+  header: 'flex flex-wrap items-center justify-between gap-3 border-b border-[color:var(--qn-border)] pb-3',
   headerActions: 'flex flex-col items-stretch gap-2 sm:items-end',
   surface: 'relative z-10',
   eyebrow: 'text-xs font-semibold tracking-[0.18em] text-[color:var(--qn-subtle)] uppercase',
-  title:
-    'mt-1 text-4xl font-semibold tracking-[-0.055em] text-[color:var(--qn-text-strong)] sm:text-5xl',
-  subtitle: 'mt-2 max-w-2xl text-sm leading-6 text-[color:var(--qn-muted)]',
-  panel:
-    'rounded-[1.375rem] border border-[color:var(--qn-border)] bg-[color:var(--qn-panel)] p-3 shadow-[var(--qn-shadow-soft)] backdrop-blur-[24px]',
+  title: 'text-lg font-semibold text-[color:var(--qn-text-strong)]',
+  subtitle: 'hidden',
+  panel: 'rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-panel)] p-3',
   panelRelaxed:
-    'rounded-[1.5rem] border border-[color:var(--qn-border)] bg-[color:var(--qn-panel)] p-4 shadow-[var(--qn-shadow-soft)] backdrop-blur-[24px]',
-  composerFocusPanel:
-    'quick-note-motion-panel rounded-[2rem] border border-[color:var(--qn-panel-highlight)] bg-[color:var(--qn-paper)] p-5 shadow-[var(--qn-shadow)] backdrop-blur-[30px] ring-1 ring-[color:var(--qn-ring)] transition-all duration-300 ease-out',
+    'rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-panel)] p-4',
+  composerFocusPanel: 'rounded-md border border-[color:var(--qn-panel-highlight)] bg-[color:var(--qn-paper)] p-4 ring-1 ring-[color:var(--qn-ring)]',
   textarea:
-    'min-h-28 resize-y rounded-[1.125rem] border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-4 py-3 text-sm leading-6 text-[color:var(--qn-text-strong)] outline-none transition placeholder:text-[color:var(--qn-placeholder)] focus:border-[color:var(--qn-border-strong)] focus:bg-[color:var(--qn-field-focus)] focus:ring-3 focus:ring-[color:var(--qn-accent-soft)]',
+    'min-h-28 resize-y rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-4 py-3 text-sm leading-6 text-[color:var(--qn-text-strong)] outline-none transition placeholder:text-[color:var(--qn-placeholder)] focus:border-[color:var(--qn-border-strong)] focus:bg-[color:var(--qn-field-focus)] focus:ring-3 focus:ring-[color:var(--qn-accent-soft)]',
   textareaFocus:
-    'h-[clamp(20rem,calc(100dvh-23rem),26rem)] min-h-[20rem] max-h-[26rem] resize-y overflow-y-auto rounded-[1.625rem] border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-5 py-4 text-lg leading-8 text-[color:var(--qn-text-strong)] outline-none transition-all duration-300 placeholder:text-[color:var(--qn-placeholder)] focus:border-[color:var(--qn-border-strong)] focus:bg-[color:var(--qn-field-focus)] focus:ring-3 focus:ring-[color:var(--qn-accent-soft)]',
-  workspaceStage:
-    'quick-note-stage rounded-[2rem] border border-[color:var(--qn-border)] bg-[color:var(--qn-stage)] p-4 shadow-[var(--qn-shadow)] backdrop-blur-[30px]',
-  workspaceGrid:
-    'grid gap-5 transition-[grid-template-columns] duration-300 ease-out lg:grid-cols-[18rem_minmax(0,1fr)] lg:items-start',
+    'h-[clamp(20rem,calc(100dvh-23rem),26rem)] min-h-[20rem] max-h-[26rem] resize-y overflow-y-auto rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-5 py-4 text-lg leading-8 text-[color:var(--qn-text-strong)] outline-none transition-none placeholder:text-[color:var(--qn-placeholder)] focus:border-[color:var(--qn-border-strong)] focus:bg-[color:var(--qn-field-focus)] focus:ring-3 focus:ring-[color:var(--qn-accent-soft)]',
+  workspaceStage: 'quick-note-stage bg-[color:var(--qn-stage)] py-2',
+  workspaceGrid: 'grid gap-4 lg:grid-cols-[18rem_minmax(0,1fr)] lg:items-start',
   workspaceMain: 'order-1 flex min-w-0 flex-col gap-5 lg:order-none',
-  focusEditGrid:
-    'grid gap-5 transition-[grid-template-columns] duration-300 ease-out lg:grid-cols-[18rem_minmax(0,1fr)] lg:items-start',
+  focusEditGrid: 'mx-auto w-full max-w-4xl',
   focusEditHint:
-    'quick-note-motion-panel rounded-full border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] px-4 py-2 text-center text-xs text-[color:var(--qn-muted)] shadow-[var(--qn-shadow-soft)] backdrop-blur-[22px]',
+    'rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] px-4 py-2 text-center text-xs text-[color:var(--qn-muted)]',
   focusEditTimelineSink:
     'quick-note-focus-timeline-sink pointer-events-none select-none transition-[opacity,transform] duration-300 ease-out',
   metaText: 'text-xs text-[color:var(--qn-muted)]',
@@ -45,7 +39,7 @@ export const quickNoteStyles = {
   searchIcon: 'size-4 text-[color:var(--qn-subtle)]',
   explorer: 'order-2 flex min-w-0 flex-col gap-4 lg:order-none lg:sticky lg:top-5 lg:self-start',
   explorerPanel:
-    'rounded-[1.5rem] border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] p-3 shadow-[var(--qn-shadow-soft)] backdrop-blur-[24px]',
+    'rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] p-3',
   explorerHeader: 'mb-3 flex items-center justify-between gap-3',
   explorerHeaderActions: 'flex items-center gap-1',
   explorerTitle:
@@ -98,8 +92,7 @@ export const quickNoteStyles = {
   timeline: 'flex flex-col gap-4',
   groupLabel:
     'sticky top-2 z-10 w-fit rounded-full border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-strong)] px-3 py-1 text-xs font-semibold text-[color:var(--qn-text)] shadow-[var(--qn-shadow-soft)] backdrop-blur-[22px]',
-  card:
-    'group/card rounded-[1.125rem] border bg-[color:var(--qn-card)] p-4 shadow-none backdrop-blur-[18px] transition-[max-height,background-color,border-color,box-shadow,transform] duration-300 ease-out hover:bg-[color:var(--qn-card-hover)] hover:shadow-[var(--qn-shadow-soft)]',
+  card: 'group/card rounded-md border bg-[color:var(--qn-card)] p-3 shadow-none transition-colors hover:bg-[color:var(--qn-card-hover)]',
   cardCollapsed:
     'max-h-[11.25rem] overflow-hidden',
   cardExpanded:
@@ -195,4 +188,8 @@ export const quickNoteStyles = {
     'mb-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-[color:var(--qn-subtle)]',
   asideRow:
     'flex items-center justify-between gap-3 border-t border-[color:var(--qn-border)] py-2 first:border-t-0 first:pt-0 last:pb-0',
+  cardOverflow: 'relative',
+  cardOverflowTrigger: 'flex size-11 cursor-pointer list-none items-center justify-center rounded-md text-[color:var(--qn-muted)] hover:bg-[color:var(--qn-hover)] [&::-webkit-details-marker]:hidden',
+  cardOverflowMenu: 'absolute right-0 z-20 mt-1 grid min-w-32 gap-1 rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-panel)] p-1 shadow-[var(--qn-shadow-soft)]',
+  cardOverflowItem: 'min-h-11 rounded-md px-3 text-left text-sm text-[color:var(--qn-text)] hover:bg-[color:var(--qn-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--qn-border-strong)]',
 }

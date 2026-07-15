@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>PomodoroXII 后端 95+ 升级规划 · 2026-07-14</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f7; --surface: #fff; --surface-2: #edf1f2;
+      --text: #172126; --muted: #5d6970; --line: #d5dde0;
+      --accent: #087f5b; --accent-soft: #dff3eb;
+      --info: #27659d; --info-soft: #e6f0fa;
+      --warn: #946200; --warn-soft: #fff1c2;
+      --danger: #b42318; --danger-soft: #fee4e2;
+      --rail: 258px; --content: 1160px;
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #151a1d; --surface: #1d2428; --surface-2: #273035;
+      --text: #edf2f3; --muted: #a9b4b9; --line: #3a464b;
+      --accent: #65d3ae; --accent-soft: #173d33;
+      --info: #8dbce8; --info-soft: #20384e;
+      --warn: #f0bd59; --warn-soft: #453715;
+      --danger: #ff8a80; --danger-soft: #4a2422;
+    }
+    * { box-sizing: border-box; }
+    html { min-width: 0; scroll-behavior: smooth; background: var(--bg); }
+    body { min-width: 0; margin: 0; background: var(--bg); color: var(--text); font: 15px/1.58 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+    a { color: var(--info); text-underline-offset: .16em; }
+    a:hover { text-decoration-thickness: 2px; }
+    button, select { font: inherit; }
+    button { cursor: pointer; }
+    :where(a, button, select, summary):focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    h1, h2, h3, p, li, dd, code, pre, .path { overflow-wrap: anywhere; }
+    h1 { max-width: 24ch; margin: 0 0 12px; font-size: 2rem; line-height: 1.18; }
+    h2 { margin: 0 0 14px; font-size: 1.38rem; line-height: 1.3; }
+    h3 { margin: 0 0 8px; font-size: 1rem; line-height: 1.4; }
+    p { margin: 0 0 14px; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+    code { font-size: .9em; }
+    pre { max-width: 100%; margin: 10px 0 0; padding: 10px 12px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); white-space: pre-wrap; }
+    .skip { position: fixed; z-index: 100; top: 10px; left: 10px; padding: 8px 11px; transform: translateY(-160%); border: 1px solid var(--accent); border-radius: 4px; background: var(--surface); color: var(--text); }
+    .skip:focus { transform: translateY(0); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    .layout { display: grid; grid-template-columns: var(--rail) minmax(0, 1fr); min-height: 100vh; }
+    .rail { position: sticky; top: 0; height: 100vh; padding: 22px 18px; overflow: auto; border-right: 1px solid var(--line); background: var(--surface); }
+    .rail-title { margin: 0 0 4px; font-size: .92rem; font-weight: 800; }
+    .rail-meta { margin: 0 0 20px; color: var(--muted); font-size: .78rem; }
+    .rail nav { display: grid; gap: 2px; }
+    .rail nav a { min-height: 38px; padding: 8px 9px; border-left: 3px solid transparent; color: var(--muted); text-decoration: none; }
+    .rail nav a:hover { color: var(--text); background: var(--surface-2); }
+    .rail nav a[aria-current="location"] { border-left-color: var(--accent); color: var(--accent); font-weight: 750; }
+    .rail-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 22px; }
+    .button { min-height: 38px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text); }
+    .button:hover { border-color: var(--accent); background: var(--accent-soft); }
+    main { width: min(calc(100% - 42px), var(--content)); min-width: 0; margin: 0 auto; }
+    section { min-width: 0; padding: 34px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 16px; }
+    .eyebrow { margin: 0 0 7px; color: var(--accent); font-size: .78rem; font-weight: 800; }
+    .lede, .section-intro, .muted { color: var(--muted); }
+    .lede, .section-intro { max-width: 82ch; }
+    .verdict { max-width: 84ch; margin: 18px 0; padding: 13px 15px; border-left: 4px solid var(--danger); background: var(--danger-soft); font-weight: 750; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 24px 0 20px; border-block: 1px solid var(--line); }
+    .stat { min-width: 0; padding: 13px 15px; border-right: 1px solid var(--line); }
+    .stat:last-child { border-right: 0; }
+    .stat dt { color: var(--muted); font-size: .76rem; font-weight: 700; }
+    .stat dd { margin: 2px 0 0; font-size: 1.22rem; font-weight: 800; }
+    .danger { color: var(--danger); } .warn { color: var(--warn); } .accent { color: var(--accent); }
+    .top-risks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+    .top-risk { min-width: 0; padding: 14px 16px 0 0; }
+    .top-risk + .top-risk { padding-left: 16px; border-left: 1px solid var(--line); }
+    .top-risk strong { display: block; margin-bottom: 4px; color: var(--danger); }
+    .table-scroll { width: 100%; max-width: 100%; overflow-x: auto; border-block: 1px solid var(--line); background: var(--surface); }
+    table { width: 100%; min-width: 760px; border-collapse: collapse; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    thead th { background: var(--surface-2); color: var(--muted); font-size: .78rem; font-weight: 800; }
+    tbody tr:last-child > * { border-bottom: 0; }
+    tbody tr:hover > * { background: var(--accent-soft); }
+    .score-cell { min-width: 150px; }
+    .score-line { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+    .bar { height: 7px; overflow: hidden; border-radius: 4px; background: var(--surface-2); }
+    .bar > span { display: block; height: 100%; background: var(--info); }
+    .bar.low > span { background: var(--danger); }
+    .badge { display: inline-flex; min-height: 24px; align-items: center; padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: .75rem; font-weight: 750; white-space: nowrap; }
+    .badge.p0 { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+    .badge.p1 { border-color: var(--warn); background: var(--warn-soft); color: var(--warn); }
+    .badge.ok { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+    .tools { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(110px, .6fr); gap: 9px; align-items: end; margin: 18px 0 14px; padding: 12px; border-block: 1px solid var(--line); background: var(--surface-2); }
+    .tools label { display: grid; min-width: 0; gap: 4px; color: var(--muted); font-size: .76rem; font-weight: 750; }
+    .tools select, .tools button { width: 100%; min-width: 0; min-height: 40px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text); }
+    .tools output { display: flex; min-height: 40px; align-items: center; justify-content: flex-end; color: var(--muted); font-weight: 800; }
+    .finding { margin: 9px 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+    .finding[hidden] { display: none; }
+    .finding summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; min-height: 54px; padding: 10px 12px; cursor: pointer; list-style: none; }
+    .finding summary::-webkit-details-marker { display: none; }
+    .finding summary::after { content: "+"; color: var(--muted); font-size: 1.15rem; font-weight: 700; }
+    .finding[open] summary::after { content: "−"; }
+    .finding-title { min-width: 0; font-weight: 760; }
+    .finding-id { display: block; color: var(--muted); font-size: .72rem; font-weight: 700; }
+    .finding-body { padding: 0 13px 14px; border-top: 1px solid var(--line); }
+    .finding-grid { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 7px 14px; margin: 12px 0 0; }
+    .finding-grid dt { color: var(--muted); font-size: .78rem; font-weight: 800; }
+    .finding-grid dd { min-width: 0; margin: 0; }
+    .path-row { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+    .copy { min-height: 30px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--muted); }
+    .copy:hover { border-color: var(--accent); color: var(--accent); }
+    html:not(.js) .copy { display: none; }
+    .module-map { border-top: 1px solid var(--line); }
+    .map-layer { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 16px; padding: 15px 0; border-bottom: 1px solid var(--line); }
+    .map-layer h3 { margin-top: 5px; color: var(--muted); }
+    .node-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0; padding: 0; list-style: none; }
+    .node-flow li { display: flex; align-items: center; min-width: 0; }
+    .node-flow li + li::before { content: "→"; margin-right: 7px; color: var(--muted); }
+    .node { padding: 6px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+    .mutation { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); margin: 18px 0; padding: 0; list-style: none; overflow-x: auto; }
+    .mutation li { position: relative; min-width: 120px; padding: 10px 20px 10px 10px; border-block: 1px solid var(--line); background: var(--surface); }
+    .mutation li + li { border-left: 1px solid var(--line); }
+    .mutation li:not(:last-child)::after { content: "→"; position: absolute; right: 5px; top: 50%; transform: translateY(-50%); color: var(--accent); font-weight: 800; }
+    .mutation strong { display: block; font-size: .82rem; }
+    .mutation span { color: var(--muted); font-size: .76rem; }
+    .timeline { margin-top: 20px; border-left: 2px solid var(--line); }
+    .wave { position: relative; padding: 0 0 28px 25px; }
+    .wave::before { content: ""; position: absolute; top: 4px; left: -7px; width: 12px; height: 12px; border: 2px solid var(--accent); border-radius: 50%; background: var(--bg); }
+    .wave:last-child { padding-bottom: 0; }
+    .wave-head { display: flex; flex-wrap: wrap; gap: 9px; align-items: baseline; margin-bottom: 8px; }
+    .wave-head h3 { margin: 0; font-size: 1.05rem; }
+    .wave-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .wave ul { margin: 5px 0 0; padding-left: 20px; }
+    .formula { max-width: 740px; padding: 14px 16px; border-left: 4px solid var(--info); background: var(--info-soft); }
+    .caps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 20px 0; border-block: 1px solid var(--line); }
+    .cap { padding: 13px 14px; border-right: 1px solid var(--line); }
+    .cap:last-child { border-right: 0; }
+    .cap strong { display: block; font-size: 1.15rem; }
+    .checklist { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+    .checklist li { position: relative; padding: 10px 10px 10px 28px; border-bottom: 1px solid var(--line); }
+    .checklist li::before { content: "□"; position: absolute; left: 3px; color: var(--accent); font-weight: 800; }
+    .callout { max-width: 86ch; padding: 12px 14px; border-left: 4px solid var(--warn); background: var(--warn-soft); }
+    .handoff { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .8fr); gap: 22px; }
+    .no-results { padding: 16px; border-block: 1px solid var(--line); color: var(--muted); }
+    footer { padding: 24px 0 34px; color: var(--muted); font-size: .8rem; }
+    @media (max-width: 980px) {
+      .layout { display: block; }
+      .rail { position: sticky; z-index: 20; display: flex; height: auto; padding: 10px 16px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .rail-title, .rail-meta { display: none; }
+      .rail nav { display: flex; flex: 1 1 auto; gap: 4px 12px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+      .rail nav a { flex: 0 0 auto; min-height: 34px; padding: 6px 3px; border-left: 0; border-bottom: 2px solid transparent; }
+      .rail nav a[aria-current="location"] { border-bottom-color: var(--accent); }
+      .rail-actions { display: grid; flex: 0 0 96px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; margin: 0 0 0 8px; }
+      .rail-actions .button { min-height: 34px; padding: 5px 4px; font-size: .78rem; }
+      main { width: min(calc(100% - 30px), var(--content)); }
+      section { scroll-margin-top: 62px; }
+      .stats, .caps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stat:nth-child(2), .cap:nth-child(2) { border-right: 0; }
+      .stat:nth-child(-n+2), .cap:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .top-risks { grid-template-columns: 1fr; }
+      .top-risk + .top-risk { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); }
+      .tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 680px) {
+      h1 { font-size: 1.65rem; }
+      section { padding: 28px 0; }
+      .rail { align-items: flex-start; }
+      .rail nav { flex-wrap: wrap; gap: 0 9px; overflow: visible; }
+      .rail nav a { min-height: 30px; padding: 3px 2px; font-size: .8rem; }
+      .rail-actions { flex-basis: 76px; }
+      .stats, .caps, .tools, .wave-grid, .checklist, .handoff { grid-template-columns: 1fr; }
+      .stat, .cap { border-right: 0; border-bottom: 1px solid var(--line); }
+      .stat:last-child, .cap:last-child { border-bottom: 0; }
+      .tools output { justify-content: flex-start; }
+      .finding-grid { grid-template-columns: 1fr; gap: 2px; }
+      .finding-grid dt { margin-top: 8px; }
+      .map-layer { grid-template-columns: 1fr; gap: 5px; }
+      .map-layer h3 { margin: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+    @media print {
+      :root { --bg: #fff; --surface: #fff; --surface-2: #f1f3f4; --text: #111; --muted: #444; --line: #bbb; }
+      .rail, .tools, .copy, .no-print { display: none !important; }
+      .finding[hidden] { display: block !important; }
+      .layout { display: block; } main { width: 100%; }
+      section { padding: 18px 0; } .finding, .wave, tr { break-inside: avoid; }
+      a { color: #111; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <div class="layout">
+    <aside class="rail" aria-label="报告导航">
+      <p class="rail-title">Backend 95+ Program</p>
+      <p class="rail-meta">main@d20f200 · 2026-07-14</p>
+      <nav>
+        <a href="#summary">结论</a><a href="#baseline">当前基线</a><a href="#findings">阻断项</a><a href="#architecture">目标架构</a><a href="#roadmap">升级波次</a><a href="#certification">认证</a><a href="#evidence">证据与风险</a><a href="#handoff">交付</a>
+      </nav>
+      <div class="rail-actions"><button class="button" id="theme" type="button" title="切换明暗主题" aria-label="切换明暗主题" aria-pressed="false">主题</button><button class="button" id="print" type="button" title="打印报告" aria-label="打印报告">打印</button></div>
+    </aside>
+    <main id="main" data-report-shell data-report-kind="backend-95-plan">
+      <section id="summary" data-report-section="summary">
+        <p class="eyebrow">POMODOROXII · BACKEND ENGINEERING PROGRAM</p>
+        <h1>后端 95+ 升级规划</h1>
+        <p class="lede">以当前源码、测试和 Git 状态为基线，沿“安全止血 → 存储基础 → 数据一致性 → Sync/MCP 收敛 → 可恢复发布 → 认证”推进。目标不是增加功能数量，而是消除确定性数据与发布风险。</p>
+        <div class="verdict">当前发布判定：NO-GO。九模块原始规划均值约 75.9，但存在数据丢失、路径逃逸、跨存储漂移和不可恢复 P0，当前可声明综合分封顶 69。</div>
+        <dl class="stats"><div class="stat"><dt>当前可声明分</dt><dd class="danger">≤69</dd></div><div class="stat"><dt>原始规划均值</dt><dd class="warn">75.9</dd></div><div class="stat"><dt>目标综合分</dt><dd class="accent">≥95.0</dd></div><div class="stat"><dt>模块最低线</dt><dd>≥90.0</dd></div></dl>
+        <div class="top-risks"><div class="top-risk"><strong>跨存储事务不完整</strong><span>Note、Folder、Markdown、index、FTS 与 ledger 可能在外层回滚或崩溃后分叉。</span></div><div class="top-risk"><strong>MCP 与 Sync 可越权或漏数</strong><span>MCP HTTP 未共享鉴权与路径约束；legacy 全局游标已有 strict xfail。</span></div><div class="top-risk"><strong>生产不可证明恢复</strong><span>当前备份不覆盖 Meta/Notes/完整索引，无 restore-to-staging 和 rollback 演练。</span></div></div>
+      </section>
+
+      <section id="baseline" data-report-section="baseline">
+        <p class="eyebrow">CURRENT POSITION</p><h2>九模块规划基线</h2>
+        <p class="section-intro">分数是当前审查切片的规划判断，不是认证结果。P0 硬封顶优先于平均值，测试数量不能替代可恢复性与运行证明。</p>
+        <div class="table-scroll"><table aria-label="九模块当前分与目标分"><caption class="sr-only">九模块当前 Maturity、Health、综合分、目标和主要缺口</caption><thead><tr><th scope="col">模块</th><th scope="col">Maturity</th><th scope="col">Health</th><th scope="col">综合 / 置信度</th><th scope="col">目标</th><th scope="col">主要缺口</th><th scope="col">波次</th></tr></thead><tbody>
+          <tr data-module-id="runtime-auth" data-completeness="18" data-integrity="17" data-verification="17" data-operability="14" data-maintainability="16" data-maturity="87.5" data-health="78.3" data-composite="82" data-confidence="medium"><td>Runtime/Auth</td><td>87.5</td><td>78.3</td><td class="score-cell"><div class="score-line"><strong>82</strong><span>Medium</span></div><div class="bar"><span style="width:82%"></span></div></td><td>≥90</td><td>弱凭据、bcrypt 阻塞、撤销契约</td><td>S1</td></tr>
+          <tr data-module-id="migration-space" data-completeness="18" data-integrity="18" data-verification="16" data-operability="14" data-maintainability="15" data-maturity="90.0" data-health="75.0" data-composite="81" data-confidence="medium"><td>Migration/Space Lifecycle</td><td>90.0</td><td>75.0</td><td class="score-cell"><div class="score-line"><strong>81</strong><span>Medium</span></div><div class="bar"><span style="width:81%"></span></div></td><td>≥90</td><td>懒迁移、路径权威、WAL/锁/fsync</td><td>S2</td></tr>
+          <tr data-module-id="registry-meta" data-completeness="19" data-integrity="18" data-verification="18" data-operability="15" data-maintainability="17" data-maturity="92.5" data-health="83.3" data-composite="87" data-confidence="medium"><td>Registry/Meta</td><td>92.5</td><td>83.3</td><td class="score-cell"><div class="score-line"><strong>87</strong><span>Medium</span></div><div class="bar"><span style="width:87%"></span></div></td><td>≥90</td><td>Catalog 未编译冻结</td><td>S2</td></tr>
+          <tr data-module-id="entity-commands" data-completeness="18" data-integrity="17" data-verification="15" data-operability="12" data-maintainability="14" data-maturity="87.5" data-health="68.3" data-composite="76" data-confidence="medium"><td>Entity Commands</td><td>87.5</td><td>68.3</td><td class="score-cell"><div class="score-line"><strong>76</strong><span>Medium</span></div><div class="bar"><span style="width:76%"></span></div></td><td>≥90</td><td>入口间不变量、CAS、稳定分页</td><td>S3</td></tr>
+          <tr data-module-id="sync-push" data-completeness="19" data-integrity="17" data-verification="18" data-operability="13" data-maintainability="15" data-maturity="90.0" data-health="76.7" data-composite="82" data-confidence="medium"><td>Sync Push</td><td>90.0</td><td>76.7</td><td class="score-cell"><div class="score-line"><strong>82</strong><span>Medium</span></div><div class="bar"><span style="width:82%"></span></div></td><td>≥90</td><td>mutation → ledger 覆盖不完整</td><td>S4</td></tr>
+          <tr data-module-id="sync-pull" data-completeness="18" data-integrity="14" data-verification="16" data-operability="12" data-maintainability="14" data-maturity="80.0" data-health="70.0" data-composite="74" data-confidence="medium"><td>Sync Pull/Recovery</td><td>80.0</td><td>70.0</td><td class="score-cell"><div class="score-line"><strong>74</strong><span>Medium</span></div><div class="bar low"><span style="width:74%"></span></div></td><td>≥90</td><td>legacy 漏数、ACK、snapshot 内存</td><td>S1/S4</td></tr>
+          <tr data-module-id="notes-fs" data-completeness="19" data-integrity="14" data-verification="17" data-operability="13" data-maintainability="15" data-maturity="82.5" data-health="75.0" data-composite="78" data-confidence="medium"><td>Notes/FS</td><td>82.5</td><td>75.0</td><td class="score-cell"><div class="score-line"><strong>78</strong><span>Medium</span></div><div class="bar"><span style="width:78%"></span></div></td><td>≥90</td><td>双存储事务与投影漂移</td><td>S3</td></tr>
+          <tr data-module-id="deploy-ops" data-completeness="13" data-integrity="12" data-verification="13" data-operability="8" data-maintainability="12" data-maturity="62.5" data-health="55.0" data-composite="58" data-confidence="medium"><td>Deploy/Operations</td><td>62.5</td><td>55.0</td><td class="score-cell"><div class="score-line"><strong>58</strong><span>Medium</span></div><div class="bar low"><span style="width:58%"></span></div></td><td>≥90</td><td>restore、rollback、供应链、指标</td><td>S5</td></tr>
+          <tr data-module-id="mcp" data-completeness="17" data-integrity="12" data-verification="15" data-operability="9" data-maintainability="12" data-maturity="72.5" data-health="60.0" data-composite="65" data-confidence="medium"><td>MCP</td><td>72.5</td><td>60.0</td><td class="score-cell"><div class="score-line"><strong>65</strong><span>Medium</span></div><div class="bar low"><span style="width:65%"></span></div></td><td>≥90</td><td>HTTP 鉴权、路径隔离、完整 parity</td><td>S1/S4</td></tr>
+        </tbody></table></div>
+        <h3 style="margin-top:24px">已验证基线</h3>
+        <div class="table-scroll"><table aria-label="当前验证证据"><caption class="sr-only">当前 Git、测试、静态检查和外部 CI 验证状态</caption><thead><tr><th scope="col">证据</th><th scope="col">结果</th><th scope="col">状态</th><th scope="col">说明</th></tr></thead><tbody>
+          <tr data-gate-id="git-snapshot" data-gate-status="verified" data-evidence="source"><td>Git snapshot</td><td><code>main@d20f200</code> / <code>origin/main@1e4f0fc</code></td><td><span class="badge ok">source-verified</span></td><td>本地 ahead 18；backend、CI、README 与保存的 origin 内容一致</td></tr>
+          <tr data-gate-id="collection" data-gate-status="verified" data-evidence="runtime"><td>Python / collection</td><td>3.13.13；828 tests collected</td><td><span class="badge ok">runtime-verified</span></td><td>当前 backend 虚拟环境</td></tr>
+          <tr data-gate-id="ruff" data-gate-status="verified" data-evidence="runtime"><td>Ruff</td><td><code>app tests</code> passed</td><td><span class="badge ok">runtime-verified</span></td><td>无缓存检查</td></tr>
+          <tr data-gate-id="prod-auth" data-gate-status="verified" data-evidence="runtime"><td>Production/Auth</td><td>83 passed；1 warning</td><td><span class="badge ok">runtime-verified</span></td><td>定向门禁</td></tr>
+          <tr data-gate-id="sync" data-gate-status="verified" data-evidence="runtime"><td>Sync</td><td>64 passed；1 xfailed</td><td><span class="badge ok">runtime-verified</span></td><td>xfail 为 legacy 跨实体游标漏数</td></tr>
+          <tr data-gate-id="migration-notes-mcp" data-gate-status="verified" data-evidence="runtime"><td>Migration/Notes/MCP</td><td>79 passed</td><td><span class="badge ok">runtime-verified</span></td><td>定向门禁，分组可能重叠</td></tr>
+          <tr data-gate-id="full-suite" data-gate-status="deferred" data-evidence="none"><td>完整 pytest</td><td>本轮未重跑</td><td><span class="badge p1">deferred</span></td><td>既有 `.test-artifacts` 约 459 MiB；先治理保留沙箱生命周期</td></tr>
+          <tr data-gate-id="github-ci" data-gate-status="unverified" data-evidence="none"><td>GitHub live CI</td><td>未验证</td><td><span class="badge p1">unverified</span></td><td><code>gh</code> 未认证，Actions 请求 transport EOF</td></tr>
+        </tbody></table></div>
+      </section>
+
+      <section id="findings" data-report-section="findings">
+        <p class="eyebrow">BLOCKING FINDINGS</p><h2>确定性阻断与重要缺口</h2>
+        <p class="section-intro">P0 在关闭前直接触发 69 分封顶。所有条目默认展开，JavaScript 仅增强筛选与批量折叠。</p>
+        <div class="tools no-print" aria-label="发现筛选">
+          <label>严重度<select id="severity-filter"><option value="all">全部</option><option value="P0">P0</option><option value="P1">P1</option></select></label>
+          <label>模块<select id="module-filter"><option value="all">全部</option><option value="knowledge">Notes/FS</option><option value="runtime">Runtime/Auth</option><option value="migration">Migration/Space</option><option value="sync">Sync</option><option value="mcp">MCP</option><option value="delivery">Deploy/Operations</option><option value="entity">Registry/Entity</option></select></label>
+          <label>波次<select id="wave-filter"><option value="all">全部</option><option>S1</option><option>S2</option><option>S3</option><option>S4</option><option>S5</option></select></label>
+          <label>证据<select id="evidence-filter"><option value="all">全部</option><option value="source">源码</option><option value="test">测试</option><option value="runtime">运行</option></select></label>
+          <output id="finding-count" aria-live="polite">18 / 18</output>
+        </div>
+
+        <details class="finding" open data-finding-id="B95-001" data-spec-items="P0-01" data-severity="P0" data-module="knowledge" data-wave="S3" data-evidence="source">
+          <summary><span class="badge p0">P0</span><span class="finding-title"><span class="finding-id">B95-001 · Notes/FS</span>Folder 与 Note 存储生命周期断裂</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>REST Folder 只写 <code>space.db</code>，Note FS 校验 <code>index.db</code>；rename、move、search、cascade 可互相漂移。</dd><dt>证据</dt><dd class="path-row"><a class="path" href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/routes/v1/folders.py">backend/app/routes/v1/folders.py:25</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\routes\v1\folders.py:25" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/file_system/engine/note_ops.py">note_ops.py:38</a></dd><dt>权威决策</dt><dd><code>space.db</code> 管元数据/生命周期，Markdown 管正文；frontmatter、路径、<code>index.db</code> 与 FTS 都是可重建投影。</dd><dt>验收</dt><dd>API create-folder → create-note、rename、move、cascade/restore 后全部表示一致。</dd></dl></div>
+        </details>
+
+        <details class="finding" open data-finding-id="B95-002" data-spec-items="P0-02" data-severity="P0" data-module="knowledge" data-wave="S3" data-evidence="source-test">
+          <summary><span class="badge p0">P0</span><span class="finding-title"><span class="finding-id">B95-002 · Notes/FS</span>Note Saga 不覆盖外层 rollback、commit 失败与崩溃</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>数据库可回到旧状态，而 Markdown、FTS、index 与 version 保留新状态；重试可能重复创建。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/test_note_service.py">backend/tests/test_note_service.py:304</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\test_note_service.py:304" type="button">复制</button></dd><dt>目标</dt><dd><code>MutationUnitOfWork</code> + durable operation journal，保留 Sync batch/SAVEPOINT 组合。</dd><dt>验收</dt><dd>stage、flush、outer commit、finalize、status commit、restart 故障矩阵只能收敛到全旧或全新。</dd></dl></div>
+        </details>
+
+        <details class="finding" open data-finding-id="B95-003" data-spec-items="P0-03" data-severity="P0" data-module="mcp" data-wave="S1" data-evidence="source-runtime">
+          <summary><span class="badge p0">P0</span><span class="finding-title"><span class="finding-id">B95-003 · MCP</span>MCP HTTP 无共享鉴权且 space_id 未限制在根目录</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>调用者可在未证明 Space 存在或授权的情况下触发数据库初始化，路径标识可能逃逸配置根目录。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/mcp/server.py">backend/app/mcp/server.py:44</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\mcp\server.py:44" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/space_manager.py">space_manager.py:50</a></dd><dt>目标</dt><dd><code>CredentialAuthority</code> + <code>AuthorizedSpaceScope</code>。</dd><dt>验收</dt><dd>HTTP 未认证为 401、跨 Space 为 403、遍历/绝对路径不创建任何文件。</dd></dl></div>
+        </details>
+
+        <details class="finding" open data-finding-id="B95-004" data-spec-items="P0-04" data-severity="P0" data-module="sync" data-wave="S1" data-evidence="source-test">
+          <summary><span class="badge p0">P0</span><span class="finding-title"><span class="finding-id">B95-004 · Sync Pull</span>legacy 全局时间戳游标可静默漏行</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>较新实体推进全局游标后，被截断实体的较旧剩余行永久跳过。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/test_sync_cursor_pagination.py">backend/tests/test_sync_cursor_pagination.py:175</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\tests\test_sync_cursor_pagination.py:175" type="button">复制</button></dd><dt>目标</dt><dd>legacy unsafe-shape fail closed；v2 opaque cursor 为主协议。</dd><dt>验收</dt><dd>critical xfail 清零，跨实体与 tombstone 交错无漏数/重复。</dd></dl></div>
+        </details>
+
+        <details class="finding" open data-finding-id="B95-005" data-spec-items="P0-05" data-severity="P0" data-module="sync" data-wave="S4" data-evidence="source">
+          <summary><span class="badge p0">P0</span><span class="finding-title"><span class="finding-id">B95-005 · Sync Push</span>已提交 mutation 可绕过 v2 ledger</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>非 Note restore 与 Note/Folder/QuickNote purge 可能对 cursor v2 客户端不可见；Settings 明确不参与 Sync，Note restore 已记录事件，均不属于此缺口。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/routes/v1/trash.py">backend/app/routes/v1/trash.py:174</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\routes\v1\trash.py:174" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/registry/builtin.py">builtin.py:141</a></dd><dt>目标</dt><dd>所有 Sync-enabled 写入口经 Unit of Work，成功一条事件、回滚零事件。</dd><dt>验收</dt><dd>对全部 Sync-enabled mutation 参数化证明 ledger 完整性。</dd></dl></div>
+        </details>
+
+        <details class="finding" open data-finding-id="B95-006" data-spec-items="P0-06" data-severity="P0" data-module="delivery" data-wave="S5" data-evidence="source">
+          <summary><span class="badge p0">P0</span><span class="finding-title"><span class="finding-id">B95-006 · Deploy/Operations</span>不存在完整、可验证、可演练的恢复快照</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>当前启动备份不覆盖 Meta/Notes/完整索引，在线 tar 不能证明 SQLite/WAL/文件一致性。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/main.py">backend/app/main.py:46</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\main.py:46" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/DEPLOY.md">DEPLOY.md:62</a></dd><dt>目标</dt><dd><code>RecoveryCoordinator</code>：snapshot、verify、restore-to-staging、cutover。</dd><dt>验收</dt><dd>从独立故障域恢复，schema、实体数、Note hash、catalog hash 与 Sync waterline 等价。</dd></dl></div>
+        </details>
+
+        <details class="finding" open data-finding-id="B95-007" data-spec-items="P0-07" data-severity="P0" data-module="runtime" data-wave="S1" data-evidence="source-runtime">
+          <summary><span class="badge p0">P0</span><span class="finding-title"><span class="finding-id">B95-007 · Runtime/Auth</span>生产 secret、空密码与 bcrypt alias 可通过</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>弱签名密钥与等价密码削弱认证；同步 bcrypt 可阻塞事件循环。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/auth/security.py">backend/app/auth/security.py:25</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\auth\security.py:25" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/settings.py">settings.py:70</a></dd><dt>目标</dt><dd><code>CredentialAuthority</code>，32-byte secret、12–64 UTF-8 byte password、线程化 bcrypt、credential version。</dd><dt>验收</dt><dd>并发 setup 仅一次成功；短 secret、空密码、超界密码 fail closed；改密/撤销后旧 token 失效。</dd></dl></div>
+        </details>
+
+        <details class="finding" open data-finding-id="B95-008" data-spec-items="P1-01" data-severity="P1" data-module="migration" data-wave="S2" data-evidence="source-design">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-008 · Migration</span>旧 Alembic 默认入口与已批准双库合同冲突</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>默认命令仍可能把 Meta 与业务表建入同库；当前请求时懒迁移违背“启动前迁移、迁移后登记”。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/alembic.ini">backend/alembic.ini:1</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\alembic.ini:1" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/docs/2026-07-11-dual-alembic-migration-design.md">dual-alembic design:18</a></dd><dt>目标</dt><dd>恢复批准合同：启动前全量迁移，新 Space migrate-before-register，请求只 verify。</dd><dt>验收</dt><dd>默认入口 fail-fast；Meta/Space 各一 head；生产 request path 不执行迁移。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-009" data-spec-items="P1-02" data-severity="P1" data-module="migration" data-wave="S2" data-evidence="source">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-009 · Space Lifecycle</span>Meta 路径不是权威且缺失库会静默重建</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>同一 Space 可解析到错误位置；删除或移动数据库后请求生成新的空库。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/routes/v1/spaces.py">backend/app/routes/v1/spaces.py:54</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\routes\v1\spaces.py:54" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/space_manager.py">space_manager.py:58</a></dd><dt>目标</dt><dd><code>SpaceRuntime</code> 以 Meta locator 为唯一权威，区分 <code>provision</code> 与 <code>open</code>。</dd><dt>验收</dt><dd>缺失存储稳定返回 <code>space_storage_missing</code>；移动必须走显式迁移。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-010" data-spec-items="P1-03" data-severity="P1" data-module="migration" data-wave="S2" data-evidence="source">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-010 · Migration</span>迁移替换未证明 WAL、多进程与掉电耐久</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>未 checkpoint 的提交、并发 runner 或 replace/fsync 故障可能损坏或丢失数据库状态。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/db/migrations.py">backend/app/db/migrations.py:225</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\db\migrations.py:225" type="button">复制</button></dd><dt>目标</dt><dd><code>MigrationCoordinator</code> 统一 backup/checkpoint、锁、verify、replace、fsync。</dd><dt>验收</dt><dd>故障矩阵后原库或新库可打开且处于已知 revision。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-011" data-spec-items="P1-04" data-severity="P1" data-module="entity" data-wave="S3" data-evidence="source-test">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-011 · Entity Commands</span>不变量、CAS 与分页规则在入口间不一致</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>REST 可绕过 Sync 的环检测，Relation 可链接不存在端点，并发更新互相覆盖。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/services/base.py">backend/app/services/base.py:107</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\base.py:107" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/test_relation_service.py">test_relation_service.py:15</a></dd><dt>目标</dt><dd>共享 <code>EntityCommand</code> 返回 typed outcome，由 REST/Sync/MCP 分别映射。</dd><dt>验收</dt><dd>缺父项、环、孤儿 link、CAS 冲突和同时间戳分页均有稳定证明。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-012" data-spec-items="P1-05" data-severity="P1" data-module="entity" data-wave="S2" data-evidence="source">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-012 · Registry/Meta</span>Registry 是可变且弱校验的元数据袋</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>重复 effective key、不可解析 model/schema 或不完整 flags 可在运行时漂移。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/registry/__init__.py">backend/app/registry/__init__.py:46</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\registry\__init__.py:46" type="button">复制</button></dd><dt>目标</dt><dd><code>CompiledEntityCatalog</code> 启动编译、冻结并导出 version/hash。</dd><dt>验收</dt><dd>重复/非法 catalog 在启动阶段被拒，冻结后不可注册。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-013" data-spec-items="P1-06" data-severity="P1" data-module="knowledge" data-wave="S2" data-evidence="source-runtime">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-013 · IndexStore</span>index.db schema 版本与普通索引缺少可靠迁移证明</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>代码错误假设 <code>CreateTable</code> 包含独立 <code>Index</code> DDL，fresh store 可缺少声明索引；健康检查也不暴露 index schema。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/file_system/schema.py">backend/app/file_system/schema.py:218</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\file_system\schema.py:218" type="button">复制</button><span>fresh 临时库实测：6 个声明 Note/Folder 索引命中 0 个。</span></dd><dt>目标</dt><dd><code>IndexStoreSchema.verify / upgrade / rebuild_indexes</code>。</dd><dt>验收</dt><dd>fresh/head/upgrade 后表、FTS 对象和所有声明普通索引与模型一致。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-014" data-spec-items="P1-07" data-severity="P1" data-module="sync" data-wave="S4" data-evidence="source">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-014 · Sync Recovery</span>retention 没有设备 ACK 安全水位</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>离线客户端未确认前删除 ledger/tombstone，可能导致删除实体被旧设备复活。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/services/sync_outbox.py">backend/app/services/sync_outbox.py:77</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\services\sync_outbox.py:77" type="button">复制</button></dd><dt>目标</dt><dd><code>SyncProtocol.ack</code> 与 active-client minimum waterline。</dd><dt>验收</dt><dd>N-device、离线、撤销、prune、expired→full recovery 全覆盖。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-015" data-spec-items="P1-08" data-severity="P1" data-module="mcp" data-wave="S4" data-evidence="source-test">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-015 · MCP</span>当前 parity 不能证明完整 REST/MCP 等价</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>MCP Sync 缺 push/full/v2 cursor/recovery，手工 expected list 可把缺失定义为正确。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/mcp/server.py">backend/app/mcp/server.py:289</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\mcp\server.py:289" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/tests/parity_helpers.py">parity_helpers.py:138</a></dd><dt>目标</dt><dd><code>McpSyncAdapter</code> 仅委托共享 <code>SyncProtocol</code>。</dd><dt>验收</dt><dd>operation、schema、cursor、error、Note content 双向等价。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-016" data-spec-items="P1-10,P1-11" data-severity="P1" data-module="delivery" data-wave="S5" data-evidence="source">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-016 · CI/Supply Chain</span>CI artifact 与供应链 gate 不构成发布证明</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>失败日志路径不产出；无 JUnit/coverage、dependency audit、image scan、SBOM、签名或 provenance。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/.github/workflows/ci.yml">.github/workflows/ci.yml:80</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\.github\workflows\ci.yml:80" type="button">复制</button></dd><dt>目标</dt><dd>统一 `.test-results`、失败 sandbox、固定 action/image、扫描并发布 digest。</dd><dt>验收</dt><dd>publish 只消费已扫描 digest，精确 SHA required jobs 全绿。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-017" data-spec-items="P1-09" data-severity="P1" data-module="delivery" data-wave="S5" data-evidence="source">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-017 · Observability</span>readiness 与 metrics 不能证明真实存储健康</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>TEMP 写探针不证明持久卷可写；metrics 只有 <code>pomodoroxii_api_up 1</code>。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/app/main.py">backend/app/main.py:121</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\app\main.py:121" type="button">复制</button></dd><dt>目标</dt><dd><code>OperationalSignals</code> 与 per-Space degraded health。</dd><dt>验收</dt><dd>真实 request/error/latency、backup/rate/sync/pending-operation 指标，标签无高基数。</dd></dl></div>
+        </details>
+        <details class="finding" open data-finding-id="B95-018" data-spec-items="P1-12,P1-13" data-severity="P1" data-module="delivery" data-wave="S5" data-evidence="source">
+          <summary><span class="badge p1">P1</span><span class="finding-title"><span class="finding-id">B95-018 · Deployment</span>mutable latest、bind mount 与文档阻断可复现发布</span></summary>
+          <div class="finding-body"><dl class="finding-grid"><dt>影响</dt><dd>部署目标不可复现，无 rollback；非 root UID 1000 与 host bind directory 权限未演练；文档契约过期。</dd><dt>证据</dt><dd class="path-row"><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/docker-compose.yml">backend/docker-compose.yml:3</a><button class="copy" data-copy-path="E:\Development\MyAwesomeApp\PomodoroXII\backend\docker-compose.yml:3" type="button">复制</button><a href="file:///E:/Development/MyAwesomeApp/PomodoroXII/backend/Dockerfile">Dockerfile:37</a></dd><dt>目标</dt><dd>digest deploy、host preparation、upgrade/rollback smoke、契约化 runbook。</dd><dt>验收</dt><dd>fresh Linux bind directory 上 deploy、升级、回滚均使用保存的 digest 与 snapshot。</dd></dl></div>
+        </details>
+        <p id="no-findings" class="no-results" hidden>当前筛选条件没有匹配项。</p>
+      </section>
+
+      <section id="architecture" data-report-section="architecture">
+        <p class="eyebrow">TARGET MODULES</p><h2>目标架构与事务 Seam</h2>
+        <p class="section-intro">REST、FastMCP 和运维 CLI 只做 transport 映射。路径、身份、事务、不变量、同步事件和恢复行为集中到共享 Module。</p>
+        <div class="module-map" aria-label="目标模块关系">
+          <div class="map-layer"><h3>Ingress</h3><ul class="node-flow"><li><span class="node">REST Adapter</span></li><li><span class="node">FastMCP Adapter</span></li><li><span class="node">Operations CLI</span></li></ul></div>
+          <div class="map-layer"><h3>Authority</h3><ul class="node-flow"><li><span class="node">CredentialAuthority</span></li><li><span class="node">AuthorizedSpaceScope</span></li><li><span class="node">SpaceRuntime</span></li></ul></div>
+          <div class="map-layer"><h3>Commands</h3><ul class="node-flow"><li><span class="node">KnowledgeStore</span></li><li><span class="node">EntityCommand</span></li><li><span class="node">SyncProtocol</span></li></ul></div>
+          <div class="map-layer"><h3>Commit</h3><ul class="node-flow"><li><span class="node">MutationUnitOfWork</span></li><li><span class="node">Durable Journal</span></li><li><span class="node">Visible Ledger Event</span></li></ul></div>
+          <div class="map-layer"><h3>Foundation</h3><ul class="node-flow"><li><span class="node">RuntimeLeaseCoordinator</span></li><li><span class="node">MigrationCoordinator</span></li><li><span class="node">IndexStoreSchema</span></li><li><span class="node">CompiledEntityCatalog</span></li><li><span class="node">RecoveryCoordinator</span></li><li><span class="node">OperationalSignals</span></li></ul></div>
+        </div>
+        <h3 style="margin-top:24px">Durable mutation</h3>
+        <ol class="mutation"><li><strong>Lease + authorize</strong><span>global shared、Space exclusive、scope/path</span></li><li><strong>INTENT</strong><span>command hash、batch、expected version</span></li><li><strong>STAGED</strong><span>before/after、manifest、fsync</span></li><li><strong>DB_COMMITTED</strong><span>业务、pending event、同一 commit</span></li><li><strong>FINALIZING</strong><span>投影幂等应用与 step hash</span></li><li><strong>FINALIZED</strong><span>ledger 批量可见、结果持久</span></li><li><strong>Recovery</strong><span>ABORTED / COMPENSATED / FAILED_MANUAL</span></li></ol>
+        <div class="table-scroll"><table aria-label="核心模块接口"><caption class="sr-only">目标核心 Module、Interface、内部职责和实施波次</caption><thead><tr><th scope="col">Module</th><th scope="col">核心 Interface</th><th scope="col">隐藏的复杂性</th><th scope="col">波次</th></tr></thead><tbody>
+          <tr><td>CredentialAuthority</td><td><code>setup / login / verify / revoke</code></td><td>secret/password policy、线程化 bcrypt、epoch-1 强制重登录、MCP scope</td><td>S1</td></tr>
+          <tr><td>MigrationCoordinator</td><td><code>verify(kind,path) / upgrade(kind,path)</code></td><td>WAL backup、锁、临时升级、integrity、replace、fsync</td><td>S2</td></tr>
+          <tr><td>AuthorizedSpaceScope</td><td><code>open(principal,space_id,mode)</code></td><td>Meta authority、containment、存在性、访问模式</td><td>S1/S2</td></tr>
+          <tr><td>SpaceRuntime</td><td><code>provision / open / health</code></td><td>migrate-before-register、pending recovery、engine/FS lease</td><td>S2</td></tr>
+          <tr><td>RuntimeLeaseCoordinator</td><td><code>acquire_global / acquire_spaces</code></td><td>shared/exclusive、固定顺序、5s/60s timeout、OS lock、fence</td><td>S2</td></tr>
+          <tr><td>IndexStoreSchema</td><td><code>verify / upgrade / rebuild_indexes</code></td><td>独立 schema version、FTS、ordinary indexes、health</td><td>S2</td></tr>
+          <tr><td>CompiledEntityCatalog</td><td><code>compile / get / hash</code></td><td>重复 key、model/schema、flags、freeze、parity</td><td>S2</td></tr>
+          <tr><td>EntityCommand</td><td><code>validate / apply → typed outcome</code></td><td>parent/cycle/relation、CAS、stable ordering、Adapter 映射</td><td>S3</td></tr>
+          <tr><td>KnowledgeStore</td><td><code>create / update / move / trash / restore / purge / convert</code></td><td>Folder/Note/QuickNote 与全部派生投影</td><td>S3</td></tr>
+          <tr><td>MutationUnitOfWork</td><td><code>execute / execute_batch / recover</code></td><td>batch SAVEPOINT、journal、stage、commit、ledger visibility</td><td>S3/S4</td></tr>
+          <tr><td>SyncProtocol</td><td><code>push / pull / recover / ack</code></td><td>opaque cursor、retention、snapshot、REST/MCP parity</td><td>S4</td></tr>
+          <tr><td>RecoveryCoordinator</td><td><code>snapshot / verify / restore_to_staging / cutover</code></td><td>一致快照、hash、schema、独立目标、rollback</td><td>S5</td></tr>
+          <tr><td>OperationalSignals</td><td><code>probe / measure / issue-rotate-revoke ops credential</code></td><td>低基数 metrics、持久探针、degraded Space、独立 ops scope</td><td>S5</td></tr>
+        </tbody></table></div>
+        <p class="callout" style="margin-top:20px"><strong>权威与拓扑：</strong><code>space.db</code> 管元数据与生命周期，Markdown 管正文，其余均为投影；每个持久数据根只认证一个 active backend process，不宣称 active-active。</p>
+
+        <h3 style="margin-top:24px">共享错误契约</h3>
+        <div class="table-scroll"><table aria-label="稳定错误码"><caption class="sr-only">REST、Sync 和 MCP 共享的稳定错误语义</caption><thead><tr><th scope="col">错误码</th><th scope="col">语义</th><th scope="col">重试</th><th scope="col">Adapter 映射</th></tr></thead><tbody>
+          <tr data-error-code="auth_required"><td><code>auth_required</code></td><td>缺少有效身份</td><td>否</td><td>REST 401 / MCP auth error</td></tr>
+          <tr data-error-code="forbidden"><td><code>forbidden</code></td><td>身份无目标 scope</td><td>否</td><td>REST 403 / MCP tool error</td></tr>
+          <tr data-error-code="space_not_found"><td><code>space_not_found</code></td><td>Meta 中不存在目标 Space</td><td>否</td><td>REST 404 / Sync typed outcome / MCP tool error</td></tr>
+          <tr data-error-code="space_storage_missing"><td><code>space_storage_missing</code></td><td>已登记 Space 的存储不存在</td><td>否</td><td>REST/MCP 稳定 domain error</td></tr>
+          <tr data-error-code="path_outside_space"><td><code>path_outside_space</code></td><td>canonical path 越出根目录</td><td>否</td><td>拒绝且不创建文件</td></tr>
+          <tr data-error-code="version_conflict"><td><code>version_conflict</code></td><td>CAS 版本冲突</td><td>条件性</td><td>REST 409 / Sync conflict / MCP tool error</td></tr>
+          <tr data-error-code="cycle_detected"><td><code>cycle_detected</code></td><td>Folder 或依赖图形成环</td><td>否</td><td>REST 409 / Sync conflict / MCP tool error</td></tr>
+          <tr data-error-code="idempotency_conflict"><td><code>idempotency_conflict</code></td><td>operation ID 被不同命令复用</td><td>否</td><td>REST 409 / Sync rejected / MCP tool error</td></tr>
+          <tr data-error-code="lease_timeout"><td><code>lease_timeout</code></td><td>5s 请求或 60s 维护锁等待超时</td><td>是</td><td>REST 503 + Retry-After / MCP retryable error</td></tr>
+          <tr data-error-code="cursor_upgrade_required"><td><code>cursor_upgrade_required</code></td><td>legacy 请求可能漏数</td><td>升级后</td><td>停止 legacy advance</td></tr>
+          <tr data-error-code="cursor_expired"><td><code>cursor_expired</code></td><td>游标低于安全水位</td><td>恢复后</td><td>携带 full recovery 合同</td></tr>
+          <tr data-error-code="space_recovery_required"><td><code>space_recovery_required</code></td><td>pending operation 无法自动收敛</td><td>运维修复后</td><td>REST 503 / Space degraded</td></tr>
+          <tr data-error-code="snapshot_invalid"><td><code>snapshot_invalid</code></td><td>hash/schema/catalog 不匹配</td><td>否</td><td>拒绝 cutover</td></tr>
+        </tbody></table></div>
+        <p class="callout" style="margin-top:18px"><strong>REST v1 兼容：</strong>默认 body 继续使用精确的 <code>detail/error_type</code> 契约；canonical code/retryable/request ID 进入稳定 headers。只有显式请求 v2 error media type 才返回五键 canonical record，MCP 直接使用该 record。</p>
+      </section>
+
+      <section id="roadmap" data-report-section="roadmap">
+        <p class="eyebrow">S0 → S6</p><h2>风险依赖驱动路线</h2>
+        <p class="section-intro">每个波次独立分支、PR、回滚点与验收证据。S2 是 S3 的硬依赖，S3 是 S4 的硬依赖；任一 P0 重现时暂停后续工作。</p>
+        <div class="timeline">
+          <article class="wave" data-wave-id="S0"><div class="wave-head"><h3>S0 · 证据基线</h3><span class="badge">baseline</span><span class="muted">无产品行为变更</span></div><div class="wave-grid"><div><strong>交付</strong><ul><li>固定九模块评分表与 evidence schema</li><li>锁定测试 inventory 和 findings 台账</li><li>测试 artifact 指向 run-scoped 外部临时根</li></ul></div><div><strong>退出门禁</strong><pre>pytest --collect-only -q -p no:cacheprovider&#10;ruff check --no-cache app tests</pre></div></div></article>
+          <article class="wave" data-wave-id="S1"><div class="wave-head"><h3>S1 · 安全止血</h3><span class="badge p0">P0 first</span><span class="muted">后续扩展前完成</span></div><div class="wave-grid"><div><strong>交付</strong><ul><li>CredentialAuthority 与 MCP HTTP auth</li><li>Space containment 与 trusted-stdio 显式模式</li><li>legacy cursor / retention fail closed</li><li>旧 Alembic 入口 fail-fast</li></ul></div><div><strong>退出门禁</strong><p>路径遍历不创建文件；短 secret、空密码、bcrypt alias、未授权 MCP、unsafe cursor 和 prune 全部稳定拒绝。</p></div></div></article>
+          <article class="wave" data-wave-id="S2"><div class="wave-head"><h3>S2 · Migration 与 SpaceRuntime</h3><span class="badge">foundation</span><span class="muted">S3 硬依赖</span></div><div class="wave-grid"><div><strong>交付</strong><ul><li>WAL-safe MigrationCoordinator</li><li>RuntimeLeaseCoordinator：顺序、timeout、fence</li><li>启动前全 Space migration 与 migrate-before-register</li><li>Meta authority、IndexStoreSchema、CompiledEntityCatalog</li></ul></div><div><strong>退出门禁</strong><p>WAL row 保留；锁超时/进程退出/fence 可证明；故障后 known revision；缺失 Space 不重建；fresh/head index schema 与普通索引完整。</p></div></div></article>
+          <article class="wave" data-wave-id="S3"><div class="wave-head"><h3>S3 · Knowledge 一致性</h3><span class="badge p0">P0 close</span><span class="muted">S4 硬依赖</span></div><div class="wave-grid"><div><strong>交付</strong><ul><li>KnowledgeStore 与 MutationUnitOfWork</li><li>INTENT→STAGED→DB_COMMITTED→终态 journal</li><li>Folder projection、Note/Trash/version 一致性</li><li>QuickNote convert 幂等、Entity typed outcome 与 CAS</li></ul></div><div><strong>退出门禁</strong><p>orphan GC、forward、reverse compensation、batch child 故障与 restart 矩阵中，DB、Markdown、index、FTS、versions 与 trash 只能全旧或全新。</p></div></div></article>
+          <article class="wave" data-wave-id="S4"><div class="wave-head"><h3>S4 · Sync 与 MCP 收敛</h3><span class="badge">protocol</span><span class="muted">critical xfail = 0</span></div><div class="wave-grid"><div><strong>交付</strong><ul><li>所有 Sync-enabled mutation → ledger</li><li>opaque cursor、client ACK、安全 retention</li><li>chunked resumable snapshot 与官方 client 协议维护</li><li>完整 MCP Sync delegation 与 parity</li></ul></div><div><strong>退出门禁</strong><p>10,000 × 4 KiB Notes；chunk ≤500 entities / 8 MiB；Python heap ≤128 MiB、Linux RSS ≤256 MiB；可逐 chunk 续传且无漏数重复。</p></div></div></article>
+          <article class="wave" data-wave-id="S5"><div class="wave-head"><h3>S5 · Recovery 与生产交付</h3><span class="badge p0">release proof</span><span class="muted">真实 Linux 环境</span></div><div class="wave-grid"><div><strong>交付</strong><ul><li>full snapshot / verify / staging restore / cutover</li><li>指标、ops credential、SLO、per-Space health</li><li>JUnit/coverage/log/sandbox artifacts</li><li>scan、SBOM、signature、provenance、digest rollback</li></ul></div><div><strong>退出门禁</strong><p>首次 N-1 固定 <code>1e4f0fc</code>；从独立目标恢复；fresh bind mount upgrade；保存 digest 与 snapshot 完成 rollback。</p></div></div></article>
+          <article class="wave" data-wave-id="S6"><div class="wave-head"><h3>S6 · 95+ 认证</h3><span class="badge ok">High confidence</span><span class="muted">同一 commit SHA</span></div><div class="wave-grid"><div><strong>交付</strong><ul><li>clean checkout 全量测试与 fault/security matrix</li><li>required CI、branch protection、image provenance</li><li>最终评分表与 HTML 认证报告</li><li>README、Deploy、Recovery、Incident runbook 对齐</li></ul></div><div><strong>退出门禁</strong><p>综合 ≥95；九模块 ≥90；P0/发布阻断/critical xfail = 0；branch-aware coverage ≥90%；所有证明绑定同一 SHA。</p></div></div></article>
+        </div>
+      </section>
+
+      <section id="certification" data-report-section="certification">
+        <p class="eyebrow">SCORING CONTRACT</p><h2>95+ 评分与硬门禁</h2>
+        <div class="formula"><code>Maturity = (Completeness + Integrity) / 40 × 100</code><br><code>Health = (Verification + Operability + Maintainability) / 60 × 100</code><br><code>模块综合 = 0.4 × Maturity + 0.6 × Health</code><br><code>后端综合 = 九模块综合分的算术平均</code></div>
+        <div class="caps" aria-label="评分封顶规则">
+          <div class="cap" data-cap-id="p0" data-cap-score="69"><span class="badge p0">P0</span><strong class="danger">≤69</strong><span>数据丢失、越权、路径逃逸或不可恢复</span></div>
+          <div class="cap" data-cap-id="release" data-cap-score="89"><span class="badge p1">Release blocker</span><strong class="warn">≤89</strong><span>不能安全发布或回滚</span></div>
+          <div class="cap" data-cap-id="proof" data-cap-score="94"><span class="badge p1">Missing proof</span><strong class="warn">≤94</strong><span>缺 restore、exact-SHA CI 或 digest</span></div>
+          <div class="cap" data-cap-id="eligible" data-cap-score="95"><span class="badge ok">Eligible</span><strong class="accent">≥95</strong><span>所有硬门禁与证据同时成立</span></div>
+        </div>
+        <h3>认证清单</h3>
+        <ul class="checklist"><li>未四舍五入后端综合分 ≥95.0</li><li>九个模块综合分全部 ≥90.0</li><li>P0、发布阻断、critical xfail 全为 0</li><li>clean checkout 全量 pytest、Ruff、lock gate 绿色</li><li>Contract、Property、Integration、System 矩阵完备</li><li>Production、Security、Performance 证据完备</li><li>full snapshot 恢复、N-1 upgrade、rollback 成功</li><li>精确 commit SHA 的 required CI 与 branch protection 绿色</li><li>镜像 digest、scan、SBOM、signature、provenance 齐全</li><li>README、Deploy、Recovery、Incident runbook 与行为一致</li></ul>
+        <p class="callout" style="margin-top:20px">测试数量、coverage 或旧报告不能单独提升评分。Coverage 只是 Verification 的辅助证据；缺失 Operability 或真实恢复证明时仍受硬封顶。</p>
+      </section>
+
+      <section id="evidence" data-report-section="evidence">
+        <p class="eyebrow">DEPENDENCIES & RISKS</p><h2>实施约束与外部证明</h2>
+        <div class="table-scroll"><table aria-label="风险与决策"><caption class="sr-only">实施依赖、已锁定决策、风险控制和认证要求</caption><thead><tr><th scope="col">主题</th><th scope="col">已锁定决策</th><th scope="col">风险控制</th><th scope="col">认证要求</th></tr></thead><tbody>
+          <tr><td>部署拓扑</td><td>每个 persistent data root 一个 active process</td><td>migration/snapshot/restore 跨进程锁</td><td>不宣称 active-active</td></tr>
+          <tr><td>数据权威</td><td><code>space.db</code> 管元数据/生命周期，Markdown 管正文</td><td>index、FTS、frontmatter、路径均可重建</td><td>不存在第二个独立 writer</td></tr>
+          <tr><td>备份目标</td><td>必须位于 active data root 之外</td><td>manifest、SHA-256、staging restore</td><td>从独立故障域完成恢复</td></tr>
+          <tr><td>GitHub</td><td>当前 live CI 未验证</td><td>不以 workflow source 代替 run status</td><td>目标 SHA required jobs + protection 证据</td></tr>
+          <tr><td>Idempotency</td><td>内部命令总有 operation ID；REST v1 加 additive header</td><td>官方客户端复用 key；MCP mutation 必填</td><td>S3 认证前官方客户端完成采用</td></tr>
+          <tr><td>客户端范围</td><td>仅维护 transport、generated types 与 contract tests</td><td>采用 Idempotency-Key、opaque cursor、ACK、full recovery</td><td>不包含 UI 或业务功能开发</td></tr>
+          <tr><td>Legacy Sync</td><td>不安全 shape 先 fail closed，再按 telemetry 退役</td><td>稳定 upgrade error 和 full recovery</td><td>critical xfail 清零</td></tr>
+          <tr><td>测试 artifacts</td><td>不删除既有用户产物</td><td>新运行成功清理、失败上传、显式保留</td><td>CI JUnit/coverage/log/sandbox 可追踪</td></tr>
+        </tbody></table></div>
+        <h3 style="margin-top:24px">明确不做</h3>
+        <p class="muted">不替换 SQLite/Markdown，不拆微服务，不开发前端 UI/业务功能（必要的官方 client 协议维护除外），不支持未经重设计的多写副本，不清理现有 untracked 文件，不重写 2026-07-13 审查报告，不在缺少 live evidence 时宣称 CI 或发布绿色，也不在没有团队吞吐数据时编造日期与工期。</p>
+      </section>
+
+      <section id="handoff" data-report-section="handoff">
+        <p class="eyebrow">WRITTEN HANDOFF</p><h2>规格与后续实施计划</h2>
+        <div class="handoff"><div><h3>权威规格</h3><p><a href="../docs/superpowers/specs/2026-07-14-pomodoroxii-backend-95plus-design.md">docs/superpowers/specs/2026-07-14-pomodoroxii-backend-95plus-design.md</a></p><p class="muted">本 HTML 是规格的可浏览渲染，不是第二套真相。源码、测试、运行 artifact 与目标 commit SHA 仍是认证权威。</p></div><div><h3>审核后输出</h3><p>S0–S6 各一份 TDD 实施计划。每份计划明确文件、Interface、失败测试、最小实现、验证命令、提交和 review gate。</p><button class="button no-print" id="expand" type="button">收起全部发现</button></div></div>
+      </section>
+
+      <footer>PomodoroXII Backend 95+ Upgrade Design · Snapshot: main@d20f200 · Generated 2026-07-14 Asia/Shanghai · Live GitHub CI unverified</footer>
+    </main>
+  </div>
+  <script>
+    (() => {
+      const root = document.documentElement;
+      root.classList.add('js');
+      const main = document.querySelector('[data-report-shell]');
+      const findings = [...document.querySelectorAll('.finding')];
+      const controls = {
+        severity: document.getElementById('severity-filter'),
+        module: document.getElementById('module-filter'),
+        wave: document.getElementById('wave-filter'),
+        evidence: document.getElementById('evidence-filter')
+      };
+
+      try {
+        const stored = localStorage.getItem('pomodoroxii-backend95-theme');
+        root.dataset.theme = stored || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      } catch {
+        root.dataset.theme = 'light';
+      }
+
+      const themeButton = document.getElementById('theme');
+      const syncThemeState = () => themeButton.setAttribute('aria-pressed', String(root.dataset.theme === 'dark'));
+      syncThemeState();
+      themeButton.addEventListener('click', () => {
+        root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+        try { localStorage.setItem('pomodoroxii-backend95-theme', root.dataset.theme); } catch { /* file privacy mode */ }
+        syncThemeState();
+      });
+      document.getElementById('print').addEventListener('click', () => window.print());
+
+      function applyFilters() {
+        let visible = 0;
+        findings.forEach((finding) => {
+          const matches = (controls.severity.value === 'all' || finding.dataset.severity === controls.severity.value)
+            && (controls.module.value === 'all' || finding.dataset.module === controls.module.value)
+            && (controls.wave.value === 'all' || finding.dataset.wave === controls.wave.value)
+            && (controls.evidence.value === 'all' || finding.dataset.evidence.includes(controls.evidence.value));
+          finding.hidden = !matches;
+          if (matches) visible += 1;
+        });
+        document.getElementById('finding-count').textContent = `${visible} / ${findings.length}`;
+        document.getElementById('no-findings').hidden = visible !== 0;
+      }
+      Object.values(controls).forEach((control) => control.addEventListener('change', applyFilters));
+
+      let expanded = true;
+      const expand = document.getElementById('expand');
+      expand.addEventListener('click', () => {
+        expanded = !expanded;
+        findings.filter((finding) => !finding.hidden).forEach((finding) => { finding.open = expanded; });
+        expand.textContent = expanded ? '收起全部发现' : '展开全部发现';
+      });
+
+      async function copyText(value) {
+        if (navigator.clipboard?.writeText) {
+          try { await navigator.clipboard.writeText(value); return true; } catch { /* use fallback */ }
+        }
+        const area = document.createElement('textarea');
+        area.value = value;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.append(area);
+        area.select();
+        const copied = document.execCommand('copy');
+        area.remove();
+        return copied;
+      }
+      document.querySelectorAll('[data-copy-path]').forEach((button) => {
+        const findingId = button.closest('[data-finding-id]').dataset.findingId;
+        button.setAttribute('aria-label', `复制 ${findingId} 证据路径`);
+        button.addEventListener('click', async () => {
+          const original = button.textContent;
+          button.textContent = await copyText(button.dataset.copyPath) ? '已复制' : '复制失败';
+          setTimeout(() => { button.textContent = original; }, 1200);
+        });
+      });
+
+      const scoreRows = [...document.querySelectorAll('[data-module-id]')];
+      const scores = scoreRows.map((row) => ['completeness', 'integrity', 'verification', 'operability', 'maintainability'].reduce((sum, key) => sum + Number(row.dataset[key]), 0));
+      const displayed = scoreRows.map((row) => Number(row.querySelector('.score-line strong').textContent));
+      if (scores.some((score, index) => score !== displayed[index])) throw new Error('Module score data does not match displayed score.');
+      main.dataset.baselineAverage = (scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1);
+
+      const navLinks = [...document.querySelectorAll('.rail nav a')];
+      const linkById = new Map(navLinks.map((link) => [link.hash.slice(1), link]));
+      const observer = new IntersectionObserver((entries) => {
+        const current = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!current) return;
+        navLinks.forEach((link) => link.removeAttribute('aria-current'));
+        linkById.get(current.target.id)?.setAttribute('aria-current', 'location');
+      }, { rootMargin: '-15% 0px -70% 0px', threshold: [0, .05, .2] });
+      document.querySelectorAll('main > section').forEach((section) => observer.observe(section));
+
+      let printState = [];
+      addEventListener('beforeprint', () => {
+        printState = findings.map((finding) => ({ open: finding.open, hidden: finding.hidden }));
+        findings.forEach((finding) => { finding.hidden = false; finding.open = true; });
+      });
+      addEventListener('afterprint', () => {
+        findings.forEach((finding, index) => { finding.open = printState[index].open; finding.hidden = printState[index].hidden; });
+      });
+    })();
+  </script>
+</body>
+</html>
