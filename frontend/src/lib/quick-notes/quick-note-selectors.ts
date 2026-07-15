@@ -65,6 +65,20 @@ export function getQuickNoteSummary(note: QuickNote): string {
     .slice(0, 280)
 }
 
+export function getQuickNoteSearchSnippet(note: QuickNote, query: string): string {
+  const needle = getQuickNoteSearchNeedle(query).trim().toLocaleLowerCase()
+  const content = note.content.replace(/\s+/g, ' ').trim()
+  if (!needle || !content) return getQuickNoteSummary(note)
+
+  const matchIndex = content.toLocaleLowerCase().indexOf(needle)
+  if (matchIndex < 0) return getQuickNoteSummary(note)
+
+  const radius = 96
+  const start = Math.max(0, matchIndex - radius)
+  const end = Math.min(content.length, matchIndex + needle.length + radius)
+  return `${start > 0 ? '...' : ''}${content.slice(start, end)}${end < content.length ? '...' : ''}`
+}
+
 export function quickNoteMatchesQuery(note: QuickNote, query: string): boolean {
   const q = query.trim().toLowerCase()
   if (!q) return true
@@ -125,7 +139,7 @@ export function selectQuickNotesForExplorer(
     })
     .filter((note) => {
       if (!selectedDate) return true
-      return toLocalDateKey(note.created_at) === selectedDate
+      return getQuickNoteActivityDateKey(note) === selectedDate
     })
     .sort(compareQuickNotes)
 }
@@ -211,18 +225,22 @@ export function getQuickNoteActivityData(notes: QuickNote[]): QuickNoteActivityD
 
   for (const note of notes) {
     if (!isActiveQuickNote(note)) continue
-    const date = toLocalDateKey(note.created_at)
+    const date = getQuickNoteActivityDateKey(note)
     data[date] = (data[date] ?? 0) + 1
   }
 
   return data
 }
 
+export function getQuickNoteActivityDateKey(note: QuickNote): string {
+  return toLocalDateKey(isValidDate(note.updated_at) ? note.updated_at : note.created_at)
+}
+
 export function groupQuickNotesByDate(notes: QuickNote[]): QuickNoteTimelineGroup[] {
   const groups = new Map<string, QuickNote[]>()
 
   for (const note of notes) {
-    const date = toLocalDateKey(note.updated_at || note.created_at)
+    const date = getQuickNoteActivityDateKey(note)
     const group = groups.get(date) ?? []
     group.push(note)
     groups.set(date, group)
@@ -233,6 +251,10 @@ export function groupQuickNotesByDate(notes: QuickNote[]): QuickNoteTimelineGrou
     label: formatDateLabel(date),
     notes: groupNotes,
   }))
+}
+
+function isValidDate(value: string | null | undefined): value is string {
+  return typeof value === 'string' && !Number.isNaN(new Date(value).getTime())
 }
 
 function toLocalDateKey(iso: string): string {
