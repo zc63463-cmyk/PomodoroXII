@@ -54,7 +54,6 @@ vi.mock('@/lib/quick-notes/quick-note-repository', async (importOriginal) => {
     getQuickNoteRepositoryUserMessage: repositoryMocks.getQuickNoteRepositoryUserMessage,
   }
 })
-
 const previewMocks = vi.hoisted(() => ({
   ensureQuickNotePreviewSpace: vi.fn().mockResolvedValue(undefined),
 }))
