@@ -9,7 +9,6 @@ import {
   QUICK_NOTE_TYPING_IDLE_MS,
   type QuickNoteDraftSaveState,
 } from '@/lib/quick-notes/quick-note-editor-status'
-import type { QuickNoteUpdateInput } from '@/lib/quick-notes/quick-note-repository'
 import { PomodoroXIDB } from '@/services/database'
 import { db, spaceDBManager } from '@/services/space-db'
 import type { QuickNote } from '@/types'
@@ -32,6 +31,17 @@ const sessionMocks = vi.hoisted(() => ({
   },
 }))
 
+const existingEditMocks = vi.hoisted(() => ({
+  useQuickNoteExistingEditRecovery: vi.fn(),
+  session: {
+    draft: '', editingId: null as string | null, editingNote: null as QuickNote | null,
+    conflict: null, saveState: 'saved' as const, isTyping: false,
+    start: vi.fn(async (_note: QuickNote) => undefined), change: vi.fn(),
+    save: vi.fn(async () => true), cancel: vi.fn(async () => 'cancelled' as const),
+    keepLocal: vi.fn(async () => true), useRemote: vi.fn(async () => undefined), mergeRemote: vi.fn(async () => undefined),
+  },
+}))
+
 vi.mock('sonner', () => ({
   toast: toastMock,
 }))
@@ -40,13 +50,16 @@ vi.mock('@/components/quick-notes/use-quick-note-draft-session', () => ({
   useQuickNoteDraftSession: sessionMocks.useQuickNoteDraftSession,
 }))
 
+vi.mock('@/components/quick-notes/use-quick-note-existing-edit-recovery', () => ({
+  useQuickNoteExistingEditRecovery: existingEditMocks.useQuickNoteExistingEditRecovery,
+}))
+
 import { useQuickNoteEditor } from '@/components/quick-notes/use-quick-note-editor'
 
 function createOptions(overrides: {
   quickNotes?: QuickNote[]
   trashedQuickNotes?: QuickNote[]
-  projectRecordedQuickNote?: (note: QuickNote) => undefined
-  updateQuickNote?: (id: string, data: QuickNoteUpdateInput) => Promise<void>
+  projectCommittedQuickNote?: (note: QuickNote) => undefined
   describeQuickNoteError?: (error: unknown, fallback: string) => string
   lifecycleStateById?: Record<
     string,
@@ -56,9 +69,8 @@ function createOptions(overrides: {
   return {
     quickNotes: overrides.quickNotes ?? [],
     trashedQuickNotes: overrides.trashedQuickNotes ?? [],
-    projectRecordedQuickNote:
-      overrides.projectRecordedQuickNote ?? vi.fn((_note: QuickNote): undefined => undefined),
-    updateQuickNote: overrides.updateQuickNote ?? vi.fn(async () => undefined),
+    projectCommittedQuickNote:
+      overrides.projectCommittedQuickNote ?? vi.fn((_note: QuickNote): undefined => undefined),
     describeQuickNoteError:
       overrides.describeQuickNoteError ??
       vi.fn((_error: unknown, fallback: string) => fallback),
@@ -115,6 +127,14 @@ describe('useQuickNoteEditor', () => {
     sessionMocks.session.discard.mockResolvedValue({ kind: 'discarded' })
     sessionMocks.useQuickNoteDraftSession.mockReset()
     sessionMocks.useQuickNoteDraftSession.mockImplementation(() => sessionMocks.session)
+    existingEditMocks.session.draft = ''
+    existingEditMocks.session.editingId = null
+    existingEditMocks.session.editingNote = null
+    existingEditMocks.session.start.mockClear()
+    existingEditMocks.session.change.mockClear()
+    existingEditMocks.session.save.mockClear()
+    existingEditMocks.session.cancel.mockClear()
+    existingEditMocks.useQuickNoteExistingEditRecovery.mockImplementation(() => existingEditMocks.session)
   })
 
   afterEach(async () => {
@@ -126,12 +146,10 @@ describe('useQuickNoteEditor', () => {
 
   it('keeps the session draft separate from an existing-note edit', async () => {
     const existing = makeQuickNote()
-    const updateQuickNote = vi.fn(async () => undefined)
-    const projectRecordedQuickNote = vi.fn((_note: QuickNote): undefined => undefined)
+    const projectCommittedQuickNote = vi.fn((_note: QuickNote): undefined => undefined)
     const options = createOptions({
       quickNotes: [existing],
-      projectRecordedQuickNote,
-      updateQuickNote,
+      projectCommittedQuickNote,
     })
     sessionMocks.session.draft = 'untouched session draft'
     sessionMocks.session.saveState = 'restored'
@@ -141,7 +159,7 @@ describe('useQuickNoteEditor', () => {
     expect(result.current.draft).toBe('untouched session draft')
     expect(result.current.draftSaveState).toBe('restored')
     expect(sessionMocks.useQuickNoteDraftSession).toHaveBeenCalledWith({
-      onRecorded: projectRecordedQuickNote,
+      onRecorded: projectCommittedQuickNote,
     })
 
     act(() => result.current.startEdit(existing))
@@ -154,15 +172,25 @@ describe('useQuickNoteEditor', () => {
     await act(async () => {
       await result.current.submitDraft(submitEvent())
     })
-    expect(updateQuickNote).toHaveBeenCalledWith(existing.id, {
-      content: 'edited existing note',
-    })
+    expect(existingEditMocks.session.save).toHaveBeenCalledWith({ closeAfterSave: false })
     expect(sessionMocks.session.record).not.toHaveBeenCalled()
 
     act(() => result.current.cancelEdit())
     expect(result.current.editingId).toBeNull()
     expect(result.current.draft).toBe('untouched session draft')
     expect(sessionMocks.session.change).not.toHaveBeenCalled()
+  })
+
+  it('delegates existing-note edits to the recovery session without a store mutation callback', async () => {
+    const existing = makeQuickNote()
+    const { result } = renderHook(() => useQuickNoteEditor(createOptions({ quickNotes: [existing] })))
+
+    act(() => result.current.startEdit(existing))
+    expect(existingEditMocks.session.start).toHaveBeenCalledWith(existing)
+    act(() => result.current.setDraft('delegated content'))
+    expect(existingEditMocks.session.change).toHaveBeenCalledWith('delegated content')
+    await act(async () => { await result.current.submitDraft(submitEvent()) })
+    expect(existingEditMocks.session.save).toHaveBeenCalledWith({ closeAfterSave: false })
   })
 
   it('suppresses only projection-failed status for a consumed session draft', () => {
@@ -455,14 +483,11 @@ describe('useQuickNoteEditor', () => {
   })
 
   it('invalidates an in-flight existing-note save that resolves after unmount', async () => {
-    let releaseUpdate: (() => void) | null = null
-    const updateGate = new Promise<void>((resolve) => {
-      releaseUpdate = resolve
-    })
+    const save = createDeferred<boolean>()
+    existingEditMocks.session.save.mockReturnValueOnce(save.promise)
     const existing = makeQuickNote()
-    const updateQuickNote = vi.fn(() => updateGate)
     const { result, unmount } = renderHook(() =>
-      useQuickNoteEditor(createOptions({ quickNotes: [existing], updateQuickNote })),
+      useQuickNoteEditor(createOptions({ quickNotes: [existing] })),
     )
 
     act(() => result.current.startEdit(existing))
@@ -471,14 +496,13 @@ describe('useQuickNoteEditor', () => {
     act(() => {
       submitPromise = result.current.submitDraft(submitEvent())
     })
-    await waitFor(() => expect(updateQuickNote).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(existingEditMocks.session.save).toHaveBeenCalledTimes(1))
     const saveStateBeforeUnmount = result.current.saveState
 
     unmount()
     let submitted = true
     await act(async () => {
-      releaseUpdate?.()
-      await updateGate
+      save.resolve(true)
       submitted = await submitPromise!
     })
 
@@ -489,14 +513,11 @@ describe('useQuickNoteEditor', () => {
   })
 
   it('suppresses failure publication when an in-flight save rejects after unmount', async () => {
-    let rejectUpdate: ((error: Error) => void) | null = null
-    const updateGate = new Promise<void>((_resolve, reject) => {
-      rejectUpdate = reject
-    })
+    const save = createDeferred<boolean>()
+    existingEditMocks.session.save.mockReturnValueOnce(save.promise)
     const existing = makeQuickNote()
-    const updateQuickNote = vi.fn(() => updateGate)
     const { result, unmount } = renderHook(() =>
-      useQuickNoteEditor(createOptions({ quickNotes: [existing], updateQuickNote })),
+      useQuickNoteEditor(createOptions({ quickNotes: [existing] })),
     )
 
     act(() => result.current.startEdit(existing))
@@ -505,12 +526,12 @@ describe('useQuickNoteEditor', () => {
     act(() => {
       submitPromise = result.current.submitDraft(submitEvent())
     })
-    await waitFor(() => expect(updateQuickNote).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(existingEditMocks.session.save).toHaveBeenCalledTimes(1))
 
     unmount()
     let submitted = true
     await act(async () => {
-      rejectUpdate?.(new Error('late update failure'))
+      save.resolve(false)
       submitted = await submitPromise!
     })
 
@@ -566,19 +587,11 @@ describe('useQuickNoteEditor', () => {
   })
 
   it('invalidates a queued existing-note save after a successful Space switch', async () => {
-    let releaseFirstWrite: (() => void) | null = null
-    const firstWriteGate = new Promise<void>((resolve) => {
-      releaseFirstWrite = resolve
-    })
+    const firstSaveGate = createDeferred<boolean>()
+    existingEditMocks.session.save.mockReturnValueOnce(firstSaveGate.promise).mockResolvedValueOnce(false)
     const existing = makeQuickNote()
-    const updateQuickNote = vi
-      .fn<(id: string, data: QuickNoteUpdateInput) => Promise<void>>()
-      .mockImplementationOnce(async () => {
-        await firstWriteGate
-      })
-      .mockResolvedValue(undefined)
     const { result } = renderHook(() =>
-      useQuickNoteEditor(createOptions({ quickNotes: [existing], updateQuickNote })),
+      useQuickNoteEditor(createOptions({ quickNotes: [existing] })),
     )
 
     act(() => result.current.startEdit(existing))
@@ -587,7 +600,7 @@ describe('useQuickNoteEditor', () => {
     act(() => {
       firstSave = result.current.submitDraft(submitEvent())
     })
-    await waitFor(() => expect(updateQuickNote).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(existingEditMocks.session.save).toHaveBeenCalledTimes(1))
 
     act(() => result.current.setDraft('second queued existing edit'))
     let secondSave: Promise<boolean> | null = null
@@ -601,12 +614,11 @@ describe('useQuickNoteEditor', () => {
     await waitFor(() => expect(result.current.editingId).toBeNull())
 
     await act(async () => {
-      releaseFirstWrite?.()
-      await firstWriteGate
+      firstSaveGate.resolve(true)
       await Promise.all([firstSave, secondSave])
     })
 
-    expect(updateQuickNote).toHaveBeenCalledTimes(1)
+    expect(existingEditMocks.session.save).toHaveBeenCalledTimes(2)
     expect(result.current.editingId).toBeNull()
     expect(result.current.saveState).toBe('saved')
   })
