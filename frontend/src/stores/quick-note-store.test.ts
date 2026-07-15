@@ -73,7 +73,7 @@ describe('useQuickNoteStore', () => {
       tags: ['work'],
     })
 
-    const result = useQuickNoteStore.getState().projectRecordedQuickNote(first)
+    const result = useQuickNoteStore.getState().projectCommittedQuickNote(first)
 
     expect(result).toBeUndefined()
     expect(useQuickNoteStore.getState()).toMatchObject({
@@ -91,7 +91,7 @@ describe('useQuickNoteStore', () => {
     })
 
     expect(
-      useQuickNoteStore.getState().projectRecordedQuickNote(replacement),
+      useQuickNoteStore.getState().projectCommittedQuickNote(replacement),
     ).toBeUndefined()
     expect(useQuickNoteStore.getState().allQuickNotes).toEqual([replacement])
     expect(useQuickNoteStore.getState().quickNotes).toEqual([])
@@ -126,7 +126,7 @@ describe('useQuickNoteStore', () => {
       id: 'recorded-during-refresh',
       content: 'recorded while an old refresh is gated',
     })
-    useQuickNoteStore.getState().projectRecordedQuickNote(note)
+    useQuickNoteStore.getState().projectCommittedQuickNote(note)
     expect(useQuickNoteStore.getState()).toMatchObject({
       allQuickNotes: [note],
       quickNotes: [note],

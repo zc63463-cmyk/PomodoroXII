@@ -26,7 +26,9 @@ export interface QuickNoteExistingEditSession {
   mergeRemote(): Promise<void>
 }
 
-export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession {
+export function useQuickNoteExistingEditRecovery(
+  { onCommitted }: { onCommitted: (note: QuickNote) => undefined } = { onCommitted: () => undefined },
+): QuickNoteExistingEditSession {
   const [draft, setDraft] = useState('')
   const [editingNote, setEditingNote] = useState<QuickNote | null>(null)
   const [conflict, setConflict] = useState<QuickNoteDraftConflict | null>(null)
@@ -39,6 +41,8 @@ export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession
   const draftRef = useRef('')
   const noteRef = useRef<QuickNote | null>(null)
   const databaseRef = useRef<PomodoroXIDB | null>(null)
+  const onCommittedRef = useRef(onCommitted)
+  onCommittedRef.current = onCommitted
   const checkpoint = useCallback(async () => {
     const current = noteRef.current
     const adapter = adapterRef.current
@@ -50,13 +54,16 @@ export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession
     if (!spaceId) throw new Error('QuickNote existing edit requires an active Space')
     const database = spaceDBManager.current
     const adapter = createDexieQuickNoteExistingEditRecoveryAdapter(database, spaceId)
+    const editId = crypto.randomUUID()
     databaseRef.current = database
-    adapterRef.current = adapter; spaceIdRef.current = spaceId; editIdRef.current = crypto.randomUUID(); revisionRef.current = 0; noteRef.current = note
+    adapterRef.current = adapter; spaceIdRef.current = spaceId; editIdRef.current = editId; revisionRef.current = 0; noteRef.current = note
+    draftRef.current = note.content; setEditingNote(note); setDraft(note.content); setConflict(null); setSaveState('saved')
     const loaded = await adapter.load(note.id)
+    if (noteRef.current !== note || editIdRef.current !== editId || databaseRef.current !== database || spaceDBManager.currentSpaceId !== spaceId) return
     const restored = loaded.kind === 'valid' && loaded.snapshot.baseUpdatedAt === note.updated_at ? loaded.snapshot : null
-    const value = restored?.draft ?? note.content
-    if (restored) { editIdRef.current = restored.editId; revisionRef.current = restored.revision }
-    draftRef.current = value; setEditingNote(note); setDraft(value); setConflict(null); setSaveState(restored ? 'unsaved' : 'saved')
+    if (!restored || revisionRef.current !== 0 || draftRef.current !== note.content) return
+    editIdRef.current = restored.editId; revisionRef.current = restored.revision
+    draftRef.current = restored.draft; setEditingNote(note); setDraft(restored.draft); setConflict(null); setSaveState('unsaved')
   }, [])
   const change = useCallback((value: string) => { draftRef.current = value; revisionRef.current += 1; setDraft(value); setSaveState('unsaved'); if (timerRef.current) clearTimeout(timerRef.current); timerRef.current = setTimeout(() => { void checkpoint() }, 500) }, [checkpoint])
   const cancel = useCallback(async () => { if (timerRef.current) clearTimeout(timerRef.current); const note = noteRef.current; const adapter = adapterRef.current; if (note && adapter) await adapter.clearIfOwned(note.id, editIdRef.current, revisionRef.current); noteRef.current = null; setEditingNote(null); setDraft(''); setConflict(null); setSaveState('saved'); return 'cancelled' as const }, [])
@@ -87,7 +94,8 @@ export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession
     const result = await commitQuickNoteExistingEdit(database, { id: note.id, expectedUpdatedAt: note.updated_at, content: draftRef.current })
     if (result.kind === 'conflict') { setConflict({ note: result.note, localDraft: draftRef.current, remoteContent: result.note.content }); setSaveState('unsaved'); return false }
     if (result.kind !== 'saved') { setSaveState('failed'); return false }
-    noteRef.current = result.note; setEditingNote(result.note); await adapter.clearIfOwned(note.id, editIdRef.current, revisionRef.current); setSaveState('saved')
+    if (noteRef.current !== note || databaseRef.current !== database || spaceDBManager.currentSpaceId !== spaceId) return false
+    noteRef.current = result.note; setEditingNote(result.note); await adapter.clearIfOwned(note.id, editIdRef.current, revisionRef.current); onCommittedRef.current(result.note); setSaveState('saved')
     if (closeAfterSave) await cancel()
     return true
   }, [cancel, checkpoint])

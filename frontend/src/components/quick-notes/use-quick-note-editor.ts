@@ -7,18 +7,14 @@ import type { QuickNoteDraftConflict } from '@/components/quick-notes/quick-note
 import { useQuickNoteDraftSession } from '@/components/quick-notes/use-quick-note-draft-session'
 import { useQuickNoteExistingEditRecovery } from '@/components/quick-notes/use-quick-note-existing-edit-recovery'
 import type { QuickNote } from '@/types'
-import type {
-  QuickNoteLifecycleState,
-  QuickNoteUpdateInput,
-} from '@/lib/quick-notes/quick-note-repository'
+import type { QuickNoteLifecycleState } from '@/lib/quick-notes/quick-note-repository'
 import { QUICK_NOTE_TYPING_IDLE_MS } from '@/lib/quick-notes/quick-note-editor-status'
 import { spaceDBManager } from '@/services/space-db'
 
 interface UseQuickNoteEditorOptions {
   quickNotes: QuickNote[]
   trashedQuickNotes: QuickNote[]
-  projectRecordedQuickNote: (note: QuickNote) => undefined
-  updateQuickNote: (id: string, data: QuickNoteUpdateInput) => Promise<void>
+  projectCommittedQuickNote: (note: QuickNote) => undefined
   describeQuickNoteError: (error: unknown, fallback: string) => string
   lifecycleStateById?: Record<string, QuickNoteLifecycleState>
 }
@@ -26,13 +22,13 @@ interface UseQuickNoteEditorOptions {
 export function useQuickNoteEditor({
   quickNotes,
   trashedQuickNotes,
-  projectRecordedQuickNote,
-  updateQuickNote: _updateQuickNote,
+  projectCommittedQuickNote,
   describeQuickNoteError,
   lifecycleStateById = {},
 }: UseQuickNoteEditorOptions) {
-  const session = useQuickNoteDraftSession({ onRecorded: projectRecordedQuickNote })
-  const existingEdit = useQuickNoteExistingEditRecovery()
+  const session = useQuickNoteDraftSession({ onRecorded: projectCommittedQuickNote })
+  const existingEdit = useQuickNoteExistingEditRecovery({ onCommitted: projectCommittedQuickNote })
+  const saveExistingEdit = existingEdit.save
   const [editingDraft, setEditingDraft] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingNoteSnapshot, setEditingNoteSnapshot] = useState<QuickNote | null>(null)
@@ -175,10 +171,25 @@ export function useQuickNoteEditor({
     async ({ closeAfterSave }: { closeAfterSave: boolean }) => {
       if (editingIdRef.current !== null) {
         const lifecycleEpoch = lifecycleEpochRef.current
-        const saved = await existingEdit.save({ closeAfterSave })
-        return mountedRef.current && lifecycleEpochRef.current === lifecycleEpoch
-          ? saved
-          : false
+        try {
+          const saved = await saveExistingEdit({ closeAfterSave })
+          if (!mountedRef.current || lifecycleEpochRef.current !== lifecycleEpoch) return false
+          if (!saved) {
+            setSaveState('failed')
+            toast.error('小记保存失败', {
+              description: '请稍后重试',
+            })
+          }
+          return saved
+        } catch (error) {
+          if (mountedRef.current && lifecycleEpochRef.current === lifecycleEpoch) {
+            setSaveState('failed')
+            toast.error('小记保存失败', {
+              description: describeQuickNoteError(error, '请稍后重试'),
+            })
+          }
+          return false
+        }
       }
       if (!editingNote) return false
       const content = latestEditingDraftRef.current.trim()
@@ -204,7 +215,10 @@ export function useQuickNoteEditor({
             return false
           }
 
-          await existingEdit.save({ closeAfterSave })
+          const saved = await saveExistingEdit({ closeAfterSave })
+          if (!saved) {
+            throw new Error('QuickNote existing edit was not committed')
+          }
           if (!mountedRef.current || saveSequenceRef.current !== saveSequence) return false
           if (latestEditingDraftRef.current.trim() !== content) {
             setSaveState('unsaved')
@@ -240,7 +254,7 @@ export function useQuickNoteEditor({
       saveQueueRef.current = queuedSave.then(() => undefined, () => undefined)
       return queuedSave
     },
-    [describeQuickNoteError, editingNote, existingEdit, invalidateExistingEdit],
+    [describeQuickNoteError, editingNote, invalidateExistingEdit, saveExistingEdit],
   )
 
   useEffect(() => {
