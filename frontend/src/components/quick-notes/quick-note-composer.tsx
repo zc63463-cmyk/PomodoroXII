@@ -39,6 +39,7 @@ export function QuickNoteComposer({
   onInsertTag,
   draftSaveState = 'idle',
   onDiscardDraft,
+  focusRequestKey,
 }: {
   draft: string
   editingNote: QuickNote | null
@@ -55,6 +56,7 @@ export function QuickNoteComposer({
   onInsertTag?: (tag: string) => void
   draftSaveState?: QuickNoteDraftSaveState
   onDiscardDraft?: () => void | Promise<void>
+  focusRequestKey?: string
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const autocompleteId = useId()
@@ -102,6 +104,11 @@ export function QuickNoteComposer({
     if (!isFocusMode) return
     textareaRef.current?.focus()
   }, [isFocusMode])
+
+  useEffect(() => {
+    if (!focusRequestKey || editingNote) return
+    textareaRef.current?.focus()
+  }, [editingNote, focusRequestKey])
 
   useEffect(() => {
     if (!draft.trim() || editingNote) setDiscardArmed(false)
