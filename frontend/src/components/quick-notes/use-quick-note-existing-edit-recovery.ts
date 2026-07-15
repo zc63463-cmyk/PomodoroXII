@@ -93,5 +93,25 @@ export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession
   }, [cancel, checkpoint])
   return { draft, editingId: editingNote?.id ?? null, editingNote, conflict, saveState, isTyping: false, start, change,
     save, cancel, keepLocal: async () => save(),
-    useRemote: async () => { setConflict(null) }, mergeRemote: async () => { setConflict(null) } }
+    useRemote: async () => {
+      if (!conflict) return
+      noteRef.current = conflict.note
+      draftRef.current = conflict.remoteContent
+      revisionRef.current += 1
+      setEditingNote(conflict.note)
+      setDraft(conflict.remoteContent)
+      setConflict(null)
+      setSaveState('saved')
+    },
+    mergeRemote: async () => {
+      if (!conflict) return
+      const merged = `${conflict.localDraft.trimEnd()}\n\n--- 远端版本 ---\n${conflict.remoteContent.trim()}`
+      noteRef.current = conflict.note
+      draftRef.current = merged
+      revisionRef.current += 1
+      setEditingNote(conflict.note)
+      setDraft(merged)
+      setConflict(null)
+      setSaveState('unsaved')
+    } }
 }
