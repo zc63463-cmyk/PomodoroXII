@@ -6,6 +6,7 @@ import type { QuickNote } from '@/types'
 import { createDexieQuickNoteExistingEditRecoveryAdapter, type QuickNoteExistingEditRecoveryAdapter } from '@/lib/quick-notes/quick-note-existing-edit-recovery'
 import { spaceDBManager } from '@/services/space-db'
 import { commitQuickNoteExistingEdit } from '@/lib/quick-notes/quick-note-repository'
+import type { PomodoroXIDB } from '@/services/database'
 
 export type QuickNoteExistingEditSaveState = 'saved' | 'unsaved' | 'saving' | 'failed'
 
@@ -37,6 +38,7 @@ export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const draftRef = useRef('')
   const noteRef = useRef<QuickNote | null>(null)
+  const databaseRef = useRef<PomodoroXIDB | null>(null)
   const checkpoint = useCallback(async () => {
     const current = noteRef.current
     const adapter = adapterRef.current
@@ -46,7 +48,9 @@ export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession
   const start = useCallback(async (note: QuickNote) => {
     const spaceId = spaceDBManager.currentSpaceId
     if (!spaceId) throw new Error('QuickNote existing edit requires an active Space')
-    const adapter = createDexieQuickNoteExistingEditRecoveryAdapter(spaceDBManager.current, spaceId)
+    const database = spaceDBManager.current
+    const adapter = createDexieQuickNoteExistingEditRecoveryAdapter(database, spaceId)
+    databaseRef.current = database
     adapterRef.current = adapter; spaceIdRef.current = spaceId; editIdRef.current = crypto.randomUUID(); revisionRef.current = 0; noteRef.current = note
     const loaded = await adapter.load(note.id)
     const restored = loaded.kind === 'valid' && loaded.snapshot.baseUpdatedAt === note.updated_at ? loaded.snapshot : null
@@ -62,6 +66,7 @@ export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession
       noteRef.current = null
       adapterRef.current = null
       spaceIdRef.current = null
+      databaseRef.current = null
       setEditingNote(null)
       setDraft('')
       setConflict(null)
@@ -73,12 +78,13 @@ export function useQuickNoteExistingEditRecovery(): QuickNoteExistingEditSession
     const note = noteRef.current
     const adapter = adapterRef.current
     const spaceId = spaceIdRef.current
-    if (!note || !adapter || !spaceId || spaceDBManager.currentSpaceId !== spaceId) return false
+    const database = databaseRef.current
+    if (!note || !adapter || !spaceId || !database || spaceDBManager.currentSpaceId !== spaceId) return false
     if (!draftRef.current.trim()) { setSaveState('unsaved'); return false }
     if (timerRef.current) clearTimeout(timerRef.current)
     await checkpoint()
     setSaveState('saving')
-    const result = await commitQuickNoteExistingEdit(spaceDBManager.current, { id: note.id, expectedUpdatedAt: note.updated_at, content: draftRef.current })
+    const result = await commitQuickNoteExistingEdit(database, { id: note.id, expectedUpdatedAt: note.updated_at, content: draftRef.current })
     if (result.kind === 'conflict') { setConflict({ note: result.note, localDraft: draftRef.current, remoteContent: result.note.content }); setSaveState('unsaved'); return false }
     if (result.kind !== 'saved') { setSaveState('failed'); return false }
     noteRef.current = result.note; setEditingNote(result.note); await adapter.clearIfOwned(note.id, editIdRef.current, revisionRef.current); setSaveState('saved')
