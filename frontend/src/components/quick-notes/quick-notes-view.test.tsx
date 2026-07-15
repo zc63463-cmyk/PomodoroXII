@@ -158,6 +158,11 @@ async function seedActiveQuickNote(note: QuickNote): Promise<void> {
   })
 }
 
+function openCardAction(name: string) {
+  fireEvent.click(screen.getAllByRole('button', { name: '更多小记操作' })[0])
+  return screen.getByRole('menuitem', { name })
+}
+
 describe('QuickNotesView', () => {
   it('keeps pin primary and exposes remaining actions from an accessible overflow menu', async () => {
     const note = makeQuickNote({ id: 'overflow-menu', content: 'Overflow action note' })
@@ -870,7 +875,7 @@ describe('QuickNotesView', () => {
 
     render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
 
     const savedStatus = screen.getByText('已保存').closest(
       '[data-quick-note-editor-status]',
@@ -904,7 +909,7 @@ describe('QuickNotesView', () => {
 
     render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: '自动保存标题\n自动保存内容' },
     })
@@ -927,7 +932,7 @@ describe('QuickNotesView', () => {
     await seedActiveQuickNote(note)
     render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'first save body' },
     })
@@ -956,7 +961,7 @@ describe('QuickNotesView', () => {
 
     render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'retry after' },
     })
@@ -987,7 +992,7 @@ describe('QuickNotesView', () => {
     await seedActiveQuickNote(note)
     render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'first queued body' },
     })
@@ -1013,7 +1018,7 @@ describe('QuickNotesView', () => {
 
     render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: '失败后标题' },
     })
@@ -1034,7 +1039,7 @@ describe('QuickNotesView', () => {
     await seedActiveQuickNote(note)
     render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: '这段不应该保存' },
     })
@@ -1052,7 +1057,7 @@ describe('QuickNotesView', () => {
     await seedActiveQuickNote(note)
     render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: 'no longer matches search' },
     })
@@ -1143,7 +1148,7 @@ describe('QuickNotesView', () => {
 
     render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: '   ' },
     })
@@ -1188,7 +1193,7 @@ describe('QuickNotesView', () => {
     fireEvent.click(screen.getByRole('button', { name: '清空搜索' }))
     expect(storeMocks.loadQuickNotes).toHaveBeenCalledWith({ query: '' })
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     expect(screen.getByText('已保存')).toBeInTheDocument()
 
     fireEvent.keyDown(screen.getByLabelText('小记内容'), {
@@ -1210,7 +1215,7 @@ describe('QuickNotesView', () => {
       }))
     })
 
-    fireEvent.click(screen.getByRole('button', { name: '移到回收站' }))
+    fireEvent.click(openCardAction('移到回收站'))
 
     await waitFor(() => {
       expect(storeMocks.deleteQuickNote).toHaveBeenCalledWith('memos')
@@ -1285,12 +1290,12 @@ describe('QuickNotesView', () => {
 
     render(createElement(QuickNotesView))
 
-    const deleteButton = await screen.findByRole('button', { name: '移到回收站' })
+    const deleteButton = openCardAction('移到回收站')
     fireEvent.click(deleteButton)
     fireEvent.click(deleteButton)
 
     expect(storeMocks.deleteQuickNote).toHaveBeenCalledTimes(1)
-    expect(deleteButton).toBeDisabled()
+    expect(screen.queryByRole('menu', { name: '小记操作' })).not.toBeInTheDocument()
 
     await act(async () => {
       resolveDelete?.()
@@ -1342,7 +1347,7 @@ describe('QuickNotesView', () => {
     storeMocks.state.quickNotes = [note]
     const { rerender } = render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     expect(screen.getByRole('button', { name: /保存修改/ })).toBeInTheDocument()
 
     storeMocks.state.quickNotes = []
@@ -1371,7 +1376,7 @@ describe('QuickNotesView', () => {
     await seedActiveQuickNote(note)
     const { rerender } = render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: '我正在写的本地草稿' },
     })
@@ -1409,7 +1414,7 @@ describe('QuickNotesView', () => {
     await seedActiveQuickNote(note)
     const { rerender } = render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: '我正在写的本地草稿' },
     })
@@ -1453,7 +1458,7 @@ describe('QuickNotesView', () => {
     storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
     const { rerender } = render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: '我正在写的本地草稿' },
     })
@@ -1484,7 +1489,7 @@ describe('QuickNotesView', () => {
     storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
     const { rerender } = render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     fireEvent.change(screen.getByLabelText('小记内容'), {
       target: { value: '本地草稿内容' },
     })
@@ -1517,7 +1522,7 @@ describe('QuickNotesView', () => {
     storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
     const { rerender } = render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
 
     storeMocks.state.quickNotes = [
       {
@@ -1543,7 +1548,7 @@ describe('QuickNotesView', () => {
     storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
     const { rerender } = render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     expect(screen.getByRole('button', { name: /保存修改/ })).toBeInTheDocument()
 
     storeMocks.state.quickNotes = []
@@ -1565,7 +1570,7 @@ describe('QuickNotesView', () => {
     storeMocks.state.lifecycleStateById = { [note.id]: 'active' }
     const { rerender } = render(createElement(QuickNotesView))
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑小记' }))
+    fireEvent.click(openCardAction('编辑小记'))
     expect(screen.getByRole('button', { name: /保存修改/ })).toBeInTheDocument()
 
     storeMocks.state.quickNotes = []
@@ -1682,7 +1687,7 @@ describe('QuickNotesView', () => {
 
     render(createElement(QuickNotesView))
 
-    fireEvent.click(await screen.findByRole('button', { name: '移到回收站' }))
+    fireEvent.click(openCardAction('移到回收站'))
 
     await waitFor(() => {
       expect(toastMock.error).toHaveBeenCalledWith(
@@ -1725,7 +1730,7 @@ describe('QuickNotesView', () => {
 
     render(createElement(QuickNotesView))
 
-    fireEvent.click(await screen.findByRole('button', { name: '转为笔记' }))
+    fireEvent.click(openCardAction('转为笔记'))
 
     await waitFor(() => {
       expect(storeMocks.migrateToNote).toHaveBeenCalledWith('convert-card')
@@ -1747,7 +1752,7 @@ describe('QuickNotesView', () => {
 
     render(createElement(QuickNotesView))
 
-    fireEvent.click(await screen.findByRole('button', { name: '转为笔记' }))
+    fireEvent.click(openCardAction('转为笔记'))
 
     await waitFor(() => {
       expect(toastMock.error).toHaveBeenCalledWith(
@@ -1781,6 +1786,7 @@ describe('QuickNotesView', () => {
       'text-[color:var(--qn-accent-readable)]',
     )
     expect(screen.getByLabelText('小记内容')).toHaveAttribute('rows', '12')
+    expect(screen.getByLabelText('小记内容')).toHaveFocus()
     expect(screen.getByLabelText('小记内容')).toHaveClass(
       'h-[clamp(20rem,calc(100dvh-23rem),26rem)]',
     )
@@ -1981,7 +1987,7 @@ describe('QuickNotesView', () => {
     fireEvent.doubleClick(await screen.findByRole('button', { name: /沉浸阅读入口/ }))
     expect(screen.getByLabelText('小记快速预览')).toHaveTextContent('沉浸阅读入口')
 
-    fireEvent.click(await screen.findByRole('button', { name: '阅读小记' }))
+    fireEvent.click(openCardAction('阅读小记'))
 
     expect(storeMocks.enterDetailRead).toHaveBeenCalledWith('detail-entry-note')
 
@@ -2398,3 +2404,4 @@ describe('QuickNotesView', () => {
     expect(storeMocks.exitFocus).not.toHaveBeenCalled()
   })
 })
+

@@ -99,6 +99,11 @@ export function QuickNoteComposer({
   }, [draft, pendingCaretIndex])
 
   useEffect(() => {
+    if (!isFocusMode) return
+    textareaRef.current?.focus()
+  }, [isFocusMode])
+
+  useEffect(() => {
     if (!draft.trim() || editingNote) setDiscardArmed(false)
   }, [draft, editingNote])
 
