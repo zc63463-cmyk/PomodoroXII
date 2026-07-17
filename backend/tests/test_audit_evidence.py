@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
+import inspect
 import json
+import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -333,3 +337,150 @@ def test_semantic_validator_rejects_empty_or_dot_artifact_segments(
             known_modules=MODULE_IDS,
             known_findings={"P0-01"},
         )
+
+
+def load_verifier():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "verify_95plus_baseline.py"
+    spec = importlib.util.spec_from_file_location("verify_95plus_baseline", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_baseline_subject_modules_findings_and_scores_are_locked() -> None:
+    baseline = load_json("baseline.json")
+    assert (
+        baseline["audited_subject_sha"]
+        == "d20f200a95c25c25b1572da1781fde55560cdce0"
+    )
+    assert (
+        baseline["saved_remote_sha"]
+        == "1e4f0fc6d82ce6203f4bada0e84b518b16fcd97f"
+    )
+    assert set(baseline["modules"]) == MODULE_IDS
+    assert {item["finding_id"] for item in baseline["findings"]} == {
+        *(f"P0-{index:02d}" for index in range(1, 8)),
+        *(f"P1-{index:02d}" for index in range(1, 14)),
+    }
+    assert {item["classification"] for item in baseline["findings"]} <= {
+        "confirmed",
+        "inferred",
+        "unverified",
+    }
+    verifier = load_verifier()
+    summary = verifier.verify_baseline(AUDIT_ROOT)
+    assert summary.raw_backend_composite == Decimal(
+        "75.88888888888888888888888889"
+    )
+    assert summary.claimable_score == Decimal("69")
+
+
+def test_every_module_and_finding_points_to_known_evidence() -> None:
+    baseline = load_json("baseline.json")
+    known = {item["evidence_id"] for item in baseline["evidence"]}
+    assert known == EXPECTED_BASELINE_EVIDENCE_IDS
+    for module in baseline["modules"].values():
+        assert set(module["evidence_ids"]) <= known
+        assert module["evidence_ids"]
+    for finding in baseline["findings"]:
+        assert set(finding["evidence_ids"]) <= known
+        assert finding["evidence_ids"]
+
+
+def test_baseline_provenance_never_branches_on_evidence_id() -> None:
+    verifier = load_verifier()
+    source = inspect.getsource(verifier.verify_baseline)
+    assert 'startswith("EV-SOURCE-")' not in source
+    assert "_contained_repository_path" not in source
+
+
+def test_verifier_checks_artifact_size_in_addition_to_sha256() -> None:
+    verifier = load_verifier()
+    record = {
+        "evidence_id": "EV-SIZE-CHECK",
+        "artifact_size_bytes": 4,
+        "artifact_sha256": "0" * 64,
+    }
+    with pytest.raises(ValueError, match="artifact size mismatch"):
+        verifier._require_fingerprint(
+            record,
+            actual_size=5,
+            actual_hash="0" * 64,
+        )
+
+
+@pytest.mark.parametrize("invalid", [True, "20", 19.9])
+def test_score_dimensions_require_exact_non_boolean_integers(invalid: object) -> None:
+    verifier = load_verifier()
+    dimensions = {name: 20 for name in verifier.DIMENSIONS}
+    dimensions["verification"] = invalid
+    with pytest.raises(ValueError, match="non-Boolean integers"):
+        verifier.score_module(dimensions)
+
+
+def test_local_and_pr_evidence_cannot_lift_certification_cap() -> None:
+    verifier = load_verifier()
+    low_trust = [
+        {
+            "evidence_id": f"EV-LOW-{index}",
+            "result": "passed",
+            "confidence": "confirmed",
+            "trust_level": trust,
+            "certification_tags": [tag],
+            "artifact_path": f"low-{index}.json",
+            "artifact_sha256": "a" * 64,
+            "artifact_size_bytes": 1,
+        }
+        for index, (trust, tag) in enumerate(
+            [
+                ("local_snapshot", "restore_drill"),
+                ("pr_local", "exact_sha_ci"),
+                ("pr_local", "image_digest"),
+            ]
+        )
+    ]
+    low_ids = {item["evidence_id"] for item in low_trust}
+    assert verifier.effective_cap([], low_trust, low_ids) == 94
+
+    trusted = [
+        {
+            "evidence_id": "EV-TRUSTED-CI",
+            "result": "passed",
+            "confidence": "confirmed",
+            "trust_level": "trusted_push",
+            "certification_tags": ["exact_sha_ci", "image_digest"],
+            "artifact_path": "trusted-ci.json",
+            "artifact_sha256": "b" * 64,
+            "artifact_size_bytes": 1,
+        },
+        {
+            "evidence_id": "EV-TRUSTED-DRILL",
+            "result": "passed",
+            "confidence": "confirmed",
+            "trust_level": "release_drill",
+            "certification_tags": ["restore_drill"],
+            "artifact_path": "trusted-drill.json",
+            "artifact_sha256": "c" * 64,
+            "artifact_size_bytes": 1,
+        },
+    ]
+    trusted_ids = {item["evidence_id"] for item in trusted}
+    assert verifier.effective_cap([], trusted, trusted_ids) is None
+    assert verifier.effective_cap([], trusted, {"EV-TRUSTED-CI"}) == 94
+
+
+def test_certification_tags_without_a_verified_artifact_cannot_lift_cap() -> None:
+    verifier = load_verifier()
+    record = {
+        "evidence_id": "EV-UNBACKED-DRILL",
+        "result": "passed",
+        "confidence": "confirmed",
+        "trust_level": "release_drill",
+        "certification_tags": ["restore_drill", "exact_sha_ci", "image_digest"],
+        "artifact_path": None,
+        "artifact_sha256": None,
+        "artifact_size_bytes": None,
+    }
+    assert verifier.effective_cap([], [record], set()) == 94
