@@ -556,22 +556,56 @@ def _close_parent_authority(parent: int) -> None:
 def _bind_existing_target(path: Path, *, create_authority: bool) -> BoundSQLiteTarget:
     source = Path(path)
     parent, main, identity = _open_authority(source)
-    token = secrets.token_hex(32)
     try:
-        control, _receipt = _bootstrap()
-        with _BOOTSTRAP_LOCK:
-            accepted = control.execute(
-                "SELECT pxii_bind(?, ?, ?, ?)",
-                (token, parent, main, source.name),
-            ).fetchone()[0]
-        if accepted != 1:
-            raise RuntimeError("pxii-vfs rejected authority binding")
+        return _bind_open_authority(
+            parent,
+            main,
+            identity,
+            source.name,
+            create_authority=create_authority,
+        )
     finally:
         _close_authority(parent, main)
+
+
+def _bind_open_authority(
+    parent: int,
+    main: int,
+    identity: StorageIdentity,
+    basename: str,
+    *,
+    create_authority: bool,
+) -> BoundSQLiteTarget:
+    if not basename or Path(basename).name != basename:
+        raise ValueError("SQLite authority basename must be exact")
+    token = secrets.token_hex(32)
+    control, _receipt = _bootstrap()
+    with _BOOTSTRAP_LOCK:
+        accepted = control.execute(
+            "SELECT pxii_bind(?, ?, ?, ?)",
+            (token, parent, main, basename),
+        ).fetchone()[0]
+    if accepted != 1:
+        raise RuntimeError("pxii-vfs rejected authority binding")
     return BoundSQLiteTarget._create(
         identity,
         _TargetAuthority(token=token, create_authority=create_authority),
     )
+
+
+def _revoke_unopened_target(target: BoundSQLiteTarget) -> None:
+    authority = target._authority
+    if authority.revoked:
+        return
+    authority.revoked = True
+    control, _receipt = _bootstrap()
+    with _BOOTSTRAP_LOCK:
+        control.execute("SELECT pxii_revoke(?)", (authority.token,)).fetchone()
+        references = control.execute(
+            "SELECT pxii_live_references(?)", (authority.token,)
+        ).fetchone()[0]
+    if references not in {0, -1}:
+        raise RuntimeError("unopened SQLite target retained native references")
 
 
 def bind_marked_isolated_target(

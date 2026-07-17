@@ -178,6 +178,12 @@ class BoundDirectoryHandle:
             )
             info = os.fstat(descriptor)
             identity = StorageIdentity(info.st_dev, info.st_ino)
+        return cls._from_descriptor(descriptor, identity)
+
+    @classmethod
+    def _from_descriptor(
+        cls, descriptor: int, identity: StorageIdentity
+    ) -> "BoundDirectoryHandle":
         instance = object.__new__(cls)
         instance._identity = identity
         instance._authority = object()
@@ -337,6 +343,33 @@ class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
         ("nFileIndexHigh", wintypes.DWORD),
         ("nFileIndexLow", wintypes.DWORD),
     ]
+
+
+def _windows_storage_identity(handle: int) -> StorageIdentity:
+    info = _BY_HANDLE_FILE_INFORMATION()
+    if not ctypes.windll.kernel32.GetFileInformationByHandle(
+        wintypes.HANDLE(handle), ctypes.byref(info)
+    ):
+        raise ctypes.WinError()
+    if info.dwFileAttributes & 0x00000400:
+        raise PathOutsideSpaceError("Contained authority is a reparse point")
+    file_id = (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow)
+    return StorageIdentity(int(info.dwVolumeSerialNumber), file_id)
+
+
+def _descriptor_identity(descriptor: int) -> StorageIdentity:
+    if os.name == "nt":
+        return _windows_storage_identity(descriptor)
+    info = os.fstat(descriptor)
+    return StorageIdentity(info.st_dev, info.st_ino)
+
+
+def _identity_matches_receipt(
+    identity: StorageIdentity, receipt: tuple[str, int, int, int]
+) -> bool:
+    if os.name == "nt":
+        return identity.file_id == receipt[2]
+    return (identity.device, identity.file_id) == (receipt[1], receipt[2])
 
 
 class _WindowsUnicodeString(ctypes.Structure):
@@ -633,6 +666,9 @@ def _open_windows_directory(location: Path) -> tuple[int, StorageIdentity]:
         error = ctypes.WinError()
         kernel32.CloseHandle(handle)
         raise error
+    if info.dwFileAttributes & 0x00000400:
+        kernel32.CloseHandle(handle)
+        raise PathOutsideSpaceError("Contained root is a reparse point")
     file_id = (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow)
     return int(handle), StorageIdentity(int(info.dwVolumeSerialNumber), file_id)
 
@@ -707,49 +743,246 @@ class ContainedSpaceOpens:
             self._notes_handle._close()
 
 
-def _create_exact_file(path: Path) -> bool:
+def _open_root_authority(root: Path) -> tuple[int, StorageIdentity]:
+    if os.name == "nt":
+        return _open_windows_directory(root)
+    descriptor = os.open(
+        root,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    identity = _descriptor_identity(descriptor)
+    return descriptor, identity
+
+
+def _open_verified_parent(
+    root: int,
+    parts: tuple[str, ...],
+    receipts: tuple[tuple[str, int, int, int], ...],
+) -> int:
+    if len(receipts) != len(parts) + 1:
+        raise PathOutsideSpaceError("Contained ancestor receipt is incomplete")
+    current = _duplicate_directory_descriptor(root)
+    try:
+        for index, part in enumerate(parts, start=1):
+            if os.name == "nt":
+                child = _open_windows_relative_directory(current, part, create=False)
+            else:
+                child = os.open(
+                    part,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=current,
+                )
+            identity = _descriptor_identity(child)
+            if not _identity_matches_receipt(identity, receipts[index]):
+                _close_directory_descriptor(child)
+                raise PathOutsideSpaceError("Contained ancestor identity changed")
+            _close_directory_descriptor(current)
+            current = child
+        return current
+    except BaseException:
+        _close_directory_descriptor(current)
+        raise
+
+
+def _open_relative_regular(
+    parent: int, basename: str
+) -> tuple[int, StorageIdentity, bool]:
+    if not basename or "/" in basename or "\\" in basename or ":" in basename:
+        raise PathOutsideSpaceError("Contained database name is not exact")
+    if os.name == "nt":
+        desired_access = 0x80000000 | 0x40000000 | 0x00000080 | 0x00100000
+        try:
+            descriptor = _nt_open_windows_relative(
+                parent,
+                basename,
+                desired_access=desired_access,
+                disposition=0x00000002,
+                options=0x00000020 | 0x00000040 | 0x00200000,
+                file_attributes=0x00000080,
+                expected_directory=False,
+            )
+        except FileExistsError:
+            created = False
+            descriptor = _nt_open_windows_relative(
+                parent,
+                basename,
+                desired_access=desired_access,
+                disposition=0x00000001,
+                options=0x00000020 | 0x00000040 | 0x00200000,
+                file_attributes=0x00000080,
+                expected_directory=False,
+            )
+        else:
+            created = True
+        return descriptor, _descriptor_identity(descriptor), created
+
+    flags = (
+        os.O_RDWR
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
     try:
         descriptor = os.open(
-            path,
-            os.O_CREAT
-            | os.O_EXCL
-            | os.O_RDWR
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
+            basename, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent
         )
     except FileExistsError:
-        return False
+        created = False
+        descriptor = os.open(basename, flags, dir_fd=parent)
+    else:
+        created = True
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(descriptor)
+        raise PathOutsideSpaceError("Contained database role is not a regular file")
+    return descriptor, StorageIdentity(info.st_dev, info.st_ino), created
+
+
+def _open_relative_directory(parent: int, basename: str) -> tuple[int, StorageIdentity]:
+    if not basename or "/" in basename or "\\" in basename or ":" in basename:
+        raise PathOutsideSpaceError("Contained directory name is not exact")
+    if os.name == "nt":
+        descriptor = _open_windows_relative_directory(parent, basename, create=False)
+    else:
+        descriptor = os.open(
+            basename,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent,
+        )
+    return descriptor, _descriptor_identity(descriptor)
+
+
+def _close_file_descriptor(descriptor: int) -> None:
+    if descriptor < 0:
+        return
+    if os.name == "nt":
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(descriptor))
     else:
         os.close(descriptor)
-        return True
 
 
-def _require_regular(path: Path) -> None:
-    info = path.stat(follow_symlinks=False)
-    if not stat.S_ISREG(info.st_mode):
-        raise PathOutsideSpaceError("Contained database role is not a regular file")
+def _remove_created_role(parent: int, basename: str) -> None:
+    if os.name == "nt":
+        _unlink_windows_relative(parent, basename)
+    else:
+        os.unlink(basename, dir_fd=parent)
+
+
+def _fault_hook(_name: str) -> None:
+    return None
 
 
 def open_bound_space(paths, ancestor_identities) -> ContainedSpaceOpens:
-    from app.runtime.sqlite_vfs import _bind_existing_target
-
-    del ancestor_identities
-    database_created = _create_exact_file(paths.db_path)
-    index_created = _create_exact_file(paths.index_db)
-    _require_regular(paths.db_path)
-    _require_regular(paths.index_db)
-    notes_handle = BoundDirectoryHandle._create(paths.notes_dir)
-    try:
-        database_target = _bind_existing_target(
-            paths.db_path, create_authority=database_created
-        )
-        index_target = _bind_existing_target(
-            paths.index_db, create_authority=index_created
-        )
-    except BaseException:
-        notes_handle._close()
-        raise
-    return ContainedSpaceOpens._create(
-        database_target, index_target, notes_handle
+    from app.runtime.scope import _walk_existing_ancestors
+    from app.runtime.sqlite_vfs import (
+        _bind_open_authority,
+        _revoke_unopened_target,
     )
+
+    receipts = tuple(ancestor_identities)
+    parent_parts = paths.db_path.parent.relative_to(paths.space_root).parts
+    if not parent_parts or any(part in {"", ".", ".."} for part in parent_parts):
+        raise PathOutsideSpaceError("Contained Space parent is not normalized")
+    if paths.notes_dir.parent != paths.db_path.parent:
+        raise PathOutsideSpaceError("Contained storage roles have different parents")
+
+    root = -1
+    parent = -1
+    database_main = -1
+    index_main = -1
+    notes_descriptor = -1
+    database_created = False
+    index_created = False
+    database_target = None
+    index_target = None
+    notes_handle = None
+    try:
+        root, root_identity = _open_root_authority(paths.space_root)
+        if not receipts or not _identity_matches_receipt(root_identity, receipts[0]):
+            raise PathOutsideSpaceError("Contained root identity changed")
+        parent = _open_verified_parent(root, parent_parts, receipts)
+        database_main, database_identity, database_created = _open_relative_regular(
+            parent, paths.db_path.name
+        )
+        index_main, index_identity, index_created = _open_relative_regular(
+            parent, paths.index_db.name
+        )
+
+        _fault_hook("before_sqlite_bound_connect")
+        database_target = _bind_open_authority(
+            parent,
+            database_main,
+            database_identity,
+            paths.db_path.name,
+            create_authority=database_created,
+        )
+        index_target = _bind_open_authority(
+            parent,
+            index_main,
+            index_identity,
+            paths.index_db.name,
+            create_authority=index_created,
+        )
+
+        _fault_hook("before_filesystem_handle_open")
+        notes_descriptor, notes_identity = _open_relative_directory(
+            parent, paths.notes_dir.name
+        )
+        notes_handle = BoundDirectoryHandle._from_descriptor(
+            notes_descriptor, notes_identity
+        )
+        notes_descriptor = -1
+
+        if _walk_existing_ancestors(paths) != receipts:
+            raise PathOutsideSpaceError("Contained namespace changed during open")
+        return ContainedSpaceOpens._create(
+            database_target, index_target, notes_handle
+        )
+    except BaseException as primary:
+        cleanup_errors: list[BaseException] = []
+        for target in (database_target, index_target):
+            if target is not None:
+                try:
+                    _revoke_unopened_target(target)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+        if notes_handle is not None:
+            try:
+                notes_handle._close()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        _close_file_descriptor(database_main)
+        database_main = -1
+        _close_file_descriptor(index_main)
+        index_main = -1
+        for created, basename in (
+            (database_created, paths.db_path.name),
+            (index_created, paths.index_db.name),
+        ):
+            if created and parent >= 0:
+                try:
+                    _remove_created_role(parent, basename)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+        if cleanup_errors:
+            raise BaseExceptionGroup(
+                "contained open and cleanup failed", [primary, *cleanup_errors]
+            ) from None
+        raise
+    finally:
+        _close_file_descriptor(database_main)
+        _close_file_descriptor(index_main)
+        _close_file_descriptor(notes_descriptor)
+        if parent >= 0:
+            _close_directory_descriptor(parent)
+        if root >= 0:
+            _close_directory_descriptor(root)

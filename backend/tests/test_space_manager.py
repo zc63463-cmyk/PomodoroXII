@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from app.errors import SpaceEnginePathMismatchError, SQLiteAuthorityRevokedError
 from app.runtime.contained_io import ContainedSpaceOpens, open_bound_space
+from app.runtime.scope import _walk_existing_ancestors
 from app.runtime.sqlite_vfs import MaintenanceOptions
 from app.space_manager import SpaceEngineManager
 
@@ -20,12 +21,12 @@ def _opens(root: Path) -> ContainedSpaceOpens:
     notes = root / "notes"
     notes.mkdir(exist_ok=True)
     paths = SimpleNamespace(
-        space_root=root,
+        space_root=root.parent,
         db_path=root / "space.db",
         notes_dir=notes,
         index_db=root / "index.db",
     )
-    return open_bound_space(paths, ())
+    return open_bound_space(paths, _walk_existing_ancestors(paths))
 
 
 @pytest.mark.asyncio
