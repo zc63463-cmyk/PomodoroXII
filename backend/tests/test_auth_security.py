@@ -23,15 +23,15 @@ from app.settings import settings
 class TestHashPassword:
     def test_returns_bcrypt_hash(self):
         """hash_password should return a valid bcrypt hash string."""
-        result = hash_password("mySecret123")
+        result = hash_password("mySecret1234")
         assert result.startswith("$2b$12$")
         assert len(result) == 60
 
-    def test_truncates_at_72_bytes(self):
-        """bcrypt has a 72-byte limit; long passwords must not raise."""
+    def test_rejects_over_64_bytes_before_bcrypt(self):
+        """Long passwords must fail instead of creating bcrypt aliases."""
         long_password = "x" * 200
-        result = hash_password(long_password)
-        assert result.startswith("$2b$")
+        with pytest.raises(ValueError, match="12 to 64 UTF-8 bytes"):
+            hash_password(long_password)
 
     def test_different_calls_produce_different_hashes(self):
         """Same password should produce different hashes (random salt)."""
@@ -63,15 +63,16 @@ class TestVerifyPassword:
 class TestCreateMasterToken:
     def test_contains_master_type(self):
         """Master token payload should have type == 'master' and no space_id."""
-        token = create_master_token("user_1")
+        token = create_master_token("user_1", epoch=1)
         payload = decode_access_token(token)
         assert payload["type"] == "master"
         assert payload["sub"] == "user_1"
+        assert payload["epoch"] == 1
         assert "space_id" not in payload
 
     def test_has_7d_expiry(self):
         """Master token exp should be ~7 days from now."""
-        token = create_master_token("user_1")
+        token = create_master_token("user_1", epoch=1)
         payload = decode_access_token(token)
         now = datetime.now(timezone.utc)
         exp = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
@@ -83,15 +84,16 @@ class TestCreateMasterToken:
 class TestCreateSpaceToken:
     def test_contains_space_id(self):
         """Space token payload should have type == 'space' and space_id."""
-        token = create_space_token("spc_123", "user_1")
+        token = create_space_token("spc_123", "user_1", epoch=1)
         payload = decode_access_token(token)
         assert payload["type"] == "space"
         assert payload["sub"] == "user_1"
         assert payload["space_id"] == "spc_123"
+        assert payload["epoch"] == 1
 
     def test_has_8h_expiry(self):
         """Space token exp should be ~8 hours from now."""
-        token = create_space_token("spc_1", "user_1")
+        token = create_space_token("spc_1", "user_1", epoch=1)
         payload = decode_access_token(token)
         now = datetime.now(timezone.utc)
         exp = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
@@ -105,10 +107,11 @@ class TestCreateSpaceToken:
 class TestDecodeAccessToken:
     def test_decodes_valid_token(self):
         """A valid token should decode to its payload dict."""
-        token = create_master_token("user_decode")
+        token = create_master_token("user_decode", epoch=1)
         payload = decode_access_token(token)
         assert payload["sub"] == "user_decode"
         assert payload["type"] == "master"
+        assert payload["epoch"] == 1
 
     def test_raises_on_invalid_token(self):
         """A garbage string should raise jwt.PyJWTError."""

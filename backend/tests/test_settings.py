@@ -63,6 +63,18 @@ class TestSecretKeyValidation:
         )
         assert s.secret_key == "a-very-secure-random-key-1234567890"
 
+    @pytest.mark.parametrize("secret", ["x" * 31, "密" * 10])
+    def test_rejects_production_secret_below_32_utf8_bytes(self, secret: str):
+        with pytest.raises(ValueError, match="at least 32 UTF-8 bytes"):
+            _make_settings(secret_key=secret, environment="production")
+
+    @pytest.mark.parametrize("secret", ["x" * 32, "密" * 11])
+    def test_accepts_production_secret_at_or_above_32_utf8_bytes(self, secret: str):
+        assert _make_settings(
+            secret_key=secret,
+            environment="production",
+        ).secret_key == secret
+
 
 # --------------------------------------------------------------------------- #
 # cors_origins parsing

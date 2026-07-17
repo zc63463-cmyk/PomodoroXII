@@ -11,11 +11,10 @@ exposes helper methods to compute per-space paths deterministically.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import PositiveInt, field_validator
+from pydantic import PositiveInt, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -67,25 +66,28 @@ class Settings(BaseSettings):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
 
-    @field_validator("secret_key")
-    @classmethod
-    def validate_secret_key(cls, v: str) -> str:
-        """Reject empty / default secret_key in production."""
-        if not v or not v.strip():
+    @model_validator(mode="after")
+    def validate_production_secret_key(self) -> Self:
+        """Enforce the production secret policy after environment parsing."""
+        if self.environment != "production":
+            return self
+        if not self.secret_key or not self.secret_key.strip():
             raise ValueError(
                 "POMODOROXII_SECRET_KEY must be set to a non-empty value. "
                 "Generate a strong key with: openssl rand -hex 32"
             )
         weak_keys = {"change-me", "change-me-in-production", "secret", "password"}
-        if v.strip().lower() in weak_keys:
-            # Only hard-fail in production; dev/test may keep the default.
-            env = os.environ.get("POMODOROXII_ENVIRONMENT", "development")
-            if env == "production":
-                raise ValueError(
-                    "POMODOROXII_SECRET_KEY is set to a known weak value. "
-                    "Generate a strong key with: openssl rand -hex 32"
-                )
-        return v
+        if self.secret_key.strip().lower() in weak_keys:
+            raise ValueError(
+                "POMODOROXII_SECRET_KEY is set to a known weak value. "
+                "Generate a strong key with: openssl rand -hex 32"
+            )
+        if len(self.secret_key.encode("utf-8")) < 32:
+            raise ValueError(
+                "POMODOROXII_SECRET_KEY must be at least 32 UTF-8 bytes in production. "
+                "Generate a strong key with: openssl rand -hex 32"
+            )
+        return self
 
     # ------------------------------------------------------------------ #
     # Per-space path helpers
