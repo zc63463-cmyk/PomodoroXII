@@ -147,6 +147,17 @@ def test_bound_directory_handle_is_pathless_and_opens_exact_child(
         ) as child:
             child.write(b"bound-authority")
         assert (tmp_path / "bound.txt").read_bytes() == b"bound-authority"
+        handle._mkdir_relative("nested")
+        handle._atomic_write_relative("nested/proof.md", b"nested-authority")
+        assert handle._iter_relative_files("", suffix=".md") == [
+            "nested/proof.md"
+        ]
+        handle._rename_relative("nested/proof.md", "nested/renamed.md")
+        assert (tmp_path / "nested" / "renamed.md").read_bytes() == (
+            b"nested-authority"
+        )
+        handle._unlink_relative("nested/renamed.md")
+        assert not (tmp_path / "nested" / "renamed.md").exists()
     finally:
         handle._close()
 

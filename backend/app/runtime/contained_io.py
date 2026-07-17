@@ -618,7 +618,7 @@ def _open_windows_directory(location: Path) -> tuple[int, StorageIdentity]:
     kernel32.CreateFileW.restype = wintypes.HANDLE
     handle = kernel32.CreateFileW(
         os.fspath(location),
-        0,
+        0x00000001 | 0x00000080 | 0x00100000,
         0x00000001 | 0x00000002,
         None,
         3,
