@@ -1,8 +1,8 @@
 export const quickNoteStyles = {
   page:
     'quick-notes-surface relative min-h-full overflow-x-hidden px-3 py-4 text-[color:var(--qn-page-text)] sm:px-5 lg:px-6',
-  shell: 'mx-auto flex w-full max-w-5xl flex-col gap-5 transition-[max-width] duration-300 ease-out',
-  shellWide: 'mx-auto flex w-full max-w-7xl flex-col gap-5 transition-[max-width] duration-300 ease-out',
+  shell: 'mx-auto flex w-full max-w-5xl flex-col gap-4 transition-[max-width] duration-200 ease-out',
+  shellWide: 'mx-auto flex w-full max-w-7xl flex-col gap-4 transition-[max-width] duration-200 ease-out',
   header: 'flex flex-wrap items-center justify-between gap-3 border-b border-[color:var(--qn-border)] pb-3',
   headerActions: 'flex flex-col items-stretch gap-2 sm:items-end',
   surface: 'relative z-10',
@@ -18,77 +18,77 @@ export const quickNoteStyles = {
   textareaFocus:
     'h-[clamp(20rem,calc(100dvh-23rem),26rem)] min-h-[20rem] max-h-[26rem] resize-y overflow-y-auto rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-5 py-4 text-lg leading-8 text-[color:var(--qn-text-strong)] outline-none transition-none placeholder:text-[color:var(--qn-placeholder)] focus:border-[color:var(--qn-border-strong)] focus:bg-[color:var(--qn-field-focus)] focus:ring-3 focus:ring-[color:var(--qn-accent-soft)]',
   workspaceStage: 'quick-note-stage bg-[color:var(--qn-stage)] py-2',
-  workspaceGrid: 'grid gap-4 lg:grid-cols-[18rem_minmax(0,1fr)] lg:items-start',
-  workspaceMain: 'order-1 flex min-w-0 flex-col gap-5 lg:order-none',
+  workspaceGrid: 'grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start',
+  workspaceMain: 'order-1 flex min-w-0 flex-col gap-4 lg:order-none',
   focusEditGrid: 'mx-auto w-full max-w-4xl',
   focusEditHint:
     'rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] px-4 py-2 text-center text-xs text-[color:var(--qn-muted)]',
   focusEditTimelineSink:
-    'quick-note-focus-timeline-sink pointer-events-none select-none transition-[opacity,transform] duration-300 ease-out',
+    'quick-note-focus-timeline-sink pointer-events-none select-none opacity-40 transition-opacity duration-200 ease-out',
   metaText: 'text-xs text-[color:var(--qn-muted)]',
   ghostButton:
     'text-[color:var(--qn-muted)] hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
   primaryButton:
-    'rounded-full bg-[color:var(--qn-accent)] text-[color:var(--qn-accent-foreground)] shadow-[var(--qn-accent-shadow)] hover:bg-[color:var(--qn-accent-hover)] disabled:bg-[color:var(--qn-disabled)] disabled:text-[color:var(--qn-disabled-foreground)] disabled:shadow-none',
+    'rounded-md bg-[color:var(--qn-accent)] text-[color:var(--qn-accent-foreground)] hover:bg-[color:var(--qn-accent-hover)] disabled:bg-[color:var(--qn-disabled)] disabled:text-[color:var(--qn-disabled-foreground)]',
   outlineButton:
-    'rounded-full border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] text-[color:var(--qn-text)] shadow-[var(--qn-shadow-soft)] backdrop-blur-[22px] hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
+    'rounded-md border-[color:var(--qn-border)] bg-[color:var(--qn-panel)] text-[color:var(--qn-text)] hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
   searchWrap:
-    'flex w-full items-center gap-2 rounded-[0.9rem] border border-transparent bg-[color:var(--qn-search)] px-3 py-2 shadow-none backdrop-blur-[18px]',
+    'flex w-full items-center gap-2 rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-3 py-2',
   searchInput:
     'border-0 bg-transparent px-0 text-[color:var(--qn-text-strong)] shadow-none placeholder:text-[color:var(--qn-placeholder)] focus-visible:ring-0',
   searchIcon: 'size-4 text-[color:var(--qn-subtle)]',
-  explorer: 'order-2 flex min-w-0 flex-col gap-4 lg:order-none lg:sticky lg:top-5 lg:self-start',
+  explorer: 'order-2 flex min-w-0 flex-col gap-3 lg:order-none lg:sticky lg:top-4 lg:self-start',
   explorerPanel:
     'rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] p-3',
-  explorerHeader: 'mb-3 flex items-center justify-between gap-3',
+  explorerHeader: 'mb-2 flex items-center justify-between gap-3',
   explorerHeaderActions: 'flex items-center gap-1',
   explorerTitle:
-    'text-[10px] font-semibold uppercase tracking-[0.18em] text-[color:var(--qn-subtle)]',
+    'text-[10px] font-semibold uppercase tracking-[0.1em] text-[color:var(--qn-subtle)]',
   explorerTextButton:
-    'rounded-full px-2 py-1 text-xs text-[color:var(--qn-muted)] transition hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
+    'rounded px-1.5 py-0.5 text-xs text-[color:var(--qn-muted)] transition hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
   explorerSegment:
-    'mb-3 grid grid-cols-4 gap-1 rounded-full bg-[color:var(--qn-search)] p-1',
+    'mb-2 grid grid-cols-4 gap-0.5 rounded-md bg-[color:var(--qn-search)] p-0.5',
   explorerSegmentButton:
-    'rounded-full px-2 py-1 text-xs font-medium text-[color:var(--qn-muted)] transition hover:text-[color:var(--qn-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--qn-border-strong)]',
+    'rounded px-2 py-1 text-xs font-medium text-[color:var(--qn-muted)] transition hover:text-[color:var(--qn-text-strong)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--qn-accent)]',
   explorerSegmentButtonActive:
-    'bg-[color:var(--qn-accent)] text-[color:var(--qn-accent-foreground)] shadow-[var(--qn-accent-shadow)]',
-  explorerEmpty: 'rounded-[1rem] bg-[color:var(--qn-search)] px-3 py-4 text-xs leading-5 text-[color:var(--qn-muted)]',
-  explorerTagCloud: 'flex flex-wrap gap-2',
+    'bg-[color:var(--qn-accent)] text-[color:var(--qn-accent-foreground)]',
+  explorerEmpty: 'rounded-md bg-[color:var(--qn-search)] px-3 py-3 text-xs leading-5 text-[color:var(--qn-muted)]',
+  explorerTagCloud: 'flex flex-wrap gap-1.5',
   explorerTagItem: 'flex min-w-0 flex-wrap items-center gap-1',
   explorerTag:
-    'inline-flex items-center gap-1.5 rounded-full bg-[color:var(--qn-chip)] px-2.5 py-1 text-xs text-[color:var(--qn-accent-readable)] ring-1 ring-[color:var(--qn-ring)] transition hover:bg-[color:var(--qn-accent-soft)] hover:text-[color:var(--qn-text-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--qn-border-strong)]',
+    'inline-flex items-center gap-1 rounded border border-[color:var(--qn-border)] bg-[color:var(--qn-panel)] px-2 py-0.5 text-xs text-[color:var(--qn-text)] transition hover:border-[color:var(--qn-accent)] hover:bg-[color:var(--qn-accent-soft)] hover:text-[color:var(--qn-text-strong)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--qn-accent)]',
   explorerTagManageButton:
-    'rounded-full px-2 py-1 text-[10px] text-[color:var(--qn-muted)] transition hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
+    'rounded px-1.5 py-0.5 text-[10px] text-[color:var(--qn-muted)] transition hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
   explorerTagSelected:
-    '!bg-[color:var(--qn-accent)] !text-[color:var(--qn-accent-foreground)] ring-[color:var(--qn-border-strong)] shadow-[var(--qn-accent-shadow)]',
-  explorerTagCount: 'rounded-full bg-[color:var(--qn-panel-strong)] px-1.5 py-0.5 text-[10px] text-[color:var(--qn-muted)]',
-  explorerRenameWrap: 'flex min-w-0 flex-wrap items-center gap-1 rounded-[1rem] bg-[color:var(--qn-search)] px-1.5 py-1',
+    '!border-[color:var(--qn-accent)] !bg-[color:var(--qn-accent)] !text-[color:var(--qn-accent-foreground)]',
+  explorerTagCount: 'rounded bg-[color:var(--qn-search)] px-1 py-px text-[10px] text-[color:var(--qn-muted)]',
+  explorerRenameWrap: 'flex min-w-0 flex-wrap items-center gap-1 rounded-md bg-[color:var(--qn-search)] px-1.5 py-1',
   explorerRenameInput:
-    'min-w-0 max-w-32 rounded-full border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-2 py-1 text-xs text-[color:var(--qn-text-strong)] outline-none focus:border-[color:var(--qn-border-strong)] focus:ring-2 focus:ring-[color:var(--qn-accent-soft)]',
-  explorerTagTree: 'grid gap-1',
-  explorerTreeNode: 'grid gap-1',
+    'min-w-0 max-w-32 rounded border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-2 py-0.5 text-xs text-[color:var(--qn-text-strong)] outline-none focus:border-[color:var(--qn-accent)] focus:ring-1 focus:ring-[color:var(--qn-accent-ring)]',
+  explorerTagTree: 'grid gap-0.5',
+  explorerTreeNode: 'grid gap-0.5',
   explorerTreeRow: 'flex items-center justify-between gap-2',
   explorerTreeLabel:
-    'min-w-0 truncate rounded-full px-2.5 py-1 text-xs font-medium text-[color:var(--qn-text)]',
+    'min-w-0 truncate rounded px-2 py-0.5 text-xs font-medium text-[color:var(--qn-text)]',
   explorerTreeCount: 'text-[10px] text-[color:var(--qn-muted)]',
-  explorerCalendar: 'grid gap-2',
+  explorerCalendar: 'grid gap-1.5',
   explorerCalendarHeader: 'flex items-center justify-between gap-2',
   explorerCalendarNav:
-    'flex size-7 items-center justify-center rounded-full text-sm text-[color:var(--qn-muted)] transition hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
+    'flex size-6 items-center justify-center rounded text-sm text-[color:var(--qn-muted)] transition hover:bg-[color:var(--qn-hover)] hover:text-[color:var(--qn-text-strong)]',
   explorerCalendarLabel: 'text-xs font-medium text-[color:var(--qn-text)]',
   explorerWeekdays:
-    'grid grid-cols-7 gap-1 text-center text-[9px] font-medium text-[color:var(--qn-subtle)]',
-  explorerCalendarGrid: 'grid grid-cols-7 gap-1',
+    'grid grid-cols-7 gap-0.5 text-center text-[9px] font-medium text-[color:var(--qn-subtle)]',
+  explorerCalendarGrid: 'grid grid-cols-7 gap-0.5',
   explorerCalendarCell:
-    'flex size-7 items-center justify-center rounded-lg text-[10px] text-[color:var(--qn-text)] transition hover:ring-2 hover:ring-[color:var(--qn-border-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--qn-border-strong)]',
-  explorerCalendarBlank: 'size-7',
-  explorerCalendarCellEmpty: 'bg-[color:var(--qn-search)]',
+    'flex size-6 items-center justify-center rounded text-[10px] text-[color:var(--qn-text)] transition hover:bg-[color:var(--qn-hover)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--qn-accent)]',
+  explorerCalendarBlank: 'size-6',
+  explorerCalendarCellEmpty: '',
   explorerCalendarCellMinimal: 'bg-[color:var(--qn-accent-soft)]',
-  explorerCalendarCellLow: 'bg-[color:var(--qn-selection)]',
-  explorerCalendarCellMedium: 'bg-[color:var(--qn-selection-ring)] text-[color:var(--qn-text-strong)]',
+  explorerCalendarCellLow: 'bg-[color:var(--qn-accent-soft)]',
+  explorerCalendarCellMedium: 'bg-[color:var(--qn-accent)] text-[color:var(--qn-accent-foreground)]',
   explorerCalendarCellHigh: 'bg-[color:var(--qn-accent)] text-[color:var(--qn-accent-foreground)]',
   explorerCalendarCellSelected:
-    '!bg-[color:var(--qn-accent)] !text-[color:var(--qn-accent-foreground)] ring-2 ring-[color:var(--qn-border-strong)] shadow-[var(--qn-accent-shadow)]',
+    '!bg-[color:var(--qn-accent)] !text-[color:var(--qn-accent-foreground)] ring-1 ring-[color:var(--qn-accent)]',
   timeline: 'flex flex-col gap-4',
   groupLabel:
     'sticky top-2 z-10 w-fit rounded-full border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-strong)] px-3 py-1 text-xs font-semibold text-[color:var(--qn-text)] shadow-[var(--qn-shadow-soft)] backdrop-blur-[22px]',
