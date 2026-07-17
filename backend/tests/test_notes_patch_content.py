@@ -22,8 +22,8 @@ import pytest
 
 async def _get_space_client(client):
     """Set up admin password, log in, create a space, issue a space token."""
-    await client.post("/api/v1/auth/setup", json={"password": "test123"})
-    resp = await client.post("/api/v1/auth/login", json={"password": "test123"})
+    await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
+    resp = await client.post("/api/v1/auth/login", json={"password": "test-password-123"})
     master_token = resp.json()["access_token"]
     resp = await client.post(
         "/api/v1/spaces",

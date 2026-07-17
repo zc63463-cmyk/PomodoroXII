@@ -113,6 +113,6 @@ async def issue_space_token(
 
     user_id = str(user["sub"])
     return {
-        "space_token": create_space_token(space_id, user_id),
+        "space_token": create_space_token(space_id, user_id, epoch=int(user["epoch"])),
         "token_type": "bearer",
     }

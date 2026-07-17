@@ -67,9 +67,9 @@ def _is_error_status(status) -> bool:
 
 
 async def _space_auth_headers(client) -> dict[str, str]:
-    setup = await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    setup = await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     assert setup.status_code == 201
-    login = await client.post("/api/v1/auth/login", json={"password": "test123"})
+    login = await client.post("/api/v1/auth/login", json={"password": "test-password-123"})
     assert login.status_code == 200
     master_headers = {
         "Authorization": f"Bearer {login.json()['access_token']}"
@@ -231,7 +231,7 @@ class TestValidationEnvelope:
         """FastAPI records a wrong request Content-Type as a 422 JSON validation error."""
         resp = await client.post(
             "/api/v1/auth/setup",
-            content='{"password":"test123"}',
+            content='{"password":"test-password-123"}',
             headers={"Content-Type": "text/plain"},
         )
 
