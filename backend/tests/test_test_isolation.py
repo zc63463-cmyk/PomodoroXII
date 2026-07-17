@@ -67,12 +67,22 @@ def test_path_escape_guard_rejects_paths_outside_run_root(tmp_path: Path):
         suite_conftest._ensure_inside_temp_root(escaped_path, run_root)
 
 
-def test_default_artifacts_root_is_backend_local(monkeypatch: pytest.MonkeyPatch):
+def test_default_artifacts_root_is_dedicated_and_outside_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("POMODOROXII_TEST_ARTIFACTS_ROOT", raising=False)
 
     resolved = suite_conftest._resolve_artifacts_root()
 
-    assert resolved == (Path(suite_conftest.__file__).resolve().parents[1] / ".test-artifacts")
+    assert resolved.name == "pomodoroxii-test-artifacts"
+    assert resolved != suite_conftest._project_root
+    assert suite_conftest._project_root not in resolved.parents
+
+
+def test_existing_repository_artifacts_are_not_cleanup_targets() -> None:
+    source = Path(suite_conftest.__file__).read_text(encoding="utf-8")
+    assert "backend/.test-artifacts" not in source
+    assert "pytest-of-" not in source
 
 
 def test_configured_artifacts_root_is_normalized(monkeypatch: pytest.MonkeyPatch):

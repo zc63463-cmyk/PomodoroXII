@@ -18,6 +18,7 @@ import hashlib
 import importlib
 import os
 import re
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -26,7 +27,9 @@ import pytest
 _tests_dir = Path(__file__).resolve().parent
 _backend_dir = _tests_dir.parent
 _project_root = _backend_dir.parent
-_DEFAULT_ARTIFACTS_ROOT = (_backend_dir / ".test-artifacts").resolve()
+_DEFAULT_ARTIFACTS_ROOT = (
+    Path(tempfile.gettempdir()) / "pomodoroxii-test-artifacts"
+).resolve()
 _EXTERNAL_ARTIFACTS_ROOT_PATTERN = re.compile(r"pomodoroxii-test-artifacts\Z", re.IGNORECASE)
 _RUN_ROOT_PATTERN = re.compile(r"run-[0-9a-f]{16}\Z")
 
@@ -34,7 +37,7 @@ _RUN_ROOT_PATTERN = re.compile(r"run-[0-9a-f]{16}\Z")
 def _resolve_artifacts_root(configured_root: str | Path | None = None) -> Path:
     """Resolve and approve the dedicated root used for persistent test artifacts.
 
-    The default remains ``backend/.test-artifacts``. An environment override must
+    New runs default to the OS temporary directory. An environment override must
     resolve outside the source tree, must not be a drive root or home directory,
     and must use the explicit ``pomodoroxii-test-artifacts`` directory name.
     """
@@ -103,9 +106,9 @@ def _test_path_for_nodeid(run_root: Path, nodeid: str) -> Path:
 def test_run_root() -> Path:
     """Create one approved short run root without recursive in-suite cleanup.
 
-    By default artifacts stay under ``backend/.test-artifacts``. Set
-    ``POMODOROXII_TEST_ARTIFACTS_ROOT`` to an external, dedicated directory named
-    ``pomodoroxii-test-artifacts`` when a shorter Windows path is required.
+    By default artifacts stay under the OS temporary directory in a dedicated
+    ``pomodoroxii-test-artifacts`` root. Set ``POMODOROXII_TEST_ARTIFACTS_ROOT``
+    to use another external root with the same dedicated directory name.
     Lifecycle cleanup remains the responsibility of CI/workspace tooling.
     """
     return _allocate_run_root()
@@ -115,9 +118,9 @@ def test_run_root() -> Path:
 def tmp_path(request: pytest.FixtureRequest, test_run_root: Path) -> Path:  # type: ignore[no-redef]
     """Return a fresh nodeid-hashed directory under the current run root.
 
-    The run root is allocated below ``backend/.test-artifacts`` for Windows path
-    compatibility. Neither this fixture nor session teardown recursively deletes
-    it; CI/workspace lifecycle tooling owns eventual cleanup.
+    The run root is allocated below the dedicated OS temporary artifacts root.
+    Neither this fixture nor session teardown recursively deletes it;
+    CI/workspace lifecycle tooling owns eventual cleanup.
     """
     path = _test_path_for_nodeid(test_run_root, request.node.nodeid)
     path.mkdir(parents=False, exist_ok=False)
