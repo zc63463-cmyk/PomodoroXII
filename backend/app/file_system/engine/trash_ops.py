@@ -1,6 +1,6 @@
 """TrashOpsMixin — 回收站操作 (列表 / 恢复 / 清除 / 清空).
 
-组合到 FileSystemStorage 后, 通过 self.root / self._lock / self._connect 等
+组合到 FileSystemStorage 后, 通过 StorageBase authority helpers
 访问 StorageBase 提供的基础设施.
 
 B3: restore 只允许恢复已软删除的笔记 (is_deleted=1)
@@ -10,7 +10,7 @@ R2: empty_trash 清理 note_links 避免孤儿外键引用
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from pathlib import PurePosixPath
 
 from app.file_system.interfaces import NoteMeta
 
@@ -56,23 +56,21 @@ class TrashOpsMixin:
                         raise KeyError(f"Note {note_id} not found")
                     # current_path now points to trash location (set by delete_note)
                     trash_rel = row["current_path"]
-                    trash_path = self.root / trash_rel
                     folder_id = row["folder_id"]
                     # Restore path uses the timestamped filename from trash (unique)
-                    filename = Path(trash_rel).name
+                    filename = PurePosixPath(trash_rel).name
                     if folder_id is None:
                         new_rel = f"notes/{filename}"
                     else:
                         new_rel = f"notes/{folder_id}/{filename}"
-                    notes_path = self.root / new_rel
                     # Don't overwrite — if target exists, raise error (caller handles)
-                    if notes_path.exists():
+                    if self._file_exists(new_rel):
                         raise FileExistsError(
-                            f"Cannot restore: target path already exists: {notes_path}"
+                            f"Cannot restore: target path already exists: {new_rel}"
                         )
-                    if trash_path.exists():
-                        notes_path.parent.mkdir(parents=True, exist_ok=True)
-                        trash_path.rename(notes_path)
+                    if self._file_exists(trash_rel):
+                        self._ensure_directory(str(PurePosixPath(new_rel).parent))
+                        self._rename_file(trash_rel, new_rel)
                     conn.execute(
                         "UPDATE notes SET is_deleted = 0, status = ?, current_path = ?, "
                         "updated_at = ? WHERE note_id = ?",
@@ -102,10 +100,10 @@ class TrashOpsMixin:
                             raise ValueError(f"Note {note_id} is not trashed")
                         raise KeyError(f"Note {note_id} not found")
                     # Delete file from .trash/
-                    trash_name = Path(row[0]).name
-                    trash_path = self.root / ".trash" / trash_name
-                    if trash_path.exists():
-                        trash_path.unlink()
+                    trash_name = PurePosixPath(row[0]).name
+                    trash_path = f".trash/{trash_name}"
+                    if self._file_exists(trash_path):
+                        self._unlink_file(trash_path)
                     # Delete child tables first (FK references notes.note_id)
                     conn.execute("DELETE FROM note_paths WHERE note_id = ?", (note_id,))
                     conn.execute("DELETE FROM note_versions WHERE note_id = ?", (note_id,))
@@ -130,9 +128,9 @@ class TrashOpsMixin:
                             "SELECT current_path FROM notes WHERE note_id = ?", (note_id,)
                         ).fetchone()
                         if trash_row:
-                            trash_path = self.root / ".trash" / Path(trash_row[0]).name
-                            if trash_path.exists():
-                                trash_path.unlink()
+                            trash_path = f".trash/{PurePosixPath(trash_row[0]).name}"
+                            if self._file_exists(trash_path):
+                                self._unlink_file(trash_path)
                         # Delete child tables first (FK references notes.note_id)
                         conn.execute("DELETE FROM note_paths WHERE note_id = ?", (note_id,))
                         conn.execute("DELETE FROM note_versions WHERE note_id = ?", (note_id,))

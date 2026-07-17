@@ -1,6 +1,6 @@
 """ConsistencyOpsMixin — 一致性检查与修复 + 统计.
 
-组合到 FileSystemStorage 后, 通过 self.root / self._lock / self._connect 等
+组合到 FileSystemStorage 后, 通过 StorageBase authority helpers
 访问 StorageBase 提供的基础设施.
 
 Phase 1: 迁移 check_consistency / repair / get_stats 实现
@@ -9,7 +9,7 @@ Phase 3 (C.2): check_consistency 追加 content_hash 验证 (hash_mismatches 字
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from pathlib import PurePosixPath
 
 from app.file_system.frontmatter import strip_frontmatter
 
@@ -31,30 +31,28 @@ class ConsistencyOpsMixin:
                     missing_files = []
                     hash_mismatches = []
                     for row in db_rows:
-                        abs_path = self.root / row["current_path"]
-                        if not abs_path.exists():
+                        relative_path = row["current_path"]
+                        if not self._file_exists(relative_path):
                             missing_files.append(row["note_id"])
                             continue
                         # content_hash tracks the Markdown body, never YAML frontmatter.
-                        body = strip_frontmatter(abs_path.read_text(encoding="utf-8"))
+                        body = strip_frontmatter(self._read_text(relative_path))
                         actual_hash = _sha256(body)
                         if actual_hash != row["content_hash"]:
                             hash_mismatches.append(row["note_id"])
                     # All .md files in notes/ dir
-                    notes_dir = self.root / "notes"
                     orphan_files = []
-                    if notes_dir.exists():
-                        db_paths = {row["current_path"] for row in db_rows}
-                        for md_file in notes_dir.rglob("*.md"):
-                            rel = str(md_file.relative_to(self.root)).replace("\\", "/")
-                            if rel not in db_paths:
-                                orphan_files.append(rel)
+                    files = self._iter_markdown("notes")
+                    db_paths = {row["current_path"] for row in db_rows}
+                    for relative_path in files:
+                        if relative_path not in db_paths:
+                            orphan_files.append(relative_path)
                     return {
                         "missing_files": missing_files,
                         "orphan_files": orphan_files,
                         "hash_mismatches": hash_mismatches,
                         "total_notes": len(db_rows),
-                        "total_files": len(list(notes_dir.rglob("*.md"))) if notes_dir.exists() else 0,
+                        "total_files": len(files),
                     }
         return await asyncio.to_thread(_do)
 
@@ -74,10 +72,9 @@ class ConsistencyOpsMixin:
                     for path in report.get("orphan_files", []):
                         # Create a minimal index entry for orphan files
                         note_id = _generate_note_id()
-                        title = Path(path).stem
+                        title = PurePosixPath(path).stem
                         # Read orphan file content for FTS5 indexing
-                        abs_file = self.root / path
-                        content = abs_file.read_text(encoding="utf-8") if abs_file.exists() else ""
+                        content = self._read_text(path) if self._file_exists(path) else ""
                         conn.execute(
                             "INSERT INTO notes (note_id, title, current_path, created_at, updated_at) "
                             "VALUES (?, ?, ?, ?, ?)",
@@ -91,9 +88,11 @@ class ConsistencyOpsMixin:
                             "SELECT current_path FROM notes WHERE note_id = ?", (note_id,)
                         ).fetchone()
                         if row:
-                            abs_path = self.root / row[0]
-                            if abs_path.exists():
-                                body = strip_frontmatter(abs_path.read_text(encoding="utf-8"))
+                            relative_path = row[0]
+                            if self._file_exists(relative_path):
+                                body = strip_frontmatter(
+                                    self._read_text(relative_path)
+                                )
                                 new_hash = _sha256(body)
                                 conn.execute(
                                     "UPDATE notes SET content_hash = ?, updated_at = ? "

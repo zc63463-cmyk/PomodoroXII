@@ -1,6 +1,6 @@
 """VersionOpsMixin — 版本历史 (列表 + 获取内容).
 
-组合到 FileSystemStorage 后, 通过 self.root / self._lock / self._connect 等
+组合到 FileSystemStorage 后, 通过 StorageBase authority helpers
 访问 StorageBase 提供的基础设施.
 
 Phase 1: 仅迁移 list_versions 实现 + get_version 桩
@@ -49,8 +49,8 @@ class VersionOpsMixin:
                     ).fetchone()
             if not row:
                 raise KeyError(f"Version {version_id} not found for note {note_id}")
-            backup_path = self.root / ".meta" / "version_backups" / f"{version_id}.md"
-            if not backup_path.exists():
+            backup_path = f".meta/version_backups/{version_id}.md"
+            if not self._file_exists(backup_path):
                 raise FileNotFoundError(f"Version backup missing: {backup_path}")
-            return backup_path.read_text(encoding="utf-8")
+            return self._read_text(backup_path)
         return await asyncio.to_thread(_do)

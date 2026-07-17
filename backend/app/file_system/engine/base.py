@@ -11,13 +11,17 @@ import hashlib
 import json
 import os
 import sqlite3
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import RLock
+from typing import Protocol
 
 from filelock import FileLock
 from nanoid import generate
 from slugify import slugify
+from sqlalchemy import create_engine
+from sqlalchemy.schema import CreateTable
 
 from app.file_system.interfaces import (
     NoteLevel,
@@ -29,8 +33,11 @@ from app.file_system.schema import (
     FTS5_TRIGGER_DELETE,
     FTS5_TRIGGER_INSERT,
     FTS5_TRIGGER_UPDATE,
-    init_database,
+    Base,
+    _run_migrations,
 )
+from app.runtime.contained_io import BoundDirectoryHandle
+from app.runtime.sqlite_vfs import BoundSQLiteTarget, MaintenanceOptions
 
 
 def _utc_now_iso() -> str:
@@ -64,6 +71,209 @@ def _is_windows_path_too_long_error(exc: OSError, path: Path) -> bool:
     return exc.errno == errno.ENAMETOOLONG or winerror == 206
 
 
+def _logical_path(value: str) -> PurePosixPath:
+    if not value or "\\" in value or ":" in value:
+        raise ValueError("note storage path must be normalized and relative")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError("note storage path must be normalized and relative")
+    return path
+
+
+def _atomic_write_path(path: Path, content: str) -> None:
+    temp_path = path.parent / f".{path.name}.tmp"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.write_text(content, encoding="utf-8")
+        os.replace(str(temp_path), str(path))
+    except OSError as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        diagnostic_path = temp_path if len(str(temp_path)) >= len(str(path)) else path
+        if _is_windows_path_too_long_error(exc, diagnostic_path):
+            raise WindowsPathTooLongError(
+                "Atomic write failed because the Windows path is too long: "
+                f"target={path} (target length={len(str(path))}, "
+                f"temporary length={len(str(temp_path))}). Enable Windows long path "
+                "support or shorten the space/test data directory."
+            ) from exc
+        raise
+
+
+class _NotesAuthority(Protocol):
+    def atomic_write(self, relative_name: str, content: str) -> None: ...
+    def exists(self, relative_name: str) -> bool: ...
+    def read_text(self, relative_name: str) -> str: ...
+    def rename(self, source: str, destination: str) -> None: ...
+    def unlink(self, relative_name: str) -> None: ...
+    def ensure_directory(self, relative_name: str) -> None: ...
+    def iter_markdown(self, relative_name: str) -> list[str]: ...
+    def close(self) -> None: ...
+
+
+class _PathNotesAuthority:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def _path(self, relative_name: str) -> Path:
+        return self.root.joinpath(*_logical_path(relative_name).parts)
+
+    def atomic_write(self, relative_name: str, content: str) -> None:
+        _atomic_write_path(self._path(relative_name), content)
+
+    def exists(self, relative_name: str) -> bool:
+        return self._path(relative_name).is_file()
+
+    def read_text(self, relative_name: str) -> str:
+        return self._path(relative_name).read_text(encoding="utf-8")
+
+    def rename(self, source: str, destination: str) -> None:
+        source_path = self._path(source)
+        destination_path = self._path(destination)
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.rename(destination_path)
+
+    def unlink(self, relative_name: str) -> None:
+        self._path(relative_name).unlink()
+
+    def ensure_directory(self, relative_name: str) -> None:
+        self._path(relative_name).mkdir(parents=True, exist_ok=True)
+
+    def iter_markdown(self, relative_name: str) -> list[str]:
+        root = self._path(relative_name)
+        if not root.is_dir():
+            return []
+        return [
+            path.relative_to(self.root).as_posix()
+            for path in root.rglob("*.md")
+            if path.is_file()
+        ]
+
+    def close(self) -> None:
+        return None
+
+
+class _BoundNotesAuthority:
+    def __init__(self, handle: BoundDirectoryHandle) -> None:
+        self._handle = handle
+
+    @staticmethod
+    def _translate(relative_name: str) -> str:
+        parts = list(_logical_path(relative_name).parts)
+        if parts[0] == "notes":
+            parts.pop(0)
+        if not parts:
+            raise ValueError("note storage path cannot name the authority root")
+        return "/".join(parts)
+
+    def atomic_write(self, relative_name: str, content: str) -> None:
+        self._handle._atomic_write_relative(
+            self._translate(relative_name), content.encode("utf-8")
+        )
+
+    def exists(self, relative_name: str) -> bool:
+        return self._handle._relative_file_exists(self._translate(relative_name))
+
+    def read_text(self, relative_name: str) -> str:
+        with self._handle._open_relative_no_follow(
+            self._translate(relative_name), os.O_RDONLY
+        ) as child:
+            return child.read().decode("utf-8")
+
+    def rename(self, source: str, destination: str) -> None:
+        self._handle._rename_relative(
+            self._translate(source), self._translate(destination)
+        )
+
+    def unlink(self, relative_name: str) -> None:
+        self._handle._unlink_relative(self._translate(relative_name))
+
+    def ensure_directory(self, relative_name: str) -> None:
+        if relative_name == "notes":
+            return
+        self._handle._mkdir_relative(self._translate(relative_name))
+
+    def iter_markdown(self, relative_name: str) -> list[str]:
+        translated = "" if relative_name == "notes" else self._translate(relative_name)
+        prefix = "notes" if relative_name == "notes" else relative_name
+        names = self._handle._iter_relative_files(translated, suffix=".md")
+        if relative_name == "notes":
+            names = [
+                name
+                for name in names
+                if name.split("/", 1)[0] not in {".meta", ".trash"}
+            ]
+        return [
+            f"{prefix.rstrip('/')}/{name}"
+            for name in names
+        ]
+
+    def close(self) -> None:
+        self._handle._close()
+
+
+class _IndexAuthority(Protocol):
+    def connect(self) -> AbstractContextManager[sqlite3.Connection]: ...
+    async def close(self) -> None: ...
+
+
+class _PathIndexAuthority:
+    def __init__(self, index_db: Path) -> None:
+        self.path = index_db
+
+    @contextmanager
+    def connect(self):
+        connection = sqlite3.connect(str(self.path), timeout=30.0)
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=ON")
+            yield connection
+        finally:
+            connection.close()
+
+    async def close(self) -> None:
+        return None
+
+
+class _BoundIndexAuthority:
+    def __init__(self, target: BoundSQLiteTarget) -> None:
+        self._target = target
+
+    def connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return self._target.open_maintenance(
+            MaintenanceOptions(read_only=False, busy_timeout_ms=5000)
+        )
+
+    async def close(self) -> None:
+        await self._target.aclose()
+
+
+def _initialize_database(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout=5000")
+    connection.execute("PRAGMA foreign_keys=ON")
+    engine = create_engine("sqlite:///:memory:", echo=False)
+    try:
+        Base.metadata.create_all(engine)
+        for table in Base.metadata.sorted_tables:
+            ddl = str(
+                CreateTable(table, if_not_exists=True).compile(dialect=engine.dialect)
+            )
+            connection.execute(ddl)
+        _run_migrations(connection)
+        connection.execute(FTS5_CREATE_SQL)
+        connection.execute(FTS5_TRIGGER_INSERT)
+        connection.execute(FTS5_TRIGGER_UPDATE)
+        connection.execute(FTS5_TRIGGER_DELETE)
+        connection.commit()
+    finally:
+        engine.dispose()
+
+
 class StorageBase:
     """文件系统存储基类 — .md + SQLite + FTS5.
 
@@ -74,19 +284,39 @@ class StorageBase:
     def __init__(self, root_dir: Path, index_db: Path):
         self.root = Path(root_dir).resolve()
         self.index_db = Path(index_db).resolve()
+        self._notes: _NotesAuthority = _PathNotesAuthority(self.root)
+        self._index: _IndexAuthority = _PathIndexAuthority(self.index_db)
+        self._storage_mode = "path"
         self._lock = RLock()
         self._file_lock = FileLock(str(self.index_db) + ".lock")
         self._engine = None
 
+    @classmethod
+    def from_bound_handles(
+        cls,
+        notes_handle: BoundDirectoryHandle,
+        index_target: BoundSQLiteTarget,
+    ):
+        instance = object.__new__(cls)
+        instance._notes = _BoundNotesAuthority(notes_handle)
+        instance._index = _BoundIndexAuthority(index_target)
+        instance._storage_mode = "contained"
+        instance._lock = RLock()
+        instance._file_lock = nullcontext()
+        instance._engine = None
+        return instance
+
     # ─── DB helpers ──────────────────────────────────────
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open a sqlite3 connection (caller manages lifecycle)."""
-        conn = sqlite3.connect(str(self.index_db), timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return self._index.connect()
+
+    @staticmethod
+    def _note_relative(note_id: str, title: str, folder_id=None) -> str:
+        filename = _make_filename(note_id, title)
+        if folder_id is None:
+            return f"notes/{filename}"
+        return f"notes/{folder_id}/{filename}"
 
     def _note_path(self, note_id: str, title: str = "", folder_id=None) -> Path:
         """Return the .md file path for a note_id.
@@ -103,10 +333,10 @@ class StorageBase:
             if row:
                 return self.root / row[1]
             raise KeyError(f"Note {note_id} not found")
-        filename = _make_filename(note_id, title)
-        if folder_id is None:
-            return self.root / "notes" / filename
-        return self.root / "notes" / folder_id / filename
+        relative = self._note_relative(note_id, title, folder_id)
+        if self._storage_mode != "path":
+            raise RuntimeError("contained storage does not expose host paths")
+        return self.root.joinpath(*PurePosixPath(relative).parts)
 
     def _row_to_note_meta(self, row: sqlite3.Row) -> NoteMeta:
         """Convert a DB row to NoteMeta."""
@@ -130,27 +360,31 @@ class StorageBase:
 
     # ─── Atomic write ────────────────────────────────────
 
-    def _atomic_write(self, path: Path, content: str) -> None:
-        """原子写入：先写临时文件，再 os.replace 覆盖。"""
-        temp_path = path.parent / f".{path.name}.tmp"
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path.write_text(content, encoding="utf-8")
-            os.replace(str(temp_path), str(path))
-        except OSError as exc:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            diagnostic_path = temp_path if len(str(temp_path)) >= len(str(path)) else path
-            if _is_windows_path_too_long_error(exc, diagnostic_path):
-                raise WindowsPathTooLongError(
-                    "Atomic write failed because the Windows path is too long: "
-                    f"target={path} (target length={len(str(path))}, "
-                    f"temporary length={len(str(temp_path))}). Enable Windows long path "
-                    "support or shorten the space/test data directory."
-                ) from exc
-            raise
+    def _atomic_write(self, path: str | Path, content: str) -> None:
+        if isinstance(path, Path):
+            if self._storage_mode != "path":
+                raise RuntimeError("contained storage rejected host Path")
+            _atomic_write_path(path, content)
+            return
+        self._notes.atomic_write(path, content)
+
+    def _file_exists(self, relative_name: str) -> bool:
+        return self._notes.exists(relative_name)
+
+    def _read_text(self, relative_name: str) -> str:
+        return self._notes.read_text(relative_name)
+
+    def _rename_file(self, source: str, destination: str) -> None:
+        self._notes.rename(source, destination)
+
+    def _unlink_file(self, relative_name: str) -> None:
+        self._notes.unlink(relative_name)
+
+    def _ensure_directory(self, relative_name: str) -> None:
+        self._notes.ensure_directory(relative_name)
+
+    def _iter_markdown(self, relative_name: str = "notes") -> list[str]:
+        return self._notes.iter_markdown(relative_name)
 
     def _update_fts_content(self, conn: sqlite3.Connection, note_id: str, content: str) -> None:
         """Update the FTS5 content column for a note."""
@@ -164,10 +398,12 @@ class StorageBase:
 
     async def init(self) -> None:
         def _do():
-            (self.root / "notes").mkdir(parents=True, exist_ok=True)
-            (self.root / ".trash").mkdir(parents=True, exist_ok=True)
-            (self.root / ".meta").mkdir(parents=True, exist_ok=True)
-            init_database(self.index_db)
+            self._ensure_directory("notes")
+            self._ensure_directory(".trash")
+            self._ensure_directory(".meta")
+            self._ensure_directory(".meta/version_backups")
+            with self._connect() as connection:
+                _initialize_database(connection)
             # R7: 升级到 trigram tokenizer 时重建 FTS5 索引并从 .md 文件回填正文
             self._rebuild_fts5_if_needed()
         await asyncio.to_thread(_do)
@@ -202,9 +438,8 @@ class StorageBase:
             for rowid, title, current_path in rows:
                 content = ""
                 if current_path:
-                    p = self.root / current_path
-                    if p.exists():
-                        content = p.read_text(encoding="utf-8")
+                    if self._file_exists(current_path):
+                        content = self._read_text(current_path)
                 conn.execute(
                     "INSERT INTO notes_fts (rowid, title, content) VALUES (?, ?, ?)",
                     (rowid, title, content),
@@ -212,5 +447,5 @@ class StorageBase:
             conn.commit()
 
     async def close(self) -> None:
-        # No persistent resources to clean up (connections are per-operation)
-        pass
+        self._notes.close()
+        await self._index.close()
