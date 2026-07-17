@@ -32,3 +32,38 @@ async def test_n_minus_one_fixture_matches_manifest(tmp_path: Path) -> None:
         for note_id, body in receipt.note_bodies.items()
     }
     assert bodies == manifest["expected"]["note_body_sha256"]
+
+
+@pytest.mark.asyncio
+async def test_n_minus_one_cleanup_continues_after_close_failure() -> None:
+    from tests.fixtures.certification import populate_n_minus_one as fixture_module
+
+    cleanup = getattr(fixture_module, "_close_fixture_resources", None)
+    assert callable(cleanup), "fixture cleanup must be independently testable"
+
+    events: list[str] = []
+
+    class FailingFileSystem:
+        async def close(self) -> None:
+            events.append("file_system")
+            raise RuntimeError("file-system close failed")
+
+    class SpaceSession:
+        async def close(self) -> None:
+            events.append("space_session")
+
+    async def dispose_space_engines() -> None:
+        events.append("space_engines")
+
+    async def close_meta_db() -> None:
+        events.append("meta_db")
+
+    with pytest.raises(RuntimeError, match="file-system close failed"):
+        await cleanup(
+            file_system=FailingFileSystem(),
+            space_session=SpaceSession(),
+            dispose_space_engines=dispose_space_engines,
+            close_meta_db=close_meta_db,
+        )
+
+    assert events == ["file_system", "space_session", "space_engines", "meta_db"]
