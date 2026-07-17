@@ -1,6 +1,6 @@
 """Common shared Pydantic schemas (pagination envelope + error body)."""
 
-from typing import Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
@@ -28,6 +28,16 @@ class ErrorResponse(BaseModel):
 
     detail: str
     error_type: str
+
+
+class CanonicalErrorResponse(BaseModel):
+    """Opt-in canonical error envelope shared by REST and MCP adapters."""
+
+    code: str
+    message: str
+    retryable: bool
+    request_id: str
+    details: dict[str, Any]
 
 
 class RequestValidationIssue(BaseModel):
