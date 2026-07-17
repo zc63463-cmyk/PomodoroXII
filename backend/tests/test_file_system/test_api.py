@@ -15,16 +15,17 @@ class _ContainedFileSystemFixture:
     @asynccontextmanager
     async def opens(self):
         from app.runtime.contained_io import open_bound_space
+        from app.runtime.scope import _walk_existing_ancestors
 
         notes = self._root / "notes"
         notes.mkdir(parents=True, exist_ok=True)
         paths = SimpleNamespace(
-            space_root=self._root,
+            space_root=self._root.parent,
             db_path=self._root / "space.db",
             notes_dir=notes,
             index_db=self._root / "index.db",
         )
-        opens = open_bound_space(paths, ())
+        opens = open_bound_space(paths, _walk_existing_ancestors(paths))
         try:
             yield opens
         finally:

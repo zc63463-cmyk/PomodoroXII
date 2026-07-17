@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import subprocess
 import threading
 from dataclasses import fields
 from pathlib import Path
@@ -87,6 +88,24 @@ def _principal(space_id: str) -> Principal:
         expires_at=None,
         space_id=space_id,
     )
+
+
+def _create_directory_link(link: Path, target: Path) -> None:
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return
+    except OSError as symlink_error:
+        if os.name != "nt":
+            raise symlink_error
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", os.fspath(link), os.fspath(target)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise OSError(result.stderr or result.stdout or "junction creation failed")
 
 
 def _walk_private_values(value: object) -> tuple[object, ...]:
@@ -268,6 +287,136 @@ async def test_existing_link_component_is_rejected_without_following(
             )
         break
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_swap_after_final_check_cannot_redirect_first_kernel_open(
+    client, tmp_path: Path, monkeypatch
+) -> None:
+    import app.runtime.scope as scope_module
+    from app.db.meta_session import get_meta_session
+    from app.db.models.meta import Space
+    from app.runtime.scope import AuthorizedSpaceScope
+    from app.settings import settings
+
+    outside = tmp_path / "outside-swap"
+    outside_notes = outside / "notes"
+    outside_notes.mkdir(parents=True)
+    probe = tmp_path / "symlink-probe"
+    try:
+        _create_directory_link(probe, outside)
+        if probe.is_symlink():
+            probe.unlink()
+        else:
+            os.rmdir(probe)
+    except OSError as exc:
+        pytest.skip(f"host cannot create a directory link: {exc}")
+
+    parent = settings.spaces_data_dir / "spc_swap"
+    notes = parent / "notes"
+    notes.mkdir(parents=True)
+    async for session in get_meta_session():
+        session.add(
+            Space(
+                id="spc_swap",
+                name="swap",
+                db_path=str(parent / "space.db"),
+                notes_dir=str(notes),
+            )
+        )
+        await session.commit()
+        scope = await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
+            _principal("spc_swap"), "spc_swap", "read"
+        )
+        break
+    else:
+        raise AssertionError("Meta session fixture did not yield")
+
+    detached = settings.spaces_data_dir / "spc_swap-detached"
+
+    async def swap_at_boundary(name: str) -> None:
+        if name == "after_final_check_before_kernel_open":
+            parent.rename(detached)
+            _create_directory_link(parent, outside)
+
+    monkeypatch.setattr(scope_module, "_fault_hook", swap_at_boundary)
+    with pytest.raises(PathOutsideSpaceError):
+        async with scope.containment.open_verified():
+            raise AssertionError("swapped storage must not be published")
+
+    assert not (outside / "space.db").exists()
+    assert not (outside / "index.db").exists()
+    assert list(outside_notes.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "boundary", ["before_sqlite_bound_connect", "before_filesystem_handle_open"]
+)
+async def test_swap_after_parent_bind_never_redirects_storage_roles(
+    client, tmp_path: Path, monkeypatch, boundary: str
+) -> None:
+    import app.runtime.contained_io as contained_io_module
+    from app.db.meta_session import get_meta_session
+    from app.db.models.meta import Space
+    from app.runtime.scope import AuthorizedSpaceScope
+    from app.settings import settings
+
+    outside = tmp_path / f"outside-{boundary}"
+    outside_notes = outside / "notes"
+    outside_notes.mkdir(parents=True)
+    parent = settings.spaces_data_dir / f"spc_{boundary}"
+    notes = parent / "notes"
+    notes.mkdir(parents=True)
+    async for session in get_meta_session():
+        space_id = f"spc_{boundary}"
+        session.add(
+            Space(
+                id=space_id,
+                name=boundary,
+                db_path=str(parent / "space.db"),
+                notes_dir=str(notes),
+            )
+        )
+        await session.commit()
+        scope = await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
+            _principal(space_id), space_id, "read"
+        )
+        break
+    else:
+        raise AssertionError("Meta session fixture did not yield")
+
+    detached = settings.spaces_data_dir / f"{parent.name}-detached"
+    state = {"blocked": False, "swapped": False, "published": False}
+
+    def swap_at_boundary(name: str) -> None:
+        if name != boundary:
+            return
+        try:
+            parent.rename(detached)
+        except OSError:
+            state["blocked"] = True
+            return
+        _create_directory_link(parent, outside)
+        state["swapped"] = True
+
+    monkeypatch.setattr(contained_io_module, "_fault_hook", swap_at_boundary)
+    rejected = False
+    try:
+        async with scope.containment.open_verified():
+            state["published"] = True
+    except PathOutsideSpaceError:
+        rejected = True
+
+    if state["swapped"]:
+        assert rejected is True
+        assert state["published"] is False
+    else:
+        assert state["blocked"] is True
+        assert state["published"] is True
+    assert not (outside / "space.db").exists()
+    assert not (outside / "index.db").exists()
+    assert list(outside_notes.iterdir()) == []
 
 
 @pytest.mark.asyncio
