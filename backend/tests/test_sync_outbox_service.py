@@ -17,6 +17,7 @@ from math import nan
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models.sync_outbox import SyncOutbox
 from app.models.task import Task
@@ -182,11 +183,10 @@ async def test_rollback_rolls_back_ledger_rows(space_session):
 @pytest.mark.asyncio
 async def test_concurrent_sqlite_writers_commit_in_ledger_id_order(space_session):
     """同一 space 的多连接写事务必须串行，后提交者不能获得更小 cursor。"""
-    from app.space_manager import get_space_engine_manager
-
-    manager = get_space_engine_manager()
-    first = await manager.get_session("spc_test")
-    second = await manager.get_session("spc_test")
+    assert space_session.bind is not None
+    sessions = async_sessionmaker(space_session.bind, expire_on_commit=False)
+    first = sessions()
+    second = sessions()
     first_ready = asyncio.Event()
     release_first = asyncio.Event()
     commit_order: list[str] = []
