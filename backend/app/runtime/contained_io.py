@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import secrets
 import stat
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ class StorageIdentity:
 
 
 class BoundDirectoryHandle:
-    __slots__ = ("_identity", "_authority", "_descriptor", "_location")
+    __slots__ = ("_identity", "_authority", "_descriptor")
 
     def __init__(self, *_args, **_kwargs) -> None:
         raise TypeError("BoundDirectoryHandle is authority-created")
@@ -31,13 +32,138 @@ class BoundDirectoryHandle:
         return self._identity
 
     def open_child_no_follow(self, relative_name: str, flags: int) -> BinaryIO:
-        if Path(relative_name).name != relative_name:
+        if (
+            not relative_name
+            or relative_name in {".", ".."}
+            or "/" in relative_name
+            or "\\" in relative_name
+            or ":" in relative_name
+        ):
             raise PathOutsideSpaceError("Contained child name is not exact")
-        descriptor = os.open(
-            self._location / relative_name,
-            flags | getattr(os, "O_NOFOLLOW", 0),
+        return self._open_relative_no_follow(relative_name, flags)
+
+    def _open_relative_no_follow(self, relative_name: str, flags: int) -> BinaryIO:
+        parts = _relative_parts(relative_name)
+        parent = _open_directory_chain(self._descriptor, parts[:-1], create=False)
+        try:
+            if os.name == "nt":
+                descriptor = _open_windows_relative_file(parent, parts[-1], flags)
+            else:
+                descriptor = os.open(
+                    parts[-1],
+                    flags | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent,
+                )
+        finally:
+            _close_directory_descriptor(parent)
+        access_mode = flags & getattr(os, "O_ACCMODE", 3)
+        mode = "rb" if access_mode == os.O_RDONLY else "wb"
+        if access_mode == os.O_RDWR:
+            mode = "r+b"
+        return os.fdopen(descriptor, mode, closefd=True)
+
+    def _mkdir_relative(self, relative_name: str) -> None:
+        descriptor = _open_directory_chain(
+            self._descriptor, _relative_parts(relative_name), create=True
         )
-        return os.fdopen(descriptor, "r+b", closefd=True)
+        _close_directory_descriptor(descriptor)
+
+    def _relative_file_exists(self, relative_name: str) -> bool:
+        try:
+            child = self._open_relative_no_follow(relative_name, os.O_RDONLY)
+        except FileNotFoundError:
+            return False
+        else:
+            child.close()
+            return True
+
+    def _atomic_write_relative(self, relative_name: str, content: bytes) -> None:
+        parts = _relative_parts(relative_name)
+        if len(parts) > 1:
+            self._mkdir_relative("/".join(parts[:-1]))
+        temporary = "/".join(
+            [*parts[:-1], f".{parts[-1]}.{secrets.token_hex(8)}.tmp"]
+        )
+        try:
+            with self._open_relative_no_follow(
+                temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            ) as child:
+                child.write(content)
+                child.flush()
+                os.fsync(child.fileno())
+            self._rename_relative(temporary, relative_name, replace=True)
+        except BaseException:
+            try:
+                self._unlink_relative(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+
+    def _rename_relative(
+        self, source: str, destination: str, *, replace: bool = False
+    ) -> None:
+        source_parts = _relative_parts(source)
+        destination_parts = _relative_parts(destination)
+        if len(destination_parts) > 1:
+            self._mkdir_relative("/".join(destination_parts[:-1]))
+        source_parent = _open_directory_chain(
+            self._descriptor, source_parts[:-1], create=False
+        )
+        try:
+            destination_parent = _open_directory_chain(
+                self._descriptor, destination_parts[:-1], create=False
+            )
+            try:
+                if os.name == "nt":
+                    _rename_windows_relative(
+                        source_parent,
+                        source_parts[-1],
+                        destination_parent,
+                        destination_parts[-1],
+                        replace=replace,
+                    )
+                elif replace:
+                    os.replace(
+                        source_parts[-1],
+                        destination_parts[-1],
+                        src_dir_fd=source_parent,
+                        dst_dir_fd=destination_parent,
+                    )
+                else:
+                    if _relative_exists_posix(
+                        destination_parent, destination_parts[-1]
+                    ):
+                        raise FileExistsError(destination)
+                    os.rename(
+                        source_parts[-1],
+                        destination_parts[-1],
+                        src_dir_fd=source_parent,
+                        dst_dir_fd=destination_parent,
+                    )
+            finally:
+                _close_directory_descriptor(destination_parent)
+        finally:
+            _close_directory_descriptor(source_parent)
+
+    def _unlink_relative(self, relative_name: str) -> None:
+        parts = _relative_parts(relative_name)
+        parent = _open_directory_chain(self._descriptor, parts[:-1], create=False)
+        try:
+            if os.name == "nt":
+                _unlink_windows_relative(parent, parts[-1])
+            else:
+                os.unlink(parts[-1], dir_fd=parent)
+        finally:
+            _close_directory_descriptor(parent)
+
+    def _iter_relative_files(self, relative_name: str, *, suffix: str) -> list[str]:
+        parts = _relative_parts(relative_name, allow_empty=True)
+        directory = _open_directory_chain(self._descriptor, parts, create=False)
+        try:
+            return _iter_descriptor_files(directory, "", suffix)
+        finally:
+            _close_directory_descriptor(directory)
 
     @classmethod
     def _create(cls, location: Path) -> "BoundDirectoryHandle":
@@ -56,7 +182,6 @@ class BoundDirectoryHandle:
         instance._identity = identity
         instance._authority = object()
         instance._descriptor = descriptor
-        instance._location = location
         return instance
 
     def _close(self) -> None:
@@ -67,6 +192,136 @@ class BoundDirectoryHandle:
             else:
                 os.close(descriptor)
             self._descriptor = -1
+
+
+def _relative_parts(relative_name: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if not relative_name:
+        if allow_empty:
+            return ()
+        raise PathOutsideSpaceError("Contained relative name is empty")
+    if relative_name.startswith("/") or "\\" in relative_name or ":" in relative_name:
+        raise PathOutsideSpaceError("Contained relative name is not normalized")
+    parts = tuple(relative_name.split("/"))
+    if any(not part or part in {".", ".."} for part in parts):
+        raise PathOutsideSpaceError("Contained relative name is not normalized")
+    return parts
+
+
+def _duplicate_directory_descriptor(descriptor: int) -> int:
+    if os.name != "nt":
+        return os.dup(descriptor)
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.DuplicateHandle.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel32.DuplicateHandle.restype = wintypes.BOOL
+    source_process = kernel32.GetCurrentProcess()
+    duplicate = wintypes.HANDLE()
+    if not kernel32.DuplicateHandle(
+        source_process,
+        wintypes.HANDLE(descriptor),
+        source_process,
+        ctypes.byref(duplicate),
+        0,
+        False,
+        0x00000002,
+    ):
+        raise ctypes.WinError()
+    return int(duplicate.value)
+
+
+def _close_directory_descriptor(descriptor: int) -> None:
+    if os.name == "nt":
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(descriptor))
+    else:
+        os.close(descriptor)
+
+
+def _open_directory_chain(
+    root: int, parts: tuple[str, ...], *, create: bool
+) -> int:
+    current = _duplicate_directory_descriptor(root)
+    try:
+        for part in parts:
+            if os.name == "nt":
+                child = _open_windows_relative_directory(current, part, create=create)
+            else:
+                if create:
+                    try:
+                        os.mkdir(part, 0o700, dir_fd=current)
+                    except FileExistsError:
+                        pass
+                child = os.open(
+                    part,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=current,
+                )
+                if not stat.S_ISDIR(os.fstat(child).st_mode):
+                    os.close(child)
+                    raise PathOutsideSpaceError("Contained component is not a directory")
+            _close_directory_descriptor(current)
+            current = child
+        return current
+    except BaseException:
+        _close_directory_descriptor(current)
+        raise
+
+
+def _relative_exists_posix(parent: int, basename: str) -> bool:
+    try:
+        os.stat(basename, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _iter_descriptor_files(directory: int, prefix: str, suffix: str) -> list[str]:
+    names = _windows_directory_names(directory) if os.name == "nt" else os.listdir(directory)
+    files: list[str] = []
+    for name in names:
+        if name in {".", ".."}:
+            continue
+        relative = f"{prefix}/{name}" if prefix else name
+        if os.name == "nt":
+            try:
+                child = _open_windows_relative_directory(directory, name, create=False)
+            except NotADirectoryError:
+                if name.endswith(suffix):
+                    files.append(relative)
+            else:
+                try:
+                    files.extend(_iter_descriptor_files(child, relative, suffix))
+                finally:
+                    _close_directory_descriptor(child)
+        else:
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise PathOutsideSpaceError("Contained enumeration found a symlink")
+            if stat.S_ISDIR(info.st_mode):
+                child = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory,
+                )
+                try:
+                    files.extend(_iter_descriptor_files(child, relative, suffix))
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(info.st_mode) and name.endswith(suffix):
+                files.append(relative)
+    return files
 
 
 class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
@@ -82,6 +337,280 @@ class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
         ("nFileIndexHigh", wintypes.DWORD),
         ("nFileIndexLow", wintypes.DWORD),
     ]
+
+
+class _WindowsUnicodeString(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_ushort),
+        ("maximum_length", ctypes.c_ushort),
+        ("buffer", ctypes.c_wchar_p),
+    ]
+
+
+class _WindowsObjectAttributes(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_ulong),
+        ("root_directory", ctypes.c_void_p),
+        ("object_name", ctypes.POINTER(_WindowsUnicodeString)),
+        ("attributes", ctypes.c_ulong),
+        ("security_descriptor", ctypes.c_void_p),
+        ("security_quality_of_service", ctypes.c_void_p),
+    ]
+
+
+class _WindowsIoStatusBlock(ctypes.Structure):
+    _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+
+
+def _nt_open_windows_relative(
+    parent: int,
+    basename: str,
+    *,
+    desired_access: int,
+    disposition: int,
+    options: int,
+    file_attributes: int,
+    expected_directory: bool,
+) -> int:
+    name_buffer = ctypes.create_unicode_buffer(basename)
+    name = _WindowsUnicodeString(
+        length=len(basename.encode("utf-16-le")),
+        maximum_length=ctypes.sizeof(name_buffer),
+        buffer=ctypes.cast(name_buffer, ctypes.c_wchar_p),
+    )
+    attributes = _WindowsObjectAttributes(
+        length=ctypes.sizeof(_WindowsObjectAttributes),
+        root_directory=parent,
+        object_name=ctypes.pointer(name),
+        attributes=0x00000040,
+        security_descriptor=None,
+        security_quality_of_service=None,
+    )
+    status_block = _WindowsIoStatusBlock()
+    handle = wintypes.HANDLE()
+    nt_create_file = ctypes.windll.ntdll.NtCreateFile
+    nt_create_file.restype = ctypes.c_long
+    status = nt_create_file(
+        ctypes.byref(handle),
+        desired_access,
+        ctypes.byref(attributes),
+        ctypes.byref(status_block),
+        None,
+        file_attributes,
+        0x00000001 | 0x00000002,
+        disposition,
+        options,
+        None,
+        0,
+    )
+    if status < 0:
+        unsigned = ctypes.c_ulong(status).value
+        if unsigned in {0xC0000034, 0xC000003A}:
+            raise FileNotFoundError(basename)
+        if unsigned in {0xC0000035, 0xC0000056}:
+            raise FileExistsError(basename)
+        if unsigned == 0xC0000103:
+            raise NotADirectoryError(basename)
+        if unsigned == 0xC00000BA:
+            raise IsADirectoryError(basename)
+        raise OSError(f"NtCreateFile failed with NTSTATUS 0x{unsigned:08x}")
+    raw_handle = int(handle.value)
+    info = _BY_HANDLE_FILE_INFORMATION()
+    try:
+        if not ctypes.windll.kernel32.GetFileInformationByHandle(
+            wintypes.HANDLE(raw_handle), ctypes.byref(info)
+        ):
+            raise ctypes.WinError()
+        if info.dwFileAttributes & 0x00000400:
+            raise PathOutsideSpaceError("Contained child is a reparse point")
+        is_directory = bool(info.dwFileAttributes & 0x00000010)
+        if expected_directory and not is_directory:
+            raise NotADirectoryError(basename)
+        if not expected_directory and is_directory:
+            raise IsADirectoryError(basename)
+    except BaseException:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(raw_handle))
+        raise
+    return raw_handle
+
+
+def _open_windows_relative_file(parent: int, basename: str, flags: int) -> int:
+    import msvcrt
+
+    access_mode = flags & getattr(os, "O_ACCMODE", 3)
+    desired_access = 0x00000080 | 0x00100000
+    if access_mode != os.O_WRONLY:
+        desired_access |= 0x00000001
+    if access_mode != os.O_RDONLY:
+        desired_access |= 0x00000002
+    if flags & os.O_APPEND:
+        desired_access |= 0x00000004
+    create = bool(flags & os.O_CREAT)
+    exclusive = bool(flags & os.O_EXCL)
+    truncate = bool(flags & os.O_TRUNC)
+    if create and exclusive:
+        disposition = 0x00000002
+    elif create and truncate:
+        disposition = 0x00000005
+    elif create:
+        disposition = 0x00000003
+    elif truncate:
+        disposition = 0x00000004
+    else:
+        disposition = 0x00000001
+    raw_handle = _nt_open_windows_relative(
+        parent,
+        basename,
+        desired_access=desired_access,
+        disposition=disposition,
+        options=0x00000020 | 0x00000040 | 0x00200000,
+        file_attributes=0x00000080,
+        expected_directory=False,
+    )
+    try:
+        return msvcrt.open_osfhandle(raw_handle, flags)
+    except BaseException:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(raw_handle))
+        raise
+
+
+def _open_windows_relative_directory(
+    parent: int, basename: str, *, create: bool
+) -> int:
+    return _nt_open_windows_relative(
+        parent,
+        basename,
+        desired_access=0x00000001 | 0x00000080 | 0x00100000,
+        disposition=0x00000003 if create else 0x00000001,
+        options=0x00000001 | 0x00000020 | 0x00200000,
+        file_attributes=0x00000010,
+        expected_directory=True,
+    )
+
+
+class _WindowsFileRenameInfo(ctypes.Structure):
+    _fields_ = [
+        ("replace_if_exists", ctypes.c_ubyte),
+        ("root_directory", ctypes.c_void_p),
+        ("file_name_length", wintypes.DWORD),
+        ("file_name", wintypes.WCHAR * 1),
+    ]
+
+
+def _rename_windows_relative(
+    source_parent: int,
+    source_name: str,
+    destination_parent: int,
+    destination_name: str,
+    *,
+    replace: bool,
+) -> None:
+    source = _nt_open_windows_relative(
+        source_parent,
+        source_name,
+        desired_access=0x00010000 | 0x00000080 | 0x00100000,
+        disposition=0x00000001,
+        options=0x00000020 | 0x00000040 | 0x00200000,
+        file_attributes=0x00000080,
+        expected_directory=False,
+    )
+    encoded_name = destination_name.encode("utf-16-le")
+    size = _WindowsFileRenameInfo.file_name.offset + len(encoded_name)
+    buffer = ctypes.create_string_buffer(size + len(encoded_name))
+    info = ctypes.cast(buffer, ctypes.POINTER(_WindowsFileRenameInfo)).contents
+    info.replace_if_exists = replace
+    info.root_directory = destination_parent
+    info.file_name_length = len(encoded_name)
+    ctypes.memmove(
+        ctypes.addressof(buffer) + _WindowsFileRenameInfo.file_name.offset,
+        encoded_name,
+        len(encoded_name),
+    )
+    try:
+        status_block = _WindowsIoStatusBlock()
+        set_information = ctypes.windll.ntdll.NtSetInformationFile
+        set_information.restype = ctypes.c_long
+        status = set_information(
+            wintypes.HANDLE(source),
+            ctypes.byref(status_block),
+            ctypes.byref(buffer),
+            ctypes.sizeof(buffer),
+            10,
+        )
+        if status < 0:
+            unsigned = ctypes.c_ulong(status).value
+            raise OSError(
+                f"NtSetInformationFile rename failed with NTSTATUS 0x{unsigned:08x}"
+            )
+    finally:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(source))
+
+
+def _unlink_windows_relative(parent: int, basename: str) -> None:
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("delete_file", wintypes.BOOL)]
+
+    handle = _nt_open_windows_relative(
+        parent,
+        basename,
+        desired_access=0x00010000 | 0x00000080 | 0x00100000,
+        disposition=0x00000001,
+        options=0x00000020 | 0x00000040 | 0x00200000,
+        file_attributes=0x00000080,
+        expected_directory=False,
+    )
+    try:
+        disposition = _FileDispositionInfo(delete_file=True)
+        if not ctypes.windll.kernel32.SetFileInformationByHandle(
+            wintypes.HANDLE(handle),
+            4,
+            ctypes.byref(disposition),
+            ctypes.sizeof(disposition),
+        ):
+            raise ctypes.WinError()
+    finally:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
+
+
+def _windows_directory_names(directory: int) -> list[str]:
+    query = ctypes.windll.ntdll.NtQueryDirectoryFile
+    query.restype = ctypes.c_long
+    names: list[str] = []
+    restart = True
+    while True:
+        buffer = ctypes.create_string_buffer(65536)
+        status_block = _WindowsIoStatusBlock()
+        status = query(
+            wintypes.HANDLE(directory),
+            None,
+            None,
+            None,
+            ctypes.byref(status_block),
+            ctypes.byref(buffer),
+            ctypes.sizeof(buffer),
+            12,
+            False,
+            None,
+            restart,
+        )
+        restart = False
+        unsigned = ctypes.c_ulong(status).value
+        if unsigned == 0x80000006:
+            break
+        if status < 0:
+            raise OSError(
+                f"NtQueryDirectoryFile failed with NTSTATUS 0x{unsigned:08x}"
+            )
+        offset = 0
+        while offset < status_block.information:
+            next_offset = ctypes.c_ulong.from_buffer(buffer, offset).value
+            name_length = ctypes.c_ulong.from_buffer(buffer, offset + 8).value
+            name_bytes = bytes(buffer[offset + 12 : offset + 12 + name_length])
+            names.append(name_bytes.decode("utf-16-le"))
+            if next_offset == 0:
+                break
+            offset += next_offset
+    return names
 
 
 def _open_windows_directory(location: Path) -> tuple[int, StorageIdentity]:
