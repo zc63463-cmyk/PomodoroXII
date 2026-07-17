@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pomodoroxii.local/audit/95plus/evidence.schema.json",
+  "title": "PomodoroXII Backend 95+ Evidence Envelope",
+  "type": "object",
+  "required": ["schema_version", "records"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/evidence_record"}
+    },
+    "findings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/finding_record"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "evidence_record": {
+      "type": "object",
+      "required": [
+        "evidence_id", "subject_sha", "command", "cwd", "runtime",
+        "started_at", "finished_at", "exit_code", "result",
+        "artifact_path", "artifact_sha256", "artifact_size_bytes",
+        "trust_level", "confidence", "modules", "finding_ids",
+        "certification_tags"
+      ],
+      "properties": {
+        "evidence_id": {"type": "string", "pattern": "^EV-[A-Z0-9-]+$"},
+        "subject_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "command": {"type": "string", "minLength": 1},
+        "cwd": {"type": "string", "minLength": 1},
+        "runtime": {
+          "type": "object",
+          "required": ["name", "version", "platform"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "version": {"type": "string", "minLength": 1},
+            "platform": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        },
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "exit_code": {"type": ["integer", "null"]},
+        "result": {"enum": ["passed", "failed", "not_run", "unverified"]},
+        "artifact_path": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        },
+        "artifact_sha256": {
+          "oneOf": [
+            {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            {"type": "null"}
+          ]
+        },
+        "artifact_size_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "trust_level": {
+          "enum": ["local_snapshot", "pr_local", "trusted_push", "release_drill"]
+        },
+        "confidence": {"enum": ["confirmed", "inferred", "unverified"]},
+        "modules": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "finding_ids": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^P[01]-[0-9]{2}$"},
+          "uniqueItems": true
+        },
+        "certification_tags": {
+          "type": "array",
+          "items": {"enum": ["restore_drill", "exact_sha_ci", "image_digest"]},
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"certification_tags": {"minItems": 1}},
+            "required": ["certification_tags"]
+          },
+          "then": {
+            "properties": {
+              "artifact_path": {"type": "string", "minLength": 1},
+              "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "artifact_size_bytes": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      ]
+    },
+    "finding_record": {
+      "type": "object",
+      "required": [
+        "finding_id", "severity", "status", "classification",
+        "release_blocker", "modules", "evidence_ids"
+      ],
+      "properties": {
+        "finding_id": {"type": "string", "pattern": "^P[01]-[0-9]{2}$"},
+        "severity": {"enum": ["P0", "P1"]},
+        "status": {"enum": ["open", "closed"]},
+        "classification": {"enum": ["confirmed", "inferred", "unverified"]},
+        "release_blocker": {"type": "boolean"},
+        "modules": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^EV-[A-Z0-9-]+$"},
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
