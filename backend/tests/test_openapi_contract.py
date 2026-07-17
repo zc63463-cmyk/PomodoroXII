@@ -27,6 +27,8 @@ PUBLIC_OPERATIONS = {
     ("GET", "/api/ready"),
 }
 ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
+CANONICAL_ERROR_RESPONSE_REF = "#/components/schemas/CanonicalErrorResponse"
+CANONICAL_ERROR_MEDIA_TYPE = "application/vnd.pomodoroxii.error+json;version=2"
 REQUEST_VALIDATION_ERROR_RESPONSE_REF = (
     "#/components/schemas/RequestValidationErrorResponse"
 )
@@ -375,9 +377,15 @@ class TestOpenAPIContractGate:
             "/api/v1/notes/{id}/versions/{version_id}",
         ):
             content = schema["paths"][path]["get"]["responses"]["422"]["content"]
-            assert set(content) == {"application/json"}, (
-                f"GET {path} must document 422 as application/json: {content}"
+            assert set(content) == {
+                "application/json",
+                CANONICAL_ERROR_MEDIA_TYPE,
+            }, (
+                f"GET {path} must document both error media types: {content}"
             )
             assert set(_schema_refs(content["application/json"]["schema"])) == (
                 STANDARD_ERROR_COMPONENTS
             )
+            assert set(_schema_refs(content[CANONICAL_ERROR_MEDIA_TYPE]["schema"])) == {
+                CANONICAL_ERROR_RESPONSE_REF
+            }
