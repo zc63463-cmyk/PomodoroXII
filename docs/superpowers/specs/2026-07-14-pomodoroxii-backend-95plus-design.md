@@ -35,13 +35,92 @@ behind them. REST, MCP, and CLI remain thin Adapters. Complexity is concentrated
 at explicit Seams so one fix produces Leverage across all callers and preserves
 Locality for maintainers.
 
+## Approved Task Space Integration Amendment (2026-07-15)
+
+The user-approved
+`docs/superpowers/specs/2026-07-15-task-space-session-integration-design.md`
+is the domain authority for Project, WorkItem, WorkItemNote, FocusSession, and
+ActiveSession ownership. The orchestration authority is
+`docs/superpowers/plans/2026-07-15-task-space-session-integration-master.md`.
+Where this older program design assumed the legacy Task/Session catalog or a
+direct S3-to-S4 transition, those two newer authorities supersede that
+assumption without weakening any 95+ safety, recovery, evidence, or scoring
+gate.
+
+The immutable execution order is:
+
+```text
+S3 -> TS0 -> TS1 -> TS2 -> TS3 -> S4 -> S5 -> S6
+```
+
+TS0 owns breaking schema/catalog/OpenAPI cutover; TS1 owns Task Space and the
+single aggregate WorkItemNote; TS2 owns FocusSession plus global active
+coordination; TS3 owns the local-first frontend loop. S4 therefore consumes the
+final catalog rather than the pre-integration model. S5 and S6 must independently
+verify all of these final predicates at one exact subject:
+
+The strict-A provisional-review boundary is also final-model authority. Before
+import, review retains only the structured `SessionReviewDraftRow` and its
+unsent fixed operation ID; it changes no Session state, persists no Outcome,
+and does not widen the original held batch. Only after exact terminal evidence
+is `meta_reconciled` and its Meta root is `transport_resolved` may recovery use the authoritative
+imported Session version to execute the original TS2 review. Only authoritative
+review success clears the still-matching draft.
+
+Before `meta_002` or any Space revision runs, S2's startup owner performs one
+read-only preflight over the existing Meta database and every registered Space,
+using TS0's registered cutover predicate. It closes all probe handles before the
+first recovery write, checkpoint, backup, DDL, index rebuild, or replacement.
+Any rejection, including a late Space with one legacy row, produces zero
+migration calls and a byte-identical complete Meta/Space/Index/Notes inventory.
+The per-Space Alembic predicate remains a defense-in-depth repeat of the same
+pure query, not permission to migrate Meta first.
+
+The final FocusSession model has no `sessionType`. Meta revision
+`meta_002_active_session_locator` creates both the singleton locator and its
+internal active-operation journal with immutable intent/result descriptor and
+monotonic phase transitions. The master Coordinator is the sole
+authoritative path for lifecycle plus Session note/current-plan/completion-draft/
+plan-add/plan-remove commands; those writes are owner/epoch fenced and cannot be
+replayed as ordinary S4 entity updates. Cross-Space conflict resolution selects
+only the persisted `active|candidate` role, derives its complete Space/Session
+identity, transfers `claiming` directly to that winner with epoch + 1, and exposes no winner
+until both intent-named child outcomes are terminal-success. Command hashes use
+RFC 8785 with explicit field mappings, and command replay requires both the
+server envelope declaration and current caller permission. Unresolved durable
+coordination returns `active_session_recovery_required` rather than pretending
+there is no active Session.
+Reconciliation persists one client root ID and serializes replay versus explicit
+abandonment in a Space-exclusive durable claim. The Task Space transition
+compiler fences every Session envelope unless that exact request has a live
+replay claim, so `abandoned` cannot be bypassed by a direct route. Activation
+conflict is locally read-only; its selected role and one canonical resolution
+timestamp remain stable across both Space commits and restart recovery.
+Level-2 `effortActualSeconds` is a materialized projection whose sole writer is
+FocusSession policy; it is recomputed from terminal valid Sessions and their one
+effective attribution revision in the same S3 UoW, never assigned by Task Space
+or Sync input and never coupled to task-command receipt success.
+
+```text
+Space head: space_011_sync_clients_streaming
+Meta head: meta_002_active_session_locator
+Catalog: version 2, exactly 31 entries
+Dexie: v19
+Legacy Task/Session routes, keys, aliases, and writable authority: absent
+```
+
+No earlier score, report, test count, or pre-TS evidence certifies that final
+model. This amendment changes planning authority only; it does not claim that
+TS0-TS3 or backend 95+ have been implemented or certified.
+
 ## Snapshot And Evidence Contract
 
 The planning snapshot was captured on 2026-07-14 Asia/Shanghai:
 
-- repository: `E:\Development\MyAwesomeApp\PomodoroXII`;
+- repository: audited repository root (all report links are repository-relative);
 - local branch: `main@d20f200`;
-- saved remote-tracking reference: `origin/main@1e4f0fc`;
+- saved remote-tracking reference captured at planning time:
+  `origin/main@1e4f0fc`;
 - local relation: 18 commits ahead of `origin/main`, consisting of the existing
   deep-audit report line; backend source, CI workflow, and README content match
   the saved `origin/main` reference;
@@ -57,6 +136,13 @@ The planning snapshot was captured on 2026-07-14 Asia/Shanghai:
   authenticated and the public Actions request failed at transport;
 - a complete backend suite was not rerun during discovery because the retained
   test sandbox already contained roughly 459 MiB of artifacts.
+
+The saved remote SHA is an immutable historical Git object, not a requirement
+that the movable current `origin/main` ref remain equal to it. S0 proves the
+saved object exists as a commit and is exactly 18 commits behind the immutable
+audited subject. It records the current remote-tracking tip separately as
+implementation context without letting that movable ref redefine or invalidate
+the captured snapshot.
 
 Counts from focused groups overlap and must not be added together. Historical
 HTML and Markdown reports are context only. Current source, current tests,
@@ -325,9 +411,18 @@ upgrade(kind, path) -> MigrationResult
 
 It owns revision selection, SQLite online backup/checkpoint, cross-process
 locking, temporary upgrade, integrity verification, atomic replacement, and
-file/directory fsync. The default legacy Alembic entry fails with instructions
-to use the named Meta or Space environment. Entity scaffolding only targets the
-Space chain unless an explicit Meta entity type is requested.
+file/directory durability. `path` is only an initial request to S1's
+package-private no-follow maintenance binder; after it returns a
+`BoundSQLiteTarget`, backup, Alembic, verification, checkpoint, temporary
+replacement, commit, and discard consume only opaque authorities. Alembic is
+given the bound `sqlite3.Connection` through `Config.attributes["connection"]`
+and cannot construct a URL or pathname connection. The S1 Module privately
+owns `begin_bound_replacement`/commit/discard and all WAL/SHM/journal names.
+Windows non-database replacement uses checked native write-through semantics;
+an unverifiable directory/volume flush fails rather than logging and
+continuing. The default legacy Alembic entry fails with instructions to use the
+named Meta or Space environment. Entity scaffolding only targets the Space
+chain unless an explicit Meta entity type is requested.
 
 This specification reaffirms sections 4.3 through 4.5 of
 `docs/2026-07-11-dual-alembic-migration-design.md`: production migration runs
@@ -397,9 +492,12 @@ contracts.
 ### IndexStoreSchema
 
 `index.db` has its own versioned schema and is not part of either Alembic chain.
-This internal Module owns `verify`, `upgrade`, and `rebuild_indexes`. It creates
-ordinary indexes explicitly instead of assuming table DDL contains them, and it
-reports its schema version through Space health. `SpaceRuntime` verifies it
+This internal Module owns `verify_open`, `upgrade_open`, and `rebuild_open`, all
+of which require `BoundSQLiteTarget`. It has no synchronous path overload or
+internal connector factory. Only a marker-bound exact-absent target can use
+`create_if_missing=True`; the caller owns `aclose()`. The Module creates
+ordinary indexes explicitly instead of assuming table DDL contains them, and
+it reports its schema version through Space health. `SpaceRuntime` verifies it
 before opening a Space; `KnowledgeStore` can rebuild it from the authoritative
 database metadata and Markdown bodies.
 
@@ -438,25 +536,30 @@ Interface.
 Interface:
 
 ```text
-execute(scope, command, operation_id) -> MutationResult
-execute_batch(scope, commands, batch_id) -> list[MutationResult]
-recover(scope) -> RecoveryResult
+execute(scope, request, operation_id) -> MutationResult
+execute_batch(scope, requests, batch_id, *, operation_ids=None) -> BatchMutationResult
+execute_prepared_batch(scope, items, batch_id) -> BatchMutationResult
+recover_under_lease(scope, lease) -> RecoveryResult
+inspect_recovery(view) -> RecoveryInspection
 ```
 
 This Module owns database transactions, per-event SAVEPOINT behavior, durable
 operation records, staged filesystem artifacts, Sync ledger visibility, and
-idempotent recovery. A direct REST command is a one-command batch. Sync push can
-retain accepted/rejected event semantics without moving commit responsibility
-back into routes or Note implementations.
+idempotent recovery. A direct REST command is a one-command batch. The ordinary
+batch method wraps request-only items; the prepared method additionally accepts
+original input index, operation ID, canonical intent hash, and exactly one of a
+request or pre-rejection. Sync push can therefore retain accepted/rejected event
+semantics without moving receipt or commit responsibility back into routes or
+Note implementations.
 
 Operation records use a closed state machine:
 
 ```text
-INTENT -> STAGED -> DB_COMMITTED -> FINALIZING -> FINALIZED
-   |         |             |              |
-   +------> ABORTED        +------> COMPENSATING -> COMPENSATED
-                                          |
-                                          +------> FAILED_MANUAL
+INTENT -> STAGED -> DB_COMMITTED -> FINALIZING -> FORWARD_APPLIED -> FINALIZED
+   |         |             |              |              |
+   +------> ABORTED        +--------------+----> COMPENSATING -> COMPENSATED
+                                                         |
+                                                         +------> FAILED_MANUAL
 ```
 
 - `INTENT` is committed before a named stage directory is published. It stores
@@ -464,8 +567,11 @@ INTENT -> STAGED -> DB_COMMITTED -> FINALIZING -> FINALIZED
   intended projection set. Reusing an ID with a different hash returns
   `idempotency_conflict`.
 - staging writes before-images, after-images, and a manifest beneath a temporary
-  name, fsyncs files and directories, atomically renames it to the operation ID,
-  then commits `STAGED` with the manifest hash.
+  name, fsyncs files and directories, then atomically renames it to the
+  deterministic lowercase SHA-256 directory key derived from the operation ID.
+  The original caller ID remains data inside the manifest and is never used as a
+  filesystem path component. Only then does the journal commit `STAGED` with the
+  manifest SHA-256.
 - the business transaction applies the database mutation, records a pending
   ledger event only for Sync-enabled commands, and advances the operation to
   `DB_COMMITTED` in the same commit.
@@ -493,15 +599,32 @@ children forward or compensates all accepted children in reverse order. Batch
 ledger events become visible together, so partial filesystem finalization is
 never externally observable.
 
+Deterministic child operation identity is the versioned `child-v1` persistence
+protocol, not a local UoW naming convention. `app.mutation.types` is its only
+backend implementation owner. It first applies the canonical operation-ID
+validator to the printable-ASCII parent, then accepts only a 1-to-512-byte ASCII
+suffix from `[A-Za-z0-9._:-]`. A result of at most 128 ASCII bytes is
+`childp:<parent-byte-length>:<parent>:<suffix>`. Longer results are
+`childh:<sha256>`, where the digest preimage is
+`b"child-v1\0" + uint16be(parent-byte-length) + parent-bytes + suffix-bytes`.
+The tracked backend authority is
+`backend/tests/fixtures/task_space_session_child_operation_id_vectors.json`;
+TS3 must copy those bytes unchanged to
+`frontend/src/lib/contracts/fixtures/task-space-session-child-operation-id-vectors.json`
+and verify both language implementations against that one oracle. Manual child
+concatenation, a second helper, or an unversioned hash change is forbidden.
+
 ### SyncProtocol
 
 Interface:
 
 ```text
-push(events, batch_id) -> PushResult
-pull(opaque_cursor, limit) -> PullPage
-recover(page_token, limit) -> RecoveryPage
+query_operations(client_id, operation_ids) -> OperationQueryResult
+push(client_id, events, batch_id) -> PushResult
+pull(client_id, opaque_cursor, limit) -> PullPage
+recover(client_id, page_token) -> RecoveryPage
 ack(client_id, cursor) -> AckResult
+status(client_id=None) -> SyncStatusResult
 ```
 
 The v2 event ledger is the primary Adapter. Every successful Sync-enabled
@@ -510,14 +633,413 @@ catalog policy, and every rolled-back mutation emits none. The cursor is opaque
 to callers. Retention uses the minimum acknowledgement among active clients;
 expired clients receive an explicit full-recovery contract.
 
-Legacy pull remains a compatibility Adapter only. If it detects a truncation
-shape that can skip rows, it returns `cursor_upgrade_required` rather than a
-possibly incomplete page. Its removal requires telemetry and a documented
-deprecation release.
+These are exactly six shared public operations across REST, MCP, and the
+official frontend. Before a push receipt is created or replayed, the client
+queries every selected persisted operation ID. `unknown`, `pending`, `terminal`,
+and `recovery_required` are distinct states: terminal returns the immutable
+original complete batch result, pending/recovery-required blocks transport, and
+only confirmed-unknown operations may send. A WorkItemNote whose response was
+lost retains its original operation/batch identity. TS3 provisional compounds
+send `prepareHeldProvisionalBatch(...).batchId`, which is the persisted
+`compoundOperationId`; S4 must not re-hash child operation IDs into a different
+batch authority. Dexie v19 admits valid `awaiting_s4` groups through
+`pending -> meta_pending -> ready` and keeps `blocked_conflict` held.
+One exclusive per-Space Browser Web Lock token fences every frontend authority
+writer and remains held through query, final proof, push, and response
+application. Admission freezes the complete canonical post-image bytes and
+separately recomputes the entity-specific command business `payloadHash`; these
+are not interchangeable for WorkItemNote. Both queried and pushed terminal
+results write crash-safe Space evidence before queue deletion and reconcile Meta
+idempotently. Retained terminal conflict/error rows are non-sendable; any retry
+uses a new operation ID while preserving the original payload and caller time.
+
+S4 must not reuse an API/cache schema as either its command post-image parser or
+its authoritative recovery parser. The three representations are independent:
+the cache may contain derived `clockState`; the complete FocusSession command
+post-image maps `sessionId -> id`, includes `overallProgress` and `mood`, and
+strictly excludes `clockState`; the recovery wire schema carries complete
+`id/spaceId/createdAt/updatedAt/version` system identity and maps `id ->
+sessionId` only after top-level entity identity/version verification. The four
+Session child entities use their own complete wire schemas and real entity IDs,
+and Outcome hashing includes `executionPersona`, `personaSwitched`, and
+`personaNote`. Both WorkItemNote writers call one complete-next-row serializer;
+a three-field overwrite post-image is invalid. Recovery parsing enforces
+`has_more === (next_page_token !== null)`, retained Schedule/TimeBlock time
+fields accept the locked `HH:mm | canonical UTC RFC3339` union, and public
+operation/batch IDs use the shared 1-128 UTF-8 byte printable-ASCII grammar.
+Only a `child-v1` suffix uses the narrower allowlist.
+
+Before the TS0 breaking cutover, any still-running legacy pull safety patch must
+fail closed with `cursor_upgrade_required` on a truncation shape that can skip
+rows. It is not compatibility authority for the final model: TS0/S4 remove the
+legacy endpoint/key completely, with no dual read, telemetry-gated retention, or
+deprecation bridge because this installation has no data or old clients to
+migrate.
 
 Snapshots are manifest-backed, chunked, resumable, bounded in memory, and tied
 to a catalog hash and event waterline. MCP delegates to this same Interface and
 does not instantiate a reduced Sync implementation.
+
+#### Normative Detailed-Plan Amendment (2026-07-14)
+
+This amendment records refinements found while reviewing the seven executable
+plans. It is normative and supersedes any earlier prose or diagram in this
+document when the two conflict.
+
+- `AuthorizedSpaceScope` resolves and tears down resources with primary-first
+  failure aggregation. A failed release never masks the body/acquisition
+  failure or discards the last retryable owner: unresolved engine, filesystem,
+  Space-lease, and global-lease cleanup remains in the bounded pending-cleanup
+  registry. A dirty read closes all read resources, releases Space-shared, and
+  only then acquires Space-exclusive for recovery; no shared-to-exclusive
+  upgrade is permitted. Every read or writer acquisition runs recovery
+  preflight before exposing authority, and a `FAILED_MANUAL` Space stays
+  degraded while all acquired leases unwind in ownership order.
+- `MigrationCoordinator.upgrade_under_lease()` opens its bound maintenance
+  target and enters one primary/cleanup envelope before `drain_identity()`.
+  Drain failure or cancellation still closes that target and invokes idempotent
+  `resume_identity()`; a failed resume remains a same-Task pending-resume owner
+  that blocks readiness, shutdown success, and another migration until retry
+  completes. Partial quiesce is never an unowned side effect.
+- Standalone `MigrationCoordinator.upgrade()` uses keyed serialization while
+  `_upgrade_once` executes inline in the public caller Task; it never uses a
+  short-lived `create_task(_upgrade_once)`. Fail-once pending cleanup converges
+  in that owner Task before top-level exit. Persistent cleanup enters explicit
+  `process_exit_required`, publishes neither success nor readiness, and keeps
+  process/global locks live until the offline process exits. Destructive
+  upgrade/create workers are joined to terminal while exact process/global/
+  drain or provision dependencies remain pinned, followed by close, resume,
+  and lease release in that physical order.
+- Migration cleanup is an owner-Task `_ReleaseSequence`: target close must be
+  physically terminal before resume, and isolated target close must be terminal
+  before its separately committed discard stage. A close failure retains the
+  drained identity and exact remaining sequence. Cancellation after physical
+  close may propagate only after resume advances. Verify/body failures remain
+  first before close failures; no `finally` masks the primary.
+- `MutationUnitOfWork` accepts immutable `MutationRequest` values, compiles them
+  only after acquiring the Space-exclusive lease, and persists a closed
+  `BatchMutationResult` containing ordered applied and rejected children.
+  Rejected children create no operation, stage, or ledger row; their caller
+  operation ID and result remain in the batch receipt so an identical retry
+  after restart returns the same result.
+- Transport mapping uses `PreparedBatchItem(request_index, operation_id,
+  intent_hash, request|pre_rejection)`. The UoW hashes every original item in
+  input order, persists mapper and compiler rejections in one receipt, and
+  returns that stored receipt before reclassification on retry. An all-rejected
+  batch still records the legal `INTENT -> ABORTED` receipt.
+- Batch compilation applies each accepted full `MutationCommand` to an
+  in-memory authority overlay, including DB state, authoritative Markdown body,
+  and planned path/projection descriptors. A later child cannot compile against
+  stale pre-batch authority.
+- `FORWARD_APPLIED` is a durable nonterminal barrier. Only one transaction that
+  proves every accepted child at this barrier may set all children and the
+  batch to `FINALIZED` and expose their ledger events together.
+- Mutation rejection and idempotency failures are S1 `AppError` carriers with
+  stable code, retryability, and details from one exhaustive specification
+  table. Adapters serialize `AppError.to_domain_record(request_id)` and never
+  invent an S3/S4-only error hierarchy or recompute a stored terminal result.
+- `SyncState.current_cursor` is the authoritative durable ledger high-watermark.
+  Invisible event append and `current_cursor` advance occur in the same business
+  transaction; every cursor consumer first completes clean recovery, so a
+  compensated invisible sequence is a harmless gap. Pull, snapshot, future
+  cursor checks, and ACK use this value even after all visible rows are pruned,
+  and always preserve `retention_floor <= current_cursor`.
+- Sync cursors, ACKs, page tokens, and recovery manifests bind the Space,
+  client, catalog hash, and recovery generation. A fresh, expired, or
+  catalog-mismatched client remains `requires_recovery` until it completes the
+  current generation and ACKs exactly that generation's waterline.
+- Every unexpired current recovery manifest waterline participates in the
+  retention minimum while its client downloads. Pruning cannot advance past a
+  recoverer's final ACK waterline; expiry releases the pin, invalidates the old
+  token, and requires a new generation. Superseded/expired manifests are
+  collected under the Space-exclusive lease and chunks cascade-delete.
+- A recovery response is exactly one persisted whole chunk and has no public
+  `limit`. It carries raw uncompressed canonical JSONL bytes as base64,
+  `entity_count`, SHA-256, opaque next-page token, catalog hash, and opaque
+  waterline cursor. Clients hash decoded bytes before parsing and never verify a
+  cross-language reserialization.
+- A clean pushed event is in `applied` with no resolution; successful
+  remote-wins LWW is in `applied` with `resolution="remote"`. Local,
+  tombstone, circular-reference, and unresolved CAS outcomes are mutually
+  exclusive conflicts or errors and never masquerade as applied work.
+- V2 retains canonical `client_updated_at` from the durable official outbox.
+  The S3 compiler, while holding Space-exclusive, is the only owner of the
+  CAS/LWW comparison. Timestamp and successful remote resolution are covered by
+  request/command hashes and terminal result JSON; retry and recovery never use
+  the current clock or recompute a resolution.
+- REST and MCP share one canonical event parser with per-event, event-count,
+  and aggregate UTF-8 byte ceilings. The official frontend routes all six v2
+  operations -- query, push, pull, recover, ACK, and status -- through one
+  transport helper that forces
+  `Accept: application/vnd.pomodoroxii.error+json;version=2`, including retries.
+- The pinned canonical implementations are Python `rfc8785==0.1.4` and npm
+  `json-canonicalize@2.0.0`, exercised by shared valid/invalid vectors and real
+  REST/MCP exact-boundary and plus-one tests. Limits are 256 KiB per event,
+  500 events, 10 MiB canonical batch, 11 MiB raw HTTP body, and 8 MiB pull or
+  recovery page; configuration validation requires the raw cap to cover the
+  canonical cap plus fixed framing headroom and the event cap not to exceed the
+  batch cap.
+- Recovery ACK requires a current, unexpired manifest matching Space, client,
+  catalog, generation, token, and waterline. Garbage collection clears client
+  completion pointers before deleting an expired manifest. Persisted gzip is
+  decoded with an `8 MiB + 1` output bound and rejects size mismatch,
+  concatenated members, and trailing data before returning bytes.
+- Incremental pull rejects any cursor above `SyncState.current_cursor`. ACK of
+  the already persisted exact generation/waterline is idempotent across a lost
+  response and process restart; backward, future, cross-client, cross-Space,
+  expired, or mismatched ACKs fail closed. Expired client rows and their
+  superseded manifests have bounded, lease-protected garbage collection so the
+  registry cannot grow without limit.
+- Before network I/O the frontend durably freezes the complete pending push
+  batch: client ID, batch ID, ordered operation IDs, canonical event snapshots,
+  and idempotency header. Timeout, cancellation, 5xx, malformed response, or a
+  committed-but-lost response replays byte-equivalent content after restart.
+  Concurrent edits receive successor operation IDs, six generated response
+  shapes pass explicit runtime parsers before state mutation, and a response
+  with zero applied work and zero queue shrink terminates the current cycle.
+- Startup recovery uses S2's internal `runtime.borrow_prepared_space(...)`
+  context. Its handle has both lease-ownership flags false, so per-Space
+  filesystem/engine resources close under that Space's exclusive lease while
+  bootstrap retains and releases its global-exclusive/process-owner exactly
+  once after all Spaces or primary-first cleanup.
+- Bootstrap calls the S1 short-lived credential-epoch helper and stores only a
+  stateless fresh-session verifier. `CredentialAuthority(AsyncSession)` never
+  survives its Meta session. `MigrationCoordinator.upgrade_under_lease()` is
+  the sole drain/resume owner; Space preparation must not nest another quiesce.
+- Every evidence producer uses the closed S0 v1.0 record with stable
+  `evidence_id`, exact `subject_sha`, command/cwd, closed runtime identity,
+  ordered RFC3339 timestamps, consistent exit/result, artifact hash and byte
+  size, trust level, unique `modules`, unique `finding_ids`, and unique
+  certification tags. Its envelope is validated against an explicit
+  `artifact_root`; bundle-relative and controlled
+  `external://pomodoroxii-test-artifacts/...` paths are contained and rehashed
+  by every consumer. Release and drills emit these records rather than
+  unaudited receipt arrays.
+- Certification tags are never claimable from an artifact-free record. A
+  nonempty tag set requires a concrete path/hash/size triple whose contained
+  bytes were rehashed successfully by the consumer. S0 locks the complete
+  baseline evidence-ID set, reads every nonexternal baseline artifact from the
+  audited target Git object regardless of ID spelling, validates timestamps
+  against a strict RFC3339 lexical grammar before aware parsing, and accepts
+  score dimensions only when their exact type is non-Boolean integer `0..20`.
+- S1 freezes and recursively thaws canonical error details through the sole
+  `app/errors.py::to_wire_json(value: object) -> JsonValue` serializer imported
+  by REST, MCP, S3, and S4; `dataclasses.asdict()` and a shallow `dict(details)`
+  are not transport contracts. Stored S3 rejection details use the same
+  recursive freezer before hashing or persistence and preserve byte-equivalent
+  wire JSON after source mutation and restart.
+- `ContainedSpacePaths` remains a four-field non-authority registration snapshot.
+  `SpaceContainmentCapability.open_verified()` does not yield it to a storage
+  consumer. The capability itself performs the kernel open with POSIX
+  descriptor-relative `openat`/no-follow semantics or Windows identity-bound
+  handles that reject reparse traversal and rename/delete sharing, then yields
+  only opaque `ContainedSpaceOpens`. SQLite, Notes, and index consumers bind to
+  those already opened identities and cannot reopen a host path. Tests swap an
+  ancestor after the final identity check but before the kernel-open hook; no
+  outside read, write, journal, or index side effect is permitted.
+- SQLite identity binding is a deep native Module, not a pathname connector.
+  A packaged C17 loadable extension registers `pxii-vfs` in the same stock
+  `sqlite3` library at controlled bootstrap. A private control connection binds
+  an unforgeable token to duplicated open main/parent authority or one-shot
+  isolated-create authority; SQLite receives only
+  `file:pxii-<token>?vfs=pxii`. Bootstrap may discover the packaged extension
+  path, but no database host path crosses the storage seam or is reopened after
+  binding. Linux companions use openat2/openat/unlinkat and Windows companions
+  use `NtCreateFile(RootDirectory=...)` without reparse traversal.
+- `BoundSQLiteTarget` exposes only `identity`, `make_async_engine(options)`,
+  `open_maintenance(options)`, and `aclose()`. Callers never observe URI/token,
+  fd/HANDLE, sidecar, or raw connector. The VFS implements open/access/delete/
+  full-path, locking, WAL shared memory, fsync/delete, and deferred-close POSIX
+  lock semantics; it denies ATTACH, arbitrary extension loading, and unsafe
+  PRAGMAs. CPython 3.13 Windows x64/Linux x86_64 wheels, swap isolation, WAL and
+  hot-journal recovery, cross-process locks, AsyncSession/savepoint/Alembic,
+  cancellation, pool disposal, and revocation are a hard feasibility gate.
+- `AsyncEngineOptions` and `MaintenanceOptions` are concrete frozen records.
+  Invalid pool/timeout values fail construction; read-only plus create is
+  invalid, and `create_if_missing` succeeds only for a one-shot isolated-create
+  binding. Provision markers validate nonce and anchored parent only, then call
+  the S1 package-private binder. S2 never enumerates companion suffixes.
+  Isolated success is target-close then authority commit; failure is
+  target-close then authority discard, with either sequence retained for
+  same-Task retry if not physically terminal.
+- `pxii-vfs` handles every stock SQLite open class and `zName == NULL` without
+  default-VFS fallback: MAIN_DB and exact journal/WAL/SHM stay relative to the
+  bound parent; TEMP_DB, TRANSIENT_DB, TEMP_JOURNAL, SUBJOURNAL, MEMORY, and
+  DELETEONCLOSE use an authority-owned anonymous temp root. SUPER_JOURNAL is
+  explicitly rejected with ATTACH disabled. Ambiguous flag combinations fail
+  before I/O; savepoint, sort, TEMP-table, and hot-journal tests prove zero
+  outside access.
+- CI publishes stable `pxii-vfs-wheel-manifest-v1` evidence with native source
+  tree/input hashes, toolchain IDs, wheel hash/size, and unpacked extension
+  hash/size/build-id for both platforms. Linux image/release consumers use the
+  attested wheel rather than implicitly recompiling it.
+- Lease and engine release are retryable state machines. Each completed cleanup
+  callback/phase is recorded exactly once; `_released` and the ContextVar order
+  token change only after every callback succeeds. Body failure or cancellation
+  remains the primary exception and simultaneous cleanup failures are appended
+  in deterministic `[primary, *cleanup]` order. Read, write, startup, shutdown,
+  REST, and MCP paths all use the same pending-cleanup ownership rule.
+- `run_joined_thread` and package-private `run_joined_awaitable` join worker and
+  terminal effects through repeated cancellation. `on_success` commits terminal
+  state in the owner Task before the original cancellation is rethrown; a
+  cancelled resource result is disposed instead of published. A newly opened
+  portal stream is wrapped and appended to the caller-owned acquisition record
+  synchronously before the first `portalocker.lock` await, so failure before
+  helper return is still registered. Portal acquire has one idempotent cleanup
+  owner. `_PortalHandle`, `ProcessOwnerReceipt`, and
+  `_ReleaseStage` never mark terminal state only after an await, and every
+  post-process-owner-acquire failure compensates through Lease publication.
+- The general awaitable helper uses `asyncio.ensure_future` (or narrows its type
+  to Coroutine); it never passes an arbitrary Awaitable/Future to
+  `create_task`. Cancellation order is exactly
+  `[original_cancel, *later_cancels, *terminal_errors]`.
+- Global/Space acquisition cleanup uses physical-terminal `_ReleaseStage`s in
+  reverse dependency order. A stage may advance after cancellation only when
+  its physical receipt is complete. Generic `PendingCleanup(owner_task, retry,
+  holds)` strongly retains exact OS/local resources and parent lineage; all
+  register/complete/retry/readiness/process-exit APIs are runnable, same-Task,
+  stable-order code. Persistent cleanup raises the defined
+  `RuntimeCleanupPendingError(code="runtime_cleanup_pending")` and blocks
+  readiness and parent release.
+- `SyncState` has a migration-owned durable invariant
+  `0 <= retention_floor <= current_cursor`, including legacy validation, ORM
+  checks, and raw-SQL rejection tests. Invisible append and cursor allocation
+  remain one transaction; pruning never derives the allocated watermark from
+  surviving rows.
+- Retention eligibility changes only through durable client state. A TTL- or
+  catalog-ineligible client continues to pin at its ACK until its bounded
+  transition commits; any still-referenced manifest continues to pin at its
+  waterline even when its wall-clock expiry passed. Floor queries contain no
+  wall-clock/catalog shortcut that can skip an unprocessed page. More-than-one-
+  batch tests cover low ACKs, catalog drift, expired manifests, crash, and retry.
+- REST v2 validation begins with the capped raw request bytes. A duplicate-
+  preserving decoder rejects repeated member names at every nesting level and
+  all other non-I-JSON inputs before the shared semantic parser. Python and
+  TypeScript contracts share exact UTC RFC3339 grammar, non-Boolean JavaScript-
+  safe integers, 500-record and 8 MiB decoded page caps, and the corresponding
+  bounded base64 representation.
+- Incremental pull budgets the tentative canonical whole response before each
+  append, including event-array/object framing, the exact next cursor,
+  `has_more`, and catalog hash. An event that would cross 8 MiB is deferred to
+  the next page and later delivered exactly once; final response construction is
+  an assertion, not the first place an oversize page can be discovered.
+- A durable pending push stores the exact idempotency header, canonical request
+  and per-event bytes, ordered operation identity, and SHA-256 receipts. Restart
+  rehashes and replays those bytes directly; it never regenerates a header or
+  reserializes mutable application objects.
+- For one target SHA, the trusted `push` on `refs/heads/main` is the only image
+  build/push owner. Release consumes and verifies that immutable digest and its
+  provenance, then produces SBOM, scan, signature, upgrade, restore, and deploy
+  evidence without rebuilding.
+- The release DAG is `publish -> drills -> read-only release aggregator`.
+  Matrix expansion, reusable invocation, and reruns cannot create a second
+  build owner. Jobs use exact least privilege; artifact download is pinned to
+  `d3f86a106a0bac45b974a628896c90dbdf5c8093`. With only `contents: read`,
+  `actions: read`, and `checks: read`, the aggregator independently bounded-
+  polls the same full SHA, fully paginates Checks, Actions runs/jobs, and
+  artifacts, and cross-checks event/ref/workflow/run/attempt/artifact identity.
+  A publish selector receipt is only a hint. Zero, duplicate, failed,
+  cancelled, timed-out, ambiguous, or incompletely paginated identities fail.
+- Fresh deploy certification allocates a never-existing run-unique volume,
+  proves its mounted data root empty through a digest-pinned read-only probe
+  container whose retained create argv and raw inspect bytes bind the exact
+  volume name/source to `/app/data`, then prepares UID/GID 1000 ownership with
+  a separate digest-pinned init container. It records volume identity and
+  probe/prepare/mount/deploy/smoke receipts and proves exact cleanup afterward.
+  Empty-root and post-remove not-found claims retain the raw command, stdout,
+  stderr, timestamps, exit code, artifact path, hash, and byte size so an
+  independent consumer can rehash the proof rather than trust a reported count.
+- The first N-1 proof pins the complete commit
+  `1e4f0fc6d82ce6203f4bada0e84b518b16fcd97f`. Docker must return the exact
+  not-found condition before volume creation, and cleanup ownership is installed
+  immediately afterward. Baseline population executes only from that archived
+  source and its frozen runtime; target-worktree Python imports, Alembic config,
+  and migration locations are forbidden before the `meta_001`/`space_008`
+  receipt exists. Release indexing excludes the index itself and future
+  aggregate evidence to prevent self-reference.
+- Trusted CI/release selection binds event, ref, full SHA, workflow ID/path,
+  run ID/attempt, artifact identity, and trust level. The required policy
+  workflow runs only on pull requests and trusted-main pushes; the manual
+  certification workflow has a distinct name/context and never emits that
+  required context. Required checks bind context plus GitHub App and eligible
+  workflow/event/run identity, so one current manual dispatch cannot become a
+  duplicate required-check candidate. Branch protection is a complete fail-
+  closed normalized policy, including bypass and restrictions.
+- S6 tracked-input eligibility is equality of the reviewed path/hash set read
+  from the target Git object; it does not inherit a prior S6 implementation
+  commit or shell variable. This content rule does not waive S5's separately
+  evidenced producer-before-activation history: the producer and activation
+  commits must remain distinct and reachable by the target. Squash/rebase of
+  S6-only documentation is acceptable when content remains exact, while
+  squashing the S5 producer/activation pair makes release evidence ineligible.
+- N-1 and rollback receipts bind the Meta/Space migration heads, compiled
+  catalog hash, IndexStore schema version, declared tables/FTS/ordinary indexes,
+  and a complete file inventory with hashes at baseline, upgraded, restored,
+  and rolled-back stages. File existence alone is not index or rollback proof.
+- The release required context has two explicit event branches: pull requests
+  skip all publishing producers and pass the same context through static
+  validation only when both predecessors are skipped and otherwise run an
+  explicit nonzero `Reject invalid PR predecessors` step; trusted main pushes require `publish` and
+  `drills` to succeed before the read-only aggregator may pass. Workflow tests
+  assert exhaustive, mutually exclusive event and `needs.*.result` conditions.
+  An event-triggered consumer may be activated only by an activation commit
+  whose first-parent ancestry already contains every referenced producer/tool
+  and focused test. Same-commit producer creation/modification is forbidden;
+  the activation commit changes only the consumer workflow and its contract
+  tests, and it may not be squash-merged with the producer commit.
+- S5 creates the sole
+  `backend/app/audit/producer_contracts.py::PRODUCER_CONTRACTS` authority before
+  release aggregation, including reserved S6 matrix producers. Its computed
+  `S5_INPUT_PRODUCERS` excludes output-only `release`; S6 imports the complete
+  mapping unchanged and cannot shadow or extend it. Fault, security, and
+  resource matrices each emit a closed S0 envelope with stable evidence IDs;
+  closure validates every `(finding_id, required_tag)` pair rather than a global
+  tag union. Certification resolves each artifact under its declared root,
+  rejects symlink/path escape, rehashes bytes, compares the exact tracked-input
+  set, and verifies detached verifier/tool bytes before trusting their output.
+- REST and MCP remain thin Adapters over the same operation catalog. The MCP
+  protocol factory is an async context manager and closes its authorized
+  `SpaceRuntimeHandle` on success, domain failure, unexpected failure, and
+  cancellation.
+- S6's pull measurement counts the full 512-event traversal exactly and records
+  a separate `max_page_events <= 500`; a page cap is never confused with the
+  traversal total. Detached certification creates a run-scoped frozen/offline
+  Python environment from the target `uv.lock`, hashes the synchronized Python
+  executable with `sha256sum`/`Get-FileHash` against the target lock before its
+  first version or verifier invocation, records interpreter and installed
+  distribution identities, and similarly records Node/runtime dependency
+  integrity. Every later local shell repeats that Python pre-execution hash and
+  version gate. Its detached tooling worktree is also fresh and run-ID-scoped;
+  every pre-execution gate rejects tracked changes plus all untracked and
+  ignored files, so no reusable checkout or shadow module can influence a
+  receipt. Python uses isolated startup, and every npm/Playwright/Node launch
+  rejects nonempty `NODE_OPTIONS` before a preload can run. GitHub artifacts
+  first land as raw ZIPs in an empty quarantine and
+  pass the detached central-directory gate before atomic publication into a new
+  local evidence root. That gate caps members at exactly 10,000 and rejects
+  links/special files, ADS colons, Win32 reserved device names, control
+  characters, trailing dots/spaces, and case/Win32-normalization collisions in
+  addition to absolute/drive/UNC/backslash/dot/parent paths and size limits.
+  Independent local report JSON/screenshots stay under quarantine and are never
+  inserted into or published with the workflow-indexed staged bundle. After an
+  in-process final rehash, publication uses a same-volume OS atomic no-replace
+  primitive (`MoveFileExW` without replace or `renameat2(RENAME_NOREPLACE)`),
+  so an existing destination fails atomically and recursive copy is forbidden.
+- Git and GitHub CLI are part of the closed per-platform S6 toolchain lock, not
+  ambient PATH trust. Workflow and local shells bind absolute executables,
+  verify hash plus normalized version before their first authority-bearing
+  fetch/ref/protection/run/API call, pass those bindings into runtime receipts,
+  and use only `$GIT`/`$GH` afterward. Every later local shell repeats the
+  hash/version check; operator-facing certification command snippets are held to
+  the same rule and reject ambient `git`/`gh`. A re-resolved Node executable is
+  likewise checked before the report verifier runs.
+- Certification policy owns a complete closed set of module/dimension criterion
+  IDs and a complete evidence-binding map. Each criterion has explicit weight,
+  required evidence IDs/tags/classes, and a machine-verifiable predicate; the
+  verifier derives every `0..20` dimension, module composite, minimum module,
+  and backend mean from satisfied criteria. No score or `97.0/96` summary is a
+  trusted input. Removing, downgrading, or invalidating evidence must lower the
+  derived score or reject certification.
 
 ### RecoveryCoordinator
 
@@ -586,8 +1108,9 @@ sequenceDiagram
     D-->>U: business commit durable
     U->>D: operation FINALIZING
     U->>F: idempotent projections + step hashes
-    U->>D: operation FINALIZED + result
-    U->>L: batch events visible
+    U->>D: each accepted child FORWARD_APPLIED
+    U->>D: batch + children FINALIZED + stored result
+    U->>L: batch events visible in the same commit
     U-->>A: result + version + operation_id
 ```
 
@@ -638,12 +1161,16 @@ canonical code, retryability, and request ID are also carried in
 Clients that explicitly send
 `Accept: application/vnd.pomodoroxii.error+json;version=2` receive the canonical
 five-key record shown above. This opt-in Adapter is additive; the default REST
-v1 representation does not gain keys.
+v1 representation does not gain keys. The official Sync v2 client always opts
+in through one shared request helper for query, push, pull, recover, ACK, and
+status;
+its recovery classifier therefore never depends on a legacy alias body.
 
 Legacy aliases are explicit: `auth_required -> authentication_error`;
 `forbidden` and `path_outside_space -> authorization_error`;
 `space_not_found -> not_found`; `space_storage_missing`,
 `space_recovery_required`, and `lease_timeout -> service_not_ready`;
+`active_session_recovery_required -> service_not_ready`;
 `version_conflict`, `cycle_detected`, `idempotency_conflict`, and
 `cursor_upgrade_required -> conflict`; `cursor_expired -> sync_cursor_expired`;
 and `snapshot_invalid -> validation_error`. Contract tests verify both the exact
@@ -657,7 +1184,13 @@ Stable codes include:
 - `version_conflict`, `cycle_detected`, `idempotency_conflict`;
 - `lease_timeout`;
 - `cursor_upgrade_required`, `cursor_expired`;
-- `space_recovery_required`, `snapshot_invalid`.
+- `space_recovery_required`, `active_session_recovery_required`,
+  `snapshot_invalid`.
+
+`active_session_recovery_required` is canonical HTTP 503 with
+`retryable=true`: the caller retries only after request/startup recovery or
+operator repair can prove the unique global owner. REST v1 keeps the
+`service_not_ready` alias and never presents the locator as empty.
 
 Internal exceptions never expose absolute host paths, SQL, secrets, tokens, or
 password material. Retryability is explicit. MCP transport errors preserve the
@@ -670,7 +1203,12 @@ same code and details rather than reducing failures to prose.
 Deliverables:
 
 - lock the nine-module scoring worksheet and evidence schema;
+- require tagged evidence to resolve and rehash a concrete artifact, lock the
+  complete evidence-ID set, strict RFC3339, and exact audited-Git blobs;
 - capture exact target commands and test inventory;
+- execute audited baseline imports/tests only from a clean detached worktree at
+  the full audited SHA with the frozen lock, and record that worktree/runtime
+  identity; untracked primary-worktree Python can never inherit that subject;
 - classify every finding as confirmed, inferred, or unverified;
 - add `pytest-cov>=6.0` to the development dependency group and refresh the
   locked environment so the final coverage command is executable;
@@ -694,7 +1232,10 @@ Deliverables:
 
 - `CredentialAuthority` and explicit password/secret policy;
 - authenticated MCP HTTP and explicit trusted-stdio mode;
-- `AuthorizedSpaceScope` containment before any engine creation;
+- JSON-safe frozen error-detail parity across REST and MCP;
+- `AuthorizedSpaceScope` protected-open containment before any engine creation,
+  including descriptor/HANDLE-relative kernel opens, final-check-to-open swap
+  resistance, and distinct storage roles without yielding authoritative paths;
 - legacy cursor unsafe-shape rejection;
 - retention endpoints disabled until client ACK exists;
 - legacy default Alembic entry fails with named-environment instructions;
@@ -718,6 +1259,10 @@ Deliverables:
   and fsync;
 - shared/exclusive `RuntimeLeaseCoordinator` with ordering, timeouts, fencing,
   and awaited engine handles;
+- primary-first `AuthorizedSpaceScope` acquisition/cleanup with bounded pending
+  ownership, read-resource close-before-upgrade, and recovery preflight;
+- retryable per-phase lease/engine cleanup that marks release only after every
+  callback succeeds and preserves body/cancellation as the primary failure;
 - startup migration for Meta and every registered Space before Uvicorn;
 - provision-and-migrate-before-register Space creation;
 - authoritative Meta path resolution and missing-store failure;
@@ -744,6 +1289,10 @@ Deliverables:
 
 - `KnowledgeStore` and `MutationUnitOfWork`;
 - durable operation journal and per-Space lease;
+- one S1 `AppError` rejection/idempotency carrier and authoritative
+  `SyncState.current_cursor` advanced with invisible append;
+- recursively frozen stored rejection details plus migration/ORM/raw-SQL proof
+  of `0 <= retention_floor <= current_cursor`;
 - Folder projection into filesystem index;
 - Note content, metadata, move, trash, restore, purge, and version consistency;
 - QuickNote conversion idempotency;
@@ -769,10 +1318,19 @@ Space.
 Deliverables:
 
 - all Sync-enabled mutation paths emit ledger events through the Unit of Work;
-- opaque v2 cursor and complete recovery contract;
+- opaque v2 cursor with future-watermark rejection and complete recovery
+  contract;
 - client registry, ACK waterline, safe ledger/tombstone retention;
+- durable-state-only retention pins across bounded TTL/catalog/manifest cleanup;
 - chunked resumable snapshot with catalog hash and memory bound;
-- complete MCP push, pull, recover, and status delegation;
+- durable official-client pending push batches, successor operations, runtime
+  response parsers, exact idempotency/canonical-byte receipts, and lost-response
+  replay without reserialization;
+- capped duplicate-preserving raw JSON decoding, safe integers, strict UTC
+  RFC3339, and shared record/decoded/base64 response bounds;
+- complete MCP query, push, pull, recover, ACK, and status delegation;
+- one official-client v2 transport helper that sends the canonical error media
+  type on all six operations;
 - generated or bidirectional REST/MCP operation parity tests.
 
 Exit gate:
@@ -789,6 +1347,8 @@ Chunks contain at most 500 entities and at most 8 MiB uncompressed. The test
 uses `tracemalloc` to require at most 128 MiB peak Python heap, while the Linux
 system gate uses `/usr/bin/time -v` to require at most 256 MiB maximum RSS. The
 snapshot must resume after every chunk boundary without duplicate or loss.
+The S6 evidence run also measures bounded incremental pull with the same
+deterministic fixture; a snapshot-only memory probe is insufficient.
 
 ### S5: Recovery And Production Delivery
 
@@ -800,15 +1360,32 @@ Deliverables:
 - JUnit, coverage, logs, and failed-sandbox CI artifacts;
 - dependency audit, action pinning, base-image digest, image scan, SBOM,
   signature, and provenance;
+- one trusted-main publish followed by drills and a read-only release
+  aggregator that fully paginates and binds same-SHA evidence;
+- the sole frozen S5/S6 producer contract map and a non-self-referential release
+  input view;
 - non-root bind-mount preparation, digest deployment, upgrade, and rollback
   runbooks with executable smoke gates.
 
-For the first 95+ certification, N-1 is fixed to backend commit `1e4f0fc`.
-S0 records a deterministic populated Meta/Space/Index/Notes fixture manifest;
-S5 builds the N-1 container from that exact commit, records its local digest,
-upgrades the fixture with the target image, then restores and rolls back to the
-recorded baseline. Later releases replace this fixture with the previous signed
-production digest rather than silently moving the reference.
+For the first 95+ certification, N-1 is fixed to backend commit
+`1e4f0fc6d82ce6203f4bada0e84b518b16fcd97f`.
+S0 records a deterministic populated Meta/Space/Index/Notes fixture manifest.
+The fixed legacy-bearing fixture remains a negative lane with `tasks=1`: target
+startup must fail closed with `breaking_cutover_requires_empty_legacy`, and its
+before/after inventory must be byte-identical. A separate
+`n_minus_one_empty_legacy_manifest.json` is the only positive upgrade lane. S5
+builds the N-1 container from that exact commit, records its local digest, uses
+the drill-only `n_minus_one_baseline` manifest for old-model backup/rollback,
+upgrades the empty-legacy fixture with the target image, and creates the
+production S5 final-model snapshot only after that upgrade. Later releases
+replace these fixtures with the previous signed production digest rather than
+silently moving the reference.
+The fixture and every drill stage also bind both migration heads, catalog hash,
+IndexStore schema and declared table/FTS/index objects, plus a complete hashed
+file inventory. Fresh-volume empty/not-found claims retain independently
+rehashable raw stdout/stderr command artifacts. Pull requests pass the stable
+release context through static validation, while trusted main pushes require
+successful publish and drills before aggregation.
 
 Exit gate:
 
@@ -827,10 +1404,24 @@ Deliverables:
 
 - clean-checkout full backend suite and static gates;
 - consolidated fault matrix, security matrix, and resource tests;
+- three closed S0 matrix envelopes with stable IDs and bounded pull evidence;
 - exact-SHA GitHub required checks and branch protection evidence;
 - release candidate image digest and provenance;
-- final module scoring worksheet and standalone HTML certification report;
+- authoritative producer contracts, per-finding required-tag closure,
+  containment/rehash, exact tracked-input equality, and detached tool integrity;
+- a 512-event pull traversal receipt with separate `max_page_events <= 500`;
+- quarantine extraction plus a detached, lock-frozen Python/Node verifier runtime;
+- complete criterion/evidence bindings and a derived module scoring worksheet,
+  never a prefilled certification score;
+- standalone HTML certification report;
 - README, deployment, recovery, and incident runbooks aligned with behavior.
+
+The final-model gate independently verifies all seven predicates: final Space
+head, final Meta head, catalog version/count, Dexie version, legacy
+Task/Session authority absence, active-session coordination classified
+`clean_or_recoverable`, and EffortProjection classified `verified`. A stored
+summary cannot substitute for `ActiveSessionCoordinationInspector.inspect_read_only`
+or `EffortProjectionCompiler.verify_all` evidence.
 
 Exit gate:
 
@@ -879,6 +1470,17 @@ The fixed modules are Runtime/Auth, Migration/Space Lifecycle, Registry/Meta,
 Entity Commands, Sync Push, Sync Pull/Recovery, Notes/FS, Deploy/Operations, and
 MCP.
 
+S6 does not prefill those scores. `certification-policy.json` contains a closed
+rubric for all 45 `(module, dimension)` cells. Each cell's criteria have stable
+IDs and exact integer weights summing to 20, and each criterion names its
+required evidence binding and executable predicate. `evidence-bindings.json`
+contains every referenced binding, not an example plus implementation prose.
+The independent verifier recomputes satisfied criterion weights from contained,
+rehashed, exact-SHA evidence and rejects unknown, missing, duplicate, or unused
+criteria/bindings. Tests remove and downgrade evidence and prove the derived
+dimension/module/backend result falls or certification fails. Displayed scores
+and summaries are outputs only.
+
 Certification requires:
 
 - backend composite at least 95.0 before rounding;
@@ -888,6 +1490,10 @@ Certification requires:
 - scanned digest image with SBOM, signature, and provenance;
 - fresh-volume deploy, N-1 upgrade, full restore, and rollback drills;
 - High confidence for every module.
+
+Therefore 95+ is an acceptance target, not a result asserted by this planning
+artifact. Until S6 derives the score from complete same-subject evidence, the
+current audited baseline and hard caps remain authoritative.
 
 Hard caps:
 

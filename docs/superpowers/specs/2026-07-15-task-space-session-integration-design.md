@@ -1,8 +1,8 @@
 # PomodoroXII Task Space + FocusSession Integration Design
 
 > Date: 2026-07-15
-> Status: review candidate; design decisions were confirmed in dialogue, but this
-> written specification still requires user review
+> Status: approved; design decisions and this written specification were
+> confirmed by the user on 2026-07-15
 > Scope: first authoritative PomodoroXII integration of Task Space,
 > WorkItemNote, and FocusSession
 > Delivery state: planning only; this document is not implementation or 95+
@@ -47,6 +47,11 @@ its pure-text WorkItemNote, reduced command handling, and compatibility choices
 are superseded where they conflict with this reviewed design. The copied source
 files remain unchanged.
 
+The archive README and `analysis/` files record the pre-approval research
+snapshot. Their open-question wording is provenance, not current decision
+status; this approved specification and its implementation plans are the local
+authority for every resolved boundary below.
+
 ## 3. Locked Product And Compatibility Decisions
 
 The following decisions are normative for this design:
@@ -54,9 +59,45 @@ The following decisions are normative for this design:
 - There is no real user data to migrate.
 - Breaking changes are accepted.
 - The legacy `/api/v1/tasks` contract, `task` Sync key, and old-client
-  compatibility are not retained.
+  compatibility are not retained. The `session`, `taskQuickNote`, and
+  `sessionQuickNote` Sync keys and their plural pull/table keys are absent as
+  well.
 - No dual read, dual write, compatibility shadow, or legacy Task-to-WorkItem
   conversion path is introduced.
+- Backend startup applies one fleet-wide read-only cutover preflight to Meta and
+  every registered Space before any recovery write, backup/checkpoint, Alembic
+  DDL, index rebuild, or replacement. One rejecting Space leaves the entire
+  data-root inventory byte-identical.
+- Frontend Dexie v18 uses one native, exclusive versionchange transaction. Once
+  every v17 connection has received `versionchange` and closed, the transaction
+  performs a read-only scan before any DDL and then removes `tasks`, `sessions`, `sessionEvents`, `sessionContexts`,
+  `cognitiveMarks`, `taskTags`, `taskRelations`, `focusPatterns`,
+  `taskQuickNotes`, and `sessionQuickNotes`; surviving QuickNote, TimeBlock,
+  Reflection, and report types contain no legacy Task/Session references. Any
+  removed-store row, removed reference, or old outbox row aborts that transaction
+  before DDL, so the database remains at v17 with byte-equivalent logical
+  inventory. Only a clean scan may apply v18 schema changes later in the same
+  transaction; a separate probe/open sequence is forbidden because it permits a
+  concurrent v17-writer race. Dexie opens through a typed factory rather than an
+  incompatible `open()` override. All old types, stores, fixtures, and tests are
+  removed or migrated before the first v18 typecheck gate.
+  Dexie 4 logical v17/v18 map to native IndexedDB versions 170/180; raw upgrade
+  code and preservation tests use 170/180, never 17/18.
+- A test-only frozen active-store oracle, independent from the structured v18
+  schema definition, exact-compares clean install, empty-v17 upgrade, native
+  IndexedDB, and Dexie inventories. Positive upgrade fixtures compare every
+  surviving row field exactly, including nested report configuration and
+  non-legacy Reflection fields. Dexie v18 also owns local
+  `directCommandIntents`, `sessionReviewDrafts`, and
+  `timerNoteComposerDrafts`; S4 v19 carries the complete v18 definitions forward
+  unchanged before adding its protocol stores.
+- Direct online Project/WorkItem create, move, transition, and Session review
+  commands persist one Space-scoped fixed operation ID plus canonical complete
+  request JSON/hash before transport. A server commit followed by response loss
+  or restart resends the byte-identical TS1/TS2/S3 idempotent POST and atomically
+  commits its parsed business cache with terminal intent state. WorkItemNote
+  keeps its outbox path and ActiveSession keeps its locator/Meta-journal path;
+  TS3 does not introduce S4 operation-query.
 - ProjectGroup and Module are not part of this first PomodoroXII integration.
 - Relation, Cycle UI, Orbit, and state-definition management UI are outside the
   first end-to-end slice.
@@ -146,20 +187,38 @@ ActiveSessionCoordinator
 ### 7.1 TaskSpaceCommandModule
 
 This Module owns Project, definitions, WorkItem, tree invariants, formal status
-transitions, WorkItemNote, and Note Item promotion. Its Interface returns typed
-domain outcomes and never HTTP-specific errors.
+transitions, and WorkItemNote. Its Interface returns typed domain outcomes and
+never HTTP-specific errors.
 
 ### 7.2 FocusSessionModule
 
 This Module owns Session start, clock facts, immutable context, attribution
-revisions, plan, outcomes, review, and immutable task-command envelopes. It
-cannot directly update WorkItem status or WorkItemNote.
+revisions, plan, outcomes, review, Session note, and immutable task-command
+envelopes. It cannot directly update WorkItem status or WorkItemNote. Its
+start, pause, resume, end, Session-note, and running-plan methods are invoked by
+the Coordinator for an active Session;
+the public Space-scoped Adapter exposes only history, review, and command
+reconciliation, so callers cannot bypass global ownership.
 
 ### 7.3 ActiveSessionCoordinator
 
 This Module owns application-wide active-Session discovery, leases, ownership
 epochs, explicit takeover, offline provisional activation, and fencing. It does
-not own Session business content.
+not own Session business content. Its master-scoped Adapter is the only public
+running-lifecycle surface. Because a master token has no implicit current
+Space, start and provisional activation explicitly carry `spaceId`; the
+Coordinator authorizes and opens that target internally. Later actions derive
+the owning Space from durable locator/conflict state. Owner-sensitive running
+content methods are exact commands: update Session note, set current plan item,
+set completion draft, add plan item, and remove plan item. They carry current
+device/Tab plus ownership epoch and cannot be sent as ordinary authoritative
+Sync entity updates.
+
+Heartbeat is a lease command and returns only the Meta-owned locator projection.
+It does not duplicate a FocusSession aggregate into Meta; clients refresh full
+Session content through `locate`. End returns the terminal Session aggregate
+plus `locator=null`, while other successful running mutations return the active
+aggregate.
 
 ### 7.4 Frontend Repositories
 
@@ -231,11 +290,67 @@ ActiveSessionLocator
 - ownershipEpoch
 - leaseExpiresAt
 - updatedAt
+
+ActiveSessionOperation
+- operationId
+- kind
+- payloadHash
+- intentJson
+- phase
+- resultDescriptorJson?
+- relatedOperationId?
+- createdAt
+- updatedAt
 ```
 
 The locator is application-wide and unique. Lease timing is an operationally
 bounded configuration; correctness depends on ownership epochs and fencing, not
 on an exact heartbeat interval.
+
+`ActiveSessionOperation` is an internal Meta coordination journal, not a
+business entity and not a Registry/Sync key. It binds an operation ID to one
+canonical, kind-specific intent and payload hash before a locator CAS. For
+cross-Space provisional competition it persists both composite Space/Session
+candidates and owners; for resolution the caller selects only the persisted
+`active|candidate` role, and the journal persists that role, its derived
+winner/loser composite identities, decision timestamp, correction, and the
+conflict operation it resolves. Equal Session IDs in different Spaces remain
+unambiguous because scalar IDs are never the selection key. Recovery reads this
+record and deterministic Space child receipts; it never reconstructs a pair or
+decision by scanning unrelated pending Sessions.
+
+The frontend Meta `ProvisionalOperationRow` mirrors the same immutability for an
+offline start root: it stores canonical full start `intentJson` and
+`payloadHash`, including level-2/level-3 selection, duration, timestamps, and
+expected WorkItem versions. Claim first reads by operation ID. A different
+intent is `idempotency_conflict`; an identical replay returns without changing
+an in-flight or terminal state. Only a new ID may check the active slot and use
+an insert-only write. A terminal provisional row can never be overwritten back
+to `pending`, and changed root intent can never reuse its child IDs.
+
+Every deterministic envelope, receipt, reconciliation, ownership, and recovery
+child consumes Backend 95+ `child-v1`; Task Space does not define a parallel ID
+scheme. The only backend owner is `app.mutation.types`, using
+`childp:<parent-byte-length>:<parent>:<suffix>` when the complete ASCII result is
+at most 128 bytes and otherwise
+`childh:<sha256(b"child-v1\0" + uint16be(parent-byte-length) + parent-bytes + suffix-bytes)>`.
+The parent passes the canonical operation-ID validator and the suffix is 1-512
+allowlisted ASCII bytes. S3 tracks the authoritative vectors at
+`backend/tests/fixtures/task_space_session_child_operation_id_vectors.json`;
+TS3 copies them byte-for-byte to
+`frontend/src/lib/contracts/fixtures/task-space-session-child-operation-id-vectors.json`.
+TS1/TS2/TS3 may only call or port this versioned contract; manual concatenation
+and a second hardcoded hash oracle are forbidden.
+
+`resultDescriptorJson`, once present, is an immutable bounded coordination
+descriptor written atomically with the phase/locator transition that makes the
+operation returnable. It stores only response kind/schema, Meta-owned locator
+projection, intent-named Space/Session/child-operation references, and the
+assembled-response hash; it never copies Space-owned Session content. Exact
+retries validate kind/hash/intent, reauthorize every referenced Space, read the
+original S3 operation result, rebuild and hash-check the response, and return it
+before current-locator/current-epoch checks. This remains valid after `end` has
+removed the singleton; missing or corrupt evidence is recovery-required.
 
 ## 9. WorkItemNote Design
 
@@ -266,15 +381,16 @@ table, or QuickNote conversion.
 The P0 contract supports:
 
 - `paragraph`;
-- `heading`;
-- `ordered_list`;
-- `unordered_list`;
 - `checklist`.
 
-Block and ListItem IDs are stable and unique within the document. Array order is
-the sole ordering authority; no parallel rank field is stored. All list kinds
-have at most two levels. Text leaves are plain text: inline marks, attachments,
-code blocks, embedded media, and a general rich-text toolbar are not P0.
+Block and Checklist item IDs are stable and unique within the document. Array
+order is the sole ordering authority; no parallel rank field is stored. Only
+Checklist items have nested `children` arrays, and their maximum depth is two;
+`parentItemId` is not stored. A Checklist item owns exactly `itemId`, plain
+text, `checked`, and `children`. Paragraphs own plain text directly. Inline
+marks, headings, ordered/unordered list Blocks, attachments, code blocks,
+embedded media, WorkItem-reference items, and a general rich-text toolbar are
+not part of content version 1.
 
 Checklist `checked` is a permanent, cross-device Task Space content fact. It
 does not change WorkItem status, completion time, Session outcome, capacity,
@@ -293,30 +409,24 @@ The closed command set is:
 ReplaceDocument
 AppendBlocks
 ToggleChecklistItem
-PromoteListItem
 ```
 
 Every write carries `commandId`, effective `spaceId`, `workItemId`,
 `expectedVersion`, and a canonical payload hash.
 
 Task Space detail uses `ReplaceDocument` for complete structural editing. Timer
-uses focused append and toggle commands. Callers do not implement document
+renders existing Blocks read-only and uses only `AppendBlocks` to add a new
+paragraph or Checklist; it does not replace existing text, toggle an existing
+Checklist item, reorder, indent, or promote. Callers do not implement document
 validation, CAS, idempotency, or Sync emission.
 
-### 9.4 Promotion
+### 9.4 First-Version Exclusions
 
-Any item in ordered, unordered, or checklist blocks may be promoted online:
-
-- an item under a level-1 or level-2 source creates a child WorkItem;
-- an item under a level-3 source creates a sibling under the same level-2
-  parent;
-- the original item becomes a WorkItem reference and no longer owns checked
-  state;
-- the new WorkItem retains source Note/Block/Item traceability.
-
-Creating the WorkItem and replacing the source item is one idempotent UoW.
-Promotion is disabled offline because it creates a formal Task Space entity.
-Batch promotion is outside P0.
+Content version 1 has no Note Item-to-WorkItem promotion command, route, schema
+variant, source-trace column, or UI action. Formal WorkItems are created only
+through the explicit WorkItem command path. Adding promotion or richer Block
+kinds requires a later `contentVersion` amendment and migration design; it
+cannot be introduced as an unversioned extension of v1.
 
 ### 9.5 Conflict Handling
 
@@ -360,6 +470,13 @@ status. Timer UI state and remaining seconds are rebuildable projections.
 
 Only Sessions whose latest Attribution revision is effective and whose validity
 is `valid` contribute focused seconds to the level-2 EffortProjection.
+The approved materialization is `WorkItem.effortActualSeconds`; it is not an
+independent business entity. FocusSession policy is its sole writer and
+recomputes impacted level-2 totals from terminal valid Sessions in the same S3
+UoW as validity, terminal-time, or effective-attribution changes.
+Task Space and Sync callers cannot assign the column. Projection writes bump the
+WorkItem version and emit its complete post-image; command-receipt success or
+failure never changes the formula.
 
 ## 11. End-To-End Product Flow
 
@@ -399,18 +516,33 @@ Timer exposes:
 - the same-parent level-3 plan;
 - one current level-3 item;
 - reversible completion drafts;
-- focused WorkItemNote paragraph/checklist editing and quick list append;
+- read-only existing WorkItemNote content plus paragraph/checklist append;
 - independent Session free text;
 - pause, resume, and end controls.
 
-The complete five-Block editor lives in Task Space detail. The first internal UI
-slice may expose only paragraph and checklist editing, but storage, validation,
-rendering, API, and Sync use the five-Block v1 contract from the start. P0 exit
-requires complete five-Block editing and single-item promotion.
+Task Space detail and Timer both use the same paragraph/checklist v1 authority.
+Task Space detail provides complete structural editing for those two Block
+kinds; Timer exposes an append-only compact composer over a read-only preview.
+Persistence is always the structured Block document and never a pure-text
+shadow.
+
+The Timer composer has separate local recovery state, also structured as
+`contentVersion: 1` paragraph/checklist draft data and explicitly keyed by
+`(spaceId, workItemId)`. It does not mutate WorkItemNote until explicit append.
+Blur, unmount, current-item change, Space switch, logout, and reopen persist or
+hydrate that exact key. Current-item change persists A before hydrating B; A can
+never append through B. Successful append clears only the submitted key, while
+validation, CAS, or transport failure retains the exact draft. Before append,
+the draft also persists one fixed operation ID and exact Block intent. If the
+Note/outbox accepts that intent but local draft deletion fails, reopen proves
+the same Block/operation is already locally applied and performs cleanup only;
+it never presents or sends the committed draft as a fresh append.
 
 Note autosave durably flushes to the current Space Dexie/outbox after about
 800 ms of inactivity and before current-item change, blur, Session end, or Space
 switch. The forced flush is local durability, not a blocking network roundtrip.
+Timer composer and Session review draft registries join that same critical
+old-Space flush barrier without auto-submitting either draft.
 
 ### 11.3 Space Switch And Cross-Tab Behavior
 
@@ -466,14 +598,32 @@ sessionRevision
 workItemId
 expectedVersion
 targetTransition
+replaySafe              // immutable server declaration
 payloadHash
 createdAt
 ```
 
+Each reconciliation invocation carries the closed business payload
+`{commandIds, replaySafe, abandonCommandIds, decisionAt}`.
+`abandonCommandIds` is a unique subset of `commandIds`; it requires one
+canonical `decisionAt`, while an empty set requires `decisionAt=null`. The
+request replay flag is caller permission for that invocation; it is not an
+envelope fact and cannot upgrade an envelope whose server-declared `replaySafe`
+is false.
+
+The client persists one reconciliation root operation ID together with the
+canonical four-field payload before sending. Transport loss and restart reuse
+that exact root; changing any field under the same root is an idempotency
+conflict. On the server, the Space-exclusive root admission serializes replay
+and abandon for every selected envelope. A pending/unknown receipt may carry
+only the closed internal `replay_claimed(root)` or
+`replay_finished_unknown(root)` projection. Public GET, active-locate, and
+reconcile responses strip that projection and never expose its root ID.
+
 Receipt states are:
 
 ```text
-not_needed / pending / succeeded / failed / conflict / unknown
+not_needed / pending / succeeded / failed / conflict / unknown / abandoned
 ```
 
 Rules:
@@ -481,21 +631,35 @@ Rules:
 - the same `commandId` and payload hash returns the original result;
 - the same `commandId` with a different hash is an idempotency conflict;
 - `unknown` queries the original command before any replay;
-- replay uses the same immutable envelope only when the server declares replay
-  safe;
+- replay uses the same immutable envelope only when the server-declared
+  `replaySafe` and the caller's current reconciliation `replaySafe` permission
+  are both true;
+- only the root that owns `replay_claimed` may execute the Task Space child; a
+  timeout completes that claim as `replay_finished_unknown`, after which a new
+  root may replay or abandon;
+- abandon also queries the original command first; an already-terminal S3
+  result wins, otherwise a new immutable `abandoned` receipt records the user
+  decision/timestamp without deleting or rewriting its envelope;
+- Task Space transition compilation recognizes a Session envelope operation ID
+  under the same Space-exclusive authority and requires its exact immutable
+  request plus a live replay claim; an unclaimed or abandoned direct call has
+  zero WorkItem and Sync effects, so the public Task Space route cannot bypass
+  reconciliation;
 - version conflict preserves the old envelope; a user-approved retry creates a
   new command ID;
 - success, failure, conflict, and unknown are independently visible per item;
 - an unresolved old command remains visible after an Outcome correction.
 
-The same infrastructure supports `StartWorkItemProgress`, completion, and
-cancellation without coupling Session persistence to WorkItem state changes.
+The approved v1 review envelope vocabulary is only `complete` and `cancel`;
+`none` creates no envelope. A future version may extend the same infrastructure
+for `StartWorkItemProgress`, but v1 does not persist or accept a `start` target
+alias. Session persistence remains decoupled from WorkItem command success.
 
 ## 13. Offline And Ownership Reconciliation
 
 Offline start is allowed for cached level-2 and level-3 WorkItems. It records
-cache time, effective Space, and WorkItem versions. Offline creation or
-promotion of a formal WorkItem remains forbidden.
+cache time, effective Space, and WorkItem versions. Offline creation of a formal
+WorkItem remains forbidden.
 
 An offline start creates `ownershipState = local_provisional`. On reconnect:
 
@@ -515,12 +679,90 @@ Activation conflict preserves both time records. Until the user resolves it:
 - validity remains `pending`;
 - neither conflicting record contributes to EffortProjection;
 - task status commands remain held;
+- Session note, plan, and timer-content editing is read-only; a conflict-period
+  edit attempt has zero local business and outbox effects;
 - no timer is silently deleted, merged, or selected as winner.
 
-The user chooses the continuing Session. The other ends as `interrupted` and
-then receives an explicit validity or time correction. Same-device local Meta
+The user chooses the persisted `active` or `candidate` role, which resolves to
+the complete `(spaceId, sessionId)` identity; a request never chooses by scalar
+Session ID or supplies a Space. The other ends as `interrupted` and then
+receives an explicit validity or time correction. Same-device local Meta
 prevents two provisional Sessions across Spaces; unavoidable multi-device
 offline competition uses this reconciliation flow.
+
+Before the first resolution request, the client durably binds one operation ID,
+the selected role, and one canonical `resolvedAt` to the exact persisted
+conflict identity. Direct response handling, locate refresh, transport retry,
+and restart recovery reuse those values until both Space caches and Meta reach
+the resolved state. A crash after the first Space commit therefore resumes the
+second Space with the same decision timestamp; a changed role or timestamp
+fails closed instead of creating an unrecoverable partial resolution.
+
+### 13.1 Closed Provisional-Activation Boundary
+
+The reconnect request is a version-1 closed document, not an open JSON bag. Its
+business payload contains canonical `cachedAt`, owner device/tab, and one
+strict nested snapshot composed of the nonterminal FocusSession time facts,
+immutable `SessionTaskContext`, and ordered `SessionWorkItemPlan` rows. The
+request separately carries optional cached ownership epoch plus an exact map of
+cached WorkItem versions as coordination/CAS guards.
+
+The command hash uses explicit snake_case field mapping. It includes cache time,
+owner identity, and every nested snapshot fact, including historical version
+snapshots. It excludes command/Space/Session identity, ownership epochs, and
+the duplicate expected-version map. No recursive case converter, arbitrary
+`Record<string, unknown>`, or auto Block/session merge is part of this contract.
+
+`FocusSession` in this approved slice has no `sessionType` fact: planned seconds
+and durable clock facts define the focus interval. Legacy timer mode labels do
+not enter the new ORM, Registry, Sync post-image, OpenAPI, or payload hash.
+
+P0 conflict resolution preserves both raw time histories. The user selects the
+continuing persisted role; the loser ends as `interrupted` and receives the closed
+validity correction `loserValidity=invalid` with reason
+`activation_conflict_loser`. The winner remains pending until its normal end.
+P0 does not accept arbitrary time-counter correction. Any future time-correction
+mode requires a versioned union and new hash vectors rather than widening this
+request in place.
+
+A Session already ended while offline never claims the active locator. S4
+imports its closed history as `local_provisional` and `validity=pending`, so it
+contributes no effort. Post-terminal review is the explicit adjudication seam:
+after chronology and frozen WorkItem facts are revalidated, a valid decision
+promotes it to authoritative/valid and materializes effort exactly once; an
+invalid decision stays zero. Multiple terminal imports are not auto-merged or
+auto-validated, including overlapping device intervals.
+
+If the user completes that review before the terminal Session is imported, the
+frontend keeps the complete structured `SessionReviewDraftRow` and its fixed
+review operation ID durable. Before import, the Session remains ended,
+`local_provisional`, `validity=pending`, and `reviewState=pending`; the review
+path writes no `SessionWorkItemOutcome` row, no review Outbox row, and no direct
+command intent. S4 imports only the unchanged held Session/Context/Attribution/
+Plan batch. After exact terminal evidence is `meta_reconciled`, all compound
+children are proven applied with no conflict/error, the matching Meta root and
+all ready-root/result/operation hashes are exactly `transport_resolved`, and the
+authoritative imported Session version is visible, the recovery path submits
+the original review business fields with that authoritative version as CAS and
+the draft's original operation ID. The draft operation ID has not been sent
+before this point. If a prepared/in-flight direct intent already exists, restart
+validates and reuses its exact persisted request/version before reading any
+newer local Session version; that branch is not gated by the local Session
+still being pending or having zero Outcomes, because a pull may already have
+installed the committed review. Only an absent intent may be created from a
+still-pending imported Session with zero Outcomes and the current authoritative
+version. Online review and imported-review recovery call one shared
+authoritative apply transaction. Before projection or writes, its single
+response projector binds the Session, optional context, attribution, every
+plan/Outcome/envelope, and receipt-to-envelope membership to the expected Space
+and Session; every nonnull Outcome command ID must also name one of those
+envelopes. The shared helper parses the durable intent's canonical request and
+compares the complete current draft business fields before apply and again
+before delete, allowing only the imported request's explicit expected-version
+rebase. It requires the same-DB direct-intent and complete review-store Dexie
+transaction, so it cannot be called as a partially durable public writer. Only
+the authoritative review response may persist Outcomes, mark the review
+complete, and delete the still-matching draft in that shared transaction.
 
 ## 14. Stable Error Categories
 
@@ -532,14 +774,19 @@ preserving these categories:
 | `space_scope_mismatch` | Payload or reference differs from AuthorizedSpaceScope. | Never retry unchanged. |
 | `version_conflict` | Aggregate version differs from `expectedVersion`. | User reconciliation or refreshed command required. |
 | `idempotency_conflict` | A command ID was reused with a different payload hash. | Never retry unchanged. |
+| `invalid_payload_hash` | The declared RFC 8785 SHA-256 does not match the command-specific business payload. | Rebuild the command from canonical payload bytes. |
+| `invalid_project_key` | Project key is not a canonical two-to-ten-character uppercase identifier. | Correct the requested key. |
+| `project_key_conflict` | The canonical Project key is already in use in the current Space. | Choose another key. |
 | `unsupported_content_version` | WorkItemNote document version is unknown. | Preserve and open read-only; upgrade software. |
 | `invalid_note_document` | Block type, ID, depth, field, size, or ordering invariant failed. | Correct the document. |
 | `invalid_work_item_tree` | Parent, Project, ancestor-cycle, or depth invariant failed. | Correct the requested structure. |
+| `active_child_conflict` | Completing a level-2 WorkItem would leave active level-3 children without an explicit disposition. | Cancel or move the children, reopen the parent, or return. |
 | `active_session_exists` | Another authoritative active Session exists. | Return to it or perform explicit takeover. |
 | `stale_session_owner` | Ownership epoch is fenced. | Refresh ownership; do not replay blindly. |
 | `session_activation_conflict` | Competing offline Session activation exists. | Explicit user resolution required. |
 | `offline_formal_creation_forbidden` | Offline action would create WorkItem identity. | Retry online. |
 | `command_result_unknown` | Execution may have occurred but no terminal receipt is known. | Query by original command ID first. |
+| `active_session_recovery_required` | Global Session ownership cannot yet be proven from durable coordination records. | Retry after recovery/operator resolution; never start a competing Session. |
 | `work_item_structure_changed` | A frozen Session reference no longer matches current structure. | Preserve history and reconcile explicitly. |
 
 Errors never cause an Adapter to bypass the owning Module or silently select an
@@ -554,7 +801,8 @@ It includes:
 
 - Project and final WorkItem identity/tree/status-definition shapes;
 - level-1/2/3 creation and selection needed by the loop;
-- WorkItemNote v1 persistence and focused Timer editing;
+- WorkItemNote v1 persistence and append-only Timer paragraph/checklist
+  composition over read-only existing content;
 - Session start from level 2 or level 3, including empty level-3 plans;
 - immutable context and plan snapshots;
 - clock persistence, pause/resume/end, completion drafts, and review;
@@ -573,7 +821,7 @@ It excludes:
 - status/type/label management UI;
 - automatic Block merge, CRDT, live cursors, or collaboration;
 - inline rich text, attachments, code blocks, or richer Block types;
-- batch Note Item promotion;
+- Note Item promotion to WorkItem;
 - automatic WorkItem completion, estimate changes, or cross-Space aggregation.
 
 ## 16. Sync, Registry, And Recovery
@@ -582,16 +830,70 @@ WorkItemNote is one Sync entity carrying the full canonical post-image. It must
 not use the current generic timestamp-LWW behavior; writes use expected-version
 CAS through EntityCommand.
 
+The frontend and S4 must keep three structurally independent representations;
+sharing one permissive schema across them is a contract defect:
+
+1. an API/cache view may expose UI-only derived state such as `clockState` and
+   may use the local Dexie key name `sessionId`;
+2. an Outbox command post-image is the complete persisted business row used for
+   admission and payload hashing, maps `sessionId -> id`, includes
+   `overallProgress` and `mood`, and strictly rejects `clockState`;
+3. an authoritative recovery wire snapshot carries the complete system identity
+   and version fields for its concrete Sync entity, then a dedicated projector
+   verifies top-level `entity_type/entity_id/version` before mapping `id ->
+   sessionId` where the Dexie table requires it. Local `clockState` is derived
+   only after that verification from durable time facts.
+
+The same separation applies to `SessionTaskContext`,
+`SessionAttributionRevision`, `SessionWorkItemPlan`, and
+`SessionWorkItemOutcome`: each recovery payload includes its real entity `id`,
+`spaceId`, `createdAt`, `updatedAt`, and `version`, while the projector derives
+the actual local primary key instead of treating `sessionId` as every entity's
+wire identity. Outcome post-images and hashes include the closed TS0 persona
+fields `executionPersona`, `personaSwitched`, and `personaNote`.
+
 The final entity catalog includes the new Task Space and FocusSession entities
 before S4 convergence. Stable business/revision facts are first-class catalog
 entries where they need independent query or replay. Command envelopes,
 receipts, ownership leases, and operation journal rows are protocol or Sync
 infrastructure, not ordinary LWW business entities.
 
-Note Item promotion emits the WorkItem and WorkItemNote effects within one UoW.
+Each accepted WorkItemNote command emits one complete WorkItemNote post-image;
+Checklist state remains content-only and never emits a WorkItem transition.
 Session command receipts are visible independently, preserving partial success.
 Backup and recovery include Meta locator state, Space business rows, Sync
 ledger, command reconciliation state, and any pending durable operation record.
+Both WorkItemNote write paths use one serializer over the complete next row;
+an overwrite may not enqueue a partial `{noteId, workItemId, document}` payload
+that omits version or timestamps.
+
+Expanded S4 exposes exactly six shared Sync operations: operation query, push,
+pull, recover, ACK, and status. Before creating or replaying a push receipt, the
+client queries every selected persisted operation ID. Terminal results converge
+from the original immutable batch receipt; pending or recovery-required results
+block; only confirmed-unknown operations may be sent. A lost WorkItemNote
+response reuses its original operation/batch authority. A provisional compound
+uses the persisted `compoundOperationId` returned unchanged as
+`prepareHeldProvisionalBatch(...).batchId`; S4 must not hash its child IDs into a
+replacement batch identity. Dexie v19 atomically admits valid TS3
+`awaiting_s4` groups through `pending -> meta_pending -> ready` and preserves
+`blocked_conflict` without transport. One exclusive per-Space cross-Tab
+authority fence covers every outbox/Meta/admission/conflict writer and remains
+held across operation query, final proof, push, and response application.
+Admission freezes full canonical post-image bytes separately from the
+entity-specific command business `payloadHash`; WorkItemNote therefore retains
+its `{document}` hash contract. Query and push terminal results persist exact
+Space evidence before queue deletion, then idempotently reconcile Meta.
+Retained terminal conflicts/errors are non-sendable; retry creates a new
+operation rather than replaying the terminal original.
+
+The public operation and batch ID grammar is the backend's shared 1-128 UTF-8
+byte printable-ASCII contract; the narrow allowlist belongs only to a
+`child-v1` suffix. Recovery response parsing requires
+`has_more === (next_page_token !== null)`. Retained Schedule and TimeBlock
+parsers follow their existing Registry/OpenAPI string contract and accept the
+locked `HH:mm | canonical UTC RFC3339` time forms instead of narrowing valid
+persisted ISO values to clock text.
 
 ## 17. 95+ Integration Order
 
@@ -632,34 +934,73 @@ implementation.
 
 - tree depth, cycle, same-Project, and status-transition invariants;
 - WorkItemNote discriminated Block validation, stable-ID uniqueness, ordering,
-  and two-level lists;
+  and Checklist nesting capped at two levels;
 - Checklist independence from WorkItem and Session status;
-- Note Item promotion level rules and source traceability;
+- explicit absence of Note Item promotion and WorkItem-reference Note items;
 - orthogonal Session clock, validity, review, and ownership axes.
 
 ### 18.2 Persistence And Command Tests
 
 - whole-document CAS and idempotency hash behavior;
-- WorkItem creation plus Note reference replacement under injected failure;
+- direct Project/WorkItem/review intent persistence before transport, exact
+  same-POST recovery after server-commit/response-loss/restart, and atomic
+  business-cache/terminal-intent completion without S4 operation-query;
+- WorkItemNote CAS rejection and retry under injected failure;
 - Session facts committed before task command dispatch;
 - per-item partial success without rollback of successful siblings;
 - unknown-result query-before-replay and stale-owner fencing;
+- caller/server replay double permission and a server-declared false value that
+  cannot be upgraded by the request;
+- operation-journal crash recovery at every locator/Space boundary, including
+  atomic conflict transfer without an intermediate empty locator;
 - append-only Attribution and Outcome revisions.
+- EffortProjection incremental recomputation, attribution/validity correction,
+  full rebuild equality, and independence from task-command receipts.
 
 ### 18.3 Offline And Frontend Tests
 
+- Dexie v18 scans all ten removed stores, surviving legacy-reference fields, and
+  the old outbox before DDL in one exclusive upgrade transaction; each rejection
+  preserves v17 inventory, and a closing v17 Tab's last committed row is caught;
+- an independent frozen complete active-store oracle exact-compares all four v18
+  schema views, including direct-intent/review-draft/Timer-draft stores, while
+  positive surviving-row fixtures remain field-for-field equal;
+- structured Timer drafts survive blur, unmount, current-item change, Space
+  switch, and reopen; A-B-A restores A, failed append retains it, successful
+  append clears it, and no A draft can append to B;
 - Timer reconstruction after refresh without persisted tick counters;
 - cross-Tab owner/read-only mirror and explicit takeover;
 - Space switch flushes the old Space and preserves the active Session;
+- the five owner-bound Session note/plan commands reject an observer Tab before
+  Meta claim or Space open and never enter the ordinary authoritative Sync
+  entity-command outbox;
 - Note autosave queue cannot let an old response overwrite newer input;
 - local/remote Note conflict preserves both documents;
 - offline provisional Session activation and multi-device conflict resolution;
+- Dexie v19 admits only valid `awaiting_s4` standalone/compound authority,
+  preserves `blocked_conflict`, and resumes `meta_pending` after restart;
 - Session time persists when Note or WorkItem commands fail.
 
 ### 18.4 Contract And Recovery Tests
 
+- exactly six REST/MCP/frontend Sync operations and four operation-query states;
+- AST absence of all four legacy singular Sync entity keys and their plural
+  pull/table keys across `SyncEntityType`, entity maps, pull maps, and pull-key
+  arrays;
+- query-before-push receipt/replay, lost-response WorkItemNote identity reuse, and
+  unchanged persisted compound batch root/child ordering;
+- exact WorkItemNote serializer parity across both writers, with missing
+  version/timestamp fields rejected before transport;
+- independent cache, command post-image, and authoritative recovery schemas:
+  command post-images reject `clockState`, preserve progress/mood and persona,
+  and recovery validates complete system fields plus both entity-ID mappings;
+- recovery `has_more`/token equivalence, printable-ASCII byte boundaries, and
+  retained `HH:mm | canonical UTC RFC3339` time vectors;
+
 - REST, Sync, MCP, Registry, OpenAPI, and generated-type parity;
 - payload Space mismatch rejected before side effects;
+- HTTP requests accept only camelCase aliases while Python commands and hashes
+  use explicit snake_case mappings, with no recursive casing converter;
 - every successful Sync-enabled mutation emits the required visible event and
   rollback emits none;
 - backup/restore retains WorkItemNote hashes, Session revisions, command
@@ -685,12 +1026,19 @@ The design is implemented only when all of the following are demonstrable:
 10. Competing offline Sessions require explicit resolution and do not contribute
     duplicate effort before resolution.
 11. Note conflicts preserve both documents without automatic overwrite.
-12. Online Note Item promotion is atomic and leaves a WorkItem reference.
+12. No Note Item promotion route, command, schema variant, or WorkItem source
+    trace exists in the first version.
 13. Cross-Space references and payload mismatches fail before mutation.
 14. Legacy Task endpoints, Sync keys, and dual-write paths are absent.
 15. S4-S6 verify the final catalog rather than the pre-Task-Space model.
 16. A new Session can start after the prior clock ends even while prior review or
     task-command reconciliation remains pending.
+17. Running Session note and plan mutations pass only through the owner-fenced
+    master Coordinator; local provisional/conflict Sync data remains durable but
+    cannot become a second authoritative write path.
+18. A durable activation conflict remains discoverable after refresh, and no
+    winner becomes active unless both intent-named Space child operations are
+    verified terminal-success.
 
 ## 20. Documentation And Change Control
 
