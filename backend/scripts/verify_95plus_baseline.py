@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from app.audit.evidence_contract import (
+    parse_rfc3339,
     resolve_external_artifact,
     validate_evidence_envelope,
 )
@@ -24,26 +25,55 @@ DIMENSIONS = (
     "operability",
     "maintainability",
 )
-EVIDENCE_FIELDS = {
-    "evidence_id",
-    "subject_sha",
-    "command",
-    "cwd",
-    "runtime",
-    "started_at",
-    "finished_at",
-    "exit_code",
-    "result",
-    "artifact_path",
-    "artifact_sha256",
-    "artifact_size_bytes",
-    "trust_level",
-    "confidence",
-    "modules",
-    "finding_ids",
-    "certification_tags",
+EXPECTED_MODULES = (
+    "runtime_auth",
+    "migration_space_lifecycle",
+    "registry_meta",
+    "entity_commands",
+    "sync_push",
+    "sync_pull_recovery",
+    "notes_fs",
+    "deploy_operations",
+    "mcp",
+)
+EXPECTED_FINDING_IDS = (
+    *(f"P0-{index:02d}" for index in range(1, 8)),
+    *(f"P1-{index:02d}" for index in range(1, 14)),
+)
+EXPECTED_POLICY = {
+    "schema_version": "1.0",
+    "modules": list(EXPECTED_MODULES),
+    "dimensions": {
+        name: {"minimum": 0, "maximum": 20} for name in DIMENSIONS
+    },
+    "formula": {
+        "maturity": "(completeness+integrity)/40*100",
+        "health": "(verification+operability+maintainability)/60*100",
+        "module_composite": (
+            "0.4*((completeness+integrity)/40*100)+"
+            "0.6*((verification+operability+maintainability)/60*100)"
+        ),
+        "backend_composite": "arithmetic_mean(module_composite)",
+    },
+    "thresholds": {
+        "backend_composite_minimum": 95.0,
+        "module_composite_minimum": 90.0,
+        "p0_maximum": 0,
+        "release_blocker_maximum": 0,
+        "critical_xfail_maximum": 0,
+    },
+    "hard_caps": {
+        "data_loss_authorization_path_escape_or_unrecoverable_p0": 69,
+        "release_blocker_or_missing_rollback": 89,
+        "missing_restore_drill_exact_sha_ci_or_digest_evidence": 94,
+    },
 }
-TRUST_LEVELS = {"local_snapshot", "pr_local", "trusted_push", "release_drill"}
+RETAINED_DEBT_FIELDS = {"path", "size_bytes", "observed_at", "handling"}
+EXPECTED_RETAINED_DEBT = {
+    "path": "backend/tests/pytest-of-20564",
+    "size_bytes": 815109,
+    "handling": "preserve",
+}
 CERTIFICATION_TRUST = {
     "restore_drill": {"release_drill"},
     "exact_sha_ci": {"trusted_push", "release_drill"},
@@ -147,6 +177,41 @@ def _configured_external_root() -> Path:
     return root
 
 
+def _validate_policy(raw_policy: object) -> None:
+    if raw_policy != EXPECTED_POLICY:
+        raise ValueError("score policy contract changed")
+
+
+def _validate_finding_ids(raw_findings: object) -> list[str]:
+    if not isinstance(raw_findings, list):
+        raise ValueError("baseline finding identity set changed")
+    finding_ids = [
+        item.get("finding_id") if isinstance(item, Mapping) else None
+        for item in raw_findings
+    ]
+    if finding_ids != list(EXPECTED_FINDING_IDS):
+        raise ValueError("baseline finding identity set changed")
+    return finding_ids
+
+
+def _validate_retained_artifact_debt(raw_debt: object) -> None:
+    if not isinstance(raw_debt, list) or len(raw_debt) != 1:
+        raise ValueError("retained artifact debt contract changed")
+    debt = raw_debt[0]
+    if not isinstance(debt, Mapping) or set(debt) != RETAINED_DEBT_FIELDS:
+        raise ValueError("retained artifact debt contract changed")
+    for field, expected in EXPECTED_RETAINED_DEBT.items():
+        value = debt[field]
+        if field == "size_bytes" and type(value) is not int:
+            raise ValueError("retained artifact debt contract changed")
+        if value != expected:
+            raise ValueError("retained artifact debt contract changed")
+    try:
+        parse_rfc3339(debt["observed_at"], field="retained_artifact_debt.observed_at")
+    except ValueError as exc:
+        raise ValueError("retained artifact debt contract changed") from exc
+
+
 def score_module(dimensions: Mapping[str, int]) -> Decimal:
     if set(dimensions) != set(DIMENSIONS):
         raise ValueError("module dimensions do not match score policy")
@@ -203,13 +268,14 @@ def effective_cap(
 def verify_baseline(audit_root: Path) -> VerificationSummary:
     baseline = _load(audit_root / "baseline.json")
     policy = _load(audit_root / "score-policy.json")
+    _validate_policy(policy)
     if set(baseline) != BASELINE_FIELDS or baseline["schema_version"] != "1.0":
         raise ValueError("invalid baseline top-level schema")
     if baseline["audited_subject_sha"] != AUDITED_SHA:
         raise ValueError("audited subject SHA changed")
     if baseline["saved_remote_sha"] != REMOTE_SHA:
         raise ValueError("saved remote SHA changed")
-    if list(baseline["modules"]) != policy["modules"]:
+    if list(baseline["modules"]) != list(EXPECTED_MODULES):
         raise ValueError("module order or identity changed")
     evidence_ids = [item["evidence_id"] for item in baseline["evidence"]]
     if len(evidence_ids) != len(set(evidence_ids)):
@@ -225,9 +291,8 @@ def verify_baseline(audit_root: Path) -> VerificationSummary:
         if score != Decimal(str(worksheet["composite"])):
             raise ValueError(f"stored composite drift: {module_id}")
         module_scores[module_id] = score
-    finding_ids = [item["finding_id"] for item in baseline["findings"]]
-    if len(finding_ids) != 20 or len(finding_ids) != len(set(finding_ids)):
-        raise ValueError("baseline must contain seven P0 and thirteen P1 findings")
+    finding_ids = _validate_finding_ids(baseline["findings"])
+    _validate_retained_artifact_debt(baseline["retained_artifact_debt"])
     records = validate_evidence_envelope(
         {
             "schema_version": "1.0",
@@ -235,8 +300,8 @@ def verify_baseline(audit_root: Path) -> VerificationSummary:
             "findings": baseline["findings"],
         },
         expected_subject_sha=AUDITED_SHA,
-        known_modules=set(policy["modules"]),
-        known_findings=set(finding_ids),
+        known_modules=set(EXPECTED_MODULES),
+        known_findings=set(EXPECTED_FINDING_IDS),
     )
     for finding in baseline["findings"]:
         if set(finding) != FINDING_FIELDS:
