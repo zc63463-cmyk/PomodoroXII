@@ -19,6 +19,7 @@ if (planDirectoryOverride || designPathOverride || integrationSpecPathOverride) 
 }
 let planDirectory = path.join(root, 'docs', 'superpowers', 'plans');
 let designPath = path.join(root, 'docs', 'superpowers', 'specs', '2026-07-14-pomodoroxii-backend-95plus-design.md');
+let reportPath = path.join(root, 'output', 'PomodoroXII-后端95Plus升级规划-2026-07-14.html');
 let integrationSpecPath = path.join(
   root, 'docs', 'superpowers', 'specs', '2026-07-15-task-space-session-integration-design.md',
 );
@@ -3480,6 +3481,48 @@ function verifyCrossWave(plans) {
   requireTaskText('S1', s1Task4Entry, 'zName == NULL', 'anonymous SQLite open handling');
   requireTaskText('S1', s1Task4Entry, 'test_joined_accepts_precreated_future_and_custom_awaitable', 'general Awaitable regression');
   requireTaskText('S1', s1Task4Entry, 'bound_sqlite_pair', 'bound-target test fixture');
+  for (const enginePath of [
+    'backend/app/file_system/engine/base.py',
+    'backend/app/file_system/engine/note_ops.py',
+    'backend/app/file_system/engine/folder_ops.py',
+    'backend/app/file_system/engine/search_ops.py',
+    'backend/app/file_system/engine/trash_ops.py',
+    'backend/app/file_system/engine/version_ops.py',
+    'backend/app/file_system/engine/export_ops.py',
+    'backend/app/file_system/engine/consistency_ops.py',
+    'backend/app/file_system/engine/__init__.py',
+  ]) {
+    requireTaskText('S1', s1Task4Entry, enginePath, `exact contained FileSystem ownership ${enginePath}`);
+  }
+  forbidPattern('S1 Task 4', s1Task4Entry.body, /file_system\/engine\/\*\*/g, 'broad FileSystem engine ownership glob');
+  for (const contract of [
+    'FileSystemStorage.from_bound_handles',
+    'relative-name-only Notes authority',
+    'BoundSQLiteTarget.open_maintenance',
+    'path-backed constructor remains a test/N-1 compatibility adapter',
+    'test_contained_entry_never_calls_path_backed_constructor',
+    'test_contained_entry_and_engine_operations_have_no_path_fallback',
+    'ExternalPathCapabilityRequiredError',
+    'external_path_capability_required',
+    'test_contained_import_and_export_require_external_path_capability',
+    'test_containment_lock_is_reentrant_for_the_same_task',
+    'test_containment_lock_excludes_a_different_task',
+    'test_containment_lock_restores_owner_and_depth_after_error_and_cancel',
+    'test_cancelled_waiter_does_not_corrupt_containment_lock_owner',
+    'same-owner entry increments depth without awaiting',
+    'Cancellation while waiting never changes owner/depth',
+    'feat: add reentrant containment scope',
+    'feat: bind sqlite through pxii vfs',
+    'feat: route filesystem through storage authorities',
+    'test: close contained storage integration',
+  ]) {
+    requireTaskText('S1', s1Task4Entry, contract, `Task 4 amendment contract ${contract}`);
+  }
+  forbidPattern('S1 Task 4', s1Task4Entry.body, /contained production (?:may|can) (?:call|use|fall back to) (?:the )?path-backed constructor/gi, 'contained path-backed fallback');
+  requireText('S2', s2, 'consumes the S1-owned contained constructor', 'S2 preserves the S1 FileSystem authority ports');
+  requireText('S2', s2, 'continue to raise `ExternalPathCapabilityRequiredError`', 'S2 does not reopen external host paths');
+  requireText('S2', s2, 'does not replace them or restore pathname state', 'S2 preserves S1 port state');
+  forbidPattern('S2', s2, /restores? (?:the )?(?:root|index|host) Path|may restore pathname state/gi, 'S2 pathname-state restoration');
   requireTaskText('S1', s1Task4Entry, 'add_library(pxii_vfs MODULE', 'concrete native CMake target');
   requireTaskText('S1', s1Task4Entry, 'windows-x86_64', 'Windows native wheel job');
   requireTaskText('S1', s1Task4Entry, 'linux-x86_64', 'Linux native wheel job');
@@ -3502,7 +3545,7 @@ function verifyCrossWave(plans) {
   forbidPattern('S1 Task 4', s1Task4Entry.body, /asyncio\.create_task\(awaitable\)/g, 'general joined awaitable must accept Future via ensure_future');
   forbidPattern('S1 Task 4 python', codeBlocks(s1Task4Entry.body, 'python').join('\n'), /def\s+test_[A-Za-z0-9_]+\([^)]*\)(?:\s*->\s*None)?\s*:\s*\.\.\./g, 'critical native feasibility test placeholder');
   forbidPattern('S1 Task 4 python', s1ContainmentBlock, /open_unchecked|open_path_unchecked/g, 'unchecked containment open');
-  requireSha256('S1 Task 4', s1Task4Step3, 'a09ce5a9278a75c057114d395efefa1c862f9987533d7b3fb273061f0de7dab6');
+  requireSha256('S1 Task 4', s1Task4Step3, 'bcec784fd005259875afa78b608c1073bb22a309ab34d443fe39d70127f6ec8a');
   const s1McpAuthBlock = codeBlocks(s1Task5Entry.body, 'python').find((block) => block.includes('class PomodoroTokenVerifier')) || '';
   check(
     /principal = await verify_with_fresh_meta_session\(\s*token, required_scope=None\s*\)/m.test(s1McpAuthBlock),
@@ -5347,6 +5390,11 @@ function verifyCrossWave(plans) {
   const design = fs.readFileSync(designPath, 'utf8');
   requireText('DESIGN', design, 'deep native Module, not a pathname connector', 'authority-bound SQLite VFS amendment');
   requireText('DESIGN', design, 'pxii-vfs-wheel-manifest-v1', 'native wheel evidence amendment');
+  requireText('DESIGN', design, '`engine/base.py`, `engine/note_ops.py`, `engine/folder_ops.py`', 'exact contained FileSystem engine ownership');
+  requireText('DESIGN', design, 'relative-name-only Notes authority', 'contained Notes authority port');
+  requireText('DESIGN', design, '`BoundSQLiteTarget.open_maintenance`', 'contained index authority port');
+  requireText('DESIGN', design, '`external_path_capability_required`', 'contained external path fail-closed error');
+  requireText('DESIGN', design, 'containment lock is Task-reentrant and cross-Task', 'Task-reentrant containment lock');
   requireText('DESIGN', design, 'create_task(_upgrade_once)', 'inline standalone migration amendment');
   requireText('DESIGN', design, 'run_joined_awaitable', 'joined terminal hook amendment');
   requireText('DESIGN', design, 'Normative Detailed-Plan Amendment (2026-07-14)', 'normative detailed-plan amendment');
@@ -5422,22 +5470,27 @@ function mutationSandbox() {
   fs.copyFileSync(designPath, design);
   const integrationSpec = path.join(sandbox, path.basename(integrationSpecPath));
   fs.copyFileSync(integrationSpecPath, integrationSpec);
-  return { sandbox, plans, design, integrationSpec };
+  const report = path.join(sandbox, path.basename(reportPath));
+  fs.copyFileSync(reportPath, report);
+  return { sandbox, plans, design, integrationSpec, report };
 }
 
 function runVerifierAtPaths(paths) {
   const previousPlanDirectory = planDirectory;
   const previousDesignPath = designPath;
   const previousIntegrationSpecPath = integrationSpecPath;
+  const previousReportPath = reportPath;
   try {
     planDirectory = paths.plans;
     designPath = paths.design;
     integrationSpecPath = paths.integrationSpec || integrationSpecPath;
+    reportPath = paths.report || reportPath;
     return verifyCurrentPaths();
   } finally {
     planDirectory = previousPlanDirectory;
     designPath = previousDesignPath;
     integrationSpecPath = previousIntegrationSpecPath;
+    reportPath = previousReportPath;
     failures.length = 0;
   }
 }
@@ -5483,7 +5536,7 @@ function verifyAuthorityRedirectRejection() {
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status !== 2
-      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\]/.test(output)
+      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\]/.test(output)
       || /VERIFY_OK(?:_INTERNAL)?|SELF_TEST_OK/.test(output)) {
       throw new Error(`${label} did not fail closed:\n${output}`);
     }
@@ -5495,7 +5548,7 @@ function verifyAuthorityRedirectRejection() {
     env: { ...process.env },
   });
   const legacyOutput = `${legacyChild.stdout}\n${legacyChild.stderr}`;
-  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
+  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
     throw new Error(`legacy internal-child entry remains callable:\n${legacyOutput}`);
   }
 }
@@ -5506,8 +5559,8 @@ function replaceRequired(filePath, before, after, label) {
   fs.writeFileSync(filePath, source.replace(before, after), 'utf8');
 }
 
-function runMutationSelfTests() {
-  verifyAuthorityRedirectRejection();
+function runMutationSelfTests(selectedNames = null) {
+  if (selectedNames === null) verifyAuthorityRedirectRejection();
   const baseline = runVerifierAtPaths({
     plans: planDirectory, design: designPath, integrationSpec: integrationSpecPath,
   });
@@ -6110,6 +6163,96 @@ function runMutationSelfTests() {
           file,
           '\n- [ ] **Step 2: Run focused migration tests and observe missing coordinator failures**',
           '\n```python\nawait marker.discard_isolated_sqlite_target(target)\nawait target.aclose()\n```\n\n- [ ] **Step 2: Run focused migration tests and observe missing coordinator failures**',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's1-task4-engine-ownership-glob-downgrade',
+      expected: /broad FileSystem engine ownership glob|exact contained FileSystem ownership|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[1].filename);
+        replaceRequired(
+          file,
+          '- Modify: `backend/app/file_system/engine/base.py`',
+          '- Modify: `backend/app/file_system/engine/**`',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's1-task4-contained-path-constructor-fallback',
+      expected: /contained path-backed fallback/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[1].filename);
+        replaceRequired(
+          file,
+          '- [ ] **Step 4: Run containment and dependency tests**',
+          'Contained production may fall back to the path-backed constructor.\n\n- [ ] **Step 4: Run containment and dependency tests**',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's1-task4-external-path-fail-open',
+      expected: /Task 4 amendment contract ExternalPathCapabilityRequiredError/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[1].filename);
+        const source = fs.readFileSync(file, 'utf8');
+        fs.writeFileSync(
+          file,
+          source.replaceAll('ExternalPathCapabilityRequiredError', 'ValidationError'),
+          'utf8',
+        );
+      },
+    },
+    {
+      name: 's1-task4-reentrant-lock-downgrade',
+      expected: /Task 4 amendment contract same-owner entry increments depth without awaiting/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[1].filename);
+        replaceRequired(
+          file,
+          'same-owner entry increments depth without awaiting',
+          'same-owner entry waits on a non-reentrant asyncio.Lock',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's1-task4-batch-c-staging-omission',
+      expected: /Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[1].filename);
+        replaceRequired(
+          file,
+          'backend/app/file_system/engine/export_ops.py backend/app/file_system/engine/consistency_ops.py backend/app/file_system/engine/__init__.py',
+          'backend/app/file_system/engine/export_ops.py backend/app/file_system/engine/__init__.py',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task4-port-handoff-path-restore',
+      expected: /S2 pathname-state restoration|S2 preserves S1 port state/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'does not replace them or restore pathname state',
+          'may restore pathname state',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's1-task4-html-port-mirror-removal',
+      expected: /contained FileSystem port mirror/,
+      mutate(paths) {
+        replaceRequired(
+          paths.report,
+          '现有 FileSystemStorage 通过内部 Notes/index authority port 工作',
+          'FileSystemStorage 使用默认入口',
           this.name,
         );
       },
@@ -9951,8 +10094,16 @@ function runMutationSelfTests() {
     );
   }
 
+  const selectedCases = selectedNames === null
+    ? cases
+    : cases.filter((testCase) => selectedNames.has(testCase.name));
+  if (selectedNames !== null && selectedCases.length !== selectedNames.size) {
+    const found = new Set(selectedCases.map((testCase) => testCase.name));
+    const missing = [...selectedNames].filter((name) => !found.has(name));
+    throw new Error(`targeted self-test cases are missing: ${missing.join(', ')}`);
+  }
   const mutationFailures = [];
-  for (const testCase of cases) {
+  for (const testCase of selectedCases) {
     const paths = mutationSandbox();
     try {
       testCase.mutate(paths);
@@ -9970,7 +10121,9 @@ function runMutationSelfTests() {
   if (mutationFailures.length > 0) {
     throw new Error(mutationFailures.join('\n'));
   }
-  process.stdout.write(`SELF_TEST_OK mutations=${cases.length} redirects=8\n`);
+  const scope = selectedNames === null ? 'all' : 's1-task4-amendment';
+  const redirects = selectedNames === null ? 8 : 0;
+  process.stdout.write(`SELF_TEST_OK mutations=${selectedCases.length} redirects=${redirects} scope=${scope}\n`);
 }
 
 function verifyCurrentPaths() {
@@ -9978,6 +10131,14 @@ function verifyCurrentPaths() {
   check(fs.existsSync(designPath), `missing governing design: ${designPath}`);
   check(fs.existsSync(integrationSpecPath),
     `missing Task Space integration spec: ${integrationSpecPath}`);
+  check(fs.existsSync(reportPath), `missing rendered planning report: ${reportPath}`);
+  if (fs.existsSync(reportPath)) {
+    const report = fs.readFileSync(reportPath, 'utf8');
+    requireText('REPORT', report, '现有 FileSystemStorage 通过内部 Notes/index authority port 工作', 'contained FileSystem port mirror');
+    requireText('REPORT', report, '生产入口不回退 path-backed constructor', 'path-backed fallback mirror');
+    requireText('REPORT', report, '在没有外部路径 capability 时稳定 fail closed', 'external path capability mirror');
+    requireText('REPORT', report, '同 Task 可重入、跨 Task 严格互斥', 'Task-reentrant lock mirror');
+  }
   const actualFiles = fs.readdirSync(planDirectory)
     .filter((name) => /^2026-07-14-backend-95plus-s[0-6]-.*\.md$/.test(name))
     .sort();
@@ -10051,9 +10212,19 @@ function main() {
 
 if (process.argv.length === 3 && process.argv[2] === '--self-test') {
   runMutationSelfTests();
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s1-task4-amendment') {
+  runMutationSelfTests(new Set([
+    's1-task4-engine-ownership-glob-downgrade',
+    's1-task4-contained-path-constructor-fallback',
+    's1-task4-external-path-fail-open',
+    's1-task4-reentrant-lock-downgrade',
+    's1-task4-batch-c-staging-omission',
+    's2-task4-port-handoff-path-restore',
+    's1-task4-html-port-mirror-removal',
+  ]));
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment]\n');
   process.exitCode = 2;
 }

@@ -837,6 +837,29 @@ document when the two conflict.
   those already opened identities and cannot reopen a host path. Tests swap an
   ancestor after the final identity check but before the kernel-open hook; no
   outside read, write, journal, or index side effect is permitted.
+- S1 owns the contained FileSystem conversion in the existing engine rather
+  than copying it into `file_system/api.py`. Exact ownership is
+  `engine/base.py`, `engine/note_ops.py`, `engine/folder_ops.py`,
+  `engine/search_ops.py`, `engine/trash_ops.py`, `engine/version_ops.py`,
+  `engine/export_ops.py`, `engine/consistency_ops.py`, and `engine/__init__.py`.
+  `FileSystemStorage` routes contained Note operations through an internal
+  relative-name-only Notes authority backed by `BoundDirectoryHandle`, and
+  routes index connections through an internal authority backed only by
+  `BoundSQLiteTarget.open_maintenance`. Contained objects store no root/index
+  host `Path`; the path-backed constructor remains only for existing tests and
+  the fixed N-1 fixture, and production dependencies have static and runtime
+  no-fallback tests.
+- `import_from_md(file_path)` and `export_folder(output_dir)` remain legacy
+  host-path operations only in path-backed test/N-1 mode. Contained mode has no
+  external path capability in S1 and raises the stable non-retryable
+  `external_path_capability_required` domain error before inspecting, opening,
+  creating, resolving, or serializing either supplied path.
+- The per-canonical-parent containment lock is Task-reentrant and cross-Task
+  exclusive. Same-owner nesting increments depth; normal, exceptional, and
+  cancelled exits restore depth/owner exactly; a cancelled waiter cannot alter
+  the current holder and a later waiter still acquires after release. Focused
+  timeout tests cover nested entry, exclusion, owner cancellation, waiter
+  cancellation, and subsequent acquisition.
 - SQLite identity binding is a deep native Module, not a pathname connector.
   A packaged C17 loadable extension registers `pxii-vfs` in the same stock
   `sqlite3` library at controlled bootstrap. A private control connection binds

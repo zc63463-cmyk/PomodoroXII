@@ -22,6 +22,9 @@
 - HTTP MCP always requires Bearer authentication. Stdio starts only with explicit `--trusted-stdio`; that principal still resolves registered Spaces through `AuthorizedSpaceScope`.
 - A Space engine, parent directory, database, Notes directory, or index must not be created until scope and containment succeed.
 - Containment is not a reusable Boolean check: every storage consumer receives only `ContainedSpaceOpens` produced by `SpaceContainmentCapability.open_verified()`. Linux anchors identities with `dirfd`, `openat2`/`openat`, `O_NOFOLLOW`, and `unlinkat`; Windows uses `NtCreateFile` with `RootDirectory`, no reparse traversal, and no delete sharing. The packaged `pxii-vfs` receives only an unforgeable virtual identifier bound to duplicated open authority. Bootstrap may discover the packaged extension by host path, but no database host path, descriptor, HANDLE, virtual token, or sidecar name is exposed to a caller, crosses the storage seam, or is reopened after binding.
+- `_containment_lock_for` returns one Task-reentrant asynchronous lock per canonical Space parent: nested acquisition by the owning `asyncio.Task` increments depth, different Tasks remain strictly mutually exclusive, every normal/error/cancellation exit restores owner/depth exactly, and cancelling a waiter cannot mutate the holder's state.
+- `FileSystemStorage` contained mode stores only internal Notes/index authorities. Notes methods accept validated relative names and reach storage only through `BoundDirectoryHandle`; index connections come only from `BoundSQLiteTarget.open_maintenance`. The `(root_dir, index_db)` constructor remains a test/N-1 compatibility adapter and production dependencies are statically and dynamically forbidden from calling it.
+- Contained `import_from_md(file_path)` and `export_folder(output_dir)` raise `ExternalPathCapabilityRequiredError` before inspecting, opening, creating, or serializing either host path. S1 defines no external import/export capability and never passes arbitrary host paths across the contained boundary.
 - `BoundSQLiteTarget` has exactly four caller-visible members: read-only `identity`, `make_async_engine(options) -> AsyncEngine`, `open_maintenance(options) -> ContextManager[sqlite3.Connection]`, and `aclose()`. Stock `sqlite3`, aiosqlite, and SQLAlchemy remain Adapters behind that Module; arbitrary extension loading, `ATTACH`, and unsafe PRAGMAs are denied.
 - Legacy Sync may return `cursor_upgrade_required`; it must never return a page whose global timestamp cursor can skip data.
 - Ledger and tombstone deletion remain disabled until S4 provides registered-client ACK waterlines.
@@ -43,7 +46,16 @@
 - Modify `backend/app/schemas/auth.py`: add the revoke response schema.
 - Modify `backend/app/deps.py`: verify REST Bearer tokens through `CredentialAuthority` and open Space scope before storage dependencies.
 - Modify `backend/app/space_manager.py`: accept opaque `ContainedSpaceOpens`, bind each cached Space engine to the database identity and `BoundSQLiteTarget.make_async_engine(options)`, and reject identity rebinding or any unpinned pathname connection.
-- Modify `backend/app/file_system/api.py`: accept opaque `ContainedSpaceOpens`, transfer the already-open Notes/index handles, and keep every later child/index operation descriptor/HANDLE-relative.
+- Modify `backend/app/file_system/api.py`: accept opaque `ContainedSpaceOpens`, call only `FileSystemStorage.from_bound_handles`, and never copy the FileSystem implementation or fall back to the path-backed constructor.
+- Modify `backend/app/file_system/engine/base.py`: replace direct `root`/`index_db` pathname ownership with internal Notes/index authority ports; the contained index port opens only through `BoundSQLiteTarget.open_maintenance`, while the path-backed adapters remain test/N-1-only.
+- Modify `backend/app/file_system/engine/note_ops.py`: express every Note content read/write/move/delete as validated relative names through the internal Notes authority.
+- Modify `backend/app/file_system/engine/folder_ops.py`: express folder create/move/rename/cascade operations through relative authority methods without reconstructing a root path.
+- Modify `backend/app/file_system/engine/search_ops.py`: read projected Note content and query the index only through the two internal authorities.
+- Modify `backend/app/file_system/engine/trash_ops.py`: perform trash move/restore/purge with relative authority operations and no host pathname conversion.
+- Modify `backend/app/file_system/engine/version_ops.py`: read/write version children through the Notes authority only.
+- Modify `backend/app/file_system/engine/export_ops.py`: keep legacy path-backed import/export only for existing tests/N-1; contained `import_from_md(file_path)` and `export_folder(output_dir)` fail closed before inspecting either host path.
+- Modify `backend/app/file_system/engine/consistency_ops.py`: enumerate, read, and repair contained Note children through relative authority operations.
+- Modify `backend/app/file_system/engine/__init__.py`: add the sole contained factory `FileSystemStorage.from_bound_handles(notes_handle, index_target)` and retain the path-backed constructor only for existing tests/N-1.
 - Modify `backend/app/main.py`: bootstrap epoch `1` after Meta initialization.
 - Create `backend/tests/test_security_policy.py`: password bytes, secret bytes, no bcrypt aliasing, and event-loop offload.
 - Create `backend/tests/test_auth_concurrency.py`: one-winner setup, epoch rollout, revocation, and stale-token rejection.
@@ -919,13 +931,22 @@ Before committing, inspect `git diff --cached --name-only` and unstage any test 
 - Modify: `backend/app/deps.py`
 - Modify: `backend/app/space_manager.py`
 - Modify: `backend/app/file_system/api.py`
+- Modify: `backend/app/file_system/engine/base.py`
+- Modify: `backend/app/file_system/engine/note_ops.py`
+- Modify: `backend/app/file_system/engine/folder_ops.py`
+- Modify: `backend/app/file_system/engine/search_ops.py`
+- Modify: `backend/app/file_system/engine/trash_ops.py`
+- Modify: `backend/app/file_system/engine/version_ops.py`
+- Modify: `backend/app/file_system/engine/export_ops.py`
+- Modify: `backend/app/file_system/engine/consistency_ops.py`
+- Modify: `backend/app/file_system/engine/__init__.py`
 - Modify: `backend/app/errors.py`
 - Create: `backend/tests/test_space_path_containment.py`
 - Create: `backend/tests/test_pxii_vfs.py`
 - Modify: `backend/tests/test_deps_space_validation.py`
 - Modify: `backend/tests/test_deps.py`
 - Modify: `backend/tests/test_space_manager.py`
-- Modify: `backend/tests/test_file_system/test_api.py`
+- Create: `backend/tests/test_file_system/test_api.py`
 - Modify: `backend/tests/conftest.py`
 
 **Interfaces:**
@@ -1080,9 +1101,161 @@ async def test_storage_path_roles_must_be_pairwise_distinct(
     assert containment_fixture.total_storage_open_count == 0
 ```
 
+Add these lock regressions to the same file. `open_twice_in_owner_task` enters the same capability twice in one Task; `hold_scope_until` and `enter_scope_and_signal` are complete local async helpers that set their entered event only after `open_verified()` returns and always release through their context manager:
+
+```python
+@pytest.mark.asyncio
+async def test_containment_lock_is_reentrant_for_the_same_task(
+    containment_fixture,
+) -> None:
+    scope = await containment_fixture.authorized_scope()
+    async with asyncio.timeout(2):
+        async with scope.containment.open_verified():
+            async with scope.containment.open_verified():
+                pass
+
+
+@pytest.mark.asyncio
+async def test_containment_lock_excludes_a_different_task(
+    containment_fixture,
+) -> None:
+    scope = await containment_fixture.authorized_scope()
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    async with scope.containment.open_verified():
+        contender = asyncio.create_task(
+            containment_fixture.enter_scope_and_signal(scope, entered, release)
+        )
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.1):
+                await entered.wait()
+        assert not contender.done()
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    release.set()
+    await asyncio.wait_for(contender, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_containment_lock_restores_owner_and_depth_after_error_and_cancel(
+    containment_fixture,
+) -> None:
+    scope = await containment_fixture.authorized_scope()
+    with pytest.raises(RuntimeError, match="body failure"):
+        async with scope.containment.open_verified():
+            async with scope.containment.open_verified():
+                raise RuntimeError("body failure")
+
+    cancelled = asyncio.create_task(
+        containment_fixture.hold_scope_until(scope, asyncio.Event())
+    )
+    await containment_fixture.wait_until_scope_entered(cancelled)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    async with asyncio.timeout(2):
+        async with scope.containment.open_verified():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_does_not_corrupt_containment_lock_owner(
+    containment_fixture,
+) -> None:
+    scope = await containment_fixture.authorized_scope()
+    holder_release = asyncio.Event()
+    holder = asyncio.create_task(
+        containment_fixture.hold_scope_until(scope, holder_release)
+    )
+    await containment_fixture.wait_until_scope_entered(holder)
+    waiter = asyncio.create_task(containment_fixture.enter_scope_once(scope))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not holder.done()
+    successor = asyncio.create_task(containment_fixture.enter_scope_once(scope))
+    await asyncio.sleep(0)
+    assert not successor.done()
+    holder_release.set()
+    await asyncio.wait_for(holder, timeout=2)
+    await asyncio.wait_for(successor, timeout=2)
+```
+
+The interrupted implementation already produced a focused RED `TimeoutError` for the first nested-acquisition regression and a subsequent GREEN `1 passed` after a Task-reentrant prototype. Preserve that receipt as worktree-only TDD evidence and rerun all four tests at the Batch A commit SHA; it is not S1 exit evidence until then.
+
 Add the two small helpers in the same test file using the public setup/login API and epoch-bearing `create_space_token`; do not bypass `CredentialAuthority` for the registered-space case. Add a Windows-capable symlink/junction/reparse test guarded by `pytest.skip` only when the host cannot create that primitive. Add a cached-engine regression: open `spc_bound` with one verified capability, then call the manager with the same Space ID and a capability for a different canonical path and assert a stable `SpaceEnginePathMismatchError` before a second engine or directory is created.
 
 Add deterministic swap-race hooks at three distinct boundaries. The mandatory boundary is after the capability's final namespace/identity check but before its first kernel-relative open: replace an in-root parent with a symlink/junction/reparse point to an outside directory, then prove the anchored open cannot touch the outside target and fails before publishing `ContainedSpaceOpens`. Repeat immediately before the private VFS authority bind and immediately before Notes/index handle transfer. Linux probes swap the main name and each exact `-wal`, `-shm`, and `-journal` companion after binding; Windows probes perform the equivalent file-ID/reparse swaps. Each probe asserts zero outside reads/writes/deletes and proves SQLite saw only `file:pxii-<token>?vfs=pxii`, where the token is never returned by a public object. Add a role-collision table for `notes_dir == db_path`, `notes_dir == index_db`, and `db_path == index_db`; all fail before storage I/O.
+
+Create `backend/tests/test_file_system/test_api.py` with contained-entry regressions. The `contained_file_system_fixture` supplies real `ContainedSpaceOpens`, initializes through `open_contained_file_system`, and retains the capability context until the FileSystem closes:
+
+```python
+from __future__ import annotations
+
+import inspect
+from pathlib import Path
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_contained_entry_never_calls_path_backed_constructor(
+    contained_file_system_fixture, monkeypatch
+) -> None:
+    from app.file_system.api import open_contained_file_system
+    from app.file_system.engine import FileSystemStorage
+
+    def forbidden_path_constructor(*args, **kwargs):
+        raise AssertionError("contained production path used path-backed constructor")
+
+    monkeypatch.setattr(FileSystemStorage, "__init__", forbidden_path_constructor)
+    async with contained_file_system_fixture.opens() as opens:
+        file_system = await open_contained_file_system(opens)
+        assert file_system._storage_mode == "contained"
+        await file_system.close()
+
+
+def test_contained_entry_and_engine_operations_have_no_path_fallback() -> None:
+    from app.file_system.api import open_contained_file_system
+
+    entry_source = inspect.getsource(open_contained_file_system)
+    assert "FileSystemStorage.from_bound_handles" in entry_source
+    assert "FileSystemStorage(" not in entry_source
+    assert "get_file_system(" not in entry_source
+    engine_root = Path(__file__).resolve().parents[2] / "app" / "file_system" / "engine"
+    for name in (
+        "note_ops.py", "folder_ops.py", "search_ops.py", "trash_ops.py",
+        "version_ops.py", "consistency_ops.py",
+    ):
+        source = (engine_root / name).read_text(encoding="utf-8")
+        assert "self.root" not in source
+        assert "self.index_db" not in source
+        assert "sqlite3.connect(" not in source
+
+
+@pytest.mark.asyncio
+async def test_contained_import_and_export_require_external_path_capability(
+    contained_file_system_fixture, tmp_path: Path
+) -> None:
+    from app.errors import ExternalPathCapabilityRequiredError
+
+    source = tmp_path / "outside.md"
+    source.write_text("do not read", encoding="utf-8")
+    output = tmp_path / "outside-export"
+    async with contained_file_system_fixture.file_system() as file_system:
+        with pytest.raises(ExternalPathCapabilityRequiredError) as imported:
+            await file_system.import_from_md(str(source))
+        with pytest.raises(ExternalPathCapabilityRequiredError) as exported:
+            await file_system.export_folder("folder", str(output))
+    assert imported.value.to_domain_record("req-import").code == (
+        "external_path_capability_required"
+    )
+    assert exported.value.to_domain_record("req-export").code == (
+        "external_path_capability_required"
+    )
+    assert source.read_text(encoding="utf-8") == "do not read"
+    assert not output.exists()
+```
 
 Create `backend/tests/test_pxii_vfs.py` with named, real regressions rather than mocked pathname calls:
 
@@ -1462,7 +1635,13 @@ Implement `open` in this order:
 5. Require `db_path.parent == notes_dir.parent`, derive `index_db` only after containment, and require all three role paths to be pairwise distinct.
 6. Construct the exact four-field non-authority `ContainedSpacePaths`, consume it privately in the factory-only capability, and return `AuthorizedSpaceScopeResult` without exposing the snapshot, creating directories, opening SQLite, migrating, or calling a storage consumer.
 
-Implement `_capture_safe_ancestor_identities` and `_require_same_safe_ancestors` for both POSIX and Windows. They use anchored handle metadata rather than string comparison, reject symlink/junction/reparse components even when their resolved target remains in-root, and compare the complete captured ancestor chain. Missing, added, replaced, retargeted, or type-changed ancestors fail with `PathOutsideSpaceError` containing no host path. `_containment_lock_for(paths)` returns the one process-local lock shared by every capability for that canonical Space parent. If a body error/cancellation and close/revalidation fail together, preserve the body failure first in `[primary, *cleanup_errors]`. The private identity receipt is never a field on `ContainedSpacePaths` and never serialized.
+Implement `_capture_safe_ancestor_identities` and `_require_same_safe_ancestors` for both POSIX and Windows. They use anchored handle metadata rather than string comparison, reject symlink/junction/reparse components even when their resolved target remains in-root, and compare the complete captured ancestor chain. Missing, added, replaced, retargeted, or type-changed ancestors fail with `PathOutsideSpaceError` containing no host path. `_containment_lock_for(paths)` returns one process-local Task-reentrant lock shared by every capability for that canonical Space parent. The lock stores the owning `asyncio.Task` and depth only after its underlying mutex is acquired; same-owner entry increments depth without awaiting, different Tasks await the mutex, and only depth zero clears owner then releases. `__aexit__` restores depth for normal, error, and cancellation exits. Cancellation while waiting never changes owner/depth and removes only that waiter's future. If a body error/cancellation and close/revalidation fail together, preserve the body failure first in `[primary, *cleanup_errors]`. The private identity receipt is never a field on `ContainedSpacePaths` and never serialized.
+
+Refactor the existing `FileSystemStorage`; do not copy it into `file_system/api.py`. `engine/base.py` defines package-private `_NotesAuthority` and `_IndexAuthority` ports plus two adapter pairs. `_BoundNotesAuthority` is the relative-name-only Notes authority: it owns one transferred `BoundDirectoryHandle`, accepts only normalized relative names, rejects absolute/drive/UNC/empty/`.`/`..` components, and implements child create/read/atomic-replace/enumerate/rename/unlink/mkdir through handle-relative methods. `_BoundIndexAuthority` owns one `BoundSQLiteTarget` and every connection is `target.open_maintenance(MaintenanceOptions(...))`. `_PathNotesAuthority` and `_PathIndexAuthority` are constructed only by the legacy `(root_dir, index_db)` constructor for existing tests and the fixed N-1 fixture. The path-backed constructor remains a test/N-1 compatibility adapter. `StorageBase` stores the two ports and a private `_storage_mode`; contained mode has no `root`, `index_db`, host `Path`, connector, or stringified path field.
+
+Modify `note_ops.py`, `folder_ops.py`, `search_ops.py`, `trash_ops.py`, `version_ops.py`, and `consistency_ops.py` so their storage I/O calls only the ports with relative names. Pure relative parsing uses `PurePosixPath`; none of these modules calls `Path.resolve`, `read_text`, `write_text`, `mkdir`, `rename`, `unlink`, `os.replace`, or `sqlite3.connect`. `engine/__init__.py::FileSystemStorage.from_bound_handles(notes_handle, index_target)` is the sole contained constructor and bypasses the path-backed `__init__` without invoking it. `file_system/api.py::open_contained_file_system(opens)` transfers the two authorities and calls only that factory. Static AST/source tests and a runtime constructor trap prove production dependencies cannot fall back to the path-backed constructor.
+
+In `export_ops.py`, branch on `_storage_mode` before converting, normalizing, resolving, checking, reading, or creating either argument. Contained `import_from_md(file_path)` and `export_folder(output_dir)` raise `ExternalPathCapabilityRequiredError`, status 403, legacy alias `authorization_error`, canonical code `external_path_capability_required`, and retryable false. The message contains no supplied path. Path-backed tests/N-1 retain their current behavior; S1 introduces no external host-path capability.
 
 `contained_io.py` is normative, not a best-effort wrapper. On POSIX, each `open_bound_space` call opens an `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC` root descriptor, verifies its captured identity, and traverses each role component with `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)` or the single-component `openat`/`O_NOFOLLOW` fallback; compare every `fstat` receipt before publishing an opaque handle. On Windows, each call opens and verifies the root directory HANDLE, then opens descendants with `NtCreateFile` relative to the retained `RootDirectory`, requests reparse-point inspection, rejects any reparse component, and omits `FILE_SHARE_DELETE`. The swap hook between final namespace check and first kernel open must still produce no outside I/O: root/component identity mismatch closes every partial handle, and an immediate namespace recheck occurs inside `open_bound_space` before return. `run_joined_thread`/`run_joined_awaitable` repeatedly join worker and terminal effects after cancellation; a successful non-resource operation executes `on_success` in its owner Task before the original cancellation is re-raised, while a cancelled resource producer invokes its disposer instead of its publisher. `test_cancel_during_bound_open_joins_worker_and_closes_every_handle` covers POSIX and Windows fault hooks and proves zero orphan descriptor/HANDLE/SQLite target.
 
@@ -1620,6 +1799,29 @@ async def open_contained_file_system(
 
 The returned filesystem retains only bound handles, and every later Note/index child operation is relative to them. The engine manager retains the `BoundSQLiteTarget` and calls only `target.make_async_engine(options)`; the target's hidden creator revalidates its live authority before each checkout and never consumes a cached host path. Engine disposal completes before `target.aclose()`. The capability owns provisional-transfer revocation until `open_verified()` exits successfully, so one successful namespace check never becomes pathname authority.
 
+Commit Task 4 in three implementation batches before the final integration batch. Each command is repository-root-relative and each path belongs to exactly one batch:
+
+**Batch A - scope, Task-reentrant lock, and joined cancellation**
+
+```powershell
+git add backend/app/runtime/__init__.py backend/app/runtime/scope.py backend/app/runtime/contained_io.py backend/app/runtime/joined_thread.py backend/app/errors.py backend/tests/test_space_path_containment.py
+git commit -m "feat: add reentrant containment scope"
+```
+
+**Batch B - native pxii-vfs and platform build**
+
+```powershell
+git add backend/app/runtime/sqlite_vfs.py backend/pyproject.toml backend/uv.lock backend/CMakeLists.txt backend/cmake/pxii-vfs-source.sha256 backend/cibuildwheel.toml backend/native/pxii_vfs/pxii_vfs.c backend/native/pxii_vfs/pxii_vfs.h backend/native/vendor/sqlite3ext.h backend/scripts/verify_pxii_vfs_source_hash.py .github/workflows/pxii-vfs-wheels.yml backend/tests/test_pxii_vfs.py backend/tests/conftest.py
+git commit -m "feat: bind sqlite through pxii vfs"
+```
+
+**Batch C - handle-relative FileSystem engine**
+
+```powershell
+git add backend/app/file_system/api.py backend/app/file_system/engine/base.py backend/app/file_system/engine/note_ops.py backend/app/file_system/engine/folder_ops.py backend/app/file_system/engine/search_ops.py backend/app/file_system/engine/trash_ops.py backend/app/file_system/engine/version_ops.py backend/app/file_system/engine/export_ops.py backend/app/file_system/engine/consistency_ops.py backend/app/file_system/engine/__init__.py backend/tests/test_file_system/test_api.py
+git commit -m "feat: route filesystem through storage authorities"
+```
+
 - [ ] **Step 4: Run containment and dependency tests**
 
 Run:
@@ -1633,12 +1835,18 @@ Run:
 
 Expected: all tests pass; source hashes match; traversal, registered escape, symlink/junction/reparse escape, role overlap, and every injected main/companion swap create no outside I/O. The final-check-to-kernel-open swap cannot redirect either platform opener; SQLite receives only virtual identifiers, while filesystem children remain identity/handle-bound. Static signatures expose no `Path`, `ContainedSpacePaths`, URI/token/fd/HANDLE/sidecar, or raw connector. cibuildwheel lists only CPython 3.13 Windows x64 and Linux x86_64; CI installs both wheels, passes the WAL, rollback-journal, cross-process lock, AsyncSession/savepoint, Alembic, cancellation, pool-disposal, and revocation feasibility tests, then publishes and independently rehashes `pxii-vfs-wheel-manifest-v1` with both wheel/extension build identities.
 
-- [ ] **Step 5: Commit**
+After the commands pass, create the final integration batch:
+
+**Batch D - dependency integration, crash recovery, and platform evidence**
 
 ```powershell
-git add backend/app/runtime/__init__.py backend/app/runtime/scope.py backend/app/runtime/contained_io.py backend/app/runtime/sqlite_vfs.py backend/app/runtime/joined_thread.py backend/pyproject.toml backend/uv.lock backend/CMakeLists.txt backend/cmake/pxii-vfs-source.sha256 backend/cibuildwheel.toml backend/native/pxii_vfs/pxii_vfs.c backend/native/pxii_vfs/pxii_vfs.h backend/native/vendor/sqlite3ext.h backend/scripts/verify_pxii_vfs_source_hash.py .github/workflows/pxii-vfs-wheels.yml .github/workflows/ci.yml backend/app/deps.py backend/app/space_manager.py backend/app/file_system/api.py backend/app/errors.py backend/tests/conftest.py backend/tests/test_space_path_containment.py backend/tests/test_pxii_vfs.py backend/tests/test_deps_space_validation.py backend/tests/test_deps.py backend/tests/test_space_manager.py backend/tests/test_file_system/test_api.py
-git commit -m "feat: authorize and contain space paths"
+git add .github/workflows/ci.yml backend/app/deps.py backend/app/space_manager.py backend/tests/test_deps_space_validation.py backend/tests/test_deps.py backend/tests/test_space_manager.py
+git commit -m "test: close contained storage integration"
 ```
+
+- [ ] **Step 5: Review all four Task 4 batches**
+
+Run one independent specification review and one independent native/storage security review across Batch A-D. Reviewers must verify Task-reentrant lock cancellation semantics, no production path-backed constructor call, relative-name-only Notes operations, `BoundSQLiteTarget.open_maintenance` as the sole index connector, contained import/export fail-closed behavior, native VFS swap/locking/recovery, and both platform receipts. Do not enter Task 5 until both reviews accept every Task 4 gate. If review changes are required, stage each corrected file with its owning Batch A-D command; do not stage a directory or unrelated retained artifacts.
 
 ### Task 5: Authenticate FastMCP HTTP And Require Explicit Trusted Stdio
 

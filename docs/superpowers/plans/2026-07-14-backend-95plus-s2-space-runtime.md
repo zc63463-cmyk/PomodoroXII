@@ -69,8 +69,8 @@ acquire_spaces(space_ids, mode, purpose, timeout_seconds) -> Lease
 - `backend/app/registry/sync_registry.py`, `backend/app/services/sync_entity_types.py`, `backend/app/routes/v1/meta.py`, `backend/app/services/meta.py`, `backend/app/schemas/meta.py`: 消费 compiled catalog 并公开 version/hash。
 - `backend/app/file_system/index_schema.py`: `IndexStoreSchema.verify/upgrade/rebuild_indexes`，schema version 与普通索引/FTS/triggers 的唯一 authority。
 - `backend/app/file_system/schema.py`: 只保留 ORM/DDL 声明和向 `IndexStoreSchema` 的兼容委托；不得继续维护第二套版本 runner。
-- `backend/app/file_system/engine/base.py`: 初始化只调用 `IndexStoreSchema`；请求 open 只 verify。
-- `backend/app/file_system/api.py`: `open_existing_file_system(ContainedSpaceOpens)` 只转移已打开的 distinct Notes/index handles/targets，后续操作保持 descriptor/HANDLE-relative；`provision_file_system()` 是隔离 provision 的唯一 mkdir/init/upgrade factory。
+- `backend/app/file_system/engine/base.py`: 消费 S1 已落地的 `_NotesAuthority`/`_IndexAuthority` port；初始化只调用 `IndexStoreSchema`，请求 open 只 verify，且不得重新引入 `root`/`index_db` host Path 或 pathname connector。
+- `backend/app/file_system/api.py`: `open_existing_file_system(ContainedSpaceOpens)` 只转移已打开的 distinct Notes/index handles/targets并调用 S1 `FileSystemStorage.from_bound_handles`，后续操作保持 descriptor/HANDLE-relative；`provision_file_system()` 是隔离 provision 的唯一 mkdir/init/upgrade factory。S1 的 path-backed constructor 仍只服务既有测试/N-1，contained import/export 在没有独立外部路径 capability 时继续稳定 fail closed。
 
 ### Tests
 
@@ -2716,7 +2716,7 @@ async def provision_file_system(root_dir: Path, index_db: Path) -> FileSystem:
     return fs
 ```
 
-`open_existing_file_system()` has no `ContainedSpacePaths` or `(Path, Path)` overload and accepts only `ContainedSpaceOpens`; its caller invokes it inside the `scope.containment.open_verified()` context that produced those handles. `FileSystemStorage.from_bound_handles()` retains the transferred Notes directory handle and identity-bound index target; `verify_existing_open()` calls `IndexStoreSchema.verify_open(index_target)` and contains no pathname reopen, `mkdir`, upgrade, DDL, or rebuild. Every Note child open is descriptor/HANDLE-relative. Test fixtures that need a fresh store call `provision_file_system`; request dependencies never call it.
+`open_existing_file_system()` has no `ContainedSpacePaths` or `(Path, Path)` overload and accepts only `ContainedSpaceOpens`; its caller invokes it inside the `scope.containment.open_verified()` context that produced those handles. It consumes the S1-owned contained constructor `FileSystemStorage.from_bound_handles()`, which retains the transferred Notes directory handle plus identity-bound index target through the S1 internal authority ports; S2 extends those ports but does not replace them or restore pathname state. `verify_existing_open()` calls `IndexStoreSchema.verify_open(index_target)` and contains no pathname reopen, `mkdir`, upgrade, DDL, or rebuild. Every Note child open is descriptor/HANDLE-relative. The legacy path-backed constructor remains test/N-1-only, and contained `import_from_md(file_path)`/`export_folder(output_dir)` continue to raise `ExternalPathCapabilityRequiredError` before inspecting a host path because S2 defines no external path capability. Test fixtures that need a fresh store call `provision_file_system`; request dependencies never call it.
 
 `backend/app/runtime/space.py` 定义唯一最终 record：
 
