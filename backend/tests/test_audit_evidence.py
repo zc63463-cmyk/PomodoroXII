@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import json
 import sys
+import tomllib
 from decimal import Decimal
 from pathlib import Path
 
@@ -484,3 +485,13 @@ def test_certification_tags_without_a_verified_artifact_cannot_lift_cap() -> Non
         "artifact_size_bytes": None,
     }
     assert verifier.effective_cap([], [record], set()) == 94
+
+
+def test_development_dependencies_include_pytest_cov_6_or_newer() -> None:
+    pyproject = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+    dev = pyproject["project"]["optional-dependencies"]["dev"]
+    assert "pytest-cov>=6.0" in dev
