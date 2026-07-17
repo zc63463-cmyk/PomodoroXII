@@ -39,6 +39,12 @@ env:
   WORKING_DIR: backend
 
 jobs:
+  pxii-vfs-wheels:
+    name: Native SQLite VFS Wheels
+    permissions:
+      contents: read
+    uses: ./.github/workflows/pxii-vfs-wheels.yml
+
   # -----------------------------------------------------------------
   # Job 1: Test — pytest + ruff
   # -----------------------------------------------------------------
@@ -100,7 +106,7 @@ jobs:
   # -----------------------------------------------------------------
   build:
     name: Build & Smoke Docker Image
-    needs: test
+    needs: [test, pxii-vfs-wheels]
     runs-on: ubuntu-latest
     permissions:
       contents: read

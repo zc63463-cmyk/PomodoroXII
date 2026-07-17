@@ -14,7 +14,7 @@ async def test_get_space_context_rejects_nonexistent_space_id(client):
     pointing at deleted spaces) must be rejected with AuthenticationError.
     """
     from app.deps import get_space_context
-    from app.errors import AuthenticationError
+    from app.errors import SpaceNotFoundError
 
     # Forge a space token payload with a non-existent space_id.
     fake_user = {
@@ -22,7 +22,7 @@ async def test_get_space_context_rejects_nonexistent_space_id(client):
         "type": "space",
         "space_id": "non-existent-space-id-xxx",
     }
-    with pytest.raises(AuthenticationError):
+    with pytest.raises(SpaceNotFoundError):
         await get_space_context(user=fake_user)
 
 
