@@ -14,6 +14,7 @@ matching against the versions other modules already bound.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib
 import os
@@ -229,24 +230,29 @@ def _isolate_env(
 async def space_session(_isolate_env: Path):
     """Yield an AsyncSession for a per-test space DB with all tables created.
 
-    The space_manager.get_session() call internally runs
+    The test fixture directly runs
     Base.metadata.create_all (excluding meta tables) on the space engine,
     so all 18 business tables are available.
     """
     from app.db.meta_session import close_meta_db, init_meta_db
-    from app.space_manager import (
-        dispose_space_engine_manager,
-        get_space_engine_manager,
-    )
+    from app.db.migrations import run_migrations
+    from app.db.session import create_engine, create_session_factory
 
     await init_meta_db()
-    manager = get_space_engine_manager()
-    session = await manager.get_session("spc_test")
+    from app.settings import settings
+
+    database = settings.space_db_path("spc_test")
+    database.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(run_migrations, "space", database)
+    engine = create_engine(
+        f"sqlite+aiosqlite:///{database.as_posix()}", echo=settings.debug
+    )
+    session = create_session_factory(engine)()
     try:
         yield session
     finally:
         await session.close()
-        await dispose_space_engine_manager()
+        await engine.dispose()
         await close_meta_db()
 
 

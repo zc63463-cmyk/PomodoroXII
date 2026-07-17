@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
@@ -112,6 +113,7 @@ async def _close_fixture_resources(
     space_session: Any,
     dispose_space_engines: Any,
     close_meta_db: Any,
+    space_engine: Any = None,
 ) -> None:
     """Close every fixture resource even when an earlier close fails."""
     try:
@@ -123,9 +125,13 @@ async def _close_fixture_resources(
                 await space_session.close()
         finally:
             try:
-                await dispose_space_engines()
+                if space_engine is not None:
+                    await space_engine.dispose()
             finally:
-                await close_meta_db()
+                try:
+                    await dispose_space_engines()
+                finally:
+                    await close_meta_db()
 
 
 async def populate_fixture(
@@ -167,7 +173,9 @@ async def populate_fixture(
                 get_meta_session_factory,
                 init_meta_db,
             )
+            from app.db.migrations import run_migrations
             from app.db.models.meta import Space
+            from app.db.session import create_engine, create_session_factory
             from app.file_system.api import get_file_system
             from app.file_system.interfaces import FileSystem
             from app.models.note import Note
@@ -177,10 +185,10 @@ async def populate_fixture(
             from app.services.sync_outbox import get_current_cursor, record_sync_event
             from app.space_manager import (
                 dispose_space_engine_manager,
-                get_space_engine_manager,
             )
 
             space_session: Any = None
+            space_engine: Any = None
             file_system: FileSystem | None = None
             try:
                 await init_meta_db()
@@ -199,8 +207,12 @@ async def populate_fixture(
                     )
                     await meta_session.commit()
 
-                manager = get_space_engine_manager()
-                space_session = await manager.get_session(space_id, db_path=space_db)
+                space_db.parent.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(run_migrations, "space", space_db)
+                space_engine = create_engine(
+                    f"sqlite+aiosqlite:///{space_db.as_posix()}", echo=False
+                )
+                space_session = create_session_factory(space_engine)()
                 file_system = await get_file_system(notes_dir, index_db)
 
                 task = Task(
@@ -293,6 +305,7 @@ async def populate_fixture(
                 await _close_fixture_resources(
                     file_system=file_system,
                     space_session=space_session,
+                    space_engine=space_engine,
                     dispose_space_engines=dispose_space_engine_manager,
                     close_meta_db=close_meta_db,
                 )
