@@ -674,7 +674,7 @@ describe('QuickNotesView', () => {
     const mainColumn = explorer.parentElement?.nextElementSibling
 
     expect(grid).toHaveClass('grid')
-    expect(grid).toHaveClass('lg:grid-cols-[16rem_minmax(0,1fr)]')
+    expect(grid).toHaveClass('lg:grid-cols-[18rem_minmax(0,1fr)]')
     expect(grid?.firstElementChild).toContainElement(explorer)
     expect(explorer).toContainElement(screen.getByLabelText('搜索小记'))
     expect(within(explorer).getByText('活动日历')).toBeInTheDocument()
@@ -830,7 +830,7 @@ describe('QuickNotesView', () => {
 
     expect(
       screen.getByRole('button', { name: '筛选标签 #work/frontend，1 条小记' }),
-    ).toHaveClass('text-[color:var(--qn-text)]')
+    ).toHaveClass('text-[color:var(--qn-accent-readable)]')
     expect(screen.getByText('work')).toBeInTheDocument()
   })
 
