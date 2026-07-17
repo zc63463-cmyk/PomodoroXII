@@ -1,6 +1,6 @@
 """ExportOpsMixin — 导入导出 (单笔记 + 批量文件夹).
 
-组合到 FileSystemStorage 后, 通过 self.root / self._lock / self._connect 等
+组合到 FileSystemStorage 后, 通过 StorageBase authority helpers
 访问 StorageBase 提供的基础设施.
 
 Phase 1: 仅迁移 export_to_md / import_from_md 实现 + export_folder 桩
@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+from app.errors import ExternalPathCapabilityRequiredError
 from app.file_system.interfaces import NoteMeta
 
 from .base import _utc_now_iso
@@ -25,6 +26,9 @@ class ExportOpsMixin:
         return await self.read_note(note_id)
 
     async def import_from_md(self, file_path: str, folder_id=None) -> NoteMeta:
+        if self._storage_mode == "contained":
+            raise ExternalPathCapabilityRequiredError()
+
         def _do():
             path = Path(file_path)
             title = path.stem
@@ -42,6 +46,9 @@ class ExportOpsMixin:
           - notes/<filename>.md  (按原文件名扁平化)
         校验: folder_id 不存在或已 trashed → KeyError.
         """
+        if self._storage_mode == "contained":
+            raise ExternalPathCapabilityRequiredError()
+
         def _collect():
             with self._lock, self._connect() as conn:
                 conn.row_factory = __import__("sqlite3").Row
@@ -85,14 +92,18 @@ class ExportOpsMixin:
                     "notes": [],
                 }
                 for n in notes:
-                    abs_path = self.root / n["current_path"]
-                    content = abs_path.read_text(encoding="utf-8") if abs_path.exists() else ""
-                    arcname = f"notes/{Path(n['current_path']).name}"
+                    relative_path = n["current_path"]
+                    content = (
+                        self._read_text(relative_path)
+                        if self._file_exists(relative_path)
+                        else ""
+                    )
+                    arcname = f"notes/{PurePosixPath(relative_path).name}"
                     zf.writestr(arcname, content)
                     manifest["notes"].append({
                         "note_id": n["note_id"],
                         "title": n["title"],
-                        "filename": Path(n["current_path"]).name,
+                        "filename": PurePosixPath(relative_path).name,
                     })
                 zf.writestr(
                     "manifest.json",

@@ -1,6 +1,6 @@
 """FolderOpsMixin — 文件夹操作 (CRUD + 移动 + 重命名 + 删除 + 路径).
 
-组合到 FileSystemStorage 后, 通过 self.root / self._lock / self._connect 等
+组合到 FileSystemStorage 后, 通过 StorageBase authority helpers
 访问 StorageBase 提供的基础设施.
 
 Phase 1: 仅迁移已实现方法 + 4 个 NotImplementedError 桩
@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import PurePosixPath
 
 from app.file_system.interfaces import FolderMeta
 
@@ -241,14 +241,12 @@ class FolderOpsMixin:
                     for note_row in note_rows:
                         note_id = note_row[0]
                         rel_path = note_row[1]
-                        abs_path = self.root / rel_path
                         # Timestamped trash filename to avoid collision
                         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
-                        trash_filename = f"{Path(rel_path).stem}-{timestamp}.md"
+                        trash_filename = f"{PurePosixPath(rel_path).stem}-{timestamp}.md"
                         trash_rel = f".trash/{trash_filename}"
-                        trash_path = self.root / trash_rel
-                        if abs_path.exists():
-                            abs_path.rename(trash_path)
+                        if self._file_exists(rel_path):
+                            self._rename_file(rel_path, trash_rel)
                         conn.execute(
                             "UPDATE notes SET is_deleted = 1, status = ?, current_path = ?, "
                             "updated_at = ? WHERE note_id = ?",

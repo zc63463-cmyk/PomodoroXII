@@ -1,6 +1,6 @@
 """NoteOpsMixin — 笔记操作 (CRUD + 移动 + 编辑).
 
-组合到 FileSystemStorage 后, 通过 self.root / self._lock / self._connect 等
+组合到 FileSystemStorage 后, 通过 StorageBase authority helpers
 访问 StorageBase 提供的基础设施.
 """
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import PurePosixPath
 
 from nanoid import generate
 
@@ -61,14 +61,7 @@ class NoteOpsMixin:
                         if exists:
                             raise ValueError(f"Note id {external_id} already exists")
                 now = _utc_now_iso()
-                # B.3: 用 _note_path 推导 abs_path (单点更新路径策略)
-                abs_path = self._note_path(note_id, title, folder_id)
-                # rel_path 用于 DB 写入 (POSIX 风格, 与 _note_path 内部逻辑等价)
-                filename = _make_filename(note_id, title)
-                if folder_id is None:
-                    rel_path = f"notes/{filename}"
-                else:
-                    rel_path = f"notes/{folder_id}/{filename}"
+                rel_path = self._note_relative(note_id, title, folder_id)
                 content_hash = _sha256(content)
                 tags_json = json.dumps(tags, ensure_ascii=False)
                 word_count = len(content.split())
@@ -83,7 +76,7 @@ class NoteOpsMixin:
                     "created_at": now,
                     "updated_at": now,
                 }
-                self._atomic_write(abs_path, wrap_with_frontmatter(fm_meta, content))
+                self._atomic_write(rel_path, wrap_with_frontmatter(fm_meta, content))
 
                 # Insert DB row (FTS5 trigger fires automatically)
                 with self._connect() as conn:
@@ -118,10 +111,10 @@ class NoteOpsMixin:
                     ).fetchone()
             if not row:
                 raise KeyError(f"Note {note_id} not found")
-            path = self.root / row[0]
-            if not path.exists():
-                raise FileNotFoundError(f"Note file missing: {path}")
-            raw = path.read_text(encoding="utf-8")
+            relative_path = row[0]
+            if not self._file_exists(relative_path):
+                raise FileNotFoundError(f"Note file missing: {relative_path}")
+            raw = self._read_text(relative_path)
             # Strip YAML frontmatter for backward compatibility (callers
             # expect raw markdown content, not frontmatter metadata).
             return strip_frontmatter(raw)
@@ -148,9 +141,8 @@ class NoteOpsMixin:
                 if rel_path is None:
                     results.append(None)
                     continue
-                abs_path = self.root / rel_path
-                if abs_path.exists():
-                    raw = abs_path.read_text(encoding="utf-8")
+                if self._file_exists(rel_path):
+                    raw = self._read_text(rel_path)
                     results.append(strip_frontmatter(raw))
                 else:
                     results.append(None)
@@ -194,18 +186,16 @@ class NoteOpsMixin:
                     if not row:
                         raise KeyError(f"Note {note_id} not found")
                     old_path = row["current_path"]
-                    filename = Path(old_path).name
+                    filename = PurePosixPath(old_path).name
                     # Compute new path based on target_folder_id
                     if target_folder_id is None:
                         new_rel_path = f"notes/{filename}"
                     else:
                         new_rel_path = f"notes/{target_folder_id}/{filename}"
                     # Move file on disk
-                    old_abs = self.root / old_path
-                    new_abs = self.root / new_rel_path
-                    if old_abs.exists() and old_abs != new_abs:
-                        new_abs.parent.mkdir(parents=True, exist_ok=True)
-                        old_abs.rename(new_abs)
+                    if self._file_exists(old_path) and old_path != new_rel_path:
+                        self._ensure_directory(str(PurePosixPath(new_rel_path).parent))
+                        self._rename_file(old_path, new_rel_path)
                     # Update DB: folder_id AND current_path
                     conn.execute(
                         "UPDATE notes SET folder_id = ?, current_path = ?, updated_at = ? "
@@ -242,17 +232,16 @@ class NoteOpsMixin:
                     if not row:
                         raise KeyError(f"Note {note_id} not found")
                     old_hash = row["content_hash"]
-                    abs_path = self.root / row["current_path"]
+                    relative_path = row["current_path"]
 
                     # A.5: 若内容变化, 先备份旧内容到 .meta/version_backups/
                     if old_hash != new_hash:
                         version_id = "v_" + generate(size=12)
                         # 读旧内容 (在 _atomic_write 覆盖之前)
                         old_content = ""
-                        if abs_path.exists():
-                            old_content = abs_path.read_text(encoding="utf-8")
-                        backup_dir = self.root / ".meta" / "version_backups"
-                        backup_path = backup_dir / f"{version_id}.md"
+                        if self._file_exists(relative_path):
+                            old_content = self._read_text(relative_path)
+                        backup_path = f".meta/version_backups/{version_id}.md"
                         self._atomic_write(backup_path, old_content)
 
                     # Write new content with updated frontmatter (atomic)
@@ -265,7 +254,9 @@ class NoteOpsMixin:
                         "created_at": row["created_at"],
                         "updated_at": now,
                     }
-                    self._atomic_write(abs_path, wrap_with_frontmatter(fm_meta, content))
+                    self._atomic_write(
+                        relative_path, wrap_with_frontmatter(fm_meta, content)
+                    )
 
                     # Update DB row
                     conn.execute(
@@ -310,14 +301,12 @@ class NoteOpsMixin:
                         # E.1: 若 title 真正变化, 触发文件重命名 + 路径历史
                         if old_title != title:
                             new_filename = _make_filename(note_id, title)
-                            old_abs = self.root / old_path
                             # 保留原 folder 目录 (notes 或 notes/<folder_id>)
-                            folder_part = str(Path(old_path).parent).replace("\\", "/")
+                            folder_part = PurePosixPath(old_path).parent.as_posix()
                             new_rel_path = f"{folder_part}/{new_filename}"
-                            new_abs = self.root / new_rel_path
-                            if old_abs.exists() and old_abs != new_abs:
-                                new_abs.parent.mkdir(parents=True, exist_ok=True)
-                                old_abs.rename(new_abs)
+                            if self._file_exists(old_path) and old_path != new_rel_path:
+                                self._ensure_directory(folder_part)
+                                self._rename_file(old_path, new_rel_path)
                             updates.append("current_path = ?")
                             params.append(new_rel_path)
                             # 记录路径历史
@@ -363,14 +352,12 @@ class NoteOpsMixin:
                     if not row:
                         raise KeyError(f"Note {note_id} not found")
                     rel_path = row[0]
-                    abs_path = self.root / rel_path
                     # Timestamped trash filename to avoid collision on repeated deletes
                     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
-                    trash_filename = f"{Path(rel_path).stem}-{timestamp}.md"
+                    trash_filename = f"{PurePosixPath(rel_path).stem}-{timestamp}.md"
                     trash_rel = f".trash/{trash_filename}"
-                    trash_path = self.root / trash_rel
-                    if abs_path.exists():
-                        abs_path.rename(trash_path)
+                    if self._file_exists(rel_path):
+                        self._rename_file(rel_path, trash_rel)
                     # Update current_path to point to trash location + mark deleted
                     conn.execute(
                         "UPDATE notes SET is_deleted = 1, status = ?, current_path = ?, "
