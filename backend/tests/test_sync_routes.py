@@ -265,15 +265,21 @@ async def test_space_token_cannot_prune_sync_ledger(client):
 
 @pytest.mark.asyncio
 async def test_cursor_expired_http_error_has_stable_recovery_fields(client):
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    from app.deps import get_current_user, get_space_context, get_space_db
     from app.services.sync_outbox import advance_retention_floor, prune_sync_events
-    from app.space_manager import get_space_engine_manager
 
     _, space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
-    token_payload = __import__("app.auth.security", fromlist=["decode_access_token"]).decode_access_token(
-        space_token
+    user = await get_current_user(
+        credentials=HTTPAuthorizationCredentials(
+            scheme="Bearer", credentials=space_token
+        )
     )
-    session = await get_space_engine_manager().get_session(token_payload["space_id"])
+    context = await get_space_context(user=user)
+    dependency = get_space_db(context)
+    session = await dependency.__anext__()
     try:
         from app.services.sync_outbox import record_sync_event
 
@@ -285,7 +291,7 @@ async def test_cursor_expired_http_error_has_stable_recovery_fields(client):
         await prune_sync_events(session, before_id=event_row.id)
         await session.commit()
     finally:
-        await session.close()
+        await dependency.aclose()
 
     response = await client.get("/api/v1/sync/pull?cursor=0", headers=headers)
     assert response.status_code == 409
