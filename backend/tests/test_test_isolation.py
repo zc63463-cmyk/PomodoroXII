@@ -79,6 +79,17 @@ def test_default_artifacts_root_is_dedicated_and_outside_repository(
     assert suite_conftest._project_root not in resolved.parents
 
 
+def test_default_artifacts_root_rejects_source_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("POMODOROXII_TEST_ARTIFACTS_ROOT", raising=False)
+    unsafe_default = suite_conftest._project_root / "pomodoroxii-test-artifacts"
+    monkeypatch.setattr(suite_conftest, "_DEFAULT_ARTIFACTS_ROOT", unsafe_default)
+
+    with pytest.raises(RuntimeError, match="inside project source"):
+        suite_conftest._resolve_artifacts_root()
+
+
 def test_existing_repository_artifacts_are_not_cleanup_targets() -> None:
     source = Path(suite_conftest.__file__).read_text(encoding="utf-8")
     assert "backend/.test-artifacts" not in source

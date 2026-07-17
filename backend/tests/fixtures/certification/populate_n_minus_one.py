@@ -106,6 +106,28 @@ def _reload_settings_graph() -> None:
     importlib.reload(deps_module)
 
 
+async def _close_fixture_resources(
+    *,
+    file_system: Any,
+    space_session: Any,
+    dispose_space_engines: Any,
+    close_meta_db: Any,
+) -> None:
+    """Close every fixture resource even when an earlier close fails."""
+    try:
+        if file_system is not None:
+            await file_system.close()
+    finally:
+        try:
+            if space_session is not None:
+                await space_session.close()
+        finally:
+            try:
+                await dispose_space_engines()
+            finally:
+                await close_meta_db()
+
+
 async def populate_fixture(
     data_root: Path,
     manifest_path: Path,
@@ -268,12 +290,12 @@ async def populate_fixture(
                     sync_waterline=await get_current_cursor(space_session),
                 )
             finally:
-                if file_system is not None:
-                    await file_system.close()
-                if space_session is not None:
-                    await space_session.close()
-                await dispose_space_engine_manager()
-                await close_meta_db()
+                await _close_fixture_resources(
+                    file_system=file_system,
+                    space_session=space_session,
+                    dispose_space_engines=dispose_space_engine_manager,
+                    close_meta_db=close_meta_db,
+                )
     finally:
         _reload_settings_graph()
 

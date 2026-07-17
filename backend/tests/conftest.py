@@ -44,7 +44,7 @@ def _resolve_artifacts_root(configured_root: str | Path | None = None) -> Path:
     if configured_root is None:
         configured_root = os.environ.get("POMODOROXII_TEST_ARTIFACTS_ROOT")
     if configured_root is None:
-        return _DEFAULT_ARTIFACTS_ROOT
+        configured_root = _DEFAULT_ARTIFACTS_ROOT
 
     resolved = Path(configured_root).expanduser().resolve()
     home = Path.home().resolve()
