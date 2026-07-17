@@ -171,6 +171,41 @@ class AuthorizationError(AppError):
     code = "forbidden"
 
 
+class SpaceNotFoundError(AppError):
+    detail = "Space is not registered"
+    status_code = 404
+    legacy_error_type = "not_found"
+    code = "space_not_found"
+
+
+class PathOutsideSpaceError(AppError):
+    detail = "Registered storage path is outside the authorized Space"
+    status_code = 403
+    legacy_error_type = "authorization_error"
+    code = "path_outside_space"
+
+
+class SpaceEnginePathMismatchError(AppError):
+    detail = "Space storage identity does not match the cached engine"
+    status_code = 409
+    legacy_error_type = "conflict"
+    code = "space_engine_path_mismatch"
+
+
+class SQLiteAuthorityRevokedError(AppError):
+    detail = "SQLite storage authority has been revoked"
+    status_code = 409
+    legacy_error_type = "conflict"
+    code = "sqlite_authority_revoked"
+
+
+class ExternalPathCapabilityRequiredError(AppError):
+    detail = "External path capability is required for this operation"
+    status_code = 403
+    legacy_error_type = "authorization_error"
+    code = "external_path_capability_required"
+
+
 class SyncCursorExpiredError(AppError):
     detail = "Sync cursor expired; perform a full sync"
     status_code = 409
