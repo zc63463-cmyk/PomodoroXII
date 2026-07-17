@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import inspect
 import json
+import os
 import sys
 import tomllib
 from decimal import Decimal
@@ -371,11 +372,88 @@ def test_baseline_subject_modules_findings_and_scores_are_locked() -> None:
         "unverified",
     }
     verifier = load_verifier()
+    module_scores = [
+        verifier.score_module(worksheet["dimensions"])
+        for worksheet in baseline["modules"].values()
+    ]
+    raw = verifier.score_backend(module_scores)
+    assert raw == Decimal(
+        "75.88888888888888888888888889"
+    )
+    assert verifier.effective_cap(baseline["findings"], baseline["evidence"], set()) == 69
+
+
+@pytest.mark.skipif(
+    not os.environ.get("POMODOROXII_TEST_ARTIFACTS_ROOT"),
+    reason="external S0 evidence root is not configured",
+)
+def test_baseline_external_artifacts_verify_when_configured() -> None:
+    verifier = load_verifier()
     summary = verifier.verify_baseline(AUDIT_ROOT)
+
     assert summary.raw_backend_composite == Decimal(
         "75.88888888888888888888888889"
     )
     assert summary.claimable_score == Decimal("69")
+
+
+def test_verifier_rejects_any_score_policy_contract_drift() -> None:
+    verifier = load_verifier()
+    policy = load_json("score-policy.json")
+    mutations = []
+
+    unexpected = copy.deepcopy(policy)
+    unexpected["unexpected"] = True
+    mutations.append(unexpected)
+
+    formula = copy.deepcopy(policy)
+    formula["formula"]["backend_composite"] = "maximum(module_composite)"
+    mutations.append(formula)
+
+    threshold = copy.deepcopy(policy)
+    threshold["thresholds"]["backend_composite_minimum"] = 0.0
+    mutations.append(threshold)
+
+    cap = copy.deepcopy(policy)
+    cap["hard_caps"]["data_loss_authorization_path_escape_or_unrecoverable_p0"] = 99
+    mutations.append(cap)
+
+    for candidate in mutations:
+        with pytest.raises(ValueError, match="score policy contract"):
+            verifier._validate_policy(candidate)
+
+
+def test_verifier_rejects_candidate_defined_finding_identity() -> None:
+    verifier = load_verifier()
+    baseline = load_json("baseline.json")
+    findings = copy.deepcopy(baseline["findings"])
+    findings[6]["finding_id"] = "P0-08"
+
+    with pytest.raises(ValueError, match="finding identity"):
+        verifier._validate_finding_ids(findings)
+
+
+def test_verifier_rejects_retained_debt_contract_drift() -> None:
+    verifier = load_verifier()
+    baseline = load_json("baseline.json")
+    debt = copy.deepcopy(baseline["retained_artifact_debt"])
+
+    verifier._validate_retained_artifact_debt(debt)
+
+    for key, value in (
+        ("handling", "delete"),
+        ("size_bytes", 0),
+        ("path", "backend/tests/other"),
+    ):
+        candidate = copy.deepcopy(debt)
+        candidate[0][key] = value
+        with pytest.raises(ValueError, match="retained artifact debt"):
+            verifier._validate_retained_artifact_debt(candidate)
+
+    candidate = copy.deepcopy(debt)
+    candidate[0]["unexpected"] = True
+    with pytest.raises(ValueError, match="retained artifact debt"):
+        verifier._validate_retained_artifact_debt(candidate)
 
 
 def test_every_module_and_finding_points_to_known_evidence() -> None:
