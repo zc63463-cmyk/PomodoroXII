@@ -13,8 +13,6 @@ from fastapi import FastAPI, Request
 from httpx import ASGITransport
 from pydantic import ValidationError
 
-from app.auth.security import create_master_token, create_space_token
-
 
 async def _request(app, *, body_frames, headers=()):
     messages = iter(
@@ -450,13 +448,32 @@ async def test_metrics_auth_and_prometheus_contract(client):
     missing = await client.get("/api/metrics")
     assert missing.status_code == 401
 
-    space_token = create_space_token("space", "user")
+    setup = await client.post(
+        "/api/v1/auth/setup", json={"password": "test-password-123"}
+    )
+    assert setup.status_code == 201
+    login = await client.post(
+        "/api/v1/auth/login", json={"password": "test-password-123"}
+    )
+    assert login.status_code == 200
+    master_token = login.json()["access_token"]
+    created = await client.post(
+        "/api/v1/spaces",
+        json={"name": "metrics"},
+        headers={"authorization": f"Bearer {master_token}"},
+    )
+    assert created.status_code == 201
+    issued = await client.post(
+        f"/api/v1/spaces/{created.json()['id']}/token",
+        headers={"authorization": f"Bearer {master_token}"},
+    )
+    assert issued.status_code == 200
+    space_token = issued.json()["space_token"]
     forbidden = await client.get(
         "/api/metrics", headers={"authorization": f"Bearer {space_token}"}
     )
     assert forbidden.status_code == 403
 
-    master_token = create_master_token("operator")
     success = await client.get(
         "/api/metrics", headers={"authorization": f"Bearer {master_token}"}
     )

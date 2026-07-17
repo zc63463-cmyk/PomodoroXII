@@ -22,9 +22,9 @@ async def _get_space_client(client):
 
     Returns ``(space_token, space_id)``.
     """
-    await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     resp = await client.post(
-        "/api/v1/auth/login", json={"password": "test123"}
+        "/api/v1/auth/login", json={"password": "test-password-123"}
     )
     master_token = resp.json()["access_token"]
     resp = await client.post(
@@ -66,9 +66,9 @@ async def test_full_lifecycle_space_token_task_session_stats(client):
     trash_list_shows_tombstone.
     """
     # 1. Setup + login -> master token
-    await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     resp = await client.post(
-        "/api/v1/auth/login", json={"password": "test123"}
+        "/api/v1/auth/login", json={"password": "test-password-123"}
     )
     master_token = resp.json()["access_token"]
     master_headers = {"Authorization": f"Bearer {master_token}"}

@@ -9,12 +9,11 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-import jwt
 from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.security import decode_access_token
+from app.auth.authority import verify_with_fresh_meta_session
 from app.errors import AuthenticationError, AuthorizationError
 from app.logging import request_id_var  # noqa: F401  (re-exported for convenience)
 from app.space_manager import get_space_engine_manager
@@ -58,14 +57,14 @@ async def get_current_user(
     if credentials is None:
         raise AuthenticationError("Missing or invalid Authorization header")
     token = credentials.credentials.strip()
-    try:
-        payload = decode_access_token(token)
-    except jwt.PyJWTError as exc:
-        raise AuthenticationError("Invalid or expired token") from exc
-
-    if "sub" not in payload or "type" not in payload:
-        raise AuthenticationError("Malformed token payload")
-    return payload
+    principal = await verify_with_fresh_meta_session(token, required_scope=None)
+    return {
+        "sub": principal.subject,
+        "type": principal.token_type,
+        "space_id": principal.space_id,
+        "epoch": principal.epoch,
+        "exp": principal.expires_at,
+    }
 
 
 async def require_master_token(

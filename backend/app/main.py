@@ -35,6 +35,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     try:
         await init_meta_db()
+        from app.auth.authority import bootstrap_credential_epoch
+
+        await bootstrap_credential_epoch()
         logger.info("Meta database initialised.")
     except Exception as exc:
         logger.critical("Failed to initialise meta database: %s", exc, exc_info=True)
