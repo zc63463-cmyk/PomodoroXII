@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import threading
 from dataclasses import fields
@@ -88,6 +89,26 @@ def _principal(space_id: str) -> Principal:
     )
 
 
+def _walk_private_values(value: object) -> tuple[object, ...]:
+    pending = [value]
+    seen: set[int] = set()
+    values: list[object] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        values.append(current)
+        if dataclasses.is_dataclass(current) and not isinstance(current, type):
+            pending.extend(
+                getattr(current, item.name) for item in dataclasses.fields(current)
+            )
+        for name in getattr(type(current), "__slots__", ()):
+            if isinstance(name, str) and hasattr(current, name):
+                pending.append(getattr(current, name))
+    return tuple(values)
+
+
 def test_contained_paths_are_private_non_authority_metadata() -> None:
     from app.runtime.scope import AuthorizedSpaceScopeResult, ContainedSpacePaths
 
@@ -104,6 +125,30 @@ def test_contained_paths_are_private_non_authority_metadata() -> None:
         "mode",
         "containment",
     ]
+
+
+def test_bound_directory_handle_is_pathless_and_opens_exact_child(
+    tmp_path: Path,
+) -> None:
+    from app.runtime.contained_io import BoundDirectoryHandle
+
+    handle = BoundDirectoryHandle._create(tmp_path)
+    try:
+        private_values = _walk_private_values(handle)
+        assert not any(isinstance(value, Path) for value in private_values)
+        host_path = os.fspath(tmp_path).casefold()
+        assert not any(
+            host_path in value.casefold()
+            for value in private_values
+            if isinstance(value, str)
+        )
+        with handle.open_child_no_follow(
+            "bound.txt", os.O_CREAT | os.O_EXCL | os.O_RDWR
+        ) as child:
+            child.write(b"bound-authority")
+        assert (tmp_path / "bound.txt").read_bytes() == b"bound-authority"
+    finally:
+        handle._close()
 
 
 @pytest.mark.asyncio
