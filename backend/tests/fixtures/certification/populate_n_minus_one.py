@@ -38,6 +38,7 @@ _ENVIRONMENT_KEYS = (
     "POMODOROXII_SPACES_DATA_DIR",
     "POMODOROXII_ENVIRONMENT",
     "POMODOROXII_SECRET_KEY",
+    "POMODOROXII_BACKUP_ENABLED",
 )
 _MISSING = object()
 
@@ -158,6 +159,7 @@ async def populate_fixture(
         "POMODOROXII_DATABASE_URL": f"sqlite+aiosqlite:///{meta_db.as_posix()}",
         "POMODOROXII_SPACES_DATA_DIR": str(spaces_dir),
         "POMODOROXII_ENVIRONMENT": "development",
+        "POMODOROXII_BACKUP_ENABLED": "false",
         "POMODOROXII_SECRET_KEY": (
             "n-minus-one-fixture-secret-key-95001-not-for-production-use"
         ),

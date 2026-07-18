@@ -30,6 +30,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("PomodoroXII API starting up (env=%s)", settings.environment)
 
     # --- Startup ---
+    from app.file_system.backup import require_legacy_backup_disabled
+
+    require_legacy_backup_disabled(enabled=settings.backup_enabled)
+
     from app.db.meta_session import close_meta_db, init_meta_db
     from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
 
@@ -45,27 +49,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Warm up the space engine manager singleton.
     get_space_engine_manager()
-
-    # Startup backup: snapshot each space's DB if backup_enabled.
-    if settings.backup_enabled:
-        from sqlalchemy import select
-
-        from app.db.meta_session import get_meta_session
-        from app.db.models.meta import Space
-        from app.file_system.backup import BackupService
-
-        try:
-            async for session in get_meta_session():
-                spaces = (await session.execute(select(Space))).scalars().all()
-                break
-            for space in spaces:
-                db_path = settings.space_db_path(space.id)
-                if not db_path.exists():
-                    continue
-                backup_dir = settings.spaces_data_dir / space.id / ".meta" / "backups"
-                BackupService.create_backup(db_path, backup_dir)
-        except Exception as exc:
-            logger.error("Startup backup failed: %s", exc, exc_info=True)
 
     logger.info("PomodoroXII API ready.")
     yield
