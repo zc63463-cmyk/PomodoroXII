@@ -367,8 +367,6 @@ def _descriptor_identity(descriptor: int) -> StorageIdentity:
 def _identity_matches_receipt(
     identity: StorageIdentity, receipt: tuple[str, int, int, int]
 ) -> bool:
-    if os.name == "nt":
-        return identity.file_id == receipt[2]
     return (identity.device, identity.file_id) == (receipt[1], receipt[2])
 
 
