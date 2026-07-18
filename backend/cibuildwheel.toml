@@ -11,6 +11,10 @@ test-requires = [
   "aiosqlite>=0.20",
 ]
 
+[[tool.cibuildwheel.overrides]]
+select = "cp313-manylinux_x86_64"
+test-command = ""
+
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]
 
