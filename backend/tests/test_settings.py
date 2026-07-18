@@ -92,6 +92,10 @@ class TestCorsOrigins:
         assert len(s.cors_origins) >= 1
 
 
+def test_backup_enabled_defaults_false():
+    assert _make_settings(backup_enabled=None).backup_enabled is False
+
+
 # --------------------------------------------------------------------------- #
 # Path helpers
 # --------------------------------------------------------------------------- #

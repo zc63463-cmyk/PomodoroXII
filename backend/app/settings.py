@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     sync_event_payload_max_bytes: PositiveInt = 256 * 1024
     debug: bool = False
     environment: str = "development"
-    backup_enabled: bool = True
+    backup_enabled: bool = False
 
     model_config = SettingsConfigDict(
         env_prefix="POMODOROXII_",
