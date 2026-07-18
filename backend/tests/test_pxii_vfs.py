@@ -519,6 +519,46 @@ def test_replacement_discard_rejects_initial_external_disappearance(
     assert moved.exists()
 
 
+@pytest.mark.parametrize("operation", ["commit", "discard"])
+def test_replacement_intent_does_not_prove_missing_rename_completed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+
+    _source, _cleanup, replacement, replacement_path, _source_identity = (
+        _prepare_closed_replacement(tmp_path, f"intent-missing-{operation}")
+    )
+    moved = tmp_path / f"moved-after-{operation}-intent.db"
+    stage_name = (
+        "replacement_commit_after_publish_intent_before_syscall"
+        if operation == "commit"
+        else "replacement_discard_after_quarantine_intent_before_syscall"
+    )
+
+    def move_after_intent(stage: str) -> None:
+        if stage == stage_name and replacement_path.exists():
+            os.replace(replacement_path, moved)
+
+    monkeypatch.setattr(sqlite_vfs_module, "_terminal_fault_hook", move_after_intent)
+    call = (
+        replacement.commit_bound_replace
+        if operation == "commit"
+        else replacement.discard_closed_replacement
+    )
+    with pytest.raises((FileNotFoundError, ValueError)):
+        call()
+    with pytest.raises(ValueError, match="not reconcilable"):
+        call()
+    if operation == "commit":
+        with sqlite3.connect(tmp_path / "intent-missing-commit.db") as source_connection:
+            assert source_connection.execute("SELECT value FROM proof").fetchone()[0] == (
+                "source"
+            )
+    assert moved.exists()
+
+
 @pytest.mark.parametrize(
     ("operation", "fault_stage"),
     [
@@ -763,6 +803,51 @@ def test_isolated_cleanup_rejects_initial_external_disappearance(
         if operation == "commit"
         else discard_closed_isolated_target
     )
+    with pytest.raises(FileNotFoundError):
+        call(cleanup, identity)
+    assert moved.exists()
+
+
+@pytest.mark.parametrize(("operation", "role"), [("commit", "marker"), ("discard", "target")])
+def test_isolated_delete_intent_does_not_prove_missing_unlink_completed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    role: str,
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import (
+        bind_marked_isolated_target,
+        commit_closed_isolated_target,
+        discard_closed_isolated_target,
+    )
+
+    marker = tmp_path / f".{operation}-intent.marker"
+    marker.write_text(operation, encoding="utf-8")
+    target_path = tmp_path / f"isolated-{operation}-intent.db"
+    target, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename=target_path.name,
+        marker_basename=marker.name,
+        marker_nonce=operation,
+    )
+    identity = target.identity
+    asyncio.run(target.aclose())
+    victim = marker if role == "marker" else target_path
+    moved = tmp_path / f"moved-after-intent-{victim.name}"
+
+    def move_after_intent(stage: str) -> None:
+        if stage == f"isolated_{role}_after_intent_before_delete" and victim.exists():
+            os.replace(victim, moved)
+
+    monkeypatch.setattr(sqlite_vfs_module, "_terminal_fault_hook", move_after_intent)
+    call = (
+        commit_closed_isolated_target
+        if operation == "commit"
+        else discard_closed_isolated_target
+    )
+    with pytest.raises(FileNotFoundError):
+        call(cleanup, identity)
     with pytest.raises(FileNotFoundError):
         call(cleanup, identity)
     assert moved.exists()

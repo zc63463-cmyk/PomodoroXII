@@ -99,6 +99,14 @@ def _terminal_fault_hook(_stage: str) -> None:
     return None
 
 
+def _mark_physical_completion(error: BaseException, operation: str) -> None:
+    setattr(error, "_pxii_physical_completion", operation)
+
+
+def _has_physical_completion(error: BaseException, operation: str) -> bool:
+    return getattr(error, "_pxii_physical_completion", None) == operation
+
+
 def _backend_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -666,6 +674,7 @@ def _delete_relative(
             _fields_ = [("delete_file", ctypes.c_int)]
 
         handle = _windows_open_relative(parent, basename, delete=True)
+        deleted = False
         try:
             if (
                 expected_identity is not None
@@ -677,7 +686,12 @@ def _delete_relative(
                 handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)
             ):
                 raise ctypes.WinError()
+            deleted = True
             _terminal_fault_hook("delete_relative_after_unlink_before_receipt")
+        except BaseException as error:
+            if deleted:
+                _mark_physical_completion(error, "delete")
+            raise
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
         return
@@ -686,6 +700,7 @@ def _delete_relative(
         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
         dir_fd=parent,
     )
+    deleted = False
     try:
         info = os.fstat(descriptor)
         if (
@@ -700,7 +715,12 @@ def _delete_relative(
         ):
             raise ValueError("isolated cleanup identity mismatch")
         os.unlink(basename, dir_fd=parent)
+        deleted = True
         _terminal_fault_hook("delete_relative_after_unlink_before_receipt")
+    except BaseException as error:
+        if deleted:
+            _mark_physical_completion(error, "delete")
+        raise
     finally:
         os.close(descriptor)
 
@@ -917,7 +937,11 @@ def _rename_relative_no_replace(parent: int, source: str, destination: str) -> N
         if error == errno.ENOENT:
             raise FileNotFoundError(source)
         raise OSError(error, os.strerror(error), source)
-    os.fsync(parent)
+    try:
+        os.fsync(parent)
+    except BaseException as error:
+        _mark_physical_completion(error, "rename")
+        raise
 
 
 class SQLiteReplacementAuthority:
@@ -1120,9 +1144,14 @@ class SQLiteReplacementAuthority:
             _require_no_companions(parent, self._source_basename)
             _require_no_companions(parent, self._replacement_basename)
             self._physical_stage = "source_quarantine_attempted"
-            _rename_relative_no_replace(
-                parent, self._source_basename, self._source_backup_basename
-            )
+            try:
+                _rename_relative_no_replace(
+                    parent, self._source_basename, self._source_backup_basename
+                )
+            except BaseException as error:
+                if not _has_physical_completion(error, "rename"):
+                    self._physical_stage = None
+                raise
             _terminal_fault_hook(
                 "replacement_commit_after_source_quarantine_before_receipt"
             )
@@ -1138,9 +1167,17 @@ class SQLiteReplacementAuthority:
                 raise ValueError("replacement target identity changed before commit")
             self._physical_stage = "replacement_publish_attempted"
             _terminal_fault_hook("replacement_commit_between_check_and_publish")
-            _rename_relative_no_replace(
-                parent, self._replacement_basename, self._source_basename
+            _terminal_fault_hook(
+                "replacement_commit_after_publish_intent_before_syscall"
             )
+            try:
+                _rename_relative_no_replace(
+                    parent, self._replacement_basename, self._source_basename
+                )
+            except BaseException as error:
+                if not _has_physical_completion(error, "rename"):
+                    self._restore_quarantined_source()
+                raise
             _terminal_fault_hook("replacement_commit_after_publish")
             self._physical_stage = "replacement_published"
             stage = self._commit_physical_stage()
@@ -1180,11 +1217,19 @@ class SQLiteReplacementAuthority:
             ):
                 raise ValueError("replacement target identity changed before discard")
             self._physical_stage = "replacement_quarantine_attempted"
-            _rename_relative_no_replace(
-                parent,
-                self._replacement_basename,
-                self._discard_tombstone_basename,
+            _terminal_fault_hook(
+                "replacement_discard_after_quarantine_intent_before_syscall"
             )
+            try:
+                _rename_relative_no_replace(
+                    parent,
+                    self._replacement_basename,
+                    self._discard_tombstone_basename,
+                )
+            except BaseException as error:
+                if not _has_physical_completion(error, "rename"):
+                    self._physical_stage = None
+                raise
             _terminal_fault_hook(
                 "replacement_discard_after_quarantine_before_receipt"
             )
@@ -1192,11 +1237,18 @@ class SQLiteReplacementAuthority:
             stage = self._discard_physical_stage()
         if stage == "replacement_quarantined":
             self._physical_stage = "replacement_delete_attempted"
-            _delete_relative(
-                parent,
-                self._discard_tombstone_basename,
-                self._replacement_identity,
-            )
+            try:
+                _delete_relative(
+                    parent,
+                    self._discard_tombstone_basename,
+                    self._replacement_identity,
+                )
+            except BaseException as error:
+                if _has_physical_completion(error, "delete"):
+                    self._physical_stage = "replacement_deleted"
+                else:
+                    self._physical_stage = "replacement_quarantined"
+                raise
             _terminal_fault_hook("replacement_discard_after_delete")
             self._physical_stage = "replacement_deleted"
             stage = self._discard_physical_stage()
@@ -1377,14 +1429,17 @@ def _delete_isolated_role(
         if observed != expected_identity:
             raise ValueError("isolated cleanup identity mismatch")
         cleanup.attempted_deletes.add(key)
+    _terminal_fault_hook(f"isolated_{key}_after_intent_before_delete")
     try:
         _delete_relative(
             cleanup.parent_descriptor,
             basename,
             expected_identity,
         )
-    except FileNotFoundError:
-        pass
+    except BaseException as error:
+        if _has_physical_completion(error, "delete"):
+            cleanup.completed_deletes.add(key)
+        raise
     cleanup.completed_deletes.add(key)
 
 
