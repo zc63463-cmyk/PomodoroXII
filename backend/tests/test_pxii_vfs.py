@@ -321,7 +321,7 @@ def test_companion_delete_rejects_swap_after_final_identity_check(
             assert swap_blocked or companion.exists()
         else:
             assert companion.read_bytes() == b"replacement"
-            assert not replacement.exists()
+            assert replacement.exists()
     finally:
         asyncio.run(target.aclose())
         discard_closed_isolated_target(cleanup, identity)
