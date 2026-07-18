@@ -9,7 +9,11 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import text
 
-from app.errors import SpaceEnginePathMismatchError, SQLiteAuthorityRevokedError
+from app.errors import (
+    PathOutsideSpaceError,
+    SpaceEnginePathMismatchError,
+    SQLiteAuthorityRevokedError,
+)
 from app.runtime.contained_io import ContainedSpaceOpens, open_bound_space
 from app.runtime.scope import _walk_existing_ancestors
 from app.runtime.sqlite_vfs import MaintenanceOptions
@@ -62,6 +66,58 @@ async def test_same_space_identity_reuses_cache_without_second_transfer(
         await second_session.close()
         await first.close_untransferred_resources()
         await second.close_untransferred_resources()
+        await manager.dispose_all()
+
+
+@pytest.mark.asyncio
+async def test_cached_engine_is_revoked_when_exit_revalidation_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import app.runtime.scope as scope_module
+    from app.runtime.scope import SpaceContainmentCapability
+
+    manager = SpaceEngineManager(max_size=2)
+    root = tmp_path / "spaces"
+    parent = root / "same"
+    parent.mkdir(parents=True)
+    notes = parent / "notes"
+    notes.mkdir()
+    paths = SimpleNamespace(
+        space_root=root,
+        db_path=parent / "space.db",
+        notes_dir=notes,
+        index_db=parent / "index.db",
+    )
+    first_capability = SpaceContainmentCapability._create(paths)
+    async with first_capability.open_verified() as first:
+        first_session = await manager.get_session("spc_same", first)
+        await first_session.close()
+
+    cached = manager._engines["spc_same"]
+    second_capability = SpaceContainmentCapability._create(paths)
+    original_revalidate = scope_module._require_same_safe_ancestors
+    revalidations = 0
+
+    def fail_only_on_exit(*args, **kwargs) -> None:
+        nonlocal revalidations
+        revalidations += 1
+        original_revalidate(*args, **kwargs)
+        if revalidations == 2:
+            raise PathOutsideSpaceError("injected exit identity change")
+
+    monkeypatch.setattr(
+        scope_module, "_require_same_safe_ancestors", fail_only_on_exit
+    )
+    try:
+        with pytest.raises(BaseExceptionGroup, match="containment cleanup failed"):
+            async with second_capability.open_verified() as second:
+                second_session = await manager.get_session("spc_same", second)
+                await second_session.close()
+
+        assert "spc_same" not in manager._engines
+        with pytest.raises(SQLiteAuthorityRevokedError):
+            cached.target.open_maintenance(MaintenanceOptions(read_only=True))
+    finally:
         await manager.dispose_all()
 
 

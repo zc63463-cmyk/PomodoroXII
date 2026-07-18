@@ -54,6 +54,9 @@ class SpaceEngineManager:
                 if cached.identity != requested_identity:
                     raise SpaceEnginePathMismatchError()
                 self._engines.move_to_end(space_id)
+                opens._register_revocation_callback(
+                    lambda: self._dispose_if_current(space_id, cached)
+                )
                 return cached.sessions()
 
             target = opens.take_database_target()
@@ -96,6 +99,16 @@ class SpaceEngineManager:
         finally:
             await run_joined_awaitable(entry.target.aclose())
         logger.info("Disposed identity-bound engine for Space %s", space_id)
+
+    async def _dispose_if_current(
+        self, space_id: str, expected: _EngineEntry
+    ) -> None:
+        async with self._lock:
+            current = self._engines.get(space_id)
+            if current is not expected:
+                return
+            self._engines.pop(space_id)
+        await self._dispose_entry(space_id, expected)
 
     async def dispose(self, space_id: str) -> None:
         async with self._lock:
