@@ -7,12 +7,12 @@ Architecture:
     dependency injection (MCP clients don't go through HTTP routes).
 
 Transports:
-  - stdio (default): for local CLI agent integration
+  - stdio (default selection, requires --trusted-stdio): local CLI integration
   - http: for remote/web integration at /mcp endpoint
 
 Usage:
-  # stdio (for Claude Desktop, Cursor, etc.)
-  python -m app.mcp.server
+  # Explicitly trusted stdio (for Claude Desktop, Cursor, etc.)
+  python -m app.mcp.server --transport stdio --trusted-stdio
 
   # HTTP (for web clients)
   python -m app.mcp.server --transport http --port 9000
@@ -490,20 +490,41 @@ def main() -> None:
     if args.transport == "http" and args.trusted_stdio:
         parser.error("--trusted-stdio is valid only with stdio transport")
 
-    # Initialize meta DB for all transports; HTTP mode must do it explicitly
-    # since FastMCP is not given an application lifespan handler.
-    asyncio.run(init_meta_db())
-    asyncio.run(bootstrap_credential_epoch())
-
+    primary_error: BaseException | None = None
     try:
+        # Initialize meta DB for all transports; HTTP mode must do it explicitly
+        # since FastMCP is not given an application lifespan handler.
+        asyncio.run(init_meta_db())
+        asyncio.run(bootstrap_credential_epoch())
+
         if args.transport == "http":
             mcp.run(transport="http", host=args.host, port=args.port)
         else:
             with trusted_stdio_context():
                 mcp.run()
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        asyncio.run(dispose_space_engine_manager())
-        asyncio.run(close_meta_db())
+        cleanup_errors: list[BaseException] = []
+        for name, cleanup in (
+            ("dispose_space_engine_manager", dispose_space_engine_manager),
+            ("close_meta_db", close_meta_db),
+        ):
+            try:
+                asyncio.run(cleanup())
+            except BaseException as error:
+                cleanup_errors.append(error)
+                if primary_error is not None:
+                    primary_error.add_note(
+                        f"MCP cleanup {name} failed: "
+                        f"{type(error).__name__}: {error}"
+                    )
+
+        if primary_error is None and cleanup_errors:
+            if len(cleanup_errors) == 1:
+                raise cleanup_errors[0]
+            raise BaseExceptionGroup("MCP cleanup failed", cleanup_errors)
 
 
 if __name__ == "__main__":
