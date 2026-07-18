@@ -410,6 +410,203 @@ def test_bound_replacement_discard_preserves_source_and_is_idempotent(
     commit_closed_isolated_target(cleanup, source_identity)
 
 
+def _prepare_closed_replacement(tmp_path: Path, nonce: str):
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        begin_bound_replacement,
+        bind_marked_isolated_target,
+    )
+
+    marker = tmp_path / f".{nonce}.marker"
+    marker.write_text(nonce, encoding="utf-8")
+    source, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename=f"{nonce}.db",
+        marker_basename=marker.name,
+        marker_nonce=nonce,
+    )
+    with source.open_maintenance(MaintenanceOptions(read_only=False)) as connection:
+        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO proof VALUES ('source')")
+        connection.commit()
+    replacement = begin_bound_replacement(source)
+    with replacement.target.open_maintenance(
+        MaintenanceOptions(read_only=False, create_if_missing=True)
+    ) as connection:
+        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO proof VALUES ('replacement')")
+        connection.commit()
+    replacement.checkpoint_and_seal_source()
+    source_identity = source.identity
+    asyncio.run(source.aclose())
+    asyncio.run(replacement.target.aclose())
+    replacement_path = next(tmp_path.glob(".pxii-replacement-*.db"))
+    return source, cleanup, replacement, replacement_path, source_identity
+
+
+def test_replacement_commit_rechecks_identity_after_pre_publish_swap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import commit_closed_isolated_target
+
+    source, cleanup, replacement, replacement_path, source_identity = (
+        _prepare_closed_replacement(tmp_path, "commit-swap")
+    )
+    moved = tmp_path / "trusted-replacement.db"
+
+    def swap(stage: str) -> None:
+        if stage == "replacement_commit_before_publish":
+            os.replace(replacement_path, moved)
+            replacement_path.write_bytes(b"untrusted replacement")
+
+    monkeypatch.setattr(sqlite_vfs_module, "_terminal_fault_hook", swap, raising=False)
+    try:
+        with pytest.raises(ValueError, match="replacement target identity changed"):
+            replacement.commit_bound_replace()
+        with sqlite3.connect(tmp_path / "commit-swap.db") as source_connection:
+            assert source_connection.execute("SELECT value FROM proof").fetchone()[0] == (
+                "source"
+            )
+        assert moved.exists()
+        assert replacement_path.read_bytes() == b"untrusted replacement"
+    finally:
+        replacement_path.unlink(missing_ok=True)
+        if moved.exists():
+            os.replace(moved, replacement_path)
+        replacement.discard_closed_replacement()
+        commit_closed_isolated_target(cleanup, source_identity)
+        del source
+
+
+@pytest.mark.parametrize(
+    ("operation", "fault_stage"),
+    [
+        ("commit", "replacement_commit_after_publish"),
+        ("discard", "replacement_discard_after_delete"),
+    ],
+)
+def test_replacement_terminal_operation_retries_after_physical_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    fault_stage: str,
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import commit_closed_isolated_target
+
+    _source, cleanup, replacement, _replacement_path, source_identity = (
+        _prepare_closed_replacement(tmp_path, f"partial-{operation}")
+    )
+    injected = False
+
+    def fail_once(stage: str) -> None:
+        nonlocal injected
+        if stage == fault_stage and not injected:
+            injected = True
+            raise OSError(f"injected {stage}")
+
+    monkeypatch.setattr(
+        sqlite_vfs_module, "_terminal_fault_hook", fail_once, raising=False
+    )
+    call = (
+        replacement.commit_bound_replace
+        if operation == "commit"
+        else replacement.discard_closed_replacement
+    )
+    with pytest.raises(OSError, match=fault_stage):
+        call()
+    call()
+    call()
+    commit_closed_isolated_target(cleanup, source_identity)
+
+
+def test_replacement_discard_rejects_reappeared_name_after_physical_delete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import commit_closed_isolated_target
+
+    _source, cleanup, replacement, replacement_path, source_identity = (
+        _prepare_closed_replacement(tmp_path, "discard-reappeared")
+    )
+    injected = False
+
+    def recreate_after_delete(stage: str) -> None:
+        nonlocal injected
+        if stage == "replacement_discard_after_delete" and not injected:
+            injected = True
+            replacement_path.write_bytes(b"untrusted replacement")
+            raise OSError("injected replacement_discard_after_delete")
+
+    monkeypatch.setattr(
+        sqlite_vfs_module, "_terminal_fault_hook", recreate_after_delete
+    )
+    with pytest.raises(OSError, match="replacement_discard_after_delete"):
+        replacement.discard_closed_replacement()
+    with pytest.raises(ValueError, match="replacement target name reappeared"):
+        replacement.discard_closed_replacement()
+    replacement_path.unlink()
+    replacement.discard_closed_replacement()
+    commit_closed_isolated_target(cleanup, source_identity)
+
+
+@pytest.mark.parametrize(
+    ("operation", "fault_stage"),
+    [
+        ("commit", "isolated_commit_after_marker_delete"),
+        ("discard", "isolated_discard_after_target_delete"),
+    ],
+)
+def test_isolated_terminal_operation_retries_after_physical_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    fault_stage: str,
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        bind_marked_isolated_target,
+        commit_closed_isolated_target,
+        discard_closed_isolated_target,
+    )
+
+    marker = tmp_path / f".{operation}.marker"
+    marker.write_text(operation, encoding="utf-8")
+    target, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename=f"isolated-{operation}.db",
+        marker_basename=marker.name,
+        marker_nonce=operation,
+    )
+    with target.open_maintenance(MaintenanceOptions(read_only=False)) as connection:
+        connection.execute("CREATE TABLE proof(value INTEGER NOT NULL)")
+        connection.commit()
+    identity = target.identity
+    asyncio.run(target.aclose())
+    injected = False
+
+    def fail_once(stage: str) -> None:
+        nonlocal injected
+        if stage == fault_stage and not injected:
+            injected = True
+            raise OSError(f"injected {stage}")
+
+    monkeypatch.setattr(
+        sqlite_vfs_module, "_terminal_fault_hook", fail_once, raising=False
+    )
+    call = (
+        commit_closed_isolated_target
+        if operation == "commit"
+        else discard_closed_isolated_target
+    )
+    with pytest.raises(OSError, match=fault_stage):
+        call(cleanup, identity)
+    call(cleanup, identity)
+    call(cleanup, identity)
+
+
 def test_virtual_identifier_and_native_reference_receipt_are_closed(tmp_path: Path) -> None:
     from app.runtime.sqlite_vfs import (
         MaintenanceOptions,
@@ -434,6 +631,16 @@ def test_virtual_identifier_and_native_reference_receipt_are_closed(tmp_path: Pa
         during = _test_binding_receipt(target)
         assert during.live_file_references == 1
     assert _test_binding_receipt(target).live_file_references == 0
+
+
+def test_native_binding_state_reads_are_registry_guarded() -> None:
+    source = (
+        Path(__file__).parents[1] / "native" / "pxii_vfs" / "pxii_vfs.c"
+    ).read_text(encoding="utf-8")
+    assert "static int binding_is_revoked(PxiiBinding *binding)" in source
+    assert "*result_out = !binding->revoked;" not in source
+    assert "pxii->binding == NULL || pxii->binding->revoked" not in source
+    assert "pxii->shm_identity = child->identity;" not in source
 
 
 def test_absent_wal_cannot_be_injected_after_authority_binding(tmp_path: Path) -> None:
@@ -928,6 +1135,73 @@ async def test_cancelled_async_connect_joins_and_closes_native_file(tmp_path: Pa
             "SELECT pxii_live_references(?)", (token,)
         ).fetchone()[0]
     assert references == -1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cancel_stage",
+    ["enable_load_extension", "set_authorizer", "busy_timeout", "foreign_keys"],
+)
+async def test_cancelled_async_creator_configuration_closes_native_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cancel_stage: str,
+) -> None:
+    import aiosqlite
+
+    from app.runtime.sqlite_vfs import (
+        AsyncEngineOptions,
+        _test_binding_receipt,
+        bind_marked_isolated_target,
+    )
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text(f"cancel-{cancel_stage}", encoding="utf-8")
+    target, _cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename=f"cancel-{cancel_stage}.db",
+        marker_basename=marker.name,
+        marker_nonce=f"cancel-{cancel_stage}",
+    )
+    engine = target.make_async_engine(
+        AsyncEngineOptions(pool_size=1, max_overflow=0, busy_timeout_ms=1_000)
+    )
+    original_execute = aiosqlite.Connection._execute
+    entered = asyncio.Event()
+    captured: list[aiosqlite.Connection] = []
+    tripped = False
+
+    def matches(function: object, arguments: tuple[object, ...]) -> bool:
+        name = getattr(function, "__name__", "")
+        if cancel_stage in {"enable_load_extension", "set_authorizer"}:
+            return name == cancel_stage
+        statement = str(arguments[0]) if name == "execute" and arguments else ""
+        return statement.startswith(
+            "PRAGMA busy_timeout" if cancel_stage == "busy_timeout" else "PRAGMA foreign_keys"
+        )
+
+    async def cancel_boundary(self, function, *arguments):
+        nonlocal tripped
+        if not tripped and matches(function, arguments):
+            tripped = True
+            captured.append(self)
+            entered.set()
+            await asyncio.Future()
+        return await original_execute(self, function, *arguments)
+
+    monkeypatch.setattr(aiosqlite.Connection, "_execute", cancel_boundary)
+    opening = asyncio.ensure_future(engine.connect())
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    opening.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    try:
+        assert _test_binding_receipt(target).live_file_references == 0
+    finally:
+        if captured:
+            await captured[0].close()
+        await engine.dispose()
+        await target.aclose()
 
 
 def test_rollback_journal_swap_cannot_redirect_io(tmp_path: Path) -> None:

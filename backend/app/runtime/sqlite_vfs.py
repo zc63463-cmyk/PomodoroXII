@@ -10,7 +10,7 @@ import stat
 import threading
 import weakref
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -85,11 +85,16 @@ class _IsolatedCleanupAuthority:
     target_identity: StorageIdentity
     marker_identity: StorageIdentity
     terminal: str | None = None
+    completed_deletes: set[str] = field(default_factory=set)
 
 
 _BOOTSTRAP_LOCK = threading.RLock()
 _CONTROL: sqlite3.Connection | None = None
 _BOOTSTRAP_RECEIPT: _BootstrapReceipt | None = None
+
+
+def _terminal_fault_hook(_stage: str) -> None:
+    return None
 
 
 def _backend_root() -> Path:
@@ -353,10 +358,24 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
                 ),
                 dispose_cancelled_result=lambda value: value.close(),
             )
-            await connection._execute(connection._conn.enable_load_extension, False)
-            await connection._execute(connection._conn.set_authorizer, _sqlite_authorizer)
-            await connection.execute(f"PRAGMA busy_timeout={options.busy_timeout_ms}")
-            await connection.execute("PRAGMA foreign_keys=ON")
+            try:
+                await connection._execute(connection._conn.enable_load_extension, False)
+                await connection._execute(
+                    connection._conn.set_authorizer, _sqlite_authorizer
+                )
+                await connection.execute(
+                    f"PRAGMA busy_timeout={options.busy_timeout_ms}"
+                )
+                await connection.execute("PRAGMA foreign_keys=ON")
+            except BaseException as primary:
+                try:
+                    await run_joined_awaitable(connection.close())
+                except BaseException as close_error:
+                    raise BaseExceptionGroup(
+                        "async SQLite configuration and close failed",
+                        [primary, close_error],
+                    ) from None
+                raise
             return connection
 
         return create_async_engine(
@@ -671,6 +690,12 @@ def _delete_relative(
             and StorageIdentity(info.st_dev, info.st_ino) != expected_identity
         ):
             raise ValueError("isolated cleanup identity mismatch")
+        _terminal_fault_hook("delete_relative_before_unlink")
+        if (
+            expected_identity is not None
+            and _relative_identity(parent, basename) != expected_identity
+        ):
+            raise ValueError("isolated cleanup identity mismatch")
         os.unlink(basename, dir_fd=parent)
     finally:
         os.close(descriptor)
@@ -877,6 +902,7 @@ class SQLiteReplacementAuthority:
         "_checkpoint",
         "_terminal",
         "_committed_identity",
+        "_physical_stage",
     )
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
@@ -903,6 +929,7 @@ class SQLiteReplacementAuthority:
         instance._checkpoint: tuple[int, int, int] | None = None
         instance._terminal: str | None = None
         instance._committed_identity: StorageIdentity | None = None
+        instance._physical_stage: str | None = None
         return instance
 
     @property
@@ -960,20 +987,33 @@ class SQLiteReplacementAuthority:
             return self._committed_identity
         if self._terminal is not None:
             raise RuntimeError("replacement authority was discarded")
-        self._require_closed_targets()
         parent = self._parent_descriptor
-        if _relative_identity(parent, self._source_basename) != self._source.identity:
-            raise ValueError("source target identity changed before replacement")
-        if (
-            _relative_identity(parent, self._replacement_basename)
-            != self._replacement_identity
-        ):
-            raise ValueError("replacement target identity changed before commit")
-        _require_no_companions(parent, self._source_basename)
-        _require_no_companions(parent, self._replacement_basename)
-        _replace_relative_main(
-            parent, self._source_basename, self._replacement_basename
-        )
+        if self._physical_stage is None:
+            self._require_closed_targets()
+            if _relative_identity(parent, self._source_basename) != self._source.identity:
+                raise ValueError("source target identity changed before replacement")
+            if (
+                _relative_identity(parent, self._replacement_basename)
+                != self._replacement_identity
+            ):
+                raise ValueError("replacement target identity changed before commit")
+            _require_no_companions(parent, self._source_basename)
+            _require_no_companions(parent, self._replacement_basename)
+            _terminal_fault_hook("replacement_commit_before_publish")
+            if _relative_identity(parent, self._source_basename) != self._source.identity:
+                raise ValueError("source target identity changed before replacement")
+            if (
+                _relative_identity(parent, self._replacement_basename)
+                != self._replacement_identity
+            ):
+                raise ValueError("replacement target identity changed before commit")
+            _replace_relative_main(
+                parent, self._source_basename, self._replacement_basename
+            )
+            self._physical_stage = "replacement_published"
+            _terminal_fault_hook("replacement_commit_after_publish")
+        elif self._physical_stage != "replacement_published":
+            raise RuntimeError("replacement authority physical stage is invalid")
         committed = _relative_identity(parent, self._source_basename)
         if committed != self._replacement_identity:
             raise RuntimeError("replacement commit published the wrong identity")
@@ -988,18 +1028,31 @@ class SQLiteReplacementAuthority:
             return
         if self._terminal is not None:
             raise RuntimeError("replacement authority was committed")
-        self._require_closed_targets()
         parent = self._parent_descriptor
-        if (
-            _relative_identity(parent, self._replacement_basename)
-            != self._replacement_identity
-        ):
-            raise ValueError("replacement target identity changed before discard")
-        _require_no_companions(parent, self._source_basename)
-        _require_no_companions(parent, self._replacement_basename)
-        _delete_relative(
-            parent, self._replacement_basename, self._replacement_identity
-        )
+        if self._physical_stage is None:
+            self._require_closed_targets()
+            if (
+                _relative_identity(parent, self._replacement_basename)
+                != self._replacement_identity
+            ):
+                raise ValueError("replacement target identity changed before discard")
+            _require_no_companions(parent, self._source_basename)
+            _require_no_companions(parent, self._replacement_basename)
+            _terminal_fault_hook("replacement_discard_before_delete")
+            if (
+                _relative_identity(parent, self._replacement_basename)
+                != self._replacement_identity
+            ):
+                raise ValueError("replacement target identity changed before discard")
+            _delete_relative(
+                parent, self._replacement_basename, self._replacement_identity
+            )
+            self._physical_stage = "replacement_deleted"
+            _terminal_fault_hook("replacement_discard_after_delete")
+        elif self._physical_stage != "replacement_deleted":
+            raise RuntimeError("replacement authority physical stage is invalid")
+        elif _relative_entry_exists(parent, self._replacement_basename):
+            raise ValueError("replacement target name reappeared after discard")
         self._terminal = "discarded"
         _close_parent_authority(parent)
         self._parent_descriptor = -1
@@ -1164,11 +1217,14 @@ def commit_closed_isolated_target(
 ) -> None:
     cleanup = _require_cleanup(cleanup_authority, identity)
     if cleanup.terminal is None:
-        _delete_relative(
-            cleanup.parent_descriptor,
-            cleanup.marker_basename,
-            cleanup.marker_identity,
-        )
+        if "marker" not in cleanup.completed_deletes:
+            _delete_relative(
+                cleanup.parent_descriptor,
+                cleanup.marker_basename,
+                cleanup.marker_identity,
+            )
+            cleanup.completed_deletes.add("marker")
+            _terminal_fault_hook("isolated_commit_after_marker_delete")
         cleanup.terminal = "committed"
         _close_parent_authority(cleanup.parent_descriptor)
         cleanup.parent_descriptor = -1
@@ -1180,6 +1236,9 @@ def discard_closed_isolated_target(
     cleanup = _require_cleanup(cleanup_authority, identity)
     if cleanup.terminal is None:
         for suffix in ("-wal", "-shm", "-journal"):
+            key = f"companion:{suffix}"
+            if key in cleanup.completed_deletes:
+                continue
             try:
                 _delete_relative(
                     cleanup.parent_descriptor,
@@ -1188,16 +1247,23 @@ def discard_closed_isolated_target(
                 )
             except FileNotFoundError:
                 pass
-        _delete_relative(
-            cleanup.parent_descriptor,
-            cleanup.target_basename,
-            cleanup.target_identity,
-        )
-        _delete_relative(
-            cleanup.parent_descriptor,
-            cleanup.marker_basename,
-            cleanup.marker_identity,
-        )
+            cleanup.completed_deletes.add(key)
+        if "target" not in cleanup.completed_deletes:
+            _delete_relative(
+                cleanup.parent_descriptor,
+                cleanup.target_basename,
+                cleanup.target_identity,
+            )
+            cleanup.completed_deletes.add("target")
+            _terminal_fault_hook("isolated_discard_after_target_delete")
+        if "marker" not in cleanup.completed_deletes:
+            _delete_relative(
+                cleanup.parent_descriptor,
+                cleanup.marker_basename,
+                cleanup.marker_identity,
+            )
+            cleanup.completed_deletes.add("marker")
+            _terminal_fault_hook("isolated_discard_after_marker_delete")
         cleanup.terminal = "discarded"
         _close_parent_authority(cleanup.parent_descriptor)
         cleanup.parent_descriptor = -1
