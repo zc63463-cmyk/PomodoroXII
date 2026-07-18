@@ -7,7 +7,7 @@ notes) and hard-deleted entities (tasks, purged items) via tombstones.
 - ``POST /{entity_type}/{entity_id}/restore`` — un-trash a single item.
 - ``DELETE /{entity_type}/{entity_id}``        — permanently purge an item
   (hard delete + sync tombstone).  Folders cascade to descendants.
-- ``POST /cleanup`` — remove expired sync tombstones (older than TTL).
+- ``POST /cleanup`` — fail closed until client ACK retention exists.
 
 Note restore/purge also coordinate with the filesystem (``.trash/`` dir)
 via ``NoteService.restore`` / ``fs.purge``.  Other entity types only
@@ -138,7 +138,7 @@ async def cleanup_expired(
     db: AsyncSession = Depends(get_space_db),
     ctx: dict = Depends(get_space_context),
 ):
-    """Remove sync tombstones older than the TTL and return the count purged."""
+    """Retain the compatibility route while S1 rejects unsafe cleanup."""
     removed = await TombstoneService(db).cleanup_expired()
     await db.commit()
     return {"message": "Cleanup complete", "removed": removed}

@@ -677,13 +677,13 @@ async def test_new_snapshot_prunes_expired_materialized_snapshots(space_session)
 
 @pytest.mark.asyncio
 async def test_full_after_prune_recovers_new_device_from_current_state(space_session):
+    from sqlalchemy import delete
+
+    from app.models.sync_outbox import SyncOutbox
+    from app.models.sync_state import SyncState
     from app.models.task import Task
     from app.services.sync import SyncService
-    from app.services.sync_outbox import (
-        advance_retention_floor,
-        prune_sync_events,
-        record_sync_event,
-    )
+    from app.services.sync_outbox import record_sync_event
 
     space_session.add(Task(id="survives-prune", title="current"))
     await space_session.flush()
@@ -694,9 +694,13 @@ async def test_full_after_prune_recovers_new_device_from_current_state(space_ses
         action="create",
         payload={"id": "survives-prune", "title": "current"},
     )
-    await advance_retention_floor(space_session, floor=event.id)
-
-    await prune_sync_events(space_session, before_id=event.id)
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    state.retention_floor = event.id
+    await space_session.execute(
+        delete(SyncOutbox).where(SyncOutbox.id <= event.id)
+    )
+    await space_session.flush()
 
     page = await SyncService(space_session).full(cursor=0, limit=100)
     assert {item["id"] for item in page["tasks"]} == {"survives-prune"}

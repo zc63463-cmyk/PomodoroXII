@@ -13,11 +13,11 @@ import json
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.sync_audit_log import SyncAuditLog
+from app.errors import RetentionAckRequiredError
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
 
@@ -75,66 +75,13 @@ async def record_sync_event(
 
 
 async def advance_retention_floor(db: AsyncSession, *, floor: int) -> None:
-    """Internal maintenance boundary; never expose through a client route."""
-    if floor < 0:
-        raise ValueError("retention floor must be >= 0")
-    current_cursor = await get_current_cursor(db)
-    if floor > current_cursor:
-        raise ValueError("retention floor exceeds current cursor")
-    current_floor = await get_retention_floor(db)
-    if floor < current_floor:
-        raise ValueError("retention floor must not move backwards")
-    await db.execute(
-        sqlite_insert(SyncState)
-        .values(id=1, retention_floor=floor, current_cursor=current_cursor)
-        .on_conflict_do_update(
-            index_elements=[SyncState.id],
-            set_={"retention_floor": floor, "current_cursor": current_cursor},
-        )
-    )
-    db.add(
-        SyncAuditLog(
-            event_type="retention_floor_advanced",
-            entity_type="sync_outbox",
-            entity_id=str(floor),
-            details=json.dumps(
-                {"previous_floor": current_floor, "new_floor": floor},
-                sort_keys=True,
-            ),
-        )
-    )
-    await db.flush()
+    """Reject retention until S4 owns registered-client ACK waterlines."""
+    raise RetentionAckRequiredError()
 
 
 async def prune_sync_events(db: AsyncSession, *, before_id: int) -> int:
-    """Prune only beneath the independently persisted internal retention floor."""
-    if before_id < 0:
-        raise ValueError("before_id must be >= 0")
-    state = await db.get(SyncState, 1)
-    if state is None:
-        raise ValueError("persisted retention floor is required")
-    if not before_id <= state.retention_floor <= state.current_cursor:
-        raise ValueError("before_id exceeds persisted retention floor")
-
-    result = await db.execute(delete(SyncOutbox).where(SyncOutbox.id <= before_id))
-    pruned_count = int(result.rowcount or 0)
-    db.add(
-        SyncAuditLog(
-            event_type="retention_pruned",
-            entity_type="sync_outbox",
-            entity_id=str(before_id),
-            details=json.dumps(
-                {
-                    "before_id": before_id,
-                    "persisted_floor": state.retention_floor,
-                    "pruned_count": pruned_count,
-                },
-                sort_keys=True,
-            ),
-        )
-    )
-    await db.flush()
-    return pruned_count
+    """Reject pruning until S4 owns registered-client ACK waterlines."""
+    raise RetentionAckRequiredError()
 
 
 async def get_current_cursor(db: AsyncSession) -> int:

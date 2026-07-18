@@ -253,6 +253,14 @@ class CursorUpgradeRequiredError(AppError):
         )
 
 
+class RetentionAckRequiredError(AppError):
+    detail = "Client ACK waterline is required before retention"
+    status_code = 409
+    legacy_error_type = "conflict"
+    code = "retention_ack_required"
+    retryable = False
+
+
 class SyncSnapshotExpiredError(AppError):
     detail = "Sync snapshot expired; restart full sync"
     status_code = 409
