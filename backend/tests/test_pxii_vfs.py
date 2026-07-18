@@ -130,8 +130,7 @@ def test_wheel_manifest_rehashes_uploaded_junit(tmp_path: Path) -> None:
     from scripts.verify_pxii_vfs_source_hash import assemble_manifest
 
     inputs = tmp_path / "inputs"
-    _write_fake_wheel_receipt(inputs, "windows-x86_64")
-    _wheel, junit = _write_fake_wheel_receipt(inputs, "linux-x86_64")
+    _wheel, junit = _write_fake_wheel_receipt(inputs, "windows-x86_64")
     junit.write_text("tampered", encoding="utf-8")
     current = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     with pytest.raises(SystemExit, match="JUnit hash mismatch"):
@@ -145,7 +144,6 @@ def test_wheel_manifest_rejects_platform_tag_mismatch(tmp_path: Path) -> None:
     _write_fake_wheel_receipt(
         inputs, "windows-x86_64", wheel_platform="linux-x86_64"
     )
-    _write_fake_wheel_receipt(inputs, "linux-x86_64")
     current = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     with pytest.raises(SystemExit, match="wheel tag does not match platform"):
         assemble_manifest(inputs, current, tmp_path / "manifest.json")
@@ -156,13 +154,24 @@ def test_wheel_manifest_rejects_subject_sha_not_current_head(tmp_path: Path) -> 
 
     inputs = tmp_path / "inputs"
     _write_fake_wheel_receipt(inputs, "windows-x86_64")
-    _write_fake_wheel_receipt(inputs, "linux-x86_64")
     current = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True
     ).strip()
     assemble_manifest(inputs, current, tmp_path / "valid-manifest.json")
     with pytest.raises(SystemExit, match="subject SHA does not match current checkout"):
         assemble_manifest(inputs, "a" * 40, tmp_path / "invalid-manifest.json")
+
+
+def test_wheel_manifest_rejects_linux_receipt(tmp_path: Path) -> None:
+    from scripts.verify_pxii_vfs_source_hash import assemble_manifest
+
+    inputs = tmp_path / "inputs"
+    _write_fake_wheel_receipt(inputs, "windows-x86_64")
+    _write_fake_wheel_receipt(inputs, "linux-x86_64")
+    current = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+
+    with pytest.raises(SystemExit, match="unsupported platform receipt: linux-x86_64"):
+        assemble_manifest(inputs, current, tmp_path / "manifest.json")
 
 
 def test_maintenance_setup_failure_closes_connection_and_preserves_primary(
@@ -1002,19 +1011,17 @@ def test_windows_companion_delete_uses_bound_delete_handle() -> None:
     assert "FILE_SHARE_DELETE" in source
 
 
-def test_linux_cibuildwheel_defers_runtime_matrix_to_capable_runner() -> None:
+def test_windows_cibuildwheel_is_the_only_supported_runtime() -> None:
     backend_root = Path(__file__).parents[1]
     config = tomllib.loads((backend_root / "cibuildwheel.toml").read_text("utf-8"))
-    overrides = config["tool"]["cibuildwheel"].get("overrides", [])
-    assert any(
-        override.get("select") == "cp313-manylinux_x86_64"
-        and override.get("test-command") == ""
-        for override in overrides
-    )
+    assert config["tool"]["cibuildwheel"]["build"] == "cp313-*"
 
     workflow = (
         backend_root.parent / ".github" / "workflows" / "pxii-vfs-wheels.yml"
     ).read_text("utf-8")
+    assert "platform_id: windows-x86_64" in workflow
+    assert "platform_id: linux-x86_64" not in workflow
+    assert "Assemble closed Windows-only manifest" in workflow
     assert "PXII_VFS_LOAD_EXTENSION_CAPABILITY_OK" in workflow
     capability_probe = workflow.index("PXII_VFS_LOAD_EXTENSION_CAPABILITY_OK")
     wheel_install = workflow.index("uv pip install --python")
