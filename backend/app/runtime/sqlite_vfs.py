@@ -70,7 +70,10 @@ class _BindingReceipt:
 class _TargetAuthority:
     token: str
     create_authority: bool
+    parent_descriptor: int
+    basename: str
     revoked: bool = False
+    sealed: bool = False
 
 
 @dataclass(slots=True)
@@ -332,7 +335,7 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
         return self._identity
 
     def _require_live(self) -> _TargetAuthority:
-        if self._authority.revoked:
+        if self._authority.revoked or self._authority.sealed:
             raise SQLiteAuthorityRevokedError()
         return self._authority
 
@@ -340,7 +343,7 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
         authority = self._require_live()
 
         async def connect() -> aiosqlite.Connection:
-            if authority.revoked:
+            if authority.revoked or authority.sealed:
                 raise SQLiteAuthorityRevokedError()
             connection = await run_joined_awaitable(
                 aiosqlite.connect(
@@ -395,6 +398,7 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
                     "SELECT pxii_live_references(?)", (authority.token,)
                 ).fetchone()[0]
             if references < 0:
+                _close_target_parent(authority)
                 return
             if references == 0:
                 raise RuntimeError("native SQLite authority did not unlink after drain")
@@ -402,7 +406,7 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
 
 
 def _virtual_uri(authority: _TargetAuthority) -> str:
-    if authority.revoked:
+    if authority.revoked or authority.sealed:
         raise SQLiteAuthorityRevokedError()
     return f"file:pxii-{authority.token}?vfs=pxii"
 
@@ -673,10 +677,50 @@ def _delete_relative(
 
 
 def _close_parent_authority(parent: int) -> None:
+    if parent < 0:
+        return
     if os.name == "nt":
         ctypes.windll.kernel32.CloseHandle(parent)
     else:
         os.close(parent)
+
+
+def _duplicate_parent_authority(parent: int) -> int:
+    if os.name != "nt":
+        return os.dup(parent)
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.DuplicateHandle.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel32.DuplicateHandle.restype = wintypes.BOOL
+    duplicate = wintypes.HANDLE()
+    process = kernel32.GetCurrentProcess()
+    if not kernel32.DuplicateHandle(
+        process,
+        wintypes.HANDLE(parent),
+        process,
+        ctypes.byref(duplicate),
+        0,
+        False,
+        0x00000002,
+    ):
+        raise ctypes.WinError()
+    return int(duplicate.value)
+
+
+def _close_target_parent(authority: _TargetAuthority) -> None:
+    parent = authority.parent_descriptor
+    authority.parent_descriptor = -1
+    _close_parent_authority(parent)
 
 
 def _bind_existing_target(path: Path, *, create_authority: bool) -> BoundSQLiteTarget:
@@ -705,22 +749,34 @@ def _bind_open_authority(
     if not basename or Path(basename).name != basename:
         raise ValueError("SQLite authority basename must be exact")
     token = secrets.token_hex(32)
-    control, _receipt = _bootstrap()
+    owned_parent = _duplicate_parent_authority(parent)
     try:
+        control, _receipt = _bootstrap()
         with _BOOTSTRAP_LOCK:
             accepted = control.execute(
                 "SELECT pxii_bind(?, ?, ?, ?, ?)",
                 (token, parent, main, basename, int(create_authority)),
             ).fetchone()[0]
-    except sqlite3.DatabaseError as error:
-        if create_authority and "companion" in str(error).lower():
+    except BaseException as error:
+        _close_parent_authority(owned_parent)
+        if (
+            isinstance(error, sqlite3.DatabaseError)
+            and create_authority
+            and "companion" in str(error).lower()
+        ):
             raise RuntimeError("SQLite create authority companion already exists") from error
         raise
     if accepted != 1:
+        _close_parent_authority(owned_parent)
         raise RuntimeError("pxii-vfs rejected authority binding")
     return BoundSQLiteTarget._create(
         identity,
-        _TargetAuthority(token=token, create_authority=create_authority),
+        _TargetAuthority(
+            token=token,
+            create_authority=create_authority,
+            parent_descriptor=owned_parent,
+            basename=basename,
+        ),
     )
 
 
@@ -737,6 +793,7 @@ def _revoke_unopened_target(target: BoundSQLiteTarget) -> None:
         ).fetchone()[0]
     if references not in {0, -1}:
         raise RuntimeError("unopened SQLite target retained native references")
+    _close_target_parent(authority)
 
 
 def _open_relative_file_descriptor(parent: int, basename: str, flags: int) -> int:
@@ -779,6 +836,228 @@ def _regular_descriptor_identity(descriptor: int) -> StorageIdentity:
         return _windows_file_identity(msvcrt.get_osfhandle(descriptor))
     info = os.fstat(descriptor)
     return StorageIdentity(info.st_dev, info.st_ino)
+
+
+def _native_reference_count(authority: _TargetAuthority) -> int:
+    control, _receipt = _bootstrap()
+    with _BOOTSTRAP_LOCK:
+        return int(
+            control.execute(
+                "SELECT pxii_live_references(?)", (authority.token,)
+            ).fetchone()[0]
+        )
+
+
+def _require_no_companions(parent: int, basename: str) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        if _relative_entry_exists(parent, f"{basename}{suffix}"):
+            raise RuntimeError("closed SQLite target retains a companion")
+
+
+def _replace_relative_main(parent: int, source: str, replacement: str) -> None:
+    if os.name == "nt":
+        from app.runtime.contained_io import _rename_windows_relative
+
+        _rename_windows_relative(
+            parent, replacement, parent, source, replace=True
+        )
+        return
+    os.replace(replacement, source, src_dir_fd=parent, dst_dir_fd=parent)
+    os.fsync(parent)
+
+
+class SQLiteReplacementAuthority:
+    __slots__ = (
+        "_source",
+        "_target",
+        "_parent_descriptor",
+        "_source_basename",
+        "_replacement_basename",
+        "_replacement_identity",
+        "_checkpoint",
+        "_terminal",
+        "_committed_identity",
+    )
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("SQLiteReplacementAuthority is factory-only")
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        source: BoundSQLiteTarget,
+        target: BoundSQLiteTarget,
+        parent_descriptor: int,
+        source_basename: str,
+        replacement_basename: str,
+        replacement_identity: StorageIdentity,
+    ) -> SQLiteReplacementAuthority:
+        instance = object.__new__(cls)
+        instance._source = source
+        instance._target = target
+        instance._parent_descriptor = parent_descriptor
+        instance._source_basename = source_basename
+        instance._replacement_basename = replacement_basename
+        instance._replacement_identity = replacement_identity
+        instance._checkpoint: tuple[int, int, int] | None = None
+        instance._terminal: str | None = None
+        instance._committed_identity: StorageIdentity | None = None
+        return instance
+
+    @property
+    def target(self) -> BoundSQLiteTarget:
+        return self._target
+
+    def checkpoint_and_seal_source(self) -> tuple[int, int, int]:
+        if self._terminal is not None:
+            raise RuntimeError("replacement authority is already terminal")
+        if self._checkpoint is not None:
+            return self._checkpoint
+        if _native_reference_count(self._source._authority) != 0:
+            raise RuntimeError("source target has live SQLite references")
+        if _native_reference_count(self._target._authority) != 0:
+            raise RuntimeError("replacement target has live SQLite references")
+        with self._source.open_maintenance(
+            MaintenanceOptions(read_only=False)
+        ) as connection:
+            row = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if row is None or len(row) != 3:
+            raise RuntimeError("source checkpoint did not return a closed receipt")
+        if _native_reference_count(self._source._authority) != 0:
+            raise RuntimeError("source checkpoint retained SQLite references")
+        if _native_reference_count(self._target._authority) != 0:
+            raise RuntimeError("replacement target gained SQLite references")
+
+        authority = self._source._authority
+        authority.sealed = True
+        authority.revoked = True
+        control, _receipt = _bootstrap()
+        with _BOOTSTRAP_LOCK:
+            control.execute("SELECT pxii_revoke(?)", (authority.token,)).fetchone()
+            references = control.execute(
+                "SELECT pxii_live_references(?)", (authority.token,)
+            ).fetchone()[0]
+        if references != -1:
+            raise RuntimeError("sealed source binding did not close")
+        _close_target_parent(authority)
+        self._checkpoint = tuple(int(value) for value in row)
+        return self._checkpoint
+
+    def _require_closed_targets(self) -> None:
+        if self._checkpoint is None:
+            raise RuntimeError("source target is not checkpointed and sealed")
+        if not self._source._authority.revoked or not self._target._authority.revoked:
+            raise RuntimeError("source and replacement targets must be closed")
+        if _native_reference_count(self._source._authority) != -1:
+            raise RuntimeError("source native binding is not closed")
+        if _native_reference_count(self._target._authority) != -1:
+            raise RuntimeError("replacement native binding is not closed")
+
+    def commit_bound_replace(self) -> StorageIdentity:
+        if self._terminal == "committed":
+            assert self._committed_identity is not None
+            return self._committed_identity
+        if self._terminal is not None:
+            raise RuntimeError("replacement authority was discarded")
+        self._require_closed_targets()
+        parent = self._parent_descriptor
+        if _relative_identity(parent, self._source_basename) != self._source.identity:
+            raise ValueError("source target identity changed before replacement")
+        if (
+            _relative_identity(parent, self._replacement_basename)
+            != self._replacement_identity
+        ):
+            raise ValueError("replacement target identity changed before commit")
+        _require_no_companions(parent, self._source_basename)
+        _require_no_companions(parent, self._replacement_basename)
+        _replace_relative_main(
+            parent, self._source_basename, self._replacement_basename
+        )
+        committed = _relative_identity(parent, self._source_basename)
+        if committed != self._replacement_identity:
+            raise RuntimeError("replacement commit published the wrong identity")
+        self._committed_identity = committed
+        self._terminal = "committed"
+        _close_parent_authority(parent)
+        self._parent_descriptor = -1
+        return committed
+
+    def discard_closed_replacement(self) -> None:
+        if self._terminal == "discarded":
+            return
+        if self._terminal is not None:
+            raise RuntimeError("replacement authority was committed")
+        self._require_closed_targets()
+        parent = self._parent_descriptor
+        if (
+            _relative_identity(parent, self._replacement_basename)
+            != self._replacement_identity
+        ):
+            raise ValueError("replacement target identity changed before discard")
+        _require_no_companions(parent, self._source_basename)
+        _require_no_companions(parent, self._replacement_basename)
+        _delete_relative(
+            parent, self._replacement_basename, self._replacement_identity
+        )
+        self._terminal = "discarded"
+        _close_parent_authority(parent)
+        self._parent_descriptor = -1
+
+
+def begin_bound_replacement(
+    source: BoundSQLiteTarget,
+) -> SQLiteReplacementAuthority:
+    authority = source._require_live()
+    if _native_reference_count(authority) != 0:
+        raise RuntimeError("source target has live SQLite references")
+    parent = _duplicate_parent_authority(authority.parent_descriptor)
+    basename = f".pxii-replacement-{secrets.token_hex(16)}.db"
+    main_descriptor = -1
+    created = False
+    target = None
+    try:
+        from app.runtime.contained_io import (
+            _close_file_descriptor,
+            _open_relative_regular,
+        )
+
+        main_descriptor, identity, created = _open_relative_regular(parent, basename)
+        if not created:
+            raise RuntimeError("random replacement target already exists")
+        target = _bind_open_authority(
+            parent,
+            main_descriptor,
+            identity,
+            basename,
+            create_authority=True,
+        )
+        _close_file_descriptor(main_descriptor)
+        main_descriptor = -1
+        return SQLiteReplacementAuthority._create(
+            source=source,
+            target=target,
+            parent_descriptor=parent,
+            source_basename=authority.basename,
+            replacement_basename=basename,
+            replacement_identity=identity,
+        )
+    except BaseException:
+        if main_descriptor >= 0:
+            from app.runtime.contained_io import _close_file_descriptor
+
+            _close_file_descriptor(main_descriptor)
+        if target is not None:
+            _revoke_unopened_target(target)
+        if created:
+            try:
+                from app.runtime.contained_io import _remove_created_role
+
+                _remove_created_role(parent, basename)
+            except FileNotFoundError:
+                pass
+        _close_parent_authority(parent)
+        raise
 
 
 def bind_marked_isolated_target(
