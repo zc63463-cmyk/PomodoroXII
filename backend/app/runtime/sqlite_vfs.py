@@ -408,13 +408,22 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
             uri=True,
             timeout=options.busy_timeout_ms / 1000,
         )
-        connection.execute(f"PRAGMA busy_timeout={options.busy_timeout_ms}")
-        connection.execute("PRAGMA foreign_keys=ON")
-        if options.read_only:
-            connection.execute("PRAGMA query_only=ON")
-        connection.enable_load_extension(False)
-        connection.set_authorizer(_sqlite_authorizer)
-        return _MaintenanceContext(connection)
+        try:
+            connection.execute(f"PRAGMA busy_timeout={options.busy_timeout_ms}")
+            connection.execute("PRAGMA foreign_keys=ON")
+            if options.read_only:
+                connection.execute("PRAGMA query_only=ON")
+            connection.enable_load_extension(False)
+            connection.set_authorizer(_sqlite_authorizer)
+            return _MaintenanceContext(connection)
+        except BaseException as primary:
+            try:
+                connection.close()
+            except BaseException as close_error:
+                raise BaseExceptionGroup(
+                    "maintenance setup and close failed", [primary, close_error]
+                ) from None
+            raise
 
     async def aclose(self) -> None:
         authority = self._authority
@@ -462,6 +471,17 @@ def _test_set_open_delay(target: BoundSQLiteTarget, delay_ms: int) -> None:
         ).fetchone()[0]
     if accepted != 1:
         raise RuntimeError("native binding rejected test delay")
+
+
+def _test_set_delete_delay(target: BoundSQLiteTarget, delay_ms: int) -> None:
+    authority = target._require_live()
+    control, _receipt = _bootstrap()
+    with _BOOTSTRAP_LOCK:
+        accepted = control.execute(
+            "SELECT pxii_set_delete_delay(?, ?)", (authority.token, delay_ms)
+        ).fetchone()[0]
+    if accepted != 1:
+        raise RuntimeError("native binding rejected test delete delay")
 
 
 def _test_memory_open_probe() -> dict[str, int | bool]:

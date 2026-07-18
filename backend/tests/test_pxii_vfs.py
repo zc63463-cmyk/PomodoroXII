@@ -7,6 +7,8 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 import tomllib
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -131,7 +133,6 @@ def test_wheel_manifest_rehashes_uploaded_junit(tmp_path: Path) -> None:
     _write_fake_wheel_receipt(inputs, "windows-x86_64")
     _wheel, junit = _write_fake_wheel_receipt(inputs, "linux-x86_64")
     junit.write_text("tampered", encoding="utf-8")
-
     with pytest.raises(SystemExit, match="JUnit hash mismatch"):
         assemble_manifest(inputs, "a" * 40, tmp_path / "manifest.json")
 
@@ -144,9 +145,113 @@ def test_wheel_manifest_rejects_platform_tag_mismatch(tmp_path: Path) -> None:
         inputs, "windows-x86_64", wheel_platform="linux-x86_64"
     )
     _write_fake_wheel_receipt(inputs, "linux-x86_64")
-
     with pytest.raises(SystemExit, match="wheel tag does not match platform"):
         assemble_manifest(inputs, "b" * 40, tmp_path / "manifest.json")
+
+
+def test_maintenance_setup_failure_closes_connection_and_preserves_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+
+    class BrokenConnection:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def execute(self, _sql, _parameters=()):
+            raise RuntimeError("setup failed")
+
+        def close(self) -> None:
+            self.closed = True
+            raise OSError("close failed")
+
+        def enable_load_extension(self, _enabled):
+            raise AssertionError("setup must fail before extension configuration")
+
+        def set_authorizer(self, _authorizer):
+            raise AssertionError("setup must fail before authorizer configuration")
+
+    broken = BrokenConnection()
+    monkeypatch.setattr(sqlite_vfs_module.sqlite3, "connect", lambda *_a, **_k: broken)
+    from app.runtime.sqlite_vfs import BoundSQLiteTarget, MaintenanceOptions
+
+    target = object.__new__(BoundSQLiteTarget)
+    target._authority = type("Authority", (), {"revoked": False, "sealed": False})()
+    target._identity = None
+    monkeypatch.setattr(sqlite_vfs_module, "_virtual_uri", lambda _authority: "file:test")
+    with pytest.raises(BaseExceptionGroup, match="maintenance setup and close failed"):
+        target.open_maintenance(MaintenanceOptions(read_only=False))
+    assert broken.closed is True
+
+
+def test_contained_opens_cleanup_collects_all_resource_errors() -> None:
+    from app.runtime.contained_io import ContainedSpaceOpens
+
+    class FailingTarget:
+        async def aclose(self):
+            raise OSError("target close")
+
+    class FailingHandle:
+        def _close(self):
+            raise OSError("notes close")
+
+    opens = ContainedSpaceOpens._create(FailingTarget(), FailingTarget(), FailingHandle())
+    with pytest.raises(BaseExceptionGroup) as error:
+        asyncio.run(opens.close_all())
+    assert len(error.value.exceptions) == 3
+
+
+def test_companion_delete_revalidates_after_identity_pause(tmp_path: Path) -> None:
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _test_set_delete_delay,
+        bind_marked_isolated_target,
+        discard_closed_isolated_target,
+    )
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text("delete-race", encoding="utf-8")
+    target, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename="delete-race.db",
+        marker_basename=marker.name,
+        marker_nonce="delete-race",
+    )
+    ready = threading.Event()
+    companion = tmp_path / "delete-race.db-wal"
+
+    def close_connection() -> None:
+        context = target.open_maintenance(MaintenanceOptions(read_only=False))
+        connection = context.__enter__()
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO proof VALUES ('race')")
+        connection.commit()
+        ready.set()
+        context.__exit__(None, None, None)
+
+    identity = target.identity
+    try:
+        _test_set_delete_delay(target, 500)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            closing = executor.submit(close_connection)
+            assert ready.wait(timeout=5)
+            assert companion.exists()
+            replacement = tmp_path / "delete-race-moved.wal"
+            try:
+                os.replace(companion, replacement)
+            except PermissionError:
+                assert os.name == "nt"
+                closing.result(timeout=5)
+                assert not replacement.exists()
+                return
+            companion.write_bytes(b"replacement")
+            closing.result(timeout=5)
+        assert companion.read_bytes() == b"replacement"
+        assert replacement.exists()
+    finally:
+        asyncio.run(target.aclose())
+        discard_closed_isolated_target(cleanup, identity)
 
 
 def test_build_receipt_binds_runtime_extension_to_wheel_member(tmp_path: Path) -> None:
