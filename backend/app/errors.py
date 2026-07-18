@@ -240,6 +240,19 @@ class SyncCursorExpiredError(AppError):
         )
 
 
+class CursorUpgradeRequiredError(AppError):
+    detail = "Legacy sync cursor cannot safely advance"
+    status_code = 409
+    legacy_error_type = "conflict"
+    code = "cursor_upgrade_required"
+    retryable = False
+
+    def __init__(self, *, truncated_groups: list[str]) -> None:
+        super().__init__(
+            details={"truncated_groups": sorted(set(truncated_groups))},
+        )
+
+
 class SyncSnapshotExpiredError(AppError):
     detail = "Sync snapshot expired; restart full sync"
     status_code = 409

@@ -132,16 +132,9 @@ async def test_pull_orders_by_updated_at_then_id(space_session):
 
 
 @pytest.mark.asyncio
-async def test_pull_same_timestamp_3_rows_first_page_returns_2_with_has_more(space_session):
-    """3 rows with the same updated_at, limit=2:
-    - First page returns 2 rows + has_more=True.
-    - First-page ids are the two smallest (id-asc ordering).
-    - next_since_id is the id of the last returned row so the next page
-      can resume via (since=ts, since_id=last_id).
-
-    See ``test_pull_same_timestamp_pagination_with_since_id`` for the
-    full two-page flow that verifies the 3rd row is reachable.
-    """
+async def test_pull_same_timestamp_3_rows_requires_cursor_upgrade(space_session):
+    """A same-timestamp legacy overflow must not return an advancing cursor."""
+    from app.errors import CursorUpgradeRequiredError
     from app.models.task import Task
     from app.services.sync import SyncService
 
@@ -155,16 +148,9 @@ async def test_pull_same_timestamp_3_rows_first_page_returns_2_with_has_more(spa
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
-    page1 = await svc.pull(since="", limit=2)
-    assert page1["has_more"] is True
-    page1_ids = [t["id"] for t in page1["tasks"]]
-    assert page1_ids == ["same-ts-1", "same-ts-2"], (
-        f"first page should return 2 id-asc rows, got {page1_ids}"
-    )
-    assert page1["next_since"] == ts
-    assert page1["next_since_id"] == "same-ts-2", (
-        f"next_since_id should be last returned id, got {page1.get('next_since_id')}"
-    )
+    with pytest.raises(CursorUpgradeRequiredError) as raised:
+        await svc.pull(since="", limit=2)
+    assert raised.value.details == {"truncated_groups": ("tasks",)}
 
 
 # --------------------------------------------------------------------------- #
@@ -172,17 +158,13 @@ async def test_pull_same_timestamp_3_rows_first_page_returns_2_with_has_more(spa
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="Legacy global timestamp cursor skips truncated older entity rows",
-)
 async def test_legacy_pull_global_cursor_skips_truncated_older_entity_rows(space_session):
-    """A newer entity must not advance the cursor past an older truncated group.
+    """A newer entity cannot make an unsafe legacy cursor advance.
 
     With ``limit=2`` the task group has one remaining 10:00 row, while a
-    quick note at 12:00 is fully returned. A single global timestamp cursor
-    cannot safely advance to 12:00 until the truncated task group is drained.
+    quick note at 12:00 exists. The legacy global cursor must fail closed.
     """
+    from app.errors import CursorUpgradeRequiredError
     from app.models.quick_note import QuickNote
     from app.models.task import Task
     from app.services.sync import SyncService
@@ -210,21 +192,9 @@ async def test_legacy_pull_global_cursor_skips_truncated_older_entity_rows(space
     await space_session.flush()
 
     service = SyncService(space_session, fs=None)
-    first = await service.pull(since="", limit=2)
-    second = await service.pull(
-        since=first["next_since"],
-        since_id=first["next_since_id"],
-        tombstone_since_id=first.get("next_tombstone_since_id", ""),
-        limit=2,
-    )
-
-    returned_task_ids = {
-        item["id"] for page in (first, second) for item in page["tasks"]
-    }
-    assert returned_task_ids == {"task-1", "task-2", "task-3"}, (
-        "the global cursor skipped the remaining older task after a newer "
-        f"quick note advanced next_since to {first['next_since']}"
-    )
+    with pytest.raises(CursorUpgradeRequiredError) as raised:
+        await service.pull(since="", limit=2)
+    assert raised.value.details == {"truncated_groups": ("tasks",)}
 
 
 @pytest.mark.asyncio
@@ -395,19 +365,9 @@ async def test_tombstones_same_timestamp_ordered_by_id(space_session):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_pull_same_timestamp_pagination_with_since_id(space_session):
-    """since_id lets the second page pick up the 3rd same-timestamp row.
-
-    Flow:
-    - 3 tasks sharing updated_at="2026-07-04T10:00:00.000Z" with ids
-      s1/s2/s3 (inserted out of order to also verify id-asc sorting).
-    - Page 1: pull(since="", since_id="", limit=2) returns s1+s2,
-      has_more=True, next_since=ts, next_since_id="s2".
-    - Page 2: pull(since=ts, since_id="s2", limit=2) returns s3 only,
-      has_more=False.
-
-    Without since_id, page 2 would use WHERE updated_at > ts and skip s3.
-    """
+async def test_pull_same_timestamp_since_id_still_rejects_overflow(space_session):
+    """A supplied legacy secondary cursor does not make group overflow safe."""
+    from app.errors import CursorUpgradeRequiredError
     from app.models.task import Task
     from app.services.sync import SyncService
 
@@ -421,40 +381,15 @@ async def test_pull_same_timestamp_pagination_with_since_id(space_session):
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
-    page1 = await svc.pull(since="", since_id="", limit=2)
-    assert page1["has_more"] is True
-    page1_ids = [t["id"] for t in page1["tasks"]]
-    assert page1_ids == ["s1", "s2"], (
-        f"page 1 should return s1+s2 in id-asc order, got {page1_ids}"
-    )
-    assert page1["next_since"] == ts
-    assert page1["next_since_id"] == "s2", (
-        f"page 1 next_since_id should be 's2', got {page1.get('next_since_id')}"
-    )
-
-    page2 = await svc.pull(since=ts, since_id="s2", limit=2)
-    page2_ids = [t["id"] for t in page2["tasks"]]
-    assert page2_ids == ["s3"], (
-        f"page 2 should return only s3 (the 3rd same-ts row), got {page2_ids}"
-    )
-    assert page2["has_more"] is False
+    with pytest.raises(CursorUpgradeRequiredError) as raised:
+        await svc.pull(since="", since_id="", limit=2)
+    assert raised.value.details == {"truncated_groups": ("tasks",)}
 
 
 @pytest.mark.asyncio
-async def test_pull_same_timestamp_5_rows_three_pages_with_since_id(space_session):
-    """5 rows with the same updated_at, limit=2: since_id must survive page2.
-
-    Regression: the original implementation only returned next_since_id when
-    max_ts advanced past since_n. On page2 all remaining rows still share the
-    same timestamp, so max_ts == since_n and next_since_id was dropped. The
-    client then fell back to (since, "") and skipped the 5th row.
-
-    Flow:
-    - Page 1: pull(since="", since_id="", limit=2) -> s1, s2; next_since_id=s2.
-    - Page 2: pull(since=ts, since_id="s2", limit=2) -> s3, s4; has_more=True;
-      next_since_id=s4 (this is the regression fix).
-    - Page 3: pull(since=ts, since_id="s4", limit=2) -> s5; has_more=False.
-    """
+async def test_pull_five_same_timestamp_rows_requires_cursor_upgrade(space_session):
+    """Legacy pages cannot represent a five-row same-timestamp overflow."""
+    from app.errors import CursorUpgradeRequiredError
     from app.models.task import Task
     from app.services.sync import SyncService
 
@@ -469,31 +404,8 @@ async def test_pull_same_timestamp_5_rows_three_pages_with_since_id(space_sessio
 
     svc = SyncService(space_session, fs=None)
 
-    page1 = await svc.pull(since="", since_id="", limit=2)
-    assert page1["has_more"] is True
-    assert [t["id"] for t in page1["tasks"]] == ["s1", "s2"]
-    assert page1["next_since"] == ts
-    assert page1["next_since_id"] == "s2"
-
-    page2 = await svc.pull(since=ts, since_id="s2", limit=2)
-    assert page2["has_more"] is True
-    assert [t["id"] for t in page2["tasks"]] == ["s3", "s4"], (
-        f"page 2 should return s3+s4, got {[t['id'] for t in page2['tasks']]}"
-    )
-    assert page2["next_since"] == ts
-    assert page2["next_since_id"] == "s4", (
-        f"page 2 next_since_id should be 's4', got {page2.get('next_since_id')}"
-    )
-
-    page3 = await svc.pull(since=ts, since_id="s4", limit=2)
-    assert page3["has_more"] is False
-    assert [t["id"] for t in page3["tasks"]] == ["s5"], (
-        f"page 3 should return s5, got {[t['id'] for t in page3['tasks']]}"
-    )
-    assert page3["next_since"] == ts
-    assert page3["next_since_id"] == "s5", (
-        f"page 3 next_since_id should be 's5', got {page3.get('next_since_id')}"
-    )
+    with pytest.raises(CursorUpgradeRequiredError):
+        await svc.pull(since="", since_id="", limit=2)
 
 
 @pytest.mark.asyncio
@@ -530,14 +442,9 @@ async def test_pull_since_id_backward_compatible(space_session):
 
 
 @pytest.mark.asyncio
-async def test_pull_since_id_with_distinct_timestamps(space_session):
-    """since_id is harmless when timestamps are distinct.
-
-    When each row has a unique updated_at, the (ts == since AND id > since_id)
-    branch never matches, so the filter reduces to ``updated_at > since``.
-    The 2nd row should be returned on page 2 even though since_id is set
-    to a value that doesn't share the page-1 timestamp.
-    """
+async def test_pull_distinct_timestamp_overflow_requires_cursor_upgrade(space_session):
+    """Distinct timestamps still cannot make a truncated legacy group safe."""
+    from app.errors import CursorUpgradeRequiredError
     from app.models.task import Task
     from app.services.sync import SyncService
 
@@ -553,22 +460,8 @@ async def test_pull_since_id_with_distinct_timestamps(space_session):
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
-    page1 = await svc.pull(since="", limit=1)
-    assert page1["has_more"] is True
-    assert [t["id"] for t in page1["tasks"]] == ["dt-1"]
-    next_since = page1["next_since"]
-    next_since_id = page1["next_since_id"]
-    assert next_since == "2026-07-04T10:00:00.000Z"
-    assert next_since_id == "dt-1"
-
-    # Page 2: pass since_id=dt-1 (which is at 10:00, not 11:00). Since dt-2
-    # has a different (later) timestamp, the ts > since branch matches and
-    # dt-2 is returned. The id > since_id branch is irrelevant here.
-    page2 = await svc.pull(since=next_since, since_id=next_since_id, limit=1)
-    assert [t["id"] for t in page2["tasks"]] == ["dt-2"], (
-        f"page 2 should return dt-2, got {[t['id'] for t in page2['tasks']]}"
-    )
-    assert page2["has_more"] is False
+    with pytest.raises(CursorUpgradeRequiredError):
+        await svc.pull(since="", limit=1)
 
 
 # --------------------------------------------------------------------------- #
@@ -576,20 +469,9 @@ async def test_pull_since_id_with_distinct_timestamps(space_session):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_tombstones_same_timestamp_5_rows_three_pages_with_since_id(space_session):
-    """5 tombstones same deleted_at, limit=2: tombstone_since_id must survive page2.
-
-    Flow:
-    - Page 1: full(since="", tombstone_since_id="", limit=2) -> t1, t2;
-      tombstones_has_more=True; next_tombstone_since_id="t2".
-    - Page 2: full(since=ts, tombstone_since_id="t2", limit=2) -> t3, t4;
-      tombstones_has_more=True; next_tombstone_since_id="t4".
-    - Page 3: full(since=ts, tombstone_since_id="t4", limit=2) -> t5;
-      tombstones_has_more=False.
-
-    Without tombstone_since_id, page 2 would use WHERE deleted_at > ts and
-    skip t3/t4/t5 (all share the same deleted_at).
-    """
+async def test_tombstone_overflow_requires_cursor_upgrade(space_session):
+    """Legacy full/pull cannot return a truncated tombstone group."""
+    from app.errors import CursorUpgradeRequiredError
     from app.models.tombstone import Tombstone
     from app.services.sync import SyncService
 
@@ -601,34 +483,9 @@ async def test_tombstones_same_timestamp_5_rows_three_pages_with_since_id(space_
 
     svc = SyncService(space_session, fs=None)
 
-    page1 = await svc.full(since="", tombstone_since_id="", limit=2)
-    assert page1["tombstones_has_more"] is True
-    assert [t["entity_id"] for t in page1["tombstones"]] == ["t1", "t2"], (
-        f"page 1 should return t1+t2 in entity_id-asc order, "
-        f"got {[t['entity_id'] for t in page1['tombstones']]}"
-    )
-    assert page1["next_tombstone_since_id"] == "t2", (
-        f"page 1 next_tombstone_since_id should be 't2', "
-        f"got {page1.get('next_tombstone_since_id')}"
-    )
-
-    page2 = await svc.full(since=ts, tombstone_since_id="t2", limit=2)
-    assert page2["tombstones_has_more"] is True
-    assert [t["entity_id"] for t in page2["tombstones"]] == ["t3", "t4"], (
-        f"page 2 should return t3+t4, "
-        f"got {[t['entity_id'] for t in page2['tombstones']]}"
-    )
-    assert page2["next_tombstone_since_id"] == "t4", (
-        f"page 2 next_tombstone_since_id should be 't4', "
-        f"got {page2.get('next_tombstone_since_id')}"
-    )
-
-    page3 = await svc.full(since=ts, tombstone_since_id="t4", limit=2)
-    assert page3["tombstones_has_more"] is False
-    assert [t["entity_id"] for t in page3["tombstones"]] == ["t5"], (
-        f"page 3 should return only t5, "
-        f"got {[t['entity_id'] for t in page3['tombstones']]}"
-    )
+    with pytest.raises(CursorUpgradeRequiredError) as raised:
+        await svc.full(since="", tombstone_since_id="", limit=2)
+    assert raised.value.details == {"truncated_groups": ("tombstones",)}
 
 
 @pytest.mark.asyncio
