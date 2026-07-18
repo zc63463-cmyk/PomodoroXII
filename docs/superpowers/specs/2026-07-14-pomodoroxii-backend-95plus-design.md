@@ -875,14 +875,21 @@ document when the two conflict.
   isolated-create authority; SQLite receives only
   `file:pxii-<token>?vfs=pxii`. Bootstrap may discover the packaged extension
   path, but no database host path crosses the storage seam or is reopened after
-  binding. Linux companions use openat2/openat/unlinkat and Windows companions
-  use `NtCreateFile(RootDirectory=...)` without reparse traversal.
+  binding. Linux companion opens use openat2/openat with anchored no-follow
+  semantics; S1 POSIX physical companion deletion is fail-closed because
+  pathname unlinkat cannot guarantee exact-object deletion against an arbitrary
+  same-UID concurrent actor. S5 may later introduce a separately probed Linux
+  delete capability. Windows companions use `NtCreateFile(RootDirectory=...)`
+  without reparse traversal and retain handle-bound delete semantics.
 - `BoundSQLiteTarget` exposes only `identity`, `make_async_engine(options)`,
   `open_maintenance(options)`, and `aclose()`. Callers never observe URI/token,
-  fd/HANDLE, sidecar, or raw connector. The VFS implements open/access/delete/
-  full-path, locking, WAL shared memory, fsync/delete, and deferred-close POSIX
-  lock semantics; it denies ATTACH, arbitrary extension loading, and unsafe
-  PRAGMAs. CPython 3.13 Windows x64/Linux x86_64 wheels, swap isolation, WAL and
+  fd/HANDLE, sidecar, or raw connector. The VFS implements authority-bound
+  open/access/full-path, locking, WAL shared memory, fsync, and deferred-close
+  POSIX lock semantics; S1 POSIX companion `xDelete` fails closed with a stable
+  deferred-delete result and never treats pathname unlinkat or quarantine
+  revalidation as exact-object deletion. Windows companion deletion remains
+  handle-bound. S5 owns any future physical POSIX cleanup capability. It denies
+  ATTACH, arbitrary extension loading, and unsafe PRAGMAs. CPython 3.13 Windows x64/Linux x86_64 wheels, swap isolation, WAL and
   hot-journal recovery, cross-process locks, AsyncSession/savepoint/Alembic,
   cancellation, pool disposal, and revocation are a hard feasibility gate.
 - `AsyncEngineOptions` and `MaintenanceOptions` are concrete frozen records.
@@ -900,6 +907,15 @@ document when the two conflict.
   explicitly rejected with ATTACH disabled. Ambiguous flag combinations fail
   before I/O; savepoint, sort, TEMP-table, and hot-journal tests prove zero
   outside access.
+- **S1 POSIX delete amendment:** Standard POSIX pathname deletion is not an
+  exact-object capability under an arbitrary same-UID concurrent actor. S1
+  therefore requires POSIX companion `xDelete` to fail closed without
+  `unlinkat` or quarantine-name deletion, preserve the verified and replacement
+  entries, and report a stable deferred-delete result. Native acceptance must
+  include real tests for deferred WAL/checkpoint cleanup and zero successful
+  POSIX delete receipts. Windows keeps its bound delete HANDLE contract. Any
+  Linux handle-based physical-delete capability is S5-owned and requires a
+  mounted-filesystem/kernel probe plus independently bound evidence.
 - CI publishes stable `pxii-vfs-wheel-manifest-v1` evidence with native source
   tree/input hashes, toolchain IDs, wheel hash/size, and unpacked extension
   hash/size/build-id for both platforms. Linux image/release consumers use the
