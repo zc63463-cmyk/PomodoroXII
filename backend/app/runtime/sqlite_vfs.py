@@ -19,7 +19,7 @@ import aiosqlite
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 
-from app.errors import SQLiteAuthorityRevokedError
+from app.errors import PlatformUnsupportedError, SQLiteAuthorityRevokedError
 from app.runtime.contained_io import StorageIdentity
 from app.runtime.joined_thread import run_joined_awaitable
 
@@ -99,6 +99,12 @@ def _terminal_fault_hook(_stage: str) -> None:
     return None
 
 
+def require_windows_native_runtime() -> None:
+    """Reject unsupported native storage platforms before any I/O."""
+    if os.name != "nt":
+        raise PlatformUnsupportedError()
+
+
 def _mark_physical_completion(error: BaseException, operation: str) -> None:
     setattr(error, "_pxii_physical_completion", operation)
 
@@ -165,6 +171,7 @@ def _verify_source_manifest() -> None:
 
 def _bootstrap() -> tuple[sqlite3.Connection, _BootstrapReceipt]:
     global _CONTROL, _BOOTSTRAP_RECEIPT
+    require_windows_native_runtime()
     with _BOOTSTRAP_LOCK:
         if _CONTROL is not None and _BOOTSTRAP_RECEIPT is not None:
             return _CONTROL, _BOOTSTRAP_RECEIPT
@@ -355,6 +362,7 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
         return self._authority
 
     def make_async_engine(self, options: AsyncEngineOptions) -> AsyncEngine:
+        require_windows_native_runtime()
         authority = self._require_live()
 
         async def connect() -> aiosqlite.Connection:
@@ -400,6 +408,7 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
     def open_maintenance(
         self, options: MaintenanceOptions
     ) -> AbstractContextManager[_MaintenanceConnection]:
+        require_windows_native_runtime()
         authority = self._require_live()
         if options.create_if_missing and not authority.create_authority:
             raise ValueError("target does not carry isolated create authority")
@@ -426,6 +435,7 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
             raise
 
     async def aclose(self) -> None:
+        require_windows_native_runtime()
         authority = self._authority
         authority.revoked = True
         control, _receipt = _bootstrap()
@@ -819,6 +829,7 @@ def _bind_open_authority(
     *,
     create_authority: bool,
 ) -> BoundSQLiteTarget:
+    require_windows_native_runtime()
     if not basename or Path(basename).name != basename:
         raise ValueError("SQLite authority basename must be exact")
     token = secrets.token_hex(32)
@@ -1296,6 +1307,7 @@ class SQLiteReplacementAuthority:
 def begin_bound_replacement(
     source: BoundSQLiteTarget,
 ) -> SQLiteReplacementAuthority:
+    require_windows_native_runtime()
     authority = source._require_live()
     if _native_reference_count(authority) != 0:
         raise RuntimeError("source target has live SQLite references")
@@ -1355,6 +1367,7 @@ def bind_marked_isolated_target(
     marker_basename: str,
     marker_nonce: str,
 ) -> tuple[BoundSQLiteTarget, object]:
+    require_windows_native_runtime()
     parent = Path(parent_path).absolute()
     if Path(exact_absent_basename).name != exact_absent_basename:
         raise ValueError("isolated target basename must be exact")

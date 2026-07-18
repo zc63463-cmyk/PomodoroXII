@@ -181,6 +181,9 @@ class SpaceContainmentCapability:
             _close_directory_descriptor,
             _open_root_authority,
         )
+        from app.runtime.sqlite_vfs import require_windows_native_runtime
+
+        require_windows_native_runtime()
 
         instance = object.__new__(cls)
         instance._paths = paths

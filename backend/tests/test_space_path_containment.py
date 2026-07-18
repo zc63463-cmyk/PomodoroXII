@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from app.auth.authority import Principal
-from app.errors import PathOutsideSpaceError, SpaceStorageMissingError
+from app.errors import AppError, PathOutsideSpaceError, SpaceStorageMissingError
 
 
 class _FakeContainedOpens:
@@ -34,6 +34,48 @@ def test_containment_lock_registry_uses_parent_storage_identity() -> None:
     first = _containment_lock_for((41, 99))
     assert _containment_lock_for((41, 99)) is first
     assert _containment_lock_for((42, 99)) is not first
+
+
+def test_linux_native_storage_returns_platform_unsupported_before_bootstrap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import app.runtime.contained_io as contained_io_module
+    import app.runtime.scope as scope_module
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.scope import ContainedSpacePaths, SpaceContainmentCapability
+
+    calls = {"root_open": 0, "bootstrap": 0, "sqlite_connect": 0}
+
+    def forbidden_root_open(_path: Path):
+        calls["root_open"] += 1
+        raise AssertionError("Linux admission opened storage before platform guard")
+
+    def forbidden_bootstrap() -> None:
+        calls["bootstrap"] += 1
+        raise AssertionError("Linux admission started native bootstrap")
+
+    def forbidden_sqlite_connect(*_args, **_kwargs):
+        calls["sqlite_connect"] += 1
+        raise AssertionError("Linux admission opened SQLite")
+
+    monkeypatch.setattr(scope_module.os, "name", "posix")
+    monkeypatch.setattr(contained_io_module, "_open_root_authority", forbidden_root_open)
+    monkeypatch.setattr(sqlite_vfs_module, "_verify_source_manifest", forbidden_bootstrap)
+    monkeypatch.setattr(sqlite_vfs_module.sqlite3, "connect", forbidden_sqlite_connect)
+
+    paths = ContainedSpacePaths(
+        space_root=tmp_path / "spaces",
+        db_path=tmp_path / "spaces" / "spc" / "space.db",
+        notes_dir=tmp_path / "spaces" / "spc" / "notes",
+        index_db=tmp_path / "spaces" / "spc" / "index.db",
+    )
+    with pytest.raises(AppError) as caught:
+        SpaceContainmentCapability._create(paths)
+
+    assert caught.value.code == "platform_unsupported"
+    assert caught.value.status_code == 501
+    assert caught.value.retryable is False
+    assert calls == {"root_open": 0, "bootstrap": 0, "sqlite_connect": 0}
 
 
 def test_windows_ancestor_receipt_identity_includes_volume(monkeypatch) -> None:

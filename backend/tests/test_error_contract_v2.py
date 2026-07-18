@@ -121,6 +121,39 @@ async def test_rest_v2_auth_body_is_exact_canonical_record(client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rest_v2_platform_unsupported_maps_to_501_and_non_retryable() -> None:
+    from app import errors
+    from app.errors import register_exception_handlers
+    from app.middleware import RequestIdMiddleware
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    register_exception_handlers(app)
+
+    @app.get("/native")
+    async def native() -> None:
+        raise errors.PlatformUnsupportedError()
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as local:
+        response = await local.get(
+            "/native",
+            headers={"Accept": CANONICAL_ACCEPT, "X-Request-ID": "req-platform"},
+        )
+
+    assert response.status_code == 501
+    assert response.json() == {
+        "code": "platform_unsupported",
+        "message": "Native contained storage is supported only on Windows",
+        "retryable": False,
+        "request_id": "req-platform",
+        "details": {},
+    }
+    assert response.headers["X-PomodoroXII-Error-Code"] == "platform_unsupported"
+    assert response.headers["X-PomodoroXII-Retryable"] == "false"
+
+
+@pytest.mark.asyncio
 async def test_v1_validation_keys_stay_top_level_and_v2_puts_issues_in_details(
     client,
 ) -> None:
