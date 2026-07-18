@@ -278,10 +278,18 @@ static int parse_virtual_name(
 
 static void binding_close_if_terminal_locked(PxiiBinding *binding) {
     if (binding->revoked && binding->references == 0) {
+        PxiiBinding **cursor = &g_bindings;
+        while (*cursor != NULL && *cursor != binding) {
+            cursor = &(*cursor)->next;
+        }
+        if (*cursor == binding) {
+            *cursor = binding->next;
+        }
         handle_close(binding->main_file);
         handle_close(binding->parent);
         binding->main_file = PXII_INVALID_HANDLE;
         binding->parent = PXII_INVALID_HANDLE;
+        sqlite3_free(binding);
     }
 }
 
@@ -1507,6 +1515,7 @@ static void sql_bind(sqlite3_context *context, int count, sqlite3_value **values
 static void sql_revoke(sqlite3_context *context, int count, sqlite3_value **values) {
     const char *token;
     PxiiBinding *binding;
+    int found;
     if (count != 1) {
         sqlite3_result_error(context, "pxii_revoke requires one argument", -1);
         return;
@@ -1518,12 +1527,13 @@ static void sql_revoke(sqlite3_context *context, int count, sqlite3_value **valu
     }
     registry_enter();
     binding = binding_find_locked(token, strlen(token));
+    found = binding != NULL;
     if (binding != NULL) {
         binding->revoked = 1;
         binding_close_if_terminal_locked(binding);
     }
     registry_leave();
-    sqlite3_result_int(context, binding != NULL);
+    sqlite3_result_int(context, found);
 }
 
 static void sql_source_id(sqlite3_context *context, int count, sqlite3_value **values) {
