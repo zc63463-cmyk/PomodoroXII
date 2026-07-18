@@ -753,13 +753,15 @@ static int pxii_open(
 static int pxii_delete(sqlite3_vfs *vfs, const char *name, int sync_dir) {
     PxiiBinding *binding = NULL;
     const char *suffix = NULL;
-    PxiiHandle handle = PXII_INVALID_HANDLE;
 #if defined(_WIN32)
+    PxiiHandle handle = PXII_INVALID_HANDLE;
     PxiiIdentity expected_identity;
 #endif
     int result;
     (void)vfs;
 #if defined(_WIN32)
+    (void)sync_dir;
+#else
     (void)sync_dir;
 #endif
     result = parse_virtual_name(name, &binding, &suffix);
