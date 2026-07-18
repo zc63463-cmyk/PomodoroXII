@@ -36,6 +36,8 @@ async def _registered_space_context(space_id: str, user_id: str = "user_test"):
     root = settings.spaces_data_dir / space_id
     notes = root / "notes"
     notes.mkdir(parents=True, exist_ok=True)
+    (root / "space.db").touch()
+    (root / "index.db").touch()
     async for session in get_meta_session():
         session.add(
             Space(
