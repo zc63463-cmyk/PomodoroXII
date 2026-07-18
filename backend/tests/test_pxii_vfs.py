@@ -183,6 +183,106 @@ def test_isolated_binder_uses_only_parent_relative_child_operations() -> None:
     assert "_bind_existing_target" not in source
 
 
+def test_bound_replacement_commits_identity_checked_main_atomically(
+    tmp_path: Path,
+) -> None:
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _bind_existing_target,
+        begin_bound_replacement,
+        bind_marked_isolated_target,
+        commit_closed_isolated_target,
+    )
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text("replacement-commit", encoding="utf-8")
+    source, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename="source.db",
+        marker_basename=marker.name,
+        marker_nonce="replacement-commit",
+    )
+    with source.open_maintenance(MaintenanceOptions(read_only=False)) as connection:
+        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO proof VALUES ('source')")
+        connection.commit()
+
+    replacement = begin_bound_replacement(source)
+    private_values = _walk_private_values(replacement)
+    assert not any(isinstance(value, Path) for value in private_values)
+    assert not any(
+        os.fspath(tmp_path).casefold() in value.casefold()
+        for value in private_values
+        if isinstance(value, str)
+    )
+    with replacement.target.open_maintenance(
+        MaintenanceOptions(read_only=False, create_if_missing=True)
+    ) as connection:
+        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO proof VALUES ('replacement')")
+        connection.commit()
+    checkpoint = replacement.checkpoint_and_seal_source()
+    assert len(checkpoint) == 3
+
+    source_identity = source.identity
+    asyncio.run(source.aclose())
+    asyncio.run(replacement.target.aclose())
+    committed = replacement.commit_bound_replace()
+    assert replacement.commit_bound_replace() == committed
+
+    reopened = _bind_existing_target(tmp_path / "source.db", create_authority=False)
+    with reopened.open_maintenance(MaintenanceOptions(read_only=True)) as connection:
+        assert connection.execute("SELECT value FROM proof").fetchone()[0] == (
+            "replacement"
+        )
+    asyncio.run(reopened.aclose())
+    commit_closed_isolated_target(cleanup, source_identity)
+
+
+def test_bound_replacement_discard_preserves_source_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _bind_existing_target,
+        begin_bound_replacement,
+        bind_marked_isolated_target,
+        commit_closed_isolated_target,
+    )
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text("replacement-discard", encoding="utf-8")
+    source, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename="source.db",
+        marker_basename=marker.name,
+        marker_nonce="replacement-discard",
+    )
+    with source.open_maintenance(MaintenanceOptions(read_only=False)) as connection:
+        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO proof VALUES ('source')")
+        connection.commit()
+
+    replacement = begin_bound_replacement(source)
+    with replacement.target.open_maintenance(
+        MaintenanceOptions(read_only=False, create_if_missing=True)
+    ) as connection:
+        connection.execute("CREATE TABLE discarded(value INTEGER NOT NULL)")
+        connection.commit()
+    replacement.checkpoint_and_seal_source()
+    source_identity = source.identity
+    asyncio.run(source.aclose())
+    asyncio.run(replacement.target.aclose())
+    replacement.discard_closed_replacement()
+    replacement.discard_closed_replacement()
+
+    reopened = _bind_existing_target(tmp_path / "source.db", create_authority=False)
+    with reopened.open_maintenance(MaintenanceOptions(read_only=True)) as connection:
+        assert connection.execute("SELECT value FROM proof").fetchone()[0] == "source"
+    asyncio.run(reopened.aclose())
+    commit_closed_isolated_target(cleanup, source_identity)
+
+
 def test_virtual_identifier_and_native_reference_receipt_are_closed(tmp_path: Path) -> None:
     from app.runtime.sqlite_vfs import (
         MaintenanceOptions,
