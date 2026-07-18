@@ -940,6 +940,9 @@ Before committing, inspect `git diff --cached --name-only` and unstage any test 
 - Modify: `backend/app/file_system/engine/export_ops.py`
 - Modify: `backend/app/file_system/engine/consistency_ops.py`
 - Modify: `backend/app/file_system/engine/__init__.py`
+- Modify: `backend/app/main.py`
+- Modify: `backend/app/settings.py`
+- Modify: `backend/app/file_system/backup.py`
 - Modify: `backend/app/errors.py`
 - Create: `backend/tests/test_space_path_containment.py`
 - Create: `backend/tests/test_pxii_vfs.py`
@@ -947,6 +950,9 @@ Before committing, inspect `git diff --cached --name-only` and unstage any test 
 - Modify: `backend/tests/test_deps.py`
 - Modify: `backend/tests/test_space_manager.py`
 - Create: `backend/tests/test_file_system/test_api.py`
+- Modify: `backend/tests/test_backup_lifespan.py`
+- Modify: `backend/tests/test_settings.py`
+- Modify: `backend/tests/fixtures/certification/populate_n_minus_one.py`
 - Modify: `backend/tests/conftest.py`
 
 **Interfaces:**
@@ -1844,9 +1850,20 @@ git add .github/workflows/ci.yml backend/app/deps.py backend/app/space_manager.p
 git commit -m "test: close contained storage integration"
 ```
 
-- [ ] **Step 5: Review all four Task 4 batches**
+S1 does not implement backup snapshot or restore; those capabilities remain owned by S5. It only removes the production-callable legacy path-backed startup backup. `backup_enabled` defaults to `False`. When disabled, application startup performs zero backup storage I/O and never enumerates a Space path. When explicitly enabled, startup fails before Meta or Space storage initialization with `LegacyBackupConfigurationError` and stable code `legacy_backup_unsupported`; it must not log-and-continue or silently degrade. `backend/app/file_system/backup.py` contains no production-callable `sqlite3.connect(str(path))` or equivalent host-path connector. The fixed N-1 fixture sets `POMODOROXII_BACKUP_ENABLED=false` explicitly so its historical data construction does not depend on the application default.
 
-Run one independent specification review and one independent native/storage security review across Batch A-D. Reviewers must verify Task-reentrant lock cancellation semantics, no production path-backed constructor call, relative-name-only Notes operations, `BoundSQLiteTarget.open_maintenance` as the sole index connector, contained import/export fail-closed behavior, native VFS swap/locking/recovery, and both platform receipts. Do not enter Task 5 until both reviews accept every Task 4 gate. If review changes are required, stage each corrected file with its owning Batch A-D command; do not stage a directory or unrelated retained artifacts.
+**Batch E - fail closed on the legacy startup backup**
+
+```powershell
+git add backend/app/main.py backend/app/settings.py backend/app/file_system/backup.py backend/tests/test_backup_lifespan.py backend/tests/test_settings.py backend/tests/fixtures/certification/populate_n_minus_one.py
+git commit -m "fix: fail closed on legacy startup backup"
+```
+
+The focused regressions include `test_backup_enabled_defaults_false`, `test_disabled_backup_performs_no_backup_storage_io`, `test_enabled_legacy_backup_fails_before_storage_initialization`, and `test_backup_module_has_no_path_backed_sqlite_connector`.
+
+- [ ] **Step 5: Review all five Task 4 batches**
+
+Run one independent specification review and one independent native/storage security review across Batch A-E. Reviewers must verify Task-reentrant lock cancellation semantics, no production path-backed constructor call, relative-name-only Notes operations, `BoundSQLiteTarget.open_maintenance` as the sole index connector, contained import/export fail-closed behavior, legacy startup backup fail-closed behavior, native VFS swap/locking/recovery, and both platform receipts. Do not enter Task 5 until both reviews accept every Task 4 gate. If review changes are required, stage each corrected file with its owning Batch A-E command; do not stage a directory or unrelated retained artifacts.
 
 ### Task 5: Authenticate FastMCP HTTP And Require Explicit Trusted Stdio
 

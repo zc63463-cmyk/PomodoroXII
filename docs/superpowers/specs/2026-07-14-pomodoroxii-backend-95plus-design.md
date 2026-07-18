@@ -854,6 +854,14 @@ document when the two conflict.
   external path capability in S1 and raises the stable non-retryable
   `external_path_capability_required` domain error before inspecting, opening,
   creating, resolving, or serializing either supplied path.
+- S1 does not add snapshot/restore; S5 retains sole ownership of the formal
+  backup capability. S1 removes the legacy path-backed startup backup from the
+  production call graph: `backup_enabled` defaults false, disabled startup does
+  zero backup storage I/O and never enumerates Space paths, and explicit enable
+  fails before storage initialization with `LegacyBackupConfigurationError`
+  and stable code `legacy_backup_unsupported`. `file_system/backup.py` retains
+  no production-callable host-path `sqlite3.connect`; the fixed N-1 fixture
+  opts out explicitly rather than relying on the current default.
 - The per-canonical-parent containment lock is Task-reentrant and cross-Task
   exclusive. Same-owner nesting increments depth; normal, exceptional, and
   cancelled exits restore depth/owner exactly; a cancelled waiter cannot alter
