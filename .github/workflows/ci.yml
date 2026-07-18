@@ -51,6 +51,8 @@ jobs:
   test:
     name: Test & Lint
     runs-on: ubuntu-latest
+    env:
+      POMODOROXII_TEST_ARTIFACTS_ROOT: ${{ runner.temp }}/pomodoroxii-test-artifacts
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
@@ -84,12 +86,16 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
           PYTHONUNBUFFERED: "1"
         run: |
+          set -o pipefail
+          mkdir -p .test-results
           uv run pytest tests/ \
             --no-header \
             -q \
             --tb=short \
             --maxfail=10 \
-            -p no:cacheprovider
+            -p no:cacheprovider \
+            --junitxml=.test-results/junit.xml \
+            2>&1 | tee .test-results/pytest.log
 
       - name: Upload test artifacts on failure
         if: failure()
@@ -97,9 +103,16 @@ jobs:
         with:
           name: pytest-output-${{ github.run_id }}
           path: |
-            ${{ env.WORKING_DIR }}/.pytest_cache/
-            ${{ env.WORKING_DIR }}/pytest_*.log
+            backend/.test-results/
+            ${{ runner.temp }}/pomodoroxii-test-artifacts/**
+          if-no-files-found: warn
           retention-days: 7
+
+      - name: Clean successful test artifacts
+        if: success()
+        run: |
+          rm -rf -- "$POMODOROXII_TEST_ARTIFACTS_ROOT"
+          rm -rf -- .test-results
 
   # -----------------------------------------------------------------
   # Job 2: Build + smoke — all protected branches and pull requests
