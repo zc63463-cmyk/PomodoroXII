@@ -217,116 +217,6 @@ def test_contained_opens_cleanup_collects_all_resource_errors() -> None:
     assert len(error.value.exceptions) == 3
 
 
-def test_companion_delete_revalidates_after_identity_pause(tmp_path: Path) -> None:
-    from app.runtime.sqlite_vfs import (
-        MaintenanceOptions,
-        _test_set_delete_delay,
-        bind_marked_isolated_target,
-        discard_closed_isolated_target,
-    )
-
-    marker = tmp_path / ".pxii-create"
-    marker.write_text("delete-race", encoding="utf-8")
-    target, cleanup = bind_marked_isolated_target(
-        parent_path=tmp_path,
-        exact_absent_basename="delete-race.db",
-        marker_basename=marker.name,
-        marker_nonce="delete-race",
-    )
-    ready = threading.Event()
-    companion = tmp_path / "delete-race.db-wal"
-
-    def close_connection() -> None:
-        context = target.open_maintenance(MaintenanceOptions(read_only=False))
-        connection = context.__enter__()
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
-        connection.execute("INSERT INTO proof VALUES ('race')")
-        connection.commit()
-        ready.set()
-        context.__exit__(None, None, None)
-
-    identity = target.identity
-    try:
-        _test_set_delete_delay(target, 500)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            closing = executor.submit(close_connection)
-            assert ready.wait(timeout=5)
-            assert companion.exists()
-            replacement = tmp_path / "delete-race-moved.wal"
-            try:
-                os.replace(companion, replacement)
-            except PermissionError:
-                assert os.name == "nt"
-                closing.result(timeout=5)
-                assert not replacement.exists()
-                return
-            companion.write_bytes(b"replacement")
-            closing.result(timeout=5)
-        assert companion.read_bytes() == b"replacement"
-        assert replacement.exists()
-    finally:
-        asyncio.run(target.aclose())
-        discard_closed_isolated_target(cleanup, identity)
-
-
-def test_companion_delete_rejects_swap_after_final_identity_check(
-    tmp_path: Path,
-) -> None:
-    from app.runtime.sqlite_vfs import (
-        MaintenanceOptions,
-        _test_set_delete_final_delay,
-        bind_marked_isolated_target,
-        discard_closed_isolated_target,
-    )
-
-    marker = tmp_path / ".pxii-create"
-    marker.write_text("delete-final-race", encoding="utf-8")
-    target, cleanup = bind_marked_isolated_target(
-        parent_path=tmp_path,
-        exact_absent_basename="delete-final-race.db",
-        marker_basename=marker.name,
-        marker_nonce="delete-final-race",
-    )
-    companion = tmp_path / "delete-final-race.db-wal"
-    replacement = tmp_path / "delete-final-race.replacement"
-    identity = target.identity
-    try:
-        _test_set_delete_final_delay(target, 500)
-        swap_blocked = False
-
-        def swap_after_final_check() -> None:
-            nonlocal swap_blocked
-            if companion.exists():
-                try:
-                    os.replace(companion, replacement)
-                    companion.write_bytes(b"replacement")
-                except PermissionError:
-                    swap_blocked = True
-
-        context = target.open_maintenance(MaintenanceOptions(read_only=False))
-        connection = context.__enter__()
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
-        connection.execute("INSERT INTO proof VALUES ('race')")
-        connection.commit()
-        timer = threading.Timer(0.1, swap_after_final_check)
-        timer.start()
-        try:
-            context.__exit__(None, None, None)
-        except PermissionError:
-            assert os.name == "nt"
-        timer.join(timeout=5)
-        if os.name == "nt":
-            assert swap_blocked or companion.exists()
-        else:
-            assert companion.read_bytes() == b"replacement"
-            assert replacement.exists()
-    finally:
-        asyncio.run(target.aclose())
-        discard_closed_isolated_target(cleanup, identity)
-
-
 def test_build_receipt_binds_runtime_extension_to_wheel_member(tmp_path: Path) -> None:
     from scripts.verify_pxii_vfs_source_hash import emit_build_receipt
 
@@ -1066,6 +956,50 @@ def test_native_binding_state_reads_are_registry_guarded() -> None:
     assert "*result_out = !binding->revoked;" not in source
     assert "pxii->binding == NULL || pxii->binding->revoked" not in source
     assert "pxii->shm_identity = child->identity;" not in source
+
+
+def test_posix_companion_delete_fails_closed_without_unlink() -> None:
+    source = (
+        Path(__file__).parents[1] / "native" / "pxii_vfs" / "pxii_vfs.c"
+    ).read_text(encoding="utf-8")
+    assert "posix_delete_via_quarantine" not in source
+    assert "unlinkat(binding->parent, quarantine" not in source
+    assert "pxii_posix_delete_deferred" in source
+
+
+def test_posix_delete_preserves_verified_and_replacement_entries() -> None:
+    source = (
+        Path(__file__).parents[1] / "native" / "pxii_vfs" / "pxii_vfs.c"
+    ).read_text(encoding="utf-8")
+    posix_branch = source.split("#if !defined(_WIN32)", 1)[1].split("#else", 1)[0]
+    assert "binding_release(binding);" in posix_branch
+    assert "return PXII_POSIX_DELETE_DEFERRED;" in posix_branch
+    assert "state = 0" not in posix_branch
+
+
+def test_posix_wal_checkpoint_reports_deferred_delete() -> None:
+    source = (
+        Path(__file__).parents[1] / "native" / "pxii_vfs" / "pxii_vfs.c"
+    ).read_text(encoding="utf-8")
+    assert 'trace_event("pxii_posix_delete_deferred", PXII_POSIX_DELETE_DEFERRED, 0)' in source
+    assert "PXII_POSIX_DELETE_DEFERRED SQLITE_IOERR_DELETE" in source
+
+
+def test_posix_rollback_journal_reports_deferred_delete() -> None:
+    source = (
+        Path(__file__).parents[1] / "native" / "pxii_vfs" / "pxii_vfs.c"
+    ).read_text(encoding="utf-8")
+    assert "strcmp(suffix, \"-journal\")" in source
+    assert "return PXII_POSIX_DELETE_DEFERRED;" in source
+
+
+def test_windows_companion_delete_uses_bound_delete_handle() -> None:
+    source = (
+        Path(__file__).parents[1] / "native" / "pxii_vfs" / "pxii_vfs.c"
+    ).read_text(encoding="utf-8")
+    assert "SetFileInformationByHandle(handle, FileDispositionInfo" in source
+    assert "relative_open(binding, child_name, 3, &handle)" in source
+    assert "FILE_SHARE_DELETE" in source
 
 
 def test_linux_cibuildwheel_defers_runtime_matrix_to_capable_runner() -> None:

@@ -473,29 +473,6 @@ def _test_set_open_delay(target: BoundSQLiteTarget, delay_ms: int) -> None:
         raise RuntimeError("native binding rejected test delay")
 
 
-def _test_set_delete_delay(target: BoundSQLiteTarget, delay_ms: int) -> None:
-    authority = target._require_live()
-    control, _receipt = _bootstrap()
-    with _BOOTSTRAP_LOCK:
-        accepted = control.execute(
-            "SELECT pxii_set_delete_delay(?, ?)", (authority.token, delay_ms)
-        ).fetchone()[0]
-    if accepted != 1:
-        raise RuntimeError("native binding rejected test delete delay")
-
-
-def _test_set_delete_final_delay(target: BoundSQLiteTarget, delay_ms: int) -> None:
-    authority = target._require_live()
-    control, _receipt = _bootstrap()
-    with _BOOTSTRAP_LOCK:
-        accepted = control.execute(
-            "SELECT pxii_set_delete_final_delay(?, ?)",
-            (authority.token, delay_ms),
-        ).fetchone()[0]
-    if accepted != 1:
-        raise RuntimeError("native binding rejected test final delete delay")
-
-
 def _test_memory_open_probe() -> dict[str, int | bool]:
     control, _receipt = _bootstrap()
     with _BOOTSTRAP_LOCK:
