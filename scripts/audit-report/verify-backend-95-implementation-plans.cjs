@@ -10322,9 +10322,13 @@ function verifyCurrentPaths() {
         ['show', `HEAD:${path.relative(root, filePath).replaceAll(path.sep, '/')}`],
         { cwd: root, encoding: 'buffer', windowsHide: true },
       );
-      const actualSha256 = blob.status === 0
+      check(
+        blob.status === 0 && Buffer.isBuffer(blob.stdout),
+        'immutable S0 plan Git blob is unavailable; worktree fallback is forbidden',
+      );
+      const actualSha256 = blob.status === 0 && Buffer.isBuffer(blob.stdout)
         ? crypto.createHash('sha256').update(blob.stdout).digest('hex')
-        : crypto.createHash('sha256').update(source, 'utf8').digest('hex');
+        : '';
       check(
         actualSha256 === immutableS0PlanSha256,
         `immutable S0 plan SHA-256 drift: expected=${immutableS0PlanSha256} actual=${actualSha256}`,
