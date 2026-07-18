@@ -20,6 +20,7 @@ from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
+    CursorUpgradeRequiredError,
     SyncCursorExpiredError,
     SyncSnapshotExpiredError,
     ValidationError,
@@ -530,6 +531,7 @@ class SyncService:
         # alive across multiple pages sharing the same deleted_at.
         latest_tomb_ts = ""
         latest_tomb_id = ""
+        truncated_groups: list[str] = []
 
         for entry in ENTITY_REGISTRY.values():
             model = entry["model"]
@@ -548,6 +550,7 @@ class SyncService:
             q = q.order_by(model.updated_at.asc(), model.id.asc()).limit(limit + 1)
             rows = (await self.db.execute(q)).scalars().all()
             if len(rows) > limit:
+                truncated_groups.append(pull_key)
                 result["has_more"] = True
                 rows = rows[:limit]
             serialized = [serialize_entity(r) for r in rows]
@@ -598,6 +601,7 @@ class SyncService:
         # D-5: surface tombstones overflow on the top-level has_more flag too,
         # so clients polling with has_more=True know to keep fetching.
         if tomb_has_more:
+            truncated_groups.append("tombstones")
             result["has_more"] = True
         for t in tombstones:
             ts = normalize_timestamp(t.deleted_at or "")
@@ -609,6 +613,11 @@ class SyncService:
             ):
                 latest_tomb_ts = ts
                 latest_tomb_id = t.entity_id
+
+        if truncated_groups:
+            raise CursorUpgradeRequiredError(
+                truncated_groups=truncated_groups,
+            )
 
         result["next_since"] = max_ts
         # Only expose next_since_id when the latest entity timestamp equals the
