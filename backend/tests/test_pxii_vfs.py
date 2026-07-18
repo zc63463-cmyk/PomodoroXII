@@ -217,6 +217,90 @@ async def test_target_close_waits_for_live_native_references(tmp_path: Path) -> 
     assert connection is not None
 
 
+@pytest.mark.asyncio
+async def test_cancelled_close_can_be_retried_and_unlinks_native_binding(
+    tmp_path: Path,
+) -> None:
+    from app.runtime.sqlite_vfs import (
+        _BOOTSTRAP_LOCK,
+        MaintenanceOptions,
+        _bootstrap,
+        bind_marked_isolated_target,
+    )
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text("cancel-close", encoding="utf-8")
+    target, _cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename="cancel-close.db",
+        marker_basename=marker.name,
+        marker_nonce="cancel-close",
+    )
+    context = target.open_maintenance(MaintenanceOptions(read_only=False))
+    context.__enter__()
+    token = target._authority.token
+    control, _receipt = _bootstrap()
+    closing = asyncio.create_task(target.aclose())
+    retry = None
+    context_open = True
+    try:
+        await asyncio.sleep(0.05)
+        assert not closing.done()
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+
+        retry = asyncio.create_task(target.aclose())
+        await asyncio.sleep(0)
+        assert not retry.done()
+        context.__exit__(None, None, None)
+        context_open = False
+        await asyncio.wait_for(retry, timeout=2)
+        with _BOOTSTRAP_LOCK:
+            references = control.execute(
+                "SELECT pxii_live_references(?)", (token,)
+            ).fetchone()[0]
+        assert references == -1
+    finally:
+        if context_open:
+            context.__exit__(None, None, None)
+        if retry is not None and not retry.done():
+            await retry
+        with _BOOTSTRAP_LOCK:
+            control.execute("SELECT pxii_revoke(?)", (token,)).fetchone()
+
+
+def test_maintenance_adapter_cannot_restore_unsafe_connection_controls(
+    tmp_path: Path,
+) -> None:
+    from app.runtime.sqlite_vfs import MaintenanceOptions, bind_marked_isolated_target
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text("closed-adapter", encoding="utf-8")
+    target, _cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename="closed-adapter.db",
+        marker_basename=marker.name,
+        marker_nonce="closed-adapter",
+    )
+    with target.open_maintenance(MaintenanceOptions(read_only=False)) as writer:
+        writer.execute("CREATE TABLE proof(value INTEGER NOT NULL)")
+        writer.commit()
+
+    with target.open_maintenance(MaintenanceOptions(read_only=True)) as connection:
+        assert not isinstance(connection, sqlite3.Connection)
+        assert not hasattr(connection, "enable_load_extension")
+        assert not hasattr(connection, "set_authorizer")
+        cursor = connection.execute("SELECT 1")
+        assert not hasattr(cursor, "connection")
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            connection.execute("PRAGMA query_only=OFF")
+        with pytest.raises(sqlite3.DatabaseError):
+            connection.execute("CREATE TABLE escaped(value INTEGER)")
+
+    asyncio.run(target.aclose())
+
+
 def test_real_bound_maintenance_connection_uses_wal_and_denies_unsafe_sql(
     tmp_path,
 ) -> None:

@@ -8,7 +8,8 @@ import secrets
 import sqlite3
 import stat
 import threading
-from contextlib import AbstractContextManager, closing
+import weakref
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -189,6 +190,128 @@ class _ClosedSurfaceMeta(type):
         return [*private, "identity", "make_async_engine", "open_maintenance", "aclose"]
 
 
+class _MaintenanceCursor:
+    __slots__ = ("__cursor", "__weakref__")
+
+    def __init__(self, cursor: sqlite3.Cursor) -> None:
+        self.__cursor: sqlite3.Cursor | None = cursor
+
+    def _require_cursor(self) -> sqlite3.Cursor:
+        if self.__cursor is None:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed cursor")
+        return self.__cursor
+
+    def fetchone(self) -> Any:
+        return self._require_cursor().fetchone()
+
+    def fetchmany(self, size: int | None = None) -> list[Any]:
+        if size is None:
+            return self._require_cursor().fetchmany()
+        return self._require_cursor().fetchmany(size)
+
+    def fetchall(self) -> list[Any]:
+        return self._require_cursor().fetchall()
+
+    def __iter__(self) -> _MaintenanceCursor:
+        return self
+
+    def __next__(self) -> Any:
+        return next(self._require_cursor())
+
+    def _close(self) -> None:
+        cursor = self.__cursor
+        self.__cursor = None
+        if cursor is not None:
+            cursor.close()
+
+    def __del__(self) -> None:
+        try:
+            self._close()
+        except BaseException:
+            pass
+
+    @property
+    def description(self) -> Any:
+        return self._require_cursor().description
+
+    @property
+    def lastrowid(self) -> int | None:
+        return self._require_cursor().lastrowid
+
+    @property
+    def rowcount(self) -> int:
+        return self._require_cursor().rowcount
+
+
+class _MaintenanceConnection:
+    __slots__ = ("__connection", "__cursors")
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.__connection = connection
+        self.__cursors: weakref.WeakSet[_MaintenanceCursor] = weakref.WeakSet()
+
+    def _wrap(self, cursor: sqlite3.Cursor) -> _MaintenanceCursor:
+        wrapped = _MaintenanceCursor(cursor)
+        self.__cursors.add(wrapped)
+        return wrapped
+
+    def execute(self, sql: str, parameters: Any = ()) -> _MaintenanceCursor:
+        return self._wrap(self.__connection.execute(sql, parameters))
+
+    def executemany(self, sql: str, parameters: Any) -> _MaintenanceCursor:
+        return self._wrap(self.__connection.executemany(sql, parameters))
+
+    def commit(self) -> None:
+        self.__connection.commit()
+
+    def rollback(self) -> None:
+        self.__connection.rollback()
+
+    @property
+    def row_factory(self) -> Any:
+        return self.__connection.row_factory
+
+    @row_factory.setter
+    def row_factory(self, value: Any) -> None:
+        self.__connection.row_factory = value
+
+    @property
+    def in_transaction(self) -> bool:
+        return self.__connection.in_transaction
+
+    @property
+    def total_changes(self) -> int:
+        return self.__connection.total_changes
+
+    def _close(self) -> None:
+        errors: list[BaseException] = []
+        for cursor in tuple(self.__cursors):
+            try:
+                cursor._close()
+            except BaseException as error:
+                errors.append(error)
+        self.__cursors.clear()
+        try:
+            self.__connection.close()
+        except BaseException as error:
+            errors.append(error)
+        if errors:
+            raise BaseExceptionGroup("maintenance adapter close failed", errors)
+
+
+class _MaintenanceContext(AbstractContextManager[_MaintenanceConnection]):
+    __slots__ = ("__adapter",)
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.__adapter = _MaintenanceConnection(connection)
+
+    def __enter__(self) -> _MaintenanceConnection:
+        return self.__adapter
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.__adapter._close()
+
+
 class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
     __slots__ = ("_identity", "_authority")
 
@@ -244,7 +367,7 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
 
     def open_maintenance(
         self, options: MaintenanceOptions
-    ) -> AbstractContextManager[sqlite3.Connection]:
+    ) -> AbstractContextManager[_MaintenanceConnection]:
         authority = self._require_live()
         if options.create_if_missing and not authority.create_authority:
             raise ValueError("target does not carry isolated create authority")
@@ -253,31 +376,28 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
             uri=True,
             timeout=options.busy_timeout_ms / 1000,
         )
-        connection.enable_load_extension(False)
-        connection.set_authorizer(_sqlite_authorizer)
         connection.execute(f"PRAGMA busy_timeout={options.busy_timeout_ms}")
         connection.execute("PRAGMA foreign_keys=ON")
         if options.read_only:
             connection.execute("PRAGMA query_only=ON")
-        return closing(connection)
+        connection.enable_load_extension(False)
+        connection.set_authorizer(_sqlite_authorizer)
+        return _MaintenanceContext(connection)
 
     async def aclose(self) -> None:
         authority = self._authority
-        if authority.revoked:
-            return
         authority.revoked = True
         control, _receipt = _bootstrap()
-        with _BOOTSTRAP_LOCK:
-            control.execute("SELECT pxii_revoke(?)", (authority.token,)).fetchone()
         while True:
             with _BOOTSTRAP_LOCK:
+                control.execute("SELECT pxii_revoke(?)", (authority.token,)).fetchone()
                 references = control.execute(
                     "SELECT pxii_live_references(?)", (authority.token,)
                 ).fetchone()[0]
-            if references == 0:
-                return
             if references < 0:
-                raise RuntimeError("native SQLite authority disappeared during close")
+                return
+            if references == 0:
+                raise RuntimeError("native SQLite authority did not unlink after drain")
             await asyncio.sleep(0.01)
 
 
@@ -338,7 +458,13 @@ def _sqlite_authorizer(
         action == sqlite3.SQLITE_PRAGMA
         and argument_one is not None
         and argument_one.lower()
-        in {"writable_schema", "trusted_schema", "temp_store_directory", "data_store_directory"}
+        in {
+            "writable_schema",
+            "trusted_schema",
+            "temp_store_directory",
+            "data_store_directory",
+            "query_only",
+        }
     ):
         return sqlite3.SQLITE_DENY
     return sqlite3.SQLITE_OK
