@@ -706,11 +706,16 @@ def _bind_open_authority(
         raise ValueError("SQLite authority basename must be exact")
     token = secrets.token_hex(32)
     control, _receipt = _bootstrap()
-    with _BOOTSTRAP_LOCK:
-        accepted = control.execute(
-            "SELECT pxii_bind(?, ?, ?, ?)",
-            (token, parent, main, basename),
-        ).fetchone()[0]
+    try:
+        with _BOOTSTRAP_LOCK:
+            accepted = control.execute(
+                "SELECT pxii_bind(?, ?, ?, ?, ?)",
+                (token, parent, main, basename, int(create_authority)),
+            ).fetchone()[0]
+    except sqlite3.DatabaseError as error:
+        if create_authority and "companion" in str(error).lower():
+            raise RuntimeError("SQLite create authority companion already exists") from error
+        raise
     if accepted != 1:
         raise RuntimeError("pxii-vfs rejected authority binding")
     return BoundSQLiteTarget._create(
@@ -734,6 +739,48 @@ def _revoke_unopened_target(target: BoundSQLiteTarget) -> None:
         raise RuntimeError("unopened SQLite target retained native references")
 
 
+def _open_relative_file_descriptor(parent: int, basename: str, flags: int) -> int:
+    if not basename or Path(basename).name != basename:
+        raise ValueError("isolated child basename must be exact")
+    if os.name == "nt":
+        from app.runtime.contained_io import _open_windows_relative_file
+
+        return _open_windows_relative_file(parent, basename, flags)
+    return os.open(
+        basename,
+        flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+        dir_fd=parent,
+    )
+
+
+def _relative_entry_exists(parent: int, basename: str) -> bool:
+    if os.name != "nt":
+        try:
+            os.stat(basename, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
+    try:
+        descriptor = _open_relative_file_descriptor(parent, basename, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    except (IsADirectoryError, PermissionError):
+        return True
+    else:
+        os.close(descriptor)
+        return True
+
+
+def _regular_descriptor_identity(descriptor: int) -> StorageIdentity:
+    if os.name == "nt":
+        import msvcrt
+
+        return _windows_file_identity(msvcrt.get_osfhandle(descriptor))
+    info = os.fstat(descriptor)
+    return StorageIdentity(info.st_dev, info.st_ino)
+
+
 def bind_marked_isolated_target(
     *,
     parent_path: Path,
@@ -746,30 +793,69 @@ def bind_marked_isolated_target(
         raise ValueError("isolated target basename must be exact")
     if Path(marker_basename).name != marker_basename:
         raise ValueError("marker basename must be exact")
-    parent_info = parent.stat(follow_symlinks=False)
-    if not stat.S_ISDIR(parent_info.st_mode):
-        raise ValueError("isolated target parent is not a directory")
-    marker = parent / marker_basename
-    marker_info = marker.stat(follow_symlinks=False)
-    if not stat.S_ISREG(marker_info.st_mode):
-        raise ValueError("isolated target marker is not a regular file")
-    if marker.read_text(encoding="utf-8") != marker_nonce:
-        raise ValueError("isolated target marker nonce mismatch")
-
-    target_path = parent / exact_absent_basename
-    descriptor = os.open(
-        target_path,
-        os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0),
-        0o600,
-    )
-    os.close(descriptor)
-    target = _bind_existing_target(target_path, create_authority=True)
     cleanup_parent = _open_parent_authority(parent)
+    marker_descriptor = -1
+    main_descriptor = -1
+    target = None
+    created = False
     try:
-        marker_identity = _relative_identity(cleanup_parent, marker_basename)
+        marker_descriptor = _open_relative_file_descriptor(
+            cleanup_parent, marker_basename, os.O_RDONLY
+        )
+        marker_info = os.fstat(marker_descriptor)
+        if not stat.S_ISREG(marker_info.st_mode):
+            raise ValueError("isolated target marker is not a regular file")
+        marker_identity = _regular_descriptor_identity(marker_descriptor)
+        with os.fdopen(marker_descriptor, "r", encoding="utf-8", closefd=True) as marker:
+            marker_descriptor = -1
+            if marker.read() != marker_nonce:
+                raise ValueError("isolated target marker nonce mismatch")
+
+        reserved = (
+            exact_absent_basename,
+            f"{exact_absent_basename}-wal",
+            f"{exact_absent_basename}-shm",
+            f"{exact_absent_basename}-journal",
+        )
+        if any(_relative_entry_exists(cleanup_parent, name) for name in reserved):
+            raise RuntimeError("isolated target or companion already exists")
+
+        from app.runtime.contained_io import (
+            _close_file_descriptor,
+            _open_relative_regular,
+        )
+
+        main_descriptor, identity, created = _open_relative_regular(
+            cleanup_parent, exact_absent_basename
+        )
+        if not created:
+            raise RuntimeError("isolated target already exists")
+        target = _bind_open_authority(
+            cleanup_parent,
+            main_descriptor,
+            identity,
+            exact_absent_basename,
+            create_authority=True,
+        )
+        _close_file_descriptor(main_descriptor)
+        main_descriptor = -1
     except BaseException:
+        if marker_descriptor >= 0:
+            os.close(marker_descriptor)
+        if main_descriptor >= 0:
+            from app.runtime.contained_io import _close_file_descriptor
+
+            _close_file_descriptor(main_descriptor)
+        if created:
+            try:
+                from app.runtime.contained_io import _remove_created_role
+
+                _remove_created_role(cleanup_parent, exact_absent_basename)
+            except FileNotFoundError:
+                pass
         _close_parent_authority(cleanup_parent)
         raise
+    assert target is not None
     return target, _IsolatedCleanupAuthority(
         target=target._authority,
         parent_descriptor=cleanup_parent,
