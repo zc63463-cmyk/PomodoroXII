@@ -889,6 +889,31 @@ def test_native_binding_state_reads_are_registry_guarded() -> None:
     assert "pxii->shm_identity = child->identity;" not in source
 
 
+def test_delete_completion_receipt_covers_descriptor_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+
+    monkeypatch.setattr(sqlite_vfs_module.os, "name", "posix")
+    monkeypatch.setattr(sqlite_vfs_module.os, "open", lambda *_args, **_kwargs: 41)
+    monkeypatch.setattr(
+        sqlite_vfs_module.os,
+        "fstat",
+        lambda _descriptor: SimpleNamespace(st_dev=1, st_ino=2),
+    )
+    monkeypatch.setattr(sqlite_vfs_module.os, "unlink", lambda *_args, **_kwargs: None)
+
+    def fail_close(_descriptor: int) -> None:
+        raise OSError("injected descriptor close failure")
+
+    monkeypatch.setattr(sqlite_vfs_module.os, "close", fail_close)
+    with pytest.raises(OSError, match="descriptor close failure") as caught:
+        sqlite_vfs_module._delete_relative(7, "target.db", None)
+    assert sqlite_vfs_module._has_physical_completion(caught.value, "delete")
+
+
 def test_absent_wal_cannot_be_injected_after_authority_binding(tmp_path: Path) -> None:
     from app.runtime.sqlite_vfs import MaintenanceOptions, bind_marked_isolated_target
 

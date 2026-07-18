@@ -701,6 +701,7 @@ def _delete_relative(
         dir_fd=parent,
     )
     deleted = False
+    operation_error: BaseException | None = None
     try:
         info = os.fstat(descriptor)
         if (
@@ -718,11 +719,25 @@ def _delete_relative(
         deleted = True
         _terminal_fault_hook("delete_relative_after_unlink_before_receipt")
     except BaseException as error:
-        if deleted:
-            _mark_physical_completion(error, "delete")
-        raise
-    finally:
+        operation_error = error
+    close_error: BaseException | None = None
+    try:
         os.close(descriptor)
+    except BaseException as error:
+        close_error = error
+    if operation_error is not None and close_error is not None:
+        combined = BaseExceptionGroup(
+            "relative delete and descriptor close failed",
+            [operation_error, close_error],
+        )
+        if deleted:
+            _mark_physical_completion(combined, "delete")
+        raise combined
+    propagated = operation_error or close_error
+    if propagated is not None:
+        if deleted:
+            _mark_physical_completion(propagated, "delete")
+        raise propagated
 
 
 def _close_parent_authority(parent: int) -> None:
