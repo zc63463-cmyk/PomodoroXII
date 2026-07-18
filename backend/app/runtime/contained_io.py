@@ -731,9 +731,18 @@ class ContainedSpaceOpens:
         self._revocation_callbacks.append(callback)
 
     async def close_all(self) -> None:
-        await self._database_target.aclose()
-        await self._index_target.aclose()
-        self._notes_handle._close()
+        errors: list[BaseException] = []
+        for close in (self._database_target.aclose, self._index_target.aclose):
+            try:
+                await close()
+            except BaseException as error:
+                errors.append(error)
+        try:
+            self._notes_handle._close()
+        except BaseException as error:
+            errors.append(error)
+        if errors:
+            raise BaseExceptionGroup("contained resource close failed", errors)
 
     async def revoke_transferred_resources(self) -> None:
         callbacks = self._revocation_callbacks
@@ -758,11 +767,23 @@ class ContainedSpaceOpens:
 
     async def close_untransferred_resources(self) -> None:
         self._revocation_callbacks = []
+        errors: list[BaseException] = []
         if not self._database_taken:
-            await self._database_target.aclose()
+            try:
+                await self._database_target.aclose()
+            except BaseException as error:
+                errors.append(error)
         if not self._file_system_taken:
-            await self._index_target.aclose()
-            self._notes_handle._close()
+            try:
+                await self._index_target.aclose()
+            except BaseException as error:
+                errors.append(error)
+            try:
+                self._notes_handle._close()
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise BaseExceptionGroup("contained resource close failed", errors)
 
 
 def _open_root_authority(root: Path) -> tuple[int, StorageIdentity]:
