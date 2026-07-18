@@ -25,6 +25,8 @@ def _opens(root: Path) -> ContainedSpaceOpens:
     root.mkdir(parents=True, exist_ok=True)
     notes = root / "notes"
     notes.mkdir(exist_ok=True)
+    (root / "space.db").touch()
+    (root / "index.db").touch()
     paths = SimpleNamespace(
         space_root=root.parent,
         db_path=root / "space.db",
@@ -83,6 +85,8 @@ async def test_cached_engine_is_revoked_when_exit_revalidation_fails(
     parent.mkdir(parents=True)
     notes = parent / "notes"
     notes.mkdir()
+    (parent / "space.db").touch()
+    (parent / "index.db").touch()
     paths = SimpleNamespace(
         space_root=root,
         db_path=parent / "space.db",
@@ -135,6 +139,8 @@ async def test_first_cached_engine_is_revoked_before_target_close_on_exit_drift(
     parent.mkdir(parents=True)
     notes = parent / "notes"
     notes.mkdir()
+    (parent / "space.db").touch()
+    (parent / "index.db").touch()
     paths = SimpleNamespace(
         space_root=root,
         db_path=parent / "space.db",

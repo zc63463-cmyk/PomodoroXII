@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from app.auth.authority import Principal
-from app.errors import PathOutsideSpaceError
+from app.errors import PathOutsideSpaceError, SpaceStorageMissingError
 
 
 class _FakeContainedOpens:
@@ -287,6 +287,56 @@ async def test_scope_rejects_registered_path_outside_root_before_storage_io(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing_role", ["db", "index", "notes"])
+async def test_registered_missing_store_fails_closed_without_storage_creation(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_role: str
+) -> None:
+    from app.db.meta_session import get_meta_session
+    from app.db.models.meta import Space
+    from app.runtime.scope import AuthorizedSpaceScope
+    from app.settings import settings
+
+    parent = settings.spaces_data_dir / f"spc_missing_{missing_role}"
+    parent.mkdir(parents=True, exist_ok=True)
+    db = parent / "space.db"
+    index = parent / "index.db"
+    notes = parent / "notes"
+    if missing_role != "db":
+        db.write_bytes(b"registered")
+    if missing_role != "index":
+        index.write_bytes(b"registered")
+    if missing_role != "notes":
+        notes.mkdir()
+    before = {entry.name for entry in parent.iterdir()}
+    counters = {"engine_open_count": 0, "file_system_open_count": 0}
+
+    async for session in get_meta_session():
+        session.add(
+            Space(
+                id=f"spc_missing_{missing_role}",
+                name="missing-store",
+                db_path=str(db),
+                notes_dir=str(notes),
+            )
+        )
+        await session.commit()
+        scope = await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
+            _principal(f"spc_missing_{missing_role}"),
+            f"spc_missing_{missing_role}",
+            "read",
+        )
+        with pytest.raises(SpaceStorageMissingError) as error:
+            async with scope.containment.open_verified():
+                counters["engine_open_count"] += 1
+                counters["file_system_open_count"] += 1
+        assert error.value.code == "space_storage_missing"
+        break
+
+    assert counters == {"engine_open_count": 0, "file_system_open_count": 0}
+    assert {entry.name for entry in parent.iterdir()} == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "collision", ["notes_equals_db", "notes_equals_index", "db_equals_index"]
 )
@@ -442,6 +492,8 @@ async def test_swap_after_parent_bind_never_redirects_storage_roles(
     parent = settings.spaces_data_dir / f"spc_{boundary}"
     notes = parent / "notes"
     notes.mkdir(parents=True)
+    (parent / "space.db").touch()
+    (parent / "index.db").touch()
     async for session in get_meta_session():
         space_id = f"spc_{boundary}"
         session.add(

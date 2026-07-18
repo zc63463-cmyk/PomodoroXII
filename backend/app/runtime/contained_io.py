@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, BinaryIO, Callable
 
-from app.errors import PathOutsideSpaceError
+from app.errors import PathOutsideSpaceError, SpaceStorageMissingError
 
 if TYPE_CHECKING:
     from app.runtime.sqlite_vfs import BoundSQLiteTarget
@@ -813,24 +813,37 @@ def _open_verified_parent(
 
 
 def _open_relative_regular(
-    parent: int, basename: str
+    parent: int, basename: str, *, create: bool = True
 ) -> tuple[int, StorageIdentity, bool]:
     if not basename or "/" in basename or "\\" in basename or ":" in basename:
         raise PathOutsideSpaceError("Contained database name is not exact")
     if os.name == "nt":
         desired_access = 0x80000000 | 0x40000000 | 0x00000080 | 0x00100000
-        try:
-            descriptor = _nt_open_windows_relative(
-                parent,
-                basename,
-                desired_access=desired_access,
-                disposition=0x00000002,
-                options=0x00000020 | 0x00000040 | 0x00200000,
-                file_attributes=0x00000080,
-                expected_directory=False,
-            )
-        except FileExistsError:
-            created = False
+        if create:
+            try:
+                descriptor = _nt_open_windows_relative(
+                    parent,
+                    basename,
+                    desired_access=desired_access,
+                    disposition=0x00000002,
+                    options=0x00000020 | 0x00000040 | 0x00200000,
+                    file_attributes=0x00000080,
+                    expected_directory=False,
+                )
+            except FileExistsError:
+                created = False
+                descriptor = _nt_open_windows_relative(
+                    parent,
+                    basename,
+                    desired_access=desired_access,
+                    disposition=0x00000001,
+                    options=0x00000020 | 0x00000040 | 0x00200000,
+                    file_attributes=0x00000080,
+                    expected_directory=False,
+                )
+            else:
+                created = True
+        else:
             descriptor = _nt_open_windows_relative(
                 parent,
                 basename,
@@ -840,8 +853,7 @@ def _open_relative_regular(
                 file_attributes=0x00000080,
                 expected_directory=False,
             )
-        else:
-            created = True
+            created = False
         return descriptor, _descriptor_identity(descriptor), created
 
     flags = (
@@ -850,19 +862,23 @@ def _open_relative_regular(
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
-    try:
-        descriptor = os.open(
-            basename, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent
-        )
-    except FileExistsError:
-        created = False
-        descriptor = os.open(basename, flags, dir_fd=parent)
+    if create:
+        try:
+            descriptor = os.open(
+                basename, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent
+            )
+        except FileExistsError:
+            created = False
+            descriptor = os.open(basename, flags, dir_fd=parent)
+        else:
+            created = True
     else:
-        created = True
+        descriptor = os.open(basename, flags, dir_fd=parent)
+        created = False
     info = os.fstat(descriptor)
     if not stat.S_ISREG(info.st_mode):
         os.close(descriptor)
-        raise PathOutsideSpaceError("Contained database role is not a regular file")
+        raise SpaceStorageMissingError()
     return descriptor, StorageIdentity(info.st_dev, info.st_ino), created
 
 
@@ -939,10 +955,10 @@ def open_bound_space(
             raise PathOutsideSpaceError("Contained root identity changed")
         parent = _open_verified_parent(root, parent_parts, receipts)
         database_main, database_identity, database_created = _open_relative_regular(
-            parent, paths.db_path.name
+            parent, paths.db_path.name, create=False
         )
         index_main, index_identity, index_created = _open_relative_regular(
-            parent, paths.index_db.name
+            parent, paths.index_db.name, create=False
         )
 
         _fault_hook("before_sqlite_bound_connect")
@@ -976,6 +992,8 @@ def open_bound_space(
             database_target, index_target, notes_handle
         )
     except BaseException as primary:
+        if isinstance(primary, (FileNotFoundError, NotADirectoryError)):
+            primary = SpaceStorageMissingError()
         cleanup_errors: list[BaseException] = []
         for target in (database_target, index_target):
             if target is not None:
@@ -1005,7 +1023,7 @@ def open_bound_space(
             raise BaseExceptionGroup(
                 "contained open and cleanup failed", [primary, *cleanup_errors]
             ) from None
-        raise
+        raise primary
     finally:
         _close_file_descriptor(database_main)
         _close_file_descriptor(index_main)

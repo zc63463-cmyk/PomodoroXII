@@ -185,6 +185,13 @@ class PathOutsideSpaceError(AppError):
     code = "path_outside_space"
 
 
+class SpaceStorageMissingError(AppError):
+    detail = "Registered Space storage is missing or invalid"
+    status_code = 503
+    legacy_error_type = "conflict"
+    code = "space_storage_missing"
+
+
 class SpaceEnginePathMismatchError(AppError):
     detail = "Space storage identity does not match the cached engine"
     status_code = 409
