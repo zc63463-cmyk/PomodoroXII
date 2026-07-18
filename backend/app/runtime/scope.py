@@ -68,26 +68,6 @@ def _path_error(detail: str) -> PathOutsideSpaceError:
     return PathOutsideSpaceError(detail)
 
 
-def _is_reparse(info: os.stat_result) -> bool:
-    attributes = getattr(info, "st_file_attributes", 0)
-    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(attributes & reparse)
-
-
-def _directory_identity(path: Path, info: os.stat_result) -> tuple[int, int]:
-    if os.name != "nt":
-        return info.st_dev, info.st_ino
-    from app.runtime.contained_io import _open_windows_directory
-
-    handle, identity = _open_windows_directory(path)
-    try:
-        return identity.device, identity.file_id
-    finally:
-        import ctypes
-
-        ctypes.windll.kernel32.CloseHandle(handle)
-
-
 def _safe_relative(path: Path, root: Path) -> tuple[str, ...]:
     try:
         relative = path.relative_to(root)
@@ -99,22 +79,63 @@ def _safe_relative(path: Path, root: Path) -> tuple[str, ...]:
 
 
 def _walk_existing_ancestors(paths: ContainedSpacePaths) -> tuple[AncestorReceipt, ...]:
-    root = paths.space_root
-    parent = paths.db_path.parent
-    parts = _safe_relative(parent, root)
-    current = root
+    from app.runtime.contained_io import (
+        _close_directory_descriptor,
+        _open_root_authority,
+    )
+
+    root = -1
+    try:
+        root, _root_identity = _open_root_authority(paths.space_root)
+        return _walk_ancestors_from_root(paths, root)
+    finally:
+        if root >= 0:
+            _close_directory_descriptor(root)
+
+
+def _walk_ancestors_from_root(
+    paths: ContainedSpacePaths, root: int
+) -> tuple[AncestorReceipt, ...]:
+    from app.runtime.contained_io import (
+        _close_directory_descriptor,
+        _descriptor_identity,
+        _duplicate_directory_descriptor,
+        _open_windows_relative_directory,
+    )
+
+    parts = _safe_relative(paths.db_path.parent, paths.space_root)
     receipts: list[AncestorReceipt] = []
-    for component in (None, *parts):
-        if component is not None:
-            current = current / component
-        try:
-            info = current.lstat()
-        except OSError as exc:
-            raise _path_error("Registered Space ancestor is missing") from exc
-        if stat.S_ISLNK(info.st_mode) or _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
-            raise _path_error("Registered Space ancestor is not a safe directory")
-        device, file_id = _directory_identity(current, info)
-        receipts.append((current.name, device, file_id, info.st_mode))
+    current = _duplicate_directory_descriptor(root)
+    current_name = paths.space_root.name
+    try:
+        for component in (None, *parts):
+            if component is not None:
+                if os.name == "nt":
+                    child = _open_windows_relative_directory(
+                        current, component, create=False
+                    )
+                else:
+                    child = os.open(
+                        component,
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=current,
+                    )
+                _close_directory_descriptor(current)
+                current = child
+                current_name = component
+            identity = _descriptor_identity(current)
+            mode = stat.S_IFDIR if os.name == "nt" else os.fstat(current).st_mode
+            receipts.append(
+                (current_name, identity.device, identity.file_id, mode)
+            )
+    except OSError as exc:
+        raise _path_error("Registered Space ancestor is missing or unsafe") from exc
+    finally:
+        if current >= 0:
+            _close_directory_descriptor(current)
     return tuple(receipts)
 
 
@@ -125,9 +146,16 @@ def _capture_safe_ancestor_identities(
 
 
 def _require_same_safe_ancestors(
-    paths: ContainedSpacePaths, expected: tuple[AncestorReceipt, ...]
+    paths: ContainedSpacePaths,
+    expected: tuple[AncestorReceipt, ...],
+    root_authority: int | None = None,
 ) -> None:
-    if _walk_existing_ancestors(paths) != expected:
+    actual = (
+        _walk_existing_ancestors(paths)
+        if root_authority is None
+        else _walk_ancestors_from_root(paths, root_authority)
+    )
+    if actual != expected:
         raise _path_error("Registered Space ancestor identity changed")
 
 
@@ -142,28 +170,56 @@ async def _fault_hook(_name: str) -> None:
 
 
 class SpaceContainmentCapability:
-    __slots__ = ("_paths", "_ancestor_identities", "_lock")
+    __slots__ = ("_paths", "_ancestor_identities", "_lock", "_root_authority")
 
     def __init__(self, *_args, **_kwargs) -> None:
         raise TypeError("SpaceContainmentCapability is factory-only")
 
     @classmethod
     def _create(cls, paths: ContainedSpacePaths) -> "SpaceContainmentCapability":
+        from app.runtime.contained_io import (
+            _close_directory_descriptor,
+            _open_root_authority,
+        )
+
         instance = object.__new__(cls)
         instance._paths = paths
-        identities = _capture_safe_ancestor_identities(paths)
+        root = -1
+        try:
+            root, _root_identity = _open_root_authority(paths.space_root)
+            identities = _walk_ancestors_from_root(paths, root)
+        except BaseException:
+            if root >= 0:
+                _close_directory_descriptor(root)
+            raise
+        instance._root_authority = root
         instance._ancestor_identities = identities
         instance._lock = _containment_lock_for((identities[-1][1], identities[-1][2]))
         return instance
+
+    def __del__(self) -> None:
+        root = getattr(self, "_root_authority", -1)
+        if root < 0:
+            return
+        self._root_authority = -1
+        from app.runtime.contained_io import _close_directory_descriptor
+
+        _close_directory_descriptor(root)
 
     def open_verified(self) -> AsyncContextManager[ContainedSpaceOpens]:
         @asynccontextmanager
         async def verified() -> AsyncIterator[ContainedSpaceOpens]:
             async with self._lock:
-                _require_same_safe_ancestors(self._paths, self._ancestor_identities)
+                _require_same_safe_ancestors(
+                    self._paths, self._ancestor_identities, self._root_authority
+                )
                 await _fault_hook("after_final_check_before_kernel_open")
                 opens = await run_joined_thread(
-                    lambda: open_bound_space(self._paths, self._ancestor_identities),
+                    lambda: open_bound_space(
+                        self._paths,
+                        self._ancestor_identities,
+                        self._root_authority,
+                    ),
                     dispose_cancelled_result=lambda value: value.close_all(),
                 )
                 primary: BaseException | None = None
@@ -173,7 +229,9 @@ class SpaceContainmentCapability:
                     primary = error
                 cleanup_errors: list[BaseException] = []
                 try:
-                    _require_same_safe_ancestors(self._paths, self._ancestor_identities)
+                    _require_same_safe_ancestors(
+                        self._paths, self._ancestor_identities, self._root_authority
+                    )
                 except BaseException as error:
                     cleanup_errors.append(error)
                     try:
