@@ -5,14 +5,13 @@ Does NOT import FastAPI.  Only flushes, never commits.
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import RetentionAckRequiredError
 from app.models.tombstone import Tombstone
-from app.services.time import utc_now, utc_now_iso_ms
+from app.services.time import utc_now_iso_ms
 
 TOMBSTONE_TTL_DAYS = 90
 
@@ -64,15 +63,5 @@ class TombstoneService:
         return res.scalar_one_or_none()
 
     async def cleanup_expired(self, ttl_days: int = TOMBSTONE_TTL_DAYS) -> int:
-        """Delete tombstones older than *ttl_days* and return the count removed."""
-        cutoff = (utc_now() - timedelta(days=ttl_days)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        res = await self.db.execute(
-            select(Tombstone).where(Tombstone.deleted_at < cutoff)
-        )
-        old = res.scalars().all()
-        for t in old:
-            await self.db.delete(t)
-        await self.db.flush()
-        return len(old)
+        """Reject cleanup until S4 owns registered-client ACK waterlines."""
+        raise RetentionAckRequiredError()

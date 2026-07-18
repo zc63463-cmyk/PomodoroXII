@@ -869,13 +869,63 @@ async def test_trash_restore(client):
 
 
 @pytest.mark.asyncio
-async def test_trash_cleanup_expired(client):
-    """POST /api/v1/trash/cleanup returns 200."""
-    space_token, _ = await _get_space_client(client)
-    resp = await client.post(
-        "/api/v1/trash/cleanup", headers=_auth(space_token)
+async def test_trash_cleanup_expired_requires_client_ack(space_session):
+    """The compatibility route returns stable errors and deletes nothing."""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy import func, select
+
+    from app.errors import register_exception_handlers
+    from app.models.tombstone import Tombstone
+    from app.routes.v1 import trash as trash_routes
+
+    tombstone = Tombstone(
+        entity_type="task",
+        entity_id="retained-old-tombstone",
+        deleted_at="2000-01-01T00:00:00.000Z",
     )
-    assert resp.status_code == 200
+    space_session.add(tombstone)
+    await space_session.flush()
+
+    async def database_override():
+        yield space_session
+
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(trash_routes.router, prefix="/api/v1/trash")
+    app.dependency_overrides[trash_routes.get_space_db] = database_override
+    app.dependency_overrides[trash_routes.get_space_context] = lambda: {
+        "space_id": "spc_test"
+    }
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as local:
+        legacy = await local.post("/api/v1/trash/cleanup")
+        canonical = await local.post(
+            "/api/v1/trash/cleanup",
+            headers={
+                "Accept": "application/vnd.pomodoroxii.error+json;version=2",
+                "X-Request-ID": "req-retention",
+            },
+        )
+
+    assert legacy.status_code == 409
+    assert legacy.json() == {
+        "detail": "Client ACK waterline is required before retention",
+        "error_type": "conflict",
+    }
+    assert canonical.status_code == 409
+    assert canonical.json() == {
+        "code": "retention_ack_required",
+        "message": "Client ACK waterline is required before retention",
+        "retryable": False,
+        "request_id": "req-retention",
+        "details": {},
+    }
+    count = await space_session.scalar(select(func.count(Tombstone.id)))
+    assert count == 1
 
 
 # --------------------------------------------------------------------------- #
