@@ -3535,6 +3535,16 @@ function verifyCrossWave(plans) {
     'feat: bind sqlite through pxii vfs',
     'feat: route filesystem through storage authorities',
     'test: close contained storage integration',
+    'S1 POSIX delete amendment',
+    'pathname `unlinkat` cannot provide exact-object deletion',
+    '| B. POSIX physical delete fail-closed',
+    'pxii_posix_delete_deferred',
+    'test_posix_companion_delete_fails_closed_without_unlink',
+    'test_posix_delete_preserves_verified_and_replacement_entries',
+    'test_posix_wal_checkpoint_reports_deferred_delete',
+    'test_windows_companion_delete_uses_bound_delete_handle',
+    'No S1 test may accept a quarantine name',
+    'S5 recovery-only delete authority',
   ]) {
     requireTaskText('S1', s1Task4Entry, contract, `Task 4 amendment contract ${contract}`);
   }
@@ -3567,7 +3577,7 @@ function verifyCrossWave(plans) {
   forbidPattern('S1 Task 4', s1Task4Entry.body, /asyncio\.create_task\(awaitable\)/g, 'general joined awaitable must accept Future via ensure_future');
   forbidPattern('S1 Task 4 python', codeBlocks(s1Task4Entry.body, 'python').join('\n'), /def\s+test_[A-Za-z0-9_]+\([^)]*\)(?:\s*->\s*None)?\s*:\s*\.\.\./g, 'critical native feasibility test placeholder');
   forbidPattern('S1 Task 4 python', s1ContainmentBlock, /open_unchecked|open_path_unchecked/g, 'unchecked containment open');
-  requireSha256('S1 Task 4', s1Task4Step3, 'bcec784fd005259875afa78b608c1073bb22a309ab34d443fe39d70127f6ec8a');
+  requireSha256('S1 Task 4', s1Task4Step3, '95e4c17b80329fd167d40d26f704de840526e4a5a85e1e022692f3c27e61f57c');
   const s1McpAuthBlock = codeBlocks(s1Task5Entry.body, 'python').find((block) => block.includes('class PomodoroTokenVerifier')) || '';
   check(
     /principal = await verify_with_fresh_meta_session\(\s*token, required_scope=None\s*\)/m.test(s1McpAuthBlock),
@@ -5569,7 +5579,11 @@ function runS1Task4AmendmentVerifierAtPaths(paths) {
     forbidPattern('S1 Task 4', task4.body, /file_system\/engine\/\*\*/g, 'broad FileSystem engine ownership glob');
     forbidPattern('S1 Task 4', task4.body, /contained production (?:may|can) (?:call|use|fall back to) (?:the )?path-backed constructor/gi, 'contained path-backed fallback');
     forbidPattern('S1 Task 4', task4.body, /backup_enabled` defaults to `True`|legacy backup (?:logs? and continues|silently degrades?)/gi, 'legacy startup backup fail-open');
-    forbidPattern('S1 Task 4', task4.body, /backup\.py` (?:may|can) retain[^\r\n]*sqlite3\.connect/gi, 'legacy backup host-path connector');
+  forbidPattern('S1 Task 4', task4.body, /backup\.py` (?:may|can) retain[^\r\n]*sqlite3\.connect/gi, 'legacy backup host-path connector');
+  forbidPattern('S1 Task 4', task4.body, /Linux uses openat2\/openat\/unlinkat|Linux companions use openat2\/openat\/unlinkat/g, 'POSIX pathname delete presented as exact-object capability');
+  requireText('DESIGN', design, 'S1 POSIX delete amendment', 'design POSIX delete amendment mirror');
+  requireText('DESIGN', design, 'pathname unlinkat cannot guarantee exact-object deletion', 'design POSIX exact-object proof');
+  requireText('DESIGN', design, 'S5 may later introduce a separately probed Linux delete capability', 'design S5 delete capability handoff');
   }
   requireText('S2', s2, 'consumes the S1-owned contained constructor', 'S2 preserves the S1 FileSystem authority ports');
   requireText('S2', s2, 'does not replace them or restore pathname state', 'S2 preserves S1 port state');
@@ -5586,6 +5600,9 @@ function runS1Task4AmendmentVerifierAtPaths(paths) {
   requireText('REPORT', report, '旧启动备份默认关闭且零 backup storage I/O', 'legacy backup disabled mirror');
   requireText('REPORT', report, 'legacy_backup_unsupported', 'legacy backup stable error mirror');
   requireText('REPORT', report, '正式 snapshot/restore 仍由 S5 独占', 'S5 backup ownership mirror');
+  requireText('REPORT', report, 'S1 POSIX companion <code>xDelete</code> fail-closed', 'S1 POSIX delete fail-closed mirror');
+  requireText('REPORT', report, 'S5 recovery-only delete authority', 'S5 POSIX delete handoff mirror');
+  requireText('REPORT', report, 'POSIX deferred-delete', 'POSIX deferred-delete gate mirror');
   const result = failures.length === 0
     ? { status: 0, stdout: 'VERIFY_S1_TASK4_AMENDMENT_OK\n', stderr: '' }
     : {
@@ -10301,6 +10318,9 @@ function verifyCurrentPaths() {
     requireText('REPORT', report, '旧启动备份默认关闭且零 backup storage I/O', 'legacy backup disabled mirror');
     requireText('REPORT', report, 'legacy_backup_unsupported', 'legacy backup stable error mirror');
     requireText('REPORT', report, '正式 snapshot/restore 仍由 S5 独占', 'S5 backup ownership mirror');
+    requireText('REPORT', report, 'S1 POSIX companion <code>xDelete</code> fail-closed', 'S1 POSIX delete fail-closed mirror');
+    requireText('REPORT', report, 'S5 recovery-only delete authority', 'S5 POSIX delete handoff mirror');
+    requireText('REPORT', report, 'POSIX deferred-delete', 'POSIX deferred-delete gate mirror');
   }
   const actualFiles = fs.readdirSync(planDirectory)
     .filter((name) => /^2026-07-14-backend-95plus-s[0-6]-.*\.md$/.test(name))
