@@ -7,7 +7,7 @@ import stat
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, Awaitable, BinaryIO, Callable
 
 from app.errors import PathOutsideSpaceError
 
@@ -680,6 +680,7 @@ class ContainedSpaceOpens:
         "_notes_handle",
         "_database_taken",
         "_file_system_taken",
+        "_revocation_callbacks",
     )
 
     def __init__(self, *_args, **_kwargs) -> None:
@@ -698,6 +699,7 @@ class ContainedSpaceOpens:
         instance._notes_handle = notes_handle
         instance._database_taken = False
         instance._file_system_taken = False
+        instance._revocation_callbacks: list[Callable[[], Awaitable[None]]] = []
         return instance
 
     @property
@@ -725,17 +727,39 @@ class ContainedSpaceOpens:
         self._file_system_taken = True
         return self._notes_handle, self._index_target
 
+    def _register_revocation_callback(
+        self, callback: Callable[[], Awaitable[None]]
+    ) -> None:
+        self._revocation_callbacks.append(callback)
+
     async def close_all(self) -> None:
         await self._database_target.aclose()
         await self._index_target.aclose()
         self._notes_handle._close()
 
     async def revoke_transferred_resources(self) -> None:
-        await self._database_target.aclose()
-        await self._index_target.aclose()
-        self._notes_handle._close()
+        callbacks = self._revocation_callbacks
+        self._revocation_callbacks = []
+        errors: list[BaseException] = []
+        for callback in callbacks:
+            try:
+                await callback()
+            except BaseException as error:
+                errors.append(error)
+        for close in (self._database_target.aclose, self._index_target.aclose):
+            try:
+                await close()
+            except BaseException as error:
+                errors.append(error)
+        try:
+            self._notes_handle._close()
+        except BaseException as error:
+            errors.append(error)
+        if errors:
+            raise BaseExceptionGroup("transferred resource revocation failed", errors)
 
     async def close_untransferred_resources(self) -> None:
+        self._revocation_callbacks = []
         if not self._database_taken:
             await self._database_target.aclose()
         if not self._file_system_taken:
