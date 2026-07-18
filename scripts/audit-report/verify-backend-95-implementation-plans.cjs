@@ -3494,6 +3494,16 @@ function verifyCrossWave(plans) {
   ]) {
     requireTaskText('S1', s1Task4Entry, enginePath, `exact contained FileSystem ownership ${enginePath}`);
   }
+  for (const backupPath of [
+    'backend/app/main.py',
+    'backend/app/settings.py',
+    'backend/app/file_system/backup.py',
+    'backend/tests/test_backup_lifespan.py',
+    'backend/tests/test_settings.py',
+    'backend/tests/fixtures/certification/populate_n_minus_one.py',
+  ]) {
+    requireTaskText('S1', s1Task4Entry, backupPath, `exact legacy backup fail-closed ownership ${backupPath}`);
+  }
   forbidPattern('S1 Task 4', s1Task4Entry.body, /file_system\/engine\/\*\*/g, 'broad FileSystem engine ownership glob');
   for (const contract of [
     'FileSystemStorage.from_bound_handles',
@@ -3511,6 +3521,16 @@ function verifyCrossWave(plans) {
     'test_cancelled_waiter_does_not_corrupt_containment_lock_owner',
     'same-owner entry increments depth without awaiting',
     'Cancellation while waiting never changes owner/depth',
+    '`backup_enabled` defaults to `False`',
+    'LegacyBackupConfigurationError',
+    '`legacy_backup_unsupported`',
+    'zero backup storage I/O',
+    'never enumerates a Space path',
+    'test_backup_enabled_defaults_false',
+    'test_disabled_backup_performs_no_backup_storage_io',
+    'test_enabled_legacy_backup_fails_before_storage_initialization',
+    'test_backup_module_has_no_path_backed_sqlite_connector',
+    'fix: fail closed on legacy startup backup',
     'feat: add reentrant containment scope',
     'feat: bind sqlite through pxii vfs',
     'feat: route filesystem through storage authorities',
@@ -3519,6 +3539,8 @@ function verifyCrossWave(plans) {
     requireTaskText('S1', s1Task4Entry, contract, `Task 4 amendment contract ${contract}`);
   }
   forbidPattern('S1 Task 4', s1Task4Entry.body, /contained production (?:may|can) (?:call|use|fall back to) (?:the )?path-backed constructor/gi, 'contained path-backed fallback');
+  forbidPattern('S1 Task 4', s1Task4Entry.body, /backup_enabled` defaults to `True`|legacy backup (?:logs? and continues|silently degrades?)/gi, 'legacy startup backup fail-open');
+  forbidPattern('S1 Task 4', s1Task4Entry.body, /backup\.py` (?:may|can) retain[^\r\n]*sqlite3\.connect/gi, 'legacy backup host-path connector');
   requireText('S2', s2, 'consumes the S1-owned contained constructor', 'S2 preserves the S1 FileSystem authority ports');
   requireText('S2', s2, 'continue to raise `ExternalPathCapabilityRequiredError`', 'S2 does not reopen external host paths');
   requireText('S2', s2, 'does not replace them or restore pathname state', 'S2 preserves S1 port state');
@@ -5495,6 +5517,86 @@ function runVerifierAtPaths(paths) {
   }
 }
 
+function runS1Task4AmendmentVerifierAtPaths(paths) {
+  failures.length = 0;
+  const s1 = fs.readFileSync(path.join(paths.plans, expectedPlans[1].filename), 'utf8');
+  const s2 = fs.readFileSync(path.join(paths.plans, expectedPlans[2].filename), 'utf8');
+  const design = fs.readFileSync(paths.design, 'utf8');
+  const report = fs.readFileSync(paths.report || reportPath, 'utf8');
+  const task4 = parseTasks(s1).find((task) => task.number === 4);
+  check(Boolean(task4), 'S1: missing Task 4 for amendment verification');
+  if (task4) {
+    verifyTaskStaging('S1', [task4]);
+    for (const exactPath of [
+      'backend/app/file_system/engine/base.py',
+      'backend/app/file_system/engine/note_ops.py',
+      'backend/app/file_system/engine/folder_ops.py',
+      'backend/app/file_system/engine/search_ops.py',
+      'backend/app/file_system/engine/trash_ops.py',
+      'backend/app/file_system/engine/version_ops.py',
+      'backend/app/file_system/engine/export_ops.py',
+      'backend/app/file_system/engine/consistency_ops.py',
+      'backend/app/file_system/engine/__init__.py',
+      'backend/app/main.py',
+      'backend/app/settings.py',
+      'backend/app/file_system/backup.py',
+      'backend/tests/test_backup_lifespan.py',
+      'backend/tests/test_settings.py',
+      'backend/tests/fixtures/certification/populate_n_minus_one.py',
+    ]) {
+      requireTaskText('S1', task4, exactPath, `exact Task 4 amendment ownership ${exactPath}`);
+    }
+    for (const contract of [
+      'FileSystemStorage.from_bound_handles',
+      'relative-name-only Notes authority',
+      'BoundSQLiteTarget.open_maintenance',
+      'path-backed constructor remains a test/N-1 compatibility adapter',
+      'ExternalPathCapabilityRequiredError',
+      'same-owner entry increments depth without awaiting',
+      '`backup_enabled` defaults to `False`',
+      'LegacyBackupConfigurationError',
+      '`legacy_backup_unsupported`',
+      'zero backup storage I/O',
+      'never enumerates a Space path',
+      'test_backup_enabled_defaults_false',
+      'test_disabled_backup_performs_no_backup_storage_io',
+      'test_enabled_legacy_backup_fails_before_storage_initialization',
+      'test_backup_module_has_no_path_backed_sqlite_connector',
+      'fix: fail closed on legacy startup backup',
+    ]) {
+      requireTaskText('S1', task4, contract, `Task 4 amendment contract ${contract}`);
+    }
+    forbidPattern('S1 Task 4', task4.body, /file_system\/engine\/\*\*/g, 'broad FileSystem engine ownership glob');
+    forbidPattern('S1 Task 4', task4.body, /contained production (?:may|can) (?:call|use|fall back to) (?:the )?path-backed constructor/gi, 'contained path-backed fallback');
+    forbidPattern('S1 Task 4', task4.body, /backup_enabled` defaults to `True`|legacy backup (?:logs? and continues|silently degrades?)/gi, 'legacy startup backup fail-open');
+    forbidPattern('S1 Task 4', task4.body, /backup\.py` (?:may|can) retain[^\r\n]*sqlite3\.connect/gi, 'legacy backup host-path connector');
+  }
+  requireText('S2', s2, 'consumes the S1-owned contained constructor', 'S2 preserves the S1 FileSystem authority ports');
+  requireText('S2', s2, 'does not replace them or restore pathname state', 'S2 preserves S1 port state');
+  for (const contract of [
+    'S1 does not add snapshot/restore',
+    '`backup_enabled` defaults false',
+    '`LegacyBackupConfigurationError`',
+    '`legacy_backup_unsupported`',
+    'no production-callable host-path `sqlite3.connect`',
+  ]) {
+    requireText('DESIGN', design, contract, `legacy backup design contract ${contract}`);
+  }
+  requireText('REPORT', report, '现有 FileSystemStorage 通过内部 Notes/index authority port 工作', 'contained FileSystem port mirror');
+  requireText('REPORT', report, '旧启动备份默认关闭且零 backup storage I/O', 'legacy backup disabled mirror');
+  requireText('REPORT', report, 'legacy_backup_unsupported', 'legacy backup stable error mirror');
+  requireText('REPORT', report, '正式 snapshot/restore 仍由 S5 独占', 'S5 backup ownership mirror');
+  const result = failures.length === 0
+    ? { status: 0, stdout: 'VERIFY_S1_TASK4_AMENDMENT_OK\n', stderr: '' }
+    : {
+      status: 1,
+      stdout: '',
+      stderr: `VERIFY_S1_TASK4_AMENDMENT_FAILED count=${failures.length}\n${failures.map((failure) => `- ${failure}`).join('\n')}\n`,
+    };
+  failures.length = 0;
+  return result;
+}
+
 function verifyAuthorityRedirectRejection() {
   const nodeOptionsChild = spawnSync(process.execPath, [__filename], {
     cwd: root,
@@ -5561,9 +5663,13 @@ function replaceRequired(filePath, before, after, label) {
 
 function runMutationSelfTests(selectedNames = null) {
   if (selectedNames === null) verifyAuthorityRedirectRejection();
-  const baseline = runVerifierAtPaths({
+  const baselinePaths = {
     plans: planDirectory, design: designPath, integrationSpec: integrationSpecPath,
-  });
+    report: reportPath,
+  };
+  const baseline = selectedNames === null
+    ? runVerifierAtPaths(baselinePaths)
+    : runS1Task4AmendmentVerifierAtPaths(baselinePaths);
   if (baseline.status !== 0) {
     throw new Error(`self-test baseline is not green:\n${baseline.stderr || baseline.stdout}`);
   }
@@ -6253,6 +6359,58 @@ function runMutationSelfTests(selectedNames = null) {
           paths.report,
           '现有 FileSystemStorage 通过内部 Notes/index authority port 工作',
           'FileSystemStorage 使用默认入口',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's1-task4-backup-whitelist-omission',
+      expected: /exact legacy backup fail-closed ownership backend\/app\/file_system\/backup\.py|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[1].filename);
+        const source = fs.readFileSync(file, 'utf8');
+        fs.writeFileSync(
+          file,
+          source.replaceAll('- Modify: `backend/app/file_system/backup.py`\n', ''),
+          'utf8',
+        );
+      },
+    },
+    {
+      name: 's1-task4-backup-default-enabled',
+      expected: /Task 4 amendment contract `backup_enabled` defaults to `False`|legacy startup backup fail-open/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[1].filename);
+        replaceRequired(
+          file,
+          '`backup_enabled` defaults to `False`',
+          '`backup_enabled` defaults to `True`',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's1-task4-backup-silent-degrade',
+      expected: /Task 4 amendment contract LegacyBackupConfigurationError|legacy startup backup fail-open/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[1].filename);
+        replaceRequired(
+          file,
+          'startup fails before Meta or Space storage initialization with `LegacyBackupConfigurationError`',
+          'legacy backup logs and continues after Meta or Space storage initialization',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's1-task4-backup-path-connector-restored',
+      expected: /legacy backup host-path connector/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[1].filename);
+        replaceRequired(
+          file,
+          '`backend/app/file_system/backup.py` contains no production-callable `sqlite3.connect(str(path))`',
+          '`backend/app/file_system/backup.py` may retain production-callable `sqlite3.connect(str(path))`',
           this.name,
         );
       },
@@ -10107,7 +10265,9 @@ function runMutationSelfTests(selectedNames = null) {
     const paths = mutationSandbox();
     try {
       testCase.mutate(paths);
-      const result = runVerifierAtPaths(paths);
+      const result = selectedNames === null
+        ? runVerifierAtPaths(paths)
+        : runS1Task4AmendmentVerifierAtPaths(paths);
       const output = `${result.stdout}\n${result.stderr}`;
       if (testCase.shouldPass ? result.status !== 0 : (result.status === 0 || !testCase.expected.test(output))) {
         mutationFailures.push(
@@ -10138,6 +10298,9 @@ function verifyCurrentPaths() {
     requireText('REPORT', report, '生产入口不回退 path-backed constructor', 'path-backed fallback mirror');
     requireText('REPORT', report, '在没有外部路径 capability 时稳定 fail closed', 'external path capability mirror');
     requireText('REPORT', report, '同 Task 可重入、跨 Task 严格互斥', 'Task-reentrant lock mirror');
+    requireText('REPORT', report, '旧启动备份默认关闭且零 backup storage I/O', 'legacy backup disabled mirror');
+    requireText('REPORT', report, 'legacy_backup_unsupported', 'legacy backup stable error mirror');
+    requireText('REPORT', report, '正式 snapshot/restore 仍由 S5 独占', 'S5 backup ownership mirror');
   }
   const actualFiles = fs.readdirSync(planDirectory)
     .filter((name) => /^2026-07-14-backend-95plus-s[0-6]-.*\.md$/.test(name))
@@ -10221,6 +10384,10 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's1-task4-batch-c-staging-omission',
     's2-task4-port-handoff-path-restore',
     's1-task4-html-port-mirror-removal',
+    's1-task4-backup-whitelist-omission',
+    's1-task4-backup-default-enabled',
+    's1-task4-backup-silent-degrade',
+    's1-task4-backup-path-connector-restored',
   ]));
 } else if (process.argv.length === 2) {
   main();
