@@ -78,6 +78,102 @@ def test_linux_native_storage_returns_platform_unsupported_before_bootstrap(
     assert calls == {"root_open": 0, "bootstrap": 0, "sqlite_connect": 0}
 
 
+@pytest.mark.asyncio
+async def test_linux_platform_guard_rejects_real_v1_route_before_contained_storage(
+    monkeypatch: pytest.MonkeyPatch, client
+) -> None:
+    """The production dependency/scope/route must fail before native storage I/O."""
+    import app.runtime.contained_io as contained_io_module
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.deps import get_current_user
+
+    calls = {"root_open": 0, "bootstrap": 0, "sqlite_connect": 0}
+
+    def forbidden_root_open(_path: Path):
+        calls["root_open"] += 1
+        raise AssertionError("route opened contained storage before platform guard")
+
+    def forbidden_bootstrap() -> None:
+        calls["bootstrap"] += 1
+        raise AssertionError("route started native bootstrap before platform guard")
+
+    def forbidden_sqlite_connect(*_args, **_kwargs):
+        calls["sqlite_connect"] += 1
+        raise AssertionError("route opened contained SQLite before platform guard")
+
+    monkeypatch.setattr(sqlite_vfs_module.os, "name", "posix")
+    monkeypatch.setattr(contained_io_module, "_open_root_authority", forbidden_root_open)
+    monkeypatch.setattr(sqlite_vfs_module, "_verify_source_manifest", forbidden_bootstrap)
+    monkeypatch.setattr(sqlite_vfs_module.sqlite3, "connect", forbidden_sqlite_connect)
+
+    app = client._transport.app
+    app.dependency_overrides[get_current_user] = lambda: {
+        "sub": "route-user",
+        "type": "space",
+        "space_id": "spc_linux_route_guard",
+        "epoch": 1,
+    }
+    try:
+        response = await client.get(
+            "/api/v1/tasks",
+            headers={"X-Request-ID": "req-linux-route"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert response.status_code == 501
+    assert response.json() == {
+        "error_type": "platform_unsupported",
+        "detail": "Native contained storage is supported only on Windows",
+    }
+    assert response.headers["X-Request-ID"] == "req-linux-route"
+    assert response.headers["X-PomodoroXII-Error-Code"] == "platform_unsupported"
+    assert response.headers["X-PomodoroXII-Retryable"] == "false"
+    assert calls == {"root_open": 0, "bootstrap": 0, "sqlite_connect": 0}
+
+
+@pytest.mark.asyncio
+async def test_linux_get_space_context_rejects_before_meta_or_contained_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.db.meta_session as meta_session_module
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.deps import get_space_context
+    from app.errors import PlatformUnsupportedError
+
+    calls = {"meta_session": 0, "bootstrap": 0, "sqlite_connect": 0}
+
+    async def forbidden_meta_session():
+        calls["meta_session"] += 1
+        raise AssertionError("space dependency opened Meta SQLite before platform guard")
+        yield
+
+    def forbidden_bootstrap() -> None:
+        calls["bootstrap"] += 1
+        raise AssertionError("space dependency started native bootstrap")
+
+    def forbidden_sqlite_connect(*_args, **_kwargs):
+        calls["sqlite_connect"] += 1
+        raise AssertionError("space dependency opened contained SQLite")
+
+    monkeypatch.setattr(sqlite_vfs_module.os, "name", "posix")
+    monkeypatch.setattr(meta_session_module, "get_meta_session", forbidden_meta_session)
+    monkeypatch.setattr(sqlite_vfs_module, "_verify_source_manifest", forbidden_bootstrap)
+    monkeypatch.setattr(sqlite_vfs_module.sqlite3, "connect", forbidden_sqlite_connect)
+
+    with pytest.raises(PlatformUnsupportedError):
+        await get_space_context(
+            user={
+                "sub": "dependency-user",
+                "type": "space",
+                "space_id": "spc_dependency_guard",
+                "epoch": 1,
+            }
+        )
+
+    assert calls == {"meta_session": 0, "bootstrap": 0, "sqlite_connect": 0}
+
+
 def test_windows_ancestor_receipt_identity_includes_volume(monkeypatch) -> None:
     import app.runtime.contained_io as contained_io
     from app.runtime.contained_io import StorageIdentity, _identity_matches_receipt

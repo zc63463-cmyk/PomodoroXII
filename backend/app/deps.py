@@ -88,6 +88,9 @@ async def get_space_context(
     meta DB so forged tokens (or tokens pointing at deleted spaces) are
     rejected early instead of failing later with confusing errors.
     """
+    from app.runtime.sqlite_vfs import require_windows_native_runtime
+
+    require_windows_native_runtime()
     if user.get("type") != "space":
         raise AuthorizationError("Space token required")
     space_id = user.get("space_id")
