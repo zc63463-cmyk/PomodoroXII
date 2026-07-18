@@ -911,11 +911,19 @@ Before committing, inspect `git diff --cached --name-only` and unstage any test 
 
 ### Task 4: Prove Authorized Space Containment Before Storage Creation
 
-#### Task 4 architecture amendment: POSIX companion deletion is S1 fail-closed
+#### Task 4 architecture amendment: S1 native storage is Windows-only
 
-This amendment supersedes any earlier S1 wording that treats POSIX `unlinkat(dirfd, basename, 0)` as exact-object deletion.
+This amendment supersedes every later S1 Task 4 reference to a Linux/POSIX supported runtime, Linux wheel, multi-platform receipt/manifest, Linux capability probe, or POSIX deferred-delete runtime acceptance gate. Those references are retained only as historical design context and are not executable S1 requirements.
 
-**S1 POSIX delete amendment.** The selected S1 contract is Option B: POSIX physical delete fail-closed.
+**S1 platform support contract.** Windows x64 on CPython 3.13 is the only supported native `pxii-vfs` runtime in S1. A production request that would initialize or use contained native storage on Linux or another POSIX platform must fail before extension bootstrap, SQLite connection creation, companion enumeration, or storage I/O with stable canonical code `platform_unsupported`, HTTP status 501, `retryable=false`, and no host path or native SQLite error in the response. Linux must never silently run, downgrade, or surface `SQLITE_IOERR_DELETE`/`disk I/O error` as if deferred deletion succeeded.
+
+**Evidence contract.** Task 4 GO requires one Windows CPython 3.13 x64 wheel built from the candidate commit, a Windows JUnit run with tests greater than zero and failures/errors/skipped all zero, a canonical Windows build receipt whose source-tree hash matches the candidate, and an independent subject manifest with `subject_sha == HEAD`, Git object type `commit`, and platform set exactly `["windows-x86_64"]`. S1 does not build or publish a Linux wheel, does not require a Linux receipt, and does not accept Linux runtime evidence.
+
+**Platform-track transfer.** Linux native `pxii-vfs` runtime, Linux wheels, POSIX exact/deferred-delete compatibility, Linux receipts/manifests, and Linux filesystem capability gates move together to S5 or an independently authorized Platform Track. That later track must define its own runtime capability probe, WAL/journal behavior, recovery inventory, artifact closure, and GO gate; it cannot inherit Windows S1 certification.
+
+**Retained fail-closed defense.** Existing POSIX C branches remain fail-closed and may not restore pathname `unlinkat`, quarantine names, sleeps, race hooks, or successful delete receipts. They are defense-in-depth for accidental invocation, not a supported S1 runtime. S1 GO additionally requires static and runtime tests proving the production Linux entry returns `platform_unsupported` before loading `pxii-vfs` or opening storage.
+
+The following POSIX analysis records why Linux was removed from S1; it does not define S1 acceptance evidence.
 
 **POSIX proof.** `openat`/`fstat` authenticates an inode at time `t0`, but `unlinkat(dirfd, basename, 0)` resolves the directory entry again at time `t1`. A same-permission concurrent actor can rename the authenticated inode away and install a different inode at the same basename in `(t0, t1)`. Holding the authenticated fd, repeating `fstat`, adding a sleep, or rechecking after `unlinkat` cannot make the already-issued pathname deletion undoable. Standard POSIX has no portable `unlinkat`-by-fd or exact-object delete primitive.
 
@@ -927,9 +935,11 @@ This amendment supersedes any earlier S1 wording that treats POSIX `unlinkat(dir
 | B. POSIX physical delete fail-closed | S1 never performs a POSIX companion pathname delete. It returns a stable deferred-delete error and preserves both the verified object and any replacement. S5 recovery later owns a separately authorized physical cleanup capability. | WAL/checkpoint or rollback-journal close may leave a companion behind and must propagate the stable deferred-delete error; no durability or cleanup success is claimed. Recovery must account for retained `-wal`, `-shm`, and `-journal` files before any later deletion. | **Selected.** |
 | C. Linux handle-based capability gate | Enable physical delete only when a future Linux-specific capability proves an exact-object primitive for the mounted filesystem; otherwise fail closed. The capability probe and evidence contract are not available in S1 and must not silently downgrade to pathname `unlinkat`. | Capability absence makes WAL/journal cleanup deferred; capability presence requires a new S5-owned probe and artifact binding. | Reserved for S5, not implemented in S1. |
 
-**Selected contract.** On POSIX, `pxii-vfs` `xDelete` for `-wal`, `-shm`, and `-journal` returns the stable `pxii_posix_delete_deferred`/`SQLITE_IOERR_DELETE` domain result without calling pathname `unlinkat`; it must not publish a successful delete receipt. The proof is that pathname `unlinkat` cannot provide exact-object deletion under the selected threat model. Windows retains its already-open delete HANDLE semantics. This amendment changes the S1 exit gate: POSIX exact-object physical deletion is explicitly *not* an S1 capability, and Task 4 cannot be GO unless the fail-closed behavior is proven.
+**Historical POSIX contract.** The current POSIX branch returns `pxii_posix_delete_deferred`/`SQLITE_IOERR_DELETE` without pathname `unlinkat` and publishes no successful delete receipt. This behavior is not S1 runtime support and is not a Task 4 GO condition; production Linux admission must reject earlier with `platform_unsupported`.
 
-**Native acceptance contract.** The native test plan must contain real, non-mocked cases named `test_posix_companion_delete_fails_closed_without_unlink`, `test_posix_delete_preserves_verified_and_replacement_entries`, `test_posix_wal_checkpoint_reports_deferred_delete`, and `test_windows_companion_delete_uses_bound_delete_handle`. POSIX cases assert no `unlinkat` call for companion deletion, no successful delete receipt, original and replacement entries remain, and live native references reach zero. Windows cases retain identity-bound delete and replacement rejection. No S1 test may accept a quarantine name, sleep, post-delete recheck, or test hook as proof of exact-object deletion.
+**Native acceptance contract.** S1 executes Windows identity-bound deletion, replacement rejection, WAL/journal recovery, cleanup, and wheel-install tests. It also executes a Linux admission regression that asserts `platform_unsupported`, zero extension bootstrap, zero SQLite/native opens, and zero storage I/O. POSIX native runtime tests and Linux wheel execution belong only to S5/Platform Track. No S1 test may accept a quarantine name, sleep, post-delete recheck, `SQLITE_IOERR_DELETE`, or disk I/O error as successful behavior.
+
+The Windows native wheel job is the only S1 wheel job. The required Windows regression remains `test_windows_companion_delete_uses_bound_delete_handle`; the Linux admission regression is named `test_linux_native_storage_returns_platform_unsupported_before_bootstrap`.
 
 **S5 recovery-only delete authority.** S5 may define a Linux capability probe and recovery-only delete authority after it proves the mounted filesystem, kernel primitive, namespace ownership, crash behavior, and receipt binding. Until then, retained companions are recovery inventory, not evidence of successful deletion.
 
@@ -1719,7 +1729,7 @@ install(TARGETS pxii_vfs
 )
 ```
 
-Reusable workflow的 build/test job固定为下面的双平台结构；aggregator job下载两个互异 platform artifacts，调用同一个 source-hash工具的 `--assemble-wheel-manifest` 模式独立重算 wheel/member/extension hashes与build IDs，然后才上传唯一稳定 artifact：
+Reusable workflow的 build/test job固定为下面的 Windows-only 结构；aggregator job下载唯一 Windows platform artifact，调用同一个 source-hash工具的 `--assemble-wheel-manifest` 模式独立重算 wheel/member/extension hashes与build ID，然后才上传唯一稳定 artifact：
 
 ```yaml
 name: pxii-vfs-wheels
@@ -1736,9 +1746,6 @@ jobs:
           - os: windows-2025
             platform_id: windows-x86_64
             cibw_arch: AMD64
-          - os: ubuntu-24.04
-            platform_id: linux-x86_64
-            cibw_arch: x86_64
     runs-on: ${{ matrix.os }}
     env:
       CIBW_BUILD: cp313-*
@@ -1792,7 +1799,7 @@ jobs:
         with:
           pattern: pxii-vfs-*
           path: ${{ runner.temp }}/pxii-vfs-inputs
-      - name: Assemble closed two-platform manifest
+      - name: Assemble closed Windows-only manifest
         run: python backend/scripts/verify_pxii_vfs_source_hash.py --assemble-wheel-manifest "${RUNNER_TEMP}/pxii-vfs-inputs" --subject-sha "${GITHUB_SHA}" --output pxii-vfs-wheel-manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -1801,9 +1808,9 @@ jobs:
           if-no-files-found: error
 ```
 
-`verify_pxii_vfs_source_hash.py`的三个模式共用 canonical JSON writer；build receipt拒绝零测试、skip、非零 exit、额外 wheel、embedded SQLite library或extension/control SQLite identity不等，aggregator要求 platform ID集合恰为 Windows/Linux并重新读取所有 artifact bytes，不能信任 receipt自报 hash。
+`verify_pxii_vfs_source_hash.py`的三个模式共用 canonical JSON writer；build receipt拒绝零测试、skip、非零 exit、额外 wheel、embedded SQLite library或extension/control SQLite identity不等，aggregator要求 platform ID集合恰为 `["windows-x86_64"]`并重新读取所有 artifact bytes，不能信任 receipt自报 hash。
 
-`.github/workflows/ci.yml` invokes that reusable matrix and publishes the stable artifact `pxii-vfs-wheel-manifest-v1`, containing one canonical JSON manifest with source-tree SHA-256, each native input hash, OS/architecture/CPython/compiler/CMake/Ninja/scikit-build-core/cibuildwheel IDs, wheel filename/hash/size, and unpacked extension filename/hash/size/build-id for both platforms. CI downloads and rehashes the uploaded wheels before accepting the manifest. The Linux image/release pipeline later consumes these exact wheel and manifest artifacts; it may not silently recompile the extension. S5/S6 bind the stable artifact name and manifest schema into their producer closure.
+`.github/workflows/ci.yml` invokes that reusable Windows-only job and publishes the stable artifact `pxii-vfs-wheel-manifest-v1`, containing one canonical JSON manifest with source-tree SHA-256, each native input hash, OS/architecture/CPython/compiler/CMake/Ninja/scikit-build-core/cibuildwheel IDs, wheel filename/hash/size, and unpacked extension filename/hash/size/build-id for Windows. CI downloads and rehashes the uploaded wheel before accepting the manifest. Linux image/release and POSIX capability work are deferred to S5/Platform Track; they may not silently consume this Windows-only evidence as Linux support. S5/S6 bind the stable artifact name and manifest schema into their producer closure.
 
 Define Space-specific AppError subclasses for `space_not_found` and `path_outside_space`, with legacy aliases `not_found` and `authorization_error`. Error messages never include the rejected host path.
 

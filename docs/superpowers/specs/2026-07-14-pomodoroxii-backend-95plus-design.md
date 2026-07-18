@@ -875,21 +875,20 @@ document when the two conflict.
   isolated-create authority; SQLite receives only
   `file:pxii-<token>?vfs=pxii`. Bootstrap may discover the packaged extension
   path, but no database host path crosses the storage seam or is reopened after
-  binding. Linux companion opens use openat2/openat with anchored no-follow
-  semantics; S1 POSIX physical companion deletion is fail-closed because
-  pathname unlinkat cannot guarantee exact-object deletion against an arbitrary
-  same-UID concurrent actor. S5 may later introduce a separately probed Linux
-  delete capability. Windows companions use `NtCreateFile(RootDirectory=...)`
-  without reparse traversal and retain handle-bound delete semantics.
+  binding. S1 supports this native storage runtime only on Windows x64 with
+  CPython 3.13. Windows companions use `NtCreateFile(RootDirectory=...)`
+  without reparse traversal and retain handle-bound delete semantics. Linux and
+  other POSIX production entry points fail before extension bootstrap or storage
+  I/O with stable `platform_unsupported`; the retained POSIX C path is
+  defense-in-depth, not a supported S1 runtime.
 - `BoundSQLiteTarget` exposes only `identity`, `make_async_engine(options)`,
   `open_maintenance(options)`, and `aclose()`. Callers never observe URI/token,
   fd/HANDLE, sidecar, or raw connector. The VFS implements authority-bound
-  open/access/full-path, locking, WAL shared memory, fsync, and deferred-close
-  POSIX lock semantics; S1 POSIX companion `xDelete` fails closed with a stable
-  deferred-delete result and never treats pathname unlinkat or quarantine
-  revalidation as exact-object deletion. Windows companion deletion remains
-  handle-bound. S5 owns any future physical POSIX cleanup capability. It denies
-  ATTACH, arbitrary extension loading, and unsafe PRAGMAs. CPython 3.13 Windows x64/Linux x86_64 wheels, swap isolation, WAL and
+  open/access/full-path, locking, WAL shared memory, and fsync on Windows.
+  Windows companion deletion remains handle-bound. Linux native runtime,
+  POSIX exact/deferred-delete compatibility, Linux filesystem capability probes,
+  and physical POSIX cleanup are S5/Platform Track responsibilities. It denies
+  ATTACH, arbitrary extension loading, and unsafe PRAGMAs. The CPython 3.13 Windows x64 wheel, swap isolation, WAL and
   hot-journal recovery, cross-process locks, AsyncSession/savepoint/Alembic,
   cancellation, pool disposal, and revocation are a hard feasibility gate.
 - `AsyncEngineOptions` and `MaintenanceOptions` are concrete frozen records.
@@ -907,19 +906,19 @@ document when the two conflict.
   explicitly rejected with ATTACH disabled. Ambiguous flag combinations fail
   before I/O; savepoint, sort, TEMP-table, and hot-journal tests prove zero
   outside access.
-- **S1 POSIX delete amendment:** Standard POSIX pathname deletion is not an
-  exact-object capability under an arbitrary same-UID concurrent actor. S1
-  therefore requires POSIX companion `xDelete` to fail closed without
-  `unlinkat` or quarantine-name deletion, preserve the verified and replacement
-  entries, and report a stable deferred-delete result. Native acceptance must
-  include real tests for deferred WAL/checkpoint cleanup and zero successful
-  POSIX delete receipts. Windows keeps its bound delete HANDLE contract. Any
-  Linux handle-based physical-delete capability is S5-owned and requires a
-  mounted-filesystem/kernel probe plus independently bound evidence.
-- CI publishes stable `pxii-vfs-wheel-manifest-v1` evidence with native source
-  tree/input hashes, toolchain IDs, wheel hash/size, and unpacked extension
-  hash/size/build-id for both platforms. Linux image/release consumers use the
-  attested wheel rather than implicitly recompiling it.
+- **S1 Windows-only amendment:** Windows x64 is the sole supported S1 native
+  runtime. Linux/POSIX requests return `platform_unsupported` with HTTP 501 and
+  `retryable=false` before extension bootstrap, SQLite connection creation,
+  companion enumeration, or storage I/O. A native `SQLITE_IOERR_DELETE` or disk
+  I/O error is never translated into success. Existing POSIX fail-closed C code
+  must not perform pathname `unlinkat` or publish successful delete receipts,
+  but it is not runtime acceptance evidence. Linux native runtime, wheels,
+  exact/deferred-delete compatibility, receipts/manifests, and filesystem
+  capability gates move to S5 or a separately authorized Platform Track.
+- CI publishes stable Windows-only `pxii-vfs-wheel-manifest-v1` evidence with
+  platform set exactly `["windows-x86_64"]`, candidate subject SHA, native
+  source tree/input hashes, toolchain IDs, wheel hash/size, and unpacked
+  extension hash/size/build-id. S1 has no Linux wheel or Linux receipt gate.
 - Lease and engine release are retryable state machines. Each completed cleanup
   callback/phase is recorded exactly once; `_released` and the ContextVar order
   token change only after every callback succeeds. Body failure or cancellation

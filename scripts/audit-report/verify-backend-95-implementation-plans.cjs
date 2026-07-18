@@ -3535,14 +3535,15 @@ function verifyCrossWave(plans) {
     'feat: bind sqlite through pxii vfs',
     'feat: route filesystem through storage authorities',
     'test: close contained storage integration',
-    'S1 POSIX delete amendment',
-    'pathname `unlinkat` cannot provide exact-object deletion',
-    '| B. POSIX physical delete fail-closed',
-    'pxii_posix_delete_deferred',
-    'test_posix_companion_delete_fails_closed_without_unlink',
-    'test_posix_delete_preserves_verified_and_replacement_entries',
-    'test_posix_wal_checkpoint_reports_deferred_delete',
+    'S1 platform support contract',
+    'Windows x64 on CPython 3.13 is the only supported native `pxii-vfs` runtime in S1',
+    '`platform_unsupported`',
+    'S1 does not build or publish a Linux wheel',
+    'platform set exactly `["windows-x86_64"]`',
+    'Linux native `pxii-vfs` runtime, Linux wheels, POSIX exact/deferred-delete compatibility',
+    'Retained fail-closed defense',
     'test_windows_companion_delete_uses_bound_delete_handle',
+    'Linux admission regression',
     'No S1 test may accept a quarantine name',
     'S5 recovery-only delete authority',
   ]) {
@@ -3557,10 +3558,11 @@ function verifyCrossWave(plans) {
   forbidPattern('S2', s2, /restores? (?:the )?(?:root|index|host) Path|may restore pathname state/gi, 'S2 pathname-state restoration');
   requireTaskText('S1', s1Task4Entry, 'add_library(pxii_vfs MODULE', 'concrete native CMake target');
   requireTaskText('S1', s1Task4Entry, 'windows-x86_64', 'Windows native wheel job');
-  requireTaskText('S1', s1Task4Entry, 'linux-x86_64', 'Linux native wheel job');
+  requireTaskText('S1', s1Task4Entry, 'Windows native wheel job', 'Windows-only native wheel job');
   requireTaskText('S1', s1Task4Entry, 'astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc', 'pinned native wheel tool bootstrap');
   requireTaskText('S1', s1Task4Entry, 'uv sync --project backend --frozen --no-install-project', 'locked native wheel build environment');
-  requireTaskText('S1', s1Task4Entry, '--assemble-wheel-manifest', 'independent two-platform native manifest aggregation');
+  requireTaskText('S1', s1Task4Entry, '--assemble-wheel-manifest', 'independent Windows-only native manifest aggregation');
+  forbidPattern('S1 Task 4', s1Task4Entry.body, /Windows\/Linux|two-platform|Linux native wheel job|platforms? exactly \["windows-x86_64", "linux-x86_64"\]/gi, 'retired S1 Linux or two-platform evidence gate');
   for (const nativePath of [
     'backend/CMakeLists.txt',
     'backend/cibuildwheel.toml',
@@ -3577,7 +3579,7 @@ function verifyCrossWave(plans) {
   forbidPattern('S1 Task 4', s1Task4Entry.body, /asyncio\.create_task\(awaitable\)/g, 'general joined awaitable must accept Future via ensure_future');
   forbidPattern('S1 Task 4 python', codeBlocks(s1Task4Entry.body, 'python').join('\n'), /def\s+test_[A-Za-z0-9_]+\([^)]*\)(?:\s*->\s*None)?\s*:\s*\.\.\./g, 'critical native feasibility test placeholder');
   forbidPattern('S1 Task 4 python', s1ContainmentBlock, /open_unchecked|open_path_unchecked/g, 'unchecked containment open');
-  requireSha256('S1 Task 4', s1Task4Step3, '95e4c17b80329fd167d40d26f704de840526e4a5a85e1e022692f3c27e61f57c');
+  requireSha256('S1 Task 4', s1Task4Step3, '92671740aa8a3cbace5b6af7cbda4d43d43ed0c368e690fd6fd9df7f362b86b7');
   const s1McpAuthBlock = codeBlocks(s1Task5Entry.body, 'python').find((block) => block.includes('class PomodoroTokenVerifier')) || '';
   check(
     /principal = await verify_with_fresh_meta_session\(\s*token, required_scope=None\s*\)/m.test(s1McpAuthBlock),
