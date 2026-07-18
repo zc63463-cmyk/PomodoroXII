@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tomllib
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -887,6 +888,26 @@ def test_native_binding_state_reads_are_registry_guarded() -> None:
     assert "*result_out = !binding->revoked;" not in source
     assert "pxii->binding == NULL || pxii->binding->revoked" not in source
     assert "pxii->shm_identity = child->identity;" not in source
+
+
+def test_linux_cibuildwheel_defers_runtime_matrix_to_capable_runner() -> None:
+    backend_root = Path(__file__).parents[1]
+    config = tomllib.loads((backend_root / "cibuildwheel.toml").read_text("utf-8"))
+    overrides = config["tool"]["cibuildwheel"].get("overrides", [])
+    assert any(
+        override.get("select") == "cp313-manylinux_x86_64"
+        and override.get("test-command") == ""
+        for override in overrides
+    )
+
+    workflow = (
+        backend_root.parent / ".github" / "workflows" / "pxii-vfs-wheels.yml"
+    ).read_text("utf-8")
+    assert "PXII_VFS_LOAD_EXTENSION_CAPABILITY_OK" in workflow
+    capability_probe = workflow.index("PXII_VFS_LOAD_EXTENSION_CAPABILITY_OK")
+    wheel_install = workflow.index("uv pip install --python")
+    native_matrix = workflow.index("-m pytest -q backend/tests/test_pxii_vfs.py")
+    assert capability_probe < wheel_install < native_matrix
 
 
 def test_delete_completion_receipt_covers_descriptor_close_failure(

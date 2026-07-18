@@ -35,6 +35,12 @@ jobs:
       - name: Verify native source closure
         shell: pwsh
         run: python backend/scripts/verify_pxii_vfs_source_hash.py
+      - name: Verify runner SQLite load extension capability
+        shell: pwsh
+        run: |
+          $python = if ($IsWindows) { "backend/.venv/Scripts/python.exe" } else { "backend/.venv/bin/python" }
+          & $python -c "import sqlite3; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); c.enable_load_extension(False); c.close(); print('PXII_VFS_LOAD_EXTENSION_CAPABILITY_OK')"
+          if ($LASTEXITCODE -ne 0) { throw "runner SQLite load extension capability is unavailable" }
       - name: Build one CPython 3.13 wheel
         shell: pwsh
         run: |
