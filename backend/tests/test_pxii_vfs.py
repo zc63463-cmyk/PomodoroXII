@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -36,6 +37,132 @@ def _walk_private_values(value: object) -> tuple[object, ...]:
             if isinstance(name, str) and hasattr(current, name):
                 pending.append(getattr(current, name))
     return tuple(values)
+
+
+def _write_fake_wheel_receipt(
+    root: Path,
+    platform_id: str,
+    *,
+    wheel_platform: str | None = None,
+) -> tuple[Path, Path]:
+    from scripts.verify_pxii_vfs_source_hash import (
+        _binary_build_id,
+        _canonical_bytes,
+        _sha256_bytes,
+        _sha256_file,
+        verify_sources,
+    )
+
+    actual_platform = wheel_platform or platform_id
+    if actual_platform == "windows-x86_64":
+        wheel_tag = "win_amd64"
+        member = "pomodoroxii_native/_pxii_vfs.pyd"
+        extension = b"fake-windows-extension"
+    else:
+        wheel_tag = "manylinux_2_28_x86_64"
+        member = "pomodoroxii_native/_pxii_vfs.so"
+        extension = b"fake-linux-extension"
+    if platform_id == "windows-x86_64":
+        system, architecture = "Windows", "AMD64"
+    else:
+        system, architecture = "Linux", "x86_64"
+    directory = root / platform_id
+    directory.mkdir(parents=True)
+    wheel = directory / (
+        f"pomodoroxii_backend-0.1.0-cp313-cp313-{wheel_tag}.whl"
+    )
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(member, extension)
+    junit = directory / "pxii-vfs.junit.xml"
+    junit.write_text(
+        '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+        '<testcase classname="pxii" name="bound"/></testsuite>',
+        encoding="utf-8",
+    )
+    receipt = {
+        "schema": "pxii-vfs-build-receipt-v1",
+        "platform_id": platform_id,
+        "source": verify_sources(),
+        "runtime": {
+            "control_sqlite_source_id": "same-source",
+            "extension_sqlite_source_id": "same-source",
+            "control_sqlite_version": "3.50.0",
+            "extension_sqlite_version": "3.50.0",
+            "vfs_name": "pxii-vfs",
+            "extension_loading_enabled_after_bootstrap": False,
+        },
+        "tests": {"tests": 1, "failures": 0, "errors": 0, "skipped": 0},
+        "junit": {
+            "filename": junit.name,
+            "sha256": _sha256_file(junit),
+            "size": junit.stat().st_size,
+        },
+        "environment": {
+            "os": system,
+            "architecture": architecture,
+            "python": "3.13.1",
+            "compiler": "test-compiler",
+            "cmake": "cmake version 3.31.0",
+            "ninja": "1.12.0",
+            "scikit_build_core": "0.11.0",
+            "cibuildwheel": "3.1.0",
+        },
+        "wheel": {
+            "filename": wheel.name,
+            "sha256": _sha256_file(wheel),
+            "size": wheel.stat().st_size,
+        },
+        "extension": {
+            "filename": member,
+            "sha256": _sha256_bytes(extension),
+            "size": len(extension),
+            "build_id": _binary_build_id(member, extension),
+        },
+    }
+    (directory / "build-receipt.json").write_bytes(_canonical_bytes(receipt))
+    return wheel, junit
+
+
+def test_wheel_manifest_rehashes_uploaded_junit(tmp_path: Path) -> None:
+    from scripts.verify_pxii_vfs_source_hash import assemble_manifest
+
+    inputs = tmp_path / "inputs"
+    _write_fake_wheel_receipt(inputs, "windows-x86_64")
+    _wheel, junit = _write_fake_wheel_receipt(inputs, "linux-x86_64")
+    junit.write_text("tampered", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="JUnit hash mismatch"):
+        assemble_manifest(inputs, "a" * 40, tmp_path / "manifest.json")
+
+
+def test_wheel_manifest_rejects_platform_tag_mismatch(tmp_path: Path) -> None:
+    from scripts.verify_pxii_vfs_source_hash import assemble_manifest
+
+    inputs = tmp_path / "inputs"
+    _write_fake_wheel_receipt(
+        inputs, "windows-x86_64", wheel_platform="linux-x86_64"
+    )
+    _write_fake_wheel_receipt(inputs, "linux-x86_64")
+
+    with pytest.raises(SystemExit, match="wheel tag does not match platform"):
+        assemble_manifest(inputs, "b" * 40, tmp_path / "manifest.json")
+
+
+def test_build_receipt_binds_runtime_extension_to_wheel_member(tmp_path: Path) -> None:
+    from scripts.verify_pxii_vfs_source_hash import emit_build_receipt
+
+    wheel, junit = _write_fake_wheel_receipt(
+        tmp_path / "inputs", "windows-x86_64"
+    )
+    with pytest.raises(
+        SystemExit, match="installed runtime extension does not match wheel member"
+    ):
+        emit_build_receipt(
+            "windows-x86_64",
+            wheel,
+            junit,
+            wheel.parent / "new-build-receipt.json",
+        )
 
 
 def _subprocess_env() -> dict[str, str]:
