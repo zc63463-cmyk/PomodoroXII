@@ -554,6 +554,45 @@ def test_replacement_discard_rejects_reappeared_name_after_physical_delete(
 @pytest.mark.parametrize(
     ("operation", "fault_stage"),
     [
+        ("commit", "replacement_commit_after_source_quarantine_before_receipt"),
+        ("discard", "replacement_discard_after_quarantine_before_receipt"),
+    ],
+)
+def test_replacement_reconciles_rename_completed_before_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    fault_stage: str,
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import commit_closed_isolated_target
+
+    _source, cleanup, replacement, _replacement_path, source_identity = (
+        _prepare_closed_replacement(tmp_path, f"rename-before-receipt-{operation}")
+    )
+    injected = False
+
+    def fail_once(stage: str) -> None:
+        nonlocal injected
+        if stage == fault_stage and not injected:
+            injected = True
+            raise OSError(f"injected {stage}")
+
+    monkeypatch.setattr(sqlite_vfs_module, "_terminal_fault_hook", fail_once)
+    call = (
+        replacement.commit_bound_replace
+        if operation == "commit"
+        else replacement.discard_closed_replacement
+    )
+    with pytest.raises(OSError, match=fault_stage):
+        call()
+    call()
+    commit_closed_isolated_target(cleanup, source_identity)
+
+
+@pytest.mark.parametrize(
+    ("operation", "fault_stage"),
+    [
         ("commit", "isolated_commit_after_marker_delete"),
         ("discard", "isolated_discard_after_target_delete"),
     ],
@@ -604,6 +643,52 @@ def test_isolated_terminal_operation_retries_after_physical_completion(
     with pytest.raises(OSError, match=fault_stage):
         call(cleanup, identity)
     call(cleanup, identity)
+    call(cleanup, identity)
+
+
+@pytest.mark.parametrize("operation", ["commit", "discard"])
+def test_isolated_cleanup_reconciles_unlink_completed_before_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        bind_marked_isolated_target,
+        commit_closed_isolated_target,
+        discard_closed_isolated_target,
+    )
+
+    marker = tmp_path / f".{operation}-unlink.marker"
+    marker.write_text(operation, encoding="utf-8")
+    target, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename=f"isolated-{operation}-unlink.db",
+        marker_basename=marker.name,
+        marker_nonce=operation,
+    )
+    with target.open_maintenance(MaintenanceOptions(read_only=False)) as connection:
+        connection.execute("CREATE TABLE proof(value INTEGER NOT NULL)")
+        connection.commit()
+    identity = target.identity
+    asyncio.run(target.aclose())
+    injected = False
+
+    def fail_once(stage: str) -> None:
+        nonlocal injected
+        if stage == "delete_relative_after_unlink_before_receipt" and not injected:
+            injected = True
+            raise OSError("injected delete_relative_after_unlink_before_receipt")
+
+    monkeypatch.setattr(sqlite_vfs_module, "_terminal_fault_hook", fail_once)
+    call = (
+        commit_closed_isolated_target
+        if operation == "commit"
+        else discard_closed_isolated_target
+    )
+    with pytest.raises(OSError, match="delete_relative_after_unlink_before_receipt"):
+        call(cleanup, identity)
     call(cleanup, identity)
 
 
