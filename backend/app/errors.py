@@ -192,6 +192,14 @@ class SpaceStorageMissingError(AppError):
     code = "space_storage_missing"
 
 
+class PlatformUnsupportedError(AppError):
+    detail = "Native contained storage is supported only on Windows"
+    status_code = 501
+    legacy_error_type = "platform_unsupported"
+    code = "platform_unsupported"
+    retryable = False
+
+
 class SpaceEnginePathMismatchError(AppError):
     detail = "Space storage identity does not match the cached engine"
     status_code = 409

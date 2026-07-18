@@ -947,7 +947,10 @@ def open_bound_space(
     from app.runtime.sqlite_vfs import (
         _bind_open_authority,
         _revoke_unopened_target,
+        require_windows_native_runtime,
     )
+
+    require_windows_native_runtime()
 
     receipts = tuple(ancestor_identities)
     parent_parts = paths.db_path.parent.relative_to(paths.space_root).parts
