@@ -46,6 +46,62 @@ def test_windows_ancestor_receipt_identity_includes_volume(monkeypatch) -> None:
     assert not _identity_matches_receipt(StorageIdentity(42, 99), receipt)
 
 
+def test_ancestor_receipts_use_handle_relative_walk_without_path_lstat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from app.runtime.scope import ContainedSpacePaths, _walk_existing_ancestors
+
+    root = tmp_path / "spaces"
+    parent = root / "spc_handle_walk"
+    notes = parent / "notes"
+    notes.mkdir(parents=True)
+    paths = ContainedSpacePaths(
+        space_root=root,
+        db_path=parent / "space.db",
+        notes_dir=notes,
+        index_db=parent / "index.db",
+    )
+
+    def forbidden_lstat(_path: Path):
+        raise AssertionError("ancestor capture reopened a host path with Path.lstat")
+
+    monkeypatch.setattr(Path, "lstat", forbidden_lstat)
+    receipts = _walk_existing_ancestors(paths)
+    assert [receipt[0] for receipt in receipts] == ["spaces", "spc_handle_walk"]
+
+
+@pytest.mark.asyncio
+async def test_capability_revalidation_reuses_retained_root_authority(
+    fake_bound_opener, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import app.runtime.contained_io as contained_io_module
+    from app.runtime.scope import ContainedSpacePaths, SpaceContainmentCapability
+
+    root = tmp_path / "spaces"
+    parent = root / "spc_retained_root"
+    notes = parent / "notes"
+    notes.mkdir(parents=True)
+    capability = SpaceContainmentCapability._create(
+        ContainedSpacePaths(
+            space_root=root,
+            db_path=parent / "space.db",
+            notes_dir=notes,
+            index_db=parent / "index.db",
+        )
+    )
+
+    def forbidden_root_reopen(_root: Path):
+        raise AssertionError("capability reopened its root host path")
+
+    monkeypatch.setattr(
+        contained_io_module, "_open_root_authority", forbidden_root_reopen
+    )
+    async with capability.open_verified():
+        pass
+    async with capability.open_verified():
+        pass
+
+
 @pytest.fixture
 def fake_bound_opener(monkeypatch):
     import app.runtime.scope as scope_module

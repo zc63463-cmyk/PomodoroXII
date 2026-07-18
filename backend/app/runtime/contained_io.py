@@ -903,8 +903,10 @@ def _fault_hook(_name: str) -> None:
     return None
 
 
-def open_bound_space(paths, ancestor_identities) -> ContainedSpaceOpens:
-    from app.runtime.scope import _walk_existing_ancestors
+def open_bound_space(
+    paths, ancestor_identities, root_authority: int | None = None
+) -> ContainedSpaceOpens:
+    from app.runtime.scope import _walk_ancestors_from_root
     from app.runtime.sqlite_vfs import (
         _bind_open_authority,
         _revoke_unopened_target,
@@ -928,7 +930,11 @@ def open_bound_space(paths, ancestor_identities) -> ContainedSpaceOpens:
     index_target = None
     notes_handle = None
     try:
-        root, root_identity = _open_root_authority(paths.space_root)
+        if root_authority is None:
+            root, root_identity = _open_root_authority(paths.space_root)
+        else:
+            root = _duplicate_directory_descriptor(root_authority)
+            root_identity = _descriptor_identity(root)
         if not receipts or not _identity_matches_receipt(root_identity, receipts[0]):
             raise PathOutsideSpaceError("Contained root identity changed")
         parent = _open_verified_parent(root, parent_parts, receipts)
@@ -964,7 +970,7 @@ def open_bound_space(paths, ancestor_identities) -> ContainedSpaceOpens:
         )
         notes_descriptor = -1
 
-        if _walk_existing_ancestors(paths) != receipts:
+        if _walk_ancestors_from_root(paths, root) != receipts:
             raise PathOutsideSpaceError("Contained namespace changed during open")
         return ContainedSpaceOpens._create(
             database_target, index_target, notes_handle
