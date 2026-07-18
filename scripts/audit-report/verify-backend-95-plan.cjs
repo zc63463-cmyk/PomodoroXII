@@ -58,7 +58,7 @@ const forbiddenMarkers = ['TBD', 'TODO', 'FIXME', 'CONTENT_SECTIONS', 'MORE_FIND
 
 function readRequired(filePath) {
   assert.ok(fs.existsSync(filePath), `missing required file: ${filePath}`);
-  return fs.readFileSync(filePath, 'utf8');
+  return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
 }
 
 function values(html, attribute) {
@@ -879,7 +879,7 @@ function verifyContent(html, spec) {
     '持久 CAS/LWW resolution', 'bounded gzip', 'canonical Accept',
     'OperationalSignals', 'REST v1 兼容', 'FORWARD_APPLIED',
     'whole-chunk raw JSONL', 'tagged evidence', 'strict RFC3339',
-    'JSON-safe serializer', 'descriptor/HANDLE-relative protected-open',
+    'JSON-safe serializer', 'Windows x64 HANDLE-relative protected-open',
     'SyncState.current_cursor',
     'durable pending push', 'runtime parser', '256 KiB', '10 MiB',
     '11 MiB', 'publish → drills → read-only aggregator',
@@ -1292,6 +1292,14 @@ async function main() {
       'report path override rejection diagnostic changed',
     );
     const mutations = [
+      {
+        label: 'windows-only-protected-open-removed',
+        html: html.replace(
+          'Windows x64 HANDLE-relative protected-open',
+          'generic pathname protected-open',
+        ),
+        expected: /required report fact missing: Windows x64 HANDLE-relative protected-open/,
+      },
       {
         label: 'current-certification-overclaim',
         html: `${html}\n当前 Backend 95+ 已认证；backend=98.0\n`,

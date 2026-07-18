@@ -46,6 +46,10 @@ const s4ProvisionalOperationStates = [
   'activation_resolved', 'transport_ready', 'transport_resolved',
 ];
 
+function readAuthorityText(filePath) {
+  return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
+}
+
 function canonicalizeSemantic(value) {
   return String(value).normalize('NFKC').replace(/\p{Cf}/gu, '');
 }
@@ -2326,7 +2330,7 @@ function readSources() {
   return Object.fromEntries(Object.entries(FILES).map(([id, relative]) => {
     const absolute = path.join(ROOT, relative);
     if (!fs.existsSync(absolute)) throw new Error(`missing required file: ${relative}`);
-    return [id, fs.readFileSync(absolute, 'utf8')];
+    return [id, readAuthorityText(absolute)];
   }));
 }
 

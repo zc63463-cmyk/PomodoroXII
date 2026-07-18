@@ -64,6 +64,14 @@ const s4ProvisionalOperationStates = [
 
 const failures = [];
 
+function normalizeAuthorityText(value) {
+  return String(value).replace(/\r\n?/g, '\n');
+}
+
+function readAuthorityText(filePath) {
+  return normalizeAuthorityText(fs.readFileSync(filePath, 'utf8'));
+}
+
 function check(condition, message) {
   if (!condition) failures.push(message);
 }
@@ -5421,9 +5429,12 @@ function verifyCrossWave(plans) {
   const s6Commands = commandBlocks(s6).join('\n');
   forbidPattern('S6 commands', s6Commands, /git\s+(?:merge-base|rev-list[^\r\n]*--ancestry-path)/g, 'ancestry-based target eligibility command');
 
-  const design = fs.readFileSync(designPath, 'utf8');
+  const design = readAuthorityText(designPath);
   requireText('DESIGN', design, 'deep native Module, not a pathname connector', 'authority-bound SQLite VFS amendment');
   requireText('DESIGN', design, 'pxii-vfs-wheel-manifest-v1', 'native wheel evidence amendment');
+  requireText('DESIGN', design, 'S1 Windows-only amendment', 'design Windows-only S1 amendment mirror');
+  requireText('DESIGN', design, '`platform_unsupported` with HTTP 501', 'design Linux platform rejection contract');
+  requireText('DESIGN', design, 'capability gates move to S5 or a separately authorized Platform Track', 'design S5 platform capability handoff');
   requireText('DESIGN', design, '`engine/base.py`, `engine/note_ops.py`, `engine/folder_ops.py`', 'exact contained FileSystem engine ownership');
   requireText('DESIGN', design, 'relative-name-only Notes authority', 'contained Notes authority port');
   requireText('DESIGN', design, '`BoundSQLiteTarget.open_maintenance`', 'contained index authority port');
@@ -5494,18 +5505,23 @@ function mutationSandbox() {
   const plans = path.join(sandbox, 'plans');
   fs.mkdirSync(plans);
   for (const plan of expectedPlans) {
-    fs.copyFileSync(path.join(planDirectory, plan.filename), path.join(plans, plan.filename));
+    fs.writeFileSync(
+      path.join(plans, plan.filename),
+      readAuthorityText(path.join(planDirectory, plan.filename)),
+      'utf8',
+    );
   }
-  fs.copyFileSync(
-    path.join(planDirectory, taskSpaceTs3PlanFilename),
+  fs.writeFileSync(
     path.join(plans, taskSpaceTs3PlanFilename),
+    readAuthorityText(path.join(planDirectory, taskSpaceTs3PlanFilename)),
+    'utf8',
   );
   const design = path.join(sandbox, path.basename(designPath));
-  fs.copyFileSync(designPath, design);
+  fs.writeFileSync(design, readAuthorityText(designPath), 'utf8');
   const integrationSpec = path.join(sandbox, path.basename(integrationSpecPath));
-  fs.copyFileSync(integrationSpecPath, integrationSpec);
+  fs.writeFileSync(integrationSpec, readAuthorityText(integrationSpecPath), 'utf8');
   const report = path.join(sandbox, path.basename(reportPath));
-  fs.copyFileSync(reportPath, report);
+  fs.writeFileSync(report, readAuthorityText(reportPath), 'utf8');
   return { sandbox, plans, design, integrationSpec, report };
 }
 
@@ -5514,12 +5530,16 @@ function runVerifierAtPaths(paths) {
   const previousDesignPath = designPath;
   const previousIntegrationSpecPath = integrationSpecPath;
   const previousReportPath = reportPath;
+  const usesRepositoryAuthority = path.resolve(paths.plans) === path.resolve(previousPlanDirectory);
   try {
     planDirectory = paths.plans;
     designPath = paths.design;
     integrationSpecPath = paths.integrationSpec || integrationSpecPath;
     reportPath = paths.report || reportPath;
-    return verifyCurrentPaths();
+    const immutableS0SandboxBytes = usesRepositoryAuthority
+      ? null
+      : fs.readFileSync(path.join(paths.plans, expectedPlans[0].filename));
+    return verifyCurrentPaths(immutableS0SandboxBytes);
   } finally {
     planDirectory = previousPlanDirectory;
     designPath = previousDesignPath;
@@ -5531,10 +5551,10 @@ function runVerifierAtPaths(paths) {
 
 function runS1Task4AmendmentVerifierAtPaths(paths) {
   failures.length = 0;
-  const s1 = fs.readFileSync(path.join(paths.plans, expectedPlans[1].filename), 'utf8');
-  const s2 = fs.readFileSync(path.join(paths.plans, expectedPlans[2].filename), 'utf8');
-  const design = fs.readFileSync(paths.design, 'utf8');
-  const report = fs.readFileSync(paths.report || reportPath, 'utf8');
+  const s1 = readAuthorityText(path.join(paths.plans, expectedPlans[1].filename));
+  const s2 = readAuthorityText(path.join(paths.plans, expectedPlans[2].filename));
+  const design = readAuthorityText(paths.design);
+  const report = readAuthorityText(paths.report || reportPath);
   const task4 = parseTasks(s1).find((task) => task.number === 4);
   check(Boolean(task4), 'S1: missing Task 4 for amendment verification');
   if (task4) {
@@ -5583,9 +5603,9 @@ function runS1Task4AmendmentVerifierAtPaths(paths) {
     forbidPattern('S1 Task 4', task4.body, /backup_enabled` defaults to `True`|legacy backup (?:logs? and continues|silently degrades?)/gi, 'legacy startup backup fail-open');
   forbidPattern('S1 Task 4', task4.body, /backup\.py` (?:may|can) retain[^\r\n]*sqlite3\.connect/gi, 'legacy backup host-path connector');
   forbidPattern('S1 Task 4', task4.body, /Linux uses openat2\/openat\/unlinkat|Linux companions use openat2\/openat\/unlinkat/g, 'POSIX pathname delete presented as exact-object capability');
-  requireText('DESIGN', design, 'S1 POSIX delete amendment', 'design POSIX delete amendment mirror');
-  requireText('DESIGN', design, 'pathname unlinkat cannot guarantee exact-object deletion', 'design POSIX exact-object proof');
-  requireText('DESIGN', design, 'S5 may later introduce a separately probed Linux delete capability', 'design S5 delete capability handoff');
+  requireText('DESIGN', design, 'S1 Windows-only amendment', 'design Windows-only S1 amendment mirror');
+  requireText('DESIGN', design, '`platform_unsupported` with HTTP 501', 'design Linux platform rejection contract');
+  requireText('DESIGN', design, 'capability gates move to S5 or a separately authorized Platform Track', 'design S5 platform capability handoff');
   }
   requireText('S2', s2, 'consumes the S1-owned contained constructor', 'S2 preserves the S1 FileSystem authority ports');
   requireText('S2', s2, 'does not replace them or restore pathname state', 'S2 preserves S1 port state');
@@ -6379,6 +6399,18 @@ function runMutationSelfTests(selectedNames = null) {
           '现有 FileSystemStorage 通过内部 Notes/index authority port 工作',
           'FileSystemStorage 使用默认入口',
           this.name,
+        );
+      },
+    },
+    {
+      name: 's1-task4-design-windows-only-amendment-removed',
+      expected: /design Windows-only S1 amendment mirror/,
+      mutate(paths) {
+        replaceRequired(
+          paths.design,
+          'S1 Windows-only amendment',
+          'S1 POSIX runtime amendment',
+          'S1 Task 4 Windows-only design authority',
         );
       },
     },
@@ -10305,14 +10337,14 @@ function runMutationSelfTests(selectedNames = null) {
   process.stdout.write(`SELF_TEST_OK mutations=${selectedCases.length} redirects=${redirects} scope=${scope}\n`);
 }
 
-function verifyCurrentPaths() {
+function verifyCurrentPaths(immutableS0SandboxBytes = null) {
   failures.length = 0;
   check(fs.existsSync(designPath), `missing governing design: ${designPath}`);
   check(fs.existsSync(integrationSpecPath),
     `missing Task Space integration spec: ${integrationSpecPath}`);
   check(fs.existsSync(reportPath), `missing rendered planning report: ${reportPath}`);
   if (fs.existsSync(reportPath)) {
-    const report = fs.readFileSync(reportPath, 'utf8');
+    const report = readAuthorityText(reportPath);
     requireText('REPORT', report, '现有 FileSystemStorage 通过内部 Notes/index authority port 工作', 'contained FileSystem port mirror');
     requireText('REPORT', report, '生产入口不回退 path-backed constructor', 'path-backed fallback mirror');
     requireText('REPORT', report, '在没有外部路径 capability 时稳定 fail closed', 'external path capability mirror');
@@ -10337,13 +10369,15 @@ function verifyCurrentPaths() {
     const filePath = path.join(planDirectory, filename);
     check(fs.existsSync(filePath), `${id}: missing ${filename}`);
     if (!fs.existsSync(filePath)) continue;
-    const source = fs.readFileSync(filePath, 'utf8');
+    const source = readAuthorityText(filePath);
     if (id === 'S0') {
-      const blob = spawnSync(
-        'git',
-        ['show', `HEAD:${path.relative(root, filePath).replaceAll(path.sep, '/')}`],
-        { cwd: root, encoding: 'buffer', windowsHide: true },
-      );
+      const blob = immutableS0SandboxBytes === null
+        ? spawnSync(
+          'git',
+          ['show', `HEAD:${path.relative(root, filePath).replaceAll(path.sep, '/')}`],
+          { cwd: root, encoding: 'buffer', windowsHide: true },
+        )
+        : { status: 0, stdout: immutableS0SandboxBytes };
       check(
         blob.status === 0 && Buffer.isBuffer(blob.stdout),
         'immutable S0 plan Git blob is unavailable; worktree fallback is forbidden',
@@ -10371,14 +10405,14 @@ function verifyCurrentPaths() {
   check(fs.existsSync(taskSpaceTs3Path), `missing TS3 authority plan: ${taskSpaceTs3PlanFilename}`);
   if (fs.existsSync(taskSpaceTs3Path)) {
     verifyTs3V18FrontendContracts(
-      fs.readFileSync(taskSpaceTs3Path, 'utf8'), check, 'TS3', root,
+      readAuthorityText(taskSpaceTs3Path), check, 'TS3', root,
     );
   }
 
   if (plans.size === expectedPlans.length) {
-    const design = fs.readFileSync(designPath, 'utf8');
+    const design = readAuthorityText(designPath);
     if (fs.existsSync(integrationSpecPath)) {
-      verifyTaskSpaceIntegrationSpec(fs.readFileSync(integrationSpecPath, 'utf8'));
+      verifyTaskSpaceIntegrationSpec(readAuthorityText(integrationSpecPath));
     }
     verifyCrossPlanFileOwnership(plans);
     verifyStageDependencyDAG(plans, design);
@@ -10417,6 +10451,7 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's1-task4-batch-c-staging-omission',
     's2-task4-port-handoff-path-restore',
     's1-task4-html-port-mirror-removal',
+    's1-task4-design-windows-only-amendment-removed',
     's1-task4-backup-whitelist-omission',
     's1-task4-backup-default-enabled',
     's1-task4-backup-silent-degrade',
