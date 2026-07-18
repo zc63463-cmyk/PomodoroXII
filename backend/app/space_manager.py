@@ -79,6 +79,9 @@ class SpaceEngineManager:
             )
             self._engines[space_id] = entry
             self._engines.move_to_end(space_id)
+            opens._register_revocation_callback(
+                lambda: self._dispose_if_current(space_id, entry)
+            )
             evicted = self._pop_evicted_locked()
 
         for evicted_id, evicted_entry in evicted:

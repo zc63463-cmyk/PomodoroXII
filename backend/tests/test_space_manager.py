@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
@@ -117,6 +118,54 @@ async def test_cached_engine_is_revoked_when_exit_revalidation_fails(
         assert "spc_same" not in manager._engines
         with pytest.raises(SQLiteAuthorityRevokedError):
             cached.target.open_maintenance(MaintenanceOptions(read_only=True))
+    finally:
+        await manager.dispose_all()
+
+
+@pytest.mark.asyncio
+async def test_first_cached_engine_is_revoked_before_target_close_on_exit_drift(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import app.runtime.scope as scope_module
+    from app.runtime.scope import SpaceContainmentCapability
+
+    manager = SpaceEngineManager(max_size=2)
+    root = tmp_path / "spaces"
+    parent = root / "first"
+    parent.mkdir(parents=True)
+    notes = parent / "notes"
+    notes.mkdir()
+    paths = SimpleNamespace(
+        space_root=root,
+        db_path=parent / "space.db",
+        notes_dir=notes,
+        index_db=parent / "index.db",
+    )
+    capability = SpaceContainmentCapability._create(paths)
+    original_revalidate = scope_module._require_same_safe_ancestors
+    revalidations = 0
+
+    def fail_only_on_exit(*args, **kwargs) -> None:
+        nonlocal revalidations
+        revalidations += 1
+        original_revalidate(*args, **kwargs)
+        if revalidations == 2:
+            raise PathOutsideSpaceError("injected first-open exit identity change")
+
+    monkeypatch.setattr(
+        scope_module, "_require_same_safe_ancestors", fail_only_on_exit
+    )
+
+    context = capability.open_verified()
+    try:
+        opens = await context.__aenter__()
+        session = await manager.get_session("spc_first", opens)
+        await session.close()
+        assert "spc_first" in manager._engines
+        assert revalidations == 1
+        with pytest.raises(BaseExceptionGroup, match="containment cleanup failed"):
+            await asyncio.wait_for(context.__aexit__(None, None, None), timeout=2)
+        assert "spc_first" not in manager._engines
     finally:
         await manager.dispose_all()
 
