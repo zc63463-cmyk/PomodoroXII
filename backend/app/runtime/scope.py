@@ -49,7 +49,7 @@ class _ReentrantAsyncLock:
             self._lock.release()
 
 
-_LOCKS: dict[str, _ReentrantAsyncLock] = {}
+_LOCKS: dict[tuple[int, int], _ReentrantAsyncLock] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +72,20 @@ def _is_reparse(info: os.stat_result) -> bool:
     attributes = getattr(info, "st_file_attributes", 0)
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return bool(attributes & reparse)
+
+
+def _directory_identity(path: Path, info: os.stat_result) -> tuple[int, int]:
+    if os.name != "nt":
+        return info.st_dev, info.st_ino
+    from app.runtime.contained_io import _open_windows_directory
+
+    handle, identity = _open_windows_directory(path)
+    try:
+        return identity.device, identity.file_id
+    finally:
+        import ctypes
+
+        ctypes.windll.kernel32.CloseHandle(handle)
 
 
 def _safe_relative(path: Path, root: Path) -> tuple[str, ...]:
@@ -99,7 +113,8 @@ def _walk_existing_ancestors(paths: ContainedSpacePaths) -> tuple[AncestorReceip
             raise _path_error("Registered Space ancestor is missing") from exc
         if stat.S_ISLNK(info.st_mode) or _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
             raise _path_error("Registered Space ancestor is not a safe directory")
-        receipts.append((current.name, info.st_dev, info.st_ino, info.st_mode))
+        device, file_id = _directory_identity(current, info)
+        receipts.append((current.name, device, file_id, info.st_mode))
     return tuple(receipts)
 
 
@@ -116,10 +131,10 @@ def _require_same_safe_ancestors(
         raise _path_error("Registered Space ancestor identity changed")
 
 
-def _containment_lock_for(paths: ContainedSpacePaths) -> _ReentrantAsyncLock:
-    return _LOCKS.setdefault(
-        os.path.normcase(str(paths.db_path.parent)), _ReentrantAsyncLock()
-    )
+def _containment_lock_for(
+    parent_identity: tuple[int, int],
+) -> _ReentrantAsyncLock:
+    return _LOCKS.setdefault(parent_identity, _ReentrantAsyncLock())
 
 
 async def _fault_hook(_name: str) -> None:
@@ -136,8 +151,9 @@ class SpaceContainmentCapability:
     def _create(cls, paths: ContainedSpacePaths) -> "SpaceContainmentCapability":
         instance = object.__new__(cls)
         instance._paths = paths
-        instance._ancestor_identities = _capture_safe_ancestor_identities(paths)
-        instance._lock = _containment_lock_for(paths)
+        identities = _capture_safe_ancestor_identities(paths)
+        instance._ancestor_identities = identities
+        instance._lock = _containment_lock_for((identities[-1][1], identities[-1][2]))
         return instance
 
     def open_verified(self) -> AsyncContextManager[ContainedSpaceOpens]:

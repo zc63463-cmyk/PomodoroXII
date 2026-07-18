@@ -28,6 +28,24 @@ class _FakeContainedOpens:
         self.closed = True
 
 
+def test_containment_lock_registry_uses_parent_storage_identity() -> None:
+    from app.runtime.scope import _containment_lock_for
+
+    first = _containment_lock_for((41, 99))
+    assert _containment_lock_for((41, 99)) is first
+    assert _containment_lock_for((42, 99)) is not first
+
+
+def test_windows_ancestor_receipt_identity_includes_volume(monkeypatch) -> None:
+    import app.runtime.contained_io as contained_io
+    from app.runtime.contained_io import StorageIdentity, _identity_matches_receipt
+
+    monkeypatch.setattr(contained_io.os, "name", "nt")
+    receipt = ("space", 41, 99, 0)
+    assert _identity_matches_receipt(StorageIdentity(41, 99), receipt)
+    assert not _identity_matches_receipt(StorageIdentity(42, 99), receipt)
+
+
 @pytest.fixture
 def fake_bound_opener(monkeypatch):
     import app.runtime.scope as scope_module
