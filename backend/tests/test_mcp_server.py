@@ -13,6 +13,53 @@ import asyncio
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _explicit_trusted_stdio_context():
+    from app.mcp.auth import trusted_stdio_context
+
+    with trusted_stdio_context():
+        yield
+
+
+@pytest.fixture
+async def mcp_space_session(space_session, monkeypatch):
+    import app.mcp.server as server
+    import app.space_manager as space_manager
+    from app.db.meta_session import get_meta_session
+    from app.db.models.meta import Space
+    from app.runtime.sqlite_vfs import _extension_candidates
+    from app.settings import settings
+    from app.space_manager import dispose_space_engine_manager
+
+    candidates = _extension_candidates()
+    assert candidates, "Task 5 MCP tests require the Windows pxii-vfs extension"
+    monkeypatch.setenv("POMODOROXII_PXII_VFS_EXTENSION", str(candidates[0]))
+    monkeypatch.setattr(
+        server,
+        "get_space_engine_manager",
+        space_manager.get_space_engine_manager,
+    )
+    database = settings.space_db_path("spc_test")
+    notes = settings.space_notes_dir("spc_test")
+    notes.mkdir(parents=True, exist_ok=True)
+    (database.parent / "index.db").touch()
+    async for meta_db in get_meta_session():
+        meta_db.add(
+            Space(
+                id="spc_test",
+                name="spc_test",
+                db_path=str(database),
+                notes_dir=str(notes),
+            )
+        )
+        await meta_db.commit()
+        break
+    try:
+        yield space_session
+    finally:
+        await dispose_space_engine_manager()
+
 # --------------------------------------------------------------------------- #
 # Server identity
 # --------------------------------------------------------------------------- #
@@ -53,7 +100,7 @@ async def test_list_all_spaces_returns_list():
 
 
 @pytest.mark.asyncio
-async def test_get_stats_overview_returns_dict(space_session):
+async def test_get_stats_overview_returns_dict(mcp_space_session):
     """get_stats_overview should return a dict with period keys."""
     from app.mcp.server import get_stats_overview
 
@@ -64,7 +111,7 @@ async def test_get_stats_overview_returns_dict(space_session):
 
 
 @pytest.mark.asyncio
-async def test_get_task_distribution_returns_dict(space_session):
+async def test_get_task_distribution_returns_dict(mcp_space_session):
     """get_task_distribution should return by_status and by_priority."""
     from app.mcp.server import get_task_distribution
 
@@ -74,7 +121,7 @@ async def test_get_task_distribution_returns_dict(space_session):
 
 
 @pytest.mark.asyncio
-async def test_get_habit_summary_returns_dict(space_session):
+async def test_get_habit_summary_returns_dict(mcp_space_session):
     """get_habit_summary should return habits list and period_days."""
     from app.mcp.server import get_habit_summary
 
@@ -85,7 +132,7 @@ async def test_get_habit_summary_returns_dict(space_session):
 
 
 @pytest.mark.asyncio
-async def test_get_note_summary_returns_counts(space_session):
+async def test_get_note_summary_returns_counts(mcp_space_session):
     """get_note_summary should return note/folder counts."""
     from app.mcp.server import get_note_summary
 
@@ -138,7 +185,7 @@ async def test_get_entity_schema_returns_fields():
 
 
 @pytest.mark.asyncio
-async def test_get_sync_status_returns_counts(space_session):
+async def test_get_sync_status_returns_counts(mcp_space_session):
     """get_sync_status should return entity_counts and tombstone_count."""
     from app.mcp.server import get_sync_status
 
@@ -149,7 +196,7 @@ async def test_get_sync_status_returns_counts(space_session):
 
 
 @pytest.mark.asyncio
-async def test_sync_pull_returns_data(space_session):
+async def test_sync_pull_returns_data(mcp_space_session):
     """sync_pull should return a dict with entity lists and next_since."""
     from app.mcp.server import sync_pull
 
@@ -255,7 +302,7 @@ def test_all_tools_registered_via_fastmcp():
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_get_focus_trend_returns_data(space_session):
+async def test_get_focus_trend_returns_data(mcp_space_session):
     """get_focus_trend should return trend data with 'data' key."""
     from app.mcp.server import get_focus_trend
 
@@ -266,7 +313,7 @@ async def test_get_focus_trend_returns_data(space_session):
 
 
 @pytest.mark.asyncio
-async def test_get_daily_detail_returns_data(space_session):
+async def test_get_daily_detail_returns_data(mcp_space_session):
     """get_daily_detail should return count and duration for a date."""
     from app.mcp.server import get_daily_detail
 
@@ -278,7 +325,7 @@ async def test_get_daily_detail_returns_data(space_session):
 
 
 @pytest.mark.asyncio
-async def test_get_schedule_summary_returns_data(space_session):
+async def test_get_schedule_summary_returns_data(mcp_space_session):
     """get_schedule_summary should return schedule completion stats."""
     from app.mcp.server import get_schedule_summary
 
