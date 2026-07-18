@@ -518,6 +518,45 @@ async def test_async_engine_savepoint_and_revocation_are_bound(tmp_path) -> None
     discard_closed_isolated_target(cleanup, identity)
 
 
+@pytest.mark.asyncio
+async def test_alembic_upgrade_head_uses_bound_async_engine(tmp_path: Path) -> None:
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.runtime.sqlite_vfs import (
+        AsyncEngineOptions,
+        bind_marked_isolated_target,
+    )
+    from tests.migrations import alembic_config
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text("bound-alembic", encoding="utf-8")
+    target, _cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename="alembic.db",
+        marker_basename=marker.name,
+        marker_nonce="bound-alembic",
+    )
+    engine = target.make_async_engine(
+        AsyncEngineOptions(pool_size=1, max_overflow=0)
+    )
+    config = alembic_config("space")
+
+    def upgrade(connection) -> None:
+        config.attributes["connection"] = connection
+        command.upgrade(config, "head")
+
+    async with engine.begin() as connection:
+        await connection.run_sync(upgrade)
+    async with engine.connect() as connection:
+        revision = await connection.scalar(
+            text('SELECT version_num FROM "alembic_version_space"')
+        )
+    assert revision == ScriptDirectory.from_config(config).get_current_head()
+    await engine.dispose()
+    await target.aclose()
+
+
 def test_cross_process_writer_lock_is_exclusive_and_recovers(tmp_path: Path) -> None:
     from app.runtime.sqlite_vfs import (
         MaintenanceOptions,
@@ -727,7 +766,9 @@ os._exit(0)
 @pytest.mark.asyncio
 async def test_cancelled_async_connect_joins_and_closes_native_file(tmp_path: Path) -> None:
     from app.runtime.sqlite_vfs import (
+        _BOOTSTRAP_LOCK,
         AsyncEngineOptions,
+        _bootstrap,
         _test_binding_receipt,
         _test_set_open_delay,
         bind_marked_isolated_target,
@@ -752,6 +793,51 @@ async def test_cancelled_async_connect_joins_and_closes_native_file(tmp_path: Pa
         await opening
     await engine.dispose()
     assert _test_binding_receipt(target).live_file_references == 0
+    token = target._authority.token
+    await target.aclose()
+    control, _receipt = _bootstrap()
+    with _BOOTSTRAP_LOCK:
+        references = control.execute(
+            "SELECT pxii_live_references(?)", (token,)
+        ).fetchone()[0]
+    assert references == -1
+
+
+def test_rollback_journal_swap_cannot_redirect_io(tmp_path: Path) -> None:
+    from app.runtime.sqlite_vfs import MaintenanceOptions, bind_marked_isolated_target
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text("journal-swap", encoding="utf-8")
+    target, _cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename="journal-swap.db",
+        marker_basename=marker.name,
+        marker_nonce="journal-swap",
+    )
+    database = tmp_path / "journal-swap.db"
+    outside = tmp_path / "outside-journal"
+    outside.mkdir()
+    with target.open_maintenance(MaintenanceOptions(read_only=False)) as connection:
+        connection.execute("PRAGMA journal_mode=DELETE")
+        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO proof VALUES ('before-swap')")
+        connection.commit()
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("UPDATE proof SET value='uncommitted'")
+        journal = database.with_name(f"{database.name}-journal")
+        assert journal.exists()
+        moved = outside / journal.name
+        size_before = journal.stat().st_size
+        try:
+            os.replace(journal, moved)
+        except PermissionError:
+            assert not moved.exists()
+        else:
+            journal.write_bytes(b"untrusted replacement")
+            with pytest.raises(sqlite3.Error):
+                connection.commit()
+            assert moved.stat().st_size == size_before
+            os.replace(moved, journal)
 
 
 def test_main_and_reserved_companion_swaps_cannot_redirect_io(tmp_path: Path) -> None:
