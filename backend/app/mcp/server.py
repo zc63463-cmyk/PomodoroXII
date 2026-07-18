@@ -31,7 +31,16 @@ from fastmcp import FastMCP
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.authority import Principal, bootstrap_credential_epoch
 from app.db.meta_session import close_meta_db, init_meta_db
+from app.errors import AuthorizationError
+from app.mcp.auth import (
+    PomodoroTokenVerifier,
+    canonical_mcp_errors,
+    current_mcp_principal,
+    trusted_stdio_context,
+)
+from app.runtime.scope import AccessMode, AuthorizedSpaceScope, AuthorizedSpaceScopeResult
 from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
 
 logger = logging.getLogger(__name__)
@@ -42,19 +51,45 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 
 @asynccontextmanager
-async def get_space_session(space_id: str) -> AsyncIterator[AsyncSession]:
-    """Yield an AsyncSession for the given space, closing it after use.
+async def get_space_session(
+    scope: AuthorizedSpaceScopeResult,
+) -> AsyncIterator[AsyncSession]:
+    """Yield a session from one already-authorized contained scope.
 
     This is the MCP equivalent of the ``get_space_db`` FastAPI dependency.
     It ensures the space engine is initialized and creates a session
     directly from the SpaceEngineManager.
     """
-    manager = get_space_engine_manager()
-    session = await manager.get_session(space_id)
-    try:
-        yield session
-    finally:
-        await session.close()
+    async with scope.containment.open_verified() as opens:
+        session = await get_space_engine_manager().get_session(scope.space_id, opens)
+        try:
+            yield session
+        finally:
+            await session.close()
+
+
+async def _authorize_space(
+    space_id: str,
+    mode: AccessMode,
+) -> AuthorizedSpaceScopeResult:
+    from app.db.meta_session import get_meta_session_factory
+    from app.settings import settings
+
+    principal = current_mcp_principal()
+    factory = get_meta_session_factory()
+    async with factory() as meta_db:
+        return await AuthorizedSpaceScope(meta_db, settings.spaces_data_dir).open(
+            principal,
+            space_id,
+            mode,
+        )
+
+
+def _require_master_principal() -> Principal:
+    principal = current_mcp_principal()
+    if principal.token_type not in {"master", "trusted_stdio"}:
+        raise AuthorizationError("Master token required")
+    return principal
 
 
 async def list_spaces() -> list[dict[str, Any]]:
@@ -88,6 +123,7 @@ mcp = FastMCP(
         "Meta tools expose the entity schema registry. "
         "Sync tools expose push/pull/status for cross-device synchronization."
     ),
+    auth=PomodoroTokenVerifier(),
 )
 
 
@@ -96,12 +132,14 @@ mcp = FastMCP(
 # --------------------------------------------------------------------------- #
 
 @mcp.tool
+@canonical_mcp_errors
 async def list_all_spaces() -> list[dict[str, Any]]:
     """List all registered spaces (workspaces).
 
     Returns a list of {id, name, created_at} dicts. Use the id as the
     space_id parameter for other tools.
     """
+    _require_master_principal()
     return await list_spaces()
 
 
@@ -110,6 +148,7 @@ async def list_all_spaces() -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_stats_overview(
     space_id: str,
     periods: list[str] | None = None,
@@ -126,11 +165,13 @@ async def get_stats_overview(
     """
     from app.services.stats import StatsService
 
-    async with get_space_session(space_id) as db:
+    scope = await _authorize_space(space_id, "read")
+    async with get_space_session(scope) as db:
         return await StatsService(db).overview(periods=periods)
 
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_focus_trend(space_id: str, days: int = 7) -> dict:
     """Get daily focus trend (pomodoro count + duration) for last N days.
 
@@ -143,11 +184,13 @@ async def get_focus_trend(space_id: str, days: int = 7) -> dict:
     """
     from app.services.stats import StatsService
 
-    async with get_space_session(space_id) as db:
+    scope = await _authorize_space(space_id, "read")
+    async with get_space_session(scope) as db:
         return await StatsService(db).focus_trend(days=days)
 
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_task_distribution(space_id: str) -> dict:
     """Get task distribution grouped by status and priority.
 
@@ -159,11 +202,13 @@ async def get_task_distribution(space_id: str) -> dict:
     """
     from app.services.stats import StatsService
 
-    async with get_space_session(space_id) as db:
+    scope = await _authorize_space(space_id, "read")
+    async with get_space_session(scope) as db:
         return await StatsService(db).task_distribution()
 
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_daily_detail(space_id: str, date: str) -> dict:
     """Get session count and total duration for a specific date.
 
@@ -176,11 +221,13 @@ async def get_daily_detail(space_id: str, date: str) -> dict:
     """
     from app.services.stats import StatsService
 
-    async with get_space_session(space_id) as db:
+    scope = await _authorize_space(space_id, "read")
+    async with get_space_session(scope) as db:
         return await StatsService(db).daily_detail(date=date)
 
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_habit_summary(space_id: str, days: int = 30) -> dict:
     """Get habit check-in statistics: streaks, completion rates.
 
@@ -194,11 +241,13 @@ async def get_habit_summary(space_id: str, days: int = 30) -> dict:
     """
     from app.services.stats import StatsService
 
-    async with get_space_session(space_id) as db:
+    scope = await _authorize_space(space_id, "read")
+    async with get_space_session(scope) as db:
         return await StatsService(db).habit_summary(days=days)
 
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_schedule_summary(space_id: str, days: int = 30) -> dict:
     """Get schedule completion statistics: completed, pending, overdue.
 
@@ -211,11 +260,13 @@ async def get_schedule_summary(space_id: str, days: int = 30) -> dict:
     """
     from app.services.stats import StatsService
 
-    async with get_space_session(space_id) as db:
+    scope = await _authorize_space(space_id, "read")
+    async with get_space_session(scope) as db:
         return await StatsService(db).schedule_summary(days=days)
 
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_note_summary(space_id: str) -> dict:
     """Get note and folder counts (active + trashed).
 
@@ -227,7 +278,8 @@ async def get_note_summary(space_id: str) -> dict:
     """
     from app.services.stats import StatsService
 
-    async with get_space_session(space_id) as db:
+    scope = await _authorize_space(space_id, "read")
+    async with get_space_session(scope) as db:
         return await StatsService(db).note_summary()
 
 
@@ -236,6 +288,7 @@ async def get_note_summary(space_id: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_registry_health() -> dict:
     """Get the entity registry health status.
 
@@ -244,10 +297,12 @@ async def get_registry_health() -> dict:
     """
     from app.services.meta import MetaService
 
+    _require_master_principal()
     return MetaService().health()
 
 
 @mcp.tool
+@canonical_mcp_errors
 async def list_entities(category: str | None = None) -> dict:
     """List all registered entity types with their metadata.
 
@@ -259,6 +314,7 @@ async def list_entities(category: str | None = None) -> dict:
     """
     from app.services.meta import MetaService
 
+    _require_master_principal()
     svc = MetaService()
     specs = svc.list_entities(category=category)
     return {
@@ -268,6 +324,7 @@ async def list_entities(category: str | None = None) -> dict:
 
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_entity_schema(entity_type: str) -> dict:
     """Get the field schema for a specific entity type.
 
@@ -279,6 +336,7 @@ async def get_entity_schema(entity_type: str) -> dict:
     """
     from app.services.meta import MetaService
 
+    _require_master_principal()
     return MetaService().get_schema(entity_type)
 
 
@@ -287,6 +345,7 @@ async def get_entity_schema(entity_type: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 @mcp.tool
+@canonical_mcp_errors
 async def get_sync_status(space_id: str) -> dict:
     """Get sync status: per-entity row counts + tombstone count.
 
@@ -299,11 +358,13 @@ async def get_sync_status(space_id: str) -> dict:
     """
     from app.services.sync import SyncService
 
-    async with get_space_session(space_id) as db:
+    scope = await _authorize_space(space_id, "read")
+    async with get_space_session(scope) as db:
         return await SyncService(db).status()
 
 
 @mcp.tool
+@canonical_mcp_errors
 async def sync_pull(
     space_id: str,
     since: str = "",
@@ -322,7 +383,8 @@ async def sync_pull(
     """
     from app.services.sync import SyncService
 
-    async with get_space_session(space_id) as db:
+    scope = await _authorize_space(space_id, "read")
+    async with get_space_session(scope) as db:
         return await SyncService(db).pull(since=since, limit=limit)
 
 
@@ -331,42 +393,35 @@ async def sync_pull(
 # --------------------------------------------------------------------------- #
 
 @mcp.resource("pomodoro://registry/health")
+@canonical_mcp_errors
 async def registry_health_resource() -> dict:
     """Registry health as an MCP resource (read-only)."""
-    from app.services.meta import MetaService
-
-    return MetaService().health()
+    return await get_registry_health()
 
 
 @mcp.resource("pomodoro://registry/entities")
+@canonical_mcp_errors
 async def all_entities_resource() -> dict:
     """Full entity registry as an MCP resource."""
-    from app.services.meta import MetaService
-
-    svc = MetaService()
-    specs = svc.list_entities()
-    return {
-        "entities": [svc.serialize(s) for s in specs],
-        "total": len(specs),
-    }
+    return await list_entities()
 
 
 @mcp.resource("pomodoro://registry/entities/{entity_type}")
+@canonical_mcp_errors
 async def entity_schema_resource(entity_type: str) -> dict:
     """Single entity schema as an MCP resource.
 
     Args:
         entity_type: Entity name (e.g. "task", "session", "note").
     """
-    from app.services.meta import MetaService
-
-    return MetaService().get_schema(entity_type)
+    return await get_entity_schema(entity_type)
 
 
 @mcp.resource("pomodoro://spaces")
+@canonical_mcp_errors
 async def spaces_resource() -> list[dict]:
     """List all spaces as an MCP resource."""
-    return await list_spaces()
+    return await list_all_spaces()
 
 
 # --------------------------------------------------------------------------- #
@@ -423,17 +478,29 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1", help="HTTP host")
     parser.add_argument("--port", type=int, default=9000, help="HTTP port")
+    parser.add_argument(
+        "--trusted-stdio",
+        action="store_true",
+        help="Explicitly trust this local stdio transport",
+    )
     args = parser.parse_args()
+
+    if args.transport == "stdio" and not args.trusted_stdio:
+        parser.error("stdio transport requires --trusted-stdio")
+    if args.transport == "http" and args.trusted_stdio:
+        parser.error("--trusted-stdio is valid only with stdio transport")
 
     # Initialize meta DB for all transports; HTTP mode must do it explicitly
     # since FastMCP is not given an application lifespan handler.
     asyncio.run(init_meta_db())
+    asyncio.run(bootstrap_credential_epoch())
 
     try:
         if args.transport == "http":
             mcp.run(transport="http", host=args.host, port=args.port)
         else:
-            mcp.run()
+            with trusted_stdio_context():
+                mcp.run()
     finally:
         asyncio.run(dispose_space_engine_manager())
         asyncio.run(close_meta_db())

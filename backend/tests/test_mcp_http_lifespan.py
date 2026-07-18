@@ -17,6 +17,10 @@ def test_http_mode_initializes_meta_db(monkeypatch):
     async def fake_init_meta_db():
         calls.append("init_meta_db")
 
+    async def fake_bootstrap():
+        calls.append("bootstrap_credential_epoch")
+        return 1
+
     async def fake_dispose():
         calls.append("dispose_space_engine_manager")
 
@@ -27,6 +31,7 @@ def test_http_mode_initializes_meta_db(monkeypatch):
         calls.append("mcp.run")
 
     monkeypatch.setattr("app.mcp.server.init_meta_db", fake_init_meta_db)
+    monkeypatch.setattr("app.mcp.server.bootstrap_credential_epoch", fake_bootstrap)
     monkeypatch.setattr(
         "app.mcp.server.dispose_space_engine_manager", fake_dispose
     )
@@ -43,6 +48,7 @@ def test_http_mode_initializes_meta_db(monkeypatch):
     # init must happen BEFORE run, and cleanup must happen AFTER.
     assert calls == [
         "init_meta_db",
+        "bootstrap_credential_epoch",
         "mcp.run",
         "dispose_space_engine_manager",
         "close_meta_db",
@@ -56,6 +62,10 @@ def test_http_mode_cleans_up_on_exception(monkeypatch):
     async def fake_init_meta_db():
         calls.append("init_meta_db")
 
+    async def fake_bootstrap():
+        calls.append("bootstrap_credential_epoch")
+        return 1
+
     async def fake_dispose():
         calls.append("dispose_space_engine_manager")
 
@@ -67,6 +77,7 @@ def test_http_mode_cleans_up_on_exception(monkeypatch):
         raise RuntimeError("server crashed")
 
     monkeypatch.setattr("app.mcp.server.init_meta_db", fake_init_meta_db)
+    monkeypatch.setattr("app.mcp.server.bootstrap_credential_epoch", fake_bootstrap)
     monkeypatch.setattr(
         "app.mcp.server.dispose_space_engine_manager", fake_dispose
     )
@@ -88,12 +99,16 @@ def test_http_mode_cleans_up_on_exception(monkeypatch):
     assert calls.index("dispose_space_engine_manager") < calls.index("close_meta_db")
 
 
-def test_stdio_mode_lifecycle_unchanged(monkeypatch):
+def test_trusted_stdio_bootstraps_epoch_before_serving(monkeypatch):
     """Stdio mode should still call init/dispose exactly as before."""
     calls: list[str] = []
 
     async def fake_init_meta_db():
         calls.append("init_meta_db")
+
+    async def fake_bootstrap():
+        calls.append("bootstrap_credential_epoch")
+        return 1
 
     async def fake_dispose():
         calls.append("dispose_space_engine_manager")
@@ -105,12 +120,16 @@ def test_stdio_mode_lifecycle_unchanged(monkeypatch):
         calls.append("mcp.run")
 
     monkeypatch.setattr("app.mcp.server.init_meta_db", fake_init_meta_db)
+    monkeypatch.setattr("app.mcp.server.bootstrap_credential_epoch", fake_bootstrap)
     monkeypatch.setattr(
         "app.mcp.server.dispose_space_engine_manager", fake_dispose
     )
     monkeypatch.setattr("app.mcp.server.close_meta_db", fake_close)
     monkeypatch.setattr("app.mcp.server.mcp.run", fake_run)
-    monkeypatch.setattr("sys.argv", ["mcp", "--transport", "stdio"])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["mcp", "--transport", "stdio", "--trusted-stdio"],
+    )
 
     from app.mcp.server import main
 
@@ -118,6 +137,7 @@ def test_stdio_mode_lifecycle_unchanged(monkeypatch):
 
     assert calls == [
         "init_meta_db",
+        "bootstrap_credential_epoch",
         "mcp.run",
         "dispose_space_engine_manager",
         "close_meta_db",
