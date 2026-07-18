@@ -155,6 +155,14 @@ static void registry_leave(void) {
     sqlite3_mutex_leave(g_registry_mutex);
 }
 
+static int binding_is_revoked(PxiiBinding *binding) {
+    int revoked;
+    registry_enter();
+    revoked = binding->revoked;
+    registry_leave();
+    return revoked;
+}
+
 static int handle_valid(PxiiHandle handle) {
 #if defined(_WIN32)
     return handle != NULL && handle != INVALID_HANDLE_VALUE;
@@ -514,6 +522,11 @@ static int binding_open_companion(
         return SQLITE_CANTOPEN;
     }
     registry_enter();
+    if (binding->revoked) {
+        registry_leave();
+        *result = PXII_INVALID_HANDLE;
+        return SQLITE_AUTH;
+    }
     if (child->state == 0 && !create) {
         registry_leave();
         *result = PXII_INVALID_HANDLE;
@@ -814,7 +827,7 @@ static int pxii_access(sqlite3_vfs *vfs, const char *name, int flags, int *resul
         return SQLITE_OK;
     }
     if (*suffix == '\0' || *suffix == '?') {
-        *result_out = !binding->revoked;
+        *result_out = !binding_is_revoked(binding);
     } else if (strcmp(suffix, "-journal") == 0 || strcmp(suffix, "-wal") == 0 || strcmp(suffix, "-shm") == 0) {
         if (binding_open_companion(binding, suffix, 0, &handle) == SQLITE_OK) {
             *result_out = 1;
@@ -1257,14 +1270,17 @@ static int ensure_shm_handle(PxiiFile *pxii) {
     if (handle_valid(pxii->shm_handle)) {
         return SQLITE_OK;
     }
-    if (pxii->binding == NULL || pxii->binding->revoked) {
+    if (pxii->binding == NULL || binding_is_revoked(pxii->binding)) {
         return SQLITE_AUTH;
     }
     {
         int result = binding_open_companion(pxii->binding, "-shm", 1, &pxii->shm_handle);
         if (result == SQLITE_OK) {
-            PxiiBoundChild *child = binding_child(pxii->binding, "-shm");
-            pxii->shm_identity = child->identity;
+            result = handle_identity(pxii->shm_handle, &pxii->shm_identity);
+            if (result != SQLITE_OK) {
+                handle_close(pxii->shm_handle);
+                pxii->shm_handle = PXII_INVALID_HANDLE;
+            }
         }
         return result;
     }
