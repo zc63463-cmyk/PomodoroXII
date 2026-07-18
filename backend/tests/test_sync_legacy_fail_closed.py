@@ -113,9 +113,8 @@ async def test_rest_legacy_pull_returns_canonical_upgrade_error(
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from app.deps import get_file_system, get_space_context, get_space_db
     from app.errors import register_exception_handlers
-    from app.routes.v1.sync import router
+    from app.routes.v1 import sync as sync_routes
     from app.services.sync_outbox import record_sync_event
 
     await _seed_tasks(space_session, 3)
@@ -133,10 +132,12 @@ async def test_rest_legacy_pull_returns_canonical_upgrade_error(
 
     app = FastAPI()
     register_exception_handlers(app)
-    app.include_router(router, prefix="/api/v1/sync")
-    app.dependency_overrides[get_space_db] = database_override
-    app.dependency_overrides[get_file_system] = lambda: None
-    app.dependency_overrides[get_space_context] = lambda: {"space_id": "spc_test"}
+    app.include_router(sync_routes.router, prefix="/api/v1/sync")
+    app.dependency_overrides[sync_routes.get_space_db] = database_override
+    app.dependency_overrides[sync_routes.get_file_system] = lambda: None
+    app.dependency_overrides[sync_routes.get_space_context] = lambda: {
+        "space_id": "spc_test"
+    }
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
@@ -151,7 +152,7 @@ async def test_rest_legacy_pull_returns_canonical_upgrade_error(
         )
         v2 = await client.get("/api/v1/sync/pull?cursor=0&limit=2")
 
-    assert legacy.status_code == 409
+    assert legacy.status_code == 409, legacy.text
     assert legacy.json() == {
         "code": "cursor_upgrade_required",
         "message": "Legacy sync cursor cannot safely advance",
