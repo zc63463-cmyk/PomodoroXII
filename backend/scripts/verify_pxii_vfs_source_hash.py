@@ -19,7 +19,7 @@ EXPECTED_SOURCES = (
     "native/pxii_vfs/pxii_vfs.h",
     "native/vendor/sqlite3ext.h",
 )
-PLATFORMS = {"windows-x86_64", "linux-x86_64"}
+PLATFORMS = {"windows-x86_64"}
 RECEIPT_KEYS = {
     "schema",
     "platform_id",

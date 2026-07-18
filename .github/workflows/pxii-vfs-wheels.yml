@@ -15,9 +15,6 @@ jobs:
           - os: windows-2025
             platform_id: windows-x86_64
             cibw_arch: AMD64
-          - os: ubuntu-24.04
-            platform_id: linux-x86_64
-            cibw_arch: x86_64
     runs-on: ${{ matrix.os }}
     env:
       CIBW_BUILD: cp313-*
@@ -77,7 +74,7 @@ jobs:
         with:
           pattern: pxii-vfs-*
           path: ${{ runner.temp }}/pxii-vfs-inputs
-      - name: Assemble closed two-platform manifest
+      - name: Assemble closed Windows-only manifest
         run: python backend/scripts/verify_pxii_vfs_source_hash.py --assemble-wheel-manifest "${RUNNER_TEMP}/pxii-vfs-inputs" --subject-sha "${GITHUB_SHA}" --output pxii-vfs-wheel-manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
