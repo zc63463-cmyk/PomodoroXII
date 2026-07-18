@@ -1449,14 +1449,17 @@ static void sql_bind(sqlite3_context *context, int count, sqlite3_value **values
     PxiiHandle main_file;
     PxiiBinding *binding;
     int result;
-    if (count != 4) {
-        sqlite3_result_error(context, "pxii_bind requires four arguments", -1);
+    int create_authority;
+    int companion_exists = 0;
+    if (count != 5) {
+        sqlite3_result_error(context, "pxii_bind requires five arguments", -1);
         return;
     }
     token = (const char *)sqlite3_value_text(values[0]);
     parent = (PxiiHandle)(intptr_t)sqlite3_value_int64(values[1]);
     main_file = (PxiiHandle)(intptr_t)sqlite3_value_int64(values[2]);
     basename = (const char *)sqlite3_value_text(values[3]);
+    create_authority = sqlite3_value_int(values[4]);
     if (token == NULL || strlen(token) == 0 || strlen(token) >= PXII_TOKEN_MAX || !exact_basename(basename)) {
         sqlite3_result_error(context, "invalid pxii authority binding", -1);
         return;
@@ -1490,11 +1493,20 @@ static void sql_bind(sqlite3_context *context, int count, sqlite3_value **values
     if (result == SQLITE_OK) {
         result = initialize_child_binding(binding, &binding->shm);
     }
+    if (result == SQLITE_OK && create_authority &&
+        (binding->journal.state != 0 || binding->wal.state != 0 || binding->shm.state != 0)) {
+        companion_exists = 1;
+        result = SQLITE_CANTOPEN;
+    }
     if (result != SQLITE_OK) {
         handle_close(binding->parent);
         handle_close(binding->main_file);
         sqlite3_free(binding);
-        sqlite3_result_error(context, "cannot duplicate pxii authority", -1);
+        if (companion_exists) {
+            sqlite3_result_error(context, "pxii create authority companion already exists", -1);
+        } else {
+            sqlite3_result_error(context, "cannot duplicate pxii authority", -1);
+        }
         return;
     }
     registry_enter();
@@ -1695,7 +1707,7 @@ PXII_EXPORT int sqlite3_pxiivfs_init(
     if (result != SQLITE_OK) {
         return result;
     }
-    result = sqlite3_create_function(db, "pxii_bind", 4, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, sql_bind, NULL, NULL);
+    result = sqlite3_create_function(db, "pxii_bind", 5, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, sql_bind, NULL, NULL);
     if (result == SQLITE_OK) {
         result = sqlite3_create_function(db, "pxii_revoke", 1, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, sql_revoke, NULL, NULL);
     }

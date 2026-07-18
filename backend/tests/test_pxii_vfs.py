@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import os
 import sqlite3
 import subprocess
@@ -147,6 +148,39 @@ def test_isolated_cleanup_authority_is_pathless_and_uses_exact_basename(
     assert not marker.exists()
     assert not (tmp_path / "arbitrary-name.db").exists()
     assert not companion.exists()
+
+
+def test_isolated_binder_rejects_preexisting_companion_before_main_creation(
+    tmp_path: Path,
+) -> None:
+    from app.runtime.sqlite_vfs import bind_marked_isolated_target
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text("preexisting-companion", encoding="utf-8")
+    companion = tmp_path / "isolated.db-wal"
+    companion.write_bytes(b"untrusted")
+
+    with pytest.raises(RuntimeError, match="companion already exists"):
+        bind_marked_isolated_target(
+            parent_path=tmp_path,
+            exact_absent_basename="isolated.db",
+            marker_basename=marker.name,
+            marker_nonce="preexisting-companion",
+        )
+
+    assert not (tmp_path / "isolated.db").exists()
+    assert companion.read_bytes() == b"untrusted"
+
+
+def test_isolated_binder_uses_only_parent_relative_child_operations() -> None:
+    from app.runtime.sqlite_vfs import bind_marked_isolated_target
+
+    source = inspect.getsource(bind_marked_isolated_target)
+    assert "_open_parent_authority" in source
+    assert ".stat(" not in source
+    assert ".read_text(" not in source
+    assert "target_path" not in source
+    assert "_bind_existing_target" not in source
 
 
 def test_virtual_identifier_and_native_reference_receipt_are_closed(tmp_path: Path) -> None:
