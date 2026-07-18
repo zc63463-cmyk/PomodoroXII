@@ -19,6 +19,8 @@ class _ContainedFileSystemFixture:
 
         notes = self._root / "notes"
         notes.mkdir(parents=True, exist_ok=True)
+        (self._root / "space.db").touch()
+        (self._root / "index.db").touch()
         paths = SimpleNamespace(
             space_root=self._root.parent,
             db_path=self._root / "space.db",
