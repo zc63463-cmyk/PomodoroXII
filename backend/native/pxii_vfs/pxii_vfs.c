@@ -1399,6 +1399,9 @@ static int pxii_shm_lock(sqlite3_file *file, int offset, int count, int flags) {
     PxiiFile *pxii = (PxiiFile *)file;
     int unlock = (flags & SQLITE_SHM_UNLOCK) != 0;
     int exclusive = (flags & SQLITE_SHM_EXCLUSIVE) != 0;
+    if (verify_shm_namespace(pxii) != SQLITE_OK) {
+        return SQLITE_IOERR_SHMLOCK;
+    }
     if (ensure_shm_handle(pxii) != SQLITE_OK) {
         return SQLITE_IOERR_SHMLOCK;
     }

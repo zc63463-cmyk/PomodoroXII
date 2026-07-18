@@ -1117,7 +1117,17 @@ class SQLiteReplacementAuthority:
         )
         if source != self._source.identity:
             raise ValueError("source target identity changed before discard")
-        if replacement == self._replacement_identity and tombstone is None:
+        if (
+            replacement == self._replacement_identity
+            and tombstone is None
+            and self._physical_stage
+            not in {
+                "replacement_quarantine_attempted",
+                "replacement_quarantined",
+                "replacement_delete_attempted",
+                "replacement_deleted",
+            }
+        ):
             return "initial"
         if replacement is None and tombstone == self._replacement_identity:
             return "replacement_quarantined"
