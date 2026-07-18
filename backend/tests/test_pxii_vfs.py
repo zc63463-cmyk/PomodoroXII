@@ -7,8 +7,6 @@ import os
 import sqlite3
 import subprocess
 import sys
-import threading
-import time
 import tomllib
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
