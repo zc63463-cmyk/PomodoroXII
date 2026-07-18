@@ -10317,7 +10317,14 @@ function verifyCurrentPaths() {
     if (!fs.existsSync(filePath)) continue;
     const source = fs.readFileSync(filePath, 'utf8');
     if (id === 'S0') {
-      const actualSha256 = crypto.createHash('sha256').update(source, 'utf8').digest('hex');
+      const blob = spawnSync(
+        'git',
+        ['show', `HEAD:${path.relative(root, filePath).replaceAll(path.sep, '/')}`],
+        { cwd: root, encoding: 'buffer', windowsHide: true },
+      );
+      const actualSha256 = blob.status === 0
+        ? crypto.createHash('sha256').update(blob.stdout).digest('hex')
+        : crypto.createHash('sha256').update(source, 'utf8').digest('hex');
       check(
         actualSha256 === immutableS0PlanSha256,
         `immutable S0 plan SHA-256 drift: expected=${immutableS0PlanSha256} actual=${actualSha256}`,
