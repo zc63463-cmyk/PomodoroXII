@@ -12,6 +12,7 @@
 #else
 #include <stdatomic.h>
 #include <fcntl.h>
+#include <sys/syscall.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -63,6 +64,7 @@ struct PxiiBinding {
     int references;
     int open_delay_ms;
     int delete_delay_ms;
+    int delete_final_delay_ms;
     PxiiBinding *next;
 };
 
@@ -99,6 +101,9 @@ static sqlite3_vfs *g_stock_vfs = NULL;
 static sqlite3_mutex *g_registry_mutex = NULL;
 static PxiiBinding *g_bindings = NULL;
 static PxiiHandle g_temp_root = PXII_INVALID_HANDLE;
+#if !defined(_WIN32)
+static unsigned long g_quarantine_serial = 0;
+#endif
 
 static void trace_event(const char *event, sqlite3_int64 first, sqlite3_int64 second) {
     if (getenv("PXII_VFS_TRACE") != NULL) {
@@ -495,6 +500,89 @@ static int relative_open(
     const char *name,
     int create_mode,
     PxiiHandle *result
+);
+
+#if !defined(_WIN32)
+static int posix_delete_via_quarantine(
+    PxiiBinding *binding,
+    const char *suffix,
+    const PxiiIdentity *expected,
+    int sync_dir
+) {
+    char child[PXII_NAME_MAX + 16];
+    char quarantine[PXII_NAME_MAX + 64];
+    PxiiHandle verified = PXII_INVALID_HANDLE;
+    PxiiIdentity observed;
+    unsigned long serial;
+    int written;
+    int result;
+
+    written = snprintf(child, sizeof(child), "%s%s", binding->basename, suffix);
+    if (written <= 0 || (size_t)written >= sizeof(child)) {
+        return SQLITE_IOERR_DELETE;
+    }
+    registry_enter();
+    serial = ++g_quarantine_serial;
+    registry_leave();
+    written = snprintf(
+        quarantine,
+        sizeof(quarantine),
+        ".pxii-quarantine-%s-%lu",
+        binding->token,
+        serial
+    );
+    if (written <= 0 || (size_t)written >= sizeof(quarantine)) {
+        return SQLITE_IOERR_DELETE;
+    }
+
+    /* Rename the namespace entry into a private name, then authenticate the moved object.
+       If a replacement won the rename race, put it back under its original name. */
+    if (renameat(binding->parent, child, binding->parent, quarantine) != 0) {
+        return SQLITE_IOERR_DELETE;
+    }
+    result = relative_open(binding, quarantine, 0, &verified);
+    if (result == SQLITE_OK) {
+        result = handle_identity(verified, &observed);
+    }
+    handle_close(verified);
+    verified = PXII_INVALID_HANDLE;
+    if (result != SQLITE_OK || !identity_equal(expected, &observed)) {
+        if (renameat(binding->parent, quarantine, binding->parent, child) != 0) {
+            return SQLITE_IOERR_DELETE;
+        }
+        return SQLITE_IOERR_DELETE;
+    }
+
+    /* Revalidate the private name immediately before deletion.  A replacement
+       here is harmless to the original namespace and is rejected. */
+    result = relative_open(binding, quarantine, 0, &verified);
+    if (result == SQLITE_OK) {
+        result = handle_identity(verified, &observed);
+    }
+    handle_close(verified);
+    verified = PXII_INVALID_HANDLE;
+    if (result != SQLITE_OK || !identity_equal(expected, &observed)) {
+        if (renameat(binding->parent, quarantine, binding->parent, child) != 0) {
+            return SQLITE_IOERR_DELETE;
+        }
+        return SQLITE_IOERR_DELETE;
+    }
+    if (unlinkat(binding->parent, quarantine, 0) != 0) {
+        (void)renameat(binding->parent, quarantine, binding->parent, child);
+        return SQLITE_IOERR_DELETE;
+    }
+    if (sync_dir && fsync(binding->parent) != 0) {
+        return SQLITE_IOERR_DIR_FSYNC;
+    }
+    return SQLITE_OK;
+}
+#endif
+
+static int relative_open(
+    PxiiBinding *binding,
+    const char *name,
+    int create_mode,
+    PxiiHandle *result
 ) {
 #if defined(_WIN32)
     return windows_relative_open(binding->parent, name, create_mode, result);
@@ -753,6 +841,9 @@ static int pxii_delete(sqlite3_vfs *vfs, const char *name, int sync_dir) {
     PxiiBinding *binding = NULL;
     const char *suffix = NULL;
     PxiiHandle handle = PXII_INVALID_HANDLE;
+    PxiiIdentity expected_identity;
+    int delete_delay_ms;
+    int delete_final_delay_ms;
     int result;
     (void)vfs;
 #if defined(_WIN32)
@@ -766,6 +857,19 @@ static int pxii_delete(sqlite3_vfs *vfs, const char *name, int sync_dir) {
         binding_release(binding);
         return SQLITE_IOERR_DELETE;
     }
+    registry_enter();
+    {
+        PxiiBoundChild *child = binding_child(binding, suffix);
+        if (child == NULL || child->state == 0) {
+            registry_leave();
+            binding_release(binding);
+            return SQLITE_IOERR_DELETE_NOENT;
+        }
+        expected_identity = child->identity;
+        delete_delay_ms = binding->delete_delay_ms;
+        delete_final_delay_ms = binding->delete_final_delay_ms;
+    }
+    registry_leave();
     result = binding_open_companion(binding, suffix, 0, &handle);
     if (result != SQLITE_OK) {
         binding_release(binding);
@@ -773,15 +877,14 @@ static int pxii_delete(sqlite3_vfs *vfs, const char *name, int sync_dir) {
     }
     handle_close(handle);
     handle = PXII_INVALID_HANDLE;
-    if (binding->delete_delay_ms > 0) {
-        (void)g_stock_vfs->xSleep(g_stock_vfs, binding->delete_delay_ms * 1000);
+    if (delete_delay_ms > 0) {
+        (void)g_stock_vfs->xSleep(g_stock_vfs, delete_delay_ms * 1000);
     }
     result = binding_open_companion(binding, suffix, 0, &handle);
     if (result == SQLITE_OK) {
         PxiiIdentity observed;
         result = handle_identity(handle, &observed);
-        if (result == SQLITE_OK &&
-            !identity_equal(&binding_child(binding, suffix)->identity, &observed)) {
+        if (result == SQLITE_OK && !identity_equal(&expected_identity, &observed)) {
             result = SQLITE_IOERR_DELETE;
         }
     }
@@ -790,6 +893,9 @@ static int pxii_delete(sqlite3_vfs *vfs, const char *name, int sync_dir) {
     if (result != SQLITE_OK) {
         binding_release(binding);
         return SQLITE_IOERR_DELETE;
+    }
+    if (delete_final_delay_ms > 0) {
+        (void)g_stock_vfs->xSleep(g_stock_vfs, delete_final_delay_ms * 1000);
     }
 #if defined(_WIN32)
     {
@@ -803,8 +909,7 @@ static int pxii_delete(sqlite3_vfs *vfs, const char *name, int sync_dir) {
         if (result == SQLITE_OK) {
             result = handle_identity(handle, &delete_identity);
         }
-        if (result != SQLITE_OK ||
-            !identity_equal(&binding_child(binding, suffix)->identity, &delete_identity)) {
+        if (result != SQLITE_OK || !identity_equal(&expected_identity, &delete_identity)) {
             handle_close(handle);
             binding_release(binding);
             return SQLITE_IOERR_DELETE;
@@ -814,14 +919,9 @@ static int pxii_delete(sqlite3_vfs *vfs, const char *name, int sync_dir) {
             ? SQLITE_OK : SQLITE_IOERR_DELETE;
     }
 #else
-    {
-        char child[PXII_NAME_MAX + 16];
-        (void)snprintf(child, sizeof(child), "%s%s", binding->basename, suffix);
-        result = unlinkat(binding->parent, child, 0) == 0 ? SQLITE_OK : SQLITE_IOERR_DELETE;
-        if (result == SQLITE_OK && sync_dir) {
-            result = fsync(binding->parent) == 0 ? SQLITE_OK : SQLITE_IOERR_DIR_FSYNC;
-        }
-    }
+    result = posix_delete_via_quarantine(
+        binding, suffix, &expected_identity, sync_dir
+    );
 #endif
     handle_close(handle);
     if (result == SQLITE_OK) {
@@ -1666,6 +1766,29 @@ static void sql_set_delete_delay(sqlite3_context *context, int count, sqlite3_va
     sqlite3_result_int(context, binding != NULL);
 }
 
+static void sql_set_delete_final_delay(sqlite3_context *context, int count, sqlite3_value **values) {
+    const char *token;
+    PxiiBinding *binding;
+    int delay;
+    if (count != 2) {
+        sqlite3_result_error(context, "pxii_set_delete_final_delay requires two arguments", -1);
+        return;
+    }
+    token = (const char *)sqlite3_value_text(values[0]);
+    delay = sqlite3_value_int(values[1]);
+    if (token == NULL || delay < 0 || delay > 10 * 1000) {
+        sqlite3_result_error(context, "invalid pxii final delete delay", -1);
+        return;
+    }
+    registry_enter();
+    binding = binding_find_locked(token, strlen(token));
+    if (binding != NULL) {
+        binding->delete_final_delay_ms = delay;
+    }
+    registry_leave();
+    sqlite3_result_int(context, binding != NULL);
+}
+
 static void sql_probe_memory(sqlite3_context *context, int count, sqlite3_value **values) {
     PxiiFile file;
     int out_flags = 0;
@@ -1788,6 +1911,9 @@ PXII_EXPORT int sqlite3_pxiivfs_init(
     }
     if (result == SQLITE_OK) {
         result = sqlite3_create_function(db, "pxii_set_delete_delay", 2, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, sql_set_delete_delay, NULL, NULL);
+    }
+    if (result == SQLITE_OK) {
+        result = sqlite3_create_function(db, "pxii_set_delete_final_delay", 2, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, sql_set_delete_final_delay, NULL, NULL);
     }
     if (result == SQLITE_OK) {
         result = sqlite3_create_function(db, "pxii_probe_memory", 0, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, sql_probe_memory, NULL, NULL);

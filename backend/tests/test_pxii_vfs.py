@@ -270,6 +270,63 @@ def test_companion_delete_revalidates_after_identity_pause(tmp_path: Path) -> No
         discard_closed_isolated_target(cleanup, identity)
 
 
+def test_companion_delete_rejects_swap_after_final_identity_check(
+    tmp_path: Path,
+) -> None:
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _test_set_delete_final_delay,
+        bind_marked_isolated_target,
+        discard_closed_isolated_target,
+    )
+
+    marker = tmp_path / ".pxii-create"
+    marker.write_text("delete-final-race", encoding="utf-8")
+    target, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename="delete-final-race.db",
+        marker_basename=marker.name,
+        marker_nonce="delete-final-race",
+    )
+    companion = tmp_path / "delete-final-race.db-wal"
+    replacement = tmp_path / "delete-final-race.replacement"
+    identity = target.identity
+    try:
+        _test_set_delete_final_delay(target, 500)
+        swap_blocked = False
+
+        def swap_after_final_check() -> None:
+            nonlocal swap_blocked
+            if companion.exists():
+                try:
+                    os.replace(companion, replacement)
+                    companion.write_bytes(b"replacement")
+                except PermissionError:
+                    swap_blocked = True
+
+        context = target.open_maintenance(MaintenanceOptions(read_only=False))
+        connection = context.__enter__()
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO proof VALUES ('race')")
+        connection.commit()
+        timer = threading.Timer(0.1, swap_after_final_check)
+        timer.start()
+        try:
+            context.__exit__(None, None, None)
+        except PermissionError:
+            assert os.name == "nt"
+        timer.join(timeout=5)
+        if os.name == "nt":
+            assert swap_blocked or companion.exists()
+        else:
+            assert companion.read_bytes() == b"replacement"
+            assert not replacement.exists()
+    finally:
+        asyncio.run(target.aclose())
+        discard_closed_isolated_target(cleanup, identity)
+
+
 def test_build_receipt_binds_runtime_extension_to_wheel_member(tmp_path: Path) -> None:
     from scripts.verify_pxii_vfs_source_hash import emit_build_receipt
 
