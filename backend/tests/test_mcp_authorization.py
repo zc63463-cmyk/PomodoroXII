@@ -10,7 +10,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from app.auth.security import create_space_token
-from app.errors import AppError, AuthenticationError, AuthorizationError
+from app.errors import AppError, AuthenticationError
 
 
 @pytest.fixture(autouse=True)
