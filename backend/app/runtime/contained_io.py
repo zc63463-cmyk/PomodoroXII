@@ -1013,7 +1013,7 @@ def open_bound_space(
             database_target, index_target, notes_handle
         )
     except BaseException as primary:
-        if isinstance(primary, (FileNotFoundError, NotADirectoryError)):
+        if isinstance(primary, (FileNotFoundError, NotADirectoryError, IsADirectoryError)):
             primary = SpaceStorageMissingError()
         cleanup_errors: list[BaseException] = []
         for target in (database_target, index_target):

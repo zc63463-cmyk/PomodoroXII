@@ -337,6 +337,47 @@ async def test_registered_missing_store_fails_closed_without_storage_creation(
 
 
 @pytest.mark.asyncio
+async def test_registered_directory_db_role_fails_with_stable_missing_error(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.db.meta_session import get_meta_session
+    from app.db.models.meta import Space
+    from app.runtime.scope import AuthorizedSpaceScope
+    from app.settings import settings
+
+    parent = settings.spaces_data_dir / "spc_invalid_db_role"
+    parent.mkdir(parents=True, exist_ok=True)
+    db = parent / "space.db"
+    index = parent / "index.db"
+    notes = parent / "notes"
+    db.mkdir()
+    index.write_bytes(b"registered")
+    notes.mkdir()
+    before = {entry.name for entry in parent.iterdir()}
+
+    async for session in get_meta_session():
+        session.add(
+            Space(
+                id="spc_invalid_db_role",
+                name="invalid-db-role",
+                db_path=str(db),
+                notes_dir=str(notes),
+            )
+        )
+        await session.commit()
+        scope = await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
+            _principal("spc_invalid_db_role"), "spc_invalid_db_role", "read"
+        )
+        with pytest.raises(SpaceStorageMissingError) as error:
+            async with scope.containment.open_verified():
+                raise AssertionError("storage must fail before yielding opens")
+        assert error.value.code == "space_storage_missing"
+        break
+
+    assert {entry.name for entry in parent.iterdir()} == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "collision", ["notes_equals_db", "notes_equals_index", "db_equals_index"]
 )
