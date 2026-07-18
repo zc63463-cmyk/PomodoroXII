@@ -394,6 +394,21 @@ def emit_build_receipt(platform_id: str, wheel: Path, junit: Path, output: Path)
 def assemble_manifest(inputs: Path, subject_sha: str, output: Path) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", subject_sha):
         raise SystemExit("subject SHA must be one lowercase full Git object ID")
+    try:
+        current_sha = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            cwd=BACKEND_ROOT.parent,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=15,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SystemExit("current checkout HEAD is unavailable") from error
+    if not re.fullmatch(r"[0-9a-f]{40}", current_sha):
+        raise SystemExit("current checkout HEAD is not a commit")
+    if subject_sha != current_sha:
+        raise SystemExit("subject SHA does not match current checkout HEAD")
     expected_source = verify_sources()
     receipts: dict[str, dict[str, object]] = {}
     for receipt_path in inputs.rglob("build-receipt.json"):
