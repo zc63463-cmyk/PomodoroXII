@@ -87,6 +87,7 @@ class _IsolatedCleanupAuthority:
     marker_identity: StorageIdentity
     terminal: str | None = None
     completed_deletes: set[str] = field(default_factory=set)
+    attempted_deletes: set[str] = field(default_factory=set)
 
 
 _BOOTSTRAP_LOCK = threading.RLock()
@@ -933,6 +934,7 @@ class SQLiteReplacementAuthority:
         "_physical_stage",
         "_source_backup_basename",
         "_discard_tombstone_basename",
+        "_rejected_public_basename",
     )
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
@@ -963,6 +965,9 @@ class SQLiteReplacementAuthority:
         instance._source_backup_basename = f".pxii-source-{secrets.token_hex(16)}.db"
         instance._discard_tombstone_basename = (
             f".pxii-discard-{secrets.token_hex(16)}.db"
+        )
+        instance._rejected_public_basename = (
+            f".pxii-rejected-{secrets.token_hex(16)}.db"
         )
         return instance
 
@@ -1023,6 +1028,20 @@ class SQLiteReplacementAuthority:
         )
         backup = _relative_identity_or_none(parent, self._source_backup_basename)
         if (
+            backup == self._source.identity
+            and replacement is None
+            and source is not None
+            and source != self._replacement_identity
+        ):
+            _rename_relative_no_replace(
+                parent, self._source_basename, self._rejected_public_basename
+            )
+            _rename_relative_no_replace(
+                parent, self._source_backup_basename, self._source_basename
+            )
+            self._physical_stage = None
+            raise ValueError("published replacement identity mismatch; source restored")
+        if (
             source == self._source.identity
             and replacement == self._replacement_identity
             and backup is None
@@ -1064,7 +1083,14 @@ class SQLiteReplacementAuthority:
         if replacement is None and tombstone == self._replacement_identity:
             return "replacement_quarantined"
         if replacement is None and tombstone is None:
-            return "replacement_deleted"
+            if self._physical_stage in {
+                "replacement_quarantine_attempted",
+                "replacement_quarantined",
+                "replacement_delete_attempted",
+                "replacement_deleted",
+            }:
+                return "replacement_deleted"
+            raise ValueError("replacement discard namespace state is not reconcilable")
         if replacement is not None and tombstone is None:
             raise ValueError("replacement target name reappeared after discard")
         raise ValueError("replacement discard namespace state is not reconcilable")
@@ -1093,6 +1119,7 @@ class SQLiteReplacementAuthority:
             self._require_closed_targets()
             _require_no_companions(parent, self._source_basename)
             _require_no_companions(parent, self._replacement_basename)
+            self._physical_stage = "source_quarantine_attempted"
             _rename_relative_no_replace(
                 parent, self._source_basename, self._source_backup_basename
             )
@@ -1109,6 +1136,8 @@ class SQLiteReplacementAuthority:
             ):
                 self._restore_quarantined_source()
                 raise ValueError("replacement target identity changed before commit")
+            self._physical_stage = "replacement_publish_attempted"
+            _terminal_fault_hook("replacement_commit_between_check_and_publish")
             _rename_relative_no_replace(
                 parent, self._replacement_basename, self._source_basename
             )
@@ -1150,6 +1179,7 @@ class SQLiteReplacementAuthority:
                 != self._replacement_identity
             ):
                 raise ValueError("replacement target identity changed before discard")
+            self._physical_stage = "replacement_quarantine_attempted"
             _rename_relative_no_replace(
                 parent,
                 self._replacement_basename,
@@ -1161,6 +1191,7 @@ class SQLiteReplacementAuthority:
             self._physical_stage = "replacement_quarantined"
             stage = self._discard_physical_stage()
         if stage == "replacement_quarantined":
+            self._physical_stage = "replacement_delete_attempted"
             _delete_relative(
                 parent,
                 self._discard_tombstone_basename,
@@ -1330,21 +1361,45 @@ def _require_cleanup(
     return cleanup_authority
 
 
+def _delete_isolated_role(
+    cleanup: _IsolatedCleanupAuthority,
+    *,
+    key: str,
+    basename: str,
+    expected_identity: StorageIdentity,
+) -> None:
+    if key in cleanup.completed_deletes:
+        return
+    if key not in cleanup.attempted_deletes:
+        observed = _relative_identity_or_none(cleanup.parent_descriptor, basename)
+        if observed is None:
+            raise FileNotFoundError(basename)
+        if observed != expected_identity:
+            raise ValueError("isolated cleanup identity mismatch")
+        cleanup.attempted_deletes.add(key)
+    try:
+        _delete_relative(
+            cleanup.parent_descriptor,
+            basename,
+            expected_identity,
+        )
+    except FileNotFoundError:
+        pass
+    cleanup.completed_deletes.add(key)
+
+
 def commit_closed_isolated_target(
     cleanup_authority: object, identity: StorageIdentity
 ) -> None:
     cleanup = _require_cleanup(cleanup_authority, identity)
     if cleanup.terminal is None:
         if "marker" not in cleanup.completed_deletes:
-            try:
-                _delete_relative(
-                    cleanup.parent_descriptor,
-                    cleanup.marker_basename,
-                    cleanup.marker_identity,
-                )
-            except FileNotFoundError:
-                pass
-            cleanup.completed_deletes.add("marker")
+            _delete_isolated_role(
+                cleanup,
+                key="marker",
+                basename=cleanup.marker_basename,
+                expected_identity=cleanup.marker_identity,
+            )
             _terminal_fault_hook("isolated_commit_after_marker_delete")
         cleanup.terminal = "committed"
         _close_parent_authority(cleanup.parent_descriptor)
@@ -1370,26 +1425,20 @@ def discard_closed_isolated_target(
                 pass
             cleanup.completed_deletes.add(key)
         if "target" not in cleanup.completed_deletes:
-            try:
-                _delete_relative(
-                    cleanup.parent_descriptor,
-                    cleanup.target_basename,
-                    cleanup.target_identity,
-                )
-            except FileNotFoundError:
-                pass
-            cleanup.completed_deletes.add("target")
+            _delete_isolated_role(
+                cleanup,
+                key="target",
+                basename=cleanup.target_basename,
+                expected_identity=cleanup.target_identity,
+            )
             _terminal_fault_hook("isolated_discard_after_target_delete")
         if "marker" not in cleanup.completed_deletes:
-            try:
-                _delete_relative(
-                    cleanup.parent_descriptor,
-                    cleanup.marker_basename,
-                    cleanup.marker_identity,
-                )
-            except FileNotFoundError:
-                pass
-            cleanup.completed_deletes.add("marker")
+            _delete_isolated_role(
+                cleanup,
+                key="marker",
+                basename=cleanup.marker_basename,
+                expected_identity=cleanup.marker_identity,
+            )
             _terminal_fault_hook("isolated_discard_after_marker_delete")
         cleanup.terminal = "discarded"
         _close_parent_authority(cleanup.parent_descriptor)

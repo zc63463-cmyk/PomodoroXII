@@ -479,6 +479,46 @@ def test_replacement_commit_rechecks_identity_after_pre_publish_swap(
         del source
 
 
+def test_replacement_commit_recovers_source_after_check_syscall_swap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import commit_closed_isolated_target
+
+    _source, cleanup, replacement, replacement_path, source_identity = (
+        _prepare_closed_replacement(tmp_path, "commit-syscall-swap")
+    )
+    trusted = tmp_path / "trusted-before-syscall.db"
+
+    def swap(stage: str) -> None:
+        if stage == "replacement_commit_between_check_and_publish":
+            os.replace(replacement_path, trusted)
+            replacement_path.write_bytes(b"untrusted replacement")
+
+    monkeypatch.setattr(sqlite_vfs_module, "_terminal_fault_hook", swap)
+    with pytest.raises(ValueError, match="published replacement identity mismatch"):
+        replacement.commit_bound_replace()
+    with sqlite3.connect(tmp_path / "commit-syscall-swap.db") as source_connection:
+        assert source_connection.execute("SELECT value FROM proof").fetchone()[0] == (
+            "source"
+        )
+    assert trusted.exists()
+    commit_closed_isolated_target(cleanup, source_identity)
+
+
+def test_replacement_discard_rejects_initial_external_disappearance(
+    tmp_path: Path,
+) -> None:
+    _source, _cleanup, replacement, replacement_path, _source_identity = (
+        _prepare_closed_replacement(tmp_path, "discard-external-move")
+    )
+    moved = tmp_path / "externally-moved-replacement.db"
+    os.replace(replacement_path, moved)
+    with pytest.raises(ValueError, match="not reconcilable"):
+        replacement.discard_closed_replacement()
+    assert moved.exists()
+
+
 @pytest.mark.parametrize(
     ("operation", "fault_stage"),
     [
@@ -690,6 +730,42 @@ def test_isolated_cleanup_reconciles_unlink_completed_before_receipt(
     with pytest.raises(OSError, match="delete_relative_after_unlink_before_receipt"):
         call(cleanup, identity)
     call(cleanup, identity)
+
+
+@pytest.mark.parametrize(("operation", "missing_role"), [("commit", "marker"), ("discard", "target")])
+def test_isolated_cleanup_rejects_initial_external_disappearance(
+    tmp_path: Path,
+    operation: str,
+    missing_role: str,
+) -> None:
+    from app.runtime.sqlite_vfs import (
+        bind_marked_isolated_target,
+        commit_closed_isolated_target,
+        discard_closed_isolated_target,
+    )
+
+    marker = tmp_path / f".{operation}-external.marker"
+    marker.write_text(operation, encoding="utf-8")
+    target_path = tmp_path / f"isolated-{operation}-external.db"
+    target, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename=target_path.name,
+        marker_basename=marker.name,
+        marker_nonce=operation,
+    )
+    identity = target.identity
+    asyncio.run(target.aclose())
+    victim = marker if missing_role == "marker" else target_path
+    moved = tmp_path / f"moved-{victim.name}"
+    os.replace(victim, moved)
+    call = (
+        commit_closed_isolated_target
+        if operation == "commit"
+        else discard_closed_isolated_target
+    )
+    with pytest.raises(FileNotFoundError):
+        call(cleanup, identity)
+    assert moved.exists()
 
 
 def test_virtual_identifier_and_native_reference_receipt_are_closed(tmp_path: Path) -> None:
