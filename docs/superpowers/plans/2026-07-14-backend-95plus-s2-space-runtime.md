@@ -2530,11 +2530,16 @@ git commit -m "refactor(runtime): require explicit leased engine handles"
 - Modify: `backend/app/settings.py`
 - Modify: `backend/app/file_system/api.py`
 - Modify: `backend/app/deps.py`
+- Modify: `backend/app/mcp/server.py`
 - Create: `backend/tests/test_space_lifecycle.py`
 - Modify: `backend/tests/test_file_system/test_api.py`
 - Modify: `backend/tests/test_runtime_leases.py`
 - Modify: `backend/tests/test_settings.py`
 - Modify: `backend/tests/test_routes_v1.py`
+- Modify: `backend/tests/test_deps.py`
+- Modify: `backend/tests/test_space_path_containment.py`
+- Modify: `backend/tests/test_mcp_authorization.py`
+- Modify: `backend/tests/test_mcp_server.py`
 
 **Interfaces:**
 - Consumes: authorized scope capability, opaque `ContainedSpaceOpens`, global/Space leases, registered identities, migration/index open verifiers, and canonical root settings.
@@ -2722,7 +2727,32 @@ async def test_read_handle_aexit_preserves_primary_before_cleanup_failure(
     assert captured.value.exceptions == (primary, cleanup.error)
     await handle.aclose()
     assert runtime_fixture.zero_refs_and_locks(handle.scope.space_id)
+
+
+@pytest.mark.asyncio
+async def test_fastapi_dependencies_share_exactly_one_request_handle(
+    production_client,
+    runtime_fixture,
+) -> None:
+    response = await production_client.get("/api/v1/tasks")
+    assert response.status_code == 200
+    assert runtime_fixture.scope_open_count == 1
+    assert runtime_fixture.database_handle is runtime_fixture.filesystem_handle
+    assert runtime_fixture.request_handle_close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_uses_runtime_handle_without_independent_engine_open(
+    runtime_fixture,
+) -> None:
+    result = await runtime_fixture.call_mcp_stats_tool()
+    assert result is not None
+    assert runtime_fixture.scope_open_count == 1
+    assert runtime_fixture.direct_engine_manager_open_count == 0
+    assert runtime_fixture.request_handle_close_count == 1
 ```
+
+Containment negative tests call the package-private authorization-resolution primitive directly; they do not construct a runtime-less `AuthorizedSpaceScope` and do not exercise `open()` without a runtime. Those tests continue to prove missing/moved/type-invalid storage, role aliasing, symlink/junction/reparse, ancestor/target identity drift, and no storage I/O before the platform guard. The primitive is not a production request entry, cannot activate an engine or filesystem, and returns only `AuthorizedSpaceScopeResult` for capability verification.
 
 - [ ] **Step 2: Run lifecycle tests and verify the missing runtime failure**
 
@@ -3119,7 +3149,11 @@ class AuthorizedSpaceScope:
 
 `release_all_acquired()` and `SpaceRuntimeHandle.aclose()` use per-resource completion flags, not an eager aggregate `_closed=True`. Filesystem, engine callback, each owned Space lease stage, and each owned global lease stage are marked complete only after that callback/stage returns successfully. Resource close attempts are independent; global release is dependency-aware and never runs while an owned Space lease or active resource remains. A failure leaves the exact resource owned for a later same-owner retry; a successful callback is never invoked twice, and `Lease` does not reset ContextVar or set `_released` early. Tests inject fail-once then success at filesystem close, engine release, Space release, and global release, call `aclose()` repeatedly, and assert zero refs/locks plus exactly one successful callback per stage. Both `Lease.__aexit__` and `SpaceRuntimeHandle.__aexit__` preserve a body exception or cancellation as the first group member and append cleanup failures in `[primary, *cleanup_errors]`; a cleanup failure never masks read or MCP cancellation. If `_resolve_registered_under_lease()` fails before a handle exists, `AuthorizedSpaceScope.open()` remains the cleanup owner: it catches that primary, attempts global release, and on release failure registers the same generic `PendingCleanup` with a retry closure plus strong `holds` for the still-owned lease and acquiring `asyncio.Task`; the raised group is exactly `[primary, *cleanup_errors]`. `retry_pending_cleanups_for_current_task()` may retry only owners acquired by that same current Task, removes an owner only after release succeeds, and never transfers lease ownership to a background/shutdown Task. A request error boundary performs that same-Task retry before it returns control; a fail-once callback therefore converges without a leak. Persistent failure remains visible in the cleanup registry, makes `assert_ready()` fail, and makes graceful shutdown return the defined `RuntimeCleanupPendingError(code="runtime_cleanup_pending", retryable=False)` without releasing process-owner or claiming success; operator termination/restart is the final fail-closed escape if the acquiring Task cannot complete cleanup. `close_space_resources()` remains the per-Space-only cleanup face used by S3 FAILED_MANUAL before drain/evict. Calling `open_resolved()` must explicitly declare global ownership; once runtime owns cleanup, scope never releases it again.
 
-`AuthorizedSpaceScope.open(principal, space_id, mode: Literal["read", "write"]) -> SpaceRuntimeHandle` 仍是唯一外部 request 入口。claim/scope 的纯内存检查可在 lease 前执行；Meta registry 读取发生在 global-shared 后，并返回持有 `SpaceContainmentCapability` 的 `AuthorizedSpaceScopeResult`。S2 删除 `_validate_registered_paths` 及任何“resolve/containment 后返回裸 Path”的替代 helper；Space/Index verify只能在 `scope.containment.open_verified()` context 内消费 opaque database/index targets。它将 `write` 映射为 `mutation` 并调用内部 `SpaceRuntime.open_resolved()`。`mode="mutation"` 只持有 global shared与 capability；S3 `MutationUnitOfWork` 再获取 per-Space exclusive并在 activation 时重新 `open_verified()`，持有到 terminal state，避免嵌套重入与 check-then-use。`borrow_prepared_space()` 仅供同 Task 已持有 process-owner + global-exclusive + matching Space-exclusive 的 bootstrap/S3 startup recovery 使用：它不重取 lease，返回 ownership flags 都为 false 的 handle，并保证 context 退出时先关闭 filesystem/engine；body 与 cleanup 同时失败时按 `[primary, *cleanup_errors]` 聚合，仍不释放 borrowed leases。外层随后退出 Space-exclusive，最外层最后退出唯一 global-exclusive。Capability拒绝 missing/moved store、role alias、symlink/junction/reparse和 ancestor/target identity drift，映射为 stable `space_storage_missing`/`path_outside_space`/`space_path_identity_changed`且不调用 mkdir/migration。`health(space_id)` 只在短 `open_verified()` context 内调用 open-target verifier。`deps.py` 定义 `get_space_runtime(request: Request) -> SpaceRuntime`，只返回 bootstrap 写入 `app.state.runtime` 的实例；它产生一个 request-scoped handle，并从同一 handle yield DB session 与 filesystem，finally 中关闭，禁止三个 dependency 各自 open。
+`AuthorizedSpaceScope.open(principal, space_id, mode: Literal["read", "write"]) -> SpaceRuntimeHandle` 仍是唯一外部 request 入口。`runtime` 是 `AuthorizedSpaceScope` 的 required constructor dependency with no `None`/default；`open()` 不存在 runtime-less fallback，也不得返回 `AuthorizedSpaceScopeResult`。claim/scope 的纯内存检查可在 lease 前执行；Meta registry 读取发生在 global-shared 后，并返回持有 `SpaceContainmentCapability` 的 `AuthorizedSpaceScopeResult`。package-private authorization-resolution primitive 只供 `open()` 内部与 containment 负向测试消费，不能激活 engine/filesystem，也不是 production request entry。S2 删除 `_validate_registered_paths` 及任何“resolve/containment 后返回裸 Path”的替代 helper；Space/Index verify只能在 `scope.containment.open_verified()` context 内消费 opaque database/index targets。它将 `write` 映射为 `mutation` 并调用内部 `SpaceRuntime.open_resolved()`。`mode="mutation"` 只持有 global shared与 capability；S3 `MutationUnitOfWork` 再获取 per-Space exclusive并在 activation 时重新 `open_verified()`，持有到 terminal state，避免嵌套重入与 check-then-use。`borrow_prepared_space()` 仅供同 Task 已持有 process-owner + global-exclusive + matching Space-exclusive 的 bootstrap/S3 startup recovery 使用：它不重取 lease，返回 ownership flags 都为 false 的 handle，并保证 context 退出时先关闭 filesystem/engine；body 与 cleanup 同时失败时按 `[primary, *cleanup_errors]` 聚合，仍不释放 borrowed leases。外层随后退出 Space-exclusive，最外层最后退出唯一 global-exclusive。Capability拒绝 missing/moved store、role alias、symlink/junction/reparse和 ancestor/target identity drift，映射为 stable `space_storage_missing`/`path_outside_space`/`space_path_identity_changed`且不调用 mkdir/migration。`health(space_id)` 只在短 `open_verified()` context 内调用 open-target verifier。
+
+`deps.py` 的真实 FastAPI dependency graph 定义 `get_space_runtime(request: Request) -> SpaceRuntime`，只返回 bootstrap 写入 `app.state.runtime` 的实例；每个 request 由 `get_space_context` 恰好调用一次 `AuthorizedSpaceScope.open()`，并将同一个 request-scoped `SpaceRuntimeHandle` 传给 DB session 与 filesystem dependencies，finally 中只关闭一次。DB 与 filesystem 必须从该 handle 派生，禁止各 dependency 重复 `open()`、重新 resolve、直接调用 engine manager、或分别持有生命周期。`test_deps.py` 与真实 v1 route 测试证明 open count 为 1、DB/FS handle identity 相同、cleanup 一次；`test_space_path_containment.py` 保持 package-private resolution 的负向证据，不得通过 autouse runtime/provisioning fixture 掩盖 missing-store fail-closed。
+
+`app/mcp/server.py` 在 Task 7 同步迁移 production consumer：每个 MCP tool invocation 通过已安装的同一个 `SpaceRuntime` 调用 `AuthorizedSpaceScope.open()` 一次，session/filesystem 从返回的 `SpaceRuntimeHandle` 派生，并在 tool invocation 的同一 Task 中关闭 handle。MCP 禁止保留 runtime-less `AuthorizedSpaceScope(meta_db, root).open(...)`、独立 `get_space_engine_manager().get_session(...)`、再次 `containment.open_verified()` 或任何第二次 scope open。Task 7 的 MCP authorization/normal-path 测试证明 unauthorized/unregistered/outside-root 在 storage activation 前失败，authorized call 恰好 open/close 一个 handle，且 direct engine-manager open count 为 0。Task 9 仍独占 FastAPI/FastMCP shared bootstrap、process owner、fleet migration、runtime installation/readiness 和 shutdown；Task 7 只要求 consumer 对缺失 runtime fail closed，不建立隐式 singleton、fallback 或独立 bootstrap。
 
 Normative lease-dependency amendment: every active or partially closed handle is registered on the exact Space lease through `retain_cleanup_dependency()`. Successful `aclose()` removes it; failure registers one same-Task pending owner containing both handle and lease. A Space lease with a dependency cannot release, a global lease cannot release while the Space order remains current, and the live `ProcessOwnerReceipt` cannot release while either child remains. `test_borrowed_cleanup_failure_pins_space_and_parent_leases_until_same_task_retry` proves fail-once convergence, persistent fail-closed behavior, and no duplicate successful callback. This explicit dependency state machine supersedes any earlier shorthand that a non-owning borrowed handle can be tracked without pinning its parent lease.
 
@@ -3128,8 +3162,9 @@ Normative resource-lifetime amendment: `mode="mutation"` holds global-shared plu
 - [ ] **Step 4: Run runtime/dependency tests**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_space_lifecycle.py tests/test_file_system/test_api.py tests/test_runtime_leases.py tests/test_settings.py tests/test_routes_v1.py tests/test_space_manager.py -p no:cacheprovider
-.\.venv\Scripts\ruff.exe check --no-cache app/runtime/space.py app/runtime/leases.py app/file_system/api.py app/settings.py app/deps.py tests/test_space_lifecycle.py tests/test_file_system/test_api.py tests/test_runtime_leases.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_space_lifecycle.py tests/test_file_system/test_api.py tests/test_runtime_leases.py tests/test_settings.py tests/test_routes_v1.py tests/test_space_manager.py tests/test_deps.py tests/test_space_path_containment.py -p no:cacheprovider
+.\.venv\Scripts\python.exe -m pytest -q tests/test_mcp_authorization.py tests/test_mcp_server.py -p no:cacheprovider
+.\.venv\Scripts\ruff.exe check --no-cache app/runtime/space.py app/runtime/scope.py app/runtime/leases.py app/file_system/api.py app/settings.py app/deps.py app/mcp/server.py tests/test_space_lifecycle.py tests/test_file_system/test_api.py tests/test_runtime_leases.py tests/test_deps.py tests/test_space_path_containment.py tests/test_mcp_authorization.py tests/test_mcp_server.py
 ```
 
 Expected: PASS; missing paths remain missing, relocated registered identities work, request targets invoke `verify_open` but never `upgrade`, no consumer performs pathname reopen, every DB/Notes/index symlink/junction/reparse/identity swap returns no handle, fail-once close stages retry without duplicate success, and read body/cancellation remains first when cleanup also fails.
@@ -3137,7 +3172,7 @@ Expected: PASS; missing paths remain missing, relocated registered identities wo
 - [ ] **Step 5: Commit SpaceRuntime open path**
 
 ```powershell
-git add app/runtime/__init__.py app/runtime/scope.py app/runtime/space.py app/runtime/leases.py app/settings.py app/file_system/api.py app/deps.py tests/test_space_lifecycle.py tests/test_file_system/test_api.py tests/test_runtime_leases.py tests/test_settings.py tests/test_routes_v1.py
+git add app/runtime/__init__.py app/runtime/scope.py app/runtime/space.py app/runtime/leases.py app/settings.py app/file_system/api.py app/deps.py app/mcp/server.py tests/test_space_lifecycle.py tests/test_file_system/test_api.py tests/test_runtime_leases.py tests/test_settings.py tests/test_routes_v1.py tests/test_deps.py tests/test_space_path_containment.py tests/test_mcp_authorization.py tests/test_mcp_server.py
 git commit -m "feat(runtime): open authoritative registered spaces"
 ```
 
