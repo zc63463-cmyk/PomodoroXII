@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -28,6 +31,37 @@ class _Leases:
         return self.owner
 
 
+def _probe_process_owner(root: Path, timeout: float) -> subprocess.CompletedProcess[str]:
+    script = """
+import asyncio
+import sys
+from pathlib import Path
+from app.runtime.leases import RuntimeLeaseCoordinator
+
+async def probe() -> int:
+    leases = RuntimeLeaseCoordinator(Path(sys.argv[1]))
+    try:
+        owner = await leases.acquire_process_owner("child-probe", float(sys.argv[2]))
+    except Exception as error:
+        print(type(error).__name__)
+        return 2
+    await owner.release()
+    return 0
+
+raise SystemExit(asyncio.run(probe()))
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    return subprocess.run(
+        [sys.executable, "-c", script, str(root), str(timeout)],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_owner_is_held_from_startup_until_shutdown() -> None:
     leases = _Leases()
@@ -44,6 +78,25 @@ async def test_owner_is_held_from_startup_until_shutdown() -> None:
     assert executor.state is OwnerExecutorState.CLOSED
     assert leases.owner is not None
     assert leases.owner.releases == 1
+
+
+@pytest.mark.asyncio
+async def test_second_process_cannot_acquire_owner_until_shutdown(tmp_path: Path) -> None:
+    from app.runtime.bootstrap import _OwnerTaskExecutor
+    from app.runtime.leases import RuntimeLeaseCoordinator
+
+    leases = RuntimeLeaseCoordinator(tmp_path)
+    executor = _OwnerTaskExecutor(leases, "cross-process", queue_size=2)
+    await executor.start()
+    try:
+        blocked = await asyncio.to_thread(_probe_process_owner, tmp_path, 0.25)
+        assert blocked.returncode == 2, blocked.stdout + blocked.stderr
+        assert "LeaseTimeoutError" in blocked.stdout
+    finally:
+        await executor.shutdown()
+
+    released = await asyncio.to_thread(_probe_process_owner, tmp_path, 2.0)
+    assert released.returncode == 0, released.stdout + released.stderr
 
 
 @pytest.mark.asyncio
