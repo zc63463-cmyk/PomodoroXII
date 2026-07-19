@@ -15,6 +15,7 @@ dependencies = [
     "bcrypt>=4.2",
     "python-multipart>=0.0.20",
     "filelock>=3.16",
+    "portalocker>=3.1,<4",
     "nanoid>=2.0.0",
     "python-slugify>=8.0.4",
     "fastmcp>=3.0",
