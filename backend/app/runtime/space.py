@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import shutil
 import uuid
@@ -10,16 +11,37 @@ from typing import TYPE_CHECKING, AsyncIterator, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.auth.authority import Principal
+from app.db.migrations import (
+    FleetPreflightTarget,
+    FrozenFleetPreflight,
+    MigrationSafetyError,
+)
 from app.db.models.meta import Space
+from app.errors import SpaceStorageMissingError
 from app.file_system.interfaces import FileSystem
 from app.runtime.contained_io import StorageIdentity
 from app.runtime.leases import Lease, LeaseMode, LeaseOrderError
-from app.runtime.scope import AuthorizedSpaceScopeResult
-from app.runtime.sqlite_vfs import BoundSQLiteTarget
-from app.settings import settings
+from app.runtime.scope import (
+    AuthorizedSpaceScope,
+    AuthorizedSpaceScopeResult,
+    ContainedSpacePaths,
+    SpaceContainmentCapability,
+)
+from app.runtime.sqlite_vfs import (
+    BoundSQLiteTarget,
+    MaintenanceOptions,
+    _bind_existing_target,
+)
 
 if TYPE_CHECKING:
     from app.space_manager import EngineHandle, SpaceEngineManager
+
+
+def _current_settings():
+    from app.settings import settings
+
+    return settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +62,23 @@ class SpaceProvisionConflictError(RuntimeError):
 class SpaceProvisionSpec:
     space_id: str
     name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProvisionedSpace:
+    id: str
+    name: str
+    db_path: str
+    notes_dir: str
+    is_default: bool
+    created_at: str
+    updated_at: str
+
+    async def __aenter__(self) -> "ProvisionedSpace":
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> bool:
+        return False
 
 
 @dataclass(slots=True)
@@ -269,42 +308,69 @@ class SpaceRuntime:
         self.engines = engines
         self.migrations = migrations
         self.index_schema = index_schema
+        self._owner_executor: object | None = None
+        self._admission_gate: object | None = None
+        self._frozen_registrations: tuple[
+            tuple[str, str, str, str, bool, str, str], ...
+        ] | None = None
 
-    async def provision(self, spec: SpaceProvisionSpec) -> SpaceRuntimeHandle:
-        """Provision storage before publishing the Meta registration."""
-        from app.auth.authority import Principal
-        from app.db.meta_session import get_meta_session
+    def install_owner_executor(self, executor: object) -> None:
+        if self._owner_executor is not None and self._owner_executor is not executor:
+            raise RuntimeError("SpaceRuntime owner executor is already installed")
+        self._owner_executor = executor
+        self._admission_gate = getattr(executor, "gate", None)
+
+    async def provision(self, spec: SpaceProvisionSpec) -> ProvisionedSpace:
+        """Submit one exclusive provision command to the installed owner Task."""
+        executor = self._owner_executor
+        if executor is None:
+            raise RuntimeError("RuntimeOwnerExecutor is not installed")
+
+        async def operation(cancellation: asyncio.Event) -> ProvisionedSpace:
+            return await self._provision_owned(spec, cancellation)
+
+        operation._pxii_accepts_cancellation = True  # type: ignore[attr-defined]
+        return await executor.submit(f"provision:{spec.space_id}", operation)
+
+    async def _provision_owned(
+        self,
+        spec: SpaceProvisionSpec,
+        cancellation: asyncio.Event,
+    ) -> ProvisionedSpace:
+        """Provision and publish one Space entirely inside the owner Task."""
         from app.file_system.api import provision_file_system
         from app.runtime.durability import fsync_directory, fsync_file
-        from app.runtime.scope import AuthorizedSpaceScope
         from app.runtime.sqlite_vfs import _bind_existing_target
 
-        final_root = settings.spaces_data_dir / spec.space_id
+        runtime_settings = _current_settings()
+        final_root = runtime_settings.spaces_data_dir / spec.space_id
         if final_root.exists():
             raise SpaceProvisionConflictError("Space storage already exists")
         nonce = uuid.uuid4().hex
-        staging_root = settings.spaces_data_dir / f".provision-{spec.space_id}-{nonce}"
+        staging_root = (
+            runtime_settings.spaces_data_dir
+            / f".provision-{spec.space_id}-{nonce}"
+        )
         db_path = staging_root / "space.db"
         index_path = staging_root / "index.db"
         notes_dir = staging_root / "notes"
         marker = ProvisionMarker(staging_root, nonce)
         renamed = False
-        owner_lease = None
         global_lease = None
         space_lease = None
-        handle: SpaceRuntimeHandle | None = None
+        committed = False
+        provisioned: ProvisionedSpace | None = None
         primary: BaseException | None = None
         cleanup_errors: list[BaseException] = []
         try:
+            if cancellation.is_set():
+                raise asyncio.CancelledError()
             staging_root.mkdir(parents=True, exist_ok=False)
             marker.marker_path.write_text(nonce, encoding="ascii")
             fsync_file(marker.marker_path)
             fsync_directory(staging_root)
             fsync_directory(staging_root.parent)
 
-            owner_lease = await self.leases.acquire_process_owner(
-                "space-provision", 5
-            )
             global_lease = await self.leases.acquire_global(
                 LeaseMode.EXCLUSIVE, "space-provision", 5
             )
@@ -332,6 +398,8 @@ class SpaceRuntime:
                 await index_target.aclose()
             if not index_status.valid:
                 raise RuntimeError("provisioned index schema is not valid")
+            if cancellation.is_set():
+                raise asyncio.CancelledError()
             global_lease.fence_receipt("global").assert_current()
             space_lease.fence_receipt(spec.space_id).assert_current()
             if final_root.exists():
@@ -341,62 +409,51 @@ class SpaceRuntime:
             fsync_directory(final_root.parent)
             final_marker = final_root / marker.marker_path.name
 
+            if cancellation.is_set():
+                raise asyncio.CancelledError()
             space = await self._commit_registration(spec, final_root)
+            committed = True
+            provisioned = ProvisionedSpace(
+                id=space.id,
+                name=space.name,
+                db_path=space.db_path,
+                notes_dir=space.notes_dir,
+                is_default=space.is_default,
+                created_at=space.created_at,
+                updated_at=space.updated_at,
+            )
             final_marker.unlink()
             fsync_directory(final_root)
-            await space_lease.release()
-            space_lease = None
-            await global_lease.release()
-            global_lease = None
-            await owner_lease.release()
-            owner_lease = None
-
-            async for session in get_meta_session():
-                principal = Principal(
-                    subject="system",
-                    token_type="trusted_stdio",
-                    epoch=0,
-                    expires_at=None,
-                    space_id=spec.space_id,
-                )
-                _ = space
-                return await AuthorizedSpaceScope(
-                    session, settings.spaces_data_dir, self
-                ).open(principal, spec.space_id, "read")
-            else:
-                raise RuntimeError("Meta session fixture did not yield")
         except BaseException as error:
             primary = error
-        cleanup_errors.extend(self._cleanup_marked_provision_tree(
-            final_root if renamed else staging_root, nonce
-        ))
-        if handle is not None:
+        if primary is not None and not committed:
+            cleanup_errors.extend(
+                self._cleanup_marked_provision_tree(
+                    final_root if renamed else staging_root, nonce
+                )
+            )
+        if space_lease is not None:
             try:
-                await handle.aclose()
-            except BaseExceptionGroup as group:
-                cleanup_errors.extend(group.exceptions)
-        else:
-            if space_lease is not None:
-                try:
-                    await space_lease.release()
-                except BaseException as error:
-                    cleanup_errors.append(error)
-            if global_lease is not None:
-                try:
-                    await global_lease.release()
-                except BaseException as error:
-                    cleanup_errors.append(error)
-            if owner_lease is not None:
-                try:
-                    await owner_lease.release()
-                except BaseException as error:
-                    cleanup_errors.append(error)
+                await space_lease.release()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if global_lease is not None:
+            try:
+                await global_lease.release()
+            except BaseException as error:
+                cleanup_errors.append(error)
         if primary is not None and cleanup_errors:
             raise BaseExceptionGroup(
                 "Space provision and cleanup failed", [primary, *cleanup_errors]
             ) from None
-        assert primary is not None
-        raise primary
+        if primary is not None:
+            raise primary
+        if cleanup_errors:
+            raise BaseExceptionGroup(
+                "Space provision cleanup failed", cleanup_errors
+            ) from None
+        assert provisioned is not None
+        return provisioned
 
     async def _commit_registration(
         self, spec: SpaceProvisionSpec, final_root: Path
@@ -425,6 +482,212 @@ class SpaceRuntime:
             return await session.scalar(select(Space).where(Space.id == space_id))
         return None
 
+    @staticmethod
+    def _registration_tuple(space: Space) -> tuple[str, str, str, str, bool, str, str]:
+        return (
+            space.id,
+            space.name,
+            space.db_path,
+            space.notes_dir,
+            space.is_default,
+            space.created_at,
+            space.updated_at,
+        )
+
+    @staticmethod
+    def _paths_for_registration(
+        space_id: str, db_path: str, notes_dir: str
+    ) -> ContainedSpacePaths:
+        runtime_settings = _current_settings()
+        expected_db = runtime_settings.space_db_path(space_id)
+        expected_notes = runtime_settings.space_notes_dir(space_id)
+        if Path(db_path) != expected_db or Path(notes_dir) != expected_notes:
+            raise MigrationSafetyError(
+                "registered Space paths do not match the canonical runtime layout"
+            )
+        index_db = expected_db.parent / "index.db"
+        if (
+            not expected_db.is_file()
+            or not expected_notes.is_dir()
+            or not index_db.is_file()
+        ):
+            raise SpaceStorageMissingError()
+        return ContainedSpacePaths(
+            space_root=runtime_settings.canonical_spaces_root,
+            db_path=expected_db,
+            notes_dir=expected_notes,
+            index_db=index_db,
+        )
+
+    async def preflight_registered_fleet(
+        self,
+        migrations,
+        meta_target: Path,
+        global_lease: Lease,
+    ) -> FrozenFleetPreflight:
+        """Freeze Meta registrations and preflight every store read-only."""
+        global_lease.assert_active_owner(
+            mode=LeaseMode.EXCLUSIVE,
+            scope="global",
+            require_process_owner=True,
+        )
+        targets: list[BoundSQLiteTarget] = []
+        handed_to_coordinator = False
+        try:
+            meta = _bind_existing_target(meta_target, create_authority=False)
+            targets.append(meta)
+            with meta.open_maintenance(
+                MaintenanceOptions(read_only=True)
+            ) as connection:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_schema WHERE type='table'"
+                    ).fetchall()
+                }
+                rows = (
+                    connection.execute(
+                        "SELECT id,name,db_path,notes_dir,is_default,"
+                        "created_at,updated_at FROM spaces ORDER BY id"
+                    ).fetchall()
+                    if "spaces" in tables
+                    else []
+                )
+            registrations = tuple(
+                (
+                    str(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                    bool(row[4]),
+                    str(row[5]),
+                    str(row[6]),
+                )
+                for row in rows
+            )
+            fleet_targets = [
+                FleetPreflightTarget(None, "meta", meta.identity, meta)
+            ]
+            for registration in registrations:
+                space_id, _name, db_path, notes_dir, *_rest = registration
+                paths = self._paths_for_registration(space_id, db_path, notes_dir)
+                containment = SpaceContainmentCapability._create(paths)
+                async with containment.open_verified() as opens:
+                    target = opens.take_database_target()
+                targets.append(target)
+                fleet_targets.append(
+                    FleetPreflightTarget(
+                        space_id, "space", target.identity, target
+                    )
+                )
+            handed_to_coordinator = True
+            fleet = await migrations.preflight_fleet_under_lease(
+                fleet_targets, global_lease
+            )
+            self._frozen_registrations = registrations
+            return fleet
+        finally:
+            if not handed_to_coordinator:
+                errors: list[BaseException] = []
+                for target in targets:
+                    try:
+                        await target.aclose()
+                    except BaseException as error:
+                        errors.append(error)
+                if errors:
+                    raise BaseExceptionGroup(
+                        "fleet target cleanup failed", errors
+                    ) from None
+
+    async def prepare_registered_spaces(
+        self,
+        catalog,
+        global_lease: Lease,
+        fleet: FrozenFleetPreflight,
+    ) -> None:
+        """Migrate and verify the frozen registration set in sorted order."""
+        global_lease.assert_active_owner(
+            mode=LeaseMode.EXCLUSIVE,
+            scope="global",
+            require_process_owner=True,
+        )
+        expected = self._frozen_registrations
+        if expected is None:
+            raise MigrationSafetyError("fleet preflight was not completed")
+        from app.db.meta_session import get_meta_session
+
+        async for session in get_meta_session():
+            from sqlalchemy import select
+
+            rows = (
+                await session.execute(select(Space).order_by(Space.id))
+            ).scalars().all()
+            current = tuple(self._registration_tuple(row) for row in rows)
+            if current != expected:
+                raise MigrationSafetyError(
+                    "registered Space inventory changed after fleet preflight"
+                )
+            scopes = [
+                await AuthorizedSpaceScope(
+                    session, _current_settings().canonical_spaces_root, self
+                ).resolve(
+                    Principal(
+                        subject="runtime-startup",
+                        token_type="trusted_stdio",
+                        epoch=0,
+                        expires_at=None,
+                        space_id=row.id,
+                    ),
+                    row.id,
+                    "read",
+                )
+                for row in rows
+            ]
+            break
+        else:
+            raise RuntimeError("Meta session fixture did not yield")
+
+        frozen_identities = {
+            space_id: identity
+            for space_id, identity in zip(
+                fleet.space_ids, fleet.identities, strict=True
+            )
+            if space_id is not None
+        }
+        for row, scope in zip(rows, scopes, strict=True):
+            async with scope.containment.open_verified() as opens:
+                if opens.database_target.identity != frozen_identities[row.id]:
+                    raise MigrationSafetyError(
+                        "registered Space identity changed after fleet preflight"
+                    )
+            space_lease = await self.leases.acquire_spaces(
+                [row.id], LeaseMode.EXCLUSIVE, "startup-prepare", 60
+            )
+            async with space_lease:
+                global_lease.assert_active_owner(
+                    mode=LeaseMode.EXCLUSIVE,
+                    scope="global",
+                    require_process_owner=True,
+                )
+                space_lease.assert_active_owner(
+                    mode=LeaseMode.EXCLUSIVE,
+                    scope=row.id,
+                    require_process_owner=True,
+                )
+                await self.migrations.upgrade_under_lease(
+                    "space", Path(row.db_path), global_lease
+                )
+                async with scope.containment.open_verified() as opens:
+                    status = self.index_schema.upgrade_open(
+                        opens.index_target, create_if_missing=False
+                    )
+                    if not status.valid:
+                        raise RuntimeError("registered index schema is invalid")
+                async with self.borrow_prepared_space(
+                    scope, global_lease, space_lease
+                ):
+                    pass
+
     def _cleanup_marked_provision_tree(
         self, provision_root: Path, nonce: str
     ) -> list[BaseException]:
@@ -433,7 +696,9 @@ class SpaceRuntime:
         errors: list[BaseException] = []
         try:
             root = provision_root.expanduser().resolve(strict=True)
-            spaces_root = settings.spaces_data_dir.expanduser().resolve(strict=True)
+            spaces_root = (
+                _current_settings().spaces_data_dir.expanduser().resolve(strict=True)
+            )
             if root.parent != spaces_root:
                 raise SpaceProvisionConflictError(
                     "provision cleanup target is outside spaces root"
@@ -539,6 +804,12 @@ class SpaceRuntime:
             physical_terminal=lambda: handle._closed,
             dependencies=dependencies,
         )
+
+    def assert_ready(self) -> None:
+        if self._admission_gate is None:
+            raise RuntimeError("RuntimeAdmissionGate is not installed")
+        self._admission_gate.assert_ready()
+        self.leases.assert_ready()
 
     @asynccontextmanager
     async def borrow_prepared_space(

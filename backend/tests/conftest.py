@@ -22,6 +22,7 @@ import re
 import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -159,6 +160,7 @@ def _ensure_inside_temp_root(path: Path, temp_root: Path) -> None:
 def _isolate_env(
     tmp_path: Path,
     test_run_root: Path,
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Path:
     """Point all PomodoroXII paths at the current test's unique sandbox.
@@ -225,6 +227,35 @@ def _isolate_env(
 
     import app.space_manager as space_manager_module
     importlib.reload(space_manager_module)
+
+    # Test setup owns fixture creation; production init_meta_db only opens a
+    # database that the runtime migration coordinator has already prepared.
+    if request.node.name != "test_missing_bound_store_never_creates_companion":
+        from app.db.migrations import run_migrations
+
+        run_migrations("meta", settings_module.settings.meta_db_path)
+
+    # Legacy MCP unit tests explicitly install a runtime without entering the
+    # process bootstrap. Adapt that test-only entrypoint to the same immutable
+    # RuntimeServices shape; production uses install_mcp_runtime_services.
+    import app.mcp.server as mcp_server
+    from app.runtime.bootstrap import _FreshAuthorizedSpaceScope
+
+    def install_test_runtime(runtime) -> None:
+        if runtime is None:
+            mcp_server._installed_runtime_services = None
+            mcp_server._installed_space_runtime = None
+            return
+        mcp_server._installed_runtime_services = SimpleNamespace(
+            runtime=runtime,
+            scope=_FreshAuthorizedSpaceScope(runtime),
+            executor=SimpleNamespace(),
+            credential_verifier=None,
+            catalog=None,
+        )
+        mcp_server._installed_space_runtime = runtime
+
+    monkeypatch.setattr(mcp_server, "install_space_runtime", install_test_runtime)
 
     # NOTE: app.deps imports app.errors (not reloaded) and app.auth.security
     # (reloaded above). Reload deps so it rebinds security + space_manager.
@@ -320,8 +351,8 @@ async def client(
 ):
     """Yield an httpx AsyncClient backed by ASGITransport.
 
-    ASGITransport does not trigger the app's lifespan, so we must
-    manually initialise the meta database before creating the app.
+    ASGITransport does not trigger the app's lifespan, so the fixture
+    enters the application lifespan explicitly.
     """
     import sys
 
@@ -333,11 +364,9 @@ async def client(
 
     from httpx import ASGITransport, AsyncClient
 
-    from app.db.meta_session import close_meta_db, init_meta_db
     from app.main import create_app
-    from app.space_manager import dispose_space_engine_manager
+    from app.settings import settings
 
-    await init_meta_db()
     app = create_app()
     provision_storage = (
         request.node.get_closest_marker("provisioned_space_storage") is not None
@@ -351,13 +380,18 @@ async def client(
             and response.status_code == 201
         ):
             await response.aread()
-            await space_storage_provisioner(response.json()["id"])
+            space_id = response.json()["id"]
+            if not (
+                settings.space_db_path(space_id).exists()
+                and settings.space_notes_dir(space_id).exists()
+                and (settings.spaces_data_dir / space_id / "index.db").exists()
+            ):
+                await space_storage_provisioner(space_id)
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-        event_hooks={"response": [provision_created_space]},
-    ) as ac:
-        yield ac
-    await dispose_space_engine_manager()
-    await close_meta_db()
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            event_hooks={"response": [provision_created_space]},
+        ) as ac:
+            yield ac

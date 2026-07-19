@@ -68,6 +68,15 @@ def _build_real_runtime(tmp_path: Path):
     ), engines
 
 
+async def _start_owner_executor(runtime):
+    from app.runtime.bootstrap import _OwnerTaskExecutor
+
+    executor = _OwnerTaskExecutor(runtime.leases, "space-lifecycle-test")
+    runtime.install_owner_executor(executor)
+    await executor.start()
+    return executor
+
+
 @pytest.mark.asyncio
 async def test_provision_is_at_space_008_and_index_v2_before_meta_visibility(
     _isolate_env: Path, tmp_path: Path
@@ -77,12 +86,34 @@ async def test_provision_is_at_space_008_and_index_v2_before_meta_visibility(
 
     await init_meta_db()
     runtime, engines = _build_real_runtime(tmp_path)
-    handle = await runtime.provision(
+    executor = await _start_owner_executor(runtime)
+    provisioned = await runtime.provision(
         SpaceProvisionSpec(space_id="space-new", name="New")
     )
+    handle = None
     try:
         registered = await runtime.get_registered("space-new")
         assert registered is not None
+        assert provisioned.id == registered.id
+        from app.auth.authority import Principal
+        from app.db.meta_session import get_meta_session_factory
+        from app.runtime.scope import AuthorizedSpaceScope
+        from app.settings import settings
+
+        async with get_meta_session_factory()() as session:
+            handle = await AuthorizedSpaceScope(
+                session, settings.canonical_spaces_root, runtime
+            ).open(
+                Principal(
+                    subject="test",
+                    token_type="trusted_stdio",
+                    epoch=0,
+                    expires_at=None,
+                    space_id="space-new",
+                ),
+                "space-new",
+                "read",
+            )
         async with handle.scope.containment.open_verified() as opens:
             migration = await runtime.migrations.verify_open(
                 "space", opens.database_target
@@ -90,7 +121,9 @@ async def test_provision_is_at_space_008_and_index_v2_before_meta_visibility(
             assert migration.revision == "space_008_sync_retention_snapshot"
             assert runtime.index_schema.verify_open(opens.index_target).version == 2
     finally:
-        await handle.aclose()
+        if handle is not None:
+            await handle.aclose()
+        await executor.shutdown()
         await engines.dispose_all()
         await close_meta_db()
 
@@ -105,6 +138,7 @@ async def test_meta_commit_failure_removes_only_new_staging_tree(
 
     await init_meta_db()
     runtime, engines = _build_real_runtime(tmp_path)
+    executor = await _start_owner_executor(runtime)
 
     async def fail_commit(_spec, _final_root):
         raise RuntimeError("commit")
@@ -117,8 +151,39 @@ async def test_meta_commit_failure_removes_only_new_staging_tree(
         assert not (settings.spaces_data_dir / "space-fail").exists()
         assert not list(settings.spaces_data_dir.glob(".provision-space-fail-*"))
     finally:
+        await executor.shutdown()
         await engines.dispose_all()
         await close_meta_db()
+
+
+@pytest.mark.asyncio
+async def test_provision_facade_submits_only_to_installed_owner_executor() -> None:
+    from app.runtime.space import SpaceProvisionSpec, SpaceRuntime
+
+    result = object()
+
+    class Executor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        async def submit(self, name, operation):
+            self.calls.append((name, operation))
+            return result
+
+    executor = Executor()
+    runtime = SpaceRuntime(
+        leases=SimpleNamespace(),
+        engines=SimpleNamespace(),
+        migrations=SimpleNamespace(),
+        index_schema=SimpleNamespace(),
+    )
+    runtime.install_owner_executor(executor)
+
+    actual = await runtime.provision(SpaceProvisionSpec("space-a", "A"))
+
+    assert actual is result
+    assert len(executor.calls) == 1
+    assert executor.calls[0][0] == "provision:space-a"
 
 
 @pytest.mark.asyncio
