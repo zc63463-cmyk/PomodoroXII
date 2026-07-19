@@ -245,3 +245,30 @@ def test_manager_has_no_path_backed_entrypoint_or_url_construction() -> None:
     assert "_get_test_session_from_path" not in source
     assert "sqlite+aiosqlite" not in source
     assert "Path(" not in source
+@pytest.mark.asyncio
+async def test_engine_manager_rejects_bare_path_without_touching_it(tmp_path):
+    from app.space_manager import SpaceEngineManager
+
+    manager = SpaceEngineManager(max_size=2)
+    missing = tmp_path / "missing" / "space.db"
+    with pytest.raises(TypeError, match="ContainedSpaceOpens"):
+        await manager.acquire("space-1", missing)
+    assert not missing.exists()
+    assert not missing.parent.exists()
+
+
+@pytest.mark.asyncio
+async def test_engine_acquire_handle_release_is_reference_counted(tmp_path: Path) -> None:
+    manager = SpaceEngineManager(max_size=2)
+    first = _opens(tmp_path / "ref")
+    second = _opens(tmp_path / "ref")
+    one = await manager.acquire("ref", first)
+    two = await manager.acquire("ref", second)
+    assert one.engine is two.engine
+    await one.release()
+    assert manager._engines["ref"].ref_count == 1
+    await two.release()
+    assert "ref" not in manager._engines
+    await first.close_untransferred_resources()
+    await second.close_untransferred_resources()
+    await manager.dispose_all()

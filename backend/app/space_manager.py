@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -30,6 +31,33 @@ class _EngineEntry:
     target: BoundSQLiteTarget
     engine: AsyncEngine
     sessions: async_sessionmaker[AsyncSession]
+    ref_count: int = 0
+
+
+@dataclass
+class EngineHandle:
+    space_id: str
+    engine: AsyncEngine
+    _session_factory: async_sessionmaker[AsyncSession] = field(repr=False)
+    _release_callback: Callable[[], Awaitable[None]] = field(repr=False)
+    _owner_task: object = field(default_factory=asyncio.current_task, repr=False)
+    _release_started: bool = False
+    _released: bool = False
+
+    @property
+    def session_factory(self):
+        if self._release_started or self._released:
+            raise RuntimeError("engine handle release has started")
+        return self._session_factory
+
+    async def release(self) -> None:
+        if self._released:
+            return
+        if asyncio.current_task() is not self._owner_task:
+            raise RuntimeError("engine handle release belongs to another asyncio Task")
+        self._release_started = True
+        await self._release_callback()
+        self._released = True
 
 
 class SpaceEngineManager:
@@ -88,6 +116,34 @@ class SpaceEngineManager:
             await self._dispose_entry(evicted_id, evicted_entry)
         logger.info("Created identity-bound engine for Space %s", space_id)
         return entry.sessions()
+
+    async def acquire(self, space_id: str, opens: ContainedSpaceOpens) -> EngineHandle:
+        if not isinstance(opens, ContainedSpaceOpens):
+            raise TypeError("SpaceEngineManager.acquire requires ContainedSpaceOpens")
+        async with self._lock:
+            entry = self._engines.get(space_id)
+            identity = opens.database_target.identity
+            if entry is not None:
+                if entry.identity != identity:
+                    raise SpaceEnginePathMismatchError()
+                entry.ref_count += 1
+                self._engines.move_to_end(space_id)
+            else:
+                target = opens.take_database_target()
+                engine = target.make_async_engine(self._engine_options(space_id))
+                entry = _EngineEntry(identity, target, engine, create_session_factory(engine), 1)
+                self._engines[space_id] = entry
+        return EngineHandle(space_id, entry.engine, entry.sessions, lambda: self._release_handle(space_id, entry))
+
+    async def _release_handle(self, space_id: str, entry: _EngineEntry) -> None:
+        async with self._lock:
+            if entry.ref_count > 0:
+                entry.ref_count -= 1
+            if entry.ref_count:
+                return
+            if self._engines.get(space_id) is entry:
+                self._engines.pop(space_id, None)
+        await self._dispose_entry(space_id, entry)
 
     def _pop_evicted_locked(self) -> list[tuple[str, _EngineEntry]]:
         evicted: list[tuple[str, _EngineEntry]] = []
