@@ -225,12 +225,28 @@ def _isolate_env(
     # The production catalog intentionally keeps its startup-frozen model
     # identities. Tests replace the ORM graph per case, so rebind only the
     # test-local sync registry to those fresh classes without replacing CATALOG.
+    import app.registry.sync_registry as sync_registry_module
     import app.services.sync as sync_module
 
+    fresh_models: dict[str, type] = {}
     for entry in sync_module.ENTITY_REGISTRY.values():
         model_path = entry["spec"].model_path
         module_name, _, class_name = model_path.rpartition(".")
-        entry["model"] = getattr(importlib.import_module(module_name), class_name)
+        fresh_models[entry["spec"].name] = getattr(
+            importlib.import_module(module_name), class_name
+        )
+
+    production_catalog = sync_registry_module.CATALOG
+
+    class _TestSyncCatalog:
+        def list_sync_enabled(self):
+            return production_catalog.list_sync_enabled()
+
+        def model_for(self, name: str):
+            return fresh_models[name]
+
+    sync_registry_module.CATALOG = _TestSyncCatalog()
+    sync_module.ENTITY_REGISTRY = sync_module.build_sync_registry()
 
     import app.auth.security as security_module
     importlib.reload(security_module)
