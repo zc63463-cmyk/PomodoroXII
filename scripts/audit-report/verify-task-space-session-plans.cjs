@@ -2536,23 +2536,26 @@ function verify(sources) {
     'MigrationCoordinator.preflight_fleet_under_lease',
     'FrozenFleetPreflight',
     'preflight_registered_fleet(migrations, meta_target, global_lease)',
-    'runtime.preflight_registered_fleet(',
-    'await migrations.upgrade_under_lease("meta", settings.meta_db_path, global_lease)',
+    'fleet = await executor.runtime.preflight_registered_fleet(',
+    'await executor.migrations.upgrade_under_lease(',
     'test_lifespan_preflights_whole_fleet_then_migrates_before_ready',
     'test_legacy_in_late_space_rejects_before_any_fleet_byte_changes',
     'assert probe.migration_calls == []',
     'assert probe.complete_data_root_inventory() == before',
   ]) requireText('s2', marker, `fleet preflight ${marker}`);
-  const s2Bootstrap = codeBlocks(sources.s2, 'python')
-    .find((block) => block.includes('runtime.preflight_registered_fleet(')) || '';
-  const fleetPreflight = s2Bootstrap.indexOf('fleet = await runtime.preflight_registered_fleet(');
-  const metaMigration = s2Bootstrap.indexOf('await migrations.upgrade_under_lease("meta"');
-  const credentialWrite = s2Bootstrap.indexOf('await bootstrap_credential_epoch()');
-  const spacePreparation = s2Bootstrap.indexOf('await runtime.prepare_registered_spaces(');
+  const s2OwnedStartup = codeBlocks(sources.s2, 'python')
+    .find((block) => block.includes('async def _startup_owned(')) || '';
+  const fleetPreflight = s2OwnedStartup.indexOf('fleet = await executor.runtime.preflight_registered_fleet(');
+  const metaMigration = s2OwnedStartup.indexOf('await executor.migrations.upgrade_under_lease(');
+  const metaOpen = s2OwnedStartup.indexOf('await init_meta_db()');
+  const credentialWrite = s2OwnedStartup.indexOf('await bootstrap_credential_epoch()');
+  const catalogCompile = s2OwnedStartup.indexOf('catalog = REGISTRY.compile(version="1")');
+  const spacePreparation = s2OwnedStartup.indexOf('await executor.runtime.prepare_registered_spaces(');
   check(
-    fleetPreflight >= 0 && fleetPreflight < metaMigration && metaMigration < credentialWrite
-      && credentialWrite < spacePreparation,
-    's2: fleet preflight must precede Meta/Space migration and recovery-capable writes',
+    fleetPreflight >= 0 && fleetPreflight < metaMigration && metaMigration < metaOpen
+      && metaOpen < credentialWrite && credentialWrite < catalogCompile
+      && catalogCompile < spacePreparation,
+    's2: fleet preflight must precede Meta/Space migration and recovery-capable writes in the owner Task',
   );
 
   requireText('s3', 'class MutationCompileContext:', 'MutationCompileContext');
@@ -3666,11 +3669,11 @@ function main(withSelfTest) {
       ['positive richer Block', (copy) => { copy.ts1 = copy.ts1.replace('ParagraphBlockV1 | ChecklistBlockV1,', 'ParagraphBlockV1 | ChecklistBlockV1 | HeadingBlockV1,'); }],
       ['nested Checklist', (copy) => { copy.ts0 = copy.ts0.replace('children: list["ChecklistItem"]', 'parent_item_id: str | None'); }],
       ['contentVersion drift', (copy) => { copy.ts0 = copy.ts0.replace('content_version: Literal[1]', 'content_version: Literal[2]'); }],
-      ['fleet preflight removed', (copy) => { copy.s2 = copy.s2.replace('fleet = await runtime.preflight_registered_fleet(', 'fleet = await runtime.skip_registered_fleet('); }],
+      ['fleet preflight removed', (copy) => { copy.s2 = copy.s2.replace('fleet = await executor.runtime.preflight_registered_fleet(', 'fleet = await executor.runtime.skip_registered_fleet('); }],
       ['fleet preflight reordered after Meta migration', (copy) => {
         copy.s2 = copy.s2.replace(
-          '            fleet = await runtime.preflight_registered_fleet(\n                migrations, settings.meta_db_path, global_lease\n            )\n            await migrations.upgrade_under_lease("meta", settings.meta_db_path, global_lease)',
-          '            await migrations.upgrade_under_lease("meta", settings.meta_db_path, global_lease)\n            fleet = await runtime.preflight_registered_fleet(\n                migrations, settings.meta_db_path, global_lease\n            )',
+          '        fleet = await executor.runtime.preflight_registered_fleet(\n            executor.migrations, settings.meta_db_path, global_lease\n        )\n        await executor.migrations.upgrade_under_lease(\n            "meta", settings.meta_db_path, global_lease\n        )',
+          '        await executor.migrations.upgrade_under_lease(\n            "meta", settings.meta_db_path, global_lease\n        )\n        fleet = await executor.runtime.preflight_registered_fleet(\n            executor.migrations, settings.meta_db_path, global_lease\n        )',
         );
       }],
       ['fleet inventory proof removed', (copy) => { copy.s2 = copy.s2.replace('assert probe.complete_data_root_inventory() == before', 'assert probe.complete_data_root_inventory() != before'); }],
