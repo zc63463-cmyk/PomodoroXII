@@ -25,6 +25,7 @@ acquire_spaces(space_ids, mode, purpose, timeout_seconds) -> Lease
 
   `Lease` 是已获取的 async context manager，公开只读 `fence`；`_HeldOrder` 与 Lease 都记录 acquiring `asyncio.Task`。调用者必须在该 Task 中进入、断言 fence、执行 destructive operation 和 release。ContextVar 复制到 child Task 时 owner identity 不匹配，任何 acquire/use/release 都 fail closed，避免 child 继承伪造锁顺序或在错误 Context 中 reset token。
 - process-owner 使用独立 `filelock` OS advisory lock 文件，并以 `thread_local=False` 支持 joined worker 获取/释放；所有 filelock/portalocker offload 都通过 S1 `run_joined_thread`，release capability 通过 package-private `run_joined_awaitable` 到终态。`_PortalHandle`、`ProcessOwnerReceipt`、`_ReleaseStage` 的 terminal state 只能由 owner Task 中的同步 `on_success` hook提交，不能在 helper 的 `await` 之后另行标记。process-owner 从 OS lock acquisition 到 live `Lease` publication 的每个异常、取消和 corrupt-fence 边界都必须 joined-release、撤销 partial token/receipt 并让 fresh child 成功 acquire。global 和 per-Space 各使用一对 `portalocker` OS advisory 文件：writer turnstile 与 data lock。reader 短持 shared turnstile、取得 shared data 后立即释放 turnstile；writer 持 exclusive turnstile 再取得并持有 exclusive data，直到 lease release。这样已进入 turnstile 的 writer 会阻止跨进程 late reader 越过；每个进程内再叠加 writer-fair queue。禁止用进程内互斥量或 process-owner 冒充跨进程 RW 语义。
+- 在线后端的 process-owner 由 package-private `RuntimeOwnerExecutor` 的一个长期 owner `asyncio.Task` 获取并从 startup 持续持有到 shutdown 收敛；FastAPI lifespan、HTTP request 和 MCP caller Task 都不获取、不继承、不伪造 process-owner ContextVar。startup、fleet preflight、provision、migration、exclusive cleanup 和 shutdown 只在 owner Task 中执行。Caller 只能提交不含 owner token、ContextVar、`Path`、URI、raw SQLite、fd/HANDLE 或 opaque storage authority 的 typed command 并等待结果；global/Space lease、containment capability 和 migration authority 永不跨 command boundary。
 - 锁顺序固定为：process owner（仅进程/维护入口）→ global → 字典序 Space IDs → Meta/Space/Index/filesystem。禁止反向获取。
 - 在线 snapshot 只需要 global-exclusive；会替换 SQLite 或 data root 的 migration/cutover/restore/relocation 必须由当前 owner 进程在 drain engine 后执行，或在后端停止后由离线 CLI 先取得 process-owner 再取得 global-exclusive。独立维护进程不得在活动 owner 仍持锁时 rename/replace 数据文件。
 - `backend/app/runtime/scope.py::AuthorizedSpaceScope.open(principal, space_id, mode) -> SpaceRuntimeHandle` 是唯一授权到 request runtime 的公开入口；`SpaceRuntime.open_resolved` 是 package-internal，公开运维面只有 `provision/health/close` 与后续明确增加的只读 root inspection。S5 不绕过 scope 构造 live request 路径。
@@ -48,7 +49,7 @@ acquire_spaces(space_ids, mode, purpose, timeout_seconds) -> Lease
 - `backend/app/runtime/leases.py`: 独立 process-owner lock、portalocker global/per-Space cross-process writer-turnstile/data-lock pairs、进程内公平 queue、超时、字典序和 fence；不创建数据库引擎。
 - `backend/app/runtime/scope.py`: `AuthorizedSpaceScope` 的授权/登记/containment 入口，只通过内部 `SpaceRuntime.open_resolved()` 返回 handle。
 - `backend/app/runtime/space.py`: `SpaceRuntime`, ownership-explicit `SpaceRuntimeHandle`, `SpaceHealth`, provision/open/close，以及 package-internal borrowed-global preparation context；只接受 Meta 权威路径和 S1 scope result。
-- `backend/app/runtime/bootstrap.py`: FastAPI 与 FastMCP 共用的 process-owner/fleet-wide read-only migration preflight/startup migration/short-lived credential epoch helper/catalog/Space preparation async context；同一 Task 负责 acquire 与 shutdown release，不保存 session-bound authority。
+- `backend/app/runtime/bootstrap.py`: FastAPI 与 FastMCP 共用的 package-private `RuntimeOwnerExecutor`、process-owner/fleet-wide read-only migration preflight/startup migration/short-lived credential epoch helper/catalog/Space preparation async context；owner Task 负责 acquire、全部 destructive commands 与 shutdown release，不保存 session-bound authority。
 
 ### Existing runtime and migration files
 
@@ -3155,6 +3156,8 @@ class AuthorizedSpaceScope:
 
 `app/mcp/server.py` 在 Task 7 同步迁移 production consumer：每个 MCP tool invocation 通过已安装的同一个 `SpaceRuntime` 调用 `AuthorizedSpaceScope.open()` 一次，session/filesystem 从返回的 `SpaceRuntimeHandle` 派生，并在 tool invocation 的同一 Task 中关闭 handle。MCP 禁止保留 runtime-less `AuthorizedSpaceScope(meta_db, root).open(...)`、独立 `get_space_engine_manager().get_session(...)`、再次 `containment.open_verified()` 或任何第二次 scope open。Task 7 的 MCP authorization/normal-path 测试证明 unauthorized/unregistered/outside-root 在 storage activation 前失败，authorized call 恰好 open/close 一个 handle，且 direct engine-manager open count 为 0。Task 9 仍独占 FastAPI/FastMCP shared bootstrap、process owner、fleet migration、runtime installation/readiness 和 shutdown；Task 7 只要求 consumer 对缺失 runtime fail closed，不建立隐式 singleton、fallback 或独立 bootstrap。
 
+Request-scoped `AuthorizedSpaceScope.open()` and `SpaceRuntimeHandle` acquisition never call `acquire_process_owner`, never inherit its ContextVar, and never dispatch ordinary read-handle ownership to the owner executor. Before acquiring global-shared they enter the same package-private `RuntimeAdmissionGate` used by owner-command admission. The gate admits request/MCP handle opening only in READY and atomically registers the opening/active handle; `READY -> DRAINING` closes both command and handle admission under that same lock before observing counts. A losing late opener fails before lease or storage I/O. The request/MCP Task remains the sole owner of its global-shared/Space-shared handle and closes it once; completion unregisters the handle exactly once. Only the Task 8 provision facade submits an exclusive typed command to Task 9's installed owner executor.
+
 Normative lease-dependency amendment: every active or partially closed handle is registered on the exact Space lease through `retain_cleanup_dependency()`. Successful `aclose()` removes it; failure registers one same-Task pending owner containing both handle and lease. A Space lease with a dependency cannot release, a global lease cannot release while the Space order remains current, and the live `ProcessOwnerReceipt` cannot release while either child remains. `test_borrowed_cleanup_failure_pins_space_and_parent_leases_until_same_task_retry` proves fail-once convergence, persistent fail-closed behavior, and no duplicate successful callback. This explicit dependency state machine supersedes any earlier shorthand that a non-owning borrowed handle can be tracked without pinning its parent lease.
 
 Normative resource-lifetime amendment: `mode="mutation"` holds global-shared plus the protected-open capability only; even three preopened writer handles leave engine/filesystem refcount at zero and no `ContainedSpacePaths`, `Path`, or unbound SQLite URL escapes. S3 UoW and every S4 exclusive protocol operation enter the combined runtime guard, which owns Space-exclusive and lazily active resources as one cleanup unit. `borrow_prepared_space()` uses the same guard with borrowed lease ownership. Read mode retains active opaque resources only while its Space-shared lease remains held. This amendment overrides the earlier shorthand that `open_resolved()` always opens engine/filesystem.
@@ -3196,17 +3199,16 @@ async def test_provision_is_at_space_008_and_index_v2_before_meta_visibility(run
     runtime = runtime_fixture.runtime
     spec = SpaceProvisionSpec(space_id="space-new", name="New")
 
-    handle = await runtime.provision(spec)
-    async with handle:
-        registered = await runtime_fixture.get_registered("space-new")
-        assert registered is not None
-        async with handle.scope.containment.open_verified() as opens:
-            assert (await runtime.migrations.verify_open(
-                "space", opens.database_target
-            )).revision == (
-                "space_008_sync_retention_snapshot"
-            )
-            assert runtime.index_schema.verify_open(opens.index_target).version == 2
+    provisioned = await runtime.provision(spec)
+
+    assert provisioned.space_id == "space-new"
+    assert runtime_fixture.is_authority_free_provision_result(provisioned)
+    registered = await runtime_fixture.get_registered("space-new")
+    assert registered is not None
+    assert await runtime_fixture.registered_space_revision("space-new") == (
+        "space_008_sync_retention_snapshot"
+    )
+    assert await runtime_fixture.registered_index_version("space-new") == 2
 
 
 @pytest.mark.asyncio
@@ -3297,6 +3299,8 @@ class ProvisionMarker:
 
 `SpaceRuntime.provision(spec)` 固定执行：获取 global exclusive + target Space exclusive；在 canonical spaces root 下创建全新 staging 目录，将 nonce 以 ASCII 原样写入 `.pomodoroxii-provision`，fsync marker 和 staging parent，再构造上面的 `ProvisionMarker`；对不存在的 staging `space.db` 调用 `MigrationCoordinator.create_isolated_under_lease("space", staging_db, global_lease, marker)`，禁止 coordinator 重取 global 或进入 existing replace 分支；调用 `provision_file_system()` 创建 notes/index；verify 两者；fsync tree；分别校验 global 与 Space fence后原子 rename 为最终 Space ID 目录，并把本调用私有的 `renamed` flag 置为 true；最后在 Meta transaction 插入 canonical paths 并 commit。commit 成功后才删除 marker 并 fsync 最终目录。global exclusive 持续到 Meta 可见性或清理完成，避免请求观察半成品。失败时先 dispose handle，再选择精确 cleanup target：`renamed` 为 false 时只能是本次 staging path，为 true 时只能是本次 final path；重新 resolve 后要求该目录仍位于 canonical root、路径等于所选 target、marker 是 regular file且内容逐字等于本次 nonce，然后才删除。final target 在 rename 前必须被证明不存在；rename 冲突时 `renamed` 保持 false，因此绝不清理既有 final tree。任一 ownership/containment/marker 检查失败都保留目录并返回 cleanup error。`get_space_runtime(request: Request)` 使用 Task 7 的唯一 app-state accessor，route 不构造 runtime。
 
+Normative owner-executor and cancellation amendment: the preceding public `SpaceRuntime.provision(spec)` call is an Adapter facade only. It submits a typed provision command to the installed `RuntimeOwnerExecutor`; package-private `_provision_owned(spec, cancellation)` performs every global/Space lease, `MigrationCoordinator.create_isolated_under_lease()`, rename, Meta transaction, compensation, and release in the executor's owner Task with live process-owner lineage. The command closes every handle/lease/capability in the owner Task and returns only an immutable JSON-safe `ProvisionedSpace` DTO containing public registration fields; it never returns `SpaceRuntimeHandle`, `AuthorizedSpaceScopeResult`, containment capability, lease, target, or cleanup authority. If the caller needs a live handle after commit, its request Task independently calls `AuthorizedSpaceScope.open()` through the READY-only request admission gate. The request Task has no owner ContextVar and never receives a lease or storage authority from the command. `create_isolated_under_lease()` must assert `require_process_owner=True` before binding or creating the target. Cancellation requested before the Meta transaction is physically committed aborts and compensates only this attempt's marker-proved staging/final tree. Once the Meta commit is physically terminal, cancellation must not delete the committed Space or registration; the owner Task completes marker/final cleanup and returns a committed cancellation outcome before caller cancellation is re-raised. Commit/refresh ambiguity is resolved from an owner-Task commit receipt, never by deleting a possibly committed final tree. Concurrent or repeated provision of the same Space ID has one owner command and deterministic conflict/replay behavior, never two migration authorities.
+
 Route 变为：
 
 ```python
@@ -3307,9 +3311,8 @@ async def create_space(
     user: dict = Depends(require_master_token),
 ) -> dict[str, Any]:
     spec = SpaceProvisionSpec(space_id=uuid.uuid4().hex, name=body.name)
-    handle = await runtime.provision(spec)
-    async with handle:
-        return _space_to_dict(await runtime.get_registered(spec.space_id))
+    provisioned = await runtime.provision(spec)
+    return provisioned.to_response_dict()
 ```
 
 - [ ] **Step 4: Run provision regression tests**
@@ -3342,6 +3345,8 @@ git commit -m "feat(spaces): provision storage before registration"
 - Modify: `backend/tests/test_mcp_http_lifespan.py`
 - Modify: `backend/tests/test_backup_lifespan.py`
 - Modify: `backend/tests/conftest.py`
+- Create: `backend/tests/test_owner_executor.py`
+- Modify: `backend/tests/test_routes_auth_spaces.py`
 
 **Interfaces:**
 - Consumes: process owner, global-exclusive startup lease, closed `MigrationPreflightPolicy` registrations, read-only Meta registration, credential bootstrap helper, catalog compiler, and every registered Space runtime.
@@ -3516,6 +3521,8 @@ async def test_mcp_cancelled_read_keeps_cancellation_before_cleanup_failure(
         assert bootstrap_probe.zero_refs_and_locks("a")
 ```
 
+`backend/tests/test_owner_executor.py`, `backend/tests/test_runtime_bootstrap.py`, `backend/tests/test_space_lifecycle.py`, and `backend/tests/test_routes_auth_spaces.py` additionally add the executable regressions `test_owner_is_held_from_startup_until_shutdown`, `test_second_process_cannot_acquire_owner_until_shutdown`, `test_provision_command_runs_in_owner_task_without_owner_context_in_caller`, `test_command_exception_does_not_stop_executor`, `test_executor_rejects_before_ready_and_after_draining`, `test_owner_executor_bounded_fifo_and_queue_full_cancellation`, `test_shutdown_admission_race_drains_accepted_command_exactly_once`, `test_command_completion_race_settles_result_once`, `test_command_surface_rejects_authority_values`, `test_request_handle_admission_is_atomic_with_draining`, `test_mcp_handle_admission_is_atomic_with_draining`, `test_provision_returns_authority_free_dto`, `test_provision_cancellation_before_meta_commit_compensates`, `test_provision_cancellation_after_meta_commit_preserves_space`, `test_shutdown_waits_for_active_command_and_handle`, `test_owner_acquire_and_release_each_once`, `test_fastapi_and_mcp_install_same_executor`, `test_startup_failure_collects_all_cleanup`, and `test_persistent_cleanup_keeps_owner_and_fails_closed`. The second-process assertion uses a real child process for the complete STARTING/READY/DRAINING interval. Route groups are executed in bounded groups with a command timeout comfortably above their measured duration; a five-minute harness timeout is not evidence of a hang.
+
 - [ ] **Step 2: Run lifespan tests and observe early-ready/lazy-migration failures**
 
 ```powershell
@@ -3526,9 +3533,18 @@ Expected: FAIL because current lifespan has no whole-fleet read-only preflight, 
 
 - [ ] **Step 3: Implement deterministic startup and process-owner lifetime**
 
-`backend/app/runtime/bootstrap.py` 是唯一 startup/shutdown owner：
+`backend/app/runtime/bootstrap.py` 是唯一 startup/shutdown owner and command executor：
 
 ```python
+class OwnerExecutorState(StrEnum):
+    NEW = "NEW"
+    STARTING = "STARTING"
+    READY = "READY"
+    DRAINING = "DRAINING"
+    CLOSED = "CLOSED"
+    FAILED = "FAILED"
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeServices:
     runtime: SpaceRuntime
@@ -3537,52 +3553,48 @@ class RuntimeServices:
         [str, Literal["master", "space"] | None], Awaitable[Principal]
     ]
     catalog: CompiledEntityCatalog
+    executor: RuntimeOwnerExecutor
+
+
+async def _startup_owned(executor: RuntimeOwnerExecutor) -> RuntimeServices:
+    global_lease = await executor.leases.acquire_global(
+        LeaseMode.EXCLUSIVE, "startup-migration", 60
+    )
+    async with global_lease:
+        fleet = await executor.runtime.preflight_registered_fleet(
+            executor.migrations, settings.meta_db_path, global_lease
+        )
+        await executor.migrations.upgrade_under_lease(
+            "meta", settings.meta_db_path, global_lease
+        )
+        await init_meta_db()
+        await bootstrap_credential_epoch()
+        catalog = REGISTRY.compile(version="1")
+        await executor.runtime.prepare_registered_spaces(
+            catalog, global_lease, fleet
+        )
+    return executor.build_services(catalog)
 
 
 @asynccontextmanager
 async def bootstrap_runtime(purpose: str) -> AsyncIterator[RuntimeServices]:
-    owner = await leases.acquire_process_owner(purpose, 5)
-    services: RuntimeServices | None = None
+    executor = RuntimeOwnerExecutor(purpose=purpose, queue_size=32)
+    services = await executor.start()
     try:
-        global_lease = await leases.acquire_global(
-            LeaseMode.EXCLUSIVE, "startup-migration", 60
-        )
-        async with global_lease:
-            fleet = await runtime.preflight_registered_fleet(
-                migrations, settings.meta_db_path, global_lease
-            )
-            await migrations.upgrade_under_lease("meta", settings.meta_db_path, global_lease)
-            await init_meta_db()
-            await bootstrap_credential_epoch()
-            catalog = REGISTRY.compile(version="1")
-            await runtime.prepare_registered_spaces(catalog, global_lease, fleet)
-        services = RuntimeServices(
-            runtime, scope, verify_with_fresh_meta_session, catalog
-        )
         yield services
     except BaseException as primary:
-        errors = await close_all_runtime_resources(
-            services.runtime if services else runtime,
-            close_meta_db,
-            owner,
-        )
-        if errors:
-            raise BaseExceptionGroup(
-                "runtime bootstrap/body and cleanup failed",
-                [primary, *errors],
-            ) from None
-        raise
+        await executor.shutdown(primary=primary)
     else:
-        errors = await close_all_runtime_resources(
-            services.runtime if services else runtime,
-            close_meta_db,
-            owner,
-        )
-        if errors:
-            raise BaseExceptionGroup("runtime shutdown failed", errors)
+        await executor.shutdown()
 ```
 
-`close_all_runtime_resources()` 依次尝试 runtime drain、Meta close、owner release并收集 `BaseException`，包括取消，不因首个清理失败停止；因此所有聚合都使用 `BaseExceptionGroup`。不得把清理放回无条件 `finally`：startup 或 context body 已有 primary 时，聚合顺序固定为 `[primary, *cleanup_errors]`，primary 必须是 group 的第一个成员；正常退出才可单独抛 `runtime shutdown failed`。增加 startup failure、body failure、body cancellation 各自叠加 drain/Meta/owner cleanup failure 的测试并断言顺序。owner acquisition/release 与 context body 始终在同一个 asyncio Task。
+`RuntimeOwnerExecutor.start()` creates exactly one owner Task with a fresh `contextvars.Context`, transitions `NEW -> STARTING`, and waits for that Task to acquire process-owner exactly once. The private startup routine then runs fleet preflight, Meta migration/open, credential bootstrap, catalog compile, and registered-Space preparation inline in that owner Task. Only complete success publishes immutable `RuntimeServices` and transitions to `READY`; public commands before `READY` fail closed. The lifespan/request/MCP caller Task never acquires or inherits owner state.
+
+The executor and `SpaceRuntime` share one package-private `RuntimeAdmissionGate`. Its single lock makes command enqueue, request/MCP handle opening, and `READY -> DRAINING` atomic. Only typed commands and handle opens admitted while `READY` run; transition to `DRAINING` closes both admissions before reading counters, rejects losers before lease/storage I/O, and drains every already-admitted command plus opening/active handle. The executor owns a bounded FIFO queue. Queue-full cancellation removes or terminally settles its waiter without admitting work after the drain sentinel. Each command result and handle-registration token is settled exactly once. A normal command exception or cancellation outcome is returned to that caller and does not kill or restart the executor. A fatal startup/executor invariant or nonconvergent shutdown transitions to `FAILED`; `FAILED` rejects all work and never implicitly restarts. `shutdown()` is idempotent in `DRAINING`, `CLOSED`, and `FAILED`, and may retry failed cleanup without restarting startup or accepting commands.
+
+Caller cancellation after enqueue sets a command-local cancellation request and waits under shield for the owner command to reach a physical terminal boundary. Provision observes that request before Meta commit and compensates, or after the physical Meta commit completes post-commit cleanup without deletion; the caller receives cancellation only after the command result records the boundary. No future, queue slot, lease, handle, or cleanup owner is abandoned, and a command is never completed twice.
+
+Owner-task shutdown records queue-drained, active-command-zero, runtime-handles-zero, runtime-cleanups-empty, engine-drained, Meta-closed, and owner-released completion bits. It waits for the queue, active command, all request-scoped handles, pending handle/lease/migration-resume cleanup, and engine references. Request handles remain owned and closed by their acquiring request/MCP Tasks; the executor waits and never transfers or forges their ownership. It attempts collect-all diagnostics, but process-owner release is not invoked until every prerequisite bit is terminal. Persistent cleanup retains the executor state plus OS owner, reports `RuntimeCleanupPendingError`/process-exit-required, and never claims graceful completion. Startup/body/cancellation plus cleanup failures use deterministic `[primary, *cleanup_errors]` ordering.
 
 Normative shutdown amendment: the preceding “attempt every stage” wording does not authorize an owner release after an earlier failure. The cleanup owner records separate `runtime_drained`, `meta_closed`, and `owner_released` completion bits; runtime drain and Meta close may both be attempted for diagnostics, but the process-owner stage is not invoked until both bits are true, all pending handle/lease/migration-resume registries are empty, and no live child lease remains. Any failure retains the state machine plus OS owner in the acquiring Task's pending registry; retry runs only unfinished stages. Tests prove another process cannot acquire owner after runtime/global/Space/Meta cleanup failure and can do so only after same-Task convergence.
 
@@ -3592,7 +3604,7 @@ Normative shutdown amendment: the preceding “attempt every stage” wording do
 
 `prepare_registered_spaces(catalog, global_lease, fleet)` accepts only that frozen successful preflight. After Meta migration/open it re-reads registration identities and requires exact equality with `fleet`; drift fails before the first Space migration. It then processes Space IDs in dictionary order; for each Space it acquires the exclusive lease and, before any migration/drain, asserts process-owner, the passed global-exclusive, and the exact matching Space-exclusive are held by the current asyncio Task. Mismatch fails before coordinator/quiescer/Index/filesystem I/O. Prepare calls only `MigrationCoordinator.upgrade_under_lease(...)` (passing the same global lease so the coordinator performs exactly one existing-identity drain/resume) and exclusive startup index upgrade/verify; prepare itself never calls `drain_identity`/`resume_identity`. In the same Space-exclusive context it passes the same asserted global/Space leases to `async with runtime.borrow_prepared_space(scope, global_lease, space_lease) as handle` for prepared-handle verification; S3 inserts startup recovery only after the fleet preflight succeeded. The borrowed handle leaves filesystem/engine refcounts at zero before Space-exclusive exits. The outer `async with global_lease` remains the sole global release owner. A missing store aborts fleet preflight, creates no request handle, and reaches no Meta or Space migration. `init_meta_db()` only opens an already migrated file.
 
-FastAPI lifespan uses `async with bootstrap_runtime("fastapi") as services`, installs services on `app.state`, calls `runtime.assert_ready()` immediately before setting ready, yields, then clears ready before leaving the context. `assert_ready()` requires an empty pending cleanup registry. Shutdown first asks the still-owning request Tasks to run `retry_pending_cleanups_for_current_task()` and waits for active handles; if any handle or lease-cleanup owner remains, it reports `RuntimeCleanupPendingError`, keeps process-owner held, and does not claim graceful completion. The shared backend `client` fixture in `tests/conftest.py` must exercise this same installed runtime path or explicitly install the same `RuntimeServices` test bootstrap; it may not bypass runtime installation while claiming full route regression. FastMCP applies the identical readiness and shutdown gate. It replaces the synchronous shortcut with one event loop and one Task:
+FastAPI lifespan uses `async with bootstrap_runtime("fastapi") as services`, installs the exact `RuntimeServices`, `SpaceRuntime`, and `RuntimeOwnerExecutor` identities on `app.state`, calls `executor.assert_ready()` and `runtime.assert_ready()` immediately before setting ready, yields, then clears ready before leaving the context. Readiness requires executor `READY`, an empty command queue, zero active commands, zero active request handles, and empty pending cleanup/resume registries. Shutdown transitions the same executor to `DRAINING`, rejects new work, and waits for already-admitted commands and request-owned handles before owner-task cleanup. If any handle or lease-cleanup owner remains, it reports `RuntimeCleanupPendingError`, keeps process-owner held, and does not claim graceful completion. The shared backend `client` fixture in `tests/conftest.py` must exercise this same installed runtime path or explicitly install the same `RuntimeServices` test bootstrap; it may not bypass runtime installation while claiming full route regression. FastMCP installs and consumes the same `services.executor` identity and applies the identical readiness and shutdown gate. It replaces the synchronous shortcut with one event loop and one Task:
 
 ```python
 async def run_mcp(args: argparse.Namespace) -> None:
@@ -3609,12 +3621,12 @@ def main() -> None:
     asyncio.run(run_mcp(parse_args()))
 ```
 
-No MCP code calls `init_meta_db`, engine manager disposal, or Meta close directly. MCP token verification calls `services.credential_verifier(...)`; it never retains a `CredentialAuthority` or Meta session. Tests cover stdio/http startup failure, cancellation, normal exit, multi-Space borrowed-handle cleanup, a failure inside the second Space, and a persistent registered cleanup owner; readiness for both entrypoints requires Meta at head, credential epoch initialized, catalog compiled, every registered Space prepared, zero borrowed engine/filesystem refs, an empty cleanup registry, exact-once coordinator drain/resume per attempted Space, and no double release of global. Shutdown may release process-owner only after all retryable owners have completed in their acquiring Tasks; a persistent or wrong-Task owner keeps readiness false and shutdown observably incomplete.
+No MCP code calls `init_meta_db`, engine manager disposal, Meta close, owner acquire, global/Space acquire, migration, or provision directly. MCP token verification calls `services.credential_verifier(...)`; it never retains a `CredentialAuthority` or Meta session. FastAPI and MCP submit exclusive commands to the installed `services.executor`; neither exposes an owner receipt, ContextVar, lease, `Path`, URI, raw SQLite, fd/HANDLE, or storage authority. Tests cover stdio/http startup failure, cancellation, normal exit, multi-Space borrowed-handle cleanup, a failure inside the second Space, command failure isolation, and a persistent registered cleanup owner; readiness for both entrypoints requires Meta at head, credential epoch initialized, catalog compiled, every registered Space prepared, zero borrowed engine/filesystem refs, an empty command/cleanup registry, exact-once coordinator drain/resume per attempted Space, and no double release of global or process owner. Shutdown may release process-owner only after all retryable owners have completed in their acquiring Tasks; a persistent or wrong-Task owner keeps readiness false and shutdown observably incomplete.
 
 - [ ] **Step 4: Run startup plus S2 integration gate**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_main.py tests/test_mcp_http_lifespan.py tests/test_backup_lifespan.py tests/test_auth_concurrency.py tests/test_migration_wal_durability.py tests/test_runtime_leases.py tests/test_compiled_entity_catalog.py tests/test_index_store_schema.py -p no:cacheprovider
+.\.venv\Scripts\python.exe -m pytest -q tests/test_owner_executor.py tests/test_runtime_bootstrap.py tests/test_space_lifecycle.py tests/test_routes_auth_spaces.py tests/test_main.py tests/test_mcp_http_lifespan.py tests/test_backup_lifespan.py tests/test_auth_concurrency.py tests/test_migration_wal_durability.py tests/test_runtime_leases.py tests/test_compiled_entity_catalog.py tests/test_index_store_schema.py -p no:cacheprovider
 .\.venv\Scripts\ruff.exe check --no-cache app tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_main.py tests/test_mcp_http_lifespan.py tests/test_backup_lifespan.py
 ```
 
@@ -3623,7 +3635,7 @@ Expected: PASS; readiness is unreachable until every registered store is at know
 - [ ] **Step 5: Commit startup gating**
 
 ```powershell
-git add app/db/meta_session.py app/runtime/bootstrap.py app/main.py app/mcp/server.py app/runtime/space.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_main.py tests/test_mcp_http_lifespan.py tests/test_backup_lifespan.py tests/conftest.py
+git add app/db/meta_session.py app/runtime/bootstrap.py app/main.py app/mcp/server.py app/runtime/space.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_main.py tests/test_mcp_http_lifespan.py tests/test_backup_lifespan.py tests/conftest.py tests/test_owner_executor.py tests/test_routes_auth_spaces.py
 git commit -m "feat(runtime): gate startup on registered space readiness"
 ```
 
@@ -3653,7 +3665,7 @@ Expected: the Alembic command prints exactly `space_008_sync_retention_snapshot 
 - [ ] **Step 2: Run the exact approved S2 test gate**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_migration_wal_durability.py tests/test_migration_runner.py tests/test_alembic_dual_environments.py tests/test_runtime_leases.py tests/test_space_lifecycle.py tests/test_space_manager.py tests/test_compiled_entity_catalog.py tests/test_index_store_schema.py -p no:cacheprovider
+.\.venv\Scripts\python.exe -m pytest -q tests/test_migration_wal_durability.py tests/test_migration_runner.py tests/test_alembic_dual_environments.py tests/test_runtime_leases.py tests/test_owner_executor.py tests/test_runtime_bootstrap.py tests/test_space_lifecycle.py tests/test_space_manager.py tests/test_compiled_entity_catalog.py tests/test_index_store_schema.py -p no:cacheprovider
 ```
 
 Expected: PASS with zero unexpected xfail/xpass. Evidence must show committed WAL survival, one migration owner, known-revision failure outcomes, missing-store non-creation, provision-before-visible, six ordinary index creation, lock order/timeouts/process-death/fences, and awaited handles.
@@ -3664,11 +3676,24 @@ Expected: PASS with zero unexpected xfail/xpass. Evidence must show committed WA
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
+$s2BaseSha = 'bd049a2b73216e3a9d0e3966c33fdbc8628e5e7b'
+$subjectSha = (& git rev-parse HEAD).Trim()
+& git merge-base --is-ancestor $s2BaseSha $subjectSha
+if ($LASTEXITCODE -ne 0) { throw 'S2 base is not an ancestor of subject' }
+& git diff --check "$s2BaseSha..$subjectSha"
 .\.venv\Scripts\python.exe -m pytest -q tests/test_routes_auth_spaces.py tests/test_routes_meta.py tests/test_registry.py tests/test_registry_integration.py tests/test_file_system tests/test_integration.py -p no:cacheprovider
+.\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
 .\.venv\Scripts\ruff.exe check --no-cache app tests
+node ..\scripts\audit-report\verify-backend-95-implementation-plans.cjs
+node ..\scripts\audit-report\verify-task-space-session-plans.cjs
+node ..\scripts\audit-report\verify-backend-95-plan.cjs all
+$finalSha = (& git rev-parse HEAD).Trim()
+if ($finalSha -ne $subjectSha) { throw 'S2 subject SHA changed during Exit Gate' }
 ```
 
-Expected: PASS. Do not run the full retained-artifact suite in a dirty source tree unless S0's external run root is configured.
+Expected: PASS. Before the first pytest command set S0's run-scoped external `POMODOROXII_TEST_ARTIFACTS_ROOT`; the full backend command is mandatory and its external watchdog must be at least 900 seconds. The 48 route tests take roughly seven seconds each, so a five-minute harness timeout is not a hang verdict. The three Node commands are the complete normal-validator set and targeted `--self-test-*` modes do not replace them.
+
+Immediately before this gate, the executable block binds the immutable base and subject, proves ancestry, and runs diff-check. Every focused, adjacent, full, Ruff, diff-check, and normal-validator receipt uses that exact `subject_sha`; after the final command, it re-reads HEAD and requires equality. Evidence is written only below the external artifact root using the closed S0 `EvidenceRecord` contract, including command, cwd, runtime identity, ordered RFC3339 timestamps, exit/result, artifact path/hash/size, and empty certification tags. Each receipt is passed to `validate_evidence_record(record, artifact_root, expected_subject_sha=$subjectSha)` before acceptance. No evidence artifact is added to this S2 branch.
 
 - [ ] **Step 4: Perform the mandatory self-review**
 
@@ -3681,7 +3706,7 @@ function Assert-NoRgMatch {
         [Parameter(Mandatory)] [string[]] $Paths,
         [Parameter(Mandatory)] [string] $FailureMessage
     )
-    $rgOutput = & rg -n -- $Pattern @Paths 2>&1
+    $rgOutput = & rg -n -U -- $Pattern @Paths 2>&1
     $rgStatus = $LASTEXITCODE
     if ($rgStatus -eq 0) {
         $rgOutput | Write-Output
@@ -3709,6 +3734,10 @@ Assert-NoRgMatch `
     -Pattern 'ContainedSpacePaths|sqlite3\.connect\([^)]*(path|str\()|aiosqlite\.connect\([^)]*(path|str\()' `
     -Paths @('app/space_manager.py', 'app/file_system/api.py', 'app/runtime/space.py') `
     -FailureMessage 'runtime storage consumer still accepts paths or reopens SQLite by pathname'
+Assert-NoRgMatch `
+    -Pattern 'await owner\.release\(\)[\s\S]{0,240}yield services|acquire_process_owner\([^\r\n]*provision' `
+    -Paths @('app/runtime/bootstrap.py', 'app/runtime/space.py') `
+    -FailureMessage 'owner is released before lifespan completion or reacquired by provision'
 ```
 
 Each guard interprets `rg` exit `0` as “forbidden text found” and fails, exit `1` as the required zero-match result, and exit greater than `1` as a command failure.
@@ -3723,6 +3752,8 @@ Review the diff and record answers in the PR body:
 6. `IndexStoreSchema` is the sole schema version authority and explicit index creation is tested on fresh and upgraded databases.
 7. no new Alembic Space revision exists, no S3 mutation type appears, the third executed guard proves bootstrap stores no session-bound authority, and multi-Space tests prove borrowed handles leave zero refs without releasing borrowed leases.
 8. the fourth executed guard proves manager/filesystem/runtime accept only `ContainedSpaceOpens`/bound targets; final-check-to-kernel-open swap tests and pathname-connector traps pass on the supported platform.
+9. the fifth executed guard plus owner-executor tests prove one process-owner remains live across STARTING/READY/DRAINING, request Tasks have no owner ContextVar, provision runs in the owner Task, command failures do not kill the executor, and owner acquire/release each occur exactly once.
+10. cancellation tests prove pre-commit compensation and post-commit preservation; shutdown tests prove queue, active command, request handles, pending cleanup/resume, Meta close, and owner release occur in that order. `git diff --name-status "$s2BaseSha..$subjectSha"` is reviewed as an S2-only exact allowlist with no frontend, S3 journal, Linux runtime, legacy compatibility, recovery, deployment, or report cleanup paths.
 
 - [ ] **Step 5: Create the focused wave commit if review fixes were required**
 
@@ -3739,7 +3770,7 @@ If no review fix was needed, do not create an empty commit; attach the exact com
 S2 may merge only when all conditions are true at one commit:
 
 - S0/S1 remain green and no P0 is reintroduced.
-- backend has one process owner per data root; global exclusive work cannot overlap request global shared leases; per-Space exclusives are ordered and fenced.
+- backend has one process owner per data root from owner-executor startup through shutdown convergence; a second process cannot acquire it during STARTING, READY, or DRAINING; global exclusive work cannot overlap request global shared leases; per-Space exclusives are ordered and fenced.
 - committed rows still in WAL survive migration; every injected migration failure leaves the target openable at a known revision.
 - startup first read-only preflights Meta plus every registered Space as one fleet, then migrates Meta and every registered Space before ready; any rejection or missing registered store reaches zero DDL/migration calls, preserves a byte-identical complete inventory, returns the stable failure, and recreates nothing.
 - new Space storage reaches Space head `space_008_sync_retention_snapshot` and index schema v2 before Meta visibility.
@@ -3747,7 +3778,7 @@ S2 may merge only when all conditions are true at one commit:
 - fresh/upgraded `index.db` contains declared tables, FTS objects, triggers, and all ordinary indexes.
 - request storage consumers receive only opaque opened/identity-bound resources; no SQLite/Notes/index path is reopened after containment.
 - fail-once Lease/EngineHandle/SpaceRuntimeHandle release stages retry in the acquiring Task without repeating successful callbacks or resetting ContextVar early; read and MCP cancellation remains first in combined failure groups.
-- shutdown awaits all runtime/engine handles before releasing the process owner.
+- shutdown rejects new commands, drains the accepted queue and active command, awaits all runtime/engine handles and pending cleanup/resume owners, closes Meta, and only then releases the process owner exactly once from the acquiring owner Task.
 - review is performed on an S2-only diff; frontend, mutation journal, Sync v2 cursor, recovery CLI, deployment, and historical report cleanup remain outside this wave.
 
 After approval, create the separate S3 branch from the approved S2 commit and execute `2026-07-14-backend-95plus-s3-knowledge-consistency.md`; do not combine both waves in one PR.

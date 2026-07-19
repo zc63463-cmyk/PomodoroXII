@@ -3184,6 +3184,7 @@ function verifyCrossWave(plans) {
   const s2Task4Step3 = parseSteps(s2Task4Entry).find((step) => step.number === 3)?.body || '';
   const s2Task5Step3 = parseSteps(s2Task5Entry).find((step) => step.number === 3)?.body || '';
   const s2Task8Step3 = parseSteps(s2Task8Entry).find((step) => step.number === 3)?.body || '';
+  const s2Task9Step3 = parseSteps(s2Task9Entry).find((step) => step.number === 3)?.body || '';
   const s2Task10Step1 = parseSteps(s2Task10Entry).find((step) => step.number === 1)?.body || '';
   const s2Task10Step3 = parseSteps(s2Task10Entry).find((step) => step.number === 3)?.body || '';
   const s5Task5 = task(s5, 5);
@@ -3833,15 +3834,19 @@ function verifyCrossWave(plans) {
     'assert probe.complete_data_root_inventory() == before',
     'preflight_registered_fleet(migrations, meta_target, global_lease)',
   ]) requireText('S2', s2, marker, `fleet preflight ${marker}`);
-  const s2BootstrapBlock = s2;
-  const fleetPreflightIndex = s2BootstrapBlock.indexOf('fleet = await runtime.preflight_registered_fleet(');
-  const metaUpgradeIndex = s2BootstrapBlock.indexOf('await migrations.upgrade_under_lease("meta"');
-  const credentialEpochIndex = s2BootstrapBlock.indexOf('await bootstrap_credential_epoch()');
-  const prepareSpacesIndex = s2BootstrapBlock.indexOf('await runtime.prepare_registered_spaces(');
+  const s2OwnedStartupBlock = codeBlocks(s2Task9Step3, 'python')
+    .find((block) => block.includes('async def _startup_owned(')) || '';
+  const fleetPreflightIndex = s2OwnedStartupBlock.indexOf('fleet = await executor.runtime.preflight_registered_fleet(');
+  const metaUpgradeIndex = s2OwnedStartupBlock.indexOf('await executor.migrations.upgrade_under_lease(');
+  const metaOpenIndex = s2OwnedStartupBlock.indexOf('await init_meta_db()');
+  const credentialEpochIndex = s2OwnedStartupBlock.indexOf('await bootstrap_credential_epoch()');
+  const catalogCompileIndex = s2OwnedStartupBlock.indexOf('catalog = REGISTRY.compile(version="1")');
+  const prepareSpacesIndex = s2OwnedStartupBlock.indexOf('await executor.runtime.prepare_registered_spaces(');
   check(
     fleetPreflightIndex >= 0 && fleetPreflightIndex < metaUpgradeIndex
-      && metaUpgradeIndex < credentialEpochIndex && credentialEpochIndex < prepareSpacesIndex,
-    'S2 Task 10: whole-fleet read-only preflight must precede every Meta/Space migration or recovery-capable write',
+      && metaUpgradeIndex < metaOpenIndex && metaOpenIndex < credentialEpochIndex
+      && credentialEpochIndex < catalogCompileIndex && catalogCompileIndex < prepareSpacesIndex,
+    'S2 Task 9 owner startup must execute fleet preflight before Meta migration/open, credential write, catalog compile, and Space preparation',
   );
   check((s2.match(/\$rgStatus = \$LASTEXITCODE/g) || []).length >= 2, 'S2: both zero-match guards must capture rg exit status');
   const s2MigrationBlock = codeBlocks(s2Task3Entry.body, 'python').find((block) => block.includes('class MigrationCoordinator:')) || '';
@@ -3983,13 +3988,93 @@ function verifyCrossWave(plans) {
     'backend/tests/test_mcp_http_lifespan.py',
     'backend/tests/test_backup_lifespan.py',
     'backend/tests/conftest.py',
+    'backend/tests/test_owner_executor.py',
+    'backend/tests/test_routes_auth_spaces.py',
   ];
   const task9Mutable = parseFileEntries(s2Task9Entry).filter((entry) => mutableFileActions.has(entry.action));
   const task9Staged = stagedFiles('S2', s2Task9Entry);
   check(equalArrays([...task9Mutable.map((entry) => entry.path)].sort(), [...task9AllowedPaths].sort()), 'S2 Task 9 mutable Files closed set drift');
   check(equalArrays([...task9Staged].sort(), [...task9AllowedPaths].sort()), 'S2 Task 9 git add closed set drift');
+  requireSha256('S2 Task 9', s2Task9Entry.body, 'd79290543a7c01644b7c66e20997d7b5cac852390de6f4cd426fe8e3d76c896d');
   requireTaskText('S2', s2Task9Entry, 'tests/conftest.py', 'Task 9 client fixture exercises installed runtime');
   requireTaskText('S2', s2Task9Entry, 'may not bypass runtime installation while claiming full route regression', 'Task 9 fixture bypass prohibition');
+  for (const contract of [
+    '`RuntimeOwnerExecutor.start()`',
+    'NEW = "NEW"',
+    'STARTING = "STARTING"',
+    'READY = "READY"',
+    'DRAINING = "DRAINING"',
+    'CLOSED = "CLOSED"',
+    'FAILED = "FAILED"',
+    'bounded FIFO queue',
+    'share one package-private `RuntimeAdmissionGate`',
+    'makes command enqueue, request/MCP handle opening, and `READY -> DRAINING` atomic',
+    'Queue-full cancellation',
+    'Each command result and handle-registration token is settled exactly once',
+    'does not kill or restart the executor',
+    'never implicitly restarts',
+    'lifespan/request/MCP caller Task never acquires or inherits owner state',
+    'test_second_process_cannot_acquire_owner_until_shutdown',
+    'test_owner_executor_bounded_fifo_and_queue_full_cancellation',
+    'test_shutdown_admission_race_drains_accepted_command_exactly_once',
+    'test_command_completion_race_settles_result_once',
+    'test_command_surface_rejects_authority_values',
+    'test_request_handle_admission_is_atomic_with_draining',
+    'test_mcp_handle_admission_is_atomic_with_draining',
+    'test_provision_returns_authority_free_dto',
+    'test_shutdown_waits_for_active_command_and_handle',
+    'test_owner_acquire_and_release_each_once',
+    'test_fastapi_and_mcp_install_same_executor',
+    'test_startup_failure_collects_all_cleanup',
+    'test_persistent_cleanup_keeps_owner_and_fails_closed',
+  ]) requireTaskText('S2', s2Task9Entry, contract, `Task 9 owner executor contract ${contract}`);
+  requireText('S2', s2, 'package-private `RuntimeOwnerExecutor`', 'package-private owner executor authority');
+  requireTaskText('S2', s2Task8Entry, 'Adapter facade only', 'Task 8 provision is an owner-executor facade');
+  requireTaskText('S2', s2Task8Entry, 'create_isolated_under_lease()` must assert `require_process_owner=True`', 'Task 8 isolated provision requires owner lineage');
+  requireTaskText('S2', s2Task8Entry, 'returns only an immutable JSON-safe `ProvisionedSpace` DTO', 'Task 8 provision command returns authority-free DTO');
+  requireTaskText('S2', s2Task8Entry, 'never returns `SpaceRuntimeHandle`, `AuthorizedSpaceScopeResult`', 'Task 8 provision command cannot return storage authority');
+  requireTaskText('S2', s2Task8Entry, 'before the Meta transaction is physically committed', 'Task 8 pre-commit cancellation boundary');
+  requireTaskText('S2', s2Task8Entry, 'must not delete the committed Space or registration', 'Task 8 post-commit cancellation boundary');
+  requireTaskText('S2', s2Task7Entry, 'never call `acquire_process_owner`', 'Task 7 request path has no process-owner');
+  requireTaskText('S2', s2Task7Entry, '`READY -> DRAINING` closes both command and handle admission under that same lock', 'Task 7 handle admission is atomic with draining');
+  forbidPattern('S2 Task 8', s2Task8Entry.body, /handle\s*=\s*await runtime\.provision\(/g, 'provision returns a live runtime handle across owner command boundary');
+  for (const contract of [
+    '.\\.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider',
+    'verify-backend-95-implementation-plans.cjs',
+    'verify-task-space-session-plans.cjs',
+    'verify-backend-95-plan.cjs all',
+    'git diff --check "$s2BaseSha..$subjectSha"',
+    'Every focused, adjacent, full, Ruff, diff-check, and normal-validator receipt uses that exact `subject_sha`',
+  ]) requireTaskText('S2', s2Task10Entry, contract, `Task 10 exit evidence contract ${contract}`);
+  requireTaskText('S2', s2Task10Entry, '$rgOutput = & rg -n -U -- $Pattern @Paths', 'Task 10 multiline owner guard');
+  const s2Task10Step3PowerShell = codeBlocks(s2Task10Step3, 'powershell').join('\n');
+  const s2Task10Step3Lines = s2Task10Step3PowerShell.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  check(
+    s2Task10Step3Lines.filter((line) => line === '.\\.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider').length === 1,
+    'S2 Task 10: full backend pytest command must be exact and unscoped',
+  );
+  const expectedNormalValidators = [
+    'node ..\\scripts\\audit-report\\verify-backend-95-implementation-plans.cjs',
+    'node ..\\scripts\\audit-report\\verify-task-space-session-plans.cjs',
+    'node ..\\scripts\\audit-report\\verify-backend-95-plan.cjs all',
+  ];
+  const normalValidatorLines = s2Task10Step3Lines.filter((line) => line.startsWith('node ..\\scripts\\audit-report\\verify-'));
+  check(
+    equalArrays(normalValidatorLines, expectedNormalValidators),
+    'S2 Task 10: normal validators must be the exact three unmodified commands',
+  );
+  for (const binding of [
+    "$s2BaseSha = 'bd049a2b73216e3a9d0e3966c33fdbc8628e5e7b'",
+    '$subjectSha = (& git rev-parse HEAD).Trim()',
+    '& git merge-base --is-ancestor $s2BaseSha $subjectSha',
+    '& git diff --check "$s2BaseSha..$subjectSha"',
+    '$finalSha = (& git rev-parse HEAD).Trim()',
+    "if ($finalSha -ne $subjectSha) { throw 'S2 subject SHA changed during Exit Gate' }",
+    'validate_evidence_record(record, artifact_root, expected_subject_sha=$subjectSha)',
+  ]) requireTaskText('S2', s2Task10Entry, binding, `Task 10 exact subject binding ${binding}`);
+  forbidPattern('S2 Task 9', s2Task9Entry.body, /await owner\.release\(\)[\s\S]{0,240}yield services/g, 'process-owner released before lifespan body');
+  forbidPattern('S2 Task 9', s2Task9Entry.body, /FAILED[^\r\n]{0,120}(?:restart|recreate)[^\r\n]{0,40}(?:automatically|implicitly)/gi, 'FAILED executor implicitly restarts');
+  check(s2Task9Step3.includes('fresh `contextvars.Context`'), 'S2 Task 9 Step 3: owner Task must start with a fresh Context');
   requireTaskText('S2', s2Task6Entry, 'pending-resume owner', 'engine manager owns retryable partial-quiesce cleanup');
   requireTaskText('S2', s2Task6Entry, 'resume fail-once/persistent failure', 'engine manager pending-resume regression');
   requireText('S2 Task 3 Step 3', s2Task3Step3, 'FenceReceipt.assert_current()` 重读持久 fence', 'persistent fence re-read immediately before replace');
@@ -6700,6 +6785,174 @@ function runMutationSelfTests(
       },
     },
     {
+      name: 's2-task9-owner-test-whitelist-omission',
+      expected: /Task 9 mutable Files closed set drift|Task 9 git add closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(file, '- Create: `backend/tests/test_owner_executor.py`\n', '', this.name);
+        replaceRequired(file, ' tests/test_owner_executor.py', '', this.name);
+      },
+    },
+    {
+      name: 's2-task9-owner-lifetime-early-release',
+      expected: /process-owner released before lifespan body/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '        yield services',
+          '        await owner.release()\n        yield services',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task9-state-machine-downgrade',
+      expected: /Task 9 owner executor contract DRAINING/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(file, '    DRAINING = "DRAINING"', '    DRAINING = "READY"', this.name);
+      },
+    },
+    {
+      name: 's2-task9-postcommit-cancellation-delete',
+      expected: /Task 8 post-commit cancellation boundary/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'must not delete the committed Space or registration',
+          'may delete the committed Space or registration',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task9-design-owner-contract-removal',
+      expected: /DESIGN S2 Task 9: missing owner executor contract/,
+      mutate(paths) {
+        const file = paths.design;
+        replaceRequired(
+          file,
+          'one package-private `RuntimeOwnerExecutor` per active data root',
+          'one unspecified runtime helper per active data root',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task8-provision-handle-leak',
+      expected: /Task 8 provision command returns authority-free DTO|provision returns a live runtime handle/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'returns only an immutable JSON-safe `ProvisionedSpace` DTO',
+          'returns a live `SpaceRuntimeHandle`',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task9-handle-admission-race',
+      expected: /Task 9 owner executor contract .*RuntimeAdmissionGate/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'share one package-private `RuntimeAdmissionGate`',
+          'use independent command and handle admission locks',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task10-owner-guard-without-multiline',
+      expected: /Task 10 multiline owner guard/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '$rgOutput = & rg -n -U -- $Pattern @Paths',
+          '$rgOutput = & rg -n -- $Pattern @Paths',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task9-body-sha-drift',
+      expected: /S2 Task 9 critical body SHA-256 drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'and command executor：',
+          'and command executor authority：',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task10-full-backend-command-scoped',
+      expected: /full backend pytest command must be exact and unscoped/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '.\\.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider\n',
+          '.\\.venv\\Scripts\\python.exe -m pytest -q tests/test_main.py -p no:cacheprovider\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task10-normal-validator-self-test-substitution',
+      expected: /normal validators must be the exact three unmodified commands/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'node ..\\scripts\\audit-report\\verify-backend-95-implementation-plans.cjs\n',
+          'node ..\\scripts\\audit-report\\verify-backend-95-implementation-plans.cjs --self-test-s2-task9-amendment\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task10-final-subject-recheck-omission',
+      expected: /Task 10 exact subject binding \$finalSha/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(file, '$finalSha = (& git rev-parse HEAD).Trim()\n', '', this.name);
+      },
+    },
+    {
+      name: 's2-task10-evidence-expected-sha-omission',
+      expected: /Task 10 exact subject binding validate_evidence_record/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'validate_evidence_record(record, artifact_root, expected_subject_sha=$subjectSha)',
+          'validate_evidence_record(record, artifact_root)',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task10-full-backend-gate-omission',
+      expected: /Task 10 exit evidence contract .*pytest -q -p no:cacheprovider/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '.\\.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider\n',
+          '',
+          this.name,
+        );
+      },
+    },
+    {
       name: 's2-index-schema-pathname-connector',
       expected: /file-backed SQLite connector outside the S1 module/,
       mutate(paths) {
@@ -9190,8 +9443,8 @@ function runMutationSelfTests(
         const file = path.join(paths.plans, expectedPlans[2].filename);
         replaceRequired(
           file,
-          'fleet = await runtime.preflight_registered_fleet(',
-          'fleet = await runtime.skip_registered_fleet(',
+          'fleet = await executor.runtime.preflight_registered_fleet(',
+          'fleet = await executor.runtime.skip_registered_fleet(',
           this.name,
         );
       },
@@ -10932,6 +11185,24 @@ function verifyCurrentPaths(immutableS0SandboxBytes = null) {
       normalizedDesign.includes(designContract.replace(/\s+/g, ' ').trim()),
       `DESIGN S2 Task 4: missing catalog one-shot authority ${designContract}`,
     );
+    for (const designContract of [
+      'one package-private `RuntimeOwnerExecutor` per active data root',
+      'retains it through the complete `STARTING`, `READY`, and `DRAINING` interval',
+      'exactly `NEW`, `STARTING`, `READY`, `DRAINING`, `CLOSED`, and `FAILED`',
+      'bounded FIFO typed-command queue',
+      'shares one package-private `RuntimeAdmissionGate`',
+      'Queue-full cancellation cannot enqueue behind shutdown',
+      'Command results and handle tokens settle exactly once',
+      'does not terminate the executor',
+      'FAILED never implicitly restarts',
+      'After commit, cancellation never deletes the committed registration or Space',
+      'returns only an immutable JSON-safe registration DTO',
+      'release process-owner exactly once',
+      'Persistent cleanup keeps the OS owner live',
+    ]) check(
+      normalizedDesign.includes(designContract.replace(/\s+/g, ' ').trim()),
+      `DESIGN S2 Task 9: missing owner executor contract ${designContract}`,
+    );
     if (fs.existsSync(integrationSpecPath)) {
       verifyTaskSpaceIntegrationSpec(readAuthorityText(integrationSpecPath));
     }
@@ -11015,6 +11286,21 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
   runMutationSelfTests(new Set([
     's2-task9-conftest-whitelist-omission',
     's2-task9-client-fixture-runtime-bypass',
+    's2-task9-owner-test-whitelist-omission',
+    's2-task9-owner-lifetime-early-release',
+    's2-task9-state-machine-downgrade',
+    's2-task9-postcommit-cancellation-delete',
+    's2-task9-design-owner-contract-removal',
+    's2-task8-provision-handle-leak',
+    's2-task9-handle-admission-race',
+    's2-task10-owner-guard-without-multiline',
+    's2-task9-body-sha-drift',
+    's2-task10-full-backend-command-scoped',
+    's2-task10-normal-validator-self-test-substitution',
+    's2-task10-final-subject-recheck-omission',
+    's2-task10-evidence-expected-sha-omission',
+    's2-task10-full-backend-gate-omission',
+    's2-fleet-preflight-bootstrap-removal',
   ]), runS2Task9AmendmentVerifierAtPaths, 's2-task9-amendment');
 } else if (process.argv.length === 2) {
   main();

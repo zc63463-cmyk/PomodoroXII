@@ -810,6 +810,40 @@ document when the two conflict.
   Concurrent edits receive successor operation IDs, six generated response
   shapes pass explicit runtime parsers before state mutation, and a response
   with zero applied work and zero queue shrink terminates the current cycle.
+- S2 uses one package-private `RuntimeOwnerExecutor` per active data root. A
+  dedicated long-lived owner `asyncio.Task` starts from a fresh Context, acquires
+  process-owner exactly once before startup work, and retains it through the
+  complete `STARTING`, `READY`, and `DRAINING` interval. FastAPI lifespan, HTTP
+  request, and MCP caller Tasks neither inherit nor reacquire process-owner.
+  Startup, fleet preflight, provision, migration, exclusive cleanup, and
+  shutdown execute inline in the owner Task; global and Space leases remain in
+  that Task and `MigrationCoordinator` remains the only migration authority.
+- The owner executor state machine is exactly `NEW`, `STARTING`, `READY`,
+  `DRAINING`, `CLOSED`, and `FAILED`. It has a bounded FIFO typed-command queue,
+  and shares one package-private `RuntimeAdmissionGate` with request/MCP handle
+  opening. One lock makes command enqueue, handle opening/registration, and the
+  READY-to-DRAINING close atomic; a losing opener fails before lease/storage I/O,
+  while accepted commands and opening/active handles drain. Queue-full
+  cancellation cannot enqueue behind shutdown. Command results and handle tokens
+  settle exactly once. Admission is READY-only, DRAINING rejects new work,
+  shutdown is idempotent, and FAILED never implicitly restarts. A command
+  exception is returned to its caller and does not terminate the executor.
+  `RuntimeServices` installs
+  the same executor for FastAPI and MCP but exposes no owner receipt, ContextVar,
+  lease, Path, URI, raw SQLite connection, fd/HANDLE, or storage authority.
+- Provision cancellation is fenced by the physical Meta commit. Before commit,
+  cancellation compensates only the current marker-proved staging/final tree.
+  After commit, cancellation never deletes the committed registration or Space;
+  the owner Task completes marker/final cleanup before propagating cancellation.
+  A provision command closes every owner-side handle, lease, capability, target,
+  and cleanup authority and returns only an immutable JSON-safe registration DTO.
+  It never returns `SpaceRuntimeHandle` or `AuthorizedSpaceScopeResult`; any live
+  request handle is opened afterward by the request Task through the READY gate.
+  Shutdown rejects new commands and waits for the accepted queue, active command,
+  request-owned handles, engine refs, pending handle/lease/migration-resume
+  cleanup, and Meta close. Only after all prerequisites converge does the same
+  owner Task release process-owner exactly once. Persistent cleanup keeps the OS
+  owner live, readiness false, and shutdown fail-closed/process-exit-required.
 - Startup recovery uses S2's internal `runtime.borrow_prepared_space(...)`
   context. Its handle has both lease-ownership flags false, so per-Space
   filesystem/engine resources close under that Space's exclusive lease while
