@@ -109,6 +109,36 @@ def test_fsync_directory_is_exported_for_durability_contract() -> None:
     assert callable(fsync_directory)
 
 
+def test_windows_file_fsync_uses_writable_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.runtime.durability as durability
+
+    modes: list[str] = []
+
+    class Handle:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info) -> None:
+            return None
+
+        def fileno(self) -> int:
+            return 23
+
+    monkeypatch.setattr(durability.os, "name", "nt")
+    monkeypatch.setattr(
+        durability.Path,
+        "open",
+        lambda _path, mode: modes.append(mode) or Handle(),
+    )
+    monkeypatch.setattr(durability.os, "fsync", lambda descriptor: None)
+
+    durability.fsync_file(tmp_path / "fence.tmp")
+
+    assert modes == ["r+b"]
+
+
 def test_posix_directory_fsync_rejects_non_directory_and_symlink_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

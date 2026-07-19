@@ -8,7 +8,8 @@ from app.runtime.sqlite_vfs import BoundSQLiteTarget, MaintenanceOptions
 
 
 def fsync_file(path: Path) -> None:
-    with Path(path).open("rb") as handle:
+    mode = "r+b" if os.name == "nt" else "rb"
+    with Path(path).open(mode) as handle:
         os.fsync(handle.fileno())
 
 
