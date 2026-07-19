@@ -34,29 +34,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     require_legacy_backup_disabled(enabled=settings.backup_enabled)
 
-    from app.db.meta_session import close_meta_db, init_meta_db
-    from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
+    from app.runtime.bootstrap import bootstrap_runtime
 
     try:
-        await init_meta_db()
-        from app.auth.authority import bootstrap_credential_epoch
-
-        await bootstrap_credential_epoch()
-        logger.info("Meta database initialised.")
+        async with bootstrap_runtime("fastapi") as services:
+            app.state.runtime_services = services
+            app.state.runtime = services.runtime
+            app.state.runtime_executor = services.executor
+            services.executor.gate.assert_ready()
+            services.runtime.assert_ready()
+            app.state.ready = True
+            logger.info("PomodoroXII API ready.")
+            yield
     except Exception as exc:
-        logger.critical("Failed to initialise meta database: %s", exc, exc_info=True)
+        logger.critical("Failed to initialise runtime: %s", exc, exc_info=True)
         raise
-
-    # Warm up the space engine manager singleton.
-    get_space_engine_manager()
-
-    logger.info("PomodoroXII API ready.")
-    yield
+    finally:
+        app.state.ready = False
+        if hasattr(app.state, "runtime"):
+            delattr(app.state, "runtime")
+        if hasattr(app.state, "runtime_services"):
+            delattr(app.state, "runtime_services")
+        if hasattr(app.state, "runtime_executor"):
+            delattr(app.state, "runtime_executor")
 
     # --- Shutdown ---
     logger.info("PomodoroXII API shutting down.")
-    await dispose_space_engine_manager()
-    await close_meta_db()
 
 
 def create_app() -> FastAPI:

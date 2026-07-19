@@ -28,21 +28,20 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 from fastmcp import FastMCP
+from fastmcp.server.auth import AccessToken, TokenVerifier
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.authority import Principal, bootstrap_credential_epoch
-from app.db.meta_session import close_meta_db, init_meta_db
-from app.errors import AuthorizationError
+from app.auth.authority import Principal
+from app.errors import AppError, AuthorizationError
 from app.mcp.auth import (
-    PomodoroTokenVerifier,
     canonical_mcp_errors,
     current_mcp_principal,
     trusted_stdio_context,
 )
-from app.runtime.scope import AccessMode, AuthorizedSpaceScope
+from app.runtime.bootstrap import RuntimeServices
+from app.runtime.scope import AccessMode
 from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
-from app.space_manager import dispose_space_engine_manager
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +51,26 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 
 _installed_space_runtime: SpaceRuntime | None = None
+_installed_runtime_services: RuntimeServices | None = None
 
 
 def install_space_runtime(runtime: SpaceRuntime | None) -> None:
     """Install the runtime supplied by shared bootstrap or explicit tests."""
     global _installed_space_runtime
     _installed_space_runtime = runtime
+
+
+def install_mcp_runtime_services(services: RuntimeServices | None) -> None:
+    global _installed_runtime_services
+    _installed_runtime_services = services
+    global _installed_space_runtime
+    _installed_space_runtime = None if services is None else services.runtime
+
+
+def _require_runtime_services() -> RuntimeServices:
+    if _installed_runtime_services is None:
+        raise RuntimeError("MCP RuntimeServices are not installed")
+    return _installed_runtime_services
 
 
 def _require_space_runtime() -> SpaceRuntime:
@@ -82,18 +95,10 @@ async def get_space_session(handle: SpaceRuntimeHandle) -> AsyncIterator[AsyncSe
 
 
 async def _authorize_space(space_id: str, mode: AccessMode) -> SpaceRuntimeHandle:
-    from app.db.meta_session import get_meta_session_factory
-    from app.settings import settings
-
     principal = current_mcp_principal()
-    runtime = _require_space_runtime()
-    factory = get_meta_session_factory()
-    async with factory() as meta_db:
-        return await AuthorizedSpaceScope(meta_db, settings.spaces_data_dir, runtime).open(
-            principal,
-            space_id,
-            mode,
-        )
+    return await _require_runtime_services().scope.open(
+        principal, space_id, mode
+    )
 
 
 def _require_master_principal() -> Principal:
@@ -125,6 +130,34 @@ async def list_spaces() -> list[dict[str, Any]]:
 # MCP Server instance
 # --------------------------------------------------------------------------- #
 
+
+class _InstalledRuntimeTokenVerifier(TokenVerifier):
+    async def verify_token(self, token: str) -> AccessToken | None:
+        try:
+            principal = await _require_runtime_services().credential_verifier(
+                token, None
+            )
+        except AppError:
+            return None
+        scopes = (
+            ["master"]
+            if principal.token_type == "master"
+            else [f"space:{principal.space_id}"]
+        )
+        return AccessToken(
+            token=token,
+            client_id=principal.subject,
+            subject=principal.subject,
+            scopes=scopes,
+            expires_at=principal.expires_at,
+            claims={
+                "sub": principal.subject,
+                "type": principal.token_type,
+                "space_id": principal.space_id,
+                "epoch": principal.epoch,
+            },
+        )
+
 mcp = FastMCP(
     "PomodoroXII",
     instructions=(
@@ -134,7 +167,7 @@ mcp = FastMCP(
         "Meta tools expose the entity schema registry. "
         "Sync tools expose push/pull/status for cross-device synchronization."
     ),
-    auth=PomodoroTokenVerifier(),
+    auth=_InstalledRuntimeTokenVerifier(),
 )
 
 
@@ -478,8 +511,7 @@ def weekly_review(space_id: str) -> str:
 # Entry point
 # --------------------------------------------------------------------------- #
 
-def main() -> None:
-    """Run the MCP server."""
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PomodoroXII MCP Server")
     parser.add_argument(
         "--transport",
@@ -500,42 +532,32 @@ def main() -> None:
         parser.error("stdio transport requires --trusted-stdio")
     if args.transport == "http" and args.trusted_stdio:
         parser.error("--trusted-stdio is valid only with stdio transport")
+    return args
 
-    primary_error: BaseException | None = None
-    try:
-        # Initialize meta DB for all transports; HTTP mode must do it explicitly
-        # since FastMCP is not given an application lifespan handler.
-        asyncio.run(init_meta_db())
-        asyncio.run(bootstrap_credential_epoch())
 
-        if args.transport == "http":
-            mcp.run(transport="http", host=args.host, port=args.port)
-        else:
-            with trusted_stdio_context():
-                mcp.run()
-    except BaseException as error:
-        primary_error = error
-        raise
-    finally:
-        cleanup_errors: list[BaseException] = []
-        for name, cleanup in (
-            ("dispose_space_engine_manager", dispose_space_engine_manager),
-            ("close_meta_db", close_meta_db),
-        ):
-            try:
-                asyncio.run(cleanup())
-            except BaseException as error:
-                cleanup_errors.append(error)
-                if primary_error is not None:
-                    primary_error.add_note(
-                        f"MCP cleanup {name} failed: "
-                        f"{type(error).__name__}: {error}"
-                    )
+async def run_mcp(args: argparse.Namespace) -> None:
+    """Run the MCP server inside the shared runtime bootstrap."""
+    from app.runtime.bootstrap import bootstrap_runtime
 
-        if primary_error is None and cleanup_errors:
-            if len(cleanup_errors) == 1:
-                raise cleanup_errors[0]
-            raise BaseExceptionGroup("MCP cleanup failed", cleanup_errors)
+    async with bootstrap_runtime(f"mcp-{args.transport}") as services:
+        install_mcp_runtime_services(services)
+        try:
+            services.executor.gate.assert_ready()
+            services.runtime.assert_ready()
+            if args.transport == "http":
+                await mcp.run_async(
+                    transport="http", host=args.host, port=args.port
+                )
+            else:
+                with trusted_stdio_context():
+                    await mcp.run_async(transport="stdio")
+        finally:
+            install_mcp_runtime_services(None)
+
+
+def main() -> None:
+    """Run the MCP server."""
+    asyncio.run(run_mcp(parse_args()))
 
 
 if __name__ == "__main__":

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,48 +15,33 @@ async def test_disabled_backup_performs_no_backup_storage_io(
     _isolate_env,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import app.auth.authority as authority_module
-    import app.db.meta_session as meta_session_module
     import app.main as main_module
+    import app.runtime.bootstrap as bootstrap_module
     import app.settings as settings_module
-    import app.space_manager as space_manager_module
 
     monkeypatch.setattr(main_module.settings, "backup_enabled", False)
     lifecycle: list[str] = []
 
-    async def init_meta_db() -> None:
-        lifecycle.append("init")
+    class Ready:
+        def assert_ready(self) -> None:
+            lifecycle.append("ready-check")
 
-    async def bootstrap_credential_epoch() -> int:
+    @asynccontextmanager
+    async def bootstrap_runtime(_purpose: str):
         lifecycle.append("bootstrap")
-        return 1
-
-    async def dispose_space_engine_manager() -> None:
-        lifecycle.append("dispose")
-
-    async def close_meta_db() -> None:
-        lifecycle.append("close")
+        ready = Ready()
+        try:
+            yield SimpleNamespace(
+                runtime=ready,
+                executor=SimpleNamespace(gate=ready),
+            )
+        finally:
+            lifecycle.append("shutdown")
 
     def forbidden_space_db_path(self, space_id: str) -> Path:
         raise AssertionError(f"legacy backup enumerated Space path {space_id}")
 
-    monkeypatch.setattr(meta_session_module, "init_meta_db", init_meta_db)
-    monkeypatch.setattr(meta_session_module, "close_meta_db", close_meta_db)
-    monkeypatch.setattr(
-        authority_module,
-        "bootstrap_credential_epoch",
-        bootstrap_credential_epoch,
-    )
-    monkeypatch.setattr(
-        space_manager_module,
-        "get_space_engine_manager",
-        lambda: lifecycle.append("manager"),
-    )
-    monkeypatch.setattr(
-        space_manager_module,
-        "dispose_space_engine_manager",
-        dispose_space_engine_manager,
-    )
+    monkeypatch.setattr(bootstrap_module, "bootstrap_runtime", bootstrap_runtime)
     monkeypatch.setattr(
         settings_module.Settings,
         "space_db_path",
@@ -64,7 +51,13 @@ async def test_disabled_backup_performs_no_backup_storage_io(
     async with main_module.lifespan(main_module.app):
         lifecycle.append("ready")
 
-    assert lifecycle == ["init", "bootstrap", "manager", "ready", "dispose", "close"]
+    assert lifecycle == [
+        "bootstrap",
+        "ready-check",
+        "ready-check",
+        "ready",
+        "shutdown",
+    ]
 
 
 @pytest.mark.asyncio
