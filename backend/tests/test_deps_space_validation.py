@@ -1,6 +1,8 @@
 """Tests for deps.get_space_context (P3.6: space_id existence check)."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -23,7 +25,12 @@ async def test_get_space_context_rejects_nonexistent_space_id(client):
         "space_id": "non-existent-space-id-xxx",
     }
     with pytest.raises(SpaceNotFoundError):
-        await get_space_context(user=fake_user)
+        await get_space_context(
+            request=SimpleNamespace(
+                app=SimpleNamespace(state=client._transport.app.state)
+            ),
+            user=fake_user,
+        )
 
 
 @pytest.mark.asyncio
@@ -56,5 +63,13 @@ async def test_get_space_context_accepts_existing_space_id(client):
     payload = await get_current_user(
         credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=space_token)
     )
-    ctx = await get_space_context(user=payload)
-    assert ctx["space_id"] == space_id
+    ctx = await get_space_context(
+        request=SimpleNamespace(
+            app=SimpleNamespace(state=client._transport.app.state)
+        ),
+        user=payload,
+    )
+    try:
+        assert ctx["space_id"] == space_id
+    finally:
+        await ctx["runtime_handle"].aclose()
