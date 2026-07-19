@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import inspect
+import shutil
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, AsyncIterator, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.models.meta import Space
 from app.file_system.interfaces import FileSystem
+from app.runtime.contained_io import StorageIdentity
 from app.runtime.leases import Lease, LeaseMode, LeaseOrderError
 from app.runtime.scope import AuthorizedSpaceScopeResult
+from app.runtime.sqlite_vfs import BoundSQLiteTarget
+from app.settings import settings
 
 if TYPE_CHECKING:
     from app.space_manager import EngineHandle, SpaceEngineManager
@@ -23,6 +30,72 @@ class SpaceHealth:
     index_schema_version: int
     catalog_hash: str
     degraded_reason: str | None = None
+
+
+class SpaceProvisionConflictError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class SpaceProvisionSpec:
+    space_id: str
+    name: str
+
+
+@dataclass(slots=True)
+class ProvisionMarker:
+    staging_root: Path
+    nonce: str
+    _isolated_authorities: dict[StorageIdentity, object] = field(
+        default_factory=dict, init=False, repr=False
+    )
+
+    @property
+    def marker_path(self) -> Path:
+        return self.staging_root / ".pomodoroxii-provision"
+
+    def _validated_binding_request(self, path: Path) -> tuple[Path, str]:
+        root = self.staging_root.expanduser().resolve(strict=True)
+        marker = root / ".pomodoroxii-provision"
+        if marker.is_symlink() or not marker.is_file():
+            raise SpaceProvisionConflictError("provision marker is missing")
+        if marker.read_text(encoding="ascii") != self.nonce:
+            raise SpaceProvisionConflictError("provision marker does not match")
+        requested = Path(path).expanduser()
+        if requested.name in {"", ".", ".."}:
+            raise SpaceProvisionConflictError("invalid provision target name")
+        if requested.parent.resolve(strict=True) != root:
+            raise SpaceProvisionConflictError(
+                "provision target is outside staging root"
+            )
+        return root, requested.name
+
+    def bind_isolated_sqlite_target(self, path: Path) -> BoundSQLiteTarget:
+        from app.runtime.sqlite_vfs import bind_marked_isolated_target
+
+        root, basename = self._validated_binding_request(path)
+        target, cleanup_authority = bind_marked_isolated_target(
+            parent_path=root,
+            exact_absent_basename=basename,
+            marker_basename=self.marker_path.name,
+            marker_nonce=self.nonce,
+        )
+        self._isolated_authorities[target.identity] = cleanup_authority
+        return target
+
+    def commit_isolated_sqlite_target(self, target: BoundSQLiteTarget) -> None:
+        from app.runtime.sqlite_vfs import commit_closed_isolated_target
+
+        authority = self._isolated_authorities[target.identity]
+        commit_closed_isolated_target(authority, target.identity)
+        del self._isolated_authorities[target.identity]
+
+    def discard_isolated_sqlite_target(self, target: BoundSQLiteTarget) -> None:
+        from app.runtime.sqlite_vfs import discard_closed_isolated_target
+
+        authority = self._isolated_authorities[target.identity]
+        discard_closed_isolated_target(authority, target.identity)
+        del self._isolated_authorities[target.identity]
 
 
 @dataclass
@@ -196,6 +269,184 @@ class SpaceRuntime:
         self.engines = engines
         self.migrations = migrations
         self.index_schema = index_schema
+
+    async def provision(self, spec: SpaceProvisionSpec) -> SpaceRuntimeHandle:
+        """Provision storage before publishing the Meta registration."""
+        from app.auth.authority import Principal
+        from app.db.meta_session import get_meta_session
+        from app.file_system.api import provision_file_system
+        from app.runtime.durability import fsync_directory, fsync_file
+        from app.runtime.scope import AuthorizedSpaceScope
+        from app.runtime.sqlite_vfs import _bind_existing_target
+
+        final_root = settings.spaces_data_dir / spec.space_id
+        if final_root.exists():
+            raise SpaceProvisionConflictError("Space storage already exists")
+        nonce = uuid.uuid4().hex
+        staging_root = settings.spaces_data_dir / f".provision-{spec.space_id}-{nonce}"
+        db_path = staging_root / "space.db"
+        index_path = staging_root / "index.db"
+        notes_dir = staging_root / "notes"
+        marker = ProvisionMarker(staging_root, nonce)
+        renamed = False
+        owner_lease = None
+        global_lease = None
+        space_lease = None
+        handle: SpaceRuntimeHandle | None = None
+        primary: BaseException | None = None
+        cleanup_errors: list[BaseException] = []
+        try:
+            staging_root.mkdir(parents=True, exist_ok=False)
+            marker.marker_path.write_text(nonce, encoding="ascii")
+            fsync_file(marker.marker_path)
+            fsync_directory(staging_root)
+            fsync_directory(staging_root.parent)
+
+            owner_lease = await self.leases.acquire_process_owner(
+                "space-provision", 5
+            )
+            global_lease = await self.leases.acquire_global(
+                LeaseMode.EXCLUSIVE, "space-provision", 5
+            )
+            space_lease = await self.leases.acquire_spaces(
+                [spec.space_id], LeaseMode.EXCLUSIVE, "space-provision", 5
+            )
+            await self.migrations.create_isolated_under_lease(
+                "space", db_path, global_lease, marker
+            )
+            marker.marker_path.write_text(nonce, encoding="ascii")
+            fsync_file(marker.marker_path)
+            fsync_directory(staging_root)
+            file_system = await provision_file_system(notes_dir, index_path)
+            try:
+                await file_system.close()
+            except BaseException as error:
+                cleanup_errors.append(error)
+            index_target = _bind_existing_target(index_path, create_authority=False)
+            try:
+                self.index_schema.upgrade_open(
+                    index_target, create_if_missing=False
+                )
+                index_status = self.index_schema.verify_open(index_target)
+            finally:
+                await index_target.aclose()
+            if not index_status.valid:
+                raise RuntimeError("provisioned index schema is not valid")
+            global_lease.fence_receipt("global").assert_current()
+            space_lease.fence_receipt(spec.space_id).assert_current()
+            if final_root.exists():
+                raise SpaceProvisionConflictError("Space storage already exists")
+            staging_root.rename(final_root)
+            renamed = True
+            fsync_directory(final_root.parent)
+            final_marker = final_root / marker.marker_path.name
+
+            space = await self._commit_registration(spec, final_root)
+            final_marker.unlink()
+            fsync_directory(final_root)
+            await space_lease.release()
+            space_lease = None
+            await global_lease.release()
+            global_lease = None
+            await owner_lease.release()
+            owner_lease = None
+
+            async for session in get_meta_session():
+                principal = Principal(
+                    subject="system",
+                    token_type="trusted_stdio",
+                    epoch=0,
+                    expires_at=None,
+                    space_id=spec.space_id,
+                )
+                _ = space
+                return await AuthorizedSpaceScope(
+                    session, settings.spaces_data_dir, self
+                ).open(principal, spec.space_id, "read")
+            else:
+                raise RuntimeError("Meta session fixture did not yield")
+        except BaseException as error:
+            primary = error
+        cleanup_errors.extend(self._cleanup_marked_provision_tree(
+            final_root if renamed else staging_root, nonce
+        ))
+        if handle is not None:
+            try:
+                await handle.aclose()
+            except BaseExceptionGroup as group:
+                cleanup_errors.extend(group.exceptions)
+        else:
+            if space_lease is not None:
+                try:
+                    await space_lease.release()
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            if global_lease is not None:
+                try:
+                    await global_lease.release()
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            if owner_lease is not None:
+                try:
+                    await owner_lease.release()
+                except BaseException as error:
+                    cleanup_errors.append(error)
+        if primary is not None and cleanup_errors:
+            raise BaseExceptionGroup(
+                "Space provision and cleanup failed", [primary, *cleanup_errors]
+            ) from None
+        assert primary is not None
+        raise primary
+
+    async def _commit_registration(
+        self, spec: SpaceProvisionSpec, final_root: Path
+    ) -> Space:
+        from app.db.meta_session import get_meta_session
+
+        async for session in get_meta_session():
+            space = Space(
+                id=spec.space_id,
+                name=spec.name,
+                db_path=str(final_root / "space.db"),
+                notes_dir=str(final_root / "notes"),
+            )
+            session.add(space)
+            await session.commit()
+            await session.refresh(space)
+            return space
+        raise RuntimeError("Meta session fixture did not yield")
+
+    async def get_registered(self, space_id: str) -> Space | None:
+        from sqlalchemy import select
+
+        from app.db.meta_session import get_meta_session
+
+        async for session in get_meta_session():
+            return await session.scalar(select(Space).where(Space.id == space_id))
+        return None
+
+    def _cleanup_marked_provision_tree(
+        self, provision_root: Path, nonce: str
+    ) -> list[BaseException]:
+        if not provision_root.exists():
+            return []
+        errors: list[BaseException] = []
+        try:
+            root = provision_root.expanduser().resolve(strict=True)
+            spaces_root = settings.spaces_data_dir.expanduser().resolve(strict=True)
+            if root.parent != spaces_root:
+                raise SpaceProvisionConflictError(
+                    "provision cleanup target is outside spaces root"
+                )
+            marker = root / ".pomodoroxii-provision"
+            if marker.is_symlink() or not marker.is_file():
+                raise SpaceProvisionConflictError("provision marker is missing")
+            if marker.read_text(encoding="ascii") != nonce:
+                raise SpaceProvisionConflictError("provision marker does not match")
+            shutil.rmtree(root)
+        except BaseException as error:
+            errors.append(error)
+        return errors
 
     async def _verify_registered_open(self, scope: AuthorizedSpaceScopeResult) -> None:
         async with scope.containment.open_verified() as opens:

@@ -51,6 +51,76 @@ class _EngineResource:
         self.successes += 1
 
 
+def _build_real_runtime(tmp_path: Path):
+    from app.db.migrations import MigrationCoordinator
+    from app.file_system.index_schema import IndexStoreSchema
+    from app.runtime.leases import RuntimeLeaseCoordinator
+    from app.runtime.space import SpaceRuntime
+    from app.space_manager import SpaceEngineManager
+
+    engines = SpaceEngineManager()
+    leases = RuntimeLeaseCoordinator(tmp_path / ".runtime")
+    return SpaceRuntime(
+        leases=leases,
+        engines=engines,
+        migrations=MigrationCoordinator(leases, engines),
+        index_schema=IndexStoreSchema(),
+    ), engines
+
+
+@pytest.mark.asyncio
+async def test_provision_is_at_space_008_and_index_v2_before_meta_visibility(
+    _isolate_env: Path, tmp_path: Path
+) -> None:
+    from app.db.meta_session import close_meta_db, init_meta_db
+    from app.runtime.space import SpaceProvisionSpec
+
+    await init_meta_db()
+    runtime, engines = _build_real_runtime(tmp_path)
+    handle = await runtime.provision(
+        SpaceProvisionSpec(space_id="space-new", name="New")
+    )
+    try:
+        registered = await runtime.get_registered("space-new")
+        assert registered is not None
+        async with handle.scope.containment.open_verified() as opens:
+            migration = await runtime.migrations.verify_open(
+                "space", opens.database_target
+            )
+            assert migration.revision == "space_008_sync_retention_snapshot"
+            assert runtime.index_schema.verify_open(opens.index_target).version == 2
+    finally:
+        await handle.aclose()
+        await engines.dispose_all()
+        await close_meta_db()
+
+
+@pytest.mark.asyncio
+async def test_meta_commit_failure_removes_only_new_staging_tree(
+    _isolate_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.db.meta_session import close_meta_db, init_meta_db
+    from app.runtime.space import SpaceProvisionSpec
+    from app.settings import settings
+
+    await init_meta_db()
+    runtime, engines = _build_real_runtime(tmp_path)
+
+    async def fail_commit(_spec, _final_root):
+        raise RuntimeError("commit")
+
+    monkeypatch.setattr(runtime, "_commit_registration", fail_commit)
+    try:
+        with pytest.raises(RuntimeError, match="commit"):
+            await runtime.provision(SpaceProvisionSpec("space-fail", "Fail"))
+        assert await runtime.get_registered("space-fail") is None
+        assert not (settings.spaces_data_dir / "space-fail").exists()
+        assert not list(settings.spaces_data_dir.glob(".provision-space-fail-*"))
+    finally:
+        await engines.dispose_all()
+        await close_meta_db()
+
+
 @pytest.mark.asyncio
 async def test_scope_acquires_global_before_registered_meta_resolve() -> None:
     from app.runtime.scope import AuthorizedSpaceScope
