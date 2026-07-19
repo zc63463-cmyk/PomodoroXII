@@ -22,6 +22,14 @@ from app.space_manager import get_space_engine_manager
 logger = logging.getLogger(__name__)
 
 
+def get_space_runtime(request: Request):
+    """Return the sole runtime instance installed by application bootstrap."""
+    runtime = getattr(request.app.state, "runtime", None)
+    if runtime is None:
+        raise RuntimeError("SpaceRuntime is not installed")
+    return runtime
+
+
 class _LegacyCompatibleHTTPBearer(HTTPBearer):
     """Keep the raw-header parser's Bearer whitespace behavior."""
 

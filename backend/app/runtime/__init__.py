@@ -26,6 +26,7 @@ from app.runtime.scope import (
     AuthorizedSpaceScopeResult,
     SpaceContainmentCapability,
 )
+from app.runtime.space import SpaceHealth, SpaceRuntime, SpaceRuntimeHandle
 
 __all__ = [
     "AuthorizedSpaceScope",
@@ -45,6 +46,9 @@ __all__ = [
     "RuntimeCleanupPendingError",
     "RuntimeLeaseCoordinator",
     "SpaceContainmentCapability",
+    "SpaceHealth",
+    "SpaceRuntime",
+    "SpaceRuntimeHandle",
     "sqlite_online_backup",
     "StaleFenceError",
     "run_joined_thread",

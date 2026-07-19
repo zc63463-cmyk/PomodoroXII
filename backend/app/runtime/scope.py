@@ -6,7 +6,7 @@ import stat
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncContextManager, AsyncIterator, Literal
+from typing import TYPE_CHECKING, AsyncContextManager, AsyncIterator, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,10 @@ from app.db.models.meta import Space
 from app.errors import AuthorizationError, PathOutsideSpaceError, SpaceNotFoundError
 from app.runtime.contained_io import ContainedSpaceOpens, open_bound_space
 from app.runtime.joined_thread import run_joined_thread
+from app.runtime.leases import LeaseMode
+
+if TYPE_CHECKING:
+    from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
 
 type AccessMode = Literal["read", "write"]
 type AncestorReceipt = tuple[str, int, int, int]
@@ -267,11 +271,46 @@ class AuthorizedSpaceScopeResult:
 
 
 class AuthorizedSpaceScope:
-    def __init__(self, meta_db: AsyncSession, spaces_root: Path) -> None:
+    def __init__(
+        self,
+        meta_db: AsyncSession,
+        spaces_root: Path,
+        runtime: SpaceRuntime | None = None,
+    ) -> None:
         self.meta_db = meta_db
         self.spaces_root = _absolute_lexical(spaces_root)
+        self.runtime = runtime
 
     async def open(
+        self,
+        principal: Principal,
+        space_id: str,
+        mode: AccessMode,
+    ) -> AuthorizedSpaceScopeResult | SpaceRuntimeHandle:
+        resolved = await self.resolve(principal, space_id, mode)
+        if self.runtime is None:
+            return resolved
+        global_lease = await self.runtime.leases.acquire_global(
+            LeaseMode.SHARED, "request", 5
+        )
+        try:
+            return await self.runtime.open_resolved(
+                resolved,
+                "read" if mode == "read" else "mutation",
+                global_lease,
+                owns_global_lease=True,
+            )
+        except BaseException as primary:
+            try:
+                await global_lease.release()
+            except BaseException as cleanup:
+                self.runtime.leases.register_pending_lease_cleanup(global_lease)
+                raise BaseExceptionGroup(
+                    "scope open and global lease cleanup failed", [primary, cleanup]
+                ) from None
+            raise
+
+    async def resolve(
         self,
         principal: Principal,
         space_id: str,

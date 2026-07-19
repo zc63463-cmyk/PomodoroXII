@@ -67,6 +67,34 @@ async def test_contained_entry_never_calls_path_backed_constructor(
         await file_system.close()
 
 
+@pytest.mark.asyncio
+async def test_request_open_verifies_existing_store_without_initializing(
+    contained_file_system_fixture, monkeypatch
+) -> None:
+    from app.file_system.api import open_existing_file_system
+    from app.file_system.engine import FileSystemStorage
+    from app.file_system.index_schema import IndexStoreSchema
+
+    async with contained_file_system_fixture.opens() as provisioning_opens:
+        IndexStoreSchema().upgrade_open(
+            provisioning_opens.index_target, create_if_missing=False
+        )
+
+    initialized = False
+
+    async def forbidden_init(self):
+        nonlocal initialized
+        initialized = True
+        raise AssertionError("request open attempted initialization")
+
+    monkeypatch.setattr(FileSystemStorage, "init", forbidden_init)
+    async with contained_file_system_fixture.opens() as opens:
+        file_system = await open_existing_file_system(opens)
+        assert file_system._storage_mode == "contained"
+        await file_system.close()
+    assert initialized is False
+
+
 def test_contained_entry_and_engine_operations_have_no_path_fallback() -> None:
     from app.file_system.api import open_contained_file_system
 
