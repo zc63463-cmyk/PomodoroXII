@@ -71,6 +71,26 @@ def test_registry_compile_seals_registration() -> None:
         )
 
 
+def test_registry_compile_is_one_shot_fail_closed() -> None:
+    from app.registry import EntityRegistry
+
+    registry = EntityRegistry()
+    registry.register(REGISTRY.get("task"))
+    first = registry.compile(version="1")
+    with pytest.raises(CatalogCompilationError, match="catalog_already_compiled"):
+        registry.compile(version="2")
+    assert first.version == "1"
+
+
+def test_route_contract_requires_service_and_schema_resolution() -> None:
+    from app.registry.entities import EntitySpec
+
+    base = REGISTRY.get("task")
+    incomplete = replace(base, service_path=None, schema_module=None, schema_prefix=None)
+    with pytest.raises(CatalogCompilationError, match="route contract"):
+        CompiledEntityCatalog.compile([incomplete], version="1")
+
+
 def test_catalog_rejects_sync_nullable_or_integer_primary_key() -> None:
     nullable = replace(REGISTRY.get("session"), primary_key="task_id")
     with pytest.raises(CatalogCompilationError, match="primary key"):

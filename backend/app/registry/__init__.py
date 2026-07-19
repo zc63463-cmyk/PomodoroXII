@@ -90,6 +90,10 @@ class EntityRegistry:
         return len(self._specs)
 
     def compile(self, *, version: str) -> CompiledEntityCatalog:
+        if self._compiled:
+            error = CatalogCompilationError("catalog_already_compiled")
+            error.code = "catalog_already_compiled"
+            raise error
         catalog = CompiledEntityCatalog.compile(self.list(), version=version)
         self._compiled = True
         return catalog
