@@ -15,8 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.registry import REGISTRY
-from app.registry.resolve import resolve_model
+from app.registry import CATALOG
 
 
 def build_sync_registry() -> dict[str, dict[str, Any]]:
@@ -30,9 +29,9 @@ def build_sync_registry() -> dict[str, dict[str, Any]]:
         AttributeError: 模块中找不到指定类
     """
     result: dict[str, dict[str, Any]] = {}
-    for spec in REGISTRY.list_sync_enabled():
+    for spec in CATALOG.list_sync_enabled():
         entity_type = spec.effective_sync_entity_type
-        model = resolve_model(spec)
+        model = CATALOG.model_for(spec.name)
         pull_key = spec.effective_pull_key
         result[entity_type] = {
             "model": model,
