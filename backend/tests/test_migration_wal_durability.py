@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 
 from app.runtime.durability import (
     atomic_replace_durable,
@@ -75,6 +76,33 @@ def test_online_backup_captures_committed_wal_row(bound_sqlite_pair) -> None:
             assert copied.execute("SELECT value FROM marker").fetchone() == (
                 "committed-in-wal",
             )
+
+
+def test_alembic_adapter_rolls_back_and_closes_on_body_failure(
+    bound_sqlite_pair,
+) -> None:
+    from app.runtime.sqlite_vfs import _alembic_maintenance_adapter
+
+    source, _backup = bound_sqlite_pair
+    with source.open_maintenance(MaintenanceOptions(read_only=False)) as maintenance:
+        maintenance.execute("CREATE TABLE rollback_probe (value TEXT)")
+        maintenance.commit()
+        adapter = _alembic_maintenance_adapter(
+            maintenance,
+            expected_identity=source.identity,
+            require_write=True,
+        )
+        with pytest.raises(RuntimeError, match="migration body"):
+            with adapter:
+                adapter.run(
+                    lambda connection: (
+                        connection.execute(
+                            text("INSERT INTO rollback_probe VALUES ('uncommitted')")
+                        ),
+                        (_ for _ in ()).throw(RuntimeError("migration body")),
+                    )
+                )
+        assert maintenance.execute("SELECT * FROM rollback_probe").fetchall() == []
 
 
 def test_atomic_replace_fsyncs_file_and_parent(tmp_path: Path, monkeypatch) -> None:

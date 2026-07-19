@@ -171,14 +171,35 @@ def test_legacy_schema_with_partial_index_predicate_drift_fails_closed(tmp_path:
 
 def test_managed_space_007_upgrades_to_008_with_existing_outbox_cursor(tmp_path: Path) -> None:
     from app.db.migrations import _config, run_migrations
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
 
     path = tmp_path / "managed-space-007.db"
-    engine = create_engine(_sqlite_url(path))
+    path.touch()
+    target = _bind_existing_target(path, create_authority=True)
     config = _config("space")
     try:
+        with target.open_maintenance(
+            MaintenanceOptions(read_only=False, create_if_missing=False)
+        ) as maintenance:
+            with _alembic_maintenance_adapter(
+                maintenance,
+                expected_identity=target.identity,
+                require_write=True,
+            ) as adapter:
+                config.attributes["maintenance_adapter"] = adapter
+                command.upgrade(config, "space_007_session_mood_check")
+    finally:
+        import asyncio
+
+        asyncio.run(target.aclose())
+
+    engine = create_engine(_sqlite_url(path))
+    try:
         with engine.begin() as connection:
-            config.attributes["connection"] = connection
-            command.upgrade(config, "space_007_session_mood_check")
             connection.execute(
                 text(
                     "INSERT INTO sync_outbox "
@@ -276,9 +297,12 @@ def test_existing_migration_failure_restores_exact_database_bytes(
     before = path.read_bytes()
 
     def fail_upgrade(config, _revision):
-        connection = config.attributes["connection"]
-        connection.execute(text("CREATE TABLE migration_pollution (id INTEGER)"))
-        connection.commit()
+        adapter = config.attributes["maintenance_adapter"]
+        adapter.run(
+            lambda connection: connection.execute(
+                text("CREATE TABLE migration_pollution (id INTEGER)")
+            )
+        )
         raise RuntimeError("injected upgrade failure")
 
     monkeypatch.setattr(migrations_module.command, "upgrade", fail_upgrade)

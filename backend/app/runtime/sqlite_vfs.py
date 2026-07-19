@@ -13,11 +13,12 @@ import weakref
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import aiosqlite
+from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from sqlalchemy.pool import AsyncAdaptedQueuePool
+from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
 
 from app.errors import PlatformUnsupportedError, SQLiteAuthorityRevokedError
 from app.runtime.contained_io import StorageIdentity
@@ -269,7 +270,13 @@ class _MaintenanceCursor:
 
 
 class _MaintenanceConnection:
-    __slots__ = ("__connection", "__cursors", "_identity", "_read_only")
+    __slots__ = (
+        "__connection",
+        "__cursors",
+        "_identity",
+        "_read_only",
+        "_alembic_adapter_active",
+    )
 
     def __init__(
         self,
@@ -281,6 +288,7 @@ class _MaintenanceConnection:
         self.__cursors: weakref.WeakSet[_MaintenanceCursor] = weakref.WeakSet()
         self._identity = identity
         self._read_only = read_only
+        self._alembic_adapter_active = False
 
     def _require_open(self) -> sqlite3.Connection:
         connection = self.__connection
@@ -395,6 +403,129 @@ class _MaintenanceContext(AbstractContextManager[_MaintenanceConnection]):
                     [primary, cleanup_error],
                 ) from None
             raise
+
+
+class _NonClosingDbapiProxy:
+    __slots__ = ("_connection",)
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+    def close(self) -> None:
+        # The owning _MaintenanceConnection remains responsible for close.
+        return None
+
+
+class _AlembicMaintenanceAdapter(AbstractContextManager["_AlembicMaintenanceAdapter"]):
+    __slots__ = (
+        "_maintenance",
+        "_identity",
+        "_require_write",
+        "_engine",
+        "_connection",
+        "_closed",
+    )
+
+    def __init__(
+        self,
+        maintenance: _MaintenanceConnection,
+        *,
+        expected_identity: StorageIdentity,
+        require_write: bool,
+    ) -> None:
+        if not isinstance(maintenance, _MaintenanceConnection):
+            raise TypeError("Alembic adapter requires a maintenance connection")
+        maintenance._require_open()
+        if maintenance._identity != expected_identity:
+            raise ValueError("Alembic adapter identity does not match target")
+        if require_write and maintenance._read_only:
+            raise ValueError("Alembic adapter cannot migrate a read-only connection")
+        if maintenance._alembic_adapter_active:
+            raise RuntimeError("Alembic adapter use is reentrant")
+        maintenance._alembic_adapter_active = True
+        self._maintenance = maintenance
+        self._identity = expected_identity
+        self._require_write = require_write
+        self._engine = None
+        self._connection = None
+        self._closed = False
+
+    def __enter__(self) -> "_AlembicMaintenanceAdapter":
+        if self._closed:
+            raise RuntimeError("Alembic adapter is closed")
+        raw = self._maintenance._require_open()
+        try:
+            self._engine = create_engine(
+                "sqlite://",
+                creator=lambda: _NonClosingDbapiProxy(raw),
+                poolclass=StaticPool,
+            )
+            self._connection = self._engine.connect()
+        except BaseException:
+            self._maintenance._alembic_adapter_active = False
+            if self._engine is not None:
+                self._engine.dispose()
+                self._engine = None
+            raise
+        return self
+
+    def run(self, callback: Callable[[Any], Any]) -> Any:
+        if self._closed or self._connection is None:
+            raise RuntimeError("Alembic adapter is closed")
+        self._maintenance._require_open()
+        return callback(self._connection)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        errors: list[BaseException] = []
+        if self._connection is not None:
+            try:
+                self._connection.close()
+            except BaseException as error:
+                errors.append(error)
+            self._connection = None
+        if self._engine is not None:
+            try:
+                self._engine.dispose()
+            except BaseException as error:
+                errors.append(error)
+            self._engine = None
+        self._maintenance._alembic_adapter_active = False
+        if errors:
+            raise BaseExceptionGroup("Alembic adapter close failed", errors)
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        primary: BaseException | None,
+        traceback: object,
+    ) -> None:
+        try:
+            if self._connection is not None:
+                if primary is not None:
+                    self._connection.rollback()
+                else:
+                    self._connection.commit()
+        finally:
+            self.close()
+
+
+def _alembic_maintenance_adapter(
+    maintenance: _MaintenanceConnection,
+    *,
+    expected_identity: StorageIdentity,
+    require_write: bool,
+) -> _AlembicMaintenanceAdapter:
+    return _AlembicMaintenanceAdapter(
+        maintenance,
+        expected_identity=expected_identity,
+        require_write=require_write,
+    )
 
 
 class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
