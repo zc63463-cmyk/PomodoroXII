@@ -3154,6 +3154,7 @@ function verifyCrossWave(plans) {
   const s2Task6Entry = taskEntry(s2, 6);
   const s2Task7Entry = taskEntry(s2, 7);
   const s2Task8Entry = taskEntry(s2, 8);
+  const s2Task9Entry = taskEntry(s2, 9);
   const s2Task10Entry = taskEntry(s2, 10);
   const s3Task1Entry = taskEntry(s3, 1);
   const s3Task2Entry = taskEntry(s3, 2);
@@ -3970,6 +3971,25 @@ function verifyCrossWave(plans) {
   ]) requireTaskText('S2', s2Task7Entry, contract, `Task 7 unified request authority ${contract}`);
   forbidPattern('S2 Task 7', s2Task7Entry.body, /MCP (?:允许|可)保留 runtime-less/gi, 'runtime-less MCP scope constructor restored');
   forbidPattern('S2 Task 7', s2Task7Entry.body, /MCP (?:允许|可)[^\r\n]*get_space_engine_manager/gi, 'independent MCP engine path restored');
+  const task9AllowedPaths = [
+    'backend/app/db/meta_session.py',
+    'backend/app/runtime/bootstrap.py',
+    'backend/app/main.py',
+    'backend/app/mcp/server.py',
+    'backend/app/runtime/space.py',
+    'backend/tests/test_space_lifecycle.py',
+    'backend/tests/test_runtime_bootstrap.py',
+    'backend/tests/test_main.py',
+    'backend/tests/test_mcp_http_lifespan.py',
+    'backend/tests/test_backup_lifespan.py',
+    'backend/tests/conftest.py',
+  ];
+  const task9Mutable = parseFileEntries(s2Task9Entry).filter((entry) => mutableFileActions.has(entry.action));
+  const task9Staged = stagedFiles('S2', s2Task9Entry);
+  check(equalArrays([...task9Mutable.map((entry) => entry.path)].sort(), [...task9AllowedPaths].sort()), 'S2 Task 9 mutable Files closed set drift');
+  check(equalArrays([...task9Staged].sort(), [...task9AllowedPaths].sort()), 'S2 Task 9 git add closed set drift');
+  requireTaskText('S2', s2Task9Entry, 'tests/conftest.py', 'Task 9 client fixture exercises installed runtime');
+  requireTaskText('S2', s2Task9Entry, 'may not bypass runtime installation while claiming full route regression', 'Task 9 fixture bypass prohibition');
   requireTaskText('S2', s2Task6Entry, 'pending-resume owner', 'engine manager owns retryable partial-quiesce cleanup');
   requireTaskText('S2', s2Task6Entry, 'resume fail-once/persistent failure', 'engine manager pending-resume regression');
   requireText('S2 Task 3 Step 3', s2Task3Step3, 'FenceReceipt.assert_current()` 重读持久 fence', 'persistent fence re-read immediately before replace');
@@ -5803,6 +5823,10 @@ function runS2Task7AmendmentVerifierAtPaths(paths) {
   return runVerifierAtPaths(paths);
 }
 
+function runS2Task9AmendmentVerifierAtPaths(paths) {
+  return runVerifierAtPaths(paths);
+}
+
 function runS2Task1AmendmentVerifierAtPaths(paths) {
   failures.length = 0;
   const s2 = readAuthorityText(path.join(paths.plans, expectedPlans[2].filename));
@@ -5892,7 +5916,7 @@ function verifyAuthorityRedirectRejection() {
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status !== 2
-      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\]/.test(output)
+      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\]/.test(output)
       || /VERIFY_OK(?:_INTERNAL)?|SELF_TEST_OK/.test(output)) {
       throw new Error(`${label} did not fail closed:\n${output}`);
     }
@@ -5904,7 +5928,7 @@ function verifyAuthorityRedirectRejection() {
     env: { ...process.env },
   });
   const legacyOutput = `${legacyChild.stdout}\n${legacyChild.stderr}`;
-  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
+  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
     throw new Error(`legacy internal-child entry remains callable:\n${legacyOutput}`);
   }
 }
@@ -6649,6 +6673,28 @@ function runMutationSelfTests(
           file,
           'MCP 禁止保留 runtime-less `AuthorizedSpaceScope(meta_db, root).open(...)`、独立 `get_space_engine_manager().get_session(...)`',
           'MCP 允许保留 runtime-bound scope、独立 `get_space_engine_manager().get_session(...)`',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task9-conftest-whitelist-omission',
+      expected: /Task 9 mutable Files closed set drift|Task 9 git add closed set drift|Task 9 client fixture exercises installed runtime|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(file, '- Modify: `backend/tests/conftest.py`\n', '', this.name);
+        replaceRequired(file, ' tests/conftest.py', '', this.name);
+      },
+    },
+    {
+      name: 's2-task9-client-fixture-runtime-bypass',
+      expected: /Task 9 fixture bypass prohibition/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'it may not bypass runtime installation while claiming full route regression',
+          'it may bypass runtime installation while claiming full route regression',
           this.name,
         );
       },
@@ -10965,9 +11011,14 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's2-task7-runtime-less-constructor-restored',
     's2-task7-independent-mcp-engine-path-restored',
   ]), runS2Task7AmendmentVerifierAtPaths, 's2-task7-amendment');
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s2-task9-amendment') {
+  runMutationSelfTests(new Set([
+    's2-task9-conftest-whitelist-omission',
+    's2-task9-client-fixture-runtime-bypass',
+  ]), runS2Task9AmendmentVerifierAtPaths, 's2-task9-amendment');
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment]\n');
   process.exitCode = 2;
 }

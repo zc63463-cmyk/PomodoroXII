@@ -3341,6 +3341,7 @@ git commit -m "feat(spaces): provision storage before registration"
 - Modify: `backend/tests/test_main.py`
 - Modify: `backend/tests/test_mcp_http_lifespan.py`
 - Modify: `backend/tests/test_backup_lifespan.py`
+- Modify: `backend/tests/conftest.py`
 
 **Interfaces:**
 - Consumes: process owner, global-exclusive startup lease, closed `MigrationPreflightPolicy` registrations, read-only Meta registration, credential bootstrap helper, catalog compiler, and every registered Space runtime.
@@ -3591,7 +3592,7 @@ Normative shutdown amendment: the preceding “attempt every stage” wording do
 
 `prepare_registered_spaces(catalog, global_lease, fleet)` accepts only that frozen successful preflight. After Meta migration/open it re-reads registration identities and requires exact equality with `fleet`; drift fails before the first Space migration. It then processes Space IDs in dictionary order; for each Space it acquires the exclusive lease and, before any migration/drain, asserts process-owner, the passed global-exclusive, and the exact matching Space-exclusive are held by the current asyncio Task. Mismatch fails before coordinator/quiescer/Index/filesystem I/O. Prepare calls only `MigrationCoordinator.upgrade_under_lease(...)` (passing the same global lease so the coordinator performs exactly one existing-identity drain/resume) and exclusive startup index upgrade/verify; prepare itself never calls `drain_identity`/`resume_identity`. In the same Space-exclusive context it passes the same asserted global/Space leases to `async with runtime.borrow_prepared_space(scope, global_lease, space_lease) as handle` for prepared-handle verification; S3 inserts startup recovery only after the fleet preflight succeeded. The borrowed handle leaves filesystem/engine refcounts at zero before Space-exclusive exits. The outer `async with global_lease` remains the sole global release owner. A missing store aborts fleet preflight, creates no request handle, and reaches no Meta or Space migration. `init_meta_db()` only opens an already migrated file.
 
-FastAPI lifespan uses `async with bootstrap_runtime("fastapi") as services`, installs services on `app.state`, calls `runtime.assert_ready()` immediately before setting ready, yields, then clears ready before leaving the context. `assert_ready()` requires an empty pending cleanup registry. Shutdown first asks the still-owning request Tasks to run `retry_pending_cleanups_for_current_task()` and waits for active handles; if any handle or lease-cleanup owner remains, it reports `RuntimeCleanupPendingError`, keeps process-owner held, and does not claim graceful completion. FastMCP applies the identical readiness and shutdown gate. It replaces the synchronous shortcut with one event loop and one Task:
+FastAPI lifespan uses `async with bootstrap_runtime("fastapi") as services`, installs services on `app.state`, calls `runtime.assert_ready()` immediately before setting ready, yields, then clears ready before leaving the context. `assert_ready()` requires an empty pending cleanup registry. Shutdown first asks the still-owning request Tasks to run `retry_pending_cleanups_for_current_task()` and waits for active handles; if any handle or lease-cleanup owner remains, it reports `RuntimeCleanupPendingError`, keeps process-owner held, and does not claim graceful completion. The shared backend `client` fixture in `tests/conftest.py` must exercise this same installed runtime path or explicitly install the same `RuntimeServices` test bootstrap; it may not bypass runtime installation while claiming full route regression. FastMCP applies the identical readiness and shutdown gate. It replaces the synchronous shortcut with one event loop and one Task:
 
 ```python
 async def run_mcp(args: argparse.Namespace) -> None:
@@ -3622,7 +3623,7 @@ Expected: PASS; readiness is unreachable until every registered store is at know
 - [ ] **Step 5: Commit startup gating**
 
 ```powershell
-git add app/db/meta_session.py app/runtime/bootstrap.py app/main.py app/mcp/server.py app/runtime/space.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_main.py tests/test_mcp_http_lifespan.py tests/test_backup_lifespan.py
+git add app/db/meta_session.py app/runtime/bootstrap.py app/main.py app/mcp/server.py app/runtime/space.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_main.py tests/test_mcp_http_lifespan.py tests/test_backup_lifespan.py tests/conftest.py
 git commit -m "feat(runtime): gate startup on registered space readiness"
 ```
 
