@@ -3933,6 +3933,43 @@ function verifyCrossWave(plans) {
   check(!/registry\/\*\*|routes\/\*\*/.test(s2Task4Entry.body), 'S2 Task 4: broad registry/routes ownership glob');
   requireText('S2 Task 4 Step 3', s2Task4Step3, 'CATALOG', 'Task 4 implementation consumes frozen catalog');
   forbidPattern('S2 Task 4', s2Task4Entry.body, /second compile returns a new object|compile may be called repeatedly/gi, 'catalog compile reentrancy downgrade');
+  const task7AllowedPaths = [
+    'backend/app/runtime/space.py',
+    'backend/app/runtime/scope.py',
+    'backend/app/runtime/__init__.py',
+    'backend/app/runtime/leases.py',
+    'backend/app/settings.py',
+    'backend/app/file_system/api.py',
+    'backend/app/deps.py',
+    'backend/app/mcp/server.py',
+    'backend/tests/test_space_lifecycle.py',
+    'backend/tests/test_file_system/test_api.py',
+    'backend/tests/test_runtime_leases.py',
+    'backend/tests/test_settings.py',
+    'backend/tests/test_routes_v1.py',
+    'backend/tests/test_deps.py',
+    'backend/tests/test_space_path_containment.py',
+    'backend/tests/test_mcp_authorization.py',
+    'backend/tests/test_mcp_server.py',
+  ];
+  const task7Mutable = parseFileEntries(s2Task7Entry).filter((entry) => mutableFileActions.has(entry.action));
+  const task7Staged = stagedFiles('S2', s2Task7Entry);
+  check(equalArrays([...task7Mutable.map((entry) => entry.path)].sort(), [...task7AllowedPaths].sort()), 'S2 Task 7 mutable Files closed set drift');
+  check(equalArrays([...task7Staged].sort(), [...task7AllowedPaths].sort()), 'S2 Task 7 git add closed set drift');
+  for (const contract of [
+    'required constructor dependency with no `None`/default',
+    'runtime-less fallback',
+    'package-private authorization-resolution primitive',
+    '真实 FastAPI dependency graph',
+    '恰好调用一次 `AuthorizedSpaceScope.open()`',
+    'DB/FS handle identity 相同',
+    '不得通过 autouse runtime/provisioning fixture 掩盖 missing-store fail-closed',
+    '`app/mcp/server.py` 在 Task 7 同步迁移 production consumer',
+    'direct engine-manager open count 为 0',
+    'Task 9 仍独占 FastAPI/FastMCP shared bootstrap',
+  ]) requireTaskText('S2', s2Task7Entry, contract, `Task 7 unified request authority ${contract}`);
+  forbidPattern('S2 Task 7', s2Task7Entry.body, /MCP (?:允许|可)保留 runtime-less/gi, 'runtime-less MCP scope constructor restored');
+  forbidPattern('S2 Task 7', s2Task7Entry.body, /MCP (?:允许|可)[^\r\n]*get_space_engine_manager/gi, 'independent MCP engine path restored');
   requireTaskText('S2', s2Task6Entry, 'pending-resume owner', 'engine manager owns retryable partial-quiesce cleanup');
   requireTaskText('S2', s2Task6Entry, 'resume fail-once/persistent failure', 'engine manager pending-resume regression');
   requireText('S2 Task 3 Step 3', s2Task3Step3, 'FenceReceipt.assert_current()` 重读持久 fence', 'persistent fence re-read immediately before replace');
@@ -5762,6 +5799,10 @@ function runS2Task4AmendmentVerifierAtPaths(paths) {
   return runVerifierAtPaths(paths);
 }
 
+function runS2Task7AmendmentVerifierAtPaths(paths) {
+  return runVerifierAtPaths(paths);
+}
+
 function runS2Task1AmendmentVerifierAtPaths(paths) {
   failures.length = 0;
   const s2 = readAuthorityText(path.join(paths.plans, expectedPlans[2].filename));
@@ -5851,7 +5892,7 @@ function verifyAuthorityRedirectRejection() {
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status !== 2
-      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\]/.test(output)
+      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\]/.test(output)
       || /VERIFY_OK(?:_INTERNAL)?|SELF_TEST_OK/.test(output)) {
       throw new Error(`${label} did not fail closed:\n${output}`);
     }
@@ -5863,7 +5904,7 @@ function verifyAuthorityRedirectRejection() {
     env: { ...process.env },
   });
   const legacyOutput = `${legacyChild.stdout}\n${legacyChild.stderr}`;
-  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
+  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
     throw new Error(`legacy internal-child entry remains callable:\n${legacyOutput}`);
   }
 }
@@ -6558,6 +6599,56 @@ function runMutationSelfTests(
           paths.design,
           'compile fails closed with `catalog_already_compiled`',
           'compile returns a replacement catalog',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task7-mcp-consumer-whitelist-omission',
+      expected: /Task 7 mutable Files closed set drift|Task 7 git add closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(file, '- Modify: `backend/app/mcp/server.py`\n', '', this.name);
+      },
+    },
+    {
+      name: 's2-task7-dependency-test-whitelist-omission',
+      expected: /Task 7 mutable Files closed set drift|Task 7 git add closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(file, '- Modify: `backend/tests/test_deps.py`\n', '', this.name);
+      },
+    },
+    {
+      name: 's2-task7-containment-test-whitelist-omission',
+      expected: /Task 7 mutable Files closed set drift|Task 7 git add closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(file, '- Modify: `backend/tests/test_space_path_containment.py`\n', '', this.name);
+      },
+    },
+    {
+      name: 's2-task7-runtime-less-constructor-restored',
+      expected: /Task 7 unified request authority required constructor dependency|runtime-less MCP scope constructor restored/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '`runtime` 是 `AuthorizedSpaceScope` 的 required constructor dependency with no `None`/default',
+          '`runtime` is optional and MCP 允许保留 runtime-less constructor fallback',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task7-independent-mcp-engine-path-restored',
+      expected: /independent MCP engine path restored/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'MCP 禁止保留 runtime-less `AuthorizedSpaceScope(meta_db, root).open(...)`、独立 `get_space_engine_manager().get_session(...)`',
+          'MCP 允许保留 runtime-bound scope、独立 `get_space_engine_manager().get_session(...)`',
           this.name,
         );
       },
@@ -10866,9 +10957,17 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's2-task4-dynamic-consumer-restored',
     's2-task4-design-one-shot-removal',
   ]), runS2Task4AmendmentVerifierAtPaths, 's2-task4-amendment');
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s2-task7-amendment') {
+  runMutationSelfTests(new Set([
+    's2-task7-mcp-consumer-whitelist-omission',
+    's2-task7-dependency-test-whitelist-omission',
+    's2-task7-containment-test-whitelist-omission',
+    's2-task7-runtime-less-constructor-restored',
+    's2-task7-independent-mcp-engine-path-restored',
+  ]), runS2Task7AmendmentVerifierAtPaths, 's2-task7-amendment');
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment]\n');
   process.exitCode = 2;
 }
