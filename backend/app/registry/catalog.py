@@ -49,6 +49,16 @@ def _resolve_model(spec: EntitySpec) -> type[Any]:
         ) from exc
 
 
+def _resolve_attribute(path: str, *, label: str) -> Any:
+    module_path, separator, attribute = path.rpartition(".")
+    if not separator or not module_path or not attribute:
+        raise CatalogCompilationError(f"{label} cannot be resolved: {path!r}")
+    try:
+        return getattr(importlib.import_module(module_path), attribute)
+    except (ImportError, AttributeError) as exc:
+        raise CatalogCompilationError(f"{label} cannot be resolved: {path!r}") from exc
+
+
 @dataclass(frozen=True)
 class CompiledEntityCatalog:
     version: str
@@ -78,6 +88,20 @@ class CompiledEntityCatalog:
                 raise CatalogCompilationError(f"duplicate table: {spec.table_name}")
             if spec.route_enabled and (not spec.route_prefix or spec.route_prefix in routes):
                 raise CatalogCompilationError(f"duplicate or missing route: {spec.route_prefix!r}")
+            if spec.route_enabled and not all(
+                (spec.service_path, spec.schema_module, spec.schema_prefix)
+            ):
+                raise CatalogCompilationError(f"route contract incomplete: {spec.name}")
+            if spec.service_path:
+                _resolve_attribute(spec.service_path, label="service path")
+            if spec.schema_module and spec.schema_prefix:
+                schema_module = importlib.import_module(spec.schema_module)
+                if not hasattr(schema_module, spec.schema_prefix):
+                    raise CatalogCompilationError(
+                        f"schema prefix cannot be resolved: {spec.schema_prefix}"
+                    )
+            elif spec.route_enabled or spec.mcp_schema_enabled is True and spec.schema_module:
+                raise CatalogCompilationError(f"schema contract incomplete: {spec.name}")
             if spec.route_prefix:
                 routes.add(spec.route_prefix)
             if spec.sync_enabled and spec.effective_sync_entity_type in sync_keys:
@@ -95,7 +119,12 @@ class CompiledEntityCatalog:
             models[spec.name] = _resolve_model(spec)
             if spec.sync_enabled:
                 try:
-                    column = sa_inspect(models[spec.name]).columns[spec.primary_key]
+                    mapper = sa_inspect(models[spec.name])
+                    if len(mapper.primary_key) != 1:
+                        raise CatalogCompilationError(
+                            f"composite primary key is not sync-safe: {spec.name}"
+                        )
+                    column = mapper.columns[spec.primary_key]
                 except (KeyError, AttributeError) as exc:
                     raise CatalogCompilationError(
                         f"primary key cannot be resolved: {spec.primary_key}"

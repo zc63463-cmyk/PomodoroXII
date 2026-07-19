@@ -29,8 +29,7 @@ from app.models.folder import Folder
 from app.models.note import Note
 from app.models.quick_note import QuickNote
 from app.models.tombstone import Tombstone
-from app.registry import REGISTRY
-from app.registry.resolve import resolve_model
+from app.registry import CATALOG
 from app.schemas.common import PaginatedResponse
 from app.schemas.trash import TrashItemResponse
 from app.services.cascade import CascadeService
@@ -39,19 +38,19 @@ from app.services.tombstone import TombstoneService
 
 router = APIRouter()
 
-# P2.5: derived from REGISTRY.list_soft_delete() — single source of truth.
+# P2.5: derived from the startup-frozen catalog — single source of truth.
 # Maps entity_type (snake_case) -> ORM model class for soft-delete entities.
 # Note: list_trash() still uses hardcoded SELECT per entity because each
 # entity's title extraction logic differs (Note.title, Folder.name,
 # QuickNote.content[:50]). YAGNI — refactor to TrashService only when
 # a 4th soft-delete entity lands.
 _ENTITY_MAP: dict[str, type] = {
-    spec.name: resolve_model(spec)
-    for spec in REGISTRY.list_soft_delete()
+    spec.name: CATALOG.model_for(spec.name)
+    for spec in CATALOG.list_soft_delete()
 }
 
 
-def _resolve_model(entity_type: str) -> type:
+def _catalog_model_for(entity_type: str) -> type:
     """Return the ORM model class for *entity_type* or raise ValidationError."""
     model = _ENTITY_MAP.get(entity_type)
     if model is None:
@@ -171,7 +170,7 @@ async def restore_item(
             "entity_id": entity_id,
         }
 
-    model = _resolve_model(entity_type)
+    model = _catalog_model_for(entity_type)
     obj = await db.get(model, entity_id)
     if obj is None:
         raise NotFoundError(f"{entity_type} '{entity_id}' not found")
@@ -228,7 +227,7 @@ async def purge_item(
             "entity_id": entity_id,
         }
 
-    model = _resolve_model(entity_type)
+    model = _catalog_model_for(entity_type)
     obj = await db.get(model, entity_id)
     if obj is None:
         raise NotFoundError(f"{entity_type} '{entity_id}' not found")
