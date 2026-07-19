@@ -25,25 +25,38 @@ def _explicit_trusted_stdio_context():
 @pytest.fixture
 async def mcp_space_session(space_session, monkeypatch):
     import app.mcp.server as server
-    import app.space_manager as space_manager
     from app.db.meta_session import get_meta_session
+    from app.db.migrations import MigrationCoordinator
     from app.db.models.meta import Space
-    from app.runtime.sqlite_vfs import _extension_candidates
+    from app.file_system.index_schema import IndexStoreSchema
+    from app.runtime.leases import RuntimeLeaseCoordinator
+    from app.runtime.space import SpaceRuntime
+    from app.runtime.sqlite_vfs import _bind_existing_target, _extension_candidates
     from app.settings import settings
-    from app.space_manager import dispose_space_engine_manager
+    from app.space_manager import SpaceEngineManager, dispose_space_engine_manager
 
     candidates = _extension_candidates()
     assert candidates, "Task 5 MCP tests require the Windows pxii-vfs extension"
     monkeypatch.setenv("POMODOROXII_PXII_VFS_EXTENSION", str(candidates[0]))
-    monkeypatch.setattr(
-        server,
-        "get_space_engine_manager",
-        space_manager.get_space_engine_manager,
+    engines = SpaceEngineManager()
+    leases = RuntimeLeaseCoordinator(settings.data_root / ".runtime")
+    index_schema = IndexStoreSchema()
+    runtime = SpaceRuntime(
+        leases=leases,
+        engines=engines,
+        migrations=MigrationCoordinator(leases, engines),
+        index_schema=index_schema,
     )
     database = settings.space_db_path("spc_test")
     notes = settings.space_notes_dir("spc_test")
     notes.mkdir(parents=True, exist_ok=True)
-    (database.parent / "index.db").touch()
+    index = database.parent / "index.db"
+    index.touch()
+    index_target = _bind_existing_target(index, create_authority=True)
+    try:
+        index_schema.upgrade_open(index_target, create_if_missing=False)
+    finally:
+        await index_target.aclose()
     async for meta_db in get_meta_session():
         meta_db.add(
             Space(
@@ -55,9 +68,12 @@ async def mcp_space_session(space_session, monkeypatch):
         )
         await meta_db.commit()
         break
+    server.install_space_runtime(runtime)
     try:
         yield space_session
     finally:
+        server.install_space_runtime(None)
+        await engines.dispose_all()
         await dispose_space_engine_manager()
 
 # --------------------------------------------------------------------------- #

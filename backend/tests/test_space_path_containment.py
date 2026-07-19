@@ -7,6 +7,7 @@ import subprocess
 import threading
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -163,6 +164,9 @@ async def test_linux_get_space_context_rejects_before_meta_or_contained_io(
 
     with pytest.raises(PlatformUnsupportedError):
         await get_space_context(
+            request=SimpleNamespace(
+                app=SimpleNamespace(state=SimpleNamespace(runtime=object()))
+            ),
             user={
                 "sub": "dependency-user",
                 "type": "space",
@@ -275,9 +279,7 @@ async def authorized_scope(client):
             )
         )
         await session.commit()
-        return await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
-            _principal("spc_lock"), "spc_lock", "read"
-        )
+        return await _resolve_authorized_scope(session, "spc_lock")
     raise AssertionError("Meta session fixture did not yield")
 
 
@@ -300,6 +302,17 @@ def _principal(space_id: str) -> Principal:
         expires_at=None,
         space_id=space_id,
     )
+
+
+async def _resolve_authorized_scope(session, space_id: str):
+    from types import SimpleNamespace
+
+    from app.runtime.scope import AuthorizedSpaceScope
+    from app.settings import settings
+
+    return await AuthorizedSpaceScope(
+        session, settings.spaces_data_dir, SimpleNamespace()
+    ).resolve(_principal(space_id), space_id, "read")
 
 
 def _create_directory_link(link: Path, target: Path) -> None:
@@ -416,9 +429,7 @@ async def test_scope_rejects_registered_path_outside_root_before_storage_io(
         )
         await session.commit()
         with pytest.raises(PathOutsideSpaceError):
-            await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
-                _principal("spc_escape"), "spc_escape", "read"
-            )
+            await _resolve_authorized_scope(session, "spc_escape")
         break
     assert not (outside / "space.db").exists()
     assert not (outside / "notes").exists()
@@ -458,11 +469,7 @@ async def test_registered_missing_store_fails_closed_without_storage_creation(
             )
         )
         await session.commit()
-        scope = await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
-            _principal(f"spc_missing_{missing_role}"),
-            f"spc_missing_{missing_role}",
-            "read",
-        )
+        scope = await _resolve_authorized_scope(session, f"spc_missing_{missing_role}")
         with pytest.raises(SpaceStorageMissingError) as error:
             async with scope.containment.open_verified():
                 counters["engine_open_count"] += 1
@@ -503,9 +510,7 @@ async def test_registered_directory_db_role_fails_with_stable_missing_error(
             )
         )
         await session.commit()
-        scope = await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
-            _principal("spc_invalid_db_role"), "spc_invalid_db_role", "read"
-        )
+        scope = await _resolve_authorized_scope(session, "spc_invalid_db_role")
         with pytest.raises(SpaceStorageMissingError) as error:
             async with scope.containment.open_verified():
                 raise AssertionError("storage must fail before yielding opens")
@@ -549,9 +554,7 @@ async def test_storage_path_roles_must_be_pairwise_distinct(
         )
         await session.commit()
         with pytest.raises(PathOutsideSpaceError, match="roles overlap"):
-            await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
-                _principal("spc_collision"), "spc_collision", "read"
-            )
+            await _resolve_authorized_scope(session, "spc_collision")
         break
     assert list(space_root.iterdir()) == []
 
@@ -585,9 +588,7 @@ async def test_existing_link_component_is_rejected_without_following(
         )
         await session.commit()
         with pytest.raises(PathOutsideSpaceError):
-            await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
-                _principal("spc_link"), "spc_link", "read"
-            )
+            await _resolve_authorized_scope(session, "spc_link")
         break
     assert list(outside.iterdir()) == []
 
@@ -628,9 +629,7 @@ async def test_swap_after_final_check_cannot_redirect_first_kernel_open(
             )
         )
         await session.commit()
-        scope = await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
-            _principal("spc_swap"), "spc_swap", "read"
-        )
+        scope = await _resolve_authorized_scope(session, "spc_swap")
         break
     else:
         raise AssertionError("Meta session fixture did not yield")
@@ -684,9 +683,7 @@ async def test_swap_after_parent_bind_never_redirects_storage_roles(
             )
         )
         await session.commit()
-        scope = await AuthorizedSpaceScope(session, settings.spaces_data_dir).open(
-            _principal(space_id), space_id, "read"
-        )
+        scope = await _resolve_authorized_scope(session, space_id)
         break
     else:
         raise AssertionError("Meta session fixture did not yield")
