@@ -3720,7 +3720,50 @@ function verifyCrossWave(plans) {
   requireText('S2 Task 1', s2Task1Entry.body, 'FlushFileBuffers', 'Windows durability flush');
   forbidPattern('S2 Task 1', s2Task1Entry.body, /Directory fsync is not exposed by Python on Windows/g, 'silent Windows durability downgrade');
   forbidPattern('S2 Task 1', s2Task1Entry.body, /Windows[^\r\n]{0,100}(?:不支持时，记录明确 debug 日志|允许[^\r\n]{0,30}debug)/gi, 'contradictory Windows durability fallback wording');
-  requireText('S2 Task 3 Step 3', s2Task3Step3, 'config.attributes["connection"] = connection', 'Alembic bound connection injection');
+  for (const task3Path of [
+    'Modify: `backend/app/runtime/sqlite_vfs.py`',
+    'Modify: `backend/app/db/migrations.py`',
+    'Modify: `backend/alembic_meta/env.py`',
+    'Modify: `backend/alembic_space/env.py`',
+    'Modify: `backend/tests/test_pxii_vfs.py`',
+    'Modify: `backend/tests/test_migration_wal_durability.py`',
+    'Modify: `backend/tests/test_migration_runner.py`',
+    'Modify: `backend/tests/test_alembic_dual_environments.py`',
+  ]) requireTaskText('S2', s2Task3Entry, task3Path, `Task 3 Alembic adapter ownership ${task3Path}`);
+  const task3AllowedPaths = [
+    'backend/app/runtime/sqlite_vfs.py',
+    'backend/app/db/migrations.py',
+    'backend/alembic_meta/env.py',
+    'backend/alembic_space/env.py',
+    'backend/tests/test_pxii_vfs.py',
+    'backend/tests/test_migration_wal_durability.py',
+    'backend/tests/test_migration_runner.py',
+    'backend/tests/test_alembic_dual_environments.py',
+  ];
+  const task3Mutable = parseFileEntries(s2Task3Entry).filter((entry) => mutableFileActions.has(entry.action));
+  const task3Staged = stagedFiles('S2', s2Task3Entry);
+  check(equalArrays([...task3Mutable.map((entry) => entry.path)].sort(), [...task3AllowedPaths].sort()), 'S2 Task 3 mutable Files closed set drift');
+  check(equalArrays([...task3Staged].sort(), [...task3AllowedPaths].sort()), 'S2 Task 3 git add closed set drift');
+  for (const adapterContract of [
+    'config.attributes["maintenance_adapter"] = adapter',
+    '_alembic_maintenance_adapter',
+    '_bind_existing_target(path, create_authority=False)',
+    '_bind_existing_target(target, create_authority=False)',
+    'MaintenanceOptions(read_only=False, create_if_missing=False)',
+    'raw `sqlite3.Connection`',
+    'wrong identity, closed/reentrant/self use',
+    'public surface',
+    'test_alembic_adapter_runs_meta_and_space_env_on_bound_authority',
+    'test_alembic_adapter_rejects_raw_sqlite_connection',
+    'test_alembic_adapter_rejects_path_uri_or_connector_input',
+    'test_alembic_adapter_enforces_identity_and_write_mode',
+    'test_alembic_adapter_rejects_closed_or_reentrant_use',
+    'test_alembic_adapter_rolls_back_and_closes_on_failure_or_cancellation',
+    'test_alembic_envs_require_the_same_package_private_adapter',
+    'test_alembic_adapter_does_not_expand_bound_target_surface',
+    'test_s2_does_not_add_a_space_revision',
+  ]) requireTaskText('S2', s2Task3Entry, adapterContract, `Task 3 authority-preserving Alembic adapter ${adapterContract}`);
+  forbidPattern('S2 Task 3 Alembic adapter', codeBlocks(s2Task3Step3, 'python').join('\n'), /config\.attributes\["connection"\]\s*=|open_sqlite_target_for_maintenance|(?:sqlite3|aiosqlite)\.connect\s*\(|sqlite(?:\+aiosqlite)?:\/{2,3}/g, 'raw, pathname, or retired Alembic adapter bypass');
   requireText('S2 Task 3 Step 3', s2Task3Step3, 'begin_bound_replacement(maintenance_target)', 'package-private bound replacement authority');
   requireText('S2 Task 3 Step 3', s2Task3Step3, 'self._migrate_target(kind, replacement.target)', 'bound-target migration callback');
   requireText('S2 Task 3 Step 3', s2Task3Step3, 'marker.commit_isolated_sqlite_target(target)', 'isolated target success commit');
@@ -3804,7 +3847,7 @@ function verifyCrossWave(plans) {
   const upgradeMethod = upgradeStart >= 0 && createStart > upgradeStart ? s2MigrationBlock.slice(upgradeStart, createStart) : '';
   check((upgradeMethod.match(/require_process_owner=True/g) || []).length === 2, 'S2 Task 3: destructive migration must assert process ownership before drain and execution');
   forbidPattern('S2 Task 3 migration code', upgradeMethod, /require_process_owner=False/g, 'destructive migration without process owner');
-  const targetOpen = upgradeMethod.indexOf('maintenance_target = open_sqlite_target_for_maintenance(target)');
+  const targetOpen = upgradeMethod.indexOf('maintenance_target = _bind_existing_target(target, create_authority=False)');
   const primaryInit = upgradeMethod.indexOf('primary: BaseException | None = None', targetOpen);
   const cleanupEnvelope = upgradeMethod.indexOf('        try:', primaryInit);
   const drainCall = upgradeMethod.indexOf('await self._quiescer.drain_identity(identity)', cleanupEnvelope);
@@ -3840,7 +3883,7 @@ function verifyCrossWave(plans) {
       && discardAfterCommitGuard > committedCancellationGuard,
     'S2 Task 3: physically committed isolated target must propagate cancellation without discard',
   );
-  requireSha256('S2 Task 3', s2Task3Step3, '8a4df2c7fabe78d59c7abc07cd400e896d1129182790eac21f8ae989c9c9b0de');
+  requireSha256('S2 Task 3', s2Task3Step3, '235d5efd6efa5ad411faf5a9092315daf99cdbbd826a47b4c031b5f21b8a64d3');
   requireTaskText('S2', s2Task6Entry, 'pending-resume owner', 'engine manager owns retryable partial-quiesce cleanup');
   requireTaskText('S2', s2Task6Entry, 'resume fail-once/persistent failure', 'engine manager pending-resume regression');
   requireText('S2 Task 3 Step 3', s2Task3Step3, 'FenceReceipt.assert_current()` 重读持久 fence', 'persistent fence re-read immediately before replace');
@@ -5662,6 +5705,10 @@ function runS1Task4AmendmentVerifierAtPaths(paths) {
   return result;
 }
 
+function runS2Task3AmendmentVerifierAtPaths(paths) {
+  return runVerifierAtPaths(paths);
+}
+
 function runS2Task1AmendmentVerifierAtPaths(paths) {
   failures.length = 0;
   const s2 = readAuthorityText(path.join(paths.plans, expectedPlans[2].filename));
@@ -5751,7 +5798,7 @@ function verifyAuthorityRedirectRejection() {
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status !== 2
-      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\]/.test(output)
+      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\]/.test(output)
       || /VERIFY_OK(?:_INTERNAL)?|SELF_TEST_OK/.test(output)) {
       throw new Error(`${label} did not fail closed:\n${output}`);
     }
@@ -5763,7 +5810,7 @@ function verifyAuthorityRedirectRejection() {
     env: { ...process.env },
   });
   const legacyOutput = `${legacyChild.stdout}\n${legacyChild.stderr}`;
-  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
+  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
     throw new Error(`legacy internal-child entry remains callable:\n${legacyOutput}`);
   }
 }
@@ -6313,6 +6360,97 @@ function runMutationSelfTests(
           file,
           '    config = _alembic_config_for_kind(kind, connection_only=True)',
           '    config = _alembic_config_for_kind(kind, connection_only=False)\n    config.set_main_option("sqlalchemy.url", "sqlite+aiosqlite:///tmp/unsafe.db")',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task3-adapter-whitelist-omission',
+      expected: /Task 3 Alembic adapter ownership|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '- Modify: `backend/app/runtime/sqlite_vfs.py`\n',
+          '',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task3-env-whitelist-omission',
+      expected: /Task 3 Alembic adapter ownership|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '- Modify: `backend/alembic_meta/env.py`\n',
+          '',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task3-raw-connection-attribute',
+      expected: /authority-preserving Alembic adapter|raw, pathname, or retired Alembic adapter bypass|critical body SHA-256 drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'config.attributes["maintenance_adapter"] = adapter',
+          'config.attributes["connection"] = connection',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task3-retired-maintenance-helper',
+      expected: /authority-preserving Alembic adapter|raw, pathname, or retired Alembic adapter bypass|critical body SHA-256 drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '_bind_existing_target(target, create_authority=False)',
+          'open_sqlite_target_for_maintenance(target)',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task3-adapter-body-drift',
+      expected: /S2 Task 3 critical body SHA-256 drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'require_write=True,',
+          'require_write=False,',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task3-extra-whitelist-file',
+      expected: /S2 Task 3 (?:mutable Files closed set drift|git add closed set drift)/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'git add app/runtime/sqlite_vfs.py app/db/migrations.py alembic_meta/env.py alembic_space/env.py tests/test_pxii_vfs.py tests/test_migration_wal_durability.py tests/test_migration_runner.py tests/test_alembic_dual_environments.py',
+          'git add app/runtime/sqlite_vfs.py app/db/migrations.py alembic_meta/env.py alembic_space/env.py tests/test_pxii_vfs.py tests/test_migration_wal_durability.py tests/test_migration_runner.py tests/test_alembic_dual_environments.py tests/test_unapproved.py',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task3-design-adapter-contract-removal',
+      expected: /DESIGN S2 Task 3: missing authority-preserving Alembic adapter contract/,
+      mutate(paths) {
+        const file = paths.design;
+        replaceRequired(
+          file,
+          '`Config.attributes["maintenance_adapter"]`',
+          '`Config.attributes["connection"]`',
           this.name,
         );
       },
@@ -10528,6 +10666,19 @@ function verifyCurrentPaths(immutableS0SandboxBytes = null) {
 
   if (plans.size === expectedPlans.length) {
     const design = readAuthorityText(designPath);
+    const normalizedDesign = design.replace(/\s+/g, ' ').trim();
+    for (const designContract of [
+      'Config.attributes["maintenance_adapter"]',
+      'legitimate open `_MaintenanceConnection`',
+      'same `StorageIdentity`',
+      'read/write mode',
+      'never returns a raw `sqlite3.Connection`',
+      'pathname, URI',
+      'closed/reentrant use',
+    ]) check(
+      normalizedDesign.includes(designContract.replace(/\s+/g, ' ').trim()),
+      `DESIGN S2 Task 3: missing authority-preserving Alembic adapter contract ${designContract}`,
+    );
     if (fs.existsSync(integrationSpecPath)) {
       verifyTaskSpaceIntegrationSpec(readAuthorityText(integrationSpecPath));
     }
@@ -10581,9 +10732,19 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's2-task1-step3-body-drift',
     's2-pathname-online-backup',
   ]), runS2Task1AmendmentVerifierAtPaths, 's2-task1-amendment');
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s2-task3-amendment') {
+  runMutationSelfTests(new Set([
+    's2-task3-adapter-whitelist-omission',
+    's2-task3-env-whitelist-omission',
+    's2-task3-raw-connection-attribute',
+    's2-task3-retired-maintenance-helper',
+    's2-task3-adapter-body-drift',
+    's2-task3-extra-whitelist-file',
+    's2-task3-design-adapter-contract-removal',
+  ]), runS2Task3AmendmentVerifierAtPaths, 's2-task3-amendment');
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment]\n');
   process.exitCode = 2;
 }

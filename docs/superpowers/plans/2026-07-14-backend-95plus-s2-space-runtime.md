@@ -1467,8 +1467,12 @@ git commit -m "feat(runtime): coordinate process and space leases"
 
 **Files:**
 - Consume unchanged: `backend/app/runtime/joined_thread.py`
+- Modify: `backend/app/runtime/sqlite_vfs.py`
 - Modify: `backend/app/db/migrations.py`
+- Modify: `backend/alembic_meta/env.py`
+- Modify: `backend/alembic_space/env.py`
 - Consume unchanged: `backend/app/runtime/contained_io.py`
+- Modify: `backend/tests/test_pxii_vfs.py`
 - Modify: `backend/tests/test_migration_wal_durability.py`
 - Modify: `backend/tests/test_migration_runner.py`
 - Modify: `backend/tests/test_alembic_dual_environments.py`
@@ -1484,6 +1488,8 @@ git commit -m "feat(runtime): coordinate process and space leases"
 Add the real regressions `test_standalone_upgrade_serializes_key_but_upgrade_once_runs_inline_in_caller_task`, `test_standalone_fail_once_pending_cleanup_converges_before_top_level_exit_and_fresh_child_acquires`, and `test_standalone_persistent_cleanup_requires_process_exit_and_keeps_locks_until_exit`. The first records `asyncio.current_task()` in `upgrade`, `_upgrade_once`, process/global acquisition, destructive work, and release and requires one object throughout while two callers for the same key serialize. The fail-once case injects a resume/release failure, proves same-Task pending cleanup converges before the top-level call exits, and then lets a real child acquire. The persistent case runs the offline coordinator in a child process, proves it emits `process_exit_required`, never emits success/readiness, and keeps process/global locks unavailable until that child exits; only process death lets a fresh child acquire.
 
 `test_cancel_during_upgrade_worker_joins_before_close_resume_and_unlock` and `test_cancel_during_isolated_create_worker_joins_before_cleanup_and_unlock` cancel after the worker enters checkpoint/replace/create. They require the worker to reach a terminal result while process/global/drain or provision cleanup dependencies remain pinned, then perform close→resume→Space/global/process release with cancellation at element zero. Any background replace/create observed after unlock fails. Tests use real files/sidecars and never mock unlink.
+
+Adapter 与 Alembic env 的 RED/GREEN 合同还必须包含以下具名测试：`test_alembic_adapter_runs_meta_and_space_env_on_bound_authority`、`test_alembic_adapter_rejects_raw_sqlite_connection`、`test_alembic_adapter_rejects_path_uri_or_connector_input`、`test_alembic_adapter_enforces_identity_and_write_mode`、`test_alembic_adapter_rejects_closed_or_reentrant_use`、`test_alembic_adapter_rolls_back_and_closes_on_failure_or_cancellation`、`test_alembic_envs_require_the_same_package_private_adapter`、`test_alembic_adapter_does_not_expand_bound_target_surface` 和 `test_s2_does_not_add_a_space_revision`。测试必须证明 adapter 只由仍打开的合法 `_MaintenanceConnection` 创建，绑定同一 `StorageIdentity`、read/write mode 和 connection lifecycle；raw `sqlite3.Connection`、Path、URI、token、fd/HANDLE、host connector、wrong identity, closed/reentrant/self use 全部 fail closed。Meta/Space env 只能读取 `Config.attributes["maintenance_adapter"]`，不得读取 raw connection 或自行建立 URL；失败、rollback、close 和 cancellation 后 adapter 不可复用且 native live references 为零。`BoundSQLiteTarget` public surface 仍严格为 `identity`、`make_async_engine(options)`、`open_maintenance(options)`、`aclose()`，Space head 仍为 `space_008_sync_retention_snapshot`，不得创建 `009` revision。
 
 `test_upgrade_close_failure_never_resumes_until_close_stage_physically_completes` injects close fail-once/persistent and cancellation after physical close: fail-once retries close then resumes once; persistent retains the drained identity and exact close/resume sequence without calling resume; cancellation after a completed close still advances resume while preserving cancellation first. `test_isolated_create_never_discards_an_open_vfs_target` injects create cancellation plus close fail-once/persistent and proves discard has its own stage strictly after close. `test_verify_body_and_close_failure_are_primary_first` injects verify error/cancellation plus close error and requires exact `[body_primary, *close_errors]`; no `finally` may mask the body.
 
@@ -1595,6 +1601,10 @@ from typing import Protocol
 
 from app.runtime.joined_thread import run_joined_awaitable, run_joined_thread
 from app.runtime.leases import _ReleaseSequence, _ReleaseStage
+from app.runtime.sqlite_vfs import (
+    _alembic_maintenance_adapter,
+    _bind_existing_target,
+)
 
 
 class MigrationQuiescer(Protocol):
@@ -1634,11 +1644,15 @@ class ProcessExitRequiredError(RuntimeError):
 def _migrate_target(kind: DatabaseKind, target: BoundSQLiteTarget) -> None:
     config = _alembic_config_for_kind(kind, connection_only=True)
     with target.open_maintenance(
-        MaintenanceOptions(read_only=False, create_if_missing=True)
+        MaintenanceOptions(read_only=False, create_if_missing=False)
     ) as connection:
-        config.attributes["connection"] = connection
-        command.upgrade(config, "head")
-        connection.commit()
+        with _alembic_maintenance_adapter(
+            connection,
+            expected_identity=target.identity,
+            require_write=True,
+        ) as adapter:
+            config.attributes["maintenance_adapter"] = adapter
+            command.upgrade(config, "head")
 
 
 class MigrationCoordinator:
@@ -1699,7 +1713,7 @@ class MigrationCoordinator:
         return errors
 
     async def verify(self, kind: DatabaseKind, path: Path) -> MigrationStatus:
-        target = open_sqlite_target_for_maintenance(path)
+        target = _bind_existing_target(path, create_authority=False)
         primary: BaseException | None = None
         result: MigrationStatus | None = None
         try:
@@ -1835,7 +1849,7 @@ class MigrationCoordinator:
         )
         target = Path(path).expanduser().resolve()
         fence_receipt = lease.fence_receipt("global")
-        maintenance_target = open_sqlite_target_for_maintenance(target)
+        maintenance_target = _bind_existing_target(target, create_authority=False)
         identity = maintenance_target.identity
         cleanup_owner = object()
         lease.retain_cleanup_dependency(cleanup_owner)
@@ -1976,7 +1990,7 @@ class MigrationCoordinator:
         return result
 ```
 
-`_alembic_config_for_kind()` 只选择固定 Meta/Space script location，移除/拒绝 `sqlalchemy.url`，且 `env.py` 必须消费 `Config.attributes["connection"]`；任何 Alembic URL、`Path` connector 或新 connection 都失败。`_upgrade_locked` 的固定顺序是：
+`_alembic_config_for_kind()` 只选择固定 Meta/Space script location，移除/拒绝 `sqlalchemy.url`。`env.py` 必须且只能消费 `Config.attributes["maintenance_adapter"]` 并调用其 package-private execution entry；任何 raw `sqlite3.Connection`、Alembic URL、`Path`/URI connector 或新 connection 都失败。`_alembic_maintenance_adapter` 只能由合法、仍打开的 `_MaintenanceConnection` 创建，在 S1 Module 内部将同一 authority-bound DBAPI connection 临时适配成 Alembic 所需的受限 SQLAlchemy `Connection`，绑定 `StorageIdentity`、read/write mode 和生命周期；它不返回 raw connection，不允许 wrong identity、closed/reentrant/self use，并在 body failure、rollback、close 或 cancellation 后 fail closed。该 package-private integration 不增加 `BoundSQLiteTarget` 的四成员 public surface。`_upgrade_locked` 的固定顺序是：
 
 1. quiescer 已确认 target 的 engine/pool/SQLite handle 全部关闭；调用 S1 SQLite Module 的 package-private `begin_bound_replacement(maintenance_target)` 获得 opaque replacement authority和其 `BoundSQLiteTarget`，不取得 temporary pathname；existing target 用 `sqlite_online_backup(maintenance_target, replacement.target)`，fresh target 仅由 one-shot isolated-create binding 创建；
 2. `after_backup` failpoint；
@@ -1991,7 +2005,7 @@ class MigrationCoordinator:
 11. `after_replace`；
 12. 通过 replacement 返回的新 bound identity再次 verify，确认没有旧 companion state，并返回 result。
 
-`lease.fence_receipt("global")` 从 `lease.fences["global"]` 复制 expected value，并同时绑定持久 fence path；replace 前只调用 receipt 的重读断言，不能把该 expected value 当成当前值。`MigrationQuiescer.drain_identity(identity)` / `resume_identity(identity)` 是 existing-file replace 的成对异步 Interface；Task 6 由引用计数 manager 实现。Coordinator under exclusive lease只允许 S1 package-private maintenance binder把初始 path一次性转换为 `BoundSQLiteTarget`/`StorageIdentity`；此后 backup、migration、verification、checkpoint、replacement和discard全都消费 opaque authority。Manager从不按该 path reopen，`verify_open()`只借用调用方 target且不关闭/转成 pathname。`begin_bound_replacement`/`commit_bound_replace`/`discard_bound_replacement`不增加 `BoundSQLiteTarget` 的四成员 public surface，且只能由 migration Module在有效 process-owner + global-exclusive fence下调用。
+`lease.fence_receipt("global")` 从 `lease.fences["global"]` 复制 expected value，并同时绑定持久 fence path；replace 前只调用 receipt 的重读断言，不能把该 expected value 当成当前值。`MigrationQuiescer.drain_identity(identity)` / `resume_identity(identity)` 是 existing-file replace 的成对异步 Interface；Task 6 由引用计数 manager 实现。Coordinator under exclusive lease只允许现有 S1 package-private `_bind_existing_target(path, create_authority=False)` 把初始 path一次性转换为 `BoundSQLiteTarget`/`StorageIdentity`；不存在且不得引入 `open_sqlite_target_for_maintenance` helper。此后 backup、migration、verification、checkpoint、replacement和discard全都消费 opaque authority。Manager从不按该 path reopen，`verify_open()`只借用调用方 target且不关闭/转成 pathname。`begin_bound_replacement`/`commit_bound_replace`/`discard_bound_replacement`不增加 `BoundSQLiteTarget` 的四成员 public surface，且只能由 migration Module在有效 process-owner + global-exclusive fence下调用。
 
 `upgrade_under_lease()` 在 maintenance target打开后立即进入统一 primary/cleanup包络并在该包络内调用 drain。Destructive thread由 joined helper持有到 terminal，期间 process/global/drain cleanup dependency保持 live；随后`_ReleaseSequence`严格执行 target `aclose()`→幂等 `resume_identity(identity)`→cleanup dependency completion→global/process release。Resume stage只有close stage physical `completed`后才可运行；close failure保留drained identity及exact pending sequence。Outer cancellation若发生在physical close之后，close stage先commit terminal，sequence继续resume，再按`[original_cancel, *later_cancels, *terminal_errors]`传播。MigrationCoordinator创建捕获quiescer/target/lease的retry closure并交给generic registry；lease coordinator不理解quiescer。
 
@@ -2011,7 +2025,7 @@ Expected: PASS; every failpoint leaves an openable known revision, concurrent ca
 - [ ] **Step 5: Commit MigrationCoordinator**
 
 ```powershell
-git add app/db/migrations.py tests/test_migration_wal_durability.py tests/test_migration_runner.py tests/test_alembic_dual_environments.py
+git add app/runtime/sqlite_vfs.py app/db/migrations.py alembic_meta/env.py alembic_space/env.py tests/test_pxii_vfs.py tests/test_migration_wal_durability.py tests/test_migration_runner.py tests/test_alembic_dual_environments.py
 git commit -m "feat(migrations): make sqlite upgrades wal durable"
 ```
 

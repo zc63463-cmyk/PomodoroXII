@@ -415,9 +415,17 @@ file/directory durability. `path` is only an initial request to S1's
 package-private no-follow maintenance binder; after it returns a
 `BoundSQLiteTarget`, backup, Alembic, verification, checkpoint, temporary
 replacement, commit, and discard consume only opaque authorities. Alembic is
-given the bound `sqlite3.Connection` through `Config.attributes["connection"]`
-and cannot construct a URL or pathname connection. The S1 Module privately
-owns `begin_bound_replacement`/commit/discard and all WAL/SHM/journal names.
+given only a package-private authority-preserving maintenance adapter through
+`Config.attributes["maintenance_adapter"]`. The adapter is created from a
+legitimate open `_MaintenanceConnection`, binds the same `StorageIdentity`,
+read/write mode, rollback/close lifecycle, and exposes only the restricted
+SQLAlchemy-compatible execution needed by the fixed Meta/Space envs. It never
+returns a raw `sqlite3.Connection` and cannot be created from a pathname, URI,
+token, fd/HANDLE, or host connector. Wrong identity, read-only migration,
+closed/reentrant use, failure, and cancellation fail closed without pathname
+reopen. This package-private integration does not expand the four-member public
+`BoundSQLiteTarget` surface. The S1 Module privately owns
+`begin_bound_replacement`/commit/discard and all WAL/SHM/journal names.
 Windows non-database replacement uses checked native write-through semantics;
 an unverifiable directory/volume flush fails rather than logging and
 continuing. The default legacy Alembic entry fails with instructions to use the
