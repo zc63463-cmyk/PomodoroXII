@@ -3690,6 +3690,32 @@ function verifyCrossWave(plans) {
   forbidPattern('S2 production Python', s2ProductionSQLiteBlocks, /sqlite(?:\+aiosqlite)?:\/{2,3}/g, 'Alembic or SQLAlchemy pathname URL outside the S1 module');
   forbidPattern('S2 production Python', s2ProductionSQLiteBlocks, /Callable\[\[DatabaseKind,\s*Path\]/g, 'pathname migration callback');
   requireText('S2 Task 1 Step 3', s2Task1Step3, 'source: BoundSQLiteTarget, destination: BoundSQLiteTarget', 'bound-target online backup signature');
+  for (const task1Path of [
+    'Modify: `backend/app/runtime/sqlite_vfs.py`',
+    'Modify: `backend/tests/test_pxii_vfs.py`',
+  ]) requireTaskText('S2', s2Task1Entry, task1Path, `Task 1 backup adapter ownership ${task1Path}`);
+  for (const backupContract of [
+    'def backup(self, destination: _MaintenanceConnection) -> None:',
+    'backup destination must be a maintenance connection',
+    'backup destination is read-only',
+    'backup source and destination must be distinct authorities',
+    'maintenance connection is closed',
+    'source_connection.backup(destination_connection)',
+    'raw `sqlite3.Connection` destination is rejected',
+    'no pathname reopen occurs',
+    'public `BoundSQLiteTarget` surface remains exactly four members',
+    'identity`, `make_async_engine(options)`, `open_maintenance(options)`, `aclose()`',
+    'test_maintenance_backup_copies_committed_wal',
+    'test_maintenance_backup_rejects_raw_sqlite_destination',
+    'test_maintenance_backup_rejects_read_only_destination',
+    'test_maintenance_backup_rejects_self_and_same_identity',
+    'test_maintenance_backup_rejects_closed_source_or_destination',
+    'test_maintenance_backup_never_reopens_by_path',
+    'test_maintenance_backup_does_not_expand_bound_target_surface',
+    'Both RED commands are mandatory',
+  ]) requireTaskText('S2', s2Task1Entry, backupContract, `Task 1 authority-preserving backup ${backupContract}`);
+  forbidPattern('S2 Task 1 backup adapter', s2Task1Step3, /(?:sqlite3|aiosqlite)\.connect\s*\(|VACUUM\s+INTO|_MaintenanceConnection__connection|\._BoundSQLiteTarget__/gi, 'raw or pathname backup authority bypass');
+  requireSha256('S2 Task 1 Step 3', s2Task1Step3, 'cdffa4d3e96e73ed2a15c706866db375a0b92788fdb06f18fe7ee80db0e01b34');
   requireText('S2 Task 1', s2Task1Entry.body, 'MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)', 'Windows write-through replacement');
   requireText('S2 Task 1', s2Task1Entry.body, 'FlushFileBuffers', 'Windows durability flush');
   forbidPattern('S2 Task 1', s2Task1Entry.body, /Directory fsync is not exposed by Python on Windows/g, 'silent Windows durability downgrade');
@@ -5636,6 +5662,54 @@ function runS1Task4AmendmentVerifierAtPaths(paths) {
   return result;
 }
 
+function runS2Task1AmendmentVerifierAtPaths(paths) {
+  failures.length = 0;
+  const s2 = readAuthorityText(path.join(paths.plans, expectedPlans[2].filename));
+  const task1 = parseTasks(s2).find((task) => task.number === 1);
+  check(Boolean(task1), 'S2: missing Task 1 for amendment verification');
+  if (task1) {
+    verifyTaskStaging('S2', [task1]);
+    check(parseSteps(task1).length === 5, 'S2 Task 1 amendment must retain five steps');
+    const step3 = parseSteps(task1).find((step) => step.number === 3)?.body || '';
+    for (const exactPath of [
+      'Modify: `backend/app/runtime/sqlite_vfs.py`',
+      'Modify: `backend/tests/test_pxii_vfs.py`',
+    ]) requireTaskText('S2', task1, exactPath, `Task 1 backup adapter ownership ${exactPath}`);
+    for (const contract of [
+      'source: BoundSQLiteTarget, destination: BoundSQLiteTarget',
+      'def backup(self, destination: _MaintenanceConnection) -> None:',
+      'backup destination must be a maintenance connection',
+      'backup destination is read-only',
+      'backup source and destination must be distinct authorities',
+      'maintenance connection is closed',
+      'source_connection.backup(destination_connection)',
+      'raw `sqlite3.Connection` destination is rejected',
+      'no pathname reopen occurs',
+      'public `BoundSQLiteTarget` surface remains exactly four members',
+      'identity`, `make_async_engine(options)`, `open_maintenance(options)`, `aclose()`',
+      'test_maintenance_backup_copies_committed_wal',
+      'test_maintenance_backup_rejects_raw_sqlite_destination',
+      'test_maintenance_backup_rejects_read_only_destination',
+      'test_maintenance_backup_rejects_self_and_same_identity',
+      'test_maintenance_backup_rejects_closed_source_or_destination',
+      'test_maintenance_backup_never_reopens_by_path',
+      'test_maintenance_backup_does_not_expand_bound_target_surface',
+      'Both RED commands are mandatory',
+    ]) requireTaskText('S2', task1, contract, `Task 1 authority-preserving backup ${contract}`);
+    forbidPattern('S2 Task 1 backup adapter', step3, /(?:sqlite3|aiosqlite)\.connect\s*\(|VACUUM\s+INTO|_MaintenanceConnection__connection|\._BoundSQLiteTarget__/gi, 'raw or pathname backup authority bypass');
+    requireSha256('S2 Task 1 Step 3', step3, 'cdffa4d3e96e73ed2a15c706866db375a0b92788fdb06f18fe7ee80db0e01b34');
+  }
+  const result = failures.length === 0
+    ? { status: 0, stdout: 'VERIFY_S2_TASK1_AMENDMENT_OK\n', stderr: '' }
+    : {
+      status: 1,
+      stdout: '',
+      stderr: `VERIFY_S2_TASK1_AMENDMENT_FAILED count=${failures.length}\n${failures.map((failure) => `- ${failure}`).join('\n')}\n`,
+    };
+  failures.length = 0;
+  return result;
+}
+
 function verifyAuthorityRedirectRejection() {
   const nodeOptionsChild = spawnSync(process.execPath, [__filename], {
     cwd: root,
@@ -5677,7 +5751,7 @@ function verifyAuthorityRedirectRejection() {
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status !== 2
-      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\]/.test(output)
+      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\]/.test(output)
       || /VERIFY_OK(?:_INTERNAL)?|SELF_TEST_OK/.test(output)) {
       throw new Error(`${label} did not fail closed:\n${output}`);
     }
@@ -5689,7 +5763,7 @@ function verifyAuthorityRedirectRejection() {
     env: { ...process.env },
   });
   const legacyOutput = `${legacyChild.stdout}\n${legacyChild.stderr}`;
-  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
+  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
     throw new Error(`legacy internal-child entry remains callable:\n${legacyOutput}`);
   }
 }
@@ -5700,7 +5774,11 @@ function replaceRequired(filePath, before, after, label) {
   fs.writeFileSync(filePath, source.replace(before, after), 'utf8');
 }
 
-function runMutationSelfTests(selectedNames = null) {
+function runMutationSelfTests(
+  selectedNames = null,
+  targetedVerifier = runS1Task4AmendmentVerifierAtPaths,
+  targetedScope = 's1-task4-amendment',
+) {
   if (selectedNames === null) verifyAuthorityRedirectRejection();
   const baselinePaths = {
     plans: planDirectory, design: designPath, integrationSpec: integrationSpecPath,
@@ -5708,7 +5786,7 @@ function runMutationSelfTests(selectedNames = null) {
   };
   const baseline = selectedNames === null
     ? runVerifierAtPaths(baselinePaths)
-    : runS1Task4AmendmentVerifierAtPaths(baselinePaths);
+    : targetedVerifier(baselinePaths);
   if (baseline.status !== 0) {
     throw new Error(`self-test baseline is not green:\n${baseline.stderr || baseline.stdout}`);
   }
@@ -6162,8 +6240,47 @@ function runMutationSelfTests(selectedNames = null) {
       },
     },
     {
+      name: 's2-task1-backup-whitelist-omission',
+      expected: /Task 1 backup adapter ownership|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '- Modify: `backend/app/runtime/sqlite_vfs.py`\n',
+          '',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task1-raw-backup-bypass',
+      expected: /raw or pathname backup authority bypass/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '    source_connection.backup(destination_connection)',
+          '    with sqlite3.connect(destination_path) as raw_destination:\n        source_connection.backup(raw_destination)',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task1-step3-body-drift',
+      expected: /S2 Task 1 Step 3 critical body SHA-256 drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'Any backup exception propagates as the primary failure;',
+          'Any backup exception propagates as the primary failure exactly;',
+          this.name,
+        );
+      },
+    },
+    {
       name: 's2-pathname-online-backup',
-      expected: /bound-target online backup signature|file-backed SQLite connector outside the S1 module/,
+      expected: /bound-target online backup signature|authority-preserving backup source: BoundSQLiteTarget|file-backed SQLite connector outside the S1 module/,
       mutate(paths) {
         const file = path.join(paths.plans, expectedPlans[2].filename);
         replaceRequired(
@@ -10318,7 +10435,7 @@ function runMutationSelfTests(selectedNames = null) {
       testCase.mutate(paths);
       const result = selectedNames === null
         ? runVerifierAtPaths(paths)
-        : runS1Task4AmendmentVerifierAtPaths(paths);
+        : targetedVerifier(paths);
       const output = `${result.stdout}\n${result.stderr}`;
       if (testCase.shouldPass ? result.status !== 0 : (result.status === 0 || !testCase.expected.test(output))) {
         mutationFailures.push(
@@ -10332,7 +10449,7 @@ function runMutationSelfTests(selectedNames = null) {
   if (mutationFailures.length > 0) {
     throw new Error(mutationFailures.join('\n'));
   }
-  const scope = selectedNames === null ? 'all' : 's1-task4-amendment';
+  const scope = selectedNames === null ? 'all' : targetedScope;
   const redirects = selectedNames === null ? 8 : 0;
   process.stdout.write(`SELF_TEST_OK mutations=${selectedCases.length} redirects=${redirects} scope=${scope}\n`);
 }
@@ -10457,9 +10574,16 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's1-task4-backup-silent-degrade',
     's1-task4-backup-path-connector-restored',
   ]));
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s2-task1-amendment') {
+  runMutationSelfTests(new Set([
+    's2-task1-backup-whitelist-omission',
+    's2-task1-raw-backup-bypass',
+    's2-task1-step3-body-drift',
+    's2-pathname-online-backup',
+  ]), runS2Task1AmendmentVerifierAtPaths, 's2-task1-amendment');
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment]\n');
   process.exitCode = 2;
 }

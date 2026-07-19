@@ -89,11 +89,14 @@ acquire_spaces(space_ids, mode, purpose, timeout_seconds) -> Lease
 - Modify: `backend/app/runtime/__init__.py`
 - Create: `backend/app/runtime/durability.py`
 - Modify: `backend/app/runtime/contained_io.py`
+- Modify: `backend/app/runtime/sqlite_vfs.py`
 - Create: `backend/tests/test_migration_wal_durability.py`
+- Modify: `backend/tests/test_pxii_vfs.py`
 
 **Interfaces:**
 - Consumes: S1 `BoundSQLiteTarget` source/destination authorities, expected fences, and non-database filesystem paths whose parents are already owned.
 - Produces: WAL-complete bound-target backup, integrity verification, native write-through non-database replace, file/tree fsync, and monotonic persisted fence primitives.
+- Extends only the private maintenance adapter: `_MaintenanceConnection.backup(destination)` performs authority-preserving maintenance-to-maintenance backup without changing the four-member public `BoundSQLiteTarget` surface (`identity`, `make_async_engine(options)`, `open_maintenance(options)`, `aclose()`).
 
 - [ ] **Step 1: Write the failing committed-WAL backup and fsync tests**
 
@@ -165,17 +168,45 @@ def test_atomic_replace_fsyncs_file_and_parent(tmp_path: Path, monkeypatch) -> N
     ]
 ```
 
+In `backend/tests/test_pxii_vfs.py`, add the exact boundary regressions `test_maintenance_backup_copies_committed_wal`, `test_maintenance_backup_rejects_raw_sqlite_destination`, `test_maintenance_backup_rejects_read_only_destination`, `test_maintenance_backup_rejects_self_and_same_identity`, `test_maintenance_backup_rejects_closed_source_or_destination`, `test_maintenance_backup_never_reopens_by_path`, and `test_maintenance_backup_does_not_expand_bound_target_surface`. They must prove maintenance-to-maintenance backup succeeds, a committed WAL row is copied, a raw `sqlite3.Connection` destination is rejected, a read-only destination is rejected, self-backup and a different connection for the same storage identity are rejected, closed source and destination adapters are rejected, no pathname reopen occurs, and the public `BoundSQLiteTarget` surface remains exactly four members. The tests may inspect the private adapter only through values returned by `open_maintenance()` and must never recover a raw connection, token, URI, path, fd/HANDLE, sidecar, or connector.
+
 - [ ] **Step 2: Run the tests and verify the missing Module failure**
 
 Run from `backend/`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_migration_wal_durability.py -p no:cacheprovider
+.\.venv\Scripts\python.exe -m pytest -q `
+  tests/test_pxii_vfs.py::test_maintenance_backup_copies_committed_wal `
+  tests/test_pxii_vfs.py::test_maintenance_backup_rejects_raw_sqlite_destination `
+  tests/test_pxii_vfs.py::test_maintenance_backup_rejects_read_only_destination `
+  tests/test_pxii_vfs.py::test_maintenance_backup_rejects_self_and_same_identity `
+  tests/test_pxii_vfs.py::test_maintenance_backup_rejects_closed_source_or_destination `
+  tests/test_pxii_vfs.py::test_maintenance_backup_never_reopens_by_path `
+  tests/test_pxii_vfs.py::test_maintenance_backup_does_not_expand_bound_target_surface `
+  -p no:cacheprovider
 ```
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'app.runtime.durability'`; S1's existing `app.runtime` package and scope exports remain present.
+Expected: the durability file FAILS during collection with `ModuleNotFoundError: No module named 'app.runtime.durability'`; the separately executed adapter nodeids FAIL because `_MaintenanceConnection.backup` and its lifecycle state do not exist. S1's existing `app.runtime` package and scope exports remain present. Both RED commands are mandatory; one failure may not mask or replace the other.
 
 - [ ] **Step 3: Implement the durability primitives**
+
+First extend the private adapter in `backend/app/runtime/sqlite_vfs.py`. `_MaintenanceConnection` records the bound `StorageIdentity`, the requested read-only state, and an internal closed sentinel supplied by `BoundSQLiteTarget.open_maintenance()`; none is public or returned. Its authority-preserving adapter is:
+
+```python
+def backup(self, destination: _MaintenanceConnection) -> None:
+    source_connection = self._require_open()
+    if not isinstance(destination, _MaintenanceConnection):
+        raise TypeError("backup destination must be a maintenance connection")
+    destination_connection = destination._require_open()
+    if destination._read_only:
+        raise ValueError("backup destination is read-only")
+    if destination is self or destination._identity == self._identity:
+        raise ValueError("backup source and destination must be distinct authorities")
+    source_connection.backup(destination_connection)
+```
+
+`_require_open()` raises a stable `RuntimeError("maintenance connection is closed")` after `_close()` atomically detaches the raw connection. `_close()` still closes every cursor and the detached connection with collect-all-errors behavior. `open_maintenance()` passes only its already-bound `StorageIdentity` and `MaintenanceOptions.read_only` into the private adapter; it does not reopen, parse, or expose any Path, URI/token, fd/HANDLE, sidecar, connector, or raw `sqlite3.Connection`. Python's underlying `sqlite3.Connection.backup()` is called only inside this private method. Any backup exception propagates as the primary failure; neither adapter is silently closed or reported as a successful backup, and their surrounding maintenance contexts retain deterministic cleanup ownership. The public `BoundSQLiteTarget` four-member surface remains unchanged.
 
 `backend/app/runtime/durability.py` 必须提供以下真实实现；Windows 目录或 volume flush 不受支持、无法验证或 `FlushFileBuffers` 失败时立即抛错并禁止发布，绝不以 debug 日志继续；Linux/macOS 的目录 fsync 失败同样抛出：
 
@@ -258,7 +289,8 @@ def next_fence(path: Path) -> int:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_migration_wal_durability.py -p no:cacheprovider
-.\.venv\Scripts\ruff.exe check --no-cache app/runtime tests/test_migration_wal_durability.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_pxii_vfs.py -p no:cacheprovider
+.\.venv\Scripts\ruff.exe check --no-cache app/runtime tests/test_migration_wal_durability.py tests/test_pxii_vfs.py
 ```
 
 Expected: both commands PASS; WAL test reads `committed-in-wal` from the backup.
@@ -266,7 +298,7 @@ Expected: both commands PASS; WAL test reads `committed-in-wal` from the backup.
 - [ ] **Step 5: Commit the durability boundary**
 
 ```powershell
-git add app/runtime/__init__.py app/runtime/contained_io.py app/runtime/durability.py tests/test_migration_wal_durability.py
+git add app/runtime/__init__.py app/runtime/contained_io.py app/runtime/durability.py app/runtime/sqlite_vfs.py tests/test_migration_wal_durability.py tests/test_pxii_vfs.py
 git commit -m "feat(runtime): add durable sqlite replacement primitives"
 ```
 
