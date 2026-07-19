@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import threading
+import uuid
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,39 @@ async def _registered_space_token(client) -> tuple[str, str]:
     space_id = created.json()["id"]
     issued = await client.post(
         f"/api/v1/spaces/{space_id}/token", headers=headers
+    )
+    return issued.json()["space_token"], space_id
+
+
+async def _missing_registered_space_token(client) -> tuple[str, str]:
+    await client.post(
+        "/api/v1/auth/setup", json={"password": "test-password-123"}
+    )
+    login = await client.post(
+        "/api/v1/auth/login", json={"password": "test-password-123"}
+    )
+    master_token = login.json()["access_token"]
+    space_id = f"spc_missing_{uuid.uuid4().hex}"
+    from app.db.meta_session import get_meta_session
+    from app.db.models.meta import Space
+    from app.settings import settings
+
+    settings.spaces_data_dir.mkdir(parents=True, exist_ok=True)
+    (settings.spaces_data_dir / space_id).mkdir()
+    async for session in get_meta_session():
+        session.add(
+            Space(
+                id=space_id,
+                name="Missing Fixture Space",
+                db_path=str(settings.space_db_path(space_id)),
+                notes_dir=str(settings.space_notes_dir(space_id)),
+            )
+        )
+        await session.commit()
+        break
+    issued = await client.post(
+        f"/api/v1/spaces/{space_id}/token",
+        headers={"Authorization": f"Bearer {master_token}"},
     )
     return issued.json()["space_token"], space_id
 
@@ -279,7 +313,7 @@ async def test_opt_in_storage_fixture_provisions_registered_space(client) -> Non
 
 @pytest.mark.asyncio
 async def test_unmarked_client_keeps_registered_space_missing(client) -> None:
-    token, space_id = await _registered_space_token(client)
+    token, space_id = await _missing_registered_space_token(client)
 
     response = await client.post(
         "/api/v1/tasks",
@@ -287,7 +321,7 @@ async def test_unmarked_client_keeps_registered_space_missing(client) -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
 
-    assert response.status_code == 503
+    assert response.status_code == 503, response.text
     assert response.headers["X-PomodoroXII-Error-Code"] == "space_storage_missing"
     from app.settings import settings
 

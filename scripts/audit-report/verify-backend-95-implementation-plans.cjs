@@ -3990,12 +3990,13 @@ function verifyCrossWave(plans) {
     'backend/tests/conftest.py',
     'backend/tests/test_owner_executor.py',
     'backend/tests/test_routes_auth_spaces.py',
+    'backend/tests/test_test_isolation.py',
   ];
   const task9Mutable = parseFileEntries(s2Task9Entry).filter((entry) => mutableFileActions.has(entry.action));
   const task9Staged = stagedFiles('S2', s2Task9Entry);
   check(equalArrays([...task9Mutable.map((entry) => entry.path)].sort(), [...task9AllowedPaths].sort()), 'S2 Task 9 mutable Files closed set drift');
   check(equalArrays([...task9Staged].sort(), [...task9AllowedPaths].sort()), 'S2 Task 9 git add closed set drift');
-  requireSha256('S2 Task 9', s2Task9Entry.body, 'd79290543a7c01644b7c66e20997d7b5cac852390de6f4cd426fe8e3d76c896d');
+  requireSha256('S2 Task 9', s2Task9Entry.body, 'a818309156e1878a41b1aeb9c9e9fb57195bbe3dd30178e1152bcaf65cbc56d5');
   requireTaskText('S2', s2Task9Entry, 'tests/conftest.py', 'Task 9 client fixture exercises installed runtime');
   requireTaskText('S2', s2Task9Entry, 'may not bypass runtime installation while claiming full route regression', 'Task 9 fixture bypass prohibition');
   for (const contract of [
