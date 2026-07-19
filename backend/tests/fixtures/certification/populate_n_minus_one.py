@@ -193,6 +193,7 @@ async def populate_fixture(
             space_engine: Any = None
             file_system: FileSystem | None = None
             try:
+                await asyncio.to_thread(run_migrations, "meta", meta_db)
                 await init_meta_db()
                 meta_factory = get_meta_session_factory()
                 async with meta_factory() as meta_session:
