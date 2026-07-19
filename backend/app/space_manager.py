@@ -10,7 +10,6 @@ from typing import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.db.metadata import get_space_metadata
 from app.db.session import create_session_factory
 from app.errors import SpaceEnginePathMismatchError
 from app.runtime.contained_io import ContainedSpaceOpens
@@ -91,8 +90,6 @@ class SpaceEngineManager:
             engine: AsyncEngine | None = None
             try:
                 engine = target.make_async_engine(self._engine_options(space_id))
-                async with engine.begin() as connection:
-                    await connection.run_sync(get_space_metadata().create_all)
             except BaseException:
                 if engine is not None:
                     await run_joined_awaitable(engine.dispose())
