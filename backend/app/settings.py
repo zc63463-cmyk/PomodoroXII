@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     space_token_expire_hours: PositiveInt = 8
 
     # --- Meta database ----------------------------------------------------
+    data_root: Path = Path("./data")
     database_url: str = "sqlite+aiosqlite:///./data/meta.db"
 
     # --- Spaces layout ----------------------------------------------------
@@ -66,6 +67,23 @@ class Settings(BaseSettings):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
 
+    @model_validator(mode="before")
+    @classmethod
+    def derive_unspecified_canonical_root(cls, values):
+        if not isinstance(values, dict) or "data_root" in values:
+            return values
+        database_url = values.get("database_url")
+        spaces_dir = values.get("spaces_data_dir")
+        if isinstance(database_url, str) and database_url.startswith(
+            "sqlite+aiosqlite:///"
+        ):
+            inferred = Path(database_url.removeprefix("sqlite+aiosqlite:///"))
+            if spaces_dir is None or Path(spaces_dir).resolve() == (
+                inferred.parent / "spaces"
+            ).resolve():
+                values["data_root"] = inferred.parent
+        return values
+
     @model_validator(mode="after")
     def validate_production_secret_key(self) -> Self:
         """Enforce the production secret policy after environment parsing."""
@@ -87,6 +105,29 @@ class Settings(BaseSettings):
                 "POMODOROXII_SECRET_KEY must be at least 32 UTF-8 bytes in production. "
                 "Generate a strong key with: openssl rand -hex 32"
             )
+        return self
+
+    @property
+    def meta_db_path(self) -> Path:
+        return self.data_root.expanduser().resolve() / "meta.db"
+
+    @property
+    def canonical_spaces_root(self) -> Path:
+        return self.data_root.expanduser().resolve() / "spaces"
+
+    @staticmethod
+    def _sqlite_path(url: str) -> Path:
+        prefix = "sqlite+aiosqlite:///"
+        if not url.startswith(prefix):
+            raise ValueError("database_url must be a sqlite+aiosqlite URL")
+        return Path(url.removeprefix(prefix)).expanduser().resolve()
+
+    @model_validator(mode="after")
+    def require_canonical_runtime_layout(self) -> Self:
+        if self._sqlite_path(self.database_url) != self.meta_db_path:
+            raise ValueError("database_url must equal data_root/meta.db")
+        if self.spaces_data_dir.expanduser().resolve() != self.canonical_spaces_root:
+            raise ValueError("spaces_data_dir must equal data_root/spaces")
         return self
 
     # ------------------------------------------------------------------ #

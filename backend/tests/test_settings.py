@@ -96,6 +96,27 @@ def test_backup_enabled_defaults_false():
     assert _make_settings(backup_enabled=None).backup_enabled is False
 
 
+def test_data_root_drives_canonical_meta_and_spaces_layout(tmp_path):
+    root = tmp_path / "runtime-data"
+    configured = _make_settings(
+        data_root=str(root),
+        database_url=f"sqlite+aiosqlite:///{root / 'meta.db'}",
+        spaces_data_dir=str(root / "spaces"),
+    )
+    assert configured.meta_db_path == root.resolve() / "meta.db"
+    assert configured.canonical_spaces_root == root.resolve() / "spaces"
+    assert configured.spaces_data_dir.resolve() == configured.canonical_spaces_root
+
+
+def test_explicit_split_runtime_layout_is_rejected(tmp_path):
+    root = tmp_path / "runtime-data"
+    with pytest.raises(ValueError, match="data_root"):
+        _make_settings(
+            data_root=str(root),
+            spaces_data_dir=str(tmp_path / "other-spaces"),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Path helpers
 # --------------------------------------------------------------------------- #
