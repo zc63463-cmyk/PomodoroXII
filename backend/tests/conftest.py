@@ -35,6 +35,14 @@ _EXTERNAL_ARTIFACTS_ROOT_PATTERN = re.compile(r"pomodoroxii-test-artifacts\Z", r
 _RUN_ROOT_PATTERN = re.compile(r"run-[0-9a-f]{16}\Z")
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "provisioned_space_storage: explicitly provision storage for Spaces "
+        "created through the test HTTP client",
+    )
+
+
 def _resolve_artifacts_root(configured_root: str | Path | None = None) -> Path:
     """Resolve and approve the dedicated root used for persistent test artifacts.
 
@@ -257,7 +265,59 @@ async def space_session(_isolate_env: Path):
 
 
 @pytest.fixture
-async def client(_isolate_env: Path):
+def space_storage_provisioner(_isolate_env: Path):
+    """Return an explicit, sandbox-bound Space storage provisioner."""
+
+    async def provision(space_id: str) -> None:
+        from app.db.migrations import run_migrations
+        from app.runtime.joined_thread import run_joined_thread
+        from app.settings import settings
+
+        parent = settings.spaces_data_dir / space_id
+        _ensure_inside_temp_root(parent, _isolate_env)
+        database = settings.space_db_path(space_id)
+        notes = settings.space_notes_dir(space_id)
+        index = parent / "index.db"
+        if not parent.is_dir() or not notes.is_dir():
+            raise RuntimeError("registered test Space directories are missing")
+        if database.exists() or index.exists():
+            raise RuntimeError("registered test Space storage already exists")
+
+        created = [
+            database,
+            database.with_name(f"{database.name}-wal"),
+            database.with_name(f"{database.name}-shm"),
+            database.with_name(f"{database.name}-journal"),
+            index,
+            index.with_name(f"{index.name}-wal"),
+            index.with_name(f"{index.name}-shm"),
+            index.with_name(f"{index.name}-journal"),
+        ]
+        try:
+            await run_joined_thread(lambda: run_migrations("space", database))
+
+            def create_index() -> None:
+                import sqlite3
+
+                connection = sqlite3.connect(index)
+                connection.close()
+
+            await run_joined_thread(create_index)
+        except BaseException:
+            for path in reversed(created):
+                if path.is_file():
+                    path.unlink()
+            raise
+
+    return provision
+
+
+@pytest.fixture
+async def client(
+    _isolate_env: Path,
+    request: pytest.FixtureRequest,
+    space_storage_provisioner,
+):
     """Yield an httpx AsyncClient backed by ASGITransport.
 
     ASGITransport does not trigger the app's lifespan, so we must
@@ -279,7 +339,25 @@ async def client(_isolate_env: Path):
 
     await init_meta_db()
     app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+    provision_storage = (
+        request.node.get_closest_marker("provisioned_space_storage") is not None
+    )
+
+    async def provision_created_space(response) -> None:
+        if (
+            provision_storage
+            and response.request.method == "POST"
+            and response.request.url.path == "/api/v1/spaces"
+            and response.status_code == 201
+        ):
+            await response.aread()
+            await space_storage_provisioner(response.json()["id"])
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        event_hooks={"response": [provision_created_space]},
+    ) as ac:
         yield ac
     await dispose_space_engine_manager()
     await close_meta_db()

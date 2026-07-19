@@ -13,6 +13,8 @@ Tests:
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 # --------------------------------------------------------------------------- #
 # Helpers (self-contained, same pattern as test_routes_v1.py)
 # --------------------------------------------------------------------------- #

@@ -10,6 +10,10 @@ Uses conftest.py's async `client` fixture (httpx.AsyncClient).
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.provisioned_space_storage
+
 HTTP_METHODS = (
     "get",
     "put",

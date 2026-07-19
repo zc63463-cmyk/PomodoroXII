@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 # --------------------------------------------------------------------------- #
 # Helpers (mirrors test_routes_v1.py style)
 # --------------------------------------------------------------------------- #
