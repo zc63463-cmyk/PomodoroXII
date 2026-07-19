@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 async def _setup_login_and_space_token(client) -> str:
     """Setup admin, login, create a space, return a space token."""

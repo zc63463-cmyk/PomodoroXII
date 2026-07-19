@@ -9,6 +9,8 @@ import uuid
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 async def _setup_login_and_space_token(client) -> tuple[str, str]:
     """Setup admin, login, create a space, issue a space token.

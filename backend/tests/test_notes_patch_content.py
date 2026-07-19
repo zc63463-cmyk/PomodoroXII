@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 # --------------------------------------------------------------------------- #
 # Helpers (self-contained per Phase D gate convention)
 # --------------------------------------------------------------------------- #

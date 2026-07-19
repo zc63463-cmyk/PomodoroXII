@@ -15,6 +15,8 @@ import uuid
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 async def _setup_login_and_space_token(client) -> str:
     """Setup admin, login, create a space, return a space token."""
@@ -383,7 +385,7 @@ async def test_sync_push_unknown_entity_returns_error(client):
 
 @pytest.mark.asyncio
 async def test_sync_pagination_has_more(client):
-    """push 5 tasks → pull(limit=2) → has_more=True."""
+    """Legacy truncation fails closed while cursor v2 remains available."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
@@ -400,10 +402,28 @@ async def test_sync_pagination_has_more(client):
     ]
     await _push(client, headers, events)
 
-    resp = await client.get(
-        "/api/v1/sync/pull?since=&limit=2", headers=headers
+    legacy = await client.get(
+        "/api/v1/sync/pull?since=&limit=2",
+        headers={
+            **headers,
+            "Accept": "application/vnd.pomodoroxii.error+json;version=2",
+            "X-Request-ID": "req-sync-pagination-upgrade",
+        },
     )
-    assert resp.status_code == 200
-    data = resp.json()
+    assert legacy.status_code == 409
+    assert legacy.json() == {
+        "code": "cursor_upgrade_required",
+        "message": "Legacy sync cursor cannot safely advance",
+        "retryable": False,
+        "request_id": "req-sync-pagination-upgrade",
+        "details": {"truncated_groups": ["tasks"]},
+    }
+
+    cursor_v2 = await client.get(
+        "/api/v1/sync/pull?cursor=0&limit=2", headers=headers
+    )
+    assert cursor_v2.status_code == 200
+    data = cursor_v2.json()
+    assert data["cursor_version"] == 2
     assert data["has_more"] is True
     assert len(data["tasks"]) == 2

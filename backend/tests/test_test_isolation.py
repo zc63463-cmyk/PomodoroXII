@@ -3,11 +3,32 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import threading
 from pathlib import Path
 
 import pytest
 
 from tests import conftest as suite_conftest
+
+
+async def _registered_space_token(client) -> tuple[str, str]:
+    await client.post(
+        "/api/v1/auth/setup", json={"password": "test-password-123"}
+    )
+    login = await client.post(
+        "/api/v1/auth/login", json={"password": "test-password-123"}
+    )
+    master_token = login.json()["access_token"]
+    headers = {"Authorization": f"Bearer {master_token}"}
+    created = await client.post(
+        "/api/v1/spaces", json={"name": "Fixture Space"}, headers=headers
+    )
+    space_id = created.json()["id"]
+    issued = await client.post(
+        f"/api/v1/spaces/{space_id}/token", headers=headers
+    )
+    return issued.json()["space_token"], space_id
 
 
 def _path_builder():
@@ -234,3 +255,82 @@ def test_real_file_system_test_package_is_preserved(tmp_path: Path):
     assert package_dir.is_dir()
     assert (package_dir / "conftest.py").is_file()
     assert (package_dir / "test_note_ops.py").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.provisioned_space_storage
+async def test_opt_in_storage_fixture_provisions_registered_space(client) -> None:
+    token, space_id = await _registered_space_token(client)
+
+    response = await client.post(
+        "/api/v1/tasks",
+        json={"title": "Provisioned task", "status": "todo"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 201, response.text
+    from app.settings import settings
+
+    parent = settings.spaces_data_dir / space_id
+    assert (parent / "space.db").is_file()
+    assert (parent / "index.db").is_file()
+    assert (parent / "notes").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_unmarked_client_keeps_registered_space_missing(client) -> None:
+    token, space_id = await _registered_space_token(client)
+
+    response = await client.post(
+        "/api/v1/tasks",
+        json={"title": "Missing store", "status": "todo"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 503
+    assert response.headers["X-PomodoroXII-Error-Code"] == "space_storage_missing"
+    from app.settings import settings
+
+    parent = settings.spaces_data_dir / space_id
+    assert not (parent / "space.db").exists()
+    assert not (parent / "index.db").exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_storage_provisioning_joins_worker_before_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    space_storage_provisioner,
+) -> None:
+    from app.db import migrations
+    from app.settings import settings
+
+    space_id = "spc_cancelled_provision"
+    parent = settings.spaces_data_dir / space_id
+    settings.space_notes_dir(space_id).mkdir(parents=True)
+    database = settings.space_db_path(space_id)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def cancelled_migration(_scope: str, target: Path) -> None:
+        target.write_bytes(b"partial")
+        started.set()
+        assert release.wait(timeout=5)
+        target.write_bytes(b"late worker write")
+        finished.set()
+
+    monkeypatch.setattr(migrations, "run_migrations", cancelled_migration)
+    operation = asyncio.create_task(space_storage_provisioner(space_id))
+    assert await asyncio.to_thread(started.wait, 5)
+
+    operation.cancel("cancel provisioning")
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError, match="cancel provisioning"):
+        await operation
+    assert await asyncio.to_thread(finished.wait, 5)
+
+    assert parent.is_dir()
+    assert settings.space_notes_dir(space_id).is_dir()
+    assert not database.exists()
+    assert not (parent / "index.db").exists()

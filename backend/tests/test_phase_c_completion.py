@@ -16,6 +16,8 @@ import uuid
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 # --------------------------------------------------------------------------- #
 # Shared HTTP helpers (mirror test_sync_integration.py patterns)
 # --------------------------------------------------------------------------- #

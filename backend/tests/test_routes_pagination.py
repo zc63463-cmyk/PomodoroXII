@@ -11,6 +11,8 @@ as defined by ``app.schemas.common.PaginatedResponse``.
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 async def _get_space_client(client):
     """Set up admin password, log in, create a space, issue a space token."""

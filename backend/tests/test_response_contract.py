@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 def _response_schema(
     openapi: Mapping[str, Any],
