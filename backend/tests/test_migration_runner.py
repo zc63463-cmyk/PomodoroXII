@@ -5,6 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
+
+def test_migration_coordinator_verifies_bound_target_without_upgrade(tmp_path):
+    import asyncio
+
+    from app.db.migrations import MigrationCoordinator, run_migrations
+    from app.runtime.sqlite_vfs import _bind_existing_target
+
+    path = tmp_path / "verify.db"
+    run_migrations("space", path)
+    target = _bind_existing_target(path, create_authority=False)
+    try:
+        status = asyncio.run(MigrationCoordinator().verify_open("space", target))
+        assert status.at_head
+        assert status.integrity_ok
+    finally:
+        asyncio.run(target.aclose())
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
 

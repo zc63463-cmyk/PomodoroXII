@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,6 +33,45 @@ _LEGACY_REVISIONS = {
 
 class MigrationSafetyError(RuntimeError):
     """Raised when a database cannot be migrated without an explicit decision."""
+
+
+@dataclass(frozen=True)
+class MigrationStatus:
+    kind: DatabaseKind
+    revision: str | None
+    head: str
+    at_head: bool
+    integrity_ok: bool
+
+
+class MigrationCoordinator:
+    """Authority-bound migration inspection surface used by request runtime."""
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    async def verify_open(self, kind: DatabaseKind, target) -> MigrationStatus:
+        from app.runtime.sqlite_vfs import MaintenanceOptions
+
+        config = _config(kind)
+        head = _single_head(config)
+        version_table = _VERSION_TABLES[kind]
+        with target.open_maintenance(MaintenanceOptions(read_only=True)) as connection:
+            integrity_row = connection.execute("PRAGMA integrity_check").fetchone()
+            try:
+                revision_row = connection.execute(
+                    f'SELECT version_num FROM "{version_table}"'
+                ).fetchone()
+            except Exception:
+                revision_row = None
+        revision = str(revision_row[0]) if revision_row else None
+        return MigrationStatus(
+            kind=kind,
+            revision=revision,
+            head=head,
+            at_head=revision == head,
+            integrity_ok=integrity_row == ("ok",),
+        )
 
 
 def _config(kind: DatabaseKind) -> Config:
