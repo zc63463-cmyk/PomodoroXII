@@ -20,6 +20,28 @@ from app.errors import SQLiteAuthorityRevokedError
 from app.runtime.sqlite_vfs import BoundSQLiteTarget, _extension_candidates
 
 
+@pytest.fixture
+def alembic_bound_target(tmp_path: Path):
+    from app.runtime.sqlite_vfs import (
+        bind_marked_isolated_target,
+        discard_closed_isolated_target,
+    )
+
+    marker = tmp_path / ".alembic-marker"
+    marker.write_text("alembic", encoding="ascii")
+    target, cleanup = bind_marked_isolated_target(
+        parent_path=tmp_path,
+        exact_absent_basename="alembic.db",
+        marker_basename=marker.name,
+        marker_nonce="alembic",
+    )
+    try:
+        yield target
+    finally:
+        asyncio.run(target.aclose())
+        discard_closed_isolated_target(cleanup, target.identity)
+
+
 def _walk_private_values(value: object) -> tuple[object, ...]:
     """Inspect the opaque implementation without making it public API."""
     pending = [value]
@@ -274,6 +296,94 @@ def test_bound_sqlite_target_has_only_closed_public_surface() -> None:
         "open_maintenance",
         "aclose",
     }
+
+
+def test_alembic_adapter_rejects_raw_sqlite_connection(alembic_bound_target) -> None:
+    from app.runtime.sqlite_vfs import _alembic_maintenance_adapter
+
+    with sqlite3.connect(":memory:") as raw:
+        with pytest.raises(TypeError):
+            _alembic_maintenance_adapter(raw, expected_identity=alembic_bound_target.identity, require_write=True)
+
+
+def test_alembic_adapter_rejects_path_uri_or_connector_input(alembic_bound_target) -> None:
+    from app.runtime.sqlite_vfs import _alembic_maintenance_adapter
+
+    for value in (Path("database.db"), "file:database", object()):
+        with pytest.raises(TypeError):
+            _alembic_maintenance_adapter(value, expected_identity=alembic_bound_target.identity, require_write=True)
+
+
+def test_alembic_adapter_enforces_identity_and_write_mode(alembic_bound_target) -> None:
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+    )
+
+    with alembic_bound_target.open_maintenance(MaintenanceOptions(read_only=True)) as connection:
+        with pytest.raises(ValueError, match="read-only"):
+            _alembic_maintenance_adapter(connection, expected_identity=alembic_bound_target.identity, require_write=True)
+
+    from app.runtime.contained_io import StorageIdentity
+    wrong_identity = StorageIdentity(
+        alembic_bound_target.identity.device,
+        alembic_bound_target.identity.file_id + 1,
+    )
+    with alembic_bound_target.open_maintenance(MaintenanceOptions(read_only=False)) as connection:
+        with pytest.raises(ValueError, match="identity"):
+            _alembic_maintenance_adapter(connection, expected_identity=wrong_identity, require_write=True)
+
+
+def test_alembic_adapter_rejects_closed_or_reentrant_use(alembic_bound_target) -> None:
+    from app.runtime.sqlite_vfs import MaintenanceOptions, _alembic_maintenance_adapter
+
+    context = alembic_bound_target.open_maintenance(MaintenanceOptions(read_only=False))
+    connection = context.__enter__()
+    adapter = _alembic_maintenance_adapter(connection, expected_identity=alembic_bound_target.identity, require_write=True)
+    with pytest.raises(RuntimeError, match="active|reentrant"):
+        _alembic_maintenance_adapter(connection, expected_identity=alembic_bound_target.identity, require_write=True)
+    adapter.close()
+    context.__exit__(None, None, None)
+    with pytest.raises(RuntimeError, match="closed"):
+        adapter.run(lambda sqlalchemy_connection: sqlalchemy_connection.execute(text("SELECT 1")))
+
+
+def test_alembic_adapter_does_not_expand_bound_target_surface() -> None:
+    public = {name for name in dir(BoundSQLiteTarget) if not name.startswith("_")}
+    assert public == {
+        "identity",
+        "make_async_engine",
+        "open_maintenance",
+        "aclose",
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "version_table"),
+    [("meta", "alembic_version_meta"), ("space", "alembic_version_space")],
+)
+def test_alembic_adapter_runs_meta_and_space_env_on_bound_authority(
+    alembic_bound_target, kind: str, version_table: str
+) -> None:
+    from alembic import command
+
+    from app.db.migrations import _config
+    from app.runtime.sqlite_vfs import MaintenanceOptions, _alembic_maintenance_adapter
+
+    config = _config(kind)
+    with alembic_bound_target.open_maintenance(
+        MaintenanceOptions(read_only=False, create_if_missing=True)
+    ) as maintenance:
+        with _alembic_maintenance_adapter(
+            maintenance,
+            expected_identity=alembic_bound_target.identity,
+            require_write=True,
+        ) as adapter:
+            config.attributes["maintenance_adapter"] = adapter
+            command.upgrade(config, "head")
+        assert maintenance.execute(
+            f'SELECT version_num FROM "{version_table}"'
+        ).fetchone() is not None
 
 
 def test_bound_target_options_reject_unsafe_combinations() -> None:
@@ -1477,6 +1587,8 @@ async def test_alembic_upgrade_head_uses_bound_async_engine(tmp_path: Path) -> N
 
     from app.runtime.sqlite_vfs import (
         AsyncEngineOptions,
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
         bind_marked_isolated_target,
     )
     from tests.migrations import alembic_config
@@ -1494,12 +1606,17 @@ async def test_alembic_upgrade_head_uses_bound_async_engine(tmp_path: Path) -> N
     )
     config = alembic_config("space")
 
-    def upgrade(connection) -> None:
-        config.attributes["connection"] = connection
-        command.upgrade(config, "head")
+    def upgrade(_connection) -> None:
+        raise AssertionError("Alembic must not consume async raw connection")
 
-    async with engine.begin() as connection:
-        await connection.run_sync(upgrade)
+    with target.open_maintenance(MaintenanceOptions(read_only=False)) as maintenance:
+        with _alembic_maintenance_adapter(
+            maintenance,
+            expected_identity=target.identity,
+            require_write=True,
+        ) as adapter:
+            config.attributes["maintenance_adapter"] = adapter
+            command.upgrade(config, "head")
     async with engine.connect() as connection:
         revision = await connection.scalar(
             text('SELECT version_num FROM "alembic_version_space"')

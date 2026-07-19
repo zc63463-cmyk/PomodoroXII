@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
@@ -126,17 +126,41 @@ def _expected_legacy_fingerprint(kind: DatabaseKind) -> dict[str, Any]:
 def _expected_managed_schema(
     kind: DatabaseKind, revision: str
 ) -> tuple[frozenset[str], dict[str, Any]]:
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
+
     config = _config(kind)
     version_table = _VERSION_TABLES[kind]
-    engine = create_engine("sqlite://")
-    try:
-        with engine.begin() as connection:
-            config.attributes["connection"] = connection
-            command.upgrade(config, revision)
-            table_names = frozenset(inspect(connection).get_table_names()) - {version_table}
-            return table_names, _inspector_fingerprint(connection, table_names)
-    finally:
-        engine.dispose()
+    with tempfile.TemporaryDirectory(prefix="pxii-schema-oracle-") as directory:
+        path = Path(directory) / "oracle.db"
+        path.touch()
+        target = _bind_existing_target(path, create_authority=True)
+        try:
+            with target.open_maintenance(
+                MaintenanceOptions(read_only=False, create_if_missing=False)
+            ) as maintenance:
+                with _alembic_maintenance_adapter(
+                    maintenance,
+                    expected_identity=target.identity,
+                    require_write=True,
+                ) as adapter:
+                    config.attributes["maintenance_adapter"] = adapter
+                    command.upgrade(config, revision)
+
+                    def fingerprint(connection: Connection):
+                        table_names = frozenset(inspect(connection).get_table_names()) - {
+                            version_table
+                        }
+                        return table_names, _inspector_fingerprint(
+                            connection, table_names
+                        )
+
+                    return adapter.run(fingerprint)
+        finally:
+            asyncio.run(target.aclose())
 
 
 def _classify_schema(
@@ -198,29 +222,45 @@ def _classify_schema(
 
 
 def _migrate_file(kind: DatabaseKind, path: Path) -> None:
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
     config = _config(kind)
     script = ScriptDirectory.from_config(config)
     head = _single_head(config)
     known_revisions = {revision.revision for revision in script.walk_revisions()}
-    engine = create_engine(f"sqlite:///{path.as_posix()}")
+    target = _bind_existing_target(path, create_authority=True)
     try:
-        with engine.begin() as connection:
-            state = _classify_schema(connection, kind, known_revisions)
-            config.attributes["connection"] = connection
-            if state == "legacy":
-                config.attributes["allow_legacy_adoption"] = True
-                command.stamp(config, _LEGACY_REVISIONS[kind])
-                command.upgrade(config, head)
-            else:
-                command.upgrade(config, head)
+        with target.open_maintenance(
+            MaintenanceOptions(read_only=False, create_if_missing=False)
+        ) as maintenance:
+            with _alembic_maintenance_adapter(
+                maintenance,
+                expected_identity=target.identity,
+                require_write=True,
+            ) as adapter:
+                def migrate(connection: Connection) -> None:
+                    state = _classify_schema(connection, kind, known_revisions)
+                    if state == "legacy":
+                        config.attributes["allow_legacy_adoption"] = True
+                        config.attributes["maintenance_adapter"] = adapter
+                        command.stamp(config, _LEGACY_REVISIONS[kind])
+                    config.attributes["maintenance_adapter"] = adapter
+                    command.upgrade(config, head)
+
+                adapter.run(migrate)
     finally:
-        engine.dispose()
+        asyncio.run(target.aclose())
 
 
 def run_migrations(kind: DatabaseKind, db_path: Path) -> None:
     """Atomically upgrade one SQLite database, adopting only an exact legacy schema."""
     if kind not in _VERSION_TABLES:
         raise ValueError(f"unsupported database kind: {kind!r}")
+
+    from app.runtime.sqlite_vfs import MaintenanceOptions, _bind_existing_target
 
     path = Path(db_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -233,7 +273,17 @@ def run_migrations(kind: DatabaseKind, db_path: Path) -> None:
         os.close(fd)
         temporary_path = Path(temporary_name)
         if existed:
-            shutil.copy2(path, temporary_path)
+            source = _bind_existing_target(path, create_authority=False)
+            try:
+                replacement = _bind_existing_target(temporary_path, create_authority=True)
+                try:
+                    with source.open_maintenance(MaintenanceOptions(read_only=False)) as source_connection:
+                        with replacement.open_maintenance(MaintenanceOptions(read_only=False)) as destination_connection:
+                            source_connection.backup(destination_connection)
+                finally:
+                    asyncio.run(replacement.aclose())
+            finally:
+                asyncio.run(source.aclose())
         _migrate_file(kind, temporary_path)
         os.replace(temporary_path, path)
         temporary_path = None
