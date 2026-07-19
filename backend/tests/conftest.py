@@ -222,6 +222,16 @@ def _isolate_env(
         if key.startswith("app.services.") and key != "app.services.time":
             del sys.modules[key]
 
+    # The production catalog intentionally keeps its startup-frozen model
+    # identities. Tests replace the ORM graph per case, so rebind only the
+    # test-local sync registry to those fresh classes without replacing CATALOG.
+    import app.services.sync as sync_module
+
+    for entry in sync_module.ENTITY_REGISTRY.values():
+        model_path = entry["spec"].model_path
+        module_name, _, class_name = model_path.rpartition(".")
+        entry["model"] = getattr(importlib.import_module(module_name), class_name)
+
     import app.auth.security as security_module
     importlib.reload(security_module)
 
