@@ -2034,15 +2034,20 @@ git commit -m "feat(migrations): make sqlite upgrades wal durable"
 **Files:**
 - Create: `backend/app/registry/catalog.py`
 - Modify: `backend/app/registry/__init__.py`
+- Modify: `backend/app/registry/builtin.py`
+- Modify: `backend/app/registry/resolve.py`
 - Modify: `backend/app/registry/sync_registry.py`
 - Modify: `backend/app/services/sync_entity_types.py`
 - Modify: `backend/app/services/meta.py`
 - Modify: `backend/app/schemas/meta.py`
 - Modify: `backend/app/routes/v1/meta.py`
+- Modify: `backend/app/routes/v1/trash.py`
 - Create: `backend/tests/test_compiled_entity_catalog.py`
+- Modify: `backend/tests/test_parity_registry_orm.py`
 - Modify: `backend/tests/test_registry.py`
 - Modify: `backend/tests/test_registry_integration.py`
 - Modify: `backend/tests/test_routes_meta.py`
+- Create: `backend/tests/test_trash_catalog_consumer.py`
 
 **Interfaces:**
 - Consumes: mutable startup `EntitySpec` registrations and compile version.
@@ -2090,7 +2095,7 @@ def test_compile_rejects_every_effective_key_collision(field, value, message) ->
         CompiledEntityCatalog.compile([note, conflicting], version="1")
 ```
 
-另加 unresolved model/schema、route enabled 但无 prefix、MCP flag 不一致以及交换输入顺序 hash 不变的测试。
+另加 unresolved model/service/schema、route enabled 但无 prefix/service/schema、MCP flag 不一致、复合/非字符串/nullable sync primary key、重复 compile、交换输入顺序 hash 不变以及 trash production consumer 不绕过 catalog 的测试。
 
 - [ ] **Step 2: Run catalog tests and verify missing compiler failures**
 
@@ -2103,6 +2108,15 @@ Expected: FAIL on missing `app.registry.catalog`.
 - [ ] **Step 3: Implement the immutable compiler and switch consumers**
 
 `backend/app/registry/catalog.py` 的稳定公开面如下：
+
+Startup calls `CATALOG = REGISTRY.compile(version="1")` exactly once. Meta,
+Sync, parity, and trash production consumers receive this frozen catalog and
+use `CATALOG.model_for(name)`; they never walk mutable `REGISTRY` or call a
+dynamic resolver after startup.
+
+Task-owned negative contracts explicitly cover `service_path`, `schema_module`,
+`schema_prefix`, `mcp_schema_enabled`, composite primary key rejection, and
+the rule that no production path dynamically resolves models after compile.
 
 ```python
 @dataclass(frozen=True)
@@ -2155,14 +2169,14 @@ class CompiledEntityCatalog:
         return self._sync_enabled
 ```
 
-`_validate_specs` 必须逐项验证：name/table/route/sync key 唯一；primary key 存在于 fields 或已解析模型 mapper；delete strategy 属于明确 allowlist；model、schema module 和 schema prefix 可解析；`route_enabled` 要求 route prefix/service/schema；MCP schema flag 与可解析 schema 一致。compile 在构造返回值前只解析每个 model path 一次，并将精确 class identity 存入 `_models_by_name`；交换输入顺序不改变 hash/model mapping。测试覆盖 `try_get_by_sync_key("unknown") is None`、`model_for` 返回 mapper class、每个 alias 的 `effective_sync_entity_type`，以及非 `id` 主键。`EntityRegistry.compile(version="1")` 原子 sealed，之后 `register()` 抛 `CatalogCompilationError`。启动只编译一次；Meta health 增加 additive `catalog_version`、`catalog_hash`，不改变现有字段。
+`_validate_specs` 必须逐项验证：name/table/route/sync key 唯一（包括 disabled route declarations）；primary key 存在于单一已解析模型 mapper，拒绝复合 primary key；sync primary key 必须 non-null、字符串 mapper、1..64 identifier 合同；delete strategy 属于明确 allowlist；model、service、schema module 和 schema prefix 均须完成 import/attribute/协议解析；`route_enabled` 要求 route prefix/service/schema 三者完整且可解析；MCP schema flag 与可解析 schema 一致，禁止 enabled 但缺失或不可解析。compile 在构造返回值前只解析每个 model path 一次，并将精确 class identity 存入 `_models_by_name`；交换输入顺序不改变 hash/model mapping。`EntityRegistry.compile(version="1")` 是 startup-only 原子 seal；第二次 compile 必须以稳定 `CatalogCompilationError(code=catalog_already_compiled)` fail closed，不能返回新对象或改变 hash；之后 `register()` 同样拒绝。所有 production consumer（包括 trash 和 registry resolver）只能消费 frozen catalog 的 compiled model，不得重新遍历 mutable REGISTRY 或动态 resolve_model；`resolve.py` 仅保留明确的 package-private test/parity compatibility boundary，生产路径不得调用。Meta health 增加 additive `catalog_version`、`catalog_hash`，不改变现有字段。
 
 For every `sync_enabled` spec, compilation additionally requires the declared primary-key mapper column to be nonnullable and string-typed with the public 1..64 identifier contract. A future integer/natural key is rejected at startup until the snapshot cursor is deliberately generalized; `_iter_records` may therefore use the empty-string lower bound safely. Tests include one non-`id` string primary key and explicit nullable/integer rejection.
 
 - [ ] **Step 4: Run registry/meta contract tests**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_compiled_entity_catalog.py tests/test_registry.py tests/test_registry_integration.py tests/test_routes_meta.py -p no:cacheprovider
+.\.venv\Scripts\python.exe -m pytest -q tests/test_compiled_entity_catalog.py tests/test_registry.py tests/test_registry_integration.py tests/test_routes_meta.py tests/test_trash_catalog_consumer.py -p no:cacheprovider
 .\.venv\Scripts\ruff.exe check --no-cache app/registry app/services/meta.py app/schemas/meta.py app/routes/v1/meta.py tests/test_compiled_entity_catalog.py
 ```
 
@@ -2171,7 +2185,7 @@ Expected: PASS; hash is order-independent and all registry consumers use the sam
 - [ ] **Step 5: Commit catalog compilation**
 
 ```powershell
-git add app/registry/catalog.py app/registry/__init__.py app/registry/sync_registry.py app/services/sync_entity_types.py app/services/meta.py app/schemas/meta.py app/routes/v1/meta.py tests/test_compiled_entity_catalog.py tests/test_registry.py tests/test_registry_integration.py tests/test_routes_meta.py
+git add app/registry/catalog.py app/registry/__init__.py app/registry/builtin.py app/registry/resolve.py app/registry/sync_registry.py app/services/sync_entity_types.py app/services/meta.py app/schemas/meta.py app/routes/v1/meta.py app/routes/v1/trash.py tests/test_compiled_entity_catalog.py tests/test_parity_registry_orm.py tests/test_registry.py tests/test_registry_integration.py tests/test_routes_meta.py tests/test_trash_catalog_consumer.py
 git commit -m "feat(registry): compile immutable entity catalog"
 ```
 

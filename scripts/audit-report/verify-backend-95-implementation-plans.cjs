@@ -3149,6 +3149,7 @@ function verifyCrossWave(plans) {
   const s2Task1Entry = taskEntry(s2, 1);
   const s2Task2Entry = taskEntry(s2, 2);
   const s2Task3Entry = taskEntry(s2, 3);
+  const s2Task4Entry = taskEntry(s2, 4);
   const s2Task5Entry = taskEntry(s2, 5);
   const s2Task6Entry = taskEntry(s2, 6);
   const s2Task7Entry = taskEntry(s2, 7);
@@ -3179,6 +3180,7 @@ function verifyCrossWave(plans) {
   const s2Task1Step3 = parseSteps(s2Task1Entry).find((step) => step.number === 3)?.body || '';
   const s2Task2Step5 = parseSteps(s2Task2Entry).find((step) => step.number === 5)?.body || '';
   const s2Task3Step3 = parseSteps(s2Task3Entry).find((step) => step.number === 3)?.body || '';
+  const s2Task4Step3 = parseSteps(s2Task4Entry).find((step) => step.number === 3)?.body || '';
   const s2Task5Step3 = parseSteps(s2Task5Entry).find((step) => step.number === 3)?.body || '';
   const s2Task8Step3 = parseSteps(s2Task8Entry).find((step) => step.number === 3)?.body || '';
   const s2Task10Step1 = parseSteps(s2Task10Entry).find((step) => step.number === 1)?.body || '';
@@ -3884,6 +3886,53 @@ function verifyCrossWave(plans) {
     'S2 Task 3: physically committed isolated target must propagate cancellation without discard',
   );
   requireSha256('S2 Task 3', s2Task3Step3, '235d5efd6efa5ad411faf5a9092315daf99cdbbd826a47b4c031b5f21b8a64d3');
+  check(Boolean(s2Task4Entry), 'S2: missing Task 4 catalog task');
+  for (const task4Path of [
+    'Create: `backend/app/registry/catalog.py`',
+    'Modify: `backend/app/registry/__init__.py`',
+    'Modify: `backend/app/registry/builtin.py`',
+    'Modify: `backend/app/registry/resolve.py`',
+    'Modify: `backend/app/routes/v1/trash.py`',
+    'Create: `backend/tests/test_trash_catalog_consumer.py`',
+  ]) requireTaskText('S2', s2Task4Entry, task4Path, `Task 4 catalog ownership ${task4Path}`);
+  const task4AllowedPaths = [
+    'backend/app/registry/catalog.py',
+    'backend/app/registry/__init__.py',
+    'backend/app/registry/builtin.py',
+    'backend/app/registry/resolve.py',
+    'backend/app/registry/sync_registry.py',
+    'backend/app/services/sync_entity_types.py',
+    'backend/app/services/meta.py',
+    'backend/app/schemas/meta.py',
+    'backend/app/routes/v1/meta.py',
+    'backend/app/routes/v1/trash.py',
+    'backend/tests/test_compiled_entity_catalog.py',
+    'backend/tests/test_parity_registry_orm.py',
+    'backend/tests/test_registry.py',
+    'backend/tests/test_registry_integration.py',
+    'backend/tests/test_routes_meta.py',
+    'backend/tests/test_trash_catalog_consumer.py',
+  ];
+  const task4Mutable = parseFileEntries(s2Task4Entry).filter((entry) => mutableFileActions.has(entry.action));
+  const task4Staged = stagedFiles('S2', s2Task4Entry);
+  check(equalArrays([...task4Mutable.map((entry) => entry.path)].sort(), [...task4AllowedPaths].sort()), 'S2 Task 4 mutable Files closed set drift');
+  check(equalArrays([...task4Staged].sort(), [...task4AllowedPaths].sort()), 'S2 Task 4 git add closed set drift');
+  for (const contract of [
+    'catalog_already_compiled',
+    'service_path',
+    'schema_module',
+    'schema_prefix',
+    'route_enabled',
+    'mcp_schema_enabled',
+    'composite primary key',
+    'non-null、字符串 mapper',
+    '所有 production consumer',
+    'trash production consumer',
+    'no production path dynamically',
+  ]) requireTaskText('S2', s2Task4Entry, contract, `Task 4 catalog contract ${contract}`);
+  check(!/registry\/\*\*|routes\/\*\*/.test(s2Task4Entry.body), 'S2 Task 4: broad registry/routes ownership glob');
+  requireText('S2 Task 4 Step 3', s2Task4Step3, 'CATALOG', 'Task 4 implementation consumes frozen catalog');
+  forbidPattern('S2 Task 4', s2Task4Entry.body, /second compile returns a new object|compile may be called repeatedly/gi, 'catalog compile reentrancy downgrade');
   requireTaskText('S2', s2Task6Entry, 'pending-resume owner', 'engine manager owns retryable partial-quiesce cleanup');
   requireTaskText('S2', s2Task6Entry, 'resume fail-once/persistent failure', 'engine manager pending-resume regression');
   requireText('S2 Task 3 Step 3', s2Task3Step3, 'FenceReceipt.assert_current()` 重读持久 fence', 'persistent fence re-read immediately before replace');
@@ -5709,6 +5758,10 @@ function runS2Task3AmendmentVerifierAtPaths(paths) {
   return runVerifierAtPaths(paths);
 }
 
+function runS2Task4AmendmentVerifierAtPaths(paths) {
+  return runVerifierAtPaths(paths);
+}
+
 function runS2Task1AmendmentVerifierAtPaths(paths) {
   failures.length = 0;
   const s2 = readAuthorityText(path.join(paths.plans, expectedPlans[2].filename));
@@ -6451,6 +6504,60 @@ function runMutationSelfTests(
           file,
           '`Config.attributes["maintenance_adapter"]`',
           '`Config.attributes["connection"]`',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task4-resolver-whitelist-omission',
+      expected: /Task 4 catalog ownership|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(file, '- Modify: `backend/app/registry/resolve.py`\n', '', this.name);
+      },
+    },
+    {
+      name: 's2-task4-trash-whitelist-omission',
+      expected: /Task 4 catalog ownership|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(file, '- Modify: `backend/app/routes/v1/trash.py`\n', '', this.name);
+      },
+    },
+    {
+      name: 's2-task4-compile-reentrancy-downgrade',
+      expected: /Task 4 catalog contract catalog_already_compiled|catalog compile reentrancy downgrade/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          '第二次 compile 必须以稳定 `CatalogCompilationError(code=catalog_already_compiled)` fail closed',
+          'second compile returns a new object',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task4-dynamic-consumer-restored',
+      expected: /Task 4 catalog contract no production path dynamically/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[2].filename);
+        replaceRequired(
+          file,
+          'no production path dynamically resolves models after compile',
+          'production path may dynamically resolve models after compile',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's2-task4-design-one-shot-removal',
+      expected: /DESIGN.*catalog_already_compiled|missing catalog one-shot authority/,
+      mutate(paths) {
+        replaceRequired(
+          paths.design,
+          'compile fails closed with `catalog_already_compiled`',
+          'compile returns a replacement catalog',
           this.name,
         );
       },
@@ -10679,6 +10786,15 @@ function verifyCurrentPaths(immutableS0SandboxBytes = null) {
       normalizedDesign.includes(designContract.replace(/\s+/g, ' ').trim()),
       `DESIGN S2 Task 3: missing authority-preserving Alembic adapter contract ${designContract}`,
     );
+    for (const designContract of [
+      'catalog_already_compiled',
+      'unresolved model/service/schema references',
+      'including trash and registry resolver paths',
+      'no production path dynamically walks mutable `REGISTRY`',
+    ]) check(
+      normalizedDesign.includes(designContract.replace(/\s+/g, ' ').trim()),
+      `DESIGN S2 Task 4: missing catalog one-shot authority ${designContract}`,
+    );
     if (fs.existsSync(integrationSpecPath)) {
       verifyTaskSpaceIntegrationSpec(readAuthorityText(integrationSpecPath));
     }
@@ -10742,9 +10858,17 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's2-task3-extra-whitelist-file',
     's2-task3-design-adapter-contract-removal',
   ]), runS2Task3AmendmentVerifierAtPaths, 's2-task3-amendment');
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s2-task4-amendment') {
+  runMutationSelfTests(new Set([
+    's2-task4-resolver-whitelist-omission',
+    's2-task4-trash-whitelist-omission',
+    's2-task4-compile-reentrancy-downgrade',
+    's2-task4-dynamic-consumer-restored',
+    's2-task4-design-one-shot-removal',
+  ]), runS2Task4AmendmentVerifierAtPaths, 's2-task4-amendment');
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment]\n');
   process.exitCode = 2;
 }

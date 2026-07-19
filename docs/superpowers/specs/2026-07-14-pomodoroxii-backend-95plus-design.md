@@ -492,10 +492,15 @@ and eviction/shutdown awaits every active handle.
 
 The mutable registration builder is allowed only during startup. Compilation
 rejects duplicate names, tables, route prefixes, effective Sync keys, missing
-primary keys, invalid delete strategies, unresolved model/schema references,
-and inconsistent route or MCP flags. The result is immutable and exposes a
-stable catalog version and hash to health, metadata, parity, snapshot, and Sync
-contracts.
+or composite primary keys, nullable/non-string Sync keys, invalid delete
+strategies, unresolved model/service/schema references, incomplete route
+contracts, and inconsistent MCP flags. Compilation is one-shot: a second
+compile fails closed with `catalog_already_compiled`; it cannot replace the
+sealed object or change its hash. The result is immutable and exposes a stable
+catalog version and hash to health, metadata, parity, snapshot, and Sync
+contracts. Every production consumer, including trash and registry resolver
+paths, consumes the frozen compiled model map; no production path dynamically
+walks mutable `REGISTRY` or calls a pathname/model resolver after startup.
 
 ### IndexStoreSchema
 
