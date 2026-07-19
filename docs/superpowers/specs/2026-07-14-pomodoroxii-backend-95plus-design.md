@@ -818,6 +818,11 @@ document when the two conflict.
   Startup, fleet preflight, provision, migration, exclusive cleanup, and
   shutdown execute inline in the owner Task; global and Space leases remain in
   that Task and `MigrationCoordinator` remains the only migration authority.
+  The production Space creation route is an atomic provision-before-registration
+  command. Missing-store isolation tests must therefore create an explicit
+  Meta-only registration when exercising fail-closed request behavior; they must
+  not use the production create route as a fixture for an intentionally missing
+  store.
 - The owner executor state machine is exactly `NEW`, `STARTING`, `READY`,
   `DRAINING`, `CLOSED`, and `FAILED`. It has a bounded FIFO typed-command queue,
   and shares one package-private `RuntimeAdmissionGate` with request/MCP handle

@@ -3347,6 +3347,7 @@ git commit -m "feat(spaces): provision storage before registration"
 - Modify: `backend/tests/conftest.py`
 - Create: `backend/tests/test_owner_executor.py`
 - Modify: `backend/tests/test_routes_auth_spaces.py`
+- Modify: `backend/tests/test_test_isolation.py` (update missing-store regression to create a Meta-only registration; production Space creation provisions before registration)
 
 **Interfaces:**
 - Consumes: process owner, global-exclusive startup lease, closed `MigrationPreflightPolicy` registrations, read-only Meta registration, credential bootstrap helper, catalog compiler, and every registered Space runtime.
@@ -3635,7 +3636,7 @@ Expected: PASS; readiness is unreachable until every registered store is at know
 - [ ] **Step 5: Commit startup gating**
 
 ```powershell
-git add app/db/meta_session.py app/runtime/bootstrap.py app/main.py app/mcp/server.py app/runtime/space.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_main.py tests/test_mcp_http_lifespan.py tests/test_backup_lifespan.py tests/conftest.py tests/test_owner_executor.py tests/test_routes_auth_spaces.py
+git add app/db/meta_session.py app/runtime/bootstrap.py app/main.py app/mcp/server.py app/runtime/space.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_main.py tests/test_mcp_http_lifespan.py tests/test_backup_lifespan.py tests/conftest.py tests/test_owner_executor.py tests/test_routes_auth_spaces.py tests/test_test_isolation.py
 git commit -m "feat(runtime): gate startup on registered space readiness"
 ```
 
