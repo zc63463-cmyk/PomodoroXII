@@ -9,7 +9,7 @@ from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
-from tests.migrations import alembic_config, migration_engine
+from tests.migrations import alembic_config, migration_engine, run_bound_command
 
 
 @pytest.mark.parametrize(
@@ -35,10 +35,9 @@ def test_upgrade_head_is_isolated_and_idempotent(
     engine = migration_engine(tmp_path, schema)
     cfg = alembic_config(schema)
     try:
-        with engine.begin() as connection:
-            cfg.attributes["connection"] = connection
-            command.upgrade(cfg, "head")
-            command.upgrade(cfg, "head")
+        db_path = tmp_path / f"{schema}.db"
+        cfg = run_bound_command(schema, db_path, command.upgrade, "head")
+        run_bound_command(schema, db_path, command.upgrade, "head")
 
         version_table = cfg.get_main_option("version_table")
         tables = set(inspect(engine).get_table_names())
@@ -59,10 +58,9 @@ def test_downgrade_base_removes_only_chain_tables(tmp_path: Path, schema: str) -
     engine = migration_engine(tmp_path, schema)
     cfg = alembic_config(schema)
     try:
-        with engine.begin() as connection:
-            cfg.attributes["connection"] = connection
-            command.upgrade(cfg, "head")
-            command.downgrade(cfg, "base")
+        db_path = tmp_path / f"{schema}.db"
+        cfg = run_bound_command(schema, db_path, command.upgrade, "head")
+        run_bound_command(schema, db_path, command.downgrade, "base")
 
         assert set(inspect(engine).get_table_names()) <= {
             cfg.get_main_option("version_table")
@@ -73,11 +71,10 @@ def test_downgrade_base_removes_only_chain_tables(tmp_path: Path, schema: str) -
 
 def test_space_notes_table_has_no_content_column(tmp_path: Path) -> None:
     engine = migration_engine(tmp_path, "space")
-    cfg = alembic_config("space")
     try:
-        with engine.begin() as connection:
-            cfg.attributes["connection"] = connection
-            command.upgrade(cfg, "head")
+        run_bound_command(
+            "space", tmp_path / "space.db", command.upgrade, "head"
+        )
         columns = {column["name"] for column in inspect(engine).get_columns("notes")}
         assert "content" not in columns
         assert {"content_hash", "word_count"} <= columns
