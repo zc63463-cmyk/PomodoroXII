@@ -3,11 +3,43 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import unicodedata
 from pathlib import Path
 
 import pytest
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _seed_space_007(path: Path) -> None:
+    from app.db.migrations import _config
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
+
+    path.touch()
+    target = _bind_existing_target(path, create_authority=True)
+    try:
+        with target.open_maintenance(
+            MaintenanceOptions(read_only=False, create_if_missing=False)
+        ) as maintenance:
+            with _alembic_maintenance_adapter(
+                maintenance,
+                expected_identity=target.identity,
+                require_write=True,
+            ) as adapter:
+                config = _config("space")
+                config.attributes["maintenance_adapter"] = adapter
+                command.upgrade(config, "space_007_session_mood_check")
+    finally:
+        asyncio.run(target.aclose())
 
 
 def test_migration_coordinator_verifies_bound_target_without_upgrade(tmp_path):
@@ -41,6 +73,7 @@ async def test_coordinator_upgrade_and_fleet_preflight_use_same_owner_and_close_
     tmp_path: Path,
 ) -> None:
     from app.db.migrations import (
+        FleetPreflightTarget,
         MigrationCoordinator,
         MigrationPreflightPolicy,
         run_migrations,
@@ -81,7 +114,7 @@ async def test_coordinator_upgrade_and_fleet_preflight_use_same_owner_and_close_
     try:
         head = result.head
         fleet = await coordinator.preflight_fleet_under_lease(
-            [("space", target)],
+            [FleetPreflightTarget("space-a", "space", target.identity, target)],
             global_lease,
             [
                 MigrationPreflightPolicy(
@@ -92,6 +125,7 @@ async def test_coordinator_upgrade_and_fleet_preflight_use_same_owner_and_close_
             ],
         )
         assert fleet.statuses[0].at_head
+        assert fleet.space_ids == ("space-a",)
         assert observed == [(1,)]
         with pytest.raises(SQLiteAuthorityRevokedError):
             target.open_maintenance(MaintenanceOptions(read_only=True))
@@ -209,6 +243,67 @@ async def test_upgrade_failure_after_backup_preserves_old_revision_and_releases_
 
 
 @pytest.mark.asyncio
+async def test_post_cutover_failure_marks_process_exit_required_without_discard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.db.migrations import MigrationCoordinator
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import (
+        SQLiteReplacementAuthority,
+        _bind_existing_target,
+    )
+
+    path = tmp_path / "post-cutover.db"
+    await asyncio.to_thread(_seed_space_007, path)
+    discard_calls = 0
+    original_discard = SQLiteReplacementAuthority.discard_closed_replacement
+
+    def record_discard(self) -> None:
+        nonlocal discard_calls
+        discard_calls += 1
+        original_discard(self)
+
+    monkeypatch.setattr(
+        SQLiteReplacementAuthority, "discard_closed_replacement", record_discard
+    )
+
+    class Quiescer:
+        async def drain_identity(self, _identity) -> None:
+            return None
+
+        async def resume_identity(self, _identity) -> None:
+            return None
+
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(
+        leases,
+        Quiescer(),
+        failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("post-cutover"))
+        if name == "after_replace"
+        else None,
+    )
+    owner = await leases.acquire_process_owner("post-cutover", 5)
+    lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "post-cutover", 5)
+    try:
+        with pytest.raises(BaseExceptionGroup) as captured:
+            await coordinator.upgrade_under_lease("space", path, lease)
+        assert isinstance(captured.value.exceptions[0], RuntimeError)
+        assert str(captured.value.exceptions[0]) == "post-cutover"
+        assert captured.value.exceptions[1].code == "process_exit_required"
+        assert discard_calls == 0
+        with pytest.raises(Exception, match="cleanup"):
+            leases.assert_ready()
+        published = _bind_existing_target(path, create_authority=False)
+        try:
+            assert (await coordinator.verify_open("space", published)).at_head
+        finally:
+            await published.aclose()
+    finally:
+        await lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
 async def test_partial_drain_failure_still_resumes_identity(tmp_path: Path) -> None:
     from app.db.migrations import MigrationCoordinator, run_migrations
     from app.runtime.leases import RuntimeLeaseCoordinator
@@ -299,8 +394,74 @@ async def test_isolated_close_failure_registers_same_task_cleanup(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_isolated_persistent_cleanup_requires_process_exit(tmp_path: Path) -> None:
+    from app.db.migrations import MigrationCoordinator
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+
+    class Target:
+        identity = object()
+
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            if self.close_calls < 3:
+                raise RuntimeError("persistent close")
+
+    class Marker:
+        def __init__(self) -> None:
+            self.target = Target()
+            self.discard_calls = 0
+
+        def bind_isolated_sqlite_target(self, _path: Path):
+            return self.target
+
+        def commit_isolated_sqlite_target(self, _target) -> None:
+            raise AssertionError("failed migration cannot commit")
+
+        def discard_isolated_sqlite_target(self, _target) -> None:
+            self.discard_calls += 1
+
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(
+        leases,
+        type("Q", (), {})(),
+        migrate_target=lambda _kind, _target: (_ for _ in ()).throw(
+            RuntimeError("isolated body")
+        ),
+    )
+    owner = await leases.acquire_process_owner("isolated-persistent", 5)
+    lease = await leases.acquire_global(
+        LeaseMode.EXCLUSIVE, "isolated-persistent", 5
+    )
+    marker = Marker()
+    try:
+        with pytest.raises(BaseExceptionGroup) as captured:
+            await coordinator.create_isolated_under_lease(
+                "space", tmp_path / "new.db", lease, marker
+            )
+        assert str(captured.value.exceptions[0]) == "isolated body"
+        assert await leases.retry_pending_cleanups_for_current_task()
+        with pytest.raises(Exception, match="cleanup"):
+            leases.assert_ready()
+        assert await leases.retry_pending_cleanups_for_current_task() == ()
+        assert marker.discard_calls == 1
+        with pytest.raises(Exception, match="cleanup"):
+            leases.assert_ready()
+    finally:
+        await lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
 async def test_duplicate_preflight_identities_close_all_open_targets(tmp_path: Path) -> None:
-    from app.db.migrations import MigrationCoordinator, MigrationSafetyError, run_migrations
+    from app.db.migrations import (
+        FleetPreflightTarget,
+        MigrationCoordinator,
+        MigrationSafetyError,
+        run_migrations,
+    )
     from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
     from app.runtime.sqlite_vfs import MaintenanceOptions, _bind_existing_target
 
@@ -315,7 +476,11 @@ async def test_duplicate_preflight_identities_close_all_open_targets(tmp_path: P
     try:
         with pytest.raises(MigrationSafetyError, match="unique"):
             await coordinator.preflight_fleet_under_lease(
-                [("space", first), ("space", second)], global_lease
+                [
+                    FleetPreflightTarget("a", "space", first.identity, first),
+                    FleetPreflightTarget("b", "space", second.identity, second),
+                ],
+                global_lease,
             )
         from app.errors import SQLiteAuthorityRevokedError
 
@@ -324,6 +489,296 @@ async def test_duplicate_preflight_identities_close_all_open_targets(tmp_path: P
                 target.open_maintenance(MaintenanceOptions(read_only=True))
     finally:
         await global_lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_fleet_preflight_sorts_meta_then_canonical_space_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.db.migrations as migrations
+    from app.db.migrations import (
+        FleetPreflightTarget,
+        MigrationCoordinator,
+        MigrationStatus,
+        run_migrations,
+    )
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import _bind_existing_target
+
+    paths = {name: tmp_path / f"{name}.db" for name in ("meta", "a", "b")}
+    await asyncio.to_thread(run_migrations, "meta", paths["meta"])
+    for name in ("a", "b"):
+        await asyncio.to_thread(run_migrations, "space", paths[name])
+    targets = {
+        name: _bind_existing_target(path, create_authority=False)
+        for name, path in paths.items()
+    }
+    labels = {target.identity: name for name, target in targets.items()}
+    observed: list[str] = []
+
+    def probe(kind, target, _policies):
+        observed.append(labels[target.identity])
+        return MigrationStatus(kind, None, "head", False, True)
+
+    monkeypatch.setattr(migrations, "_preflight_bound_target", probe)
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(leases, type("Q", (), {})())
+    owner = await leases.acquire_process_owner("fleet-order", 5)
+    lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "fleet-order", 5)
+    try:
+        fleet = await coordinator.preflight_fleet_under_lease(
+            [
+                FleetPreflightTarget("b", "space", targets["b"].identity, targets["b"]),
+                FleetPreflightTarget(None, "meta", targets["meta"].identity, targets["meta"]),
+                FleetPreflightTarget("a", "space", targets["a"].identity, targets["a"]),
+            ],
+            lease,
+        )
+        assert observed == ["meta", "a", "b"]
+        assert fleet.space_ids == (None, "a", "b")
+        assert fleet.identities == tuple(targets[name].identity for name in observed)
+    finally:
+        await lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "space_ids",
+    [
+        ("alpha", "alpha"),
+        ("alpha", "ALPHA"),
+        ("caf\u00e9", unicodedata.normalize("NFD", "caf\u00e9")),
+    ],
+)
+async def test_fleet_preflight_rejects_canonical_id_collisions_and_closes_all(
+    tmp_path: Path, space_ids: tuple[str, str]
+) -> None:
+    from app.db.migrations import FleetPreflightTarget, MigrationCoordinator, MigrationSafetyError
+    from app.errors import SQLiteAuthorityRevokedError
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import MaintenanceOptions, _bind_existing_target
+
+    paths = [tmp_path / "one.db", tmp_path / "two.db"]
+    from app.db.migrations import run_migrations
+
+    for path in paths:
+        await asyncio.to_thread(run_migrations, "space", path)
+    targets = [_bind_existing_target(path, create_authority=False) for path in paths]
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(leases, type("Q", (), {})())
+    owner = await leases.acquire_process_owner("fleet-collision", 5)
+    lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "fleet-collision", 5)
+    try:
+        with pytest.raises(MigrationSafetyError, match="canonical Space ID"):
+            await coordinator.preflight_fleet_under_lease(
+                [
+                    FleetPreflightTarget(space_id, "space", target.identity, target)
+                    for space_id, target in zip(space_ids, targets, strict=True)
+                ],
+                lease,
+            )
+        for target in targets:
+            with pytest.raises(SQLiteAuthorityRevokedError):
+                target.open_maintenance(MaintenanceOptions(read_only=True))
+    finally:
+        await lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_fleet_preflight_rejects_expected_identity_before_probe_and_preserves_bytes(
+    tmp_path: Path,
+) -> None:
+    from app.db.migrations import (
+        FleetPreflightTarget,
+        MigrationCoordinator,
+        MigrationSafetyError,
+        run_migrations,
+    )
+    from app.runtime.contained_io import StorageIdentity
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import _bind_existing_target
+
+    path = tmp_path / "identity.db"
+    await asyncio.to_thread(run_migrations, "space", path)
+    before = _sha256(path)
+    target = _bind_existing_target(path, create_authority=False)
+    migration_calls: list[str] = []
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(
+        leases,
+        type("Q", (), {})(),
+        migrate_target=lambda _kind, _target: migration_calls.append("migration"),
+    )
+    owner = await leases.acquire_process_owner("fleet-identity", 5)
+    lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "fleet-identity", 5)
+    try:
+        with pytest.raises(MigrationSafetyError, match="expected identity"):
+            await coordinator.preflight_fleet_under_lease(
+                [
+                    FleetPreflightTarget(
+                        "a",
+                        "space",
+                        StorageIdentity(target.identity.device, target.identity.file_id + 1),
+                        target,
+                    )
+                ],
+                lease,
+            )
+        assert migration_calls == []
+        assert _sha256(path) == before
+    finally:
+        await lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_fleet_cancellation_closes_all_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.db.migrations as migrations
+    from app.db.migrations import FleetPreflightTarget, MigrationCoordinator, run_migrations
+    from app.errors import SQLiteAuthorityRevokedError
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import MaintenanceOptions, _bind_existing_target
+
+    paths = [tmp_path / "a.db", tmp_path / "b.db"]
+    for path in paths:
+        await asyncio.to_thread(run_migrations, "space", path)
+    targets = [_bind_existing_target(path, create_authority=False) for path in paths]
+    original = migrations._run_joined
+    calls = 0
+
+    async def cancel_second(callback):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise asyncio.CancelledError("fleet cancelled")
+        return await original(callback)
+
+    monkeypatch.setattr(migrations, "_run_joined", cancel_second)
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(leases, type("Q", (), {})())
+    owner = await leases.acquire_process_owner("fleet-cancel", 5)
+    lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "fleet-cancel", 5)
+    try:
+        with pytest.raises(asyncio.CancelledError, match="fleet cancelled"):
+            await coordinator.preflight_fleet_under_lease(
+                [
+                    FleetPreflightTarget(name, "space", target.identity, target)
+                    for name, target in zip(("a", "b"), targets, strict=True)
+                ],
+                lease,
+            )
+        for target in targets:
+            with pytest.raises(SQLiteAuthorityRevokedError):
+                target.open_maintenance(MaintenanceOptions(read_only=True))
+    finally:
+        await lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_fleet_identity_property_error_closes_all_targets(tmp_path: Path) -> None:
+    from app.db.migrations import FleetPreflightTarget, MigrationCoordinator
+    from app.runtime.contained_io import StorageIdentity
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+
+    class Target:
+        def __init__(self, identity_error: bool) -> None:
+            self.identity_error = identity_error
+            self.close_calls = 0
+
+        @property
+        def identity(self):
+            if self.identity_error:
+                raise RuntimeError("identity probe")
+            return StorageIdentity(1, 2)
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    targets = [Target(True), Target(False)]
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(leases, type("Q", (), {})())
+    owner = await leases.acquire_process_owner("fleet-identity-error", 5)
+    lease = await leases.acquire_global(
+        LeaseMode.EXCLUSIVE, "fleet-identity-error", 5
+    )
+    try:
+        with pytest.raises(RuntimeError, match="identity probe"):
+            await coordinator.preflight_fleet_under_lease(
+                [
+                    FleetPreflightTarget("a", "space", StorageIdentity(1, 1), targets[0]),
+                    FleetPreflightTarget("b", "space", StorageIdentity(1, 2), targets[1]),
+                ],
+                lease,
+            )
+        assert [target.close_calls for target in targets] == [1, 1]
+    finally:
+        await lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_index", [0, 1, 2])
+async def test_fleet_probe_failure_is_zero_write_and_byte_identical(
+    tmp_path: Path, failure_index: int
+) -> None:
+    from app.db.migrations import (
+        FleetPreflightTarget,
+        MigrationCoordinator,
+        MigrationPreflightPolicy,
+        _config,
+        _single_head,
+        run_migrations,
+    )
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import _bind_existing_target
+
+    paths = [tmp_path / f"{name}.db" for name in ("a", "b", "c")]
+    for path in paths:
+        await asyncio.to_thread(run_migrations, "space", path)
+    before = [_sha256(path) for path in paths]
+    targets = [_bind_existing_target(path, create_authority=False) for path in paths]
+    probes = 0
+
+    def reject(_kind, _status, _connection) -> None:
+        nonlocal probes
+        current = probes
+        probes += 1
+        if current == failure_index:
+            raise RuntimeError(f"legacy-bearing-{failure_index}")
+
+    side_effects = dict.fromkeys(("migration", "backup", "ddl", "index", "register"), 0)
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(
+        leases,
+        type("Q", (), {})(),
+        migrate_target=lambda _kind, _target: side_effects.__setitem__("migration", 1),
+    )
+    owner = await leases.acquire_process_owner("fleet-policy", 5)
+    lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "fleet-policy", 5)
+    try:
+        with pytest.raises(RuntimeError, match=f"legacy-bearing-{failure_index}"):
+            await coordinator.preflight_fleet_under_lease(
+                [
+                    FleetPreflightTarget(name, "space", target.identity, target)
+                    for name, target in zip(("a", "b", "c"), targets, strict=True)
+                ],
+                lease,
+                [
+                    MigrationPreflightPolicy(
+                        "space", _single_head(_config("space")), reject
+                    )
+                ],
+            )
+        assert side_effects == dict.fromkeys(side_effects, 0)
+        assert [_sha256(path) for path in paths] == before
+    finally:
+        await lease.release()
         await owner.release()
 
 
