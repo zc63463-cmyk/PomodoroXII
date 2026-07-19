@@ -287,13 +287,13 @@ class AuthorizedSpaceScope:
         space_id: str,
         mode: AccessMode,
     ) -> AuthorizedSpaceScopeResult | SpaceRuntimeHandle:
-        resolved = await self.resolve(principal, space_id, mode)
         if self.runtime is None:
-            return resolved
+            return await self.resolve(principal, space_id, mode)
         global_lease = await self.runtime.leases.acquire_global(
             LeaseMode.SHARED, "request", 5
         )
         try:
+            resolved = await self.resolve(principal, space_id, mode)
             return await self.runtime.open_resolved(
                 resolved,
                 "read" if mode == "read" else "mutation",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +40,33 @@ class _EngineResource:
     async def release(self) -> None:
         self.attempts += 1
         self.successes += 1
+
+
+@pytest.mark.asyncio
+async def test_scope_acquires_global_before_registered_meta_resolve() -> None:
+    from app.runtime.scope import AuthorizedSpaceScope
+
+    calls: list[str] = []
+
+    class Leases:
+        async def acquire_global(self, *_args):
+            calls.append("global")
+            return _FakeLease("global")
+
+    runtime = SimpleNamespace(
+        leases=Leases(),
+        open_resolved=lambda *_args, **_kwargs: None,
+    )
+    scope = AuthorizedSpaceScope(SimpleNamespace(), Path.cwd(), runtime)
+
+    async def resolve(*_args):
+        calls.append("resolve")
+        raise RuntimeError("stop")
+
+    scope.resolve = resolve
+    with pytest.raises(RuntimeError, match="stop"):
+        await scope.open(SimpleNamespace(), "space-a", "read")
+    assert calls[:2] == ["global", "resolve"]
 
 
 @pytest.mark.asyncio
