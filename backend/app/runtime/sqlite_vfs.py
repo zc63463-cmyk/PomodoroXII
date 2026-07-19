@@ -245,9 +245,9 @@ class _MaintenanceCursor:
 
     def _close(self) -> None:
         cursor = self.__cursor
-        self.__cursor = None
         if cursor is not None:
             cursor.close()
+            self.__cursor = None
 
     def __del__(self) -> None:
         try:
@@ -269,11 +269,24 @@ class _MaintenanceCursor:
 
 
 class _MaintenanceConnection:
-    __slots__ = ("__connection", "__cursors")
+    __slots__ = ("__connection", "__cursors", "_identity", "_read_only")
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        identity: StorageIdentity,
+        read_only: bool,
+    ) -> None:
         self.__connection = connection
         self.__cursors: weakref.WeakSet[_MaintenanceCursor] = weakref.WeakSet()
+        self._identity = identity
+        self._read_only = read_only
+
+    def _require_open(self) -> sqlite3.Connection:
+        connection = self.__connection
+        if connection is None:
+            raise RuntimeError("maintenance connection is closed")
+        return connection
 
     def _wrap(self, cursor: sqlite3.Cursor) -> _MaintenanceCursor:
         wrapped = _MaintenanceCursor(cursor)
@@ -281,45 +294,67 @@ class _MaintenanceConnection:
         return wrapped
 
     def execute(self, sql: str, parameters: Any = ()) -> _MaintenanceCursor:
-        return self._wrap(self.__connection.execute(sql, parameters))
+        return self._wrap(self._require_open().execute(sql, parameters))
 
     def executemany(self, sql: str, parameters: Any) -> _MaintenanceCursor:
-        return self._wrap(self.__connection.executemany(sql, parameters))
+        return self._wrap(self._require_open().executemany(sql, parameters))
 
     def commit(self) -> None:
-        self.__connection.commit()
+        self._require_open().commit()
 
     def rollback(self) -> None:
-        self.__connection.rollback()
+        self._require_open().rollback()
+
+    def backup(self, destination: _MaintenanceConnection) -> None:
+        source_connection = self._require_open()
+        if not isinstance(destination, _MaintenanceConnection):
+            raise TypeError("backup destination must be a maintenance connection")
+        destination_connection = destination._require_open()
+        if destination._read_only:
+            raise ValueError("backup destination is read-only")
+        if destination is self or destination._identity == self._identity:
+            raise ValueError(
+                "backup source and destination must be distinct authorities"
+            )
+        source_connection.backup(destination_connection)
 
     @property
     def row_factory(self) -> Any:
-        return self.__connection.row_factory
+        return self._require_open().row_factory
 
     @row_factory.setter
     def row_factory(self, value: Any) -> None:
-        self.__connection.row_factory = value
+        self._require_open().row_factory = value
 
     @property
     def in_transaction(self) -> bool:
-        return self.__connection.in_transaction
+        return self._require_open().in_transaction
 
     @property
     def total_changes(self) -> int:
-        return self.__connection.total_changes
+        return self._require_open().total_changes
 
     def _close(self) -> None:
+        connection = self.__connection
         errors: list[BaseException] = []
         for cursor in tuple(self.__cursors):
-            try:
-                cursor._close()
-            except BaseException as error:
-                errors.append(error)
-        self.__cursors.clear()
-        try:
-            self.__connection.close()
-        except BaseException as error:
-            errors.append(error)
+            for _attempt in range(2):
+                try:
+                    cursor._close()
+                except BaseException as error:
+                    errors.append(error)
+                else:
+                    self.__cursors.discard(cursor)
+                    break
+        if not self.__cursors and connection is not None:
+            for _attempt in range(2):
+                try:
+                    connection.close()
+                except BaseException as error:
+                    errors.append(error)
+                else:
+                    self.__connection = None
+                    break
         if errors:
             raise BaseExceptionGroup("maintenance adapter close failed", errors)
 
@@ -327,14 +362,39 @@ class _MaintenanceConnection:
 class _MaintenanceContext(AbstractContextManager[_MaintenanceConnection]):
     __slots__ = ("__adapter",)
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        self.__adapter = _MaintenanceConnection(connection)
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        identity: StorageIdentity,
+        read_only: bool,
+    ) -> None:
+        self.__adapter = _MaintenanceConnection(connection, identity, read_only)
 
     def __enter__(self) -> _MaintenanceConnection:
         return self.__adapter
 
-    def __exit__(self, *_exc_info: object) -> None:
-        self.__adapter._close()
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        primary: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.__adapter._close()
+        except BaseExceptionGroup as cleanup_group:
+            if primary is not None:
+                raise BaseExceptionGroup(
+                    "maintenance body and cleanup failed",
+                    [primary, *cleanup_group.exceptions],
+                ) from None
+            raise
+        except BaseException as cleanup_error:
+            if primary is not None:
+                raise BaseExceptionGroup(
+                    "maintenance body and cleanup failed",
+                    [primary, cleanup_error],
+                ) from None
+            raise
 
 
 class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
@@ -424,7 +484,7 @@ class BoundSQLiteTarget(metaclass=_ClosedSurfaceMeta):
                 connection.execute("PRAGMA query_only=ON")
             connection.enable_load_extension(False)
             connection.set_authorizer(_sqlite_authorizer)
-            return _MaintenanceContext(connection)
+            return _MaintenanceContext(connection, self._identity, options.read_only)
         except BaseException as primary:
             try:
                 connection.close()

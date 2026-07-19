@@ -364,6 +364,98 @@ def _descriptor_identity(descriptor: int) -> StorageIdentity:
     return StorageIdentity(info.st_dev, info.st_ino)
 
 
+def flush_owned_directory(path: Path) -> None:
+    directory = Path(path)
+    if os.name != "nt":
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    handle = kernel32.CreateFileW(
+        os.fspath(directory),
+        0x80000000 | 0x40000000,
+        0x00000001 | 0x00000002,
+        None,
+        3,
+        0x02000000 | 0x00200000,
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle in {None, invalid}:
+        raise ctypes.WinError()
+    verification = -1
+    primary: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
+    try:
+        opened_identity = _windows_storage_identity(int(handle))
+        verification, current_identity = _open_windows_directory(directory)
+        if current_identity != opened_identity:
+            raise PathOutsideSpaceError("Owned directory identity changed")
+        if not kernel32.FlushFileBuffers(wintypes.HANDLE(handle)):
+            raise ctypes.WinError()
+    except BaseException as error:
+        primary = error
+    finally:
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        for owned_handle in (verification, int(handle)):
+            if owned_handle < 0:
+                continue
+            if not kernel32.CloseHandle(wintypes.HANDLE(owned_handle)):
+                cleanup_errors.append(ctypes.WinError())
+    if primary is not None:
+        if cleanup_errors:
+            raise BaseExceptionGroup(
+                "owned directory flush and close failed",
+                [primary, *cleanup_errors],
+            ) from None
+        raise primary
+    if len(cleanup_errors) == 1:
+        raise cleanup_errors[0]
+    if cleanup_errors:
+        raise BaseExceptionGroup("owned directory close failed", cleanup_errors)
+
+
+def replace_file_write_through(source: Path, target: Path) -> None:
+    source_path = Path(source)
+    target_path = Path(target)
+    if os.name != "nt":
+        os.replace(source_path, target_path)
+        return
+    kernel32 = ctypes.windll.kernel32
+    kernel32.MoveFileExW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+    ]
+    kernel32.MoveFileExW.restype = wintypes.BOOL
+    if not kernel32.MoveFileExW(
+        os.fspath(source_path),
+        os.fspath(target_path),
+        0x00000001 | 0x00000008,
+    ):
+        raise ctypes.WinError()
+
+
 def _identity_matches_receipt(
     identity: StorageIdentity, receipt: tuple[str, int, int, int]
 ) -> bool:
