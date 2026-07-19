@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, Protocol, Sequence
@@ -76,9 +77,20 @@ class MigrationPreflightPolicy:
 
 
 @dataclass(frozen=True)
+class FleetPreflightTarget:
+    """Frozen registration authority consumed by fleet preflight."""
+
+    space_id: str | None
+    kind: DatabaseKind
+    expected_identity: StorageIdentity
+    target: BoundSQLiteTarget
+
+
+@dataclass(frozen=True)
 class FrozenFleetPreflight:
     statuses: tuple[MigrationStatus, ...]
     identities: tuple[StorageIdentity, ...]
+    space_ids: tuple[str | None, ...]
 
 
 @dataclass
@@ -169,35 +181,50 @@ class MigrationCoordinator:
 
     async def preflight_fleet_under_lease(
         self,
-        targets: Sequence[tuple[DatabaseKind, BoundSQLiteTarget]],
+        targets: Sequence[FleetPreflightTarget],
         lease: Lease,
         policies: Iterable[MigrationPreflightPolicy] = (),
     ) -> FrozenFleetPreflight:
         self._assert_destructive_lease(lease)
         targets = tuple(targets)
+        close_targets = tuple(registration.target for registration in targets)
         policy_list = tuple(policies)
         statuses: list[MigrationStatus] = []
         primary: BaseException | None = None
         identities: tuple[StorageIdentity, ...] = ()
+        ordered: tuple[FleetPreflightTarget, ...] = ()
         try:
-            identities = tuple(target.identity for _kind, target in targets)
+            ordered = _canonical_fleet_order(targets)
+            actual_identities: list[StorageIdentity] = []
+            for registration in ordered:
+                actual_identity = registration.target.identity
+                if actual_identity != registration.expected_identity:
+                    raise MigrationSafetyError(
+                        "fleet preflight target does not match expected identity"
+                    )
+                actual_identities.append(actual_identity)
+            identities = tuple(actual_identities)
             if len(set(identities)) != len(identities):
                 raise MigrationSafetyError(
                     "fleet preflight target identities must be unique"
                 )
-            for kind, target in targets:
+            for registration in ordered:
                 self._assert_destructive_lease(lease)
                 status = await _run_joined(
-                    lambda kind=kind, target=target: _preflight_bound_target(
-                        kind, target, policy_list
+                    lambda registration=registration: _preflight_bound_target(
+                        registration.kind, registration.target, policy_list
                     )
                 )
                 statuses.append(status)
         except BaseException as error:
             primary = error
-        cleanup_errors = await _close_all(*(target for _kind, target in targets))
+        cleanup_errors = await _close_all(*close_targets)
         _raise_primary_cleanup("fleet preflight failed", primary, cleanup_errors)
-        return FrozenFleetPreflight(tuple(statuses), identities)
+        return FrozenFleetPreflight(
+            tuple(statuses),
+            identities,
+            tuple(registration.space_id for registration in ordered),
+        )
 
     async def upgrade(self, kind: DatabaseKind, path: Path) -> MigrationResult:
         from app.runtime.leases import _HELD_ORDER, LeaseMode, LeaseOrderError
@@ -475,6 +502,21 @@ class MigrationCoordinator:
             _raise_primary_cleanup(
                 "replacement migration failed", primary, close_errors
             )
+        if committed and primary is not None:
+            leases, _quiescer = self._require_runtime()
+            leases.mark_process_exit_required(
+                "replacement failed after physical cutover",
+                holds=(replacement, replacement_target, source),
+            )
+            _raise_primary_cleanup(
+                "post-cutover migration verification failed",
+                primary,
+                [
+                    ProcessExitRequiredError(
+                        "replacement cutover requires process exit"
+                    )
+                ],
+            )
         if primary is not None:
             raise primary
         assert result is not None
@@ -575,6 +617,43 @@ async def _close_all(*targets: BoundSQLiteTarget) -> list[BaseException]:
         except BaseException as error:
             errors.append(error)
     return errors
+
+
+def _canonical_fleet_order(
+    targets: Sequence[FleetPreflightTarget],
+) -> tuple[FleetPreflightTarget, ...]:
+    keyed: list[tuple[tuple[int, str], str | None, FleetPreflightTarget]] = []
+    for registration in targets:
+        if registration.kind == "meta":
+            if registration.space_id is not None:
+                raise MigrationSafetyError(
+                    "Meta fleet preflight target cannot carry a Space ID"
+                )
+            key = (0, "")
+            canonical: str | None = None
+        elif registration.kind == "space":
+            space_id = registration.space_id
+            if not isinstance(space_id, str) or not space_id:
+                raise MigrationSafetyError(
+                    "Space fleet preflight target requires a canonical Space ID"
+                )
+            canonical = unicodedata.normalize("NFC", space_id).casefold()
+            key = (1, canonical)
+        else:
+            raise MigrationSafetyError("fleet preflight database kind is invalid")
+        keyed.append((key, canonical, registration))
+
+    keys = [key for key, _canonical, _registration in keyed]
+    if len(set(keys)) != len(keys):
+        raise MigrationSafetyError(
+            "fleet preflight canonical Space IDs must be unique"
+        )
+    for _key, canonical, registration in keyed:
+        if registration.kind == "space" and registration.space_id != canonical:
+            raise MigrationSafetyError(
+                "fleet preflight Space ID is not canonical"
+            )
+    return tuple(registration for _key, _canonical, registration in sorted(keyed))
 
 
 async def _run_joined(callback: Callable[[], Any]) -> Any:
