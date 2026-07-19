@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
+from alembic import command
+from sqlalchemy import create_engine, inspect, text
 
 
 def test_migration_coordinator_verifies_bound_target_without_upgrade(tmp_path):
     import asyncio
 
     from app.db.migrations import MigrationCoordinator, run_migrations
-    from app.runtime.sqlite_vfs import _bind_existing_target
+    from app.runtime.sqlite_vfs import MaintenanceOptions, _bind_existing_target
 
     path = tmp_path / "verify.db"
     run_migrations("space", path)
@@ -22,9 +25,378 @@ def test_migration_coordinator_verifies_bound_target_without_upgrade(tmp_path):
         assert status.integrity_ok
     finally:
         asyncio.run(target.aclose())
-from alembic import command
-from sqlalchemy import create_engine, inspect, text
 
+
+def test_migration_coordinator_exposes_all_authority_preserving_entrypoints():
+    from app.db.migrations import MigrationCoordinator
+
+    assert callable(MigrationCoordinator.upgrade)
+    assert callable(MigrationCoordinator.upgrade_under_lease)
+    assert callable(MigrationCoordinator.create_isolated_under_lease)
+    assert callable(MigrationCoordinator.preflight_fleet_under_lease)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_upgrade_and_fleet_preflight_use_same_owner_and_close_targets(
+    tmp_path: Path,
+) -> None:
+    from app.db.migrations import (
+        MigrationCoordinator,
+        MigrationPreflightPolicy,
+        run_migrations,
+    )
+    from app.errors import SQLiteAuthorityRevokedError
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import MaintenanceOptions, _bind_existing_target
+
+    class Quiescer:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def drain_identity(self, _identity) -> None:
+            self.events.append("drain")
+
+        async def resume_identity(self, _identity) -> None:
+            self.events.append("resume")
+
+    path = tmp_path / "coordinator.db"
+    await asyncio.to_thread(run_migrations, "space", path)
+    quiescer = Quiescer()
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(leases, quiescer)
+    result = await coordinator.upgrade("space", path)
+    assert result.changed is False
+    assert quiescer.events == ["drain", "resume"]
+
+    owner = await leases.acquire_process_owner("preflight", 5)
+    global_lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "preflight", 5)
+    target = _bind_existing_target(path, create_authority=False)
+    observed: list[object] = []
+
+    def read_only_probe(_kind, _status, connection) -> None:
+        observed.append(connection.execute("SELECT 1").fetchone())
+        with pytest.raises(Exception, match="readonly|authorized|query"):
+            connection.execute("CREATE TABLE forbidden_preflight_write (id INTEGER)")
+
+    try:
+        head = result.head
+        fleet = await coordinator.preflight_fleet_under_lease(
+            [("space", target)],
+            global_lease,
+            [
+                MigrationPreflightPolicy(
+                    "space",
+                    head,
+                    read_only_probe,
+                )
+            ],
+        )
+        assert fleet.statuses[0].at_head
+        assert observed == [(1,)]
+        with pytest.raises(SQLiteAuthorityRevokedError):
+            target.open_maintenance(MaintenanceOptions(read_only=True))
+    finally:
+        await global_lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_replaces_managed_space_007_under_bound_authority(
+    tmp_path: Path,
+) -> None:
+    from app.db.migrations import MigrationCoordinator, _config
+    from app.runtime.leases import RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
+
+    path = tmp_path / "managed-007.db"
+
+    def seed_revision() -> None:
+        path.touch()
+        target = _bind_existing_target(path, create_authority=True)
+        try:
+            with target.open_maintenance(
+                MaintenanceOptions(read_only=False, create_if_missing=False)
+            ) as maintenance:
+                with _alembic_maintenance_adapter(
+                    maintenance,
+                    expected_identity=target.identity,
+                    require_write=True,
+                ) as adapter:
+                    config = _config("space")
+                    config.attributes["maintenance_adapter"] = adapter
+                    command.upgrade(config, "space_007_session_mood_check")
+        finally:
+            asyncio.run(target.aclose())
+
+    class Quiescer:
+        async def drain_identity(self, _identity) -> None:
+            return None
+
+        async def resume_identity(self, _identity) -> None:
+            return None
+
+    await asyncio.to_thread(seed_revision)
+    coordinator = MigrationCoordinator(
+        RuntimeLeaseCoordinator(tmp_path / "runtime"), Quiescer()
+    )
+    result = await coordinator.upgrade("space", path)
+    assert result.changed is True
+    assert result.previous_revision == "space_007_session_mood_check"
+    assert result.head == "space_008_sync_retention_snapshot"
+    status = await coordinator.verify("space", path)
+    assert status.at_head and status.integrity_ok
+
+
+@pytest.mark.asyncio
+async def test_upgrade_failure_after_backup_preserves_old_revision_and_releases_owner(
+    tmp_path: Path,
+) -> None:
+    from app.db.migrations import MigrationCoordinator, _config
+    from app.runtime.leases import RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
+
+    path = tmp_path / "failure-after-backup.db"
+
+    def seed_revision() -> None:
+        path.touch()
+        target = _bind_existing_target(path, create_authority=True)
+        try:
+            with target.open_maintenance(
+                MaintenanceOptions(read_only=False, create_if_missing=False)
+            ) as maintenance:
+                with _alembic_maintenance_adapter(
+                    maintenance,
+                    expected_identity=target.identity,
+                    require_write=True,
+                ) as adapter:
+                    config = _config("space")
+                    config.attributes["maintenance_adapter"] = adapter
+                    command.upgrade(config, "space_007_session_mood_check")
+        finally:
+            asyncio.run(target.aclose())
+
+    class Quiescer:
+        async def drain_identity(self, _identity) -> None:
+            return None
+
+        async def resume_identity(self, _identity) -> None:
+            return None
+
+    await asyncio.to_thread(seed_revision)
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(
+        leases, Quiescer(), failpoint=lambda name: (_ for _ in ()).throw(
+            RuntimeError("injected " + name)
+        ) if name == "after_backup" else None
+    )
+    with pytest.raises(RuntimeError, match="injected after_backup"):
+        await coordinator.upgrade("space", path)
+
+    status = await coordinator.verify("space", path)
+    assert status.revision == "space_007_session_mood_check"
+    assert status.integrity_ok
+    fresh = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    owner = await fresh.acquire_process_owner("fresh", 5)
+    await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_partial_drain_failure_still_resumes_identity(tmp_path: Path) -> None:
+    from app.db.migrations import MigrationCoordinator, run_migrations
+    from app.runtime.leases import RuntimeLeaseCoordinator
+
+    path = tmp_path / "partial-drain.db"
+    await asyncio.to_thread(run_migrations, "space", path)
+    events: list[str] = []
+
+    class PartialQuiescer:
+        async def drain_identity(self, _identity) -> None:
+            events.append("drain-started")
+            raise RuntimeError("partial drain")
+
+        async def resume_identity(self, _identity) -> None:
+            events.append("resume")
+
+    coordinator = MigrationCoordinator(
+        RuntimeLeaseCoordinator(tmp_path / "runtime"), PartialQuiescer()
+    )
+    with pytest.raises(RuntimeError, match="partial drain"):
+        await coordinator.upgrade("space", path)
+    assert events == ["drain-started", "resume"]
+
+
+@pytest.mark.asyncio
+async def test_isolated_close_failure_registers_same_task_cleanup(tmp_path: Path) -> None:
+    from app.db.migrations import MigrationCoordinator
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+
+    class FailingTarget:
+        identity = object()
+
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("close once")
+
+    class Marker:
+        def __init__(self) -> None:
+            self.target = FailingTarget()
+            self.discard_calls = 0
+
+        def bind_isolated_sqlite_target(self, _path: Path):
+            return self.target
+
+        def commit_isolated_sqlite_target(self, _target) -> None:
+            raise AssertionError("failed migration cannot commit")
+
+        def discard_isolated_sqlite_target(self, _target) -> None:
+            self.discard_calls += 1
+
+    class Quiescer:
+        async def drain_identity(self, _identity) -> None:
+            return None
+
+        async def resume_identity(self, _identity) -> None:
+            return None
+
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(
+        leases,
+        Quiescer(),
+        migrate_target=lambda _kind, _target: (_ for _ in ()).throw(
+            RuntimeError("create body")
+        ),
+    )
+    owner = await leases.acquire_process_owner("isolated", 5)
+    global_lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "isolated", 5)
+    marker = Marker()
+    try:
+        with pytest.raises(BaseExceptionGroup, match="isolated migration failed"):
+            await coordinator.create_isolated_under_lease(
+                "space", tmp_path / "new.db", global_lease, marker
+            )
+        assert leases.has_pending_cleanups_for_current_task()
+        with pytest.raises(Exception, match="cleanup"):
+            leases.assert_ready()
+        assert marker.discard_calls == 0
+        assert await leases.retry_pending_cleanups_for_current_task() == ()
+        assert not leases.has_pending_cleanups_for_current_task()
+        assert marker.discard_calls == 1
+    finally:
+        await global_lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_preflight_identities_close_all_open_targets(tmp_path: Path) -> None:
+    from app.db.migrations import MigrationCoordinator, MigrationSafetyError, run_migrations
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.sqlite_vfs import MaintenanceOptions, _bind_existing_target
+
+    path = tmp_path / "duplicate-preflight.db"
+    await asyncio.to_thread(run_migrations, "space", path)
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    coordinator = MigrationCoordinator(leases, type("Q", (), {})())
+    owner = await leases.acquire_process_owner("duplicate", 5)
+    global_lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "duplicate", 5)
+    first = _bind_existing_target(path, create_authority=False)
+    second = _bind_existing_target(path, create_authority=False)
+    try:
+        with pytest.raises(MigrationSafetyError, match="unique"):
+            await coordinator.preflight_fleet_under_lease(
+                [("space", first), ("space", second)], global_lease
+            )
+        from app.errors import SQLiteAuthorityRevokedError
+
+        for target in (first, second):
+            with pytest.raises(SQLiteAuthorityRevokedError):
+                target.open_maintenance(MaintenanceOptions(read_only=True))
+    finally:
+        await global_lease.release()
+        await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_checkpoint_keeps_process_owner_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.db.migrations import MigrationCoordinator, _config
+    from app.runtime.leases import (
+        _HELD_ORDER,
+        LeaseTimeoutError,
+        RuntimeLeaseCoordinator,
+        _HeldOrder,
+    )
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        SQLiteReplacementAuthority,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
+
+    path = tmp_path / "busy-checkpoint.db"
+
+    def seed_revision() -> None:
+        path.touch()
+        target = _bind_existing_target(path, create_authority=True)
+        try:
+            with target.open_maintenance(
+                MaintenanceOptions(read_only=False, create_if_missing=False)
+            ) as maintenance:
+                with _alembic_maintenance_adapter(
+                    maintenance,
+                    expected_identity=target.identity,
+                    require_write=True,
+                ) as adapter:
+                    config = _config("space")
+                    config.attributes["maintenance_adapter"] = adapter
+                    command.upgrade(config, "space_007_session_mood_check")
+        finally:
+            asyncio.run(target.aclose())
+
+    class Quiescer:
+        async def drain_identity(self, _identity) -> None:
+            return None
+
+        async def resume_identity(self, _identity) -> None:
+            return None
+
+    await asyncio.to_thread(seed_revision)
+    monkeypatch.setattr(
+        SQLiteReplacementAuthority,
+        "checkpoint_and_seal_source",
+        lambda _self: (1, 4, 3),
+    )
+    runtime_root = tmp_path / "runtime"
+    coordinator = MigrationCoordinator(
+        RuntimeLeaseCoordinator(runtime_root), Quiescer()
+    )
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await coordinator.upgrade("space", path)
+    leaves = list(captured.value.exceptions)
+    assert any("checkpoint" in str(error).lower() for error in leaves)
+    fresh = RuntimeLeaseCoordinator(runtime_root)
+
+    async def acquire_from_fresh_task() -> None:
+        token = _HELD_ORDER.set(_HeldOrder(None, None, None, "none"))
+        try:
+            await fresh.acquire_process_owner("blocked", 0.05)
+        finally:
+            _HELD_ORDER.reset(token)
+
+    with pytest.raises(LeaseTimeoutError):
+        await asyncio.to_thread(asyncio.run, acquire_from_fresh_task())
 import app.db.migrations as migrations_module
 
 META_TABLES = {"spaces", "meta_settings"}
