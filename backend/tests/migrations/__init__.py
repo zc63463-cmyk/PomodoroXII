@@ -19,3 +19,36 @@ def alembic_config(schema: str) -> Config:
 def migration_engine(tmp_path: Path, schema: str) -> Engine:
     db_path = tmp_path / f"{schema}.db"
     return create_engine(f"sqlite:///{db_path.as_posix()}")
+
+
+def run_bound_command(
+    schema: str,
+    db_path: Path,
+    operation,
+    revision: str,
+) -> Config:
+    import asyncio
+
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
+
+    db_path.touch(exist_ok=True)
+    target = _bind_existing_target(db_path, create_authority=True)
+    config = alembic_config(schema)
+    try:
+        with target.open_maintenance(
+            MaintenanceOptions(read_only=False, create_if_missing=False)
+        ) as maintenance:
+            with _alembic_maintenance_adapter(
+                maintenance,
+                expected_identity=target.identity,
+                require_write=True,
+            ) as adapter:
+                config.attributes["maintenance_adapter"] = adapter
+                operation(config, revision)
+    finally:
+        asyncio.run(target.aclose())
+    return config

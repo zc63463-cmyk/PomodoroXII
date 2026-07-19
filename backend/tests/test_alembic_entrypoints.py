@@ -87,7 +87,7 @@ def test_default_alembic_environment_fails_with_named_instructions(
 
 
 @pytest.mark.parametrize("environment", ["meta", "space"])
-def test_named_alembic_environment_still_reaches_head(
+def test_named_alembic_environment_requires_bound_authority(
     tmp_path: Path,
     environment: str,
 ) -> None:
@@ -109,4 +109,7 @@ def test_named_alembic_environment_still_reaches_head(
         capture_output=True,
         check=False,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "Alembic requires an authority-bound maintenance adapter" in (
+        result.stdout + result.stderr
+    )
