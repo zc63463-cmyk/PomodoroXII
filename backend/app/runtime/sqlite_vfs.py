@@ -1431,8 +1431,11 @@ class SQLiteReplacementAuthority:
             raise RuntimeError("replacement commit published the wrong identity")
         self._committed_identity = committed
         self._terminal = "committed"
-        _close_parent_authority(parent)
-        self._parent_descriptor = -1
+        try:
+            _require_no_companions(parent, self._source_basename)
+        finally:
+            _close_parent_authority(parent)
+            self._parent_descriptor = -1
         return committed
 
     def discard_closed_replacement(self) -> None:
