@@ -221,17 +221,16 @@ async def test_lru_disposes_engine_before_revoking_target_and_returning(
 async def test_engine_initialization_failure_revokes_transferred_target(
     monkeypatch, tmp_path: Path
 ) -> None:
-    import app.space_manager as manager_module
-
-    class BrokenMetadata:
-        @staticmethod
-        def create_all(_connection) -> None:
-            raise RuntimeError("injected schema failure")
-
-    monkeypatch.setattr(manager_module, "get_space_metadata", lambda: BrokenMetadata())
     manager = SpaceEngineManager(max_size=1)
     opens = _opens(tmp_path / "failure")
-    with pytest.raises(RuntimeError, match="injected schema failure"):
+    monkeypatch.setattr(
+        type(opens.database_target),
+        "make_async_engine",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected engine failure")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="injected engine failure"):
         await manager.get_session("spc_failure", opens)
     with pytest.raises(SQLiteAuthorityRevokedError):
         opens.database_target.open_maintenance(
@@ -245,6 +244,7 @@ def test_manager_has_no_path_backed_entrypoint_or_url_construction() -> None:
     assert "_get_test_session_from_path" not in source
     assert "sqlite+aiosqlite" not in source
     assert "Path(" not in source
+    assert "create_all" not in source
 @pytest.mark.asyncio
 async def test_engine_manager_rejects_bare_path_without_touching_it(tmp_path):
     from app.space_manager import SpaceEngineManager
