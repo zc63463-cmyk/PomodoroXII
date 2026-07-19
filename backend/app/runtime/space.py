@@ -25,7 +25,6 @@ from app.runtime.leases import Lease, LeaseMode, LeaseOrderError
 from app.runtime.scope import (
     AuthorizedSpaceScope,
     AuthorizedSpaceScopeResult,
-    ContainedSpacePaths,
     SpaceContainmentCapability,
 )
 from app.runtime.sqlite_vfs import (
@@ -62,6 +61,14 @@ class SpaceProvisionConflictError(RuntimeError):
 class SpaceProvisionSpec:
     space_id: str
     name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredSpacePathRecord:
+    space_root: Path
+    db_path: Path
+    notes_dir: Path
+    index_db: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,7 +504,7 @@ class SpaceRuntime:
     @staticmethod
     def _paths_for_registration(
         space_id: str, db_path: str, notes_dir: str
-    ) -> ContainedSpacePaths:
+    ) -> _RegisteredSpacePathRecord:
         runtime_settings = _current_settings()
         expected_db = runtime_settings.space_db_path(space_id)
         expected_notes = runtime_settings.space_notes_dir(space_id)
@@ -512,7 +519,7 @@ class SpaceRuntime:
             or not index_db.is_file()
         ):
             raise SpaceStorageMissingError()
-        return ContainedSpacePaths(
+        return _RegisteredSpacePathRecord(
             space_root=runtime_settings.canonical_spaces_root,
             db_path=expected_db,
             notes_dir=expected_notes,
