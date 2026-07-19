@@ -275,7 +275,7 @@ class AuthorizedSpaceScope:
         self,
         meta_db: AsyncSession,
         spaces_root: Path,
-        runtime: SpaceRuntime | None = None,
+        runtime: SpaceRuntime,
     ) -> None:
         self.meta_db = meta_db
         self.spaces_root = _absolute_lexical(spaces_root)
@@ -286,20 +286,12 @@ class AuthorizedSpaceScope:
         principal: Principal,
         space_id: str,
         mode: AccessMode,
-    ) -> AuthorizedSpaceScopeResult | SpaceRuntimeHandle:
-        if self.runtime is None:
-            return await self.resolve(principal, space_id, mode)
+    ) -> SpaceRuntimeHandle:
         global_lease = await self.runtime.leases.acquire_global(
             LeaseMode.SHARED, "request", 5
         )
         try:
             resolved = await self.resolve(principal, space_id, mode)
-            return await self.runtime.open_resolved(
-                resolved,
-                "read" if mode == "read" else "mutation",
-                global_lease,
-                owns_global_lease=True,
-            )
         except BaseException as primary:
             try:
                 await global_lease.release()
@@ -309,6 +301,12 @@ class AuthorizedSpaceScope:
                     "scope open and global lease cleanup failed", [primary, cleanup]
                 ) from None
             raise
+        return await self.runtime.open_resolved(
+            resolved,
+            "read" if mode == "read" else "mutation",
+            global_lease,
+            owns_global_lease=True,
+        )
 
     async def resolve(
         self,

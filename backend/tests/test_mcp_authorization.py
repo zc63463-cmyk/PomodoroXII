@@ -4,6 +4,7 @@ import inspect
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import jwt
 import pytest
@@ -22,6 +23,9 @@ async def _meta_database():
     try:
         yield
     finally:
+        import app.mcp.server as server
+
+        server.install_space_runtime(None)
         await dispose_space_engine_manager()
         await close_meta_db()
 
@@ -67,6 +71,37 @@ async def _register_space_at(space_id: str, root: Path) -> None:
         )
         await session.commit()
         break
+
+
+class _FakeLease:
+    fence = 1
+
+    async def release(self) -> None:
+        return None
+
+
+class _FakeLeases:
+    async def acquire_global(self, *_args):
+        return _FakeLease()
+
+    def register_pending_lease_cleanup(self, _lease) -> None:
+        return None
+
+
+class _ForbiddenRuntime:
+    def __init__(self) -> None:
+        self.leases = _FakeLeases()
+        self.open_count = 0
+
+    async def open_resolved(self, *_args, **_kwargs):
+        self.open_count += 1
+        raise AssertionError("request reached storage activation")
+
+
+def _install_forbidden_runtime(server):
+    runtime = _ForbiddenRuntime()
+    server.install_space_runtime(SimpleNamespace(**runtime.__dict__, open_resolved=runtime.open_resolved))
+    return runtime
 
 
 @pytest.mark.asyncio
@@ -254,14 +289,7 @@ async def test_space_token_cannot_authorize_another_space_before_storage(
             space_id="spc_a",
         ),
     )
-    opened = 0
-
-    def forbidden_manager():
-        nonlocal opened
-        opened += 1
-        raise AssertionError("cross-Space request reached storage")
-
-    monkeypatch.setattr(server, "get_space_engine_manager", forbidden_manager)
+    runtime = _install_forbidden_runtime(server)
     with pytest.raises(ToolError) as raised:
         await server.get_stats_overview("spc_b")
     assert json.loads(str(raised.value)) == {
@@ -271,7 +299,7 @@ async def test_space_token_cannot_authorize_another_space_before_storage(
         "request_id": "",
         "details": {},
     }
-    assert opened == 0
+    assert runtime.open_count == 0
 
 
 @pytest.mark.asyncio
@@ -291,11 +319,7 @@ async def test_unregistered_space_returns_canonical_error_before_storage(
             expires_at=None,
         ),
     )
-    monkeypatch.setattr(
-        server,
-        "get_space_engine_manager",
-        lambda: pytest.fail("unregistered Space reached storage"),
-    )
+    runtime = _install_forbidden_runtime(server)
     with pytest.raises(ToolError) as raised:
         await server.get_stats_overview("spc_missing")
     assert json.loads(str(raised.value)) == {
@@ -305,6 +329,7 @@ async def test_unregistered_space_returns_canonical_error_before_storage(
         "request_id": "",
         "details": {},
     }
+    assert runtime.open_count == 0
 
 
 @pytest.mark.asyncio
@@ -328,11 +353,7 @@ async def test_outside_root_space_returns_canonical_error_before_storage(
             expires_at=None,
         ),
     )
-    monkeypatch.setattr(
-        server,
-        "get_space_engine_manager",
-        lambda: pytest.fail("outside-root Space reached storage"),
-    )
+    runtime = _install_forbidden_runtime(server)
     with pytest.raises(ToolError) as raised:
         await server.get_stats_overview("spc_outside")
     payload = json.loads(str(raised.value))
@@ -340,6 +361,7 @@ async def test_outside_root_space_returns_canonical_error_before_storage(
     assert payload["retryable"] is False
     assert payload["request_id"] == ""
     assert payload["details"] == {}
+    assert runtime.open_count == 0
 
 
 def test_mcp_error_payload_uses_shared_recursive_serializer() -> None:

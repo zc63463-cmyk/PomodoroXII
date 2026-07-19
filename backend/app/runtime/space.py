@@ -50,20 +50,25 @@ class SpaceRuntimeHandle:
         lease.assert_active_owner(scope=self.scope.space_id)
         if self.engine is not None or self.file_system is not None:
             raise LeaseOrderError("Space resources are already active")
-        engine = None
-        file_system = None
         try:
             async with self.scope.containment.open_verified() as opens:
-                engine = await self._runtime.engines.acquire(self.scope.space_id, opens)
-                file_system = await open_existing_file_system(opens)
-        except BaseException:
-            if file_system is not None:
-                await file_system.close()
-            if engine is not None:
-                await engine.release()
+                self.engine = await self._runtime.engines.acquire(
+                    self.scope.space_id, opens
+                )
+                self.file_system = await open_existing_file_system(opens)
+        except BaseException as primary:
+            cleanup_errors: list[BaseException] = []
+            try:
+                await self.close_space_resources()
+            except BaseExceptionGroup as group:
+                cleanup_errors.extend(group.exceptions)
+            if cleanup_errors:
+                self._runtime.register_pending_cleanup(self)
+                raise BaseExceptionGroup(
+                    "Space activation and cleanup failed",
+                    [primary, *cleanup_errors],
+                ) from None
             raise
-        self.engine = engine
-        self.file_system = file_system
 
     async def close_space_resources(self) -> None:
         errors: list[BaseException] = []
@@ -119,9 +124,56 @@ class SpaceRuntimeHandle:
             and space_done
             and global_done
         )
+        if self._closed:
+            complete = getattr(self._runtime.leases, "complete_pending_cleanup", None)
+            if complete is not None:
+                complete(self)
         if errors:
             self._runtime.register_pending_cleanup(self)
             raise BaseExceptionGroup("SpaceRuntimeHandle close failed", errors)
+
+    @asynccontextmanager
+    async def exclusive_space_resources(
+        self, purpose: str, timeout_seconds: float
+    ) -> AsyncIterator[Lease]:
+        if self.space_lease is not None:
+            raise LeaseOrderError("handle already owns a Space lease")
+        lease = await self._runtime.leases.acquire_spaces(
+            [self.scope.space_id], LeaseMode.EXCLUSIVE, purpose, timeout_seconds
+        )
+        self.space_lease = lease
+        self.owns_space_lease = True
+        primary: BaseException | None = None
+        try:
+            await self.activate_space_resources_under_lease(lease)
+            yield lease
+        except BaseException as exc:
+            primary = exc
+        cleanup_errors: list[BaseException] = []
+        try:
+            await self.close_space_resources()
+        except BaseExceptionGroup as group:
+            cleanup_errors.extend(group.exceptions)
+        if self.engine is None and self.file_system is None:
+            try:
+                await lease.release()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            else:
+                self.space_lease = None
+                self.owns_space_lease = False
+        if cleanup_errors:
+            self._runtime.register_pending_cleanup(self)
+        if primary is not None and cleanup_errors:
+            raise BaseExceptionGroup(
+                "Space operation and cleanup failed", [primary, *cleanup_errors]
+            ) from None
+        if primary is not None:
+            raise primary
+        if cleanup_errors:
+            raise BaseExceptionGroup(
+                "Space operation cleanup failed", cleanup_errors
+            ) from None
 
     async def __aenter__(self) -> "SpaceRuntimeHandle":
         return self
@@ -163,26 +215,69 @@ class SpaceRuntime:
         owns_global_lease: bool,
         borrowed_space_lease: Lease | None = None,
     ) -> SpaceRuntimeHandle:
-        verified = self._verify_registered_open(scope)
-        if inspect.isawaitable(verified):
-            await verified
         space_lease = borrowed_space_lease
         owns_space_lease = False
-        if mode == "read" and space_lease is None:
-            space_lease = await self.leases.acquire_spaces(
-                [scope.space_id], LeaseMode.SHARED, "read", 5
+        handle = None
+        try:
+            if mode == "read" and space_lease is None:
+                space_lease = await self.leases.acquire_spaces(
+                    [scope.space_id], LeaseMode.SHARED, "read", 5
+                )
+                owns_space_lease = True
+            verified = self._verify_registered_open(scope)
+            if inspect.isawaitable(verified):
+                await verified
+            handle = SpaceRuntimeHandle(
+                scope, None, None, global_lease, space_lease,
+                owns_global_lease, owns_space_lease,
+                space_lease.fence if space_lease is not None else global_lease.fence,
+                self,
             )
-            owns_space_lease = True
-        handle = SpaceRuntimeHandle(
-            scope, None, None, global_lease, space_lease,
-            owns_global_lease, owns_space_lease,
-            space_lease.fence if space_lease is not None else global_lease.fence,
-            self,
+            if mode == "read" or borrowed_space_lease is not None:
+                assert space_lease is not None
+                await handle.activate_space_resources_under_lease(space_lease)
+            return handle
+        except BaseException as primary:
+            cleanup_errors: list[BaseException] = []
+            if handle is not None:
+                try:
+                    await handle.aclose()
+                except BaseExceptionGroup as group:
+                    cleanup_errors.extend(group.exceptions)
+            else:
+                if owns_space_lease and space_lease is not None:
+                    try:
+                        await space_lease.release()
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
+                if owns_global_lease:
+                    try:
+                        await global_lease.release()
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
+            if cleanup_errors:
+                raise BaseExceptionGroup(
+                    "runtime open and cleanup failed", [primary, *cleanup_errors]
+                ) from None
+            raise
+
+    async def health(
+        self, scope: AuthorizedSpaceScopeResult, *, catalog_hash: str = ""
+    ) -> SpaceHealth:
+        async with scope.containment.open_verified() as opens:
+            migration = await self.migrations.verify_open(
+                "space", opens.database_target
+            )
+            index_status = self.index_schema.verify_open(opens.index_target)
+        available = bool(migration.at_head and index_status.valid)
+        return SpaceHealth(
+            scope.space_id,
+            available,
+            getattr(migration, "revision", None) or "",
+            index_status.version,
+            catalog_hash,
+            None if available else "space_recovery_required",
         )
-        if mode == "read" or borrowed_space_lease is not None:
-            assert space_lease is not None
-            await handle.activate_space_resources_under_lease(space_lease)
-        return handle
 
     def register_pending_cleanup(self, handle: SpaceRuntimeHandle) -> None:
         dependencies = (handle.space_lease,) if handle.space_lease is not None else ()
@@ -203,8 +298,27 @@ class SpaceRuntime:
             owns_global_lease=False, borrowed_space_lease=space_lease,
         )
         space_lease.retain_cleanup_dependency(handle)
+        primary: BaseException | None = None
         try:
             yield handle
-        finally:
+        except BaseException as exc:
+            primary = exc
+        cleanup_errors: list[BaseException] = []
+        try:
             await handle.aclose()
+        except BaseExceptionGroup as group:
+            cleanup_errors.extend(group.exceptions)
+            self.register_pending_cleanup(handle)
+        if handle._closed:
             space_lease.complete_cleanup_dependency(handle)
+        if primary is not None and cleanup_errors:
+            raise BaseExceptionGroup(
+                "borrowed Space runtime body and cleanup failed",
+                [primary, *cleanup_errors],
+            ) from None
+        if primary is not None:
+            raise primary
+        if cleanup_errors:
+            raise BaseExceptionGroup(
+                "borrowed Space runtime cleanup failed", cleanup_errors
+            ) from None

@@ -40,8 +40,9 @@ from app.mcp.auth import (
     current_mcp_principal,
     trusted_stdio_context,
 )
-from app.runtime.scope import AccessMode, AuthorizedSpaceScope, AuthorizedSpaceScopeResult
-from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
+from app.runtime.scope import AccessMode, AuthorizedSpaceScope
+from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
+from app.space_manager import dispose_space_engine_manager
 
 logger = logging.getLogger(__name__)
 
@@ -50,35 +51,45 @@ logger = logging.getLogger(__name__)
 # DB session bridge — bypasses FastAPI deps, directly uses engine manager
 # --------------------------------------------------------------------------- #
 
+_installed_space_runtime: SpaceRuntime | None = None
+
+
+def install_space_runtime(runtime: SpaceRuntime | None) -> None:
+    """Install the runtime supplied by shared bootstrap or explicit tests."""
+    global _installed_space_runtime
+    _installed_space_runtime = runtime
+
+
+def _require_space_runtime() -> SpaceRuntime:
+    if _installed_space_runtime is None:
+        raise RuntimeError("SpaceRuntime is not installed")
+    return _installed_space_runtime
+
+
 @asynccontextmanager
-async def get_space_session(
-    scope: AuthorizedSpaceScopeResult,
-) -> AsyncIterator[AsyncSession]:
-    """Yield a session from one already-authorized contained scope.
+async def get_space_session(handle: SpaceRuntimeHandle) -> AsyncIterator[AsyncSession]:
+    """Yield a session from one already-authorized runtime handle.
 
     This is the MCP equivalent of the ``get_space_db`` FastAPI dependency.
-    It ensures the space engine is initialized and creates a session
-    directly from the SpaceEngineManager.
+    The handle owns the engine/filesystem lifetime and closes in this same Task.
     """
-    async with scope.containment.open_verified() as opens:
-        session = await get_space_engine_manager().get_session(scope.space_id, opens)
-        try:
-            yield session
-        finally:
-            await session.close()
+    session = handle.session_factory()
+    try:
+        yield session
+    finally:
+        await session.close()
+        await handle.aclose()
 
 
-async def _authorize_space(
-    space_id: str,
-    mode: AccessMode,
-) -> AuthorizedSpaceScopeResult:
+async def _authorize_space(space_id: str, mode: AccessMode) -> SpaceRuntimeHandle:
     from app.db.meta_session import get_meta_session_factory
     from app.settings import settings
 
     principal = current_mcp_principal()
+    runtime = _require_space_runtime()
     factory = get_meta_session_factory()
     async with factory() as meta_db:
-        return await AuthorizedSpaceScope(meta_db, settings.spaces_data_dir).open(
+        return await AuthorizedSpaceScope(meta_db, settings.spaces_data_dir, runtime).open(
             principal,
             space_id,
             mode,

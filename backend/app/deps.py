@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.authority import Principal, verify_with_fresh_meta_session
 from app.errors import AuthenticationError, AuthorizationError
 from app.logging import request_id_var  # noqa: F401  (re-exported for convenience)
-from app.runtime.scope import AuthorizedSpaceScope, AuthorizedSpaceScopeResult
-from app.space_manager import get_space_engine_manager
+from app.runtime.scope import AuthorizedSpaceScope
+from app.runtime.space import SpaceRuntimeHandle
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ async def require_master_token(
 
 
 async def get_space_context(
+    request: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Ensure the token is a space token and return its context.
@@ -115,17 +116,36 @@ async def get_space_context(
     from app.db.meta_session import get_meta_session
     from app.settings import settings
 
+    runtime = get_space_runtime(request)
     async for session in get_meta_session():
-        scope_result = await AuthorizedSpaceScope(
-            session, settings.spaces_data_dir
+        opened = await AuthorizedSpaceScope(
+            session, settings.spaces_data_dir, runtime
         ).open(principal, str(space_id), "read")
         break
 
-    return {
+    runtime_handle = opened
+    scope_result = runtime_handle.scope
+
+    result = {
         "space_id": str(space_id),
         "user_id": principal.subject,
         "scope_result": scope_result,
     }
+    result["runtime_handle"] = runtime_handle
+    return result
+
+
+async def get_space_runtime_handle(
+    ctx: dict[str, Any] = Depends(get_space_context),
+) -> AsyncIterator[SpaceRuntimeHandle]:
+    """Yield one request-owned runtime handle for all Space resources."""
+    existing = ctx.get("runtime_handle")
+    if not isinstance(existing, SpaceRuntimeHandle):
+        raise RuntimeError("SpaceRuntimeHandle is required")
+    try:
+        yield existing
+    finally:
+        await existing.aclose()
 
 
 # --------------------------------------------------------------------------- #
@@ -140,23 +160,21 @@ async def get_meta_db() -> AsyncIterator[AsyncSession]:
 
 
 async def get_space_db(
-    ctx: dict[str, Any] = Depends(get_space_context),
+    handle: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
 ) -> AsyncIterator[AsyncSession]:
     """Yield an AsyncSession bound to the space's database."""
-    scope_result: AuthorizedSpaceScopeResult = ctx["scope_result"]
-    async with scope_result.containment.open_verified() as opens:
-        session = await get_space_engine_manager().get_session(ctx["space_id"], opens)
-        try:
-            yield session
-        finally:
-            await session.close()
+    session = handle.session_factory()
+    try:
+        yield session
+    finally:
+        await session.close()
 
 
 # --------------------------------------------------------------------------- #
 # Filesystem
 # --------------------------------------------------------------------------- #
 async def get_file_system(
-    ctx: dict[str, Any] = Depends(get_space_context),
+    handle: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
 ) -> AsyncIterator[Any]:
     """Yield a contained FileSystem instance for the current request.
 
@@ -164,12 +182,6 @@ async def get_file_system(
     ``app.file_system.api``) to create and initialise a filesystem
     rooted at the space's notes directory.
     """
-    from app.file_system.api import open_contained_file_system
-
-    scope_result: AuthorizedSpaceScopeResult = ctx["scope_result"]
-    async with scope_result.containment.open_verified() as opens:
-        file_system = await open_contained_file_system(opens)
-        try:
-            yield file_system
-        finally:
-            await file_system.close()
+    if handle.file_system is None:
+        raise RuntimeError("Space runtime has no active filesystem")
+    yield handle.file_system

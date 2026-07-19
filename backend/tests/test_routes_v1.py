@@ -69,6 +69,73 @@ def _items(resp_json):
     return []
 
 
+@pytest.mark.asyncio
+async def test_request_dependencies_share_one_runtime_handle() -> None:
+    from types import SimpleNamespace
+
+    from fastapi import Depends, FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from app.deps import get_file_system, get_space_context, get_space_db
+    from app.runtime.space import SpaceRuntimeHandle
+
+    events: list[str] = []
+
+    class Session:
+        async def close(self) -> None:
+            events.append("session-close")
+
+    class Engine:
+        def __init__(self) -> None:
+            self.session_factory = lambda: Session()
+
+        async def release(self) -> None:
+            events.append("engine-release")
+
+    class FileSystem:
+        async def close(self) -> None:
+            events.append("filesystem-close")
+
+    handle = SpaceRuntimeHandle(
+        SimpleNamespace(space_id="shared"),
+        Engine(),
+        FileSystem(),
+        SimpleNamespace(),
+        None,
+        False,
+        False,
+        1,
+        SimpleNamespace(leases=SimpleNamespace()),
+    )
+    app = FastAPI()
+
+    async def context_override():
+        return {
+            "space_id": "shared",
+            "scope_result": handle.scope,
+            "runtime_handle": handle,
+        }
+
+    app.dependency_overrides[get_space_context] = context_override
+
+    @app.get("/probe")
+    async def probe(
+        session=Depends(get_space_db), file_system=Depends(get_file_system)
+    ):
+        assert file_system is handle.file_system
+        assert session is not None
+        return {"space_id": handle.scope.space_id}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/probe")
+
+    assert response.status_code == 200
+    assert response.json() == {"space_id": "shared"}
+    assert events == ["session-close", "filesystem-close", "engine-release"]
+
+
 # --------------------------------------------------------------------------- #
 # Tasks  (5 tests)
 # --------------------------------------------------------------------------- #
