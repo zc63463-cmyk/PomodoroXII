@@ -1219,6 +1219,215 @@ def test_real_bound_maintenance_connection_uses_wal_and_denies_unsafe_sql(
     commit_closed_isolated_target(cleanup, identity)
 
 
+@pytest.fixture
+def maintenance_backup_targets(tmp_path: Path):
+    from app.runtime.sqlite_vfs import (
+        bind_marked_isolated_target,
+        discard_closed_isolated_target,
+    )
+
+    targets = []
+    for name in ("source", "destination"):
+        marker = tmp_path / f".{name}-marker"
+        marker.write_text(name, encoding="ascii")
+        target, cleanup = bind_marked_isolated_target(
+            parent_path=tmp_path,
+            exact_absent_basename=f"{name}.db",
+            marker_basename=marker.name,
+            marker_nonce=name,
+        )
+        targets.append((target, cleanup))
+    try:
+        yield targets[0][0], targets[1][0]
+    finally:
+        errors: list[BaseException] = []
+        for target, cleanup in targets:
+            identity = target.identity
+            try:
+                asyncio.run(target.aclose())
+                discard_closed_isolated_target(cleanup, identity)
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise BaseExceptionGroup("maintenance backup fixture cleanup failed", errors)
+
+
+def test_maintenance_backup_copies_committed_wal(maintenance_backup_targets) -> None:
+    from app.runtime.sqlite_vfs import MaintenanceOptions
+
+    source, destination = maintenance_backup_targets
+    with source.open_maintenance(MaintenanceOptions(read_only=False)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+        writer.commit()
+        writer.execute("INSERT INTO proof VALUES ('committed-wal')")
+        writer.commit()
+        with destination.open_maintenance(
+            MaintenanceOptions(read_only=False, create_if_missing=True)
+        ) as copied:
+            writer.backup(copied)
+            assert copied.execute("SELECT value FROM proof").fetchone() == (
+                "committed-wal",
+            )
+
+
+def test_maintenance_backup_rejects_raw_sqlite_destination(
+    maintenance_backup_targets,
+) -> None:
+    from app.runtime.sqlite_vfs import MaintenanceOptions
+
+    source, _destination = maintenance_backup_targets
+    with source.open_maintenance(MaintenanceOptions(read_only=True)) as adapter:
+        with sqlite3.connect(":memory:") as raw:
+            with pytest.raises(
+                TypeError, match="backup destination must be a maintenance connection"
+            ):
+                adapter.backup(raw)
+
+
+def test_maintenance_backup_rejects_read_only_destination(
+    maintenance_backup_targets,
+) -> None:
+    from app.runtime.sqlite_vfs import MaintenanceOptions
+
+    source, destination = maintenance_backup_targets
+    with source.open_maintenance(
+        MaintenanceOptions(read_only=True)
+    ) as source_adapter, destination.open_maintenance(
+        MaintenanceOptions(read_only=True)
+    ) as destination_adapter:
+        with pytest.raises(ValueError, match="backup destination is read-only"):
+            source_adapter.backup(destination_adapter)
+
+
+def test_maintenance_backup_rejects_self_and_same_identity(
+    maintenance_backup_targets,
+) -> None:
+    from app.runtime.sqlite_vfs import MaintenanceOptions
+
+    source, _destination = maintenance_backup_targets
+    with source.open_maintenance(
+        MaintenanceOptions(read_only=False)
+    ) as first, source.open_maintenance(MaintenanceOptions(read_only=False)) as second:
+        with pytest.raises(ValueError, match="distinct authorities"):
+            first.backup(first)
+        with pytest.raises(ValueError, match="distinct authorities"):
+            first.backup(second)
+
+
+def test_maintenance_backup_rejects_closed_source_or_destination(
+    maintenance_backup_targets,
+) -> None:
+    from app.runtime.sqlite_vfs import MaintenanceOptions
+
+    source, destination = maintenance_backup_targets
+    source_context = source.open_maintenance(MaintenanceOptions(read_only=True))
+    source_adapter = source_context.__enter__()
+    source_context.__exit__(None, None, None)
+    with destination.open_maintenance(
+        MaintenanceOptions(read_only=False)
+    ) as destination_adapter:
+        with pytest.raises(RuntimeError, match="maintenance connection is closed"):
+            source_adapter.backup(destination_adapter)
+
+    destination_context = destination.open_maintenance(
+        MaintenanceOptions(read_only=False)
+    )
+    closed_destination = destination_context.__enter__()
+    destination_context.__exit__(None, None, None)
+    with source.open_maintenance(MaintenanceOptions(read_only=True)) as open_source:
+        with pytest.raises(RuntimeError, match="maintenance connection is closed"):
+            open_source.backup(closed_destination)
+
+
+def test_maintenance_backup_never_reopens_by_path(
+    maintenance_backup_targets, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import MaintenanceOptions
+
+    source, destination = maintenance_backup_targets
+    with source.open_maintenance(
+        MaintenanceOptions(read_only=True)
+    ) as source_adapter, destination.open_maintenance(
+        MaintenanceOptions(read_only=False)
+    ) as destination_adapter:
+        monkeypatch.setattr(
+            sqlite_vfs_module.sqlite3,
+            "connect",
+            lambda *_args, **_kwargs: pytest.fail("backup reopened SQLite by path"),
+        )
+        source_adapter.backup(destination_adapter)
+
+
+def test_maintenance_backup_does_not_expand_bound_target_surface() -> None:
+    public = {name for name in dir(BoundSQLiteTarget) if not name.startswith("_")}
+    assert public == {
+        "identity",
+        "make_async_engine",
+        "open_maintenance",
+        "aclose",
+    }
+
+
+@pytest.mark.parametrize("connection_fails_once", [False, True])
+def test_maintenance_backup_primary_precedes_retryable_cleanup_failures(
+    maintenance_backup_targets,
+    monkeypatch: pytest.MonkeyPatch,
+    connection_fails_once: bool,
+) -> None:
+    import app.runtime.sqlite_vfs as sqlite_vfs_module
+    from app.runtime.sqlite_vfs import MaintenanceOptions
+
+    class FailOnceCursor:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("cursor close failed")
+
+    class FailOnceConnection:
+        def __init__(self) -> None:
+            self.cursor = FailOnceCursor()
+            self.close_calls = 0
+
+        def execute(self, _sql, _parameters=()):
+            return self.cursor
+
+        def enable_load_extension(self, _enabled) -> None:
+            return None
+
+        def set_authorizer(self, _authorizer) -> None:
+            return None
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if connection_fails_once and self.close_calls == 1:
+                raise RuntimeError("connection close failed")
+
+    source, _destination = maintenance_backup_targets
+    raw = FailOnceConnection()
+    monkeypatch.setattr(sqlite_vfs_module.sqlite3, "connect", lambda *_a, **_k: raw)
+    primary = RuntimeError("backup failed")
+    cursor = None
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        with source.open_maintenance(MaintenanceOptions(read_only=True)) as adapter:
+            cursor = adapter.execute("SELECT 1")
+            raise primary
+    assert raised.value.exceptions[0] is primary
+    expected_cleanup = ["cursor close failed"]
+    if connection_fails_once:
+        expected_cleanup.append("connection close failed")
+    assert [str(error) for error in raised.value.exceptions[1:]] == expected_cleanup
+
+    assert cursor is not None
+    assert raw.cursor.close_calls == 2
+    assert raw.close_calls == (2 if connection_fails_once else 1)
+
+
 @pytest.mark.asyncio
 async def test_async_engine_savepoint_and_revocation_are_bound(tmp_path) -> None:
     from app.runtime.sqlite_vfs import (
