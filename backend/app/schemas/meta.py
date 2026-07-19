@@ -72,6 +72,8 @@ class RegistryHealthOut(BaseModel):
     registry_loaded: bool
     entity_count: int
     categories: dict[str, int]
+    catalog_version: str | None = None
+    catalog_hash: str | None = None
 
 
 class EntitySchemaOut(BaseModel):
