@@ -24,6 +24,12 @@ from app.settings import settings
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _DrainState:
+    owner_task: asyncio.Task[object]
+    resumed: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 @dataclass(slots=True)
 class _EngineEntry:
     identity: StorageIdentity
@@ -66,6 +72,7 @@ class SpaceEngineManager:
         self._max_size = max_size if max_size is not None else settings.engine_pool_max_size
         self._engines: OrderedDict[str, _EngineEntry] = OrderedDict()
         self._lock = asyncio.Lock()
+        self._draining: dict[StorageIdentity, _DrainState] = {}
 
     @staticmethod
     def _engine_options(_space_id: str) -> AsyncEngineOptions:
@@ -75,39 +82,44 @@ class SpaceEngineManager:
         self, space_id: str, opens: ContainedSpaceOpens
     ) -> AsyncSession:
         requested_identity = opens.database_target.identity
-        async with self._lock:
-            cached = self._engines.get(space_id)
-            if cached is not None:
-                if cached.identity != requested_identity:
-                    raise SpaceEnginePathMismatchError()
+        while True:
+            await self._wait_until_resumed(requested_identity)
+            async with self._lock:
+                if requested_identity in self._draining:
+                    continue
+                cached = self._engines.get(space_id)
+                if cached is not None:
+                    if cached.identity != requested_identity:
+                        raise SpaceEnginePathMismatchError()
+                    self._engines.move_to_end(space_id)
+                    opens._register_revocation_callback(
+                        lambda: self._dispose_if_current(space_id, cached)
+                    )
+                    return cached.sessions()
+
+                target = opens.take_database_target()
+                engine: AsyncEngine | None = None
+                try:
+                    engine = target.make_async_engine(self._engine_options(space_id))
+                except BaseException:
+                    if engine is not None:
+                        await run_joined_awaitable(engine.dispose())
+                    await run_joined_awaitable(target.aclose())
+                    raise
+                assert engine is not None
+                entry = _EngineEntry(
+                    identity=target.identity,
+                    target=target,
+                    engine=engine,
+                    sessions=create_session_factory(engine),
+                )
+                self._engines[space_id] = entry
                 self._engines.move_to_end(space_id)
                 opens._register_revocation_callback(
-                    lambda: self._dispose_if_current(space_id, cached)
+                    lambda: self._dispose_if_current(space_id, entry)
                 )
-                return cached.sessions()
-
-            target = opens.take_database_target()
-            engine: AsyncEngine | None = None
-            try:
-                engine = target.make_async_engine(self._engine_options(space_id))
-            except BaseException:
-                if engine is not None:
-                    await run_joined_awaitable(engine.dispose())
-                await run_joined_awaitable(target.aclose())
-                raise
-            assert engine is not None
-            entry = _EngineEntry(
-                identity=target.identity,
-                target=target,
-                engine=engine,
-                sessions=create_session_factory(engine),
-            )
-            self._engines[space_id] = entry
-            self._engines.move_to_end(space_id)
-            opens._register_revocation_callback(
-                lambda: self._dispose_if_current(space_id, entry)
-            )
-            evicted = self._pop_evicted_locked()
+                evicted = self._pop_evicted_locked()
+                break
 
         for evicted_id, evicted_entry in evicted:
             await self._dispose_entry(evicted_id, evicted_entry)
@@ -117,20 +129,85 @@ class SpaceEngineManager:
     async def acquire(self, space_id: str, opens: ContainedSpaceOpens) -> EngineHandle:
         if not isinstance(opens, ContainedSpaceOpens):
             raise TypeError("SpaceEngineManager.acquire requires ContainedSpaceOpens")
-        async with self._lock:
-            entry = self._engines.get(space_id)
-            identity = opens.database_target.identity
-            if entry is not None:
-                if entry.identity != identity:
-                    raise SpaceEnginePathMismatchError()
-                entry.ref_count += 1
-                self._engines.move_to_end(space_id)
-            else:
-                target = opens.take_database_target()
-                engine = target.make_async_engine(self._engine_options(space_id))
-                entry = _EngineEntry(identity, target, engine, create_session_factory(engine), 1)
-                self._engines[space_id] = entry
+        identity = opens.database_target.identity
+        while True:
+            await self._wait_until_resumed(identity)
+            async with self._lock:
+                if identity in self._draining:
+                    continue
+                entry = self._engines.get(space_id)
+                if entry is not None:
+                    if entry.identity != identity:
+                        raise SpaceEnginePathMismatchError()
+                    entry.ref_count += 1
+                    self._engines.move_to_end(space_id)
+                else:
+                    target = opens.take_database_target()
+                    engine = target.make_async_engine(self._engine_options(space_id))
+                    entry = _EngineEntry(
+                        identity, target, engine, create_session_factory(engine), 1
+                    )
+                    self._engines[space_id] = entry
+                break
         return EngineHandle(space_id, entry.engine, entry.sessions, lambda: self._release_handle(space_id, entry))
+
+    async def _wait_until_resumed(self, identity: StorageIdentity) -> None:
+        while True:
+            state = self._draining.get(identity)
+            if state is None:
+                return
+            await state.resumed.wait()
+
+    async def drain_identity(self, identity: StorageIdentity) -> None:
+        """Quiesce one bound storage identity until its refs are terminal."""
+        owner = asyncio.current_task()
+        assert owner is not None
+        async with self._lock:
+            existing = self._draining.get(identity)
+            if existing is not None:
+                if existing.owner_task is not owner:
+                    raise RuntimeError("drain owner Task changed")
+                return
+            self._draining[identity] = _DrainState(owner)
+        while True:
+            async with self._lock:
+                active = any(
+                    entry.identity == identity and entry.ref_count
+                    for entry in self._engines.values()
+                )
+                if not active:
+                    entries = [
+                        (space_id, entry)
+                        for space_id, entry in self._engines.items()
+                        if entry.identity == identity
+                    ]
+                    for space_id, _entry in entries:
+                        self._engines.pop(space_id, None)
+                    break
+            await asyncio.sleep(0)
+        errors: list[BaseException] = []
+        for space_id, entry in entries:
+            try:
+                await self._dispose_entry(space_id, entry)
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("identity drain failed", errors)
+
+    async def resume_identity(self, identity: StorageIdentity) -> None:
+        owner = asyncio.current_task()
+        assert owner is not None
+        state = self._draining.get(identity)
+        if state is None:
+            return
+        if state.owner_task is not owner:
+            raise RuntimeError("drain owner Task changed")
+        self._draining.pop(identity, None)
+        state.resumed.set()
+
+    @property
+    def draining_identities(self) -> frozenset[StorageIdentity]:
+        return frozenset(self._draining)
 
     async def _release_handle(self, space_id: str, entry: _EngineEntry) -> None:
         async with self._lock:

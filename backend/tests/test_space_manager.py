@@ -272,3 +272,53 @@ async def test_engine_acquire_handle_release_is_reference_counted(tmp_path: Path
     await first.close_untransferred_resources()
     await second.close_untransferred_resources()
     await manager.dispose_all()
+
+
+@pytest.mark.asyncio
+async def test_drain_identity_blocks_acquire_until_same_task_resume(tmp_path: Path) -> None:
+    manager = SpaceEngineManager(max_size=2)
+    first = _opens(tmp_path / "drain")
+    second = _opens(tmp_path / "drain")
+    held = await manager.acquire("drain", first)
+    identity = first.database_target.identity
+    drained = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def maintenance() -> None:
+        await manager.drain_identity(identity)
+        drained.set()
+        await resume.wait()
+        await manager.resume_identity(identity)
+
+    maintenance_task = asyncio.create_task(maintenance())
+    await asyncio.sleep(0)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(drained.wait(), timeout=0.05)
+    await held.release()
+    await asyncio.wait_for(drained.wait(), timeout=2)
+
+    async def acquire_and_release() -> None:
+        replacement = await manager.acquire("drain", second)
+        await replacement.release()
+
+    acquiring = asyncio.create_task(acquire_and_release())
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(acquiring), timeout=0.05)
+    resume.set()
+    await maintenance_task
+    await asyncio.wait_for(acquiring, timeout=2)
+    await first.close_untransferred_resources()
+    await second.close_untransferred_resources()
+    await manager.dispose_all()
+
+
+@pytest.mark.asyncio
+async def test_drain_requires_same_owner_to_resume(tmp_path: Path) -> None:
+    manager = SpaceEngineManager(max_size=2)
+    opens = _opens(tmp_path / "owner")
+    identity = opens.database_target.identity
+    await manager.drain_identity(identity)
+    with pytest.raises(RuntimeError, match="drain owner"):
+        await asyncio.create_task(manager.resume_identity(identity))
+    await manager.resume_identity(identity)
+    await opens.close_all()
