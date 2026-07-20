@@ -207,14 +207,17 @@ async def test_cursor_pull_pages_cross_entity_events_without_skipping(space_sess
     await record_sync_event(
         space_session, entity_type="task", entity_id="task-1", action="create",
         payload={"id": "task-1", "title": "one"},
+        visible=True,
     )
     await record_sync_event(
         space_session, entity_type="quickNote", entity_id="quick-1", action="create",
         payload={"id": "quick-1", "content": "quick"},
+        visible=True,
     )
     await record_sync_event(
         space_session, entity_type="task", entity_id="task-2", action="create",
         payload={"id": "task-2", "title": "two"},
+        visible=True,
     )
 
     service = SyncService(space_session)
@@ -238,13 +241,16 @@ async def test_cursor_pull_limit_one_reaches_delete_and_interleaved_update(space
     await record_sync_event(
         space_session, entity_type="task", entity_id="task-1", action="create",
         payload={"id": "task-1", "title": "created"},
+        visible=True,
     )
     await record_sync_event(
         space_session, entity_type="quickNote", entity_id="quick-1", action="delete",
+        visible=True,
     )
     await record_sync_event(
         space_session, entity_type="task", entity_id="task-1", action="update",
         payload={"id": "task-1", "title": "updated"},
+        visible=True,
     )
 
     service = SyncService(space_session)
@@ -273,16 +279,51 @@ async def test_cursor_pull_folds_repeated_entity_events_to_last_scanned_state(sp
     first = await record_sync_event(
         space_session, entity_type="task", entity_id="same", action="create",
         payload={"id": "same", "title": "first"},
+        visible=True,
     )
     last = await record_sync_event(
         space_session, entity_type="task", entity_id="same", action="update",
         payload={"id": "same", "title": "last"},
+        visible=True,
     )
 
     page = await SyncService(space_session).pull(cursor=0, limit=10)
     assert page["tasks"] == [{"id": "same", "title": "last"}]
     assert page["next_cursor"] == last.id
     assert page["next_cursor"] != first.id
+
+
+@pytest.mark.asyncio
+async def test_cursor_pull_excludes_invisible_events_but_keeps_allocated_cursor(space_session):
+    from app.models.sync_state import SyncState
+    from app.services.sync import SyncService
+    from app.services.sync_outbox import record_sync_event
+
+    visible_event = await record_sync_event(
+        space_session,
+        entity_type="task",
+        entity_id="visible-task",
+        action="create",
+        payload={"id": "visible-task", "title": "visible"},
+        visible=True,
+    )
+    invisible_event = await record_sync_event(
+        space_session,
+        entity_type="task",
+        entity_id="hidden-task",
+        action="create",
+        payload={"id": "hidden-task", "title": "hidden"},
+        visible=False,
+    )
+
+    state = await space_session.get(SyncState, 1)
+    page = await SyncService(space_session).pull(cursor=0, limit=10)
+
+    assert state is not None
+    assert state.current_cursor == invisible_event.id
+    assert page["tasks"] == [{"id": "visible-task", "title": "visible"}]
+    assert page["next_cursor"] == visible_event.id
+    assert page["has_more"] is False
 
 
 @pytest.mark.asyncio
@@ -507,6 +548,7 @@ async def test_full_cursor_zero_is_current_state_snapshot_not_ledger_replay(spac
         entity_id="ledger-only",
         action="create",
         payload={"id": "ledger-only", "content": "current", "tags": "[]"},
+        visible=True,
     )
 
     page = await SyncService(space_session).full(cursor=0, limit=100)
@@ -695,6 +737,7 @@ async def test_full_after_prune_recovers_new_device_from_current_state(space_ses
         entity_id="survives-prune",
         action="create",
         payload={"id": "survives-prune", "title": "current"},
+        visible=True,
     )
     state = await space_session.get(SyncState, 1)
     assert state is not None

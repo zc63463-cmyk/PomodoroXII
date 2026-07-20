@@ -9,7 +9,32 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Protocol
+
+if TYPE_CHECKING:
+    from app.mutation.types import PersistedMutationCommand
+    from app.runtime.leases import FenceReceipt
+    from app.runtime.space import SpaceRuntimeHandle
+
+
+class FencedProjectionExecutor(Protocol):
+    """Apply persisted projections through the current Space fence only."""
+
+    async def apply_forward(
+        self,
+        scope: "SpaceRuntimeHandle",
+        operation_id: str,
+        command: "PersistedMutationCommand",
+        receipt: "FenceReceipt",
+    ) -> None: ...
+
+    async def restore_before(
+        self,
+        scope: "SpaceRuntimeHandle",
+        operation_id: str,
+        command: "PersistedMutationCommand",
+        receipt: "FenceReceipt",
+    ) -> None: ...
 
 
 class NoteStatus(StrEnum):

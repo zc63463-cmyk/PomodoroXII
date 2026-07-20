@@ -7,10 +7,13 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 
 from app.mutation.types import (
+    ContainedProjectionActionField,
+    MaterializedProjectionAction,
     PersistedProjectionDescriptor,
+    ProjectionActionTag,
     ProjectionPlan,
     validate_projection_ordinals,
 )
@@ -92,6 +95,10 @@ class StageStore:
         return target
 
     @staticmethod
+    def _contained(value: object) -> ContainedProjectionActionField:
+        return ContainedProjectionActionField(value)  # type: ignore[arg-type]
+
+    @staticmethod
     def directory_key(operation_id: str) -> str:
         return hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
 
@@ -109,15 +116,14 @@ class StageStore:
         key = self.directory_key(operation_id)
         steps: list[dict[str, object]] = []
         for plan in plans:
-            if not isinstance(plan.store, str) or not plan.store:
-                raise ValueError("projection store must be a nonempty string")
-            target = self.validate_target(plan.target)
+            target = self.validate_target(str(plan.target))
             steps.append(
                 {
                     "after": _image(plan.after, f"after/{plan.ordinal}.bin"),
                     "before": _image(plan.before, f"before/{plan.ordinal}.bin"),
                     "ordinal": plan.ordinal,
-                    "store": plan.store,
+                    "source": None if plan.source is None else str(plan.source),
+                    "tag": plan.tag.value,
                     "target": target,
                 }
             )
@@ -211,13 +217,17 @@ class StageStore:
         for expected_ordinal, raw_item in enumerate(value["steps"]):
             item = _require_keys(
                 raw_item,
-                {"after", "before", "ordinal", "store", "target"},
+                {"after", "before", "ordinal", "source", "tag", "target"},
                 label="manifest step",
             )
             if type(item["ordinal"]) is not int or item["ordinal"] != expected_ordinal:
                 raise StageIntegrityError("manifest ordinals must be contiguous")
-            if not isinstance(item["store"], str) or not item["store"]:
-                raise StageIntegrityError("manifest store must be a nonempty string")
+            try:
+                tag = ProjectionActionTag(item["tag"])
+                source = None if item["source"] is None else type(self)._contained(item["source"])
+                target = type(self)._contained(item["target"])
+            except (TypeError, ValueError) as exc:
+                raise StageIntegrityError("manifest projection action is invalid") from exc
             images: dict[str, tuple[str | None, int | None]] = {}
             for side in ("before", "after"):
                 image = item[side]
@@ -243,8 +253,9 @@ class StageStore:
             descriptors.append(
                 StagedStep(
                     PersistedProjectionDescriptor(
-                        item["store"],
-                        self.validate_target(item["target"]),
+                        tag,
+                        source,
+                        target,
                         item["ordinal"],
                         *images["before"],
                         *images["after"],
@@ -264,6 +275,56 @@ class StageStore:
             tuple(descriptors),
             hashlib.sha256(encoded).hexdigest(),
         )
+
+    async def materialize(
+        self,
+        operation_id: str,
+        descriptors: tuple[PersistedProjectionDescriptor, ...],
+        *,
+        image: Literal["before", "after"],
+        receipt,
+    ) -> tuple[MaterializedProjectionAction, ...]:
+        if image not in ("before", "after"):
+            raise ValueError("image must be before or after")
+        return await run_joined_thread(
+            lambda: self._materialize_sync(operation_id, tuple(descriptors), image, receipt)
+        )
+
+    def _materialize_sync(
+        self,
+        operation_id: str,
+        descriptors: tuple[PersistedProjectionDescriptor, ...],
+        image: Literal["before", "after"],
+        receipt,
+    ) -> tuple[MaterializedProjectionAction, ...]:
+        receipt.assert_current()
+        manifest = self.verify(operation_id)
+        expected = tuple(step.descriptor for step in manifest.steps)
+        if descriptors != expected:
+            raise StageIntegrityError("staged descriptors do not exactly match manifest")
+        actions: list[MaterializedProjectionAction] = []
+        for descriptor in descriptors:
+            digest = getattr(descriptor, f"{image}_sha256")
+            size = getattr(descriptor, f"{image}_size")
+            blob = None
+            if digest is not None:
+                blob = self._authority.read_bytes(
+                    f"{manifest.directory_key}/{image}/{descriptor.ordinal}.bin"
+                )
+                if hashlib.sha256(blob).hexdigest() != digest or len(blob) != size:
+                    raise StageIntegrityError("staged image hash or size mismatch")
+            tag = descriptor.tag
+            source = descriptor.source
+            target = descriptor.target
+            if image == "before":
+                if tag is ProjectionActionTag.PATH_RENAME:
+                    source, target = target, source
+                elif tag is ProjectionActionTag.PATH_REMOVE:
+                    tag = ProjectionActionTag.MARKDOWN_WRITE
+                elif tag is ProjectionActionTag.MARKDOWN_WRITE and blob is None:
+                    tag = ProjectionActionTag.PATH_REMOVE
+            actions.append(MaterializedProjectionAction(tag, source, target, descriptor.ordinal, blob))
+        return tuple(actions)
 
     async def collect_orphans(
         self,
