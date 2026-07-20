@@ -207,6 +207,7 @@ def test_persisted_command_hash_and_fresh_decoder_are_canonical() -> None:
         "batch_id": "batch",
         "applied": [],
         "rejected": [],
+        "operation_id_derivations": {},
     }
 
     noncanonical = json.dumps(json.loads(encoded), indent=2).encode()
