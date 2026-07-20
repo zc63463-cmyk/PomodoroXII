@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from sqlalchemy import func, select, update
@@ -69,7 +69,10 @@ class JournalBatch:
     result: BatchMutationResult
 
 
-def _encode_result(result: BatchMutationResult) -> str:
+def _encode_result(
+    result: BatchMutationResult,
+    operation_id_derivations: Mapping[str, tuple[str, str]] | None = None,
+) -> str:
     return json.dumps(
         {
             "applied": [
@@ -97,6 +100,12 @@ def _encode_result(result: BatchMutationResult) -> str:
                 }
                 for item in result.rejected
             ],
+            "operation_id_derivations": {
+                operation_id: {"parent_id": parent_id, "suffix": suffix}
+                for operation_id, (parent_id, suffix) in sorted(
+                    (operation_id_derivations or {}).items()
+                )
+            },
         },
         ensure_ascii=True,
         sort_keys=True,
@@ -193,6 +202,7 @@ class MutationJournal:
         operation_ids: tuple[str, ...],
         commands: tuple[MutationCommand, ...],
         rejections: tuple[MutationRejection, ...],
+        operation_id_derivations: Mapping[str, tuple[str, str]] | None = None,
     ) -> None:
         if len(operation_ids) != len(commands) or not operation_ids:
             raise ValueError("accepted operation IDs must align with commands")
@@ -217,7 +227,7 @@ class MutationJournal:
                     command_hash=request_hash,
                     state=MutationState.INTENT,
                     accepted_count=len(operation_ids),
-                    result_json=_encode_result(result),
+                    result_json=_encode_result(result, operation_id_derivations),
                 )
             )
             for sequence, (operation_id, command) in enumerate(
@@ -245,6 +255,7 @@ class MutationJournal:
         batch_id: str,
         request_hash: str,
         rejections: tuple[MutationRejection, ...],
+        operation_id_derivations: Mapping[str, tuple[str, str]] | None = None,
     ) -> BatchMutationResult:
         result = BatchMutationResult(batch_id, (), rejections)
         async with self._sessions.begin() as session:
@@ -254,7 +265,7 @@ class MutationJournal:
                     command_hash=request_hash,
                     state=MutationState.INTENT,
                     accepted_count=0,
-                    result_json=_encode_result(result),
+                    result_json=_encode_result(result, operation_id_derivations),
                 )
             )
             await session.flush()

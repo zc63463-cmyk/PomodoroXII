@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +27,7 @@ from app.mutation.types import (
     MutationRequest,
     MutationState,
     SyncEventPlan,
+    bounded_child_operation_id,
 )
 from app.mutation.unit_of_work import (
     AuthorityOverlay,
@@ -440,6 +441,26 @@ def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -
             overlay.apply(command)
         assert overlay.row("task", "overlay-existing") == current
 
+    new_row = {**current, "id": "overlay-new"}
+    insert_with_cas = MutationCommand.from_effects(
+        request=request,
+        db_plans=(
+            DbMutationPlan(
+                "tasks",
+                {"id": "overlay-new"},
+                "insert",
+                1,
+                None,
+                new_row,
+            ),
+        ),
+        projections=(),
+        sync_events=(),
+        result_value=new_row,
+    )
+    with pytest.raises(SpaceRecoveryRequiredError):
+        AuthorityOverlay(CATALOG, {}).apply(insert_with_cas)
+
 
 @pytest.mark.asyncio
 async def test_batch_overlay_exposes_folder_create_to_note_child(uow_fixture) -> None:
@@ -451,7 +472,31 @@ async def test_batch_overlay_exposes_folder_create_to_note_child(uow_fixture) ->
                 folder_id = request.payload.get("folder_id")
                 assert isinstance(folder_id, str)
                 assert context.authority.row("folder", folder_id) is not None
-            return await compile_catalog_entity_command(context, request)
+            base = await compile_catalog_entity_command(context, request)
+            if request.entity_type == "folder":
+                row = base.db_plans[0].after_row
+                assert row is not None
+                projection = _projection_plan(
+                    "index_replace",
+                    f"index/folders/id/{request.entity_id}",
+                    0,
+                    None,
+                    json.dumps(
+                        {"row": dict(row)},
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("ascii"),
+                )
+            else:
+                projection = _projection_plan(
+                    "markdown_write",
+                    f"notes/{request.entity_id}.md",
+                    0,
+                    None,
+                    b"",
+                )
+            return _with_projection(base, projections=(projection,))
 
     compilation = await _compile_production_batch(
         uow_fixture,
@@ -521,16 +566,16 @@ async def test_batch_overlay_exposes_quick_note_create_to_junction_child(uow_fix
 
 
 @pytest.mark.asyncio
-async def test_batch_overlay_exposes_note_create_to_schedule_junction_child(
+async def test_batch_overlay_exposes_quick_note_create_to_schedule_junction_child(
     uow_fixture,
 ) -> None:
     class NoteJunctionPolicy:
-        entity_types = frozenset({"note", "schedule_quick_note"})
+        entity_types = frozenset({"quick_note", "schedule_quick_note"})
 
         async def compile(self, context, request):
             if request.entity_type == "schedule_quick_note":
-                note_id = request.payload.get("quick_note_id")
-                assert context.authority.row("note", note_id) is not None
+                quick_note_id = request.payload.get("quick_note_id")
+                assert context.authority.row("quick_note", quick_note_id) is not None
             return await compile_catalog_entity_command(context, request)
 
     compilation = await _compile_production_batch(
@@ -538,9 +583,9 @@ async def test_batch_overlay_exposes_note_create_to_schedule_junction_child(
         (
             MutationRequest.from_payload(
                 name="entity.create",
-                entity_type="note",
+                entity_type="quick_note",
                 entity_id="junction-note-parent",
-                payload={"title": "Parent", "content_hash": "body"},
+                payload={"content": "Parent"},
                 expected_version=None,
             ),
             MutationRequest.from_payload(
@@ -744,7 +789,21 @@ async def test_batch_overlay_carries_quick_note_conversion_children(uow_fixture)
                 quick_note = context.authority.row("quick_note", "conversion-quick-note")
                 assert quick_note is not None
                 assert quick_note["migrated_to_note_id"] == "converted-note"
-            return await compile_catalog_entity_command(context, request)
+            base = await compile_catalog_entity_command(context, request)
+            if request.entity_type == "note":
+                return _with_projection(
+                    base,
+                    projections=(
+                        _projection_plan(
+                            "markdown_write",
+                            "notes/converted-note.md",
+                            0,
+                            None,
+                            b"captured",
+                        ),
+                    ),
+                )
+            return base
 
     compilation = await _compile_production_batch(
         uow_fixture,
@@ -910,6 +969,45 @@ async def test_timestamp_lww_remote_delete_executes_against_authoritative_versio
 
 
 @pytest.mark.asyncio
+async def test_strict_cas_rejects_update_without_expected_version(uow_fixture) -> None:
+    async with uow_fixture.sessions.begin() as session:
+        session.add(
+            Task(
+                id="strict-cas-task",
+                title="before",
+                created_at="2026-07-20T00:00:00Z",
+                updated_at="2026-07-20T00:00:00Z",
+                version=1,
+            )
+        )
+    strict_catalog = replace(
+        CATALOG,
+        _by_name={
+            **CATALOG._by_name,
+            "task": replace(CATALOG.get("task"), sync_conflict_policy="strict_cas"),
+        },
+    )
+    request = MutationRequest.from_payload(
+        name="entity.update",
+        entity_type="task",
+        entity_id="strict-cas-task",
+        payload={"title": "after"},
+        expected_version=None,
+    )
+    item = mutation_types.PreparedBatchItem(
+        0, "strict-cas-operation", request.request_hash, request, None
+    )
+
+    async with uow_fixture.sessions() as session:
+        compilation = await MutationCompiler(strict_catalog).compile_batch(
+            uow_fixture.scope, (item,), session
+        )
+
+    assert compilation.commands == ()
+    assert tuple(item.code for item in compilation.rejected) == ("version_conflict",)
+
+
+@pytest.mark.asyncio
 async def test_production_compiler_injects_closed_plan_factories(uow_fixture) -> None:
     class FactoryPolicy:
         entity_types = frozenset({"task"})
@@ -1038,6 +1136,104 @@ async def test_production_compiler_requires_policy_for_projection_backed_entity(
             await MutationCompiler(CATALOG).compile_batch(
                 uow_fixture.scope, (item,), session
             )
+
+
+@pytest.mark.asyncio
+async def test_production_compiler_rejects_incomplete_registered_policy(
+    uow_fixture,
+) -> None:
+    class IncompleteNotePolicy:
+        entity_types = frozenset({"note"})
+
+        async def compile(self, context, request):
+            return await compile_catalog_entity_command(context, request)
+
+    class MissingSyncPolicy:
+        entity_types = frozenset({"task"})
+
+        async def compile(self, context, request):
+            base = await compile_catalog_entity_command(context, request)
+            return context.command(
+                request=request,
+                db_plans=base.db_plans,
+                sync_events=(),
+                value=base.result_value,
+            )
+
+    class CrossEntityPolicy:
+        entity_types = frozenset({"note"})
+
+        async def compile(self, context, request):
+            task_request = MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="task",
+                entity_id="cross-entity-task",
+                payload={"title": "cross"},
+                expected_version=None,
+            )
+            task_command = await compile_catalog_entity_command(
+                context, task_request
+            )
+            return context.command(
+                request=request,
+                db_plans=task_command.db_plans,
+                projections=(
+                    _projection_plan(
+                        "markdown_write",
+                        "notes/cross-entity-note.md",
+                        0,
+                        None,
+                        b"cross",
+                    ),
+                ),
+                sync_events=task_command.sync_events,
+                value={"id": request.entity_id},
+            )
+
+    cases = (
+        (
+            IncompleteNotePolicy(),
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="note",
+                entity_id="incomplete-note",
+                payload={"title": "Incomplete"},
+                expected_version=None,
+            ),
+            "complete projections",
+        ),
+        (
+            MissingSyncPolicy(),
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="task",
+                entity_id="missing-sync-task",
+                payload={"title": "Missing sync"},
+                expected_version=None,
+            ),
+            "sync event is missing",
+        ),
+        (
+            CrossEntityPolicy(),
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="note",
+                entity_id="cross-entity-note",
+                payload={"title": "Cross"},
+                expected_version=None,
+            ),
+            "request entity",
+        ),
+    )
+    for index, (policy, request, message) in enumerate(cases):
+        item = mutation_types.PreparedBatchItem(
+            0, f"incomplete-policy-{index}", request.request_hash, request, None
+        )
+        async with uow_fixture.sessions() as session:
+            with pytest.raises(SpaceRecoveryRequiredError, match=message):
+                await MutationCompiler(CATALOG, (policy,)).compile_batch(
+                    uow_fixture.scope, (item,), session
+                )
 
 
 def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
@@ -1252,6 +1448,34 @@ async def test_execute_finalizes_once_and_makes_ledger_visible_at_final_boundary
         state = await session.get(SyncState, 1)
     assert event is not None and event.visible is True and event.entity_type == "wire-note"
     assert state is not None and state.current_cursor == event.id
+
+
+@pytest.mark.asyncio
+async def test_internal_hashed_child_ids_persist_parent_suffix_mapping(
+    uow_fixture,
+) -> None:
+    batch_id = "b" * 128
+    result = await uow_fixture.uow.execute_batch(
+        uow_fixture.scope,
+        (_request("derived-1"), _request("derived-2")),
+        batch_id,
+    )
+    expected = {
+        bounded_child_operation_id(batch_id, "0000"): {
+            "parent_id": batch_id,
+            "suffix": "0000",
+        },
+        bounded_child_operation_id(batch_id, "0001"): {
+            "parent_id": batch_id,
+            "suffix": "0001",
+        },
+    }
+    async with uow_fixture.sessions() as session:
+        batch = await session.get(MutationBatch, batch_id)
+
+    assert tuple(item.operation_id for item in result.applied) == tuple(expected)
+    assert batch is not None
+    assert json.loads(batch.result_json)["operation_id_derivations"] == expected
 
 
 @pytest.mark.asyncio
