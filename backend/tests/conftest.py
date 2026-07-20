@@ -243,7 +243,7 @@ def _isolate_env(
         def model_for(self, name: str):
             return fresh_models[name]
 
-    sync_registry_module.CATALOG = _TestSyncCatalog()
+    monkeypatch.setattr(sync_registry_module, "CATALOG", _TestSyncCatalog())
 
     import app.auth.security as security_module
     importlib.reload(security_module)
