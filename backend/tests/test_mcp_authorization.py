@@ -100,7 +100,9 @@ class _ForbiddenRuntime:
 
 def _install_forbidden_runtime(server):
     runtime = _ForbiddenRuntime()
-    server.install_space_runtime(SimpleNamespace(**runtime.__dict__, open_resolved=runtime.open_resolved))
+    server.install_space_runtime(
+        SimpleNamespace(**runtime.__dict__, open_resolved=runtime.open_resolved)
+    )
     return runtime
 
 
@@ -368,17 +370,11 @@ def test_mcp_error_payload_uses_shared_recursive_serializer() -> None:
     from app.mcp.auth import mcp_error_payload
 
     details = {"resolution": {"kind": "local", "versions": [1, 2]}}
-    error = AppError(
-        "Version conflict",
-        status_code=409,
-        error_type="conflict",
-        code="version_conflict",
-        details=details,
-    )
+    error = AppError(code="version_conflict", details=details)
     details["resolution"]["versions"].append(3)
     assert mcp_error_payload(error, "req-parity") == {
         "code": "version_conflict",
-        "message": "Version conflict",
+        "message": "Entity version conflict",
         "retryable": False,
         "request_id": "req-parity",
         "details": {"resolution": {"kind": "local", "versions": [1, 2]}},
@@ -397,13 +393,7 @@ async def test_rest_and_mcp_share_nested_frozen_error_wire_json(
     from app.mcp.auth import canonical_mcp_errors
 
     details = {"resolution": {"kind": "local", "versions": [1, 2]}}
-    error = AppError(
-        "Version conflict",
-        status_code=409,
-        error_type="conflict",
-        code="version_conflict",
-        details=details,
-    )
+    error = AppError(code="version_conflict", details=details)
     details["resolution"]["versions"].append(3)
 
     app = FastAPI()
@@ -441,7 +431,7 @@ async def test_rest_and_mcp_share_nested_frozen_error_wire_json(
     assert mcp == rest.json()
     assert mcp == {
         "code": "version_conflict",
-        "message": "Version conflict",
+        "message": "Entity version conflict",
         "retryable": False,
         "request_id": "req-parity",
         "details": {"resolution": {"kind": "local", "versions": [1, 2]}},

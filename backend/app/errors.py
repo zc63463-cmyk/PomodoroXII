@@ -24,14 +24,115 @@ CANONICAL_ERROR_MEDIA_TYPE = "application/vnd.pomodoroxii.error+json;version=2"
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 
+@dataclass(frozen=True, slots=True)
+class MutationRejectionSpec:
+    status_code: int
+    message: str
+    legacy_error_type: str
+    retryable: bool
+
+
+S3_MUTATION_REJECTION_CODES = frozenset(
+    {
+        "space_scope_mismatch",
+        "version_conflict",
+        "cycle_detected",
+        "relation_endpoint_missing",
+        "entity_id_mismatch",
+        "delete_payload_not_empty",
+        "not_found",
+    }
+)
+RESERVED_TS_CODES = frozenset(
+    {
+        "space_scope_mismatch",
+        "version_conflict",
+        "idempotency_conflict",
+        "invalid_payload_hash",
+        "invalid_project_key",
+        "project_key_conflict",
+        "unsupported_content_version",
+        "invalid_note_document",
+        "invalid_work_item_tree",
+        "not_found",
+        "active_child_conflict",
+        "active_session_exists",
+        "stale_session_owner",
+        "session_activation_conflict",
+        "offline_formal_creation_forbidden",
+        "command_result_unknown",
+        "active_session_recovery_required",
+        "work_item_structure_changed",
+    }
+)
+RESERVED_S4_MAPPING_CODES = frozenset({"entity_not_sync_enabled"})
+
+
+def _spec(status: int, message: str, legacy: str, retryable: bool = False) -> MutationRejectionSpec:
+    return MutationRejectionSpec(status, message, legacy, retryable)
+
+
+MUTATION_REJECTION_SPECS = MappingProxyType(
+    {
+        "space_scope_mismatch": _spec(
+            403, "Mutation does not belong to the authorized Space", "authorization_error"
+        ),
+        "version_conflict": _spec(409, "Entity version conflict", "conflict"),
+        "cycle_detected": _spec(409, "Mutation would create a cycle", "conflict"),
+        "relation_endpoint_missing": _spec(409, "Relation endpoint does not exist", "conflict"),
+        "entity_id_mismatch": _spec(
+            422, "Entity identity does not match payload", "validation_error"
+        ),
+        "delete_payload_not_empty": _spec(422, "Delete payload must be empty", "validation_error"),
+        "idempotency_conflict": _spec(
+            409, "Operation ID is already bound to a different request", "conflict"
+        ),
+        "invalid_payload_hash": _spec(
+            422, "Payload hash does not match canonical payload", "validation_error"
+        ),
+        "invalid_project_key": _spec(422, "Project key is invalid", "validation_error"),
+        "project_key_conflict": _spec(409, "Project key conflict", "conflict"),
+        "unsupported_content_version": _spec(
+            422, "Content version is unsupported", "validation_error"
+        ),
+        "invalid_note_document": _spec(422, "Note document is invalid", "validation_error"),
+        "invalid_work_item_tree": _spec(422, "Work item tree is invalid", "validation_error"),
+        "not_found": _spec(404, "Entity not found", "not_found"),
+        "active_child_conflict": _spec(409, "An active child prevents this mutation", "conflict"),
+        "active_session_exists": _spec(409, "An active Session already exists", "conflict"),
+        "stale_session_owner": _spec(409, "Session ownership is stale", "conflict"),
+        "session_activation_conflict": _spec(409, "Session activation conflict", "conflict"),
+        "offline_formal_creation_forbidden": _spec(
+            409, "Formal offline creation is forbidden", "conflict"
+        ),
+        "command_result_unknown": _spec(
+            503, "Command result requires recovery", "service_unavailable", True
+        ),
+        "active_session_recovery_required": _spec(
+            503,
+            "Active Session coordination requires recovery",
+            "service_unavailable",
+            True,
+        ),
+        "work_item_structure_changed": _spec(409, "Work item structure changed", "conflict"),
+        "entity_not_sync_enabled": _spec(
+            422, "Entity type is not sync-enabled", "validation_error"
+        ),
+    }
+)
+
+if set(MUTATION_REJECTION_SPECS) != (
+    S3_MUTATION_REJECTION_CODES | RESERVED_TS_CODES | RESERVED_S4_MAPPING_CODES
+):
+    raise RuntimeError("mutation rejection map does not match closed code sets")
+
+
 def deep_freeze_json(value: object) -> object:
     """Validate and recursively freeze one JSON-compatible value."""
     if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise TypeError("JSON object keys must be strings")
-        return MappingProxyType({
-            key: deep_freeze_json(item) for key, item in value.items()
-        })
+        return MappingProxyType({key: deep_freeze_json(item) for key, item in value.items()})
     if isinstance(value, (tuple, list)):
         return tuple(deep_freeze_json(item) for item in value)
     if isinstance(value, float) and not math.isfinite(value):
@@ -59,10 +160,13 @@ def thaw_json(value: object) -> JsonValue:
 def to_wire_json(value: object) -> JsonValue:
     """Serialize dataclasses and frozen JSON through the sole recursive owner."""
     if is_dataclass(value) and not isinstance(value, type):
-        return {
-            item.name: to_wire_json(getattr(value, item.name))
-            for item in fields(value)
-        }
+        return {item.name: to_wire_json(getattr(value, item.name)) for item in fields(value)}
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("JSON object keys must be strings")
+        return {key: to_wire_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [to_wire_json(item) for item in value]
     return thaw_json(value)
 
 
@@ -106,10 +210,26 @@ class AppError(Exception):
         retryable: bool | None = None,
         details: Mapping[str, Any] | None = None,
     ) -> None:
+        if type(self) is AppError and code is not None:
+            spec = MUTATION_REJECTION_SPECS.get(code)
+            if spec is None:
+                raise ValueError("unknown direct AppError code")
+            else:
+                overrides = (detail, status_code, error_type, retryable)
+                expected = (
+                    spec.message,
+                    spec.status_code,
+                    spec.legacy_error_type,
+                    spec.retryable,
+                )
+                if any(
+                    value is not None and value != expected[index]
+                    for index, value in enumerate(overrides)
+                ):
+                    raise ValueError("closed mutation error override conflicts with spec")
+                detail, status_code, error_type, retryable = expected
         self.detail = detail if detail is not None else type(self).detail
-        self.status_code = (
-            status_code if status_code is not None else type(self).status_code
-        )
+        self.status_code = status_code if status_code is not None else type(self).status_code
         self.legacy_error_type = (
             error_type if error_type is not None else type(self).legacy_error_type
         )
@@ -134,6 +254,52 @@ class AppError(Exception):
             request_id=request_id,
             details=self.details,
         )
+
+
+class MutationRejectedError(AppError):
+    def __init__(self, rejection: Any) -> None:
+        from app.mutation.types import MutationRejection
+
+        if not isinstance(rejection, MutationRejection):
+            raise TypeError("rejection must be a frozen MutationRejection")
+        spec = MUTATION_REJECTION_SPECS[rejection.code]
+        if rejection.retryable is not spec.retryable:
+            raise ValueError("persisted retryable does not match rejection spec")
+        self.rejection = rejection
+        super().__init__(
+            spec.message,
+            spec.status_code,
+            spec.legacy_error_type,
+            code=rejection.code,
+            retryable=rejection.retryable,
+            details=rejection.details,
+        )
+
+
+class IdempotencyConflictError(AppError):
+    detail = MUTATION_REJECTION_SPECS["idempotency_conflict"].message
+    status_code = MUTATION_REJECTION_SPECS["idempotency_conflict"].status_code
+    legacy_error_type = MUTATION_REJECTION_SPECS["idempotency_conflict"].legacy_error_type
+    code = "idempotency_conflict"
+    retryable = False
+
+    def __init__(
+        self,
+        *,
+        operation_id: str | None = None,
+        existing_batch_id: str | None = None,
+        requested_batch_id: str | None = None,
+    ) -> None:
+        details = {
+            key: value
+            for key, value in (
+                ("operation_id", operation_id),
+                ("existing_batch_id", existing_batch_id),
+                ("requested_batch_id", requested_batch_id),
+            )
+            if value is not None
+        }
+        super().__init__(details=details)
 
 
 class NotFoundError(AppError):
@@ -325,9 +491,7 @@ def _install_openapi_error_contract(app: FastAPI) -> None:
                     if not str(status).startswith(("4", "5")):
                         continue
                     content = response.setdefault("content", {})
-                    content.setdefault(CANONICAL_ERROR_MEDIA_TYPE, {
-                        "schema": canonical_ref
-                    })
+                    content.setdefault(CANONICAL_ERROR_MEDIA_TYPE, {"schema": canonical_ref})
                     headers = response.setdefault("headers", {})
                     for name in (
                         "X-PomodoroXII-Error-Code",
@@ -352,11 +516,13 @@ def register_exception_handlers(app: FastAPI) -> None:
             "error_type": exc.error_type,
         }
         if isinstance(exc, SyncCursorExpiredError):
-            legacy.update({
-                "floor": exc.floor,
-                "current_cursor": exc.current_cursor,
-                "recovery_action": exc.recovery_action,
-            })
+            legacy.update(
+                {
+                    "floor": exc.floor,
+                    "current_cursor": exc.current_cursor,
+                    "recovery_action": exc.recovery_action,
+                }
+            )
         elif isinstance(exc, SyncSnapshotExpiredError):
             legacy["recovery_action"] = exc.recovery_action
         return _response(

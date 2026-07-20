@@ -1,4 +1,5 @@
 """Compile the mutable entity registry into an immutable runtime catalog."""
+
 from __future__ import annotations
 
 import hashlib
@@ -10,7 +11,7 @@ from typing import Any, Iterable, Mapping
 
 from sqlalchemy import inspect as sa_inspect
 
-from app.registry.entities import EntitySpec
+from app.registry.entities import EntitySpec, require_sync_conflict_policy
 
 
 class CatalogCompilationError(ValueError):
@@ -34,6 +35,7 @@ def _canonical_spec(spec: EntitySpec) -> dict[str, Any]:
         "delete_strategy": spec.delete_strategy,
         "route_enabled": spec.route_enabled,
         "mcp_schema_enabled": spec.mcp_schema_enabled,
+        "sync_conflict_policy": spec.sync_conflict_policy,
     }
 
 
@@ -69,9 +71,7 @@ class CompiledEntityCatalog:
     _models_by_name: Mapping[str, type[Any]] = field(repr=False)
 
     @classmethod
-    def compile(
-        cls, specs: Iterable[EntitySpec], *, version: str
-    ) -> "CompiledEntityCatalog":
+    def compile(cls, specs: Iterable[EntitySpec], *, version: str) -> "CompiledEntityCatalog":
         ordered = tuple(sorted(specs, key=lambda item: item.name))
         if not ordered:
             raise CatalogCompilationError("catalog cannot be empty")
@@ -82,6 +82,7 @@ class CompiledEntityCatalog:
         allowed_delete = {"hard_tombstone", "soft_delete", "cascade_soft_delete", "fs_saga"}
         models: dict[str, type[Any]] = {}
         for spec in ordered:
+            require_sync_conflict_policy(spec.sync_conflict_policy)
             if spec.name in names:
                 raise CatalogCompilationError(f"duplicate entity name: {spec.name}")
             if spec.table_name in tables:

@@ -47,6 +47,19 @@ def test_catalog_hash_is_order_independent_and_models_are_resolved() -> None:
     assert forward.get("setting").primary_key == "key"
 
 
+def test_catalog_validates_and_hashes_sync_conflict_policy() -> None:
+    base = REGISTRY.get("note")
+    strict = replace(base, sync_conflict_policy="strict_cas")
+    strict_catalog = CompiledEntityCatalog.compile((strict,), version="1")
+    default_catalog = CompiledEntityCatalog.compile((base,), version="1")
+    assert strict_catalog.get("note").sync_conflict_policy == "strict_cas"
+    assert strict_catalog.hash != default_catalog.hash
+    with pytest.raises(ValueError, match="sync_conflict_policy"):
+        CompiledEntityCatalog.compile(
+            (replace(base, sync_conflict_policy="merge_magic"),), version="1"
+        )
+
+
 def test_registry_compile_seals_registration() -> None:
     from app.registry import EntityRegistry
     from app.registry.entities import EntityCategory, EntitySpec, FieldSpec, StorageType
@@ -66,9 +79,7 @@ def test_registry_compile_seals_registration() -> None:
     )
     registry.compile(version="1")
     with pytest.raises(CatalogCompilationError, match="sealed"):
-        registry.register(
-            replace(registry.get("example"), name="other", table_name="others")
-        )
+        registry.register(replace(registry.get("example"), name="other", table_name="others"))
 
 
 def test_registry_compile_is_one_shot_fail_closed() -> None:
