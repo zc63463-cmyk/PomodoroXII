@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import secrets
 import stat
@@ -82,9 +83,7 @@ class BoundDirectoryHandle:
         parts = _relative_parts(relative_name)
         if len(parts) > 1:
             self._mkdir_relative("/".join(parts[:-1]))
-        temporary = "/".join(
-            [*parts[:-1], f".{parts[-1]}.{secrets.token_hex(8)}.tmp"]
-        )
+        temporary = "/".join([*parts[:-1], f".{parts[-1]}.{secrets.token_hex(8)}.tmp"])
         try:
             with self._open_relative_no_follow(
                 temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY
@@ -100,16 +99,12 @@ class BoundDirectoryHandle:
                 pass
             raise
 
-    def _rename_relative(
-        self, source: str, destination: str, *, replace: bool = False
-    ) -> None:
+    def _rename_relative(self, source: str, destination: str, *, replace: bool = False) -> None:
         source_parts = _relative_parts(source)
         destination_parts = _relative_parts(destination)
         if len(destination_parts) > 1:
             self._mkdir_relative("/".join(destination_parts[:-1]))
-        source_parent = _open_directory_chain(
-            self._descriptor, source_parts[:-1], create=False
-        )
+        source_parent = _open_directory_chain(self._descriptor, source_parts[:-1], create=False)
         try:
             destination_parent = _open_directory_chain(
                 self._descriptor, destination_parts[:-1], create=False
@@ -131,9 +126,7 @@ class BoundDirectoryHandle:
                         dst_dir_fd=destination_parent,
                     )
                 else:
-                    if _relative_exists_posix(
-                        destination_parent, destination_parts[-1]
-                    ):
+                    if _relative_exists_posix(destination_parent, destination_parts[-1]):
                         raise FileExistsError(destination)
                     os.rename(
                         source_parts[-1],
@@ -172,18 +165,14 @@ class BoundDirectoryHandle:
         else:
             descriptor = os.open(
                 location,
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
             )
             info = os.fstat(descriptor)
             identity = StorageIdentity(info.st_dev, info.st_ino)
         return cls._from_descriptor(descriptor, identity)
 
     @classmethod
-    def _from_descriptor(
-        cls, descriptor: int, identity: StorageIdentity
-    ) -> "BoundDirectoryHandle":
+    def _from_descriptor(cls, descriptor: int, identity: StorageIdentity) -> "BoundDirectoryHandle":
         instance = object.__new__(cls)
         instance._identity = identity
         instance._authority = object()
@@ -200,6 +189,161 @@ class BoundDirectoryHandle:
             self._descriptor = -1
 
 
+class BoundStageDirectory:
+    """Opaque authority for the fixed notes/.mutations namespace."""
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise TypeError("BoundStageDirectory is authority-created")
+
+    @classmethod
+    def _from_parent_handle(
+        cls, parent: BoundDirectoryHandle, child_name: str
+    ) -> "BoundStageDirectory":
+        return cls._from_parent_descriptor(parent._descriptor, child_name)
+
+    @classmethod
+    def _from_parent_descriptor(
+        cls, parent: int, child_name: str
+    ) -> "BoundStageDirectory":
+        if not _is_exact_child_name(child_name):
+            raise PathOutsideSpaceError("Stage authority child name is not exact")
+        instance = object.__new__(cls)
+        if os.name == "nt":
+            descriptor = _open_windows_relative_directory(
+                parent, child_name, create=False, writable=True
+            )
+        else:
+            descriptor = _open_child_directory(parent, child_name)
+        instance._handle = BoundDirectoryHandle._from_descriptor(
+            descriptor, _descriptor_identity(descriptor)
+        )
+        return instance
+
+    @classmethod
+    def _from_notes_handle(cls, notes: BoundDirectoryHandle) -> "BoundStageDirectory":
+        descriptor = _duplicate_directory_descriptor(notes._descriptor)
+        instance = object.__new__(cls)
+        instance._handle = BoundDirectoryHandle._from_descriptor(
+            descriptor, _descriptor_identity(descriptor)
+        )
+        return instance
+
+    @staticmethod
+    def _relative(name: str = "") -> str:
+        if name:
+            _relative_parts(name)
+            return f".mutations/{name}"
+        return ".mutations"
+
+    def ensure_directory(self, name: str, receipt) -> None:
+        receipt.assert_current()
+        self._handle._mkdir_relative(self._relative(name))
+
+    def write_fsynced(self, name: str, content: bytes, receipt) -> None:
+        receipt.assert_current()
+        with self._handle._open_relative_no_follow(
+            self._relative(name), os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        ) as child:
+            child.write(content)
+            child.flush()
+            os.fsync(child.fileno())
+
+    def read_bytes(self, name: str) -> bytes:
+        with self._handle._open_relative_no_follow(self._relative(name), os.O_RDONLY) as child:
+            return child.read()
+
+    def exists(self, name: str) -> bool:
+        try:
+            directory = _open_directory_chain(
+                self._handle._descriptor, _relative_parts(self._relative(name)), create=False
+            )
+        except FileNotFoundError:
+            return False
+        else:
+            _close_directory_descriptor(directory)
+            return True
+
+    def rename_directory(self, source: str, destination: str, receipt) -> None:
+        if not _is_exact_child_name(source) or not _is_exact_child_name(destination):
+            raise PathOutsideSpaceError("Stage rename requires direct child names")
+        receipt.assert_current()
+        parts = _relative_parts(self._relative())
+        root = (
+            _open_directory_chain_for_flush(self._handle._descriptor, parts)
+            if os.name == "nt"
+            else _open_directory_chain(self._handle._descriptor, parts, create=False)
+        )
+        try:
+            if os.name == "nt":
+                _rename_windows_relative_directory(root, source, root, destination)
+            else:
+                _rename_posix_relative_no_replace(root, source, destination)
+        finally:
+            _close_directory_descriptor(root)
+
+    def fsync_directory(self, name: str, observer: Callable[[str], None] | None = None) -> None:
+        parts = _relative_parts(self._relative(name))
+        directory = (
+            _open_directory_chain_for_flush(self._handle._descriptor, parts)
+            if os.name == "nt"
+            else _open_directory_chain(self._handle._descriptor, parts, create=False)
+        )
+        try:
+            _flush_directory_descriptor(directory)
+        finally:
+            _close_directory_descriptor(directory)
+        if observer is not None:
+            observer(name)
+
+    def direct_children(self) -> tuple[str, ...]:
+        try:
+            directory = _open_directory_chain(
+                self._handle._descriptor, _relative_parts(self._relative()), create=False
+            )
+        except FileNotFoundError:
+            return ()
+        try:
+            names = _directory_names(directory)
+            for name in names:
+                try:
+                    child = _open_child_directory(directory, name)
+                except NotADirectoryError as exc:
+                    raise PathOutsideSpaceError(
+                        "Staging namespace contains a non-directory child"
+                    ) from exc
+                _close_directory_descriptor(child)
+            return tuple(sorted(names))
+        finally:
+            _close_directory_descriptor(directory)
+
+    def relative_files(self, name: str) -> tuple[str, ...]:
+        return tuple(sorted(self._handle._iter_relative_files(self._relative(name), suffix="")))
+
+    def remove_tree(self, name: str, receipt) -> None:
+        if not _is_exact_child_name(name):
+            raise PathOutsideSpaceError("Stage removal requires a direct child name")
+        receipt.assert_current()
+        parts = _relative_parts(self._relative())
+        root = (
+            _open_directory_chain_for_flush(self._handle._descriptor, parts)
+            if os.name == "nt"
+            else _open_directory_chain(self._handle._descriptor, parts, create=False)
+        )
+        try:
+            _remove_relative_tree(root, name, receipt)
+        finally:
+            _close_directory_descriptor(root)
+
+    def close(self) -> None:
+        self._handle._close()
+
+    def fsync_namespace_parent(self, receipt) -> None:
+        receipt.assert_current()
+        _flush_directory_descriptor(self._handle._descriptor)
+
+
 def _relative_parts(relative_name: str, *, allow_empty: bool = False) -> tuple[str, ...]:
     if not relative_name:
         if allow_empty:
@@ -211,6 +355,12 @@ def _relative_parts(relative_name: str, *, allow_empty: bool = False) -> tuple[s
     if any(not part or part in {".", ".."} for part in parts):
         raise PathOutsideSpaceError("Contained relative name is not normalized")
     return parts
+
+
+def _is_exact_child_name(name: str) -> bool:
+    return bool(name) and name not in {".", ".."} and not any(
+        separator in name for separator in ("/", "\\", ":")
+    )
 
 
 def _duplicate_directory_descriptor(descriptor: int) -> int:
@@ -250,9 +400,7 @@ def _close_directory_descriptor(descriptor: int) -> None:
         os.close(descriptor)
 
 
-def _open_directory_chain(
-    root: int, parts: tuple[str, ...], *, create: bool
-) -> int:
+def _open_directory_chain(root: int, parts: tuple[str, ...], *, create: bool) -> int:
     current = _duplicate_directory_descriptor(root)
     try:
         for part in parts:
@@ -283,12 +431,44 @@ def _open_directory_chain(
         raise
 
 
+def _open_directory_chain_for_flush(root: int, parts: tuple[str, ...]) -> int:
+    if not parts:
+        return _duplicate_directory_descriptor(root)
+    parent = _open_directory_chain(root, parts[:-1], create=False)
+    try:
+        return _open_windows_relative_directory(parent, parts[-1], create=False, writable=True)
+    finally:
+        _close_directory_descriptor(parent)
+
+
 def _relative_exists_posix(parent: int, basename: str) -> bool:
     try:
         os.stat(basename, dir_fd=parent, follow_symlinks=False)
     except FileNotFoundError:
         return False
     return True
+
+
+def _rename_posix_relative_no_replace(parent: int, source: str, destination: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise RuntimeError("renameat2 is required for no-replace stage publication")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(parent, os.fsencode(source), parent, os.fsencode(destination), 1) != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(destination)
+        if error == errno.ENOENT:
+            raise FileNotFoundError(source)
+        raise OSError(error, os.strerror(error), source)
 
 
 def _iter_descriptor_files(directory: int, prefix: str, suffix: str) -> list[str]:
@@ -316,9 +496,7 @@ def _iter_descriptor_files(directory: int, prefix: str, suffix: str) -> list[str
             if stat.S_ISDIR(info.st_mode):
                 child = os.open(
                     name,
-                    os.O_RDONLY
-                    | getattr(os, "O_DIRECTORY", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
                     dir_fd=directory,
                 )
                 try:
@@ -369,9 +547,7 @@ def flush_owned_directory(path: Path) -> None:
     if os.name != "nt":
         descriptor = os.open(
             directory,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
         )
         try:
             os.fsync(descriptor)
@@ -393,7 +569,7 @@ def flush_owned_directory(path: Path) -> None:
     handle = kernel32.CreateFileW(
         os.fspath(directory),
         0x80000000 | 0x40000000,
-        0x00000001 | 0x00000002,
+        0x00000001 | 0x00000002 | 0x00000004,
         None,
         3,
         0x02000000 | 0x00200000,
@@ -520,7 +696,7 @@ def _nt_open_windows_relative(
         ctypes.byref(status_block),
         None,
         file_attributes,
-        0x00000001 | 0x00000002,
+        0x00000001 | 0x00000002 | 0x00000004,
         disposition,
         options,
         None,
@@ -598,12 +774,16 @@ def _open_windows_relative_file(parent: int, basename: str, flags: int) -> int:
 
 
 def _open_windows_relative_directory(
-    parent: int, basename: str, *, create: bool
+    parent: int, basename: str, *, create: bool, writable: bool = False
 ) -> int:
     return _nt_open_windows_relative(
         parent,
         basename,
-        desired_access=0x00000001 | 0x00000080 | 0x00100000,
+        desired_access=(
+            0x80000000 | 0x40000000 | 0x00010000 | 0x00000080 | 0x00100000
+            if writable
+            else 0x00000001 | 0x00000080 | 0x00100000
+        ),
         disposition=0x00000003 if create else 0x00000001,
         options=0x00000001 | 0x00000020 | 0x00200000,
         file_attributes=0x00000010,
@@ -662,9 +842,7 @@ def _rename_windows_relative(
         )
         if status < 0:
             unsigned = ctypes.c_ulong(status).value
-            raise OSError(
-                f"NtSetInformationFile rename failed with NTSTATUS 0x{unsigned:08x}"
-            )
+            raise OSError(f"NtSetInformationFile rename failed with NTSTATUS 0x{unsigned:08x}")
     finally:
         ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(source))
 
@@ -682,6 +860,60 @@ def _unlink_windows_relative(parent: int, basename: str) -> None:
         file_attributes=0x00000080,
         expected_directory=False,
     )
+    try:
+        disposition = _FileDispositionInfo(delete_file=True)
+        if not ctypes.windll.kernel32.SetFileInformationByHandle(
+            wintypes.HANDLE(handle),
+            4,
+            ctypes.byref(disposition),
+            ctypes.sizeof(disposition),
+        ):
+            raise ctypes.WinError()
+    finally:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
+
+
+def _rename_windows_relative_directory(
+    source_parent: int, source_name: str, destination_parent: int, destination_name: str
+) -> None:
+    source = _open_windows_relative_directory(
+        source_parent, source_name, create=False, writable=True
+    )
+    encoded_name = destination_name.encode("utf-16-le")
+    size = _WindowsFileRenameInfo.file_name.offset + len(encoded_name)
+    buffer = ctypes.create_string_buffer(size + len(encoded_name))
+    info = ctypes.cast(buffer, ctypes.POINTER(_WindowsFileRenameInfo)).contents
+    info.replace_if_exists = False
+    info.root_directory = destination_parent
+    info.file_name_length = len(encoded_name)
+    ctypes.memmove(
+        ctypes.addressof(buffer) + _WindowsFileRenameInfo.file_name.offset,
+        encoded_name,
+        len(encoded_name),
+    )
+    try:
+        status_block = _WindowsIoStatusBlock()
+        status = ctypes.windll.ntdll.NtSetInformationFile(
+            wintypes.HANDLE(source),
+            ctypes.byref(status_block),
+            ctypes.byref(buffer),
+            ctypes.sizeof(buffer),
+            10,
+        )
+        if status < 0:
+            unsigned = ctypes.c_ulong(status).value
+            if unsigned in {0xC0000035, 0xC0000056}:
+                raise FileExistsError(destination_name)
+            raise OSError(f"NtSetInformationFile rename failed with NTSTATUS 0x{unsigned:08x}")
+    finally:
+        ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(source))
+
+
+def _remove_windows_relative_directory(parent: int, basename: str) -> None:
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("delete_file", wintypes.BOOL)]
+
+    handle = _open_windows_relative_directory(parent, basename, create=False, writable=True)
     try:
         disposition = _FileDispositionInfo(delete_file=True)
         if not ctypes.windll.kernel32.SetFileInformationByHandle(
@@ -721,9 +953,7 @@ def _windows_directory_names(directory: int) -> list[str]:
         if unsigned == 0x80000006:
             break
         if status < 0:
-            raise OSError(
-                f"NtQueryDirectoryFile failed with NTSTATUS 0x{unsigned:08x}"
-            )
+            raise OSError(f"NtQueryDirectoryFile failed with NTSTATUS 0x{unsigned:08x}")
         offset = 0
         while offset < status_block.information:
             next_offset = ctypes.c_ulong.from_buffer(buffer, offset).value
@@ -734,6 +964,68 @@ def _windows_directory_names(directory: int) -> list[str]:
                 break
             offset += next_offset
     return names
+
+
+def _directory_names(directory: int) -> list[str]:
+    names = _windows_directory_names(directory) if os.name == "nt" else os.listdir(directory)
+    return [name for name in names if name not in {".", ".."}]
+
+
+def _open_child_directory(parent: int, name: str) -> int:
+    if os.name == "nt":
+        return _open_windows_relative_directory(parent, name, create=False)
+    descriptor = os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=parent,
+    )
+    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise NotADirectoryError(name)
+    return descriptor
+
+
+def _flush_directory_descriptor(directory: int) -> None:
+    if os.name == "nt":
+        if not ctypes.windll.kernel32.FlushFileBuffers(wintypes.HANDLE(directory)):
+            raise ctypes.WinError()
+    else:
+        os.fsync(directory)
+
+
+def _remove_relative_tree(parent: int, name: str, receipt) -> None:
+    directory = _open_child_directory(parent, name)
+    try:
+        for child_name in _directory_names(directory):
+            if os.name != "nt":
+                info = os.stat(child_name, dir_fd=directory, follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode):
+                    receipt.assert_current()
+                    os.unlink(child_name, dir_fd=directory)
+                    continue
+                if not stat.S_ISDIR(info.st_mode):
+                    raise PathOutsideSpaceError(
+                        "Staging tree contains a symlink or special file"
+                    )
+            try:
+                child = _open_child_directory(directory, child_name)
+            except NotADirectoryError:
+                receipt.assert_current()
+                if os.name == "nt":
+                    _unlink_windows_relative(directory, child_name)
+            else:
+                _close_directory_descriptor(child)
+                _remove_relative_tree(directory, child_name, receipt)
+    finally:
+        _close_directory_descriptor(directory)
+    receipt.assert_current()
+    if os.name == "nt":
+        _remove_windows_relative_directory(parent, name)
+    else:
+        os.rmdir(name, dir_fd=parent)
 
 
 def _open_windows_directory(location: Path) -> tuple[int, StorageIdentity]:
@@ -768,8 +1060,10 @@ class ContainedSpaceOpens:
         "_database_target",
         "_index_target",
         "_notes_handle",
+        "_stage_authority",
         "_database_taken",
         "_file_system_taken",
+        "_stage_taken",
         "_revocation_callbacks",
     )
 
@@ -782,13 +1076,16 @@ class ContainedSpaceOpens:
         database_target: BoundSQLiteTarget,
         index_target: BoundSQLiteTarget,
         notes_handle: BoundDirectoryHandle,
+        stage_authority: BoundStageDirectory,
     ) -> "ContainedSpaceOpens":
         instance = object.__new__(cls)
         instance._database_target = database_target
         instance._index_target = index_target
         instance._notes_handle = notes_handle
+        instance._stage_authority = stage_authority
         instance._database_taken = False
         instance._file_system_taken = False
+        instance._stage_taken = False
         instance._revocation_callbacks: list[Callable[[], Awaitable[None]]] = []
         return instance
 
@@ -817,9 +1114,13 @@ class ContainedSpaceOpens:
         self._file_system_taken = True
         return self._notes_handle, self._index_target
 
-    def _register_revocation_callback(
-        self, callback: Callable[[], Awaitable[None]]
-    ) -> None:
+    def take_mutation_stage_authority(self) -> BoundStageDirectory:
+        if self._stage_taken:
+            raise RuntimeError("mutation stage authority already transferred")
+        self._stage_taken = True
+        return self._stage_authority
+
+    def _register_revocation_callback(self, callback: Callable[[], Awaitable[None]]) -> None:
         self._revocation_callbacks.append(callback)
 
     async def close_all(self) -> None:
@@ -831,6 +1132,10 @@ class ContainedSpaceOpens:
                 errors.append(error)
         try:
             self._notes_handle._close()
+        except BaseException as error:
+            errors.append(error)
+        try:
+            self._stage_authority.close()
         except BaseException as error:
             errors.append(error)
         if errors:
@@ -854,6 +1159,10 @@ class ContainedSpaceOpens:
             self._notes_handle._close()
         except BaseException as error:
             errors.append(error)
+        try:
+            self._stage_authority.close()
+        except BaseException as error:
+            errors.append(error)
         if errors:
             raise BaseExceptionGroup("transferred resource revocation failed", errors)
 
@@ -872,6 +1181,11 @@ class ContainedSpaceOpens:
                 errors.append(error)
             try:
                 self._notes_handle._close()
+            except BaseException as error:
+                errors.append(error)
+        if not self._stage_taken:
+            try:
+                self._stage_authority.close()
             except BaseException as error:
                 errors.append(error)
         if errors:
@@ -977,9 +1291,7 @@ def _open_relative_regular(
     )
     if create:
         try:
-            descriptor = os.open(
-                basename, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent
-            )
+            descriptor = os.open(basename, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
         except FileExistsError:
             created = False
             descriptor = os.open(basename, flags, dir_fd=parent)
@@ -995,11 +1307,15 @@ def _open_relative_regular(
     return descriptor, StorageIdentity(info.st_dev, info.st_ino), created
 
 
-def _open_relative_directory(parent: int, basename: str) -> tuple[int, StorageIdentity]:
+def _open_relative_directory(
+    parent: int, basename: str, *, writable: bool = False
+) -> tuple[int, StorageIdentity]:
     if not basename or "/" in basename or "\\" in basename or ":" in basename:
         raise PathOutsideSpaceError("Contained directory name is not exact")
     if os.name == "nt":
-        descriptor = _open_windows_relative_directory(parent, basename, create=False)
+        descriptor = _open_windows_relative_directory(
+            parent, basename, create=False, writable=writable
+        )
     else:
         descriptor = os.open(
             basename,
@@ -1061,6 +1377,7 @@ def open_bound_space(
     database_target = None
     index_target = None
     notes_handle = None
+    stage_authority = None
     try:
         if root_authority is None:
             root, root_identity = _open_root_authority(paths.space_root)
@@ -1095,17 +1412,17 @@ def open_bound_space(
 
         _fault_hook("before_filesystem_handle_open")
         notes_descriptor, notes_identity = _open_relative_directory(
-            parent, paths.notes_dir.name
+            parent, paths.notes_dir.name, writable=True
         )
-        notes_handle = BoundDirectoryHandle._from_descriptor(
-            notes_descriptor, notes_identity
-        )
+        notes_handle = BoundDirectoryHandle._from_descriptor(notes_descriptor, notes_identity)
         notes_descriptor = -1
+        _fault_hook("after_notes_authority_bind")
+        stage_authority = BoundStageDirectory._from_notes_handle(notes_handle)
 
         if _walk_ancestors_from_root(paths, root) != receipts:
             raise PathOutsideSpaceError("Contained namespace changed during open")
         return ContainedSpaceOpens._create(
-            database_target, index_target, notes_handle
+            database_target, index_target, notes_handle, stage_authority
         )
     except BaseException as primary:
         if isinstance(primary, (FileNotFoundError, NotADirectoryError, IsADirectoryError)):
@@ -1120,6 +1437,11 @@ def open_bound_space(
         if notes_handle is not None:
             try:
                 notes_handle._close()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if stage_authority is not None:
+            try:
+                stage_authority.close()
             except BaseException as error:
                 cleanup_errors.append(error)
         _close_file_descriptor(database_main)

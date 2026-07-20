@@ -164,15 +164,13 @@ async def test_linux_get_space_context_rejects_before_meta_or_contained_io(
 
     with pytest.raises(PlatformUnsupportedError):
         await get_space_context(
-            request=SimpleNamespace(
-                app=SimpleNamespace(state=SimpleNamespace(runtime=object()))
-            ),
+            request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime=object()))),
             user={
                 "sub": "dependency-user",
                 "type": "space",
                 "space_id": "spc_dependency_guard",
                 "epoch": 1,
-            }
+            },
         )
 
     assert calls == {"meta_session": 0, "bootstrap": 0, "sqlite_connect": 0}
@@ -235,9 +233,7 @@ async def test_capability_revalidation_reuses_retained_root_authority(
     def forbidden_root_reopen(_root: Path):
         raise AssertionError("capability reopened its root host path")
 
-    monkeypatch.setattr(
-        contained_io_module, "_open_root_authority", forbidden_root_reopen
-    )
+    monkeypatch.setattr(contained_io_module, "_open_root_authority", forbidden_root_reopen)
     async with capability.open_verified():
         pass
     async with capability.open_verified():
@@ -310,9 +306,9 @@ async def _resolve_authorized_scope(session, space_id: str):
     from app.runtime.scope import AuthorizedSpaceScope
     from app.settings import settings
 
-    return await AuthorizedSpaceScope(
-        session, settings.spaces_data_dir, SimpleNamespace()
-    ).resolve(_principal(space_id), space_id, "read")
+    return await AuthorizedSpaceScope(session, settings.spaces_data_dir, SimpleNamespace()).resolve(
+        _principal(space_id), space_id, "read"
+    )
 
 
 def _create_directory_link(link: Path, target: Path) -> None:
@@ -344,9 +340,7 @@ def _walk_private_values(value: object) -> tuple[object, ...]:
         seen.add(id(current))
         values.append(current)
         if dataclasses.is_dataclass(current) and not isinstance(current, type):
-            pending.extend(
-                getattr(current, item.name) for item in dataclasses.fields(current)
-            )
+            pending.extend(getattr(current, item.name) for item in dataclasses.fields(current))
         for name in getattr(type(current), "__slots__", ()):
             if isinstance(name, str) and hasattr(current, name):
                 pending.append(getattr(current, name))
@@ -382,28 +376,43 @@ def test_bound_directory_handle_is_pathless_and_opens_exact_child(
         assert not any(isinstance(value, Path) for value in private_values)
         host_path = os.fspath(tmp_path).casefold()
         assert not any(
-            host_path in value.casefold()
-            for value in private_values
-            if isinstance(value, str)
+            host_path in value.casefold() for value in private_values if isinstance(value, str)
         )
-        with handle.open_child_no_follow(
-            "bound.txt", os.O_CREAT | os.O_EXCL | os.O_RDWR
-        ) as child:
+        with handle.open_child_no_follow("bound.txt", os.O_CREAT | os.O_EXCL | os.O_RDWR) as child:
             child.write(b"bound-authority")
         assert (tmp_path / "bound.txt").read_bytes() == b"bound-authority"
         handle._mkdir_relative("nested")
         handle._atomic_write_relative("nested/proof.md", b"nested-authority")
-        assert handle._iter_relative_files("", suffix=".md") == [
-            "nested/proof.md"
-        ]
+        assert handle._iter_relative_files("", suffix=".md") == ["nested/proof.md"]
         handle._rename_relative("nested/proof.md", "nested/renamed.md")
-        assert (tmp_path / "nested" / "renamed.md").read_bytes() == (
-            b"nested-authority"
-        )
+        assert (tmp_path / "nested" / "renamed.md").read_bytes() == (b"nested-authority")
         handle._unlink_relative("nested/renamed.md")
         assert not (tmp_path / "nested" / "renamed.md").exists()
     finally:
         handle._close()
+
+
+def test_bound_stage_directory_is_pathless_and_transfer_is_single_use(tmp_path: Path) -> None:
+    from app.runtime.contained_io import (
+        BoundDirectoryHandle,
+        BoundStageDirectory,
+        ContainedSpaceOpens,
+    )
+
+    parent = BoundDirectoryHandle._create(tmp_path.parent)
+    stage = BoundStageDirectory._from_parent_handle(parent, tmp_path.name)
+    try:
+        assert not any(isinstance(value, Path) for value in _walk_private_values(stage))
+        opens = object.__new__(ContainedSpaceOpens)
+        opens._stage_authority = stage
+        opens._stage_taken = False
+        assert opens.take_mutation_stage_authority() is stage
+        with pytest.raises(RuntimeError, match="already transferred"):
+            opens.take_mutation_stage_authority()
+        assert not (tmp_path / ".mutations").exists()
+    finally:
+        stage.close()
+        parent._close()
 
 
 @pytest.mark.asyncio
@@ -521,9 +530,7 @@ async def test_registered_directory_db_role_fails_with_stable_missing_error(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "collision", ["notes_equals_db", "notes_equals_index", "db_equals_index"]
-)
+@pytest.mark.parametrize("collision", ["notes_equals_db", "notes_equals_index", "db_equals_index"])
 async def test_storage_path_roles_must_be_pairwise_distinct(
     client, tmp_path: Path, collision: str
 ) -> None:
@@ -722,6 +729,59 @@ async def test_swap_after_parent_bind_never_redirects_storage_roles(
 
 
 @pytest.mark.asyncio
+async def test_stage_authority_duplicates_bound_notes_identity_across_leaf_swap(
+    client, monkeypatch
+) -> None:
+    import app.runtime.contained_io as contained_io_module
+    from app.db.meta_session import get_meta_session
+    from app.db.models.meta import Space
+    from app.settings import settings
+
+    parent = settings.spaces_data_dir / "spc_notes_leaf_swap"
+    notes = parent / "notes"
+    replacement = parent / "replacement"
+    detached = parent / "detached"
+    notes.mkdir(parents=True)
+    replacement.mkdir()
+    (parent / "space.db").touch()
+    (parent / "index.db").touch()
+    async for session in get_meta_session():
+        session.add(
+            Space(
+                id="spc_notes_leaf_swap",
+                name="notes-leaf-swap",
+                db_path=str(parent / "space.db"),
+                notes_dir=str(notes),
+            )
+        )
+        await session.commit()
+        scope = await _resolve_authorized_scope(session, "spc_notes_leaf_swap")
+        break
+    else:
+        raise AssertionError("Meta session fixture did not yield")
+
+    state = {"hook_seen": False, "swapped": False}
+
+    def swap_notes_leaf(name: str) -> None:
+        if name != "after_notes_authority_bind":
+            return
+        state["hook_seen"] = True
+        try:
+            notes.rename(detached)
+            replacement.rename(notes)
+        except OSError:
+            return
+        state["swapped"] = True
+
+    monkeypatch.setattr(contained_io_module, "_fault_hook", swap_notes_leaf)
+    async with scope.containment.open_verified() as opens:
+        assert opens._notes_handle.identity == opens._stage_authority._handle.identity
+
+    assert state["hook_seen"] is True
+    assert state["swapped"] is True
+
+
+@pytest.mark.asyncio
 async def test_joined_accepts_precreated_future_and_custom_awaitable() -> None:
     from app.runtime.joined_thread import run_joined_awaitable
 
@@ -763,9 +823,7 @@ async def test_containment_lock_excludes_a_different_task(
     release = asyncio.Event()
     entered = asyncio.Event()
     async with authorized_scope.containment.open_verified():
-        contender = asyncio.create_task(
-            _enter_scope_until(authorized_scope, entered, release)
-        )
+        contender = asyncio.create_task(_enter_scope_until(authorized_scope, entered, release))
         with pytest.raises(TimeoutError):
             async with asyncio.timeout(0.1):
                 await entered.wait()
@@ -786,9 +844,7 @@ async def test_containment_lock_restores_owner_and_depth_after_error_and_cancel(
 
     entered = asyncio.Event()
     never_release = asyncio.Event()
-    cancelled = asyncio.create_task(
-        _enter_scope_until(authorized_scope, entered, never_release)
-    )
+    cancelled = asyncio.create_task(_enter_scope_until(authorized_scope, entered, never_release))
     await asyncio.wait_for(entered.wait(), timeout=2)
     cancelled.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -835,9 +891,7 @@ async def test_joined_success_commits_before_original_cancel_is_rethrown() -> No
         await release.wait()
         return "ready"
 
-    operation = asyncio.create_task(
-        run_joined_awaitable(worker(), on_success=committed.append)
-    )
+    operation = asyncio.create_task(run_joined_awaitable(worker(), on_success=committed.append))
     await started.wait()
     operation.cancel("original")
     await asyncio.sleep(0)

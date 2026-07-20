@@ -116,6 +116,7 @@ async def test_provision_is_at_space_009_and_index_v2_before_meta_visibility(
             migration = await runtime.migrations.verify_open("space", opens.database_target)
             assert migration.revision == "space_009_mutation_journal"
             assert runtime.index_schema.verify_open(opens.index_target).version == 2
+        assert not (settings.spaces_data_dir / "space-new" / "notes" / ".mutations").exists()
     finally:
         if handle is not None:
             await handle.aclose()
@@ -386,17 +387,26 @@ async def test_health_uses_verified_open_targets_only() -> None:
 @pytest.mark.asyncio
 async def test_activation_exit_fault_collects_filesystem_and_releases_engine(
     monkeypatch,
+    tmp_path,
 ) -> None:
+    from app.runtime.contained_io import BoundDirectoryHandle, BoundStageDirectory
     from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
 
     primary = RuntimeError("identity drift")
     file_system = _FailOnceResource()
     engine = _EngineResource()
+    parent = BoundDirectoryHandle._create(tmp_path.parent)
+    stage = BoundStageDirectory._from_parent_handle(parent, tmp_path.name)
+    parent._close()
+
+    class Opens:
+        def take_mutation_stage_authority(self):
+            return stage
 
     class Containment:
         @asynccontextmanager
         async def open_verified(self):
-            yield SimpleNamespace()
+            yield Opens()
             raise primary
 
     class Engines:
@@ -432,6 +442,104 @@ async def test_activation_exit_fault_collects_filesystem_and_releases_engine(
     assert engine.successes == 1
     assert handle.engine is None
     assert handle.file_system is file_system
+
+
+@pytest.mark.asyncio
+async def test_stage_close_failure_pins_leases_until_retry() -> None:
+    from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
+
+    events: list[str] = []
+
+    class FileSystem:
+        async def close(self):
+            events.append("filesystem")
+
+    class Stage:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def close(self):
+            self.attempts += 1
+            events.append(f"stage-{self.attempts}")
+            if self.attempts == 1:
+                raise OSError("stage close")
+
+    class Engine:
+        async def release(self):
+            events.append("engine")
+
+    runtime = SpaceRuntime(
+        leases=SimpleNamespace(register_pending_cleanup=lambda *_args, **_kwargs: None),
+        engines=SimpleNamespace(),
+        migrations=SimpleNamespace(),
+        index_schema=SimpleNamespace(),
+    )
+    global_lease = _FakeLease("global")
+    space_lease = _FakeLease("space-a")
+    stage = Stage()
+    handle = SpaceRuntimeHandle(
+        SimpleNamespace(space_id="space-a"),
+        Engine(),
+        FileSystem(),
+        global_lease,
+        space_lease,
+        True,
+        True,
+        1,
+        runtime,
+        stage,  # type: ignore[arg-type]
+    )
+    with pytest.raises(BaseExceptionGroup):
+        await handle.aclose()
+    assert events == ["filesystem", "stage-1", "engine"]
+    assert (space_lease.release_count, global_lease.release_count) == (0, 0)
+    await handle.aclose()
+    assert events[-1] == "stage-2"
+    assert (space_lease.release_count, global_lease.release_count) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_persistent_stage_close_failure_keeps_leases_and_pending_cleanup() -> None:
+    from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
+
+    pending: list[object] = []
+
+    class Leases:
+        def register_pending_cleanup(self, owner, **_kwargs) -> None:
+            if owner not in pending:
+                pending.append(owner)
+
+    class Stage:
+        def close(self):
+            raise OSError("persistent stage close")
+
+    runtime = SpaceRuntime(
+        leases=Leases(),
+        engines=SimpleNamespace(),
+        migrations=SimpleNamespace(),
+        index_schema=SimpleNamespace(),
+    )
+    global_lease = _FakeLease("global")
+    space_lease = _FakeLease("space-a")
+    handle = SpaceRuntimeHandle(
+        SimpleNamespace(space_id="space-a"),
+        _EngineResource(),
+        None,
+        global_lease,
+        space_lease,
+        True,
+        True,
+        1,
+        runtime,
+        Stage(),  # type: ignore[arg-type]
+    )
+
+    for _attempt in range(2):
+        with pytest.raises(BaseExceptionGroup):
+            await handle.aclose()
+        assert (space_lease.release_count, global_lease.release_count) == (0, 0)
+        assert handle._closed is False
+        assert pending == [handle]
 
 
 @pytest.mark.asyncio
