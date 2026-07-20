@@ -12,18 +12,47 @@ Verifies:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 from math import nan
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models.sync_outbox import SyncOutbox
+from app.models.sync_state import SyncState
 from app.models.task import Task
 from app.services.base import BaseService
-from app.services.sync_outbox import record_sync_event
+from app.services.sync_outbox import get_current_cursor, record_sync_event
+
+
+def test_every_record_sync_event_call_chooses_visibility_explicitly():
+    """Ledger callers must declare whether an event is pull-visible."""
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    calls: list[tuple[Path, ast.Call]] = []
+    for source_path in app_root.rglob("*.py"):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        calls.extend(
+            (source_path.relative_to(app_root), node)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "record_sync_event"
+        )
+
+    assert calls
+    for source_path, call in calls:
+        visibility = [keyword.value for keyword in call.keywords if keyword.arg == "visible"]
+        assert len(visibility) == 1, f"{source_path}:{call.lineno} must set visible explicitly"
+        assert isinstance(visibility[0], ast.Constant) and type(visibility[0].value) is bool
+        expected_visible = source_path != Path("mutation/unit_of_work.py")
+        assert visibility[0].value is expected_visible, (
+            f"{source_path}:{call.lineno} must use "
+            f"visible={expected_visible}"
+        )
 
 
 @pytest.mark.asyncio
@@ -35,6 +64,7 @@ async def test_record_sync_event_appends_one_row(space_session):
         entity_id="tsk_test_001",
         action="create",
         payload={"title": "Test Task"},
+        visible=True,
     )
     rows = (await space_session.execute(select(SyncOutbox))).scalars().all()
     assert len(rows) == 1
@@ -55,6 +85,7 @@ async def test_record_sync_event_keeps_repeated_mutations_as_distinct_events(spa
         entity_id="tsk_dup",
         action="create",
         payload={"title": "First"},
+        visible=True,
     )
     await record_sync_event(
         space_session,
@@ -62,6 +93,7 @@ async def test_record_sync_event_keeps_repeated_mutations_as_distinct_events(spa
         entity_id="tsk_dup",
         action="update",
         payload={"title": "Second"},
+        visible=True,
     )
     rows = (
         (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_dup")))
@@ -83,6 +115,7 @@ async def test_record_sync_event_rejects_nan_in_payload(space_session):
             entity_id="tsk_nan",
             action="create",
             payload={"score": nan},
+            visible=True,
         )
 
 
@@ -96,6 +129,7 @@ async def test_record_sync_event_flush_false_does_not_assign_id_until_caller_flu
         entity_type="task",
         entity_id="tsk_noflush",
         action="create",
+        visible=True,
         flush=False,
     )
     # Without flush, the DB has not assigned an id yet.
@@ -182,6 +216,7 @@ async def test_rollback_rolls_back_ledger_rows(space_session):
             entity_id="tsk_rb",
             action="create",
             payload={"title": "Rollback Me"},
+            visible=False,
         )
         await savepoint.rollback()
 
@@ -191,6 +226,35 @@ async def test_rollback_rolls_back_ledger_rows(space_session):
         .all()
     )
     assert len(rows) == 0
+    assert await get_current_cursor(space_session) == 0
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    assert state.current_cursor == 0
+
+
+@pytest.mark.asyncio
+async def test_record_sync_event_advances_current_cursor_for_invisible_rows(space_session):
+    """The allocated ledger cursor includes rows omitted from pull responses."""
+    visible_event = await record_sync_event(
+        space_session,
+        entity_type="task",
+        entity_id="tsk_visible",
+        action="create",
+        visible=True,
+    )
+    invisible_event = await record_sync_event(
+        space_session,
+        entity_type="task",
+        entity_id="tsk_invisible",
+        action="update",
+        visible=False,
+    )
+
+    state = await space_session.get(SyncState, 1)
+    assert visible_event.id < invisible_event.id
+    assert state is not None
+    assert state.current_cursor == invisible_event.id
+    assert await get_current_cursor(space_session) == invisible_event.id
 
 
 @pytest.mark.asyncio
@@ -206,7 +270,7 @@ async def test_concurrent_sqlite_writers_commit_in_ledger_id_order(space_session
 
     async def writer_one():
         event_row = await record_sync_event(
-            first, entity_type="task", entity_id="writer-1", action="create"
+            first, entity_type="task", entity_id="writer-1", action="create", visible=True
         )
         first_ready.set()
         await release_first.wait()
@@ -217,7 +281,7 @@ async def test_concurrent_sqlite_writers_commit_in_ledger_id_order(space_session
     async def writer_two():
         await first_ready.wait()
         event_row = await record_sync_event(
-            second, entity_type="task", entity_id="writer-2", action="create"
+            second, entity_type="task", entity_id="writer-2", action="create", visible=True
         )
         await second.commit()
         commit_order.append("writer-2")
@@ -245,6 +309,7 @@ async def test_record_sync_event_payload_is_sorted_and_utf8_safe(space_session):
         entity_id="tsk_utf8",
         action="create",
         payload={"z": "last", "a": "first", "unicode": "你好世界"},
+        visible=True,
     )
     row = (
         (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_utf8")))

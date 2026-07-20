@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors import RetentionAckRequiredError
+from app.errors import RetentionAckRequiredError, to_wire_json
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
 
@@ -33,6 +33,11 @@ async def record_sync_event(
     entity_id: str,
     action: SyncAction,
     payload: Mapping[str, Any] | None = None,
+    operation_id: str | None = None,
+    batch_id: str | None = None,
+    version: int | None = None,
+    created_at: str | None = None,
+    visible: bool,
     flush: bool = True,
 ) -> SyncOutbox:
     """Append one mutation event and return its allocated global sequence.
@@ -48,20 +53,34 @@ async def record_sync_event(
         raise ValueError("entity_id must not be empty")
     if action not in _VALID_ACTIONS:
         raise ValueError(f"Unsupported sync action: {action}")
+    if type(visible) is not bool:
+        raise ValueError("visible must be an explicit boolean")
+    if version is not None and (type(version) is not int or version < 0):
+        raise ValueError("version must be a nonnegative integer or null")
+    try:
+        wire_payload = to_wire_json(payload or {})
+    except TypeError as exc:
+        if "finite" in str(exc):
+            raise ValueError("Out of range float values are not JSON compliant") from exc
+        raise
 
     event = SyncOutbox(
         entity_type=entity_type,
         entity_id=entity_id,
         action=action,
         payload=json.dumps(
-            payload or {},
+            wire_payload,
             ensure_ascii=False,
             sort_keys=True,
             allow_nan=False,
         ),
-        version=None,
-        visible=True,
+        operation_id=operation_id,
+        batch_id=batch_id,
+        version=version,
+        visible=visible,
     )
+    if created_at is not None:
+        event.created_at = created_at
     db.add(event)
     if flush:
         await db.flush()

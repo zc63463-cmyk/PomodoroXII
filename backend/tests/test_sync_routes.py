@@ -282,6 +282,7 @@ async def test_cursor_expired_http_error_has_stable_recovery_fields(space_sessio
         entity_type="task",
         entity_id="expired-http",
         action="create",
+        visible=True,
     )
     state = await space_session.get(SyncState, 1)
     assert state is not None

@@ -117,6 +117,7 @@ class QuickNoteService(BaseService):
             entity_id=qn.id,
             action="update",
             payload=serialize_entity(qn),
+            visible=True,
         )
 
         # Copy memo_comments (note_id points to new Note.id; originals kept).
@@ -140,6 +141,7 @@ class QuickNoteService(BaseService):
                     entity_id=copied.id,
                     action="create",
                     payload=serialize_entity(copied),
+                    visible=True,
                 )
 
         return {

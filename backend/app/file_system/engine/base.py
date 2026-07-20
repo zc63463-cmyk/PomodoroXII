@@ -15,7 +15,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from threading import RLock
-from typing import Protocol
+from typing import Protocol, Sequence, assert_never
 
 from filelock import FileLock
 from nanoid import generate
@@ -24,6 +24,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.schema import CreateTable
 
 from app.file_system.interfaces import (
+    FencedProjectionExecutor,
     NoteLevel,
     NoteMeta,
     NoteStatus,
@@ -36,8 +37,76 @@ from app.file_system.schema import (
     Base,
     _run_migrations,
 )
+from app.mutation.types import MaterializedProjectionAction, ProjectionActionTag
 from app.runtime.contained_io import BoundDirectoryHandle
 from app.runtime.sqlite_vfs import BoundSQLiteTarget, MaintenanceOptions
+
+
+class FileSystemProjectionExecutor(FencedProjectionExecutor):
+    """Execute only verified, contained actions from the active stage authority."""
+
+    async def apply_forward(self, scope, operation_id, command, receipt) -> None:
+        stages = scope.mutation_stages
+        if stages is None:
+            raise RuntimeError("Space mutation stages are not active")
+        actions = await stages.materialize(
+            operation_id, command.projections, image="after", receipt=receipt
+        )
+        await self._execute_actions(scope, actions, receipt)
+
+    async def restore_before(self, scope, operation_id, command, receipt) -> None:
+        stages = scope.mutation_stages
+        if stages is None:
+            raise RuntimeError("Space mutation stages are not active")
+        actions = await stages.materialize(
+            operation_id, command.projections, image="before", receipt=receipt
+        )
+        await self._execute_actions(scope, actions, receipt)
+
+    async def _execute_actions(
+        self, scope, actions: Sequence[MaterializedProjectionAction], receipt
+    ) -> None:
+        from app.runtime.joined_thread import run_joined_thread
+
+        for action in actions:
+            await run_joined_thread(
+                lambda: self._apply_one_contained_action(scope, action, receipt)
+            )
+
+    def _apply_one_contained_action(self, scope, action: MaterializedProjectionAction, receipt) -> None:
+        match action.tag:
+            case ProjectionActionTag.MARKDOWN_WRITE:
+                receipt.assert_current()
+                self._apply_markdown_write(scope, action)
+            case ProjectionActionTag.PATH_RENAME:
+                receipt.assert_current()
+                self._apply_path_rename(scope, action)
+            case ProjectionActionTag.PATH_REMOVE:
+                receipt.assert_current()
+                self._apply_path_remove(scope, action)
+            case ProjectionActionTag.INDEX_REPLACE:
+                receipt.assert_current()
+                self._apply_index_replace(scope, action)
+            case ProjectionActionTag.FTS_REPLACE:
+                receipt.assert_current()
+                self._apply_fts_replace(scope, action)
+            case unreachable:
+                assert_never(unreachable)
+
+    def _apply_markdown_write(self, scope, action: MaterializedProjectionAction) -> None:
+        scope.file_system._apply_projection_markdown_write(action)
+
+    def _apply_path_rename(self, scope, action: MaterializedProjectionAction) -> None:
+        scope.file_system._apply_projection_path_rename(action)
+
+    def _apply_path_remove(self, scope, action: MaterializedProjectionAction) -> None:
+        scope.file_system._apply_projection_path_remove(action)
+
+    def _apply_index_replace(self, scope, action: MaterializedProjectionAction) -> None:
+        scope.file_system._apply_projection_index_replace(action)
+
+    def _apply_fts_replace(self, scope, action: MaterializedProjectionAction) -> None:
+        scope.file_system._apply_projection_fts_replace(action)
 
 
 def _utc_now_iso() -> str:

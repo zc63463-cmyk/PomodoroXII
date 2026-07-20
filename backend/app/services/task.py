@@ -92,4 +92,5 @@ class TaskService(BaseService):
                 entity_type=self.entity_type,
                 entity_id=id,
                 action="delete",
+                visible=True,
             )

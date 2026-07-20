@@ -236,6 +236,7 @@ async def populate_fixture(
                         "title": task.title,
                         "updated_at": task.updated_at,
                     },
+                    visible=True,
                 )
 
                 quick_note = QuickNote(
@@ -258,6 +259,7 @@ async def populate_fixture(
                         "tags": quick_note.tags,
                         "updated_at": quick_note.updated_at,
                     },
+                    visible=True,
                 )
 
                 note_service = NoteService(space_session, file_system)

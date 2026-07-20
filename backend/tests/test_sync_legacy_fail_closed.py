@@ -100,6 +100,7 @@ async def test_cursor_v2_remains_available_for_same_dataset(space_session) -> No
             entity_id=f"task-{index}",
             action="create",
             payload={"id": f"task-{index}", "title": f"Task {index}"},
+            visible=True,
         )
     page = await SyncService(space_session, fs=None).pull(cursor=0, limit=2)
     assert page["cursor_version"] == 2
@@ -125,6 +126,7 @@ async def test_rest_legacy_pull_returns_canonical_upgrade_error(
             entity_id=f"task-{index}",
             action="create",
             payload={"id": f"task-{index}", "title": f"Task {index}"},
+            visible=True,
         )
 
     async def database_override():

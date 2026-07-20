@@ -23,6 +23,7 @@ async def _record_events(space_session, count: int) -> list[SyncOutbox]:
             entity_id=f"t{index}",
             action="create",
             payload={"id": f"t{index}", "v": index},
+            visible=True,
         )
         for index in range(1, count + 1)
     ]

@@ -58,6 +58,7 @@ class BaseService:
                 entity_id=obj.id,
                 action="create",
                 payload=serialize_entity(obj),
+                visible=True,
             )
         return obj
 
@@ -131,6 +132,7 @@ class BaseService:
                 entity_id=obj.id,
                 action="update",
                 payload=serialize_entity(obj),
+                visible=True,
             )
         return obj
 
@@ -163,4 +165,5 @@ class BaseService:
                 entity_type=self.entity_type,
                 entity_id=id,
                 action="delete",
+                visible=True,
             )

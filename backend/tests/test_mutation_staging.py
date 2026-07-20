@@ -3,17 +3,59 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import hashlib
+import inspect
 import json
 import os
 import threading
+from dataclasses import fields, replace
+from pathlib import Path
+from typing import cast
 
 import pytest
 
+import app.mutation.types as mutation_types
 from app.errors import PathOutsideSpaceError
 from app.mutation.staging import StageIntegrityError, StageStore, UnsafeProjectionPathError
-from app.mutation.types import ProjectionPlan
 from app.runtime.contained_io import BoundDirectoryHandle, BoundStageDirectory
-from app.runtime.leases import LeaseMode, LeaseOrderError, RuntimeLeaseCoordinator
+from app.runtime.leases import FenceReceipt, LeaseMode, LeaseOrderError, RuntimeLeaseCoordinator
+
+
+def _projection_api():
+    names = (
+        "ContainedProjectionActionField",
+        "MaterializedProjectionAction",
+        "PersistedProjectionDescriptor",
+        "ProjectionActionTag",
+        "ProjectionPlan",
+    )
+    missing = tuple(name for name in names if not hasattr(mutation_types, name))
+    assert missing == (), f"missing closed projection API: {missing}"
+    return tuple(getattr(mutation_types, name) for name in names)
+
+
+def _field(value: str):
+    contained_field, *_ = _projection_api()
+    return contained_field(value)
+
+
+def _plan(
+    tag: str,
+    target: str,
+    ordinal: int,
+    before: bytes | None,
+    after: bytes | None,
+    *,
+    source: str | None = None,
+):
+    *_, projection_tag, projection_plan = _projection_api()
+    return projection_plan(
+        projection_tag(tag),
+        None if source is None else _field(source),
+        _field(target),
+        ordinal,
+        before,
+        after,
+    )
 
 
 async def _exclusive(tmp_path):
@@ -38,8 +80,8 @@ async def test_stage_publication_is_durable_and_idempotent(tmp_path) -> None:
     store = StageStore(authority, observer=calls.append)
     global_lease, lease = await _exclusive(tmp_path)
     plans = (
-        ProjectionPlan("markdown", "notes/n1.md", 0, b"old", b"new"),
-        ProjectionPlan("index", "rows/n1.json", 1, None, b'{"id":"n1"}'),
+        _plan("markdown_write", "notes/n1.md", 0, b"old", b"new"),
+        _plan("index_replace", "rows/n1.json", 1, None, b'{"id":"n1"}'),
     )
     try:
         first = await store.publish("op-1", plans, lease=lease, space_id="space-a")
@@ -76,14 +118,14 @@ async def test_same_operation_with_different_stage_content_fails_closed(tmp_path
     try:
         await store.publish(
             "same-op",
-            (ProjectionPlan("markdown", "notes/n.md", 0, None, b"first"),),
+            (_plan("markdown_write", "notes/n.md", 0, None, b"first"),),
             lease=lease,
             space_id="space-a",
         )
         with pytest.raises(StageIntegrityError, match="different content"):
             await store.publish(
                 "same-op",
-                (ProjectionPlan("markdown", "notes/n.md", 0, None, b"second"),),
+                (_plan("markdown_write", "notes/n.md", 0, None, b"second"),),
                 lease=lease,
                 space_id="space-a",
             )
@@ -96,13 +138,13 @@ async def test_same_operation_with_different_stage_content_fails_closed(tmp_path
 @pytest.mark.parametrize(
     "plan",
     [
-        ProjectionPlan("markdown", "notes/n.md", 1, None, b"new"),
-        ProjectionPlan("", "notes/n.md", 0, None, b"new"),
+        lambda: _plan("markdown_write", "notes/n.md", 1, None, b"new"),
+        lambda: _plan("markdown_write", "notes/n.md", 0, None, None),
     ],
 )
 @pytest.mark.asyncio
 async def test_invalid_projection_plan_is_rejected_before_staging(
-    tmp_path, plan: ProjectionPlan
+    tmp_path, plan
 ) -> None:
     calls: list[str] = []
     authority = _authority(tmp_path)
@@ -110,7 +152,9 @@ async def test_invalid_projection_plan_is_rejected_before_staging(
     global_lease, lease = await _exclusive(tmp_path)
     try:
         with pytest.raises(ValueError):
-            await store.publish("invalid-plan", (plan,), lease=lease, space_id="space-a")
+            await store.publish(
+                "invalid-plan", (plan(),), lease=lease, space_id="space-a"
+            )
         assert calls == []
         assert authority.direct_children() == ()
     finally:
@@ -129,6 +173,253 @@ def test_projection_target_must_be_relative_and_contained(tmp_path, target: str)
             store.validate_target(target)
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "/absolute",
+        "../escape",
+        "notes/../../escape",
+        r"notes\escape.md",
+        "file://notes/n.md",
+        "C:/notes/n.md",
+        "notes/\x00n.md",
+        ".mutations/operation/after/0.bin",
+        f"{'a' * 64}/after/0.bin",
+        "after/0.bin",
+        "manifest.json",
+    ],
+)
+def test_contained_projection_action_field_rejects_stage_and_host_names(value: str) -> None:
+    with pytest.raises(ValueError):
+        _field(value)
+
+
+def _action_shape(action) -> tuple[str, str | None, str, int, bytes | None]:
+    return (
+        action.tag.value,
+        None if action.source is None else str(action.source),
+        str(action.target),
+        action.ordinal,
+        action.blob,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stage_materialize_after_returns_closed_actions(tmp_path) -> None:
+    authority = _authority(tmp_path)
+    store = StageStore(authority)
+    global_lease, lease = await _exclusive(tmp_path)
+    plans = (
+        _plan("markdown_write", "notes/n.md", 0, b"old", b"new"),
+        _plan(
+            "path_rename",
+            "notes/renamed.md",
+            1,
+            None,
+            None,
+            source="notes/n.md",
+        ),
+        _plan("path_remove", "notes/deleted.md", 2, b"deleted", None),
+        _plan("index_replace", "rows/n.json", 3, b"old-index", b"new-index"),
+        _plan("fts_replace", "fts/n.json", 4, b"old-fts", None),
+    )
+    try:
+        manifest = await store.publish(
+            "caller-secret.md", plans, lease=lease, space_id="space-a"
+        )
+        descriptors = tuple(step.descriptor for step in manifest.steps)
+        actions = await store.materialize(
+            "caller-secret.md",
+            descriptors,
+            image="after",
+            receipt=lease.fence_receipt("space-a"),
+        )
+
+        assert tuple(_action_shape(action) for action in actions) == (
+            ("markdown_write", None, "notes/n.md", 0, b"new"),
+            ("path_rename", "notes/n.md", "notes/renamed.md", 1, None),
+            ("path_remove", None, "notes/deleted.md", 2, None),
+            ("index_replace", None, "rows/n.json", 3, b"new-index"),
+            ("fts_replace", None, "fts/n.json", 4, None),
+        )
+        materialized_action = _projection_api()[1]
+        assert tuple(field.name for field in fields(materialized_action)) == (
+            "tag",
+            "source",
+            "target",
+            "ordinal",
+            "blob",
+        )
+        exposed = repr(actions)
+        assert manifest.directory_key not in exposed
+        assert "caller-secret.md" not in exposed
+        assert "after/0.bin" not in exposed
+        assert not any(
+            isinstance(getattr(action, field.name), Path)
+            for action in actions
+            for field in fields(action)
+        )
+        assert tuple(inspect.signature(store.materialize).parameters) == (
+            "operation_id",
+            "descriptors",
+            "image",
+            "receipt",
+        )
+    finally:
+        store.close()
+        await lease.release()
+        await global_lease.release()
+
+
+@pytest.mark.asyncio
+async def test_stage_materialize_before_derives_exact_inverse_actions(tmp_path) -> None:
+    authority = _authority(tmp_path)
+    store = StageStore(authority)
+    global_lease, lease = await _exclusive(tmp_path)
+    plans = (
+        _plan("markdown_write", "notes/created.md", 0, None, b"created"),
+        _plan("markdown_write", "notes/updated.md", 1, b"old", b"new"),
+        _plan(
+            "path_rename",
+            "notes/new-name.md",
+            2,
+            None,
+            None,
+            source="notes/old-name.md",
+        ),
+        _plan("path_remove", "notes/removed.md", 3, b"removed", None),
+        _plan("index_replace", "rows/n.json", 4, b"old-index", b"new-index"),
+        _plan("fts_replace", "fts/n.json", 5, None, b"new-fts"),
+    )
+    try:
+        manifest = await store.publish(
+            "inverse-op", plans, lease=lease, space_id="space-a"
+        )
+        actions = await store.materialize(
+            "inverse-op",
+            tuple(step.descriptor for step in manifest.steps),
+            image="before",
+            receipt=lease.fence_receipt("space-a"),
+        )
+
+        assert tuple(_action_shape(action) for action in actions) == (
+            ("path_remove", None, "notes/created.md", 0, None),
+            ("markdown_write", None, "notes/updated.md", 1, b"old"),
+            ("path_rename", "notes/new-name.md", "notes/old-name.md", 2, None),
+            ("markdown_write", None, "notes/removed.md", 3, b"removed"),
+            ("index_replace", None, "rows/n.json", 4, b"old-index"),
+            ("fts_replace", None, "fts/n.json", 5, None),
+        )
+    finally:
+        store.close()
+        await lease.release()
+        await global_lease.release()
+
+
+@pytest.mark.parametrize("drift", ["target", "hash", "size"])
+@pytest.mark.asyncio
+async def test_stage_materialize_rejects_nonexact_descriptors(
+    tmp_path, drift: str
+) -> None:
+    authority = _authority(tmp_path)
+    store = StageStore(authority)
+    global_lease, lease = await _exclusive(tmp_path)
+    try:
+        manifest = await store.publish(
+            "descriptor-op",
+            (_plan("markdown_write", "notes/n.md", 0, b"old", b"new"),),
+            lease=lease,
+            space_id="space-a",
+        )
+        descriptor = manifest.steps[0].descriptor
+        if drift == "target":
+            descriptor = replace(descriptor, target=_field("notes/other.md"))
+        elif drift == "hash":
+            descriptor = replace(descriptor, after_sha256="f" * 64)
+        else:
+            assert descriptor.after_size is not None
+            descriptor = replace(descriptor, after_size=descriptor.after_size + 1)
+
+        with pytest.raises(StageIntegrityError):
+            await store.materialize(
+                "descriptor-op",
+                (descriptor,),
+                image="after",
+                receipt=lease.fence_receipt("space-a"),
+            )
+    finally:
+        store.close()
+        await lease.release()
+        await global_lease.release()
+
+
+@pytest.mark.parametrize("tampered", [b"tam", b"longer-tamper"])
+@pytest.mark.asyncio
+async def test_stage_materialize_rejects_selected_blob_hash_or_size_drift(
+    tmp_path, tampered: bytes
+) -> None:
+    authority = _authority(tmp_path)
+    store = StageStore(authority)
+    global_lease, lease = await _exclusive(tmp_path)
+    try:
+        manifest = await store.publish(
+            "blob-op",
+            (_plan("markdown_write", "notes/n.md", 0, None, b"new"),),
+            lease=lease,
+            space_id="space-a",
+        )
+        relative = f"{manifest.directory_key}/after/0.bin"
+        authority._handle._atomic_write_relative(authority._relative(relative), tampered)
+
+        with pytest.raises(StageIntegrityError, match="hash or size"):
+            await store.materialize(
+                "blob-op",
+                tuple(step.descriptor for step in manifest.steps),
+                image="after",
+                receipt=lease.fence_receipt("space-a"),
+            )
+    finally:
+        store.close()
+        await lease.release()
+        await global_lease.release()
+
+
+@pytest.mark.asyncio
+async def test_stage_materialize_binds_operation_and_rejects_invalid_image_side(
+    tmp_path,
+) -> None:
+    authority = _authority(tmp_path)
+    store = StageStore(authority)
+    global_lease, lease = await _exclusive(tmp_path)
+    try:
+        manifest = await store.publish(
+            "bound-op",
+            (_plan("markdown_write", "notes/n.md", 0, None, b"new"),),
+            lease=lease,
+            space_id="space-a",
+        )
+        descriptors = tuple(step.descriptor for step in manifest.steps)
+        with pytest.raises(StageIntegrityError):
+            await store.materialize(
+                "other-op",
+                descriptors,
+                image="after",
+                receipt=lease.fence_receipt("space-a"),
+            )
+        with pytest.raises(ValueError, match="before or after"):
+            await store.materialize(
+                "bound-op",
+                descriptors,
+                image=cast(str, "sideways"),
+                receipt=cast(FenceReceipt, lease.fence_receipt("space-a")),
+            )
+    finally:
+        store.close()
+        await lease.release()
+        await global_lease.release()
 
 
 @pytest.mark.asyncio
@@ -167,7 +458,7 @@ async def test_published_batch_child_orphan_is_verified_before_deletion(tmp_path
     try:
         manifest = await store.publish(
             operation_id,
-            (ProjectionPlan("markdown", "notes/n.md", 0, None, b"new"),),
+            (_plan("markdown_write", "notes/n.md", 0, None, b"new"),),
             lease=lease,
             space_id="space-a",
         )
@@ -199,7 +490,7 @@ async def test_verified_published_orphan_is_deleted(tmp_path) -> None:
     try:
         manifest = await store.publish(
             "published-orphan",
-            (ProjectionPlan("markdown", "notes/n.md", 0, None, b"new"),),
+            (_plan("markdown_write", "notes/n.md", 0, None, b"new"),),
             lease=lease,
             space_id="space-a",
         )
@@ -240,7 +531,7 @@ async def test_publish_cancellation_joins_worker_before_lease_release(tmp_path) 
         with pytest.raises(asyncio.CancelledError):
             await store.publish(
                 "cancel-op",
-                (ProjectionPlan("markdown", "notes/n.md", 0, None, b"new"),),
+                (_plan("markdown_write", "notes/n.md", 0, None, b"new"),),
                 lease=lease,
                 space_id="space-a",
             )
@@ -308,7 +599,7 @@ async def test_stale_fence_before_publish_rename_keeps_stage_invisible(tmp_path)
         with pytest.raises(StaleFenceError):
             await store.publish(
                 "stale-op",
-                (ProjectionPlan("markdown", "notes/n.md", 0, None, b"new"),),
+                (_plan("markdown_write", "notes/n.md", 0, None, b"new"),),
                 lease=lease,
                 space_id="space-a",
             )
@@ -354,8 +645,8 @@ async def test_stale_fence_blocks_every_publish_write_boundary(
             await store.publish(
                 "all-boundaries",
                 (
-                    ProjectionPlan("markdown", "notes/n.md", 0, b"old", b"new"),
-                    ProjectionPlan("index", "rows/n.json", 1, None, b"indexed"),
+                    _plan("markdown_write", "notes/n.md", 0, b"old", b"new"),
+                    _plan("index_replace", "rows/n.json", 1, None, b"indexed"),
                 ),
                 lease=lease,
                 space_id="space-a",
@@ -379,7 +670,7 @@ async def test_manifest_tamper_matrix_fails_closed(tmp_path, mutation: str) -> N
     try:
         manifest = await store.publish(
             "tamper-op",
-            (ProjectionPlan("markdown", "notes/n.md", 0, b"old", b"new"),),
+            (_plan("markdown_write", "notes/n.md", 0, b"old", b"new"),),
             lease=lease,
             space_id="space-a",
         )

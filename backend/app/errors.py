@@ -302,6 +302,16 @@ class IdempotencyConflictError(AppError):
         super().__init__(details=details)
 
 
+class SpaceRecoveryRequiredError(AppError):
+    """Reject mutation work until the durable Space journal is clean."""
+
+    detail = "Space mutation recovery is required"
+    status_code = 503
+    legacy_error_type = "service_unavailable"
+    code = "space_recovery_required"
+    retryable = True
+
+
 class NotFoundError(AppError):
     detail = "Resource not found"
     status_code = 404

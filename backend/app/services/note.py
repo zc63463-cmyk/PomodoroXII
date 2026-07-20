@@ -112,6 +112,7 @@ class NoteService(BaseService):
                     entity_id=obj.id,
                     action="create",
                     payload=payload,
+                    visible=True,
                 )
             return obj
         except Exception:
@@ -174,6 +175,7 @@ class NoteService(BaseService):
                     entity_id=obj.id,
                     action="update",
                     payload=payload,
+                    visible=True,
                 )
             return obj
         except Exception:
@@ -260,6 +262,7 @@ class NoteService(BaseService):
                     entity_id=obj.id,
                     action="update",
                     payload=payload,
+                    visible=True,
                 )
         elif content is not None:
             obj = await self.update_content(
@@ -303,6 +306,7 @@ class NoteService(BaseService):
                     entity_type=self.entity_type,
                     entity_id=id,
                     action="delete",
+                    visible=True,
                 )
             # FS deletion is best-effort (orphan .md is harmless).
             try:
@@ -328,6 +332,7 @@ class NoteService(BaseService):
                 entity_id=id,
                 action="update",
                 payload=serialize_entity(obj),
+                visible=True,
             )
 
     async def restore(self, id: str) -> Any:
@@ -356,5 +361,6 @@ class NoteService(BaseService):
                 entity_id=id,
                 action="update",
                 payload=payload,
+                visible=True,
             )
         return obj

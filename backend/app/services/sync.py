@@ -258,6 +258,7 @@ class SyncService:
             entity_id=entity_id,
             action=action,  # type: ignore[arg-type]
             payload=event_payload,
+            visible=True,
         )
 
     async def _check_preflight(
@@ -651,7 +652,7 @@ class SyncService:
         rows = (
             await self.db.execute(
                 select(SyncOutbox)
-                .where(SyncOutbox.id > cursor)
+                .where(SyncOutbox.id > cursor, SyncOutbox.visible.is_(True))
                 .order_by(SyncOutbox.id.asc())
                 .limit(limit + 1)
             )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,7 @@ from app.models.sync_outbox import SyncOutbox
 from app.mutation.journal import IllegalMutationTransition, MutationJournal
 from app.mutation.types import (
     BatchMutationResult,
+    ContainedProjectionActionField,
     DbMutationPlan,
     InvalidPayloadHashError,
     MutationCommand,
@@ -32,13 +35,71 @@ from app.mutation.types import (
     PersistedMutationCommand,
     PersistedProjectionDescriptor,
     PreparedBatchItem,
+    ProjectionActionTag,
     ProjectionPlan,
     SyncEventPlan,
+    bounded_child_operation_id,
     canonical_payload_hash,
     decode_persisted_command,
     persisted_command_bytes,
     require_payload_hash,
+    validate_operation_id,
 )
+
+
+def test_authoritative_child_operation_id_vectors_match_in_process_and_fresh_process() -> None:
+    fixture_path = Path(__file__).parent / "fixtures/task_space_session_child_operation_id_vectors.json"
+    raw = fixture_path.read_bytes()
+    vectors = json.loads(raw)
+    assert tuple(vectors) == ("algorithm", "valid", "invalid")
+    assert vectors["algorithm"] == "child-v1"
+    assert [item["name"] for item in vectors["valid"]] == [
+        "colon_parent",
+        "colon_suffix",
+        "plain_result_127",
+        "plain_result_128",
+        "first_overflow_129",
+        "parent_127",
+        "parent_128",
+        "suffix_512",
+    ]
+    assert [item["name"] for item in vectors["invalid"]] == [
+        "suffix_513",
+        "suffix_non_ascii",
+    ]
+    assert raw.endswith(b"\n") and b"\r\n" not in raw
+    for vector in vectors["valid"]:
+        actual = bounded_child_operation_id(vector["parent_id"], vector["suffix"])
+        assert actual == vector["expected"], vector["name"]
+        validate_operation_id(actual)
+    assert len(vectors["valid"][2]["expected"].encode("ascii")) == 127
+    assert len(vectors["valid"][3]["expected"].encode("ascii")) == 128
+    assert vectors["valid"][4]["expected"].startswith("childh:")
+    for vector in vectors["invalid"]:
+        with pytest.raises(ValueError, match=vector["error"]):
+            bounded_child_operation_id(vector["parent_id"], vector["suffix"])
+
+    probe = vectors["valid"][6]
+    backend_root = Path(__file__).parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "from app.mutation.types import bounded_child_operation_id; "
+                "print(bounded_child_operation_id(sys.argv[2], sys.argv[3]))"
+            ),
+            str(backend_root),
+            probe["parent_id"],
+            probe["suffix"],
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.stdout.strip() == probe["expected"]
 from tests.ast_helpers import literal_exception_codes
 
 
@@ -112,7 +173,16 @@ def _command() -> MutationCommand:
                 after_row={"title": "A"},
             ),
         ),
-        projections=(ProjectionPlan("markdown", "notes/n1.md", 0, b"old", b"new"),),
+        projections=(
+            ProjectionPlan(
+                ProjectionActionTag.MARKDOWN_WRITE,
+                None,
+                ContainedProjectionActionField("notes/n1.md"),
+                0,
+                b"old",
+                b"new",
+            ),
+        ),
         sync_events=(
             SyncEventPlan(
                 entity_type="note",
@@ -161,7 +231,16 @@ def test_projection_descriptor_rejects_invalid_hash_size_pairs(
     digest: str | None, size: int | None
 ) -> None:
     with pytest.raises(ValueError):
-        PersistedProjectionDescriptor("markdown", "notes/n1.md", 0, digest, size, None, None)
+        PersistedProjectionDescriptor(
+            ProjectionActionTag.MARKDOWN_WRITE,
+            None,
+            ContainedProjectionActionField("notes/n1.md"),
+            0,
+            digest,
+            size,
+            None,
+            None,
+        )
 
 
 def test_direct_record_constructors_reject_untyped_or_invalid_children() -> None:
@@ -178,7 +257,14 @@ def test_direct_record_constructors_reject_untyped_or_invalid_children() -> None
     for request_index, intent_hash in ((True, "0" * 64), (0, "bad")):
         with pytest.raises(ValueError):
             PreparedBatchItem(request_index, "op", intent_hash, _request(), None)  # type: ignore[arg-type]
-    duplicate = ProjectionPlan("markdown", "notes/n1.md", 0, None, b"a")
+    duplicate = ProjectionPlan(
+        ProjectionActionTag.MARKDOWN_WRITE,
+        None,
+        ContainedProjectionActionField("notes/n1.md"),
+        0,
+        None,
+        b"a",
+    )
     with pytest.raises(ValueError, match="ordinals"):
         MutationCommand.from_effects(
             request=_request(),
@@ -338,7 +424,8 @@ async def test_closed_transitions_and_batch_visibility_barrier(space_session) ->
         await journal.transition("op-1", target)
         await journal.transition("op-2", target)
     assert await journal.visible_event_count("batch-1") == 0
-    await journal.finalize_batch("batch-1")
+    async with sessions.begin() as session:
+        await MutationJournal.finalize_batch_in_transaction(session, "batch-1")
     assert await journal.visible_event_count("batch-1") == 2
     async with sessions() as session:
         states = set(

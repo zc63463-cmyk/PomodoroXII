@@ -125,6 +125,7 @@ class CascadeService:
                 entity_id=changed.id,
                 action="update",
                 payload=serialize_entity(changed),
+                visible=True,
             )
         return {"trashed_folder_ids": all_ids}
 

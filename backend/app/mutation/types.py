@@ -40,6 +40,7 @@ MUTATION_STATES = tuple(state.value for state in MutationState)
 STEP_STATES = tuple(state.value for state in StepState)
 PAYLOAD_SHA256 = re.compile(r"[0-9a-f]{64}")
 SYNC_UTC_RFC3339 = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
+PRINTABLE_ASCII_OPERATION_ID = re.compile(r"[\x21-\x7e]{1,128}")
 
 
 class InvalidPayloadHashError(ValueError):
@@ -77,6 +78,34 @@ def require_payload_hash(declared: str, payload: Mapping[str, object]) -> None:
 def validate_sha256(value: str, *, label: str) -> None:
     if not isinstance(value, str) or PAYLOAD_SHA256.fullmatch(value) is None:
         raise ValueError(f"{label} must be 64 lowercase hex characters")
+
+
+def validate_operation_id(value: str) -> None:
+    """Require the cross-wave 1..128 byte printable ASCII ID contract."""
+    if not isinstance(value, str) or PRINTABLE_ASCII_OPERATION_ID.fullmatch(value) is None:
+        raise ValueError("operation and batch IDs must use the exact 1-128-byte printable-ASCII validator")
+
+
+def bounded_child_operation_id(parent_id: str, suffix: str) -> str:
+    """Derive one deterministic ASCII child ID without exceeding 128 bytes."""
+    validate_operation_id(parent_id)
+    if not suffix or not suffix.isascii() or len(suffix.encode("ascii")) > 512 or any(
+        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
+        for character in suffix
+    ):
+        raise ValueError("invalid child operation suffix")
+    parent_bytes = parent_id.encode("ascii")
+    suffix_bytes = suffix.encode("ascii")
+    candidate = f"childp:{len(parent_bytes)}:{parent_id}:{suffix}"
+    if len(candidate.encode("ascii")) <= 128:
+        validate_operation_id(candidate)
+        return candidate
+    digest = hashlib.sha256(
+        b"child-v1\0" + len(parent_bytes).to_bytes(2, "big") + parent_bytes + suffix_bytes
+    ).hexdigest()
+    bounded = f"childh:{digest}"
+    validate_operation_id(bounded)
+    return bounded
 
 
 def validate_expected_version(value: int | None) -> None:
@@ -129,26 +158,80 @@ def canonical_request_bytes(
     )
 
 
+class ProjectionActionTag(StrEnum):
+    MARKDOWN_WRITE = "markdown_write"
+    PATH_RENAME = "path_rename"
+    PATH_REMOVE = "path_remove"
+    INDEX_REPLACE = "index_replace"
+    FTS_REPLACE = "fts_replace"
+
+
+class ContainedProjectionActionField(str):
+    """One normalized logical projection location, never a stage location."""
+
+    def __new__(cls, value: str):
+        if not isinstance(value, str) or not value or "\0" in value or "\\" in value:
+            raise ValueError("projection action field must be a contained relative path")
+        if ":" in value or value.startswith("/"):
+            raise ValueError("projection action field must be a contained relative path")
+        parts = value.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            raise ValueError("projection action field must be a contained relative path")
+        if (
+            parts[0] == ".mutations"
+            or parts[0] in {"before", "after"}
+            or value == "manifest.json"
+            or (len(parts) >= 3 and re.fullmatch(r"[0-9a-f]{64}", parts[0]) and parts[1] in {"before", "after"})
+        ):
+            raise ValueError("projection action field must not name staged content")
+        return str.__new__(cls, value)
+
+
+def _validate_projection_images(
+    tag: ProjectionActionTag, source: ContainedProjectionActionField | None,
+    before: bytes | None, after: bytes | None,
+) -> None:
+    if (tag is ProjectionActionTag.PATH_RENAME) != (source is not None):
+        raise ValueError("projection source is required only for path rename")
+    if tag is ProjectionActionTag.PATH_RENAME and (before is not None or after is not None):
+        raise ValueError("path rename has no byte images")
+    if tag is ProjectionActionTag.PATH_REMOVE and (before is None or after is not None):
+        raise ValueError("path remove requires before and no after image")
+    if tag is ProjectionActionTag.MARKDOWN_WRITE and after is None:
+        raise ValueError("markdown write requires an after image")
+    if tag in {ProjectionActionTag.INDEX_REPLACE, ProjectionActionTag.FTS_REPLACE} and before is None and after is None:
+        raise ValueError("replace projection requires an image")
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectionPlan:
-    store: str
-    target: str
+    tag: ProjectionActionTag
+    source: ContainedProjectionActionField | None
+    target: ContainedProjectionActionField
     ordinal: int
     before: bytes | None
     after: bytes | None
 
     def __post_init__(self) -> None:
+        if type(self.tag) is not ProjectionActionTag:
+            raise TypeError("projection tag must be a closed ProjectionActionTag")
+        if self.source is not None and type(self.source) is not ContainedProjectionActionField:
+            raise TypeError("projection source must be contained")
+        if type(self.target) is not ContainedProjectionActionField:
+            raise TypeError("projection target must be contained")
         if type(self.ordinal) is not int or self.ordinal < 0:
             raise ValueError("projection ordinal must be nonnegative")
         for value in (self.before, self.after):
             if value is not None and not isinstance(value, bytes):
                 raise TypeError("projection images must be bytes or null")
+        _validate_projection_images(self.tag, self.source, self.before, self.after)
 
 
 @dataclass(frozen=True, slots=True)
 class PersistedProjectionDescriptor:
-    store: str
-    target: str
+    tag: ProjectionActionTag
+    source: ContainedProjectionActionField | None
+    target: ContainedProjectionActionField
     ordinal: int
     before_sha256: str | None
     before_size: int | None
@@ -156,6 +239,12 @@ class PersistedProjectionDescriptor:
     after_size: int | None
 
     def __post_init__(self) -> None:
+        if type(self.tag) is not ProjectionActionTag:
+            raise TypeError("projection tag must be a closed ProjectionActionTag")
+        if self.source is not None and type(self.source) is not ContainedProjectionActionField:
+            raise TypeError("projection source must be contained")
+        if type(self.target) is not ContainedProjectionActionField:
+            raise TypeError("projection target must be contained")
         if type(self.ordinal) is not int or self.ordinal < 0:
             raise ValueError("projection ordinal must be a nonnegative integer")
         for label, digest, size in (
@@ -168,6 +257,30 @@ class PersistedProjectionDescriptor:
                 validate_sha256(digest, label=f"{label}_sha256")
                 if type(size) is not int or size < 0:
                     raise ValueError(f"{label}_size must be a nonnegative integer")
+        _validate_projection_images(self.tag, self.source, self.before_sha256, self.after_sha256)
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializedProjectionAction:
+    tag: ProjectionActionTag
+    source: ContainedProjectionActionField | None
+    target: ContainedProjectionActionField
+    ordinal: int
+    blob: bytes | None
+
+    def __post_init__(self) -> None:
+        if type(self.tag) is not ProjectionActionTag:
+            raise TypeError("projection tag must be a closed ProjectionActionTag")
+        if self.source is not None and type(self.source) is not ContainedProjectionActionField:
+            raise TypeError("projection source must be contained")
+        if type(self.target) is not ContainedProjectionActionField:
+            raise TypeError("projection target must be contained")
+        if type(self.ordinal) is not int or self.ordinal < 0:
+            raise ValueError("projection ordinal must be nonnegative")
+        if self.blob is not None and not isinstance(self.blob, bytes):
+            raise TypeError("materialized projection blob must be bytes or null")
+        if (self.tag is ProjectionActionTag.PATH_RENAME) != (self.source is not None):
+            raise ValueError("projection source is required only for path rename")
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,7 +393,8 @@ def _persisted_descriptors(
 ) -> tuple[PersistedProjectionDescriptor, ...]:
     return tuple(
         PersistedProjectionDescriptor(
-            plan.store,
+            plan.tag,
+            plan.source,
             plan.target,
             plan.ordinal,
             *_descriptor(plan.before),
@@ -473,7 +587,19 @@ def decode_persisted_command(payload: bytes | str) -> PersistedMutationCommand:
             request=request,
             db_plans=tuple(DbMutationPlan(**item) for item in value["db_plans"]),
             projections=tuple(
-                PersistedProjectionDescriptor(**item) for item in value["projections"]
+                PersistedProjectionDescriptor(
+                    ProjectionActionTag(item["tag"]),
+                    None
+                    if item["source"] is None
+                    else ContainedProjectionActionField(item["source"]),
+                    ContainedProjectionActionField(item["target"]),
+                    item["ordinal"],
+                    item["before_sha256"],
+                    item["before_size"],
+                    item["after_sha256"],
+                    item["after_size"],
+                )
+                for item in value["projections"]
             ),
             sync_events=tuple(SyncEventPlan(**item) for item in value["sync_events"]),
             result_value=value["result_value"],
