@@ -3170,6 +3170,7 @@ function verifyCrossWave(plans) {
   const s3Task1 = task(s3, 1);
   const s3Task2 = task(s3, 2);
   const s3Task3 = task(s3, 3);
+  const s3Task4 = task(s3, 4);
   const s4Task2 = task(s4, 2);
   const s4Task3 = task(s4, 3);
   const s4Task7 = task(s4, 7);
@@ -4156,6 +4157,53 @@ function verifyCrossWave(plans) {
     '_publish_stages(scope, lease, ...)',
     'requires `scope.mutation_stages`',
   ]) requireTaskText('S3', s3Task4Entry, contract, `Task 3 downstream UoW amendment ${contract}`);
+  const s3Task4AllowedPaths = [
+    'backend/app/errors.py',
+    'backend/app/file_system/interfaces.py',
+    'backend/app/file_system/engine/base.py',
+    'backend/app/mutation/unit_of_work.py',
+    'backend/app/mutation/types.py',
+    'backend/app/mutation/journal.py',
+    'backend/app/services/sync_outbox.py',
+    'backend/app/services/base.py',
+    'backend/app/services/cascade.py',
+    'backend/app/services/note.py',
+    'backend/app/services/quick_note.py',
+    'backend/app/services/relation.py',
+    'backend/app/services/sync.py',
+    'backend/app/services/task.py',
+    'backend/tests/fixtures/task_space_session_child_operation_id_vectors.json',
+    'backend/tests/test_mutation_journal.py',
+    'backend/tests/test_note_workspace_atomicity.py',
+    'backend/tests/test_sync_outbox_service.py',
+    'backend/tests/test_sync_cursor_pagination.py',
+  ];
+  const s3Task4Mutable = parseFileEntries(s3Task4Entry).filter((entry) => mutableFileActions.has(entry.action));
+  const s3Task4Staged = stagedFiles('S3', s3Task4Entry);
+  check(equalArrays([...s3Task4Mutable.map((entry) => entry.path)].sort(), [...s3Task4AllowedPaths].sort()), 'S3 Task 4 mutable Files closed set drift');
+  check(equalArrays([...s3Task4Staged].sort(), [...s3Task4AllowedPaths].sort()), 'S3 Task 4 git add closed set drift');
+  for (const contract of [
+    'Modify: `backend/app/errors.py`',
+    'Modify: `backend/app/file_system/interfaces.py`',
+    'Modify: `backend/app/file_system/engine/base.py`',
+    'class SpaceRecoveryRequiredError(AppError):',
+    'class RecoveryGate(Protocol):',
+    'class FencedProjectionExecutor(Protocol):',
+    'class FileSystemProjectionExecutor(FencedProjectionExecutor):',
+    'only two legal outcomes: return after a durable clean proof, or raise canonical `SpaceRecoveryRequiredError`',
+    'It never repairs, replays, aborts, compensates, mutates journal state',
+    'The constructor requires the gate with no default',
+    'Concrete `MutationRecovery`, `SpaceDataView`, `MutationUnitOfWork.recover_under_lease`, and `MutationUnitOfWork.inspect_recovery` belong to Task 5',
+    'journal_factory(scope.session_factory)',
+    '固定 cross-Space field',
+    'runtime/bootstrap registration 明确推迟到 Task 5',
+    'Task 4 不修改或注册 `app/runtime/bootstrap.py`',
+    'never reopens a path or URI',
+    'never falls back to a path-backed constructor',
+    'test_dirty_recovery_gate_raises_canonical_error_before_batch_read',
+    'test_projection_executor_asserts_fence_immediately_before_each_destructive_action',
+  ]) requireTaskText('S3', s3Task4Entry, contract, `Task 4 recovery/projection amendment ${contract}`);
+  requireSha256('S3 Task 4', s3Task4, 'bcf3fb5bb85d86725f4975be98906b9156812bcb8f038461874ba4ac87ca5aec');
   requireTaskText('S3', s3Task4Entry, 'Modify: `backend/app/mutation/types.py`', 'Task 4 extends the shared mutation identity owner');
   requireTaskText('S3', s3Task4Entry, 'Create: `backend/tests/fixtures/task_space_session_child_operation_id_vectors.json`', 'Task 4 owns authoritative child-ID vectors');
   requireTaskText('S3', s3Task4Entry, '`types.py` owns and exports the cross-wave helper', 'single backend child-ID implementation owner');
@@ -4202,6 +4250,8 @@ function verifyCrossWave(plans) {
   forbidPattern('S3', s3, /\bmanifest_hash\b/g, 'ambiguous manifest_hash field');
   requireText('S3', s3, 'overlay.apply(command)', 'full-command authority overlay');
   forbidPattern('S3', s3, /overlay\.apply\(command\.db_plans\)/g, 'DB-only authority overlay');
+  requireTaskText('S3', s3Task4Entry, 'AuthorityOverlay.from_locked_authorities(', 'Task 4 locked multi-authority overlay');
+  forbidPattern('S3 Task 4', s3Task4Entry.body, /AuthorityOverlay\.from_locked_session\s*\(/g, 'session-only authority overlay');
   const s3Task4Python = codeBlocks(s3Task4Entry.body, 'python').join('\n');
   const s3Task4Lines = pythonLineInfo(s3Task4Python);
   check((s3Task4Python.match(/^def bounded_child_operation_id\(/gm) || []).length === 1, 'S3 Task 4: child-ID helper must have one implementation owner');
@@ -4215,15 +4265,47 @@ function verifyCrossWave(plans) {
       && !s3Task4Lines.some((line) => /(?:self\.db|session)\.apply\s*\(/.test(line.text)),
     'S3 Task 4: executable full-command overlay cannot be replaced by dead code or a downgraded DB-only call',
   );
+  const s3ProjectionBlock = codeBlocks(s3Task4Entry.body, 'python')
+    .find((block) => block.includes('class FileSystemProjectionExecutor(')) || '';
+  const s3ProjectionLines = pythonLineInfo(s3ProjectionBlock);
+  const fenceAssertionIndices = s3ProjectionLines
+    .map((line, index) => line.text === 'receipt.assert_current()' ? index : -1)
+    .filter((index) => index >= 0);
+  check(
+    fenceAssertionIndices.length === 1
+      && s3ProjectionLines[fenceAssertionIndices[0] + 1]?.text
+        === 'self._apply_exactly_one_destructive_primitive(scope, action)'
+      && s3ProjectionBlock.includes(
+        'self._apply_one_contained_action, scope, action, receipt',
+      ),
+    'S3 Task 4: fence receipt assertion must immediately precede every destructive projection action',
+  );
   const s3UowBlock = codeBlocks(s3Task4Entry.body, 'python').find((block) => block.includes('class MutationUnitOfWork:')) || '';
-  for (const required of ['class MutationCompiler:', 'class DbMutationInterpreter:', 'def child_operation_ids(', 'from app.mutation.types import bounded_child_operation_id']) {
+  for (const required of [
+    'class MutationCompiler:',
+    'class DbMutationInterpreter:',
+    'def child_operation_ids(',
+    'from app.mutation.types import bounded_child_operation_id',
+    'catalog: CompiledEntityCatalog,',
+    'compiler: MutationCompiler,',
+    'interpreter: DbMutationInterpreter,',
+    'projection_executor: FencedProjectionExecutor,',
+    'recovery_gate: RecoveryGate,',
+    'journal_factory: MutationJournalFactory,',
+    'self.recovery_gate = recovery_gate',
+    'self.journal_factory = journal_factory',
+  ]) {
     requireText('S3 Task 4 UoW', s3UowBlock, required, `continuous UoW contract ${required}`);
   }
+  forbidPattern('S3 Task 4 UoW', s3UowBlock, /recovery_gate:\s*RecoveryGate\s*=/g, 'optional or default recovery gate');
+  forbidPattern('S3 Task 4 UoW', s3UowBlock, /^\s+async def (?:recover_under_lease|inspect_recovery)\s*\(/gm, 'Task 4 concrete recovery implementation');
+  forbidPattern('S3 Task 4 UoW', s3UowBlock, /self\.journal\b|MutationJournal\s*\(\s*scope\.session_factory/g, 'fixed journal or session binding');
   const s3UowLines = pythonLineInfo(s3UowBlock);
   const exclusiveIndex = s3UowLines.findIndex((line) => line.text === 'async with scope.exclusive_space_resources("mutation", 5) as lease:');
-  const recoveryIndex = s3UowLines.findIndex((line) => line.text === 'await self.recover_under_lease(scope, lease)');
-  const findBatchIndex = s3UowLines.findIndex((line) => line.text === 'existing = await self.journal.find_batch(batch_id)');
-  const bindingIndex = s3UowLines.findIndex((line) => line.text === 'bindings = await self.journal.find_operation_batch_bindings(operation_ids)');
+  const journalIndex = s3UowLines.findIndex((line) => line.text === 'journal = self.journal_factory(scope.session_factory)');
+  const recoveryGateIndex = s3UowLines.findIndex((line) => line.text === 'await self.recovery_gate.require_clean_under_lease(scope, lease, journal)');
+  const findBatchIndex = s3UowLines.findIndex((line) => line.text === 'existing = await journal.find_batch(batch_id)');
+  const bindingIndex = s3UowLines.findIndex((line) => line.text === 'bindings = await journal.find_operation_batch_bindings(operation_ids)');
   const foreignConflictIndex = s3UowLines.findIndex((line) => line.text === 'if foreign_bindings:');
   const compileIndex = s3UowLines.findIndex((line) => line.text === 'compilation = await self.compiler.compile_batch(');
   const exclusiveIndent = exclusiveIndex >= 0 ? s3UowLines[exclusiveIndex].indent : -1;
@@ -4231,19 +4313,21 @@ function verifyCrossWave(plans) {
     index > exclusiveIndex && line.indent <= exclusiveIndent
   ));
   check(
-    exclusiveIndex >= 0 && recoveryIndex > exclusiveIndex
-      && (exclusiveEnd < 0 || recoveryIndex < exclusiveEnd)
-      && s3UowLines[recoveryIndex]?.indent > exclusiveIndent
-      && recoveryIndex < findBatchIndex
+    exclusiveIndex >= 0 && journalIndex > exclusiveIndex
+      && journalIndex < recoveryGateIndex
+      && (exclusiveEnd < 0 || recoveryGateIndex < exclusiveEnd)
+      && s3UowLines[journalIndex]?.indent > exclusiveIndent
+      && s3UowLines[recoveryGateIndex]?.indent > exclusiveIndent
+      && recoveryGateIndex < findBatchIndex
       && findBatchIndex < bindingIndex
       && bindingIndex < foreignConflictIndex
       && foreignConflictIndex < compileIndex,
-    'S3 Task 4: caller operation binding preflight is invalid; recovery and exact batch retry must precede one binding query, and foreign conflicts must fail before compiler authority reads',
+    'S3 Task 4: recovery gate and guard-local journal preflight are invalid; clean proof and exact batch retry must precede one binding query, and foreign conflicts must fail before compiler authority reads',
   );
   requireTaskText('S3', s3Task4Entry, 'test_operation_id_cannot_move_to_another_batch_before_compilation', 'cross-batch operation binding test');
   requireTaskText('S3', s3Task4Entry, 'assert uow_fixture.compiler_compile_count == compiler_calls', 'cross-batch zero compiler assertion');
   requireTaskText('S3', s3Task4Entry, 'assert uow_fixture.authority_read_count == authority_reads', 'cross-batch zero authority-read assertion');
-  requireSha256('S3 Task 4 UoW', s3UowBlock, '379b602970ac15e1c03eaf4a1df5c9e9eb4d9bdfb34b67a2c68a41f4f4e0902e');
+  requireSha256('S3 Task 4 UoW', s3UowBlock, '1438b409c9e0d8d1391f1fe8beaf99eee3c59da8141f57b05afa89566808d4bc');
   for (const caller of ['base.py', 'cascade.py', 'note.py', 'quick_note.py', 'relation.py', 'sync.py', 'task.py']) {
     requireText('S3', s3, `\`${caller}\``, `legacy ledger caller ownership for ${caller}`);
   }
@@ -6081,6 +6165,10 @@ function runS3Task3AmendmentVerifierAtPaths(paths) {
   return runVerifierAtPaths(paths);
 }
 
+function runS3Task4AmendmentVerifierAtPaths(paths) {
+  return runVerifierAtPaths(paths);
+}
+
 function verifyAuthorityRedirectRejection() {
   const nodeOptionsChild = spawnSync(process.execPath, [__filename], {
     cwd: root,
@@ -6122,7 +6210,7 @@ function verifyAuthorityRedirectRejection() {
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status !== 2
-      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\]/.test(output)
+      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\|--self-test-s3-task4-amendment\]/.test(output)
       || /VERIFY_OK(?:_INTERNAL)?|SELF_TEST_OK/.test(output)) {
       throw new Error(`${label} did not fail closed:\n${output}`);
     }
@@ -6134,7 +6222,7 @@ function verifyAuthorityRedirectRejection() {
     env: { ...process.env },
   });
   const legacyOutput = `${legacyChild.stdout}\n${legacyChild.stderr}`;
-  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
+  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\|--self-test-s3-task4-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
     throw new Error(`legacy internal-child entry remains callable:\n${legacyOutput}`);
   }
 }
@@ -6145,10 +6233,26 @@ function replaceRequired(filePath, before, after, label) {
   fs.writeFileSync(filePath, source.replace(before, after), 'utf8');
 }
 
+function replaceRequiredInTask(filePath, taskNumber, before, after, label) {
+  const source = fs.readFileSync(filePath, 'utf8');
+  const task = parseTasks(source).find((candidate) => candidate.number === taskNumber);
+  if (!task || !task.body.includes(before)) {
+    throw new Error(`self-test mutation source missing for ${label}`);
+  }
+  const taskStart = source.indexOf(task.body);
+  const mutatedBody = task.body.replace(before, after);
+  fs.writeFileSync(
+    filePath,
+    source.slice(0, taskStart) + mutatedBody + source.slice(taskStart + task.body.length),
+    'utf8',
+  );
+}
+
 function runMutationSelfTests(
   selectedNames = null,
   targetedVerifier = runS1Task4AmendmentVerifierAtPaths,
   targetedScope = 's1-task4-amendment',
+  expectedMutationCount = null,
 ) {
   if (selectedNames === null) verifyAuthorityRedirectRejection();
   const baselinePaths = {
@@ -7824,13 +7928,147 @@ function runMutationSelfTests(
     },
     {
       name: 's3-recovery-after-exclusive-scope',
-      expected: /recovery must remain inside exclusive scope|caller operation binding preflight is invalid|S3 Task 4 UoW critical body SHA-256 drift/,
+      expected: /recovery gate and guard-local journal preflight are invalid|S3 Task 4(?: UoW)? critical body SHA-256 drift/,
       mutate(paths) {
         const file = path.join(paths.plans, expectedPlans[3].filename);
         replaceRequired(
           file,
-          '        async with scope.exclusive_space_resources("mutation", 5) as lease:\n            await self.recover_under_lease(scope, lease)\n            existing = await self.journal.find_batch(batch_id)\n',
-          '        async with scope.exclusive_space_resources("mutation", 5) as lease:\n            pass\n        await self.recover_under_lease(scope, lease)\n        if True:\n            existing = await self.journal.find_batch(batch_id)\n',
+          '        async with scope.exclusive_space_resources("mutation", 5) as lease:\n            journal = self.journal_factory(scope.session_factory)\n            await self.recovery_gate.require_clean_under_lease(scope, lease, journal)\n            existing = await journal.find_batch(batch_id)\n',
+          '        async with scope.exclusive_space_resources("mutation", 5) as lease:\n            pass\n        journal = self.journal_factory(scope.session_factory)\n        await self.recovery_gate.require_clean_under_lease(scope, lease, journal)\n        if True:\n            existing = await journal.find_batch(batch_id)\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-errors-whitelist-omission',
+      expected: /Task 4 recovery\/projection amendment .*app\/errors\.py|S3 Task 4 (?:mutable Files|git add) closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(file, 4, '- Modify: `backend/app/errors.py`\n', '', this.name);
+        replaceRequiredInTask(file, 4, 'git add app/errors.py ', 'git add ', this.name);
+      },
+    },
+    {
+      name: 's3-task4-interfaces-whitelist-omission',
+      expected: /Task 4 recovery\/projection amendment .*file_system\/interfaces\.py|S3 Task 4 (?:mutable Files|git add) closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(file, 4, '- Modify: `backend/app/file_system/interfaces.py`\n', '', this.name);
+        replaceRequiredInTask(
+          file, 4,
+          'git add app/errors.py app/file_system/interfaces.py ',
+          'git add app/errors.py ',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-engine-base-whitelist-omission',
+      expected: /Task 4 recovery\/projection amendment .*file_system\/engine\/base\.py|S3 Task 4 (?:mutable Files|git add) closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(file, 4, '- Modify: `backend/app/file_system/engine/base.py`\n', '', this.name);
+        replaceRequiredInTask(
+          file, 4,
+          'git add app/errors.py app/file_system/interfaces.py app/file_system/engine/base.py ',
+          'git add app/errors.py app/file_system/interfaces.py ',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-recovery-gate-noop-weakening',
+      expected: /Task 4 recovery\/projection amendment .*only two legal outcomes/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          'only two legal outcomes: return after a durable clean proof, or raise canonical `SpaceRecoveryRequiredError`',
+          'may return without reading durable recovery state',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-recovery-gate-default-weakening',
+      expected: /optional or default recovery gate|continuous UoW contract recovery_gate: RecoveryGate,/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '        recovery_gate: RecoveryGate,\n',
+          '        recovery_gate: RecoveryGate = NoopRecoveryGate(),\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-premature-recovery-implementation',
+      expected: /Task 4 concrete recovery implementation/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          'class MutationUnitOfWork:\n    def __init__(',
+          'class MutationUnitOfWork:\n    async def recover_under_lease(self, scope, lease):\n        return await self.recovery.recover_under_lease(scope, lease)\n\n    def __init__(',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-fixed-journal-session-binding',
+      expected: /fixed journal or session binding|recovery gate and guard-local journal preflight are invalid/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '            journal = self.journal_factory(scope.session_factory)\n',
+          '            journal = self.journal\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-session-only-authority-overlay',
+      expected: /session-only authority overlay|Task 4 locked multi-authority overlay/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '        overlay = await AuthorityOverlay.from_locked_authorities(\n            scope, session, self.catalog\n        )\n',
+          '        overlay = await AuthorityOverlay.from_locked_session(session, self.catalog)\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-fence-receipt-assertion-omission',
+      expected: /fence receipt assertion must immediately precede every destructive projection action/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '        receipt.assert_current()\n        self._apply_exactly_one_destructive_primitive(scope, action)\n',
+          '        self._apply_exactly_one_destructive_primitive(scope, action)\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-premature-bootstrap-registration',
+      expected: /S3 Task 4 mutable Files closed set drift|S3 Task 4 git add closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '- Modify: `backend/app/file_system/engine/base.py`\n',
+          '- Modify: `backend/app/file_system/engine/base.py`\n- Modify: `backend/app/runtime/bootstrap.py`\n',
+          this.name,
+        );
+        replaceRequiredInTask(
+          file, 4,
+          'app/file_system/engine/base.py app/mutation/unit_of_work.py',
+          'app/file_system/engine/base.py app/runtime/bootstrap.py app/mutation/unit_of_work.py',
           this.name,
         );
       },
@@ -11505,6 +11743,9 @@ function runMutationSelfTests(
     const missing = [...selectedNames].filter((name) => !found.has(name));
     throw new Error(`targeted self-test cases are missing: ${missing.join(', ')}`);
   }
+  if (expectedMutationCount !== null && selectedCases.length !== expectedMutationCount) {
+    throw new Error(`targeted self-test mutation count drift: expected=${expectedMutationCount} actual=${selectedCases.length}`);
+  }
   const mutationFailures = [];
   for (const testCase of selectedCases) {
     const paths = mutationSandbox();
@@ -11782,9 +12023,23 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's3-task3-uow-path-reopen-restored',
     's3-task3-body-sha-drift',
   ]), runS3Task3AmendmentVerifierAtPaths, 's3-task3-amendment');
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s3-task4-amendment') {
+  runMutationSelfTests(new Set([
+    's3-recovery-after-exclusive-scope',
+    's3-task4-errors-whitelist-omission',
+    's3-task4-interfaces-whitelist-omission',
+    's3-task4-engine-base-whitelist-omission',
+    's3-task4-recovery-gate-noop-weakening',
+    's3-task4-recovery-gate-default-weakening',
+    's3-task4-premature-recovery-implementation',
+    's3-task4-fixed-journal-session-binding',
+    's3-task4-session-only-authority-overlay',
+    's3-task4-fence-receipt-assertion-omission',
+    's3-task4-premature-bootstrap-registration',
+  ]), runS3Task4AmendmentVerifierAtPaths, 's3-task4-amendment', 11);
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment|--self-test-s3-task1-amendment|--self-test-s3-task2-amendment|--self-test-s3-task3-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment|--self-test-s3-task1-amendment|--self-test-s3-task2-amendment|--self-test-s3-task3-amendment|--self-test-s3-task4-amendment]\n');
   process.exitCode = 2;
 }
