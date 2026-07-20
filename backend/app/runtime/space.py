@@ -34,6 +34,7 @@ from app.runtime.sqlite_vfs import (
 )
 
 if TYPE_CHECKING:
+    from app.mutation.staging import StageStore
     from app.space_manager import EngineHandle, SpaceEngineManager
 
 
@@ -111,9 +112,7 @@ class ProvisionMarker:
         if requested.name in {"", ".", ".."}:
             raise SpaceProvisionConflictError("invalid provision target name")
         if requested.parent.resolve(strict=True) != root:
-            raise SpaceProvisionConflictError(
-                "provision target is outside staging root"
-            )
+            raise SpaceProvisionConflictError("provision target is outside staging root")
         return root, requested.name
 
     def bind_isolated_sqlite_target(self, path: Path) -> BoundSQLiteTarget:
@@ -155,6 +154,7 @@ class SpaceRuntimeHandle:
     owns_space_lease: bool
     fence: int
     _runtime: "SpaceRuntime" = field(repr=False)
+    mutation_stages: "StageStore | None" = field(default=None, repr=False)
     _closed: bool = False
 
     @property
@@ -165,15 +165,19 @@ class SpaceRuntimeHandle:
 
     async def activate_space_resources_under_lease(self, lease: Lease) -> None:
         from app.file_system.api import open_existing_file_system
+        from app.mutation.staging import StageStore
 
         lease.assert_active_owner(scope=self.scope.space_id)
-        if self.engine is not None or self.file_system is not None:
+        if (
+            self.engine is not None
+            or self.file_system is not None
+            or self.mutation_stages is not None
+        ):
             raise LeaseOrderError("Space resources are already active")
         try:
             async with self.scope.containment.open_verified() as opens:
-                self.engine = await self._runtime.engines.acquire(
-                    self.scope.space_id, opens
-                )
+                self.engine = await self._runtime.engines.acquire(self.scope.space_id, opens)
+                self.mutation_stages = StageStore(opens.take_mutation_stage_authority())
                 self.file_system = await open_existing_file_system(opens)
         except BaseException as primary:
             cleanup_errors: list[BaseException] = []
@@ -198,6 +202,13 @@ class SpaceRuntimeHandle:
                 errors.append(exc)
             else:
                 self.file_system = None
+        if self.mutation_stages is not None:
+            try:
+                self.mutation_stages.close()
+            except BaseException as exc:
+                errors.append(exc)
+            else:
+                self.mutation_stages = None
         if self.engine is not None:
             try:
                 await self.engine.release()
@@ -216,7 +227,13 @@ class SpaceRuntimeHandle:
             await self.close_space_resources()
         except BaseExceptionGroup as group:
             errors.extend(group.exceptions)
-        if self.engine is None and self.file_system is None and self.owns_space_lease and self.space_lease is not None:
+        if (
+            self.engine is None
+            and self.file_system is None
+            and self.mutation_stages is None
+            and self.owns_space_lease
+            and self.space_lease is not None
+        ):
             try:
                 await self.space_lease.release()
             except BaseException as exc:
@@ -226,6 +243,7 @@ class SpaceRuntimeHandle:
         if (
             self.engine is None
             and self.file_system is None
+            and self.mutation_stages is None
             and (not self.owns_space_lease or self.space_lease is None)
             and self.owns_global_lease
         ):
@@ -240,6 +258,7 @@ class SpaceRuntimeHandle:
         self._closed = (
             self.engine is None
             and self.file_system is None
+            and self.mutation_stages is None
             and space_done
             and global_done
         )
@@ -273,7 +292,7 @@ class SpaceRuntimeHandle:
             await self.close_space_resources()
         except BaseExceptionGroup as group:
             cleanup_errors.extend(group.exceptions)
-        if self.engine is None and self.file_system is None:
+        if self.engine is None and self.file_system is None and self.mutation_stages is None:
             try:
                 await lease.release()
             except BaseException as exc:
@@ -290,9 +309,7 @@ class SpaceRuntimeHandle:
         if primary is not None:
             raise primary
         if cleanup_errors:
-            raise BaseExceptionGroup(
-                "Space operation cleanup failed", cleanup_errors
-            ) from None
+            raise BaseExceptionGroup("Space operation cleanup failed", cleanup_errors) from None
 
     async def __aenter__(self) -> "SpaceRuntimeHandle":
         return self
@@ -317,9 +334,9 @@ class SpaceRuntime:
         self.index_schema = index_schema
         self._owner_executor: object | None = None
         self._admission_gate: object | None = None
-        self._frozen_registrations: tuple[
-            tuple[str, str, str, str, bool, str, str], ...
-        ] | None = None
+        self._frozen_registrations: tuple[tuple[str, str, str, str, bool, str, str], ...] | None = (
+            None
+        )
 
     def install_owner_executor(self, executor: object) -> None:
         if self._owner_executor is not None and self._owner_executor is not executor:
@@ -354,10 +371,7 @@ class SpaceRuntime:
         if final_root.exists():
             raise SpaceProvisionConflictError("Space storage already exists")
         nonce = uuid.uuid4().hex
-        staging_root = (
-            runtime_settings.spaces_data_dir
-            / f".provision-{spec.space_id}-{nonce}"
-        )
+        staging_root = runtime_settings.spaces_data_dir / f".provision-{spec.space_id}-{nonce}"
         db_path = staging_root / "space.db"
         index_path = staging_root / "index.db"
         notes_dir = staging_root / "notes"
@@ -397,9 +411,7 @@ class SpaceRuntime:
                 cleanup_errors.append(error)
             index_target = _bind_existing_target(index_path, create_authority=False)
             try:
-                self.index_schema.upgrade_open(
-                    index_target, create_if_missing=False
-                )
+                self.index_schema.upgrade_open(index_target, create_if_missing=False)
                 index_status = self.index_schema.verify_open(index_target)
             finally:
                 await index_target.aclose()
@@ -435,9 +447,7 @@ class SpaceRuntime:
             primary = error
         if primary is not None and not committed:
             cleanup_errors.extend(
-                self._cleanup_marked_provision_tree(
-                    final_root if renamed else staging_root, nonce
-                )
+                self._cleanup_marked_provision_tree(final_root if renamed else staging_root, nonce)
             )
         if space_lease is not None:
             try:
@@ -456,15 +466,11 @@ class SpaceRuntime:
         if primary is not None:
             raise primary
         if cleanup_errors:
-            raise BaseExceptionGroup(
-                "Space provision cleanup failed", cleanup_errors
-            ) from None
+            raise BaseExceptionGroup("Space provision cleanup failed", cleanup_errors) from None
         assert provisioned is not None
         return provisioned
 
-    async def _commit_registration(
-        self, spec: SpaceProvisionSpec, final_root: Path
-    ) -> Space:
+    async def _commit_registration(self, spec: SpaceProvisionSpec, final_root: Path) -> Space:
         from app.db.meta_session import get_meta_session
 
         async for session in get_meta_session():
@@ -513,11 +519,7 @@ class SpaceRuntime:
                 "registered Space paths do not match the canonical runtime layout"
             )
         index_db = expected_db.parent / "index.db"
-        if (
-            not expected_db.is_file()
-            or not expected_notes.is_dir()
-            or not index_db.is_file()
-        ):
+        if not expected_db.is_file() or not expected_notes.is_dir() or not index_db.is_file():
             raise SpaceStorageMissingError()
         return _RegisteredSpacePathRecord(
             space_root=runtime_settings.canonical_spaces_root,
@@ -543,9 +545,7 @@ class SpaceRuntime:
         try:
             meta = _bind_existing_target(meta_target, create_authority=False)
             targets.append(meta)
-            with meta.open_maintenance(
-                MaintenanceOptions(read_only=True)
-            ) as connection:
+            with meta.open_maintenance(MaintenanceOptions(read_only=True)) as connection:
                 tables = {
                     row[0]
                     for row in connection.execute(
@@ -572,9 +572,7 @@ class SpaceRuntime:
                 )
                 for row in rows
             )
-            fleet_targets = [
-                FleetPreflightTarget(None, "meta", meta.identity, meta)
-            ]
+            fleet_targets = [FleetPreflightTarget(None, "meta", meta.identity, meta)]
             for registration in registrations:
                 space_id, _name, db_path, notes_dir, *_rest = registration
                 paths = self._paths_for_registration(space_id, db_path, notes_dir)
@@ -583,14 +581,10 @@ class SpaceRuntime:
                     target = opens.take_database_target()
                 targets.append(target)
                 fleet_targets.append(
-                    FleetPreflightTarget(
-                        space_id, "space", target.identity, target
-                    )
+                    FleetPreflightTarget(space_id, "space", target.identity, target)
                 )
             handed_to_coordinator = True
-            fleet = await migrations.preflight_fleet_under_lease(
-                fleet_targets, global_lease
-            )
+            fleet = await migrations.preflight_fleet_under_lease(fleet_targets, global_lease)
             self._frozen_registrations = registrations
             return fleet
         finally:
@@ -602,9 +596,7 @@ class SpaceRuntime:
                     except BaseException as error:
                         errors.append(error)
                 if errors:
-                    raise BaseExceptionGroup(
-                        "fleet target cleanup failed", errors
-                    ) from None
+                    raise BaseExceptionGroup("fleet target cleanup failed", errors) from None
 
     async def prepare_registered_spaces(
         self,
@@ -626,9 +618,7 @@ class SpaceRuntime:
         async for session in get_meta_session():
             from sqlalchemy import select
 
-            rows = (
-                await session.execute(select(Space).order_by(Space.id))
-            ).scalars().all()
+            rows = (await session.execute(select(Space).order_by(Space.id))).scalars().all()
             current = tuple(self._registration_tuple(row) for row in rows)
             if current != expected:
                 raise MigrationSafetyError(
@@ -656,9 +646,7 @@ class SpaceRuntime:
 
         frozen_identities = {
             space_id: identity
-            for space_id, identity in zip(
-                fleet.space_ids, fleet.identities, strict=True
-            )
+            for space_id, identity in zip(fleet.space_ids, fleet.identities, strict=True)
             if space_id is not None
         }
         for row, scope in zip(rows, scopes, strict=True):
@@ -681,18 +669,14 @@ class SpaceRuntime:
                     scope=row.id,
                     require_process_owner=True,
                 )
-                await self.migrations.upgrade_under_lease(
-                    "space", Path(row.db_path), global_lease
-                )
+                await self.migrations.upgrade_under_lease("space", Path(row.db_path), global_lease)
                 async with scope.containment.open_verified() as opens:
                     status = self.index_schema.upgrade_open(
                         opens.index_target, create_if_missing=False
                     )
                     if not status.valid:
                         raise RuntimeError("registered index schema is invalid")
-                async with self.borrow_prepared_space(
-                    scope, global_lease, space_lease
-                ):
+                async with self.borrow_prepared_space(scope, global_lease, space_lease):
                     pass
 
     def _cleanup_marked_provision_tree(
@@ -703,13 +687,9 @@ class SpaceRuntime:
         errors: list[BaseException] = []
         try:
             root = provision_root.expanduser().resolve(strict=True)
-            spaces_root = (
-                _current_settings().spaces_data_dir.expanduser().resolve(strict=True)
-            )
+            spaces_root = _current_settings().spaces_data_dir.expanduser().resolve(strict=True)
             if root.parent != spaces_root:
-                raise SpaceProvisionConflictError(
-                    "provision cleanup target is outside spaces root"
-                )
+                raise SpaceProvisionConflictError("provision cleanup target is outside spaces root")
             marker = root / ".pomodoroxii-provision"
             if marker.is_symlink() or not marker.is_file():
                 raise SpaceProvisionConflictError("provision marker is missing")
@@ -751,8 +731,13 @@ class SpaceRuntime:
             if inspect.isawaitable(verified):
                 await verified
             handle = SpaceRuntimeHandle(
-                scope, None, None, global_lease, space_lease,
-                owns_global_lease, owns_space_lease,
+                scope,
+                None,
+                None,
+                global_lease,
+                space_lease,
+                owns_global_lease,
+                owns_space_lease,
                 space_lease.fence if space_lease is not None else global_lease.fence,
                 self,
             )
@@ -788,9 +773,7 @@ class SpaceRuntime:
         self, scope: AuthorizedSpaceScopeResult, *, catalog_hash: str = ""
     ) -> SpaceHealth:
         async with scope.containment.open_verified() as opens:
-            migration = await self.migrations.verify_open(
-                "space", opens.database_target
-            )
+            migration = await self.migrations.verify_open("space", opens.database_target)
             index_status = self.index_schema.verify_open(opens.index_target)
         available = bool(migration.at_head and index_status.valid)
         return SpaceHealth(
@@ -823,8 +806,11 @@ class SpaceRuntime:
         self, scope: AuthorizedSpaceScopeResult, global_lease: Lease, space_lease: Lease
     ) -> AsyncIterator[SpaceRuntimeHandle]:
         handle = await self.open_resolved(
-            scope, "mutation", global_lease,
-            owns_global_lease=False, borrowed_space_lease=space_lease,
+            scope,
+            "mutation",
+            global_lease,
+            owns_global_lease=False,
+            borrowed_space_lease=space_lease,
         )
         space_lease.retain_cleanup_dependency(handle)
         primary: BaseException | None = None
