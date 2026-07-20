@@ -4109,6 +4109,26 @@ function verifyCrossWave(plans) {
   forbidPattern('S3 Task 1', s3Task1, /config\.attributes\["connection"\]\s*=|config\.attributes\['connection'\]\s*=/g, 'raw Alembic connection attribute bypass');
   forbidPattern('S3 Task 1', s3Task1, /create_engine\s*\(\s*f?["']sqlite:\/\/\//g, 'pathname SQLite engine reopen');
   requireText('S3 Task 2', s3Task2, 'Modify: `backend/app/mutation/types.py`', 'Task 2 extends canonical mutation types');
+  requireSha256('S3 Task 2', s3Task2, '5f6b5325a8e07573d1c5cb727d097bdc4a53194a5be278e023d96838bb1e4c69');
+  for (const contract of [
+    'S2 没有、Task 2 也不得引入第二个 `CompiledEntitySpec` DTO',
+    'CompiledEntityCatalog.compile((invalid,), version="test")',
+    'catalog.get("note").sync_conflict_policy == "strict_cas"',
+    'S3_MUTATION_REJECTION_CODES = frozenset({',
+    'RESERVED_S4_MAPPING_CODES = frozenset({"entity_not_sync_enabled"})',
+    '| `invalid_payload_hash` | 422 | `Payload hash does not match canonical payload` | `validation_error` | false |',
+    '| `not_found` | 404 | `Entity not found` | `not_found` | false |',
+    '| `active_session_recovery_required` | 503 | `Active Session coordination requires recovery` | `service_unavailable` | true |',
+    'map key 始终精确等于三个声明集合',
+    'Task 6 完成后同一测试升级为与',
+    'Task 2 must not pretend Task 4/6 producers already exist',
+    'every `MutationRejection` construction and fresh-process decoder validates that the persisted boolean equals the closed spec',
+    '`AppError(code="active_session_recovery_required")` 精确渲染为表中 503 四元组',
+    'Modify: `backend/tests/test_mcp_authorization.py`',
+    '只传 `code="version_conflict"` 与 frozen nested details',
+    '`not_found` 同时属于 S3 与 TS reserved 集合',
+  ]) requireTaskText('S3', s3Task2Entry, contract, `Task 2 authority amendment ${contract}`);
+  forbidPattern('S3 Task 2', s3Task2, /catalog_fixture\.compile_spec\s*\(/g, 'nonexistent catalog fixture compile API');
   requireTaskText('S3', s3Task4Entry, 'Modify: `backend/app/mutation/types.py`', 'Task 4 extends the shared mutation identity owner');
   requireTaskText('S3', s3Task4Entry, 'Create: `backend/tests/fixtures/task_space_session_child_operation_id_vectors.json`', 'Task 4 owns authoritative child-ID vectors');
   requireTaskText('S3', s3Task4Entry, '`types.py` owns and exports the cross-wave helper', 'single backend child-ID implementation owner');
@@ -6026,6 +6046,10 @@ function runS3Task1AmendmentVerifierAtPaths(paths) {
   return result;
 }
 
+function runS3Task2AmendmentVerifierAtPaths(paths) {
+  return runVerifierAtPaths(paths);
+}
+
 function verifyAuthorityRedirectRejection() {
   const nodeOptionsChild = spawnSync(process.execPath, [__filename], {
     cwd: root,
@@ -6067,7 +6091,7 @@ function verifyAuthorityRedirectRejection() {
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status !== 2
-      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\]/.test(output)
+      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\]/.test(output)
       || /VERIFY_OK(?:_INTERNAL)?|SELF_TEST_OK/.test(output)) {
       throw new Error(`${label} did not fail closed:\n${output}`);
     }
@@ -6079,7 +6103,7 @@ function verifyAuthorityRedirectRejection() {
     env: { ...process.env },
   });
   const legacyOutput = `${legacyChild.stdout}\n${legacyChild.stderr}`;
-  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
+  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
     throw new Error(`legacy internal-child entry remains callable:\n${legacyOutput}`);
   }
 }
@@ -8178,6 +8202,140 @@ function runMutationSelfTests(
           file,
           'helper 在 callback 正常返回后对其 DML 精确 `commit()`',
           'helper 在 callback 正常返回后直接关闭连接',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task2-compiled-dto-restored',
+      expected: /Task 2 authority amendment .*CompiledEntitySpec/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'S2 没有、Task 2 也不得引入第二个 `CompiledEntitySpec` DTO',
+          'Task 2 introduces a `CompiledEntitySpec` DTO',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task2-nonexistent-compile-spec-restored',
+      expected: /nonexistent catalog fixture compile API/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'CompiledEntityCatalog.compile((invalid,), version="test")',
+          'catalog_fixture.compile_spec(sync_conflict_policy="merge_magic")',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task2-s3-code-set-removal',
+      expected: /Task 2 authority amendment S3_MUTATION_REJECTION_CODES/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, 'S3_MUTATION_REJECTION_CODES = frozenset({', 'S3_REJECTION_CODES = frozenset({', this.name);
+      },
+    },
+    {
+      name: 's3-task2-s4-code-set-removal',
+      expected: /Task 2 authority amendment RESERVED_S4_MAPPING_CODES/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'RESERVED_S4_MAPPING_CODES = frozenset({"entity_not_sync_enabled"})',
+          'RESERVED_S4_MAPPING_CODES = frozenset()',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task2-invalid-hash-mapping-downgrade',
+      expected: /Task 2 authority amendment .*invalid_payload_hash/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          '| `invalid_payload_hash` | 422 | `Payload hash does not match canonical payload` | `validation_error` | false |',
+          '| `invalid_payload_hash` | 409 | `Invalid payload` | `conflict` | true |',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task2-not-found-mapping-removal',
+      expected: /Task 2 authority amendment .*not_found.*404/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          '| `not_found` | 404 | `Entity not found` | `not_found` | false |',
+          '| `not_found` | 409 | `Missing` | `conflict` | true |',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task2-producer-phase-faked-exact',
+      expected: /Task 2 authority amendment Task 6 完成后同一测试升级为与/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'Task 6 完成后同一测试升级为与',
+          'Task 2 immediately requires equality with',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task2-persisted-retryable-validation-removal',
+      expected: /Task 2 authority amendment .*persisted boolean equals the closed spec/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'every `MutationRejection` construction and fresh-process decoder validates that the persisted boolean equals the closed spec',
+          'rendering trusts any persisted retryable boolean',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task2-direct-app-error-mapping-removal',
+      expected: /Task 2 authority amendment .*active_session_recovery_required.*503/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          '`AppError(code="active_session_recovery_required")` 精确渲染为表中 503 四元组',
+          '`AppError(code="active_session_recovery_required")` uses the default 500 mapping',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task2-mcp-authorization-whitelist-omission',
+      expected: /Task 2 authority amendment .*test_mcp_authorization\.py|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, '- Modify: `backend/tests/test_mcp_authorization.py`\n', '', this.name);
+        replaceRequired(file, ' tests/test_mcp_authorization.py', '', this.name);
+      },
+    },
+    {
+      name: 's3-task2-not-found-s3-ownership-removal',
+      expected: /Task 2 authority amendment .*not_found.*S3.*TS reserved/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          '`not_found` 同时属于 S3 与 TS reserved 集合',
+          '`not_found` belongs only to the TS reserved set',
           this.name,
         );
       },
@@ -11479,9 +11637,23 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's3-task1-after-callback-transaction-downgrade',
     's3-task1-explicit-legacy-visibility-removal',
   ]), runS3Task1AmendmentVerifierAtPaths, 's3-task1-amendment');
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s3-task2-amendment') {
+  runMutationSelfTests(new Set([
+    's3-task2-compiled-dto-restored',
+    's3-task2-nonexistent-compile-spec-restored',
+    's3-task2-s3-code-set-removal',
+    's3-task2-s4-code-set-removal',
+    's3-task2-invalid-hash-mapping-downgrade',
+    's3-task2-not-found-mapping-removal',
+    's3-task2-producer-phase-faked-exact',
+    's3-task2-persisted-retryable-validation-removal',
+    's3-task2-direct-app-error-mapping-removal',
+    's3-task2-mcp-authorization-whitelist-omission',
+    's3-task2-not-found-s3-ownership-removal',
+  ]), runS3Task2AmendmentVerifierAtPaths, 's3-task2-amendment');
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment|--self-test-s3-task1-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment|--self-test-s3-task1-amendment|--self-test-s3-task2-amendment]\n');
   process.exitCode = 2;
 }
