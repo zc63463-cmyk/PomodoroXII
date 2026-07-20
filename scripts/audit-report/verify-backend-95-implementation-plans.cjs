@@ -4088,6 +4088,26 @@ function verifyCrossWave(plans) {
     requireText('S3', s3, required);
   }
   requireText('S3 Task 1', s3Task1, 'Create: `backend/app/mutation/types.py`', 'canonical enums exist before ORM mapping');
+  requireSha256('S3 Task 1', s3Task1, '1666c45de2daf96ff571b3d24b7147e18eb432682fafb26079ad9e7e7d050583');
+  for (const contract of [
+    'Modify: `backend/app/services/sync_outbox.py`',
+    'Modify: `backend/tests/test_sync_outbox_service.py`',
+    'Modify: `backend/tests/migrations/__init__.py`',
+    'tests.migrations.run_bound_command()',
+    '_alembic_maintenance_adapter()',
+    '测试不得设置 Alembic `connection` attribute',
+    '`name="floor_cursor"`',
+    'batch.f("ck_sync_state_floor_cursor")',
+    'name=op.f("ck_mutation_batches_state")',
+    'name=op.f("uq_mutation_operation_sequence")',
+    '所有已写成最终形式的 PK/FK/UQ/CK/index 名都必须使用 `op.f(...)`',
+    'callback 正常返回后对其 DML 精确 `commit()`',
+    'callback 抛出时 `rollback()`',
+    '`in_transaction is False`',
+    'record_sync_event()` 显式构造 `version=None,visible=True`',
+  ]) requireTaskText('S3', s3Task1Entry, contract, `Task 1 authority amendment ${contract}`);
+  forbidPattern('S3 Task 1', s3Task1, /config\.attributes\["connection"\]\s*=|config\.attributes\['connection'\]\s*=/g, 'raw Alembic connection attribute bypass');
+  forbidPattern('S3 Task 1', s3Task1, /create_engine\s*\(\s*f?["']sqlite:\/\/\//g, 'pathname SQLite engine reopen');
   requireText('S3 Task 2', s3Task2, 'Modify: `backend/app/mutation/types.py`', 'Task 2 extends canonical mutation types');
   requireTaskText('S3', s3Task4Entry, 'Modify: `backend/app/mutation/types.py`', 'Task 4 extends the shared mutation identity owner');
   requireTaskText('S3', s3Task4Entry, 'Create: `backend/tests/fixtures/task_space_session_child_operation_id_vectors.json`', 'Task 4 owns authoritative child-ID vectors');
@@ -5956,6 +5976,51 @@ function runS2Task1AmendmentVerifierAtPaths(paths) {
       status: 1,
       stdout: '',
       stderr: `VERIFY_S2_TASK1_AMENDMENT_FAILED count=${failures.length}\n${failures.map((failure) => `- ${failure}`).join('\n')}\n`,
+    };
+  failures.length = 0;
+  return result;
+}
+
+function runS3Task1AmendmentVerifierAtPaths(paths) {
+  failures.length = 0;
+  const s3 = readAuthorityText(path.join(paths.plans, expectedPlans[3].filename));
+  const task1 = parseTasks(s3).find((task) => task.number === 1);
+  check(Boolean(task1), 'S3: missing Task 1 for amendment verification');
+  if (task1) {
+    verifyTaskStaging('S3', [task1]);
+    check(parseSteps(task1).length === 5, 'S3 Task 1 amendment must retain five steps');
+    requireSha256('S3 Task 1', task1.body, '1666c45de2daf96ff571b3d24b7147e18eb432682fafb26079ad9e7e7d050583');
+    for (const contract of [
+      'Modify: `backend/app/services/sync_outbox.py`',
+      'Modify: `backend/tests/test_sync_outbox_service.py`',
+      'Modify: `backend/tests/migrations/__init__.py`',
+      'run_bound_command(..., *, after: Callable[[_MaintenanceConnection], None] | None = None)',
+      'tests.migrations.run_bound_command()',
+      '_bind_existing_target()',
+      'open_maintenance()',
+      '_alembic_maintenance_adapter()',
+      '测试不得设置 Alembic `connection` attribute',
+      '`name="floor_cursor"`',
+      'batch.f("ck_sync_state_floor_cursor")',
+      'name=op.f("ck_mutation_batches_state")',
+      'name=op.f("uq_mutation_operation_sequence")',
+      '所有已写成最终形式的 PK/FK/UQ/CK/index 名都必须使用 `op.f(...)`',
+      'callback 正常返回后对其 DML 精确 `commit()`',
+      'callback 抛出时 `rollback()`',
+      '`in_transaction is False`',
+      'callback failure',
+      'record_sync_event()` 显式构造 `version=None,visible=True`',
+      'legacy helper explicit visibility',
+    ]) requireTaskText('S3', task1, contract, `Task 1 authority amendment ${contract}`);
+    forbidPattern('S3 Task 1', task1.body, /config\.attributes\["connection"\]\s*=|config\.attributes\['connection'\]\s*=/g, 'raw Alembic connection attribute bypass');
+    forbidPattern('S3 Task 1', task1.body, /create_engine\s*\(\s*f?["']sqlite:\/\/\//g, 'pathname SQLite engine reopen');
+  }
+  const result = failures.length === 0
+    ? { status: 0, stdout: 'VERIFY_S3_TASK1_AMENDMENT_OK\n', stderr: '' }
+    : {
+      status: 1,
+      stdout: '',
+      stderr: `VERIFY_S3_TASK1_AMENDMENT_FAILED count=${failures.length}\n${failures.map((failure) => `- ${failure}`).join('\n')}\n`,
     };
   failures.length = 0;
   return result;
@@ -8024,6 +8089,105 @@ function runMutationSelfTests(
           '                # overlay.apply(command)\n                overlay.apply(\n                    command.db_plans\n                )',
           this.name,
         );
+      },
+    },
+    {
+      name: 's3-task1-legacy-writer-whitelist-omission',
+      expected: /Task 1 authority amendment .*services\/sync_outbox\.py|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, '- Modify: `backend/app/services/sync_outbox.py`\n', '', this.name);
+        replaceRequired(file, ' app/services/sync_outbox.py', '', this.name);
+      },
+    },
+    {
+      name: 's3-task1-migration-helper-whitelist-omission',
+      expected: /Task 1 authority amendment .*tests\/migrations\/__init__\.py|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, '- Modify: `backend/tests/migrations/__init__.py`\n', '', this.name);
+        replaceRequired(file, ' tests/migrations/__init__.py', '', this.name);
+      },
+    },
+    {
+      name: 's3-task1-raw-connection-attribute-restored',
+      expected: /raw Alembic connection attribute bypass/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          '    run_bound_command("space", path, command.upgrade, "head", after=verify_009)',
+          '    config.attributes["connection"] = connection\n    command.upgrade(config, "head")',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task1-pathname-engine-reopen',
+      expected: /pathname SQLite engine reopen/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          '    path = tmp_path / "space.db"',
+          '    path = tmp_path / "space.db"\n    engine = create_engine(f"sqlite:///{path.as_posix()}")',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task1-check-token-double-prefix',
+      expected: /Task 1 authority amendment .*name="floor_cursor"/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, '`name="floor_cursor"`', '`name="ck_sync_state_floor_cursor"`', this.name);
+      },
+    },
+    {
+      name: 's3-task1-migration-check-double-prefix',
+      expected: /Task 1 authority amendment .*batch\.f/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'batch.f("ck_sync_state_floor_cursor")',
+          '"ck_sync_state_floor_cursor"',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task1-create-table-check-double-prefix',
+      expected: /Task 1 authority amendment .*ck_mutation_batches_state/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'name=op.f("ck_mutation_batches_state")',
+          'name="ck_mutation_batches_state"',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task1-after-callback-transaction-downgrade',
+      expected: /Task 1 authority amendment .*commit\(\)/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'helper 在 callback 正常返回后对其 DML 精确 `commit()`',
+          'helper 在 callback 正常返回后直接关闭连接',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task1-explicit-legacy-visibility-removal',
+      expected: /Task 1 authority amendment .*record_sync_event/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, '，让 `record_sync_event()` 显式构造 `version=None,visible=True`', '', this.name);
       },
     },
     {
@@ -11303,9 +11467,21 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's2-task10-full-backend-gate-omission',
     's2-fleet-preflight-bootstrap-removal',
   ]), runS2Task9AmendmentVerifierAtPaths, 's2-task9-amendment');
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s3-task1-amendment') {
+  runMutationSelfTests(new Set([
+    's3-task1-legacy-writer-whitelist-omission',
+    's3-task1-migration-helper-whitelist-omission',
+    's3-task1-raw-connection-attribute-restored',
+    's3-task1-pathname-engine-reopen',
+    's3-task1-check-token-double-prefix',
+    's3-task1-migration-check-double-prefix',
+    's3-task1-create-table-check-double-prefix',
+    's3-task1-after-callback-transaction-downgrade',
+    's3-task1-explicit-legacy-visibility-removal',
+  ]), runS3Task1AmendmentVerifierAtPaths, 's3-task1-amendment');
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment|--self-test-s3-task1-amendment]\n');
   process.exitCode = 2;
 }
