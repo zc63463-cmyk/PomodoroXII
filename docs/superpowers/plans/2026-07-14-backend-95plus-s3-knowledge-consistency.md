@@ -138,7 +138,10 @@ from_sync_event(scope, event) -> MutationRequest
 - Modify: `backend/app/models/sync_state.py`
 - Modify: `backend/app/models/__init__.py`
 - Modify: `backend/app/db/metadata.py`
+- Modify: `backend/app/services/sync_outbox.py`
+- Modify: `backend/tests/migrations/__init__.py`
 - Create: `backend/tests/test_mutation_migration.py`
+- Modify: `backend/tests/test_sync_outbox_service.py`
 - Modify: `backend/tests/test_parity_alembic_metadata.py`
 - Modify: `backend/tests/test_migration_runner.py`
 - Modify: `backend/tests/test_migration_wal_durability.py`
@@ -157,49 +160,71 @@ from __future__ import annotations
 from pathlib import Path
 
 from alembic import command
-from sqlalchemy import create_engine, inspect, text
 
-from app.db.migrations import _config, run_migrations
+from tests.migrations import run_bound_command
 
 
 def test_space_008_upgrades_to_mutation_journal_and_preserves_legacy_visibility(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "space.db"
-    engine = create_engine(f"sqlite:///{path.as_posix()}")
-    config = _config("space")
-    with engine.begin() as connection:
-        config.attributes["connection"] = connection
-        command.upgrade(config, "space_008_sync_retention_snapshot")
-        connection.execute(
-            text(
-                "INSERT INTO sync_outbox "
-                "(entity_type, entity_id, action, payload, created_at, synced_at) "
-                "VALUES ('note', 'n1', 'update', '{}', '2026-07-14T00:00:00.000Z', NULL)"
-            )
-        )
-    engine.dispose()
 
-    run_migrations("space", path)
-
-    engine = create_engine(f"sqlite:///{path.as_posix()}")
-    try:
-        inspector = inspect(engine)
-        assert {"mutation_batches", "mutation_operations", "mutation_steps"} <= set(
-            inspector.get_table_names()
+    def seed_legacy(maintenance) -> None:
+        maintenance.execute(
+            "INSERT INTO sync_outbox "
+            "(entity_type, entity_id, action, payload, created_at, synced_at) "
+            "VALUES ('note', 'n1', 'update', '{}', "
+            "'2026-07-14T00:00:00.000Z', NULL)"
         )
-        outbox_columns = {column["name"] for column in inspector.get_columns("sync_outbox")}
-        assert {"operation_id", "batch_id", "version", "visible"} <= outbox_columns
-        with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT operation_id, batch_id, version, visible FROM sync_outbox WHERE entity_id='n1'")
-            ).one() == (None, None, None, 1)
-            assert connection.execute(
-                text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_009_mutation_journal"
-    finally:
-        engine.dispose()
+
+    run_bound_command(
+        "space",
+        path,
+        command.upgrade,
+        "space_008_sync_retention_snapshot",
+        after=seed_legacy,
+    )
+
+    observed: dict[str, object] = {}
+
+    def verify_009(maintenance) -> None:
+        observed["tables"] = {
+            row[0]
+            for row in maintenance.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        observed["columns"] = {
+            row[1] for row in maintenance.execute("PRAGMA table_info(sync_outbox)").fetchall()
+        }
+        observed["legacy"] = maintenance.execute(
+            "SELECT operation_id, batch_id, version, visible "
+            "FROM sync_outbox WHERE entity_id='n1'"
+        ).fetchone()
+        observed["head"] = maintenance.execute(
+            "SELECT version_num FROM alembic_version_space"
+        ).fetchone()[0]
+
+    run_bound_command("space", path, command.upgrade, "head", after=verify_009)
+
+    assert {"mutation_batches", "mutation_operations", "mutation_steps"} <= observed["tables"]
+    assert {"operation_id", "batch_id", "version", "visible"} <= observed["columns"]
+    assert observed["legacy"] == (None, None, None, 1)
+    assert observed["head"] == "space_009_mutation_journal"
 ```
+
+Task 1 在 `tests/migrations/__init__.py` 为现有 helper 增加 package-private、仅测试用的
+`run_bound_command(..., *, after: Callable[[_MaintenanceConnection], None] | None = None)`；
+callback 只能在 Alembic operation 完成后、同一 `open_maintenance()` context 关闭前执行，
+helper 在 callback 正常返回后对其 DML 精确 `commit()`，callback 抛出时 `rollback()` 后
+原样重抛，并在离开 maintenance context 前断言 `in_transaction is False`；helper 不返回、
+不缓存、不泄漏 maintenance handle。`test_mutation_migration.py` 必须证明 callback failure
+回滚全部 seed DML、后续新 bound open 可用且旧 callback handle 已关闭。所有 migration setup、seed 和 query
+必须沿用 `tests.migrations.run_bound_command()` 的
+`_bind_existing_target()` + `open_maintenance()` + `_alembic_maintenance_adapter()`
+authority-bound 链路。测试不得设置 Alembic `connection` attribute、不得 pathname
+reopen（包括 SQLAlchemy pathname engine constructor），也不得为制造预期 RED 而削弱 S2
+fail-closed migration authority。
 
 另测 fresh DB 的 FK/unique/check/index，以及 downgrade 到 008 后 legacy outbox rows 仍存在。用 raw SQL 分别尝试非法 batch/operation/step state、负 `accepted_count`、负 `sequence` 和负 `ordinal`，每个写入都必须由 SQLite CHECK 拒绝；Task 1 在 `app/mutation/types.py` 只建立 canonical `MutationState`/`StepState`，ORM 与 migration tests 都导入它们，ORM enum 与 migration literal 集合必须精确相等。不得在 model 或 migration test 中复制第二套 enum；Task 2 只扩展同一 types 文件。
 
@@ -239,10 +264,11 @@ op.create_table(
     sa.CheckConstraint(
         "state IN ('INTENT','STAGED','DB_COMMITTED','FINALIZING','FORWARD_APPLIED','FINALIZED',"
         "'ABORTED','COMPENSATING','COMPENSATED','FAILED_MANUAL')",
-        name="ck_mutation_batches_state",
+        name=op.f("ck_mutation_batches_state"),
     ),
     sa.CheckConstraint(
-        "accepted_count >= 0", name="ck_mutation_batches_accepted_count_nonnegative"
+        "accepted_count >= 0",
+        name=op.f("ck_mutation_batches_accepted_count_nonnegative"),
     ),
 )
 op.create_table(
@@ -263,14 +289,17 @@ op.create_table(
     sa.Column("created_at", sa.String(length=32), nullable=False),
     sa.Column("updated_at", sa.String(length=32), nullable=False),
     sa.ForeignKeyConstraint(["batch_id"], ["mutation_batches.batch_id"]),
-    sa.UniqueConstraint("batch_id", "sequence", name="uq_mutation_operation_sequence"),
+    sa.UniqueConstraint(
+        "batch_id", "sequence", name=op.f("uq_mutation_operation_sequence")
+    ),
     sa.CheckConstraint(
         "state IN ('INTENT','STAGED','DB_COMMITTED','FINALIZING','FORWARD_APPLIED','FINALIZED',"
         "'ABORTED','COMPENSATING','COMPENSATED','FAILED_MANUAL')",
-        name="ck_mutation_operations_state",
+        name=op.f("ck_mutation_operations_state"),
     ),
     sa.CheckConstraint(
-        "sequence >= 0", name="ck_mutation_operations_sequence_nonnegative"
+        "sequence >= 0",
+        name=op.f("ck_mutation_operations_sequence_nonnegative"),
     ),
 )
 op.create_table(
@@ -286,12 +315,16 @@ op.create_table(
     sa.Column("applied_hash", sa.String(length=64), nullable=True),
     sa.Column("state", sa.String(length=16), nullable=False),
     sa.ForeignKeyConstraint(["operation_id"], ["mutation_operations.operation_id"]),
-    sa.UniqueConstraint("operation_id", "ordinal", name="uq_mutation_step_ordinal"),
+    sa.UniqueConstraint(
+        "operation_id", "ordinal", name=op.f("uq_mutation_step_ordinal")
+    ),
     sa.CheckConstraint(
         "state IN ('PENDING','APPLIED','COMPENSATED')",
-        name="ck_mutation_steps_state",
+        name=op.f("ck_mutation_steps_state"),
     ),
-    sa.CheckConstraint("ordinal >= 0", name="ck_mutation_steps_ordinal_nonnegative"),
+    sa.CheckConstraint(
+        "ordinal >= 0", name=op.f("ck_mutation_steps_ordinal_nonnegative")
+    ),
 )
 ```
 
@@ -312,13 +345,21 @@ if invalid is not None:
 
 with op.batch_alter_table("sync_state") as batch:
     batch.create_check_constraint(
-        "ck_sync_state_floor_cursor", SYNC_STATE_FLOOR_CURSOR_CHECK
+        batch.f("ck_sync_state_floor_cursor"), SYNC_STATE_FLOOR_CURSOR_CHECK
     )
 ```
 
-`SyncState.__table_args__` 使用相同命名 CHECK。009 的 downgrade 显式 drop 该约束再回到 008；010 继续保持 `down_revision="space_009_mutation_journal"`，不得复制、改名或接管此不变量。
+`SyncState.__table_args__` 使用相同命名 CHECK。由于 `Base.metadata` 已安装
+`ck_%(table_name)s_%(constraint_name)s` naming convention，ORM 必须使用 constraint
+token `name="floor_cursor"`，使最终数据库名精确为 `ck_sync_state_floor_cursor`；不得把
+完整最终名再次作为 token 导致二次前缀。009 的 downgrade 显式 drop 该约束再回到
+008；010 继续保持 `down_revision="space_009_mutation_journal"`，不得复制、改名或接管此不变量。
+009 migration 中所有已写成最终形式的 PK/FK/UQ/CK/index 名都必须使用 `op.f(...)`
+或 `batch.f(...)` 标记已经应用 naming convention；禁止把 `ck_mutation_*`、
+`uq_mutation_*`、`ix_mutation_*` 等最终名当成 convention token 再次扩展。parity test
+必须逐名证明 migration 与 ORM 的最终约束和索引名称相同。
 
-再为 batch/operation state、operation batch、step operation 创建普通 indexes；通过 `batch_alter_table("sync_outbox")` 添加 nullable `operation_id`, nullable `batch_id`, nullable integer `version` with `version IS NULL OR version >= 0`, non-null boolean `visible`，最终 DB/ORM visible server default 必须是 false。migration transaction 先以 false 建列，再把迁移前 existing rows 显式 backfill 为 `visible=true,version=null`；新 raw INSERT 省略 visible 时保持 false，任何 caller 都不能因漏参提前公开。S3 UoW 的 Sync-enabled event 必须显式写 `SyncEventPlan.version`；legacy non-UoW helper 暂时显式传 `version=None,visible=True`，不得保留 Python/DB true default；S4 删除最后 bypass。为 identity/visibility 列建立 indexes，version CHECK 做 migration/ORM parity。把 S2 新增的 `test_migration_wal_durability.py`、`test_space_lifecycle.py` 以及所有 Space table/head assertions 从 `space_008_sync_retention_snapshot` 更新为 `space_009_mutation_journal`，不得留下跨波硬编码。测试包含 migration legacy null version/visible row、UoW delete version persistence、negative raw version rejection和 post-migration raw INSERT omitted-visible=false。
+再为 batch/operation state、operation batch、step operation 创建普通 indexes；通过 `batch_alter_table("sync_outbox")` 添加 nullable `operation_id`, nullable `batch_id`, nullable integer `version` with `version IS NULL OR version >= 0`, non-null boolean `visible`，最终 DB/ORM visible server default 必须是 false。migration transaction 先以 false 建列，再把迁移前 existing rows 显式 backfill 为 `visible=true,version=null`；新 raw INSERT 省略 visible 时保持 false，任何 caller 都不能因漏参提前公开。S3 UoW 的 Sync-enabled event 必须显式写 `SyncEventPlan.version`；Task 1 同时修改唯一 legacy writer `app/services/sync_outbox.py`，让 `record_sync_event()` 显式构造 `version=None,visible=True`，并在 `test_sync_outbox_service.py` 证明 Task 1 后旧写入仍可见；不得保留 Python/DB true default，S4 删除最后 bypass。为 identity/visibility 列建立 indexes，version CHECK 做 migration/ORM parity。把 S2 新增的 `test_migration_wal_durability.py`、`test_space_lifecycle.py` 以及所有 Space table/head assertions 从 `space_008_sync_retention_snapshot` 更新为 `space_009_mutation_journal`，不得留下跨波硬编码。测试包含 migration legacy null version/visible row、legacy helper explicit visibility、UoW delete version persistence、negative raw version rejection和 post-migration raw INSERT omitted-visible=false。
 
 - [ ] **Step 4: Run migration/parity tests**
 
@@ -327,7 +368,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 .\.venv\Scripts\python.exe -m pytest -q tests/test_mutation_migration.py tests/test_migration_runner.py tests/test_migration_wal_durability.py tests/test_space_lifecycle.py tests/test_alembic_dual_environments.py tests/test_parity_alembic_metadata.py -p no:cacheprovider
-.\.venv\Scripts\ruff.exe check --no-cache app/models/mutation.py app/models/sync_outbox.py app/models/sync_state.py alembic_space/versions/009_mutation_journal.py tests/test_mutation_migration.py tests/test_parity_alembic_metadata.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_sync_outbox_service.py -p no:cacheprovider
+.\.venv\Scripts\ruff.exe check --no-cache app/models/mutation.py app/models/sync_outbox.py app/models/sync_state.py app/services/sync_outbox.py alembic_space/versions/009_mutation_journal.py tests/test_mutation_migration.py tests/test_parity_alembic_metadata.py tests/test_sync_outbox_service.py
 ```
 
 Expected: PASS; Space has exactly one head `space_009_mutation_journal`; legacy events are visible with null operation/batch IDs; valid legacy Sync state is preserved and every raw SQL violation of `0 <= retention_floor <= current_cursor` is rejected.
@@ -335,7 +377,7 @@ Expected: PASS; Space has exactly one head `space_009_mutation_journal`; legacy 
 - [ ] **Step 5: Commit the journal schema**
 
 ```powershell
-git add alembic_space/versions/009_mutation_journal.py app/mutation/__init__.py app/mutation/types.py app/models/mutation.py app/models/sync_outbox.py app/models/sync_state.py app/models/__init__.py app/db/metadata.py tests/test_mutation_migration.py tests/test_parity_alembic_metadata.py tests/test_migration_runner.py tests/test_migration_wal_durability.py tests/test_space_lifecycle.py tests/test_alembic_dual_environments.py
+git add alembic_space/versions/009_mutation_journal.py app/mutation/__init__.py app/mutation/types.py app/models/mutation.py app/models/sync_outbox.py app/models/sync_state.py app/models/__init__.py app/db/metadata.py app/services/sync_outbox.py tests/migrations/__init__.py tests/test_mutation_migration.py tests/test_sync_outbox_service.py tests/test_parity_alembic_metadata.py tests/test_migration_runner.py tests/test_migration_wal_durability.py tests/test_space_lifecycle.py tests/test_alembic_dual_environments.py
 git commit -m "feat(mutation): add durable operation journal schema"
 ```
 
