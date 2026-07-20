@@ -396,6 +396,7 @@ git commit -m "feat(mutation): add durable operation journal schema"
 - Create: `backend/tests/ast_helpers.py`
 - Create: `backend/tests/test_mutation_journal.py`
 - Modify: `backend/tests/test_compiled_entity_catalog.py`
+- Modify: `backend/tests/test_mcp_authorization.py`
 
 **Interfaces:**
 - Consumes: Task 1 canonical enums/schema and S1 `app.errors.deep_freeze_json(value)` plus sole recursive `app.errors.to_wire_json(value)` serializer.
@@ -525,13 +526,19 @@ async def test_rejection_source_mutation_and_restart_preserve_wire_bytes(
 
 
 def test_catalog_rejects_unknown_sync_conflict_policy(catalog_fixture) -> None:
+    invalid = replace(
+        REGISTRY.get("note"), sync_conflict_policy="merge_magic"
+    )
     with pytest.raises(ValueError, match="sync_conflict_policy"):
-        catalog_fixture.compile_spec(sync_conflict_policy="merge_magic")
+        CompiledEntityCatalog.compile((invalid,), version="test")
 
 
 def test_catalog_preserves_strict_cas_policy(catalog_fixture) -> None:
-    compiled = catalog_fixture.compile_spec(sync_conflict_policy="strict_cas")
-    assert compiled.sync_conflict_policy == "strict_cas"
+    strict = replace(
+        REGISTRY.get("note"), sync_conflict_policy="strict_cas"
+    )
+    catalog = CompiledEntityCatalog.compile((strict,), version="test")
+    assert catalog.get("note").sync_conflict_policy == "strict_cas"
 ```
 
 相邻参数化用例必须覆盖 `MutationRequest.payload`、`DbMutationPlan.primary_key/before_row/after_row`、`SyncEventPlan.payload`、`MutationCommand.result_value`、`PersistedMutationCommand.result_value`、`MutationResult.value`、`MutationRejection.details`、`MutationRuleViolation.details`，并分别在构造后变更原始 nested dict/list。每个 record 的 `to_wire_json()` 结果、canonical bytes/hash 与 fresh-process journal decoder 结果都必须逐字不变；直接 dataclass constructor 与 factory constructor 都走相同 `__post_init__`，不能只保护 `from_payload()`。
@@ -975,14 +982,17 @@ def require_sync_conflict_policy(value: str) -> SyncConflictPolicy:
     return cast(SyncConflictPolicy, value)
 ```
 
-在 `EntitySpec` 与 S2 `CompiledEntitySpec` 中分别加入以下精确字段，并在 catalog compile 时调用上面的 validator：
+S2 没有、Task 2 也不得引入第二个 `CompiledEntitySpec` DTO。
+`CompiledEntityCatalog` 继续持有并返回 frozen `EntitySpec`；compile loop 对每个 spec
+调用 `require_sync_conflict_policy()`，`_canonical_spec()` 把验证后的字段纳入 catalog
+hash。compiler 后续只从 `catalog.get(...).sync_conflict_policy` 读取该 compiled value，
+不得按 entity name 硬编码。`EntitySpec` 加入以下精确字段：
 
 ```python
-sync_conflict_policy: SyncConflictPolicy = "timestamp_lww"  # EntitySpec
-sync_conflict_policy: SyncConflictPolicy                    # CompiledEntitySpec
+sync_conflict_policy: SyncConflictPolicy = "timestamp_lww"
 ```
 
-`backend/app/errors.py` owns the only externally catchable mutation exceptions. `MutationRejectedError(AppError)` retains the frozen stored `MutationRejection`, and `IdempotencyConflictError(AppError)` owns `code="idempotency_conflict"`; neither is a plain `RuntimeError`. A closed `MUTATION_REJECTION_SPECS` maps every compiler/mapper code to exact status, safe message, and legacy error type. S3 defines explicit `S3_MUTATION_REJECTION_CODES`, `RESERVED_TS_CODES`, and `RESERVED_S4_MAPPING_CODES`: its producer-enumeration test covers only current `MutationCompiler` and `EntityCommand` producers, requires exact equality with `S3_MUTATION_REJECTION_CODES`, and separately requires every reserved TS/S4 code to exist in the closed map without pretending a pre-TS/S4 producer exists. TS1/TS2 and S4 extend the producer test only when their real producers land, so an unknown code cannot silently become a 500 and no reserved code may remain orphaned. `retryable` and `details` are copied from the persisted rejection; request ID is supplied only by S1's existing handler at render time and is never persisted. Default REST keeps the endpoint's existing legacy body; canonical REST and MCP serialize the same five-field `DomainErrorRecord`. No S3/S4 `DomainFailure` family is introduced.
+`backend/app/errors.py` owns the only externally catchable mutation exceptions. `MutationRejectedError(AppError)` retains the frozen stored `MutationRejection`, and `IdempotencyConflictError(AppError)` owns `code="idempotency_conflict"`; neither is a plain `RuntimeError`. A closed `MUTATION_REJECTION_SPECS` maps every compiler/mapper code to exact status, safe message, legacy error type, and retryable value. S3 defines explicit `S3_MUTATION_REJECTION_CODES`, `RESERVED_TS_CODES`, and `RESERVED_S4_MAPPING_CODES`. Producer enumeration follows the phased subset/exact rule below; Task 2 must not pretend Task 4/6 producers already exist. TS1/TS2 and S4 extend the producer test only when their real producers land, so an unknown code cannot silently become a 500 and no reserved code may remain orphaned. `retryable` and `details` are copied from the persisted rejection, but every `MutationRejection` construction and fresh-process decoder validates that the persisted boolean equals the closed spec; mismatch is corrupt durable state and fails closed rather than being rendered. request ID is supplied only by S1's existing handler at render time and is never persisted. Default REST keeps the endpoint's existing legacy body; canonical REST and MCP serialize the same five-field `DomainErrorRecord`. No S3/S4 `DomainFailure` family is introduced.
 
 ```python
 RESERVED_TS_CODES = frozenset({
@@ -995,6 +1005,7 @@ RESERVED_TS_CODES = frozenset({
     "unsupported_content_version",
     "invalid_note_document",
     "invalid_work_item_tree",
+    "not_found",
     "active_child_conflict",
     "active_session_exists",
     "stale_session_owner",
@@ -1004,7 +1015,72 @@ RESERVED_TS_CODES = frozenset({
     "active_session_recovery_required",
     "work_item_structure_changed",
 })
+
+S3_MUTATION_REJECTION_CODES = frozenset({
+    "space_scope_mismatch",
+    "version_conflict",
+    "cycle_detected",
+    "relation_endpoint_missing",
+    "entity_id_mismatch",
+    "delete_payload_not_empty",
+    "not_found",
+})
+
+RESERVED_S4_MAPPING_CODES = frozenset({"entity_not_sync_enabled"})
 ```
+
+`MUTATION_REJECTION_SPECS` 的 key 精确等于上述三个集合的并集（集合可重叠，
+map 中每个 code 只出现一次），并固定以下四元组：
+`not_found` 同时属于 S3 与 TS reserved 集合：S3 Task 6 的 CAS reread 产出它，
+TS1/TS2 domain compiler 也复用同一 durable rejection；两个 producer gate 都枚举该
+literal，但 closed map 仍只有一个条目。
+
+| code | HTTP | safe message | legacy error type | retryable |
+|---|---:|---|---|---:|
+| `space_scope_mismatch` | 403 | `Mutation does not belong to the authorized Space` | `authorization_error` | false |
+| `version_conflict` | 409 | `Entity version conflict` | `conflict` | false |
+| `cycle_detected` | 409 | `Mutation would create a cycle` | `conflict` | false |
+| `relation_endpoint_missing` | 409 | `Relation endpoint does not exist` | `conflict` | false |
+| `entity_id_mismatch` | 422 | `Entity identity does not match payload` | `validation_error` | false |
+| `delete_payload_not_empty` | 422 | `Delete payload must be empty` | `validation_error` | false |
+| `idempotency_conflict` | 409 | `Operation ID is already bound to a different request` | `conflict` | false |
+| `invalid_payload_hash` | 422 | `Payload hash does not match canonical payload` | `validation_error` | false |
+| `invalid_project_key` | 422 | `Project key is invalid` | `validation_error` | false |
+| `project_key_conflict` | 409 | `Project key conflict` | `conflict` | false |
+| `unsupported_content_version` | 422 | `Content version is unsupported` | `validation_error` | false |
+| `invalid_note_document` | 422 | `Note document is invalid` | `validation_error` | false |
+| `invalid_work_item_tree` | 422 | `Work item tree is invalid` | `validation_error` | false |
+| `not_found` | 404 | `Entity not found` | `not_found` | false |
+| `active_child_conflict` | 409 | `An active child prevents this mutation` | `conflict` | false |
+| `active_session_exists` | 409 | `An active Session already exists` | `conflict` | false |
+| `stale_session_owner` | 409 | `Session ownership is stale` | `conflict` | false |
+| `session_activation_conflict` | 409 | `Session activation conflict` | `conflict` | false |
+| `offline_formal_creation_forbidden` | 409 | `Formal offline creation is forbidden` | `conflict` | false |
+| `command_result_unknown` | 503 | `Command result requires recovery` | `service_unavailable` | true |
+| `active_session_recovery_required` | 503 | `Active Session coordination requires recovery` | `service_unavailable` | true |
+| `work_item_structure_changed` | 409 | `Work item structure changed` | `conflict` | false |
+| `entity_not_sync_enabled` | 422 | `Entity type is not sync-enabled` | `validation_error` | false |
+
+Task 2 的 producer-enumeration test 只扫描此时真实存在的 S3 producer modules；在
+Task 4/6 producer 落地前允许实际 producer set 是 `S3_MUTATION_REJECTION_CODES` 的子集，
+但每个发现的 literal 必须属于该集合。Task 6 完成后同一测试升级为与
+`S3_MUTATION_REJECTION_CODES` 精确相等。TS1/TS2 与 S4 分别在真实 producer 落地时把
+对应 reserved 集合加入 exact equality；任何阶段 map key 始终精确等于三个声明集合
+的并集，不允许未知或孤儿 code。
+
+S1 `AppError` 已有 `code=` 参数。Task 2 对“直接实例化 base `AppError` 且 code 属于
+上述 closed mutation map”的路径增加唯一 resolver：从 spec 绑定 status、safe message、
+legacy error type 与 retryable；调用方提供任何冲突 override 时拒绝，unknown mutation
+code 也不得降级为默认 500。这样 TS2 计划中的
+`AppError(code="active_session_recovery_required")` 精确渲染为表中 503 四元组。
+subclass（包括 `MutationRejectedError`/`IdempotencyConflictError`）继续使用各自构造器，
+不得经第二套 mapping。测试必须覆盖 direct base error 的 503 映射、冲突 override 拒绝、
+unknown code 拒绝，以及 persisted retryable 篡改在 decoder/render 前失败。
+Task 2 同时更新 `test_mcp_authorization.py` 中既有的两处 direct
+`version_conflict` fixture：只传 `code="version_conflict"` 与 frozen nested details，
+不再传旧 message/status/error_type override；断言改为 closed spec 的
+`Entity version conflict`/409/`conflict`/false，并继续证明 canonical REST 与 MCP
+使用同一 `DomainErrorRecord`、nested source mutation 不改变 wire bytes。
 
 The reserved `invalid_payload_hash` entry is fixed at HTTP `422`, safe message
 `"Payload hash does not match canonical payload"`, and `retryable=False`.
@@ -1051,8 +1127,8 @@ Journal 的 `command_json` 保存 `PersistedMutationCommand` canonical JSON：de
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
-.\.venv\Scripts\python.exe -m pytest -q tests/test_mutation_journal.py tests/test_compiled_entity_catalog.py -p no:cacheprovider
-.\.venv\Scripts\ruff.exe check --no-cache app/mutation/types.py app/mutation/journal.py app/registry/entities.py app/registry/catalog.py tests/ast_helpers.py tests/test_mutation_journal.py tests/test_compiled_entity_catalog.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_mutation_journal.py tests/test_compiled_entity_catalog.py tests/test_mcp_authorization.py -p no:cacheprovider
+.\.venv\Scripts\ruff.exe check --no-cache app/mutation/types.py app/mutation/journal.py app/registry/entities.py app/registry/catalog.py tests/ast_helpers.py tests/test_mutation_journal.py tests/test_compiled_entity_catalog.py tests/test_mcp_authorization.py
 ```
 
 Expected: PASS; every illegal shortcut and every terminal escape is rejected, and batch events become visible together.
@@ -1060,7 +1136,7 @@ Expected: PASS; every illegal shortcut and every terminal escape is rejected, an
 - [ ] **Step 5: Commit shared mutation types and journal**
 
 ```powershell
-git add pyproject.toml uv.lock app/mutation/__init__.py app/mutation/types.py app/mutation/journal.py app/errors.py app/registry/entities.py app/registry/catalog.py tests/ast_helpers.py tests/fixtures/task_space_session_payload_hash_vectors.json tests/test_mutation_journal.py tests/test_compiled_entity_catalog.py
+git add pyproject.toml uv.lock app/mutation/__init__.py app/mutation/types.py app/mutation/journal.py app/errors.py app/registry/entities.py app/registry/catalog.py tests/ast_helpers.py tests/fixtures/task_space_session_payload_hash_vectors.json tests/test_mutation_journal.py tests/test_compiled_entity_catalog.py tests/test_mcp_authorization.py
 git commit -m "feat(mutation): enforce closed journal state machine"
 ```
 
