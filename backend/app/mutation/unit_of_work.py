@@ -316,7 +316,11 @@ class AuthorityOverlay:
 
             if plan.operation == "insert":
                 after = require_complete_row(plan.after_row, "after")
-                if current is not None or plan.before_row is not None:
+                if (
+                    current is not None
+                    or plan.before_row is not None
+                    or plan.expected_version is not None
+                ):
                     raise SpaceRecoveryRequiredError(
                         "insert plan conflicts with authoritative state"
                     )
@@ -419,7 +423,13 @@ def _require_current_version(
 ) -> str | None:
     expected = request.expected_version
     actual = current.get("version")
-    if expected is None or actual == expected:
+    if expected is None:
+        if spec.sync_conflict_policy == "strict_cas":
+            raise MutationRuleViolation(
+                "version_conflict", {"entityId": request.entity_id}
+            )
+        return None
+    if actual == expected:
         return None
     details: dict[str, object] = {"entityId": request.entity_id}
     if spec.sync_conflict_policy == "timestamp_lww" and request.client_updated_at is not None:
@@ -656,6 +666,7 @@ class MutationCompiler:
                     )
                 )
             else:
+                _validate_compiled_command(command, self.catalog)
                 overlay.apply(command)
                 accepted_ids.append(item.operation_id)
                 commands.append(command)
@@ -707,6 +718,84 @@ def _validate_persisted_plan_against_catalog(
     raise SpaceRecoveryRequiredError(f"unknown persisted mutation table: {plan.table}")
 
 
+def _validate_sync_event_against_catalog(
+    event: SyncEventPlan, catalog: CompiledEntityCatalog
+) -> EntitySpec:
+    try:
+        spec = catalog.get(event.entity_type)
+    except KeyError as exc:
+        raise SpaceRecoveryRequiredError(
+            "persisted sync entity is outside the compiled catalog"
+        ) from exc
+    if not spec.sync_enabled:
+        raise SpaceRecoveryRequiredError("persisted sync entity is not sync-enabled")
+    if event.action in {"create", "update"}:
+        valid_payload = (
+            set(event.payload) == set(spec.field_names)
+            and str(event.payload.get(spec.primary_key)) == event.entity_id
+            and event.payload.get("version") == event.version
+        )
+    else:
+        valid_payload = event.payload == {"deleted_at": event.created_at}
+    if not valid_payload:
+        raise SpaceRecoveryRequiredError(
+            "persisted sync event conflicts with the catalog"
+        )
+    return spec
+
+
+def _validate_compiled_command(
+    command: MutationCommand, catalog: CompiledEntityCatalog
+) -> None:
+    try:
+        request_spec = catalog.get(command.request.entity_type)
+    except KeyError as exc:
+        raise SpaceRecoveryRequiredError(
+            "compiled request entity is outside the compiled catalog"
+        ) from exc
+    plan_specs = tuple(
+        _validate_persisted_plan_against_catalog(plan, catalog)
+        for plan in command.db_plans
+    )
+    if plan_specs and request_spec.name not in {spec.name for spec in plan_specs}:
+        raise SpaceRecoveryRequiredError(
+            "compiled database effects do not include the request entity"
+        )
+    for event in command.sync_events:
+        _validate_sync_event_against_catalog(event, catalog)
+    for plan, spec in zip(command.db_plans, plan_specs, strict=True):
+        if spec.sync_enabled and not any(
+            event.entity_type == spec.name
+            and event.entity_id == str(plan.primary_key[spec.primary_key])
+            and event.action
+            == {"insert": "create", "update": "update", "delete": "delete"}[plan.operation]
+            for event in command.sync_events
+        ):
+            raise SpaceRecoveryRequiredError(
+                "compiled sync event is missing for a database mutation"
+            )
+    affected_specs = {spec.name: spec for spec in plan_specs}
+    if not plan_specs:
+        affected_specs[request_spec.name] = request_spec
+    tags = {projection.tag for projection in command.projections}
+    for spec in affected_specs.values():
+        if spec.storage_type is StorageType.FS_DB_SPLIT:
+            if not tags or (
+                command.request.name in {"entity.create", "note.create"}
+                and ProjectionActionTag.MARKDOWN_WRITE not in tags
+            ):
+                raise SpaceRecoveryRequiredError(
+                    "projection-backed entity requires complete projections"
+                )
+        if (
+            spec.delete_strategy == "cascade_soft_delete"
+            and ProjectionActionTag.INDEX_REPLACE not in tags
+        ):
+            raise SpaceRecoveryRequiredError(
+                "cascade entity requires an index projection"
+            )
+
+
 def decode_and_validate_persisted_command(
     command_json: str, *, catalog: CompiledEntityCatalog
 ) -> PersistedMutationCommand:
@@ -720,28 +809,7 @@ def decode_and_validate_persisted_command(
     for plan in command.db_plans:
         _validate_persisted_plan_against_catalog(plan, catalog)
     for event in command.sync_events:
-        try:
-            spec = catalog.get(event.entity_type)
-        except KeyError as exc:
-            raise SpaceRecoveryRequiredError(
-                "persisted sync entity is outside the compiled catalog"
-            ) from exc
-        if not spec.sync_enabled:
-            raise SpaceRecoveryRequiredError(
-                "persisted sync entity is not sync-enabled"
-            )
-        if event.action in {"create", "update"}:
-            valid_payload = (
-                set(event.payload) == set(spec.field_names)
-                and str(event.payload.get(spec.primary_key)) == event.entity_id
-                and event.payload.get("version") == event.version
-            )
-        else:
-            valid_payload = event.payload == {"deleted_at": event.created_at}
-        if not valid_payload:
-            raise SpaceRecoveryRequiredError(
-                "persisted sync event conflicts with the catalog"
-            )
+        _validate_sync_event_against_catalog(event, catalog)
     return command
 
 
@@ -859,7 +927,15 @@ class MutationUnitOfWork:
         operation_ids: Sequence[str] | None = None,
     ) -> BatchMutationResult:
         requested = tuple(requests)
-        resolved_ids = tuple(operation_ids) if operation_ids is not None else child_operation_ids(batch_id, len(requested))
+        if operation_ids is None:
+            resolved_ids = child_operation_ids(batch_id, len(requested))
+            operation_id_derivations = {
+                operation_id: (batch_id, f"{index:04d}")
+                for index, operation_id in enumerate(resolved_ids)
+            }
+        else:
+            resolved_ids = tuple(operation_ids)
+            operation_id_derivations = {}
         if len(resolved_ids) != len(requested) or len(set(resolved_ids)) != len(resolved_ids):
             raise ValueError("operation_ids must be unique and align with requests")
         return await self.execute_prepared_batch(
@@ -869,6 +945,7 @@ class MutationUnitOfWork:
                 for index, (operation_id, request) in enumerate(zip(resolved_ids, requested, strict=True))
             ),
             batch_id,
+            operation_id_derivations=operation_id_derivations,
         )
 
     async def execute_prepared_batch(
@@ -876,6 +953,8 @@ class MutationUnitOfWork:
         scope: SpaceRuntimeHandle,
         items: Sequence[PreparedBatchItem],
         batch_id: str,
+        *,
+        operation_id_derivations: Mapping[str, tuple[str, str]] | None = None,
     ) -> BatchMutationResult:
         validate_operation_id(batch_id)
         prepared = tuple(items)
@@ -888,6 +967,12 @@ class MutationUnitOfWork:
             raise ValueError("prepared operation IDs must be unique")
         for operation_id in operation_ids:
             validate_operation_id(operation_id)
+        derivations = dict(operation_id_derivations or {})
+        if set(derivations) - set(operation_ids):
+            raise ValueError("operation ID derivations must belong to this batch")
+        for operation_id, (parent_id, suffix) in derivations.items():
+            if parent_id != batch_id or bounded_child_operation_id(parent_id, suffix) != operation_id:
+                raise ValueError("operation ID derivation does not match its child")
         request_hash = hash_prepared_batch_identity(
             tuple((item.request_index, item.operation_id, item.intent_hash) for item in prepared)
         )
@@ -922,9 +1007,19 @@ class MutationUnitOfWork:
                 )
             )
             if not compilation.commands:
-                return await journal.record_rejected_batch(batch_id, request_hash, rejections)
+                return await journal.record_rejected_batch(
+                    batch_id,
+                    request_hash,
+                    rejections,
+                    operation_id_derivations=derivations,
+                )
             await journal.create_batch_intent(
-                batch_id, request_hash, compilation.operation_ids, compilation.commands, rejections
+                batch_id,
+                request_hash,
+                compilation.operation_ids,
+                compilation.commands,
+                rejections,
+                operation_id_derivations=derivations,
             )
             manifests = await self._publish_stages(scope, lease, compilation.operation_ids, compilation.commands)
             await journal.mark_staged(batch_id, manifests)
