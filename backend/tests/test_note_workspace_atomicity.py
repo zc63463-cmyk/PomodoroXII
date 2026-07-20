@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -284,6 +286,90 @@ def _with_projection(base, *, projections):
     )
 
 
+def _canonical_projection_blob(value) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
+def _note_index_blob(row, path: str) -> bytes:
+    return _canonical_projection_blob(
+        {
+            "row": {
+                "category": row["category"],
+                "content_hash": row["content_hash"],
+                "created_at": row["created_at"],
+                "current_path": path,
+                "folder_id": row["folder_id"],
+                "is_deleted": False,
+                "level": "L1",
+                "note_id": row["id"],
+                "status": row["status"],
+                "summary": row["summary"],
+                "tags": row["tags"],
+                "title": row["title"],
+                "trashed_at": row["trashed_at"],
+                "updated_at": row["updated_at"],
+                "word_count": row["word_count"],
+            }
+        }
+    )
+
+
+def _folder_index_blob(row) -> bytes:
+    return _canonical_projection_blob(
+        {
+            "row": {
+                key: row[key]
+                for key in (
+                    "color",
+                    "created_at",
+                    "icon",
+                    "id",
+                    "is_system",
+                    "name",
+                    "parent_id",
+                    "sort_order",
+                    "trashed_at",
+                    "updated_at",
+                )
+            }
+        }
+    )
+
+
+def _fts_blob(row, body: bytes) -> bytes:
+    return _canonical_projection_blob(
+        {"content": body.decode("utf-8"), "title": row["title"]}
+    )
+
+
+def _note_create_projections(base, body: bytes, *, path: str | None = None):
+    row = base.db_plans[0].after_row
+    assert row is not None
+    target = path or f"notes/{row['id']}.md"
+    return (
+        _projection_plan("markdown_write", target, 0, None, body),
+        _projection_plan(
+            "index_replace",
+            f"index/notes/note_id/{row['id']}",
+            1,
+            None,
+            _note_index_blob(row, target),
+        ),
+        _projection_plan(
+            "fts_replace",
+            f"fts/{row['id']}",
+            2,
+            None,
+            _fts_blob(row, body),
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_fixture) -> None:
     async with uow_fixture.sessions.begin() as session:
@@ -481,20 +567,11 @@ async def test_batch_overlay_exposes_folder_create_to_note_child(uow_fixture) ->
                     f"index/folders/id/{request.entity_id}",
                     0,
                     None,
-                    json.dumps(
-                        {"row": dict(row)},
-                        ensure_ascii=True,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("ascii"),
+                    _folder_index_blob(row),
                 )
             else:
-                projection = _projection_plan(
-                    "markdown_write",
-                    f"notes/{request.entity_id}.md",
-                    0,
-                    None,
-                    b"",
+                return _with_projection(
+                    base, projections=_note_create_projections(base, b"")
                 )
             return _with_projection(base, projections=(projection,))
 
@@ -512,7 +589,11 @@ async def test_batch_overlay_exposes_folder_create_to_note_child(uow_fixture) ->
                 name="entity.create",
                 entity_type="note",
                 entity_id="note-child",
-                payload={"title": "Child", "folder_id": "folder-child-parent"},
+                payload={
+                    "title": "Child",
+                    "content_hash": hashlib.sha256(b"").hexdigest(),
+                    "folder_id": "folder-child-parent",
+                },
                 expected_version=None,
             ),
         ),
@@ -615,7 +696,7 @@ async def test_batch_overlay_carries_consecutive_note_body_updates(uow_fixture) 
             Note(
                 id="body-note",
                 title="Body",
-                content_hash="original",
+                content_hash=hashlib.sha256(b"original").hexdigest(),
                 word_count=1,
                 summary="",
                 tags="[]",
@@ -640,18 +721,44 @@ async def test_batch_overlay_carries_consecutive_note_body_updates(uow_fixture) 
             target = "notes/body-note.md"
             before = context.authority.markdown(target)
             assert before is not None
-            body = str(request.payload["content_hash"]).encode("utf-8")
+            body = b"first" if request.expected_version == 1 else b"second"
             assert before == (b"original" if request.expected_version == 1 else b"first")
             _, _, tag_type, plan_type = _projection_api()
-            projection = plan_type(
-                tag_type.MARKDOWN_WRITE,
-                None,
-                mutation_types.ContainedProjectionActionField(target),
-                0,
-                before,
-                body,
+            row = base.db_plans[0].after_row
+            assert row is not None
+            index_target = f"index/notes/note_id/{request.entity_id}"
+            fts_target = f"fts/{request.entity_id}"
+            projections = (
+                plan_type(
+                    tag_type.MARKDOWN_WRITE,
+                    None,
+                    mutation_types.ContainedProjectionActionField(target),
+                    0,
+                    before,
+                    body,
+                ),
+                plan_type(
+                    tag_type.INDEX_REPLACE,
+                    None,
+                    mutation_types.ContainedProjectionActionField(index_target),
+                    1,
+                    context.authority.derived_projection(
+                        tag_type.INDEX_REPLACE, index_target
+                    ),
+                    _note_index_blob(row, target),
+                ),
+                plan_type(
+                    tag_type.FTS_REPLACE,
+                    None,
+                    mutation_types.ContainedProjectionActionField(fts_target),
+                    2,
+                    context.authority.derived_projection(
+                        tag_type.FTS_REPLACE, fts_target
+                    ),
+                    _fts_blob(row, body),
+                ),
             )
-            return _with_projection(base, projections=(projection,))
+            return _with_projection(base, projections=projections)
 
     compilation = await _compile_production_batch(
         uow_fixture,
@@ -660,14 +767,14 @@ async def test_batch_overlay_carries_consecutive_note_body_updates(uow_fixture) 
                 name="entity.update",
                 entity_type="note",
                 entity_id="body-note",
-                payload={"content_hash": "first"},
+                payload={"content_hash": hashlib.sha256(b"first").hexdigest()},
                 expected_version=1,
             ),
             MutationRequest.from_payload(
                 name="entity.update",
                 entity_type="note",
                 entity_id="body-note",
-                payload={"content_hash": "second"},
+                payload={"content_hash": hashlib.sha256(b"second").hexdigest()},
                 expected_version=2,
             ),
         ),
@@ -678,7 +785,8 @@ async def test_batch_overlay_carries_consecutive_note_body_updates(uow_fixture) 
     assert compilation.commands[1].projections[0].before == b"first"
     async with uow_fixture.sessions() as session:
         stored = await session.get(Note, "body-note")
-    assert stored is not None and stored.content_hash == "original"
+    assert stored is not None
+    assert stored.content_hash == hashlib.sha256(b"original").hexdigest()
 
 
 @pytest.mark.asyncio
@@ -688,7 +796,7 @@ async def test_batch_overlay_carries_move_target_into_metadata_update(uow_fixtur
             Note(
                 id="move-note",
                 title="Original",
-                content_hash="body",
+                content_hash=hashlib.sha256(b"body").hexdigest(),
                 word_count=1,
                 summary="",
                 tags="[]",
@@ -702,7 +810,7 @@ async def test_batch_overlay_carries_move_target_into_metadata_update(uow_fixtur
             )
         )
     uow_fixture.scope.projection_snapshot = ProjectionAuthoritySnapshot(
-        {"notes/folder-one/Original.md": b"body"}, {}, {}
+        {"notes/folder-one/move-note-Original.md": b"body"}, {}, {}
     )
 
     class MoveMetadataPolicy:
@@ -712,21 +820,55 @@ async def test_batch_overlay_carries_move_target_into_metadata_update(uow_fixtur
             base = await compile_catalog_entity_command(context, request)
             current = context.authority.row("note", request.entity_id)
             assert current is not None
-            source = f"notes/{current['folder_id']}/{current['title']}.md"
+            source = (
+                f"notes/{current['folder_id']}/{request.entity_id}-{current['title']}.md"
+            )
             target_folder = request.payload.get("folder_id", current["folder_id"])
             target_title = request.payload.get("title", current["title"])
-            target = f"notes/{target_folder}/{target_title}.md"
+            target = f"notes/{target_folder}/{request.entity_id}-{target_title}.md"
             assert context.authority.markdown(source) == b"body"
             _, _, tag_type, plan_type = _projection_api()
-            projection = plan_type(
-                tag_type.PATH_RENAME,
-                mutation_types.ContainedProjectionActionField(source),
-                mutation_types.ContainedProjectionActionField(target),
-                0,
-                None,
-                None,
+            row = base.db_plans[0].after_row
+            assert row is not None
+            index_target = f"index/notes/note_id/{request.entity_id}"
+            projections = [
+                plan_type(
+                    tag_type.PATH_RENAME,
+                    mutation_types.ContainedProjectionActionField(source),
+                    mutation_types.ContainedProjectionActionField(target),
+                    0,
+                    None,
+                    None,
+                ),
+                plan_type(
+                    tag_type.INDEX_REPLACE,
+                    None,
+                    mutation_types.ContainedProjectionActionField(index_target),
+                    1,
+                    context.authority.derived_projection(
+                        tag_type.INDEX_REPLACE, index_target
+                    ),
+                    _note_index_blob(row, target),
+                ),
+            ]
+            if request.payload.get("title") is not None:
+                fts_target = f"fts/{request.entity_id}"
+                projections.append(
+                    plan_type(
+                        tag_type.FTS_REPLACE,
+                        None,
+                        mutation_types.ContainedProjectionActionField(fts_target),
+                        2,
+                        context.authority.derived_projection(
+                            tag_type.FTS_REPLACE, fts_target
+                        ),
+                        _fts_blob(row, b"body"),
+                    )
+                )
+            return _with_projection(
+                base,
+                projections=tuple(projections),
             )
-            return _with_projection(base, projections=(projection,))
 
     compilation = await _compile_production_batch(
         uow_fixture,
@@ -751,8 +893,8 @@ async def test_batch_overlay_carries_move_target_into_metadata_update(uow_fixtur
 
     assert compilation.rejected == ()
     second = compilation.commands[1].projections[0]
-    assert str(second.source) == "notes/folder-two/Original.md"
-    assert str(second.target) == "notes/folder-two/Renamed.md"
+    assert str(second.source) == "notes/folder-two/move-note-Original.md"
+    assert str(second.target) == "notes/folder-two/move-note-Renamed.md"
 
 
 @pytest.mark.asyncio
@@ -793,15 +935,7 @@ async def test_batch_overlay_carries_quick_note_conversion_children(uow_fixture)
             if request.entity_type == "note":
                 return _with_projection(
                     base,
-                    projections=(
-                        _projection_plan(
-                            "markdown_write",
-                            "notes/converted-note.md",
-                            0,
-                            None,
-                            b"captured",
-                        ),
-                    ),
+                    projections=_note_create_projections(base, b"captured"),
                 )
             return base
 
@@ -812,7 +946,10 @@ async def test_batch_overlay_carries_quick_note_conversion_children(uow_fixture)
                 name="entity.create",
                 entity_type="note",
                 entity_id="converted-note",
-                payload={"title": "Converted", "content_hash": "captured"},
+                payload={
+                    "title": "Converted",
+                    "content_hash": hashlib.sha256(b"captured").hexdigest(),
+                },
                 expected_version=None,
             ),
             MutationRequest.from_payload(
@@ -1190,6 +1327,43 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
                 value={"id": request.entity_id},
             )
 
+    class DivergentSyncPolicy:
+        entity_types = frozenset({"task"})
+
+        async def compile(self, context, request):
+            base = await compile_catalog_entity_command(context, request)
+            event = base.sync_events[0]
+            payload = {**event.payload, "title": "different-ledger-title"}
+            divergent = SyncEventPlan(
+                event.entity_type,
+                event.entity_id,
+                event.action,
+                payload,
+                event.version,
+                event.created_at,
+            )
+            return context.command(
+                request=request,
+                db_plans=base.db_plans,
+                sync_events=(divergent,),
+                value=base.result_value,
+            )
+
+    class WrongTargetNotePolicy:
+        entity_types = frozenset({"note"})
+
+        async def compile(self, context, request):
+            base = await compile_catalog_entity_command(context, request)
+            projections = list(_note_create_projections(base, b"wrong target"))
+            projections[0] = _projection_plan(
+                "markdown_write",
+                "notes/another-note.md",
+                0,
+                None,
+                b"wrong target",
+            )
+            return _with_projection(base, projections=tuple(projections))
+
     cases = (
         (
             IncompleteNotePolicy(),
@@ -1200,7 +1374,7 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
                 payload={"title": "Incomplete"},
                 expected_version=None,
             ),
-            "complete projections",
+            "complete bound projections",
         ),
         (
             MissingSyncPolicy(),
@@ -1223,6 +1397,31 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
                 expected_version=None,
             ),
             "request entity",
+        ),
+        (
+            DivergentSyncPolicy(),
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="task",
+                entity_id="divergent-sync-task",
+                payload={"title": "Database title"},
+                expected_version=None,
+            ),
+            "after image",
+        ),
+        (
+            WrongTargetNotePolicy(),
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="note",
+                entity_id="wrong-target-note",
+                payload={
+                    "content_hash": hashlib.sha256(b"wrong target").hexdigest(),
+                    "title": "Wrong target",
+                },
+                expected_version=None,
+            ),
+            "complete bound projections",
         ),
     )
     for index, (policy, request, message) in enumerate(cases):
@@ -1261,6 +1460,13 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
         "updated_at": "2026-07-20T00:00:00Z",
         "version": 1,
     }
+    note_request = MutationRequest.from_payload(
+        name="entity.create",
+        entity_type="note",
+        entity_id="decode-note",
+        payload={"title": "Decode note"},
+        expected_version=None,
+    )
     commands = (
         MutationCommand.from_effects(
             request=request,
@@ -1276,6 +1482,56 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             ),
             projections=(),
             sync_events=(),
+            result_value={"id": "decode-task"},
+        ),
+        MutationCommand.from_effects(
+            request=note_request,
+            db_plans=(
+                DbMutationPlan(
+                    "tasks",
+                    {"id": "decode-task"},
+                    "insert",
+                    None,
+                    None,
+                    complete_task,
+                ),
+            ),
+            projections=(),
+            sync_events=(
+                SyncEventPlan(
+                    "task",
+                    "decode-task",
+                    "create",
+                    complete_task,
+                    1,
+                    "2026-07-20T00:00:00Z",
+                ),
+            ),
+            result_value={"id": "decode-note"},
+        ),
+        MutationCommand.from_effects(
+            request=request,
+            db_plans=(
+                DbMutationPlan(
+                    "tasks",
+                    {"id": "decode-task"},
+                    "insert",
+                    None,
+                    None,
+                    complete_task,
+                ),
+            ),
+            projections=(),
+            sync_events=(
+                SyncEventPlan(
+                    "task",
+                    "decode-task",
+                    "create",
+                    {**complete_task, "title": "different ledger title"},
+                    1,
+                    "2026-07-20T00:00:00Z",
+                ),
+            ),
             result_value={"id": "decode-task"},
         ),
         MutationCommand.from_effects(
@@ -1474,8 +1730,18 @@ async def test_internal_hashed_child_ids_persist_parent_suffix_mapping(
         batch = await session.get(MutationBatch, batch_id)
 
     assert tuple(item.operation_id for item in result.applied) == tuple(expected)
+    assert result.operation_id_derivations == expected
     assert batch is not None
     assert json.loads(batch.result_json)["operation_id_derivations"] == expected
+    retry = await uow_fixture.uow.execute_batch(
+        uow_fixture.scope,
+        (_request("derived-1"), _request("derived-2")),
+        batch_id,
+    )
+    assert retry == result
+    assert "operation_id_derivations" not in inspect.signature(
+        MutationUnitOfWork.execute_prepared_batch
+    ).parameters
 
 
 @pytest.mark.asyncio
@@ -1693,7 +1959,7 @@ def test_storage_base_owns_all_contained_projection_primitives() -> None:
 
 @pytest.mark.asyncio
 async def test_production_projection_executor_applies_all_tags_through_contained_authorities(
-    uow_fixture, tmp_path
+    tmp_path,
 ) -> None:
     from app.file_system.api import open_contained_file_system
     from app.runtime.contained_io import open_bound_space
@@ -1772,38 +2038,17 @@ async def test_production_projection_executor_applies_all_tags_through_contained
                 canonical({"content": "fresh searchable term", "title": "Original"}),
             ),
         )
-        request = _request("n-production")
-
-        class ProjectionPolicy:
-            entity_types = frozenset({"note"})
-
-            async def compile(self, context, compiled_request):
-                return context.command(
-                    request=compiled_request,
-                    db_plans=(),
-                    projections=plans,
-                    sync_events=(),
-                    value={"id": compiled_request.entity_id},
-                )
-
         scope = SimpleNamespace(
             mutation_stages=stages,
             file_system=file_system,
-            scope=SimpleNamespace(space_id="space-production"),
         )
-        item = mutation_types.PreparedBatchItem(
-            0,
-            "production-projection",
-            request.request_hash,
-            request,
-            None,
+        command = MutationCommand.from_effects(
+            request=_request("n-production"),
+            db_plans=(),
+            projections=plans,
+            sync_events=(),
+            result_value={"id": "n-production"},
         )
-        async with uow_fixture.sessions() as session:
-            compilation = await MutationCompiler(
-                CATALOG, (ProjectionPolicy(),)
-            ).compile_batch(scope, (item,), session)
-        assert compilation.rejected == ()
-        command = compilation.commands[0]
         manifest = await stages.publish(
             "production-projection",
             plans,
@@ -1828,6 +2073,109 @@ async def test_production_projection_executor_applies_all_tags_through_contained
         await file_system.close()
         await space_lease.release()
         await global_lease.release()
+
+
+@pytest.mark.asyncio
+async def test_production_note_policy_executes_db_markdown_index_fts_and_ledger(
+    uow_fixture, tmp_path
+) -> None:
+    from app.file_system.api import open_contained_file_system
+    from app.runtime.contained_io import open_bound_space
+    from app.runtime.scope import _walk_existing_ancestors
+
+    root = tmp_path / "production-note-uow"
+    notes = root / "notes"
+    notes.mkdir(parents=True)
+    (root / "space.db").touch()
+    (root / "index.db").touch()
+    paths = SimpleNamespace(
+        space_root=root.parent,
+        db_path=root / "space.db",
+        notes_dir=notes,
+        index_db=root / "index.db",
+    )
+    opens = open_bound_space(paths, _walk_existing_ancestors(paths))
+    file_system = await open_contained_file_system(opens)
+    stages = StageStore(opens.take_mutation_stage_authority())
+    coordinator = RuntimeLeaseCoordinator(tmp_path / ".runtime-production-note-uow")
+    global_lease = await coordinator.acquire_global(LeaseMode.SHARED, "test", 2)
+    space_id = "space-production-note-uow"
+    space_lease = await coordinator.acquire_spaces(
+        [space_id], LeaseMode.EXCLUSIVE, "mutation", 2
+    )
+
+    class RuntimeScope:
+        session_factory = uow_fixture.sessions
+        scope = SimpleNamespace(space_id=space_id)
+        mutation_stages = stages
+
+        def __init__(self) -> None:
+            self.file_system = file_system
+
+        @asynccontextmanager
+        async def exclusive_space_resources(self, purpose, timeout_seconds):
+            assert (purpose, timeout_seconds) == ("mutation", 5)
+            yield space_lease
+
+    body = b"compiled body"
+    note_id = "n-compiled-production"
+
+    class NotePolicy:
+        entity_types = frozenset({"note"})
+
+        async def compile(self, context, request):
+            base = await compile_catalog_entity_command(context, request)
+            return _with_projection(
+                base,
+                projections=_note_create_projections(
+                    base,
+                    body,
+                    path=f"notes/{note_id}-compiled.md",
+                ),
+            )
+
+    request = MutationRequest.from_payload(
+        name="entity.create",
+        entity_type="note",
+        entity_id=note_id,
+        payload={
+            "content_hash": hashlib.sha256(body).hexdigest(),
+            "title": "Compiled",
+            "word_count": 2,
+        },
+        expected_version=None,
+    )
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=MutationCompiler(CATALOG, (NotePolicy(),)),
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+        recovery_gate=_CleanGate(),
+        journal_factory=MutationJournal,
+    )
+    try:
+        result = await uow.execute(RuntimeScope(), request, "production-note-operation")
+        async with uow_fixture.sessions() as session:
+            stored = await session.get(Note, note_id)
+            event = await session.scalar(
+                select(SyncOutbox).where(
+                    SyncOutbox.operation_id == "production-note-operation"
+                )
+            )
+
+        assert result.state is MutationState.FINALIZED
+        assert stored is not None and stored.content_hash == hashlib.sha256(body).hexdigest()
+        assert await file_system.read_note(note_id) == body.decode("utf-8")
+        assert [item.note_id for item in await file_system.search("compiled body")] == [
+            note_id
+        ]
+        assert event is not None and event.visible is True
+    finally:
+        stages.close()
+        await file_system.close()
+        await space_lease.release()
+        await global_lease.release()
+        await opens.close_all()
 
 
 @pytest.mark.asyncio

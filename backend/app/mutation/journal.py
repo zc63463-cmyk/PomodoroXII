@@ -69,10 +69,7 @@ class JournalBatch:
     result: BatchMutationResult
 
 
-def _encode_result(
-    result: BatchMutationResult,
-    operation_id_derivations: Mapping[str, tuple[str, str]] | None = None,
-) -> str:
+def _encode_result(result: BatchMutationResult) -> str:
     return json.dumps(
         {
             "applied": [
@@ -101,9 +98,9 @@ def _encode_result(
                 for item in result.rejected
             ],
             "operation_id_derivations": {
-                operation_id: {"parent_id": parent_id, "suffix": suffix}
-                for operation_id, (parent_id, suffix) in sorted(
-                    (operation_id_derivations or {}).items()
+                operation_id: dict(derivation)
+                for operation_id, derivation in sorted(
+                    result.operation_id_derivations.items()
                 )
             },
         },
@@ -145,6 +142,7 @@ def _decode_result(batch_id: str, payload: str | None) -> BatchMutationResult:
                 )
                 for item in raw["rejected"]
             ),
+            raw.get("operation_id_derivations", {}),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise IllegalMutationTransition("batch receipt is invalid") from exc
@@ -219,7 +217,13 @@ class MutationJournal:
             )
             for operation_id, command in zip(operation_ids, commands, strict=True)
         )
-        result = BatchMutationResult(batch_id, applied, rejections)
+        derivations = {
+            operation_id: {"parent_id": parent_id, "suffix": suffix}
+            for operation_id, (parent_id, suffix) in (
+                operation_id_derivations or {}
+            ).items()
+        }
+        result = BatchMutationResult(batch_id, applied, rejections, derivations)
         async with self._sessions.begin() as session:
             session.add(
                 MutationBatch(
@@ -227,7 +231,7 @@ class MutationJournal:
                     command_hash=request_hash,
                     state=MutationState.INTENT,
                     accepted_count=len(operation_ids),
-                    result_json=_encode_result(result, operation_id_derivations),
+                    result_json=_encode_result(result),
                 )
             )
             for sequence, (operation_id, command) in enumerate(
@@ -257,7 +261,13 @@ class MutationJournal:
         rejections: tuple[MutationRejection, ...],
         operation_id_derivations: Mapping[str, tuple[str, str]] | None = None,
     ) -> BatchMutationResult:
-        result = BatchMutationResult(batch_id, (), rejections)
+        derivations = {
+            operation_id: {"parent_id": parent_id, "suffix": suffix}
+            for operation_id, (parent_id, suffix) in (
+                operation_id_derivations or {}
+            ).items()
+        }
+        result = BatchMutationResult(batch_id, (), rejections, derivations)
         async with self._sessions.begin() as session:
             session.add(
                 MutationBatch(
@@ -265,7 +275,7 @@ class MutationJournal:
                     command_hash=request_hash,
                     state=MutationState.INTENT,
                     accepted_count=0,
-                    result_json=_encode_result(result, operation_id_derivations),
+                    result_json=_encode_result(result),
                 )
             )
             await session.flush()

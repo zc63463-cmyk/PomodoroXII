@@ -744,8 +744,86 @@ def _validate_sync_event_against_catalog(
     return spec
 
 
+def _note_path_belongs_to_identity(value: object, identity: str) -> bool:
+    if value is None:
+        return False
+    filename = str(value).rsplit("/", 1)[-1]
+    return filename == f"{identity}.md" or filename.startswith(f"{identity}-")
+
+
+def _projection_belongs_to_plan(projection, spec: EntitySpec, identity: str) -> bool:
+    target = str(projection.target)
+    if spec.name == "note":
+        if projection.tag in {
+            ProjectionActionTag.MARKDOWN_WRITE,
+            ProjectionActionTag.PATH_RENAME,
+            ProjectionActionTag.PATH_REMOVE,
+        }:
+            return _note_path_belongs_to_identity(projection.target, identity) and (
+                projection.tag is not ProjectionActionTag.PATH_RENAME
+                or _note_path_belongs_to_identity(projection.source, identity)
+            )
+        if projection.tag is ProjectionActionTag.INDEX_REPLACE:
+            return target == f"index/notes/note_id/{identity}"
+        if projection.tag is ProjectionActionTag.FTS_REPLACE:
+            return target == f"fts/{identity}"
+    if spec.name == "folder":
+        return (
+            projection.tag is ProjectionActionTag.INDEX_REPLACE
+            and target == f"index/folders/id/{identity}"
+        )
+    return False
+
+
+def _required_projection_tags(
+    plan: DbMutationPlan, spec: EntitySpec
+) -> frozenset[ProjectionActionTag]:
+    if spec.name == "folder":
+        return frozenset({ProjectionActionTag.INDEX_REPLACE})
+    if spec.storage_type is not StorageType.FS_DB_SPLIT:
+        return frozenset()
+    if plan.operation == "insert":
+        return frozenset(
+            {
+                ProjectionActionTag.MARKDOWN_WRITE,
+                ProjectionActionTag.INDEX_REPLACE,
+                ProjectionActionTag.FTS_REPLACE,
+            }
+        )
+    if plan.operation == "delete":
+        return frozenset(
+            {
+                ProjectionActionTag.PATH_REMOVE,
+                ProjectionActionTag.INDEX_REPLACE,
+                ProjectionActionTag.FTS_REPLACE,
+            }
+        )
+    assert plan.before_row is not None and plan.after_row is not None
+    required = {ProjectionActionTag.INDEX_REPLACE}
+    if plan.before_row.get("content_hash") != plan.after_row.get("content_hash"):
+        required.update(
+            {ProjectionActionTag.MARKDOWN_WRITE, ProjectionActionTag.FTS_REPLACE}
+        )
+    if any(
+        plan.before_row.get(field) != plan.after_row.get(field)
+        for field in ("folder_id", "title")
+    ):
+        required.add(ProjectionActionTag.PATH_RENAME)
+    if plan.before_row.get("title") != plan.after_row.get("title"):
+        required.add(ProjectionActionTag.FTS_REPLACE)
+    return frozenset(required)
+
+
+def _projection_after_digest(projection) -> str | None:
+    if hasattr(projection, "after"):
+        after = projection.after
+        return None if after is None else hashlib.sha256(after).hexdigest()
+    return projection.after_sha256
+
+
 def _validate_compiled_command(
-    command: MutationCommand, catalog: CompiledEntityCatalog
+    command: MutationCommand | PersistedMutationCommand,
+    catalog: CompiledEntityCatalog,
 ) -> None:
     try:
         request_spec = catalog.get(command.request.entity_type)
@@ -764,35 +842,96 @@ def _validate_compiled_command(
     for event in command.sync_events:
         _validate_sync_event_against_catalog(event, catalog)
     for plan, spec in zip(command.db_plans, plan_specs, strict=True):
-        if spec.sync_enabled and not any(
-            event.entity_type == spec.name
-            and event.entity_id == str(plan.primary_key[spec.primary_key])
-            and event.action
-            == {"insert": "create", "update": "update", "delete": "delete"}[plan.operation]
+        matching_events = tuple(
+            event
             for event in command.sync_events
-        ):
+            if (
+                event.entity_type == spec.name
+                and event.entity_id == str(plan.primary_key[spec.primary_key])
+                and event.action
+                == {"insert": "create", "update": "update", "delete": "delete"}[
+                    plan.operation
+                ]
+            )
+        )
+        if spec.sync_enabled and len(matching_events) != 1:
             raise SpaceRecoveryRequiredError(
                 "compiled sync event is missing for a database mutation"
             )
-    affected_specs = {spec.name: spec for spec in plan_specs}
-    if not plan_specs:
-        affected_specs[request_spec.name] = request_spec
-    tags = {projection.tag for projection in command.projections}
-    for spec in affected_specs.values():
-        if spec.storage_type is StorageType.FS_DB_SPLIT:
-            if not tags or (
-                command.request.name in {"entity.create", "note.create"}
-                and ProjectionActionTag.MARKDOWN_WRITE not in tags
-            ):
-                raise SpaceRecoveryRequiredError(
-                    "projection-backed entity requires complete projections"
+        if matching_events:
+            event = matching_events[0]
+            if plan.operation in {"insert", "update"}:
+                if (
+                    event.payload != plan.after_row
+                    or plan.after_row is None
+                    or event.version != plan.after_row.get("version")
+                ):
+                    raise SpaceRecoveryRequiredError(
+                        "compiled sync event differs from the database after image"
+                    )
+            else:
+                before_version = (
+                    None
+                    if plan.before_row is None
+                    else plan.before_row.get("version")
                 )
-        if (
-            spec.delete_strategy == "cascade_soft_delete"
-            and ProjectionActionTag.INDEX_REPLACE not in tags
+                if type(before_version) is not int or event.version != before_version + 1:
+                    raise SpaceRecoveryRequiredError(
+                        "compiled delete event version differs from the database before image"
+                    )
+        identity = str(plan.primary_key[spec.primary_key])
+        owned = tuple(
+            projection
+            for projection in command.projections
+            if _projection_belongs_to_plan(projection, spec, identity)
+        )
+        required = _required_projection_tags(plan, spec)
+        for tag in required:
+            matching_projections = tuple(
+                projection for projection in owned if projection.tag is tag
+            )
+            if len(matching_projections) != 1:
+                raise SpaceRecoveryRequiredError(
+                    "projection-backed entity requires complete bound projections"
+                )
+            if tag in {
+                ProjectionActionTag.MARKDOWN_WRITE,
+                ProjectionActionTag.INDEX_REPLACE,
+                ProjectionActionTag.FTS_REPLACE,
+            }:
+                after_digest = _projection_after_digest(matching_projections[0])
+                if (plan.operation == "delete") == (after_digest is not None):
+                    raise SpaceRecoveryRequiredError(
+                        "projection image does not match the database operation"
+                    )
+                if (
+                    tag is ProjectionActionTag.MARKDOWN_WRITE
+                    and plan.after_row is not None
+                    and after_digest != plan.after_row.get("content_hash")
+                ):
+                    raise SpaceRecoveryRequiredError(
+                        "Markdown projection differs from the Note content hash"
+                    )
+    if len(command.sync_events) != sum(spec.sync_enabled for spec in plan_specs):
+        raise SpaceRecoveryRequiredError(
+            "compiled sync events do not align with database mutations"
+        )
+    if command.projections and not plan_specs:
+        raise SpaceRecoveryRequiredError(
+            "compiled projection effects require a database mutation"
+        )
+    for projection in command.projections:
+        if not any(
+            _projection_belongs_to_plan(
+                projection,
+                spec,
+                str(plan.primary_key[spec.primary_key]),
+            )
+            for plan, spec in zip(command.db_plans, plan_specs, strict=True)
+            if spec.name in {"folder", "note"}
         ):
             raise SpaceRecoveryRequiredError(
-                "cascade entity requires an index projection"
+                "compiled projection target is not bound to a database mutation"
             )
 
 
@@ -800,16 +939,7 @@ def decode_and_validate_persisted_command(
     command_json: str, *, catalog: CompiledEntityCatalog
 ) -> PersistedMutationCommand:
     command = decode_persisted_command(command_json)
-    try:
-        catalog.get(command.request.entity_type)
-    except KeyError as exc:
-        raise SpaceRecoveryRequiredError(
-            "persisted request entity is outside the compiled catalog"
-        ) from exc
-    for plan in command.db_plans:
-        _validate_persisted_plan_against_catalog(plan, catalog)
-    for event in command.sync_events:
-        _validate_sync_event_against_catalog(event, catalog)
+    _validate_compiled_command(command, catalog)
     return command
 
 
@@ -938,7 +1068,7 @@ class MutationUnitOfWork:
             operation_id_derivations = {}
         if len(resolved_ids) != len(requested) or len(set(resolved_ids)) != len(resolved_ids):
             raise ValueError("operation_ids must be unique and align with requests")
-        return await self.execute_prepared_batch(
+        return await self._execute_prepared_batch(
             scope,
             tuple(
                 PreparedBatchItem(index, operation_id, request.request_hash, request, None)
@@ -949,6 +1079,14 @@ class MutationUnitOfWork:
         )
 
     async def execute_prepared_batch(
+        self,
+        scope: SpaceRuntimeHandle,
+        items: Sequence[PreparedBatchItem],
+        batch_id: str,
+    ) -> BatchMutationResult:
+        return await self._execute_prepared_batch(scope, items, batch_id)
+
+    async def _execute_prepared_batch(
         self,
         scope: SpaceRuntimeHandle,
         items: Sequence[PreparedBatchItem],

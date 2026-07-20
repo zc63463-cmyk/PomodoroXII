@@ -7,7 +7,7 @@ import hmac
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -692,6 +692,7 @@ class BatchMutationResult:
     batch_id: str
     applied: tuple[MutationResult, ...]
     rejected: tuple[MutationRejection, ...]
+    operation_id_derivations: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -703,6 +704,30 @@ class BatchMutationResult:
             self,
             "rejected",
             require_typed_tuple(self.rejected, MutationRejection, label="rejected"),
+        )
+        result_ids = {
+            *(item.operation_id for item in self.applied),
+            *(item.operation_id for item in self.rejected),
+        }
+        if not isinstance(self.operation_id_derivations, Mapping):
+            raise TypeError("operation ID derivations must be a mapping")
+        for operation_id, derivation in self.operation_id_derivations.items():
+            if (
+                operation_id not in result_ids
+                or not isinstance(derivation, Mapping)
+                or set(derivation) != {"parent_id", "suffix"}
+                or not isinstance(derivation["parent_id"], str)
+                or not isinstance(derivation["suffix"], str)
+                or bounded_child_operation_id(
+                    derivation["parent_id"], derivation["suffix"]
+                )
+                != operation_id
+            ):
+                raise ValueError("operation ID derivation is invalid")
+        object.__setattr__(
+            self,
+            "operation_id_derivations",
+            require_frozen_object(self.operation_id_derivations),
         )
 
 
