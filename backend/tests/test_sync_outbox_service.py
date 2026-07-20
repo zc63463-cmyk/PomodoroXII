@@ -9,6 +9,7 @@ Verifies:
 - BaseService skips events when record_sync_events=False (sync_mode).
 - flush=False defers the flush to the caller.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,13 +36,13 @@ async def test_record_sync_event_appends_one_row(space_session):
         action="create",
         payload={"title": "Test Task"},
     )
-    rows = (
-        await space_session.execute(select(SyncOutbox))
-    ).scalars().all()
+    rows = (await space_session.execute(select(SyncOutbox))).scalars().all()
     assert len(rows) == 1
     assert rows[0].entity_type == "task"
     assert rows[0].entity_id == "tsk_test_001"
     assert rows[0].action == "create"
+    assert rows[0].version is None
+    assert rows[0].visible is True
     assert json.loads(rows[0].payload)["title"] == "Test Task"
 
 
@@ -63,10 +64,10 @@ async def test_record_sync_event_keeps_repeated_mutations_as_distinct_events(spa
         payload={"title": "Second"},
     )
     rows = (
-        await space_session.execute(
-            select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_dup")
-        )
-    ).scalars().all()
+        (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_dup")))
+        .scalars()
+        .all()
+    )
     assert len(rows) == 2
     assert rows[0].action == "create"
     assert rows[1].action == "update"
@@ -104,10 +105,14 @@ async def test_record_sync_event_flush_false_does_not_assign_id_until_caller_flu
     assert event.id is not None
 
     rows = (
-        await space_session.execute(
-            select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_noflush")
+        (
+            await space_session.execute(
+                select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_noflush")
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(rows) == 1
     assert rows[0].id is not None
 
@@ -128,12 +133,16 @@ async def test_base_service_mutations_append_create_update_delete_events(space_s
     await svc.delete("tsk_crud")
 
     rows = (
-        await space_session.execute(
-            select(SyncOutbox)
-            .where(SyncOutbox.entity_id == "tsk_crud")
-            .order_by(SyncOutbox.id.asc())
+        (
+            await space_session.execute(
+                select(SyncOutbox)
+                .where(SyncOutbox.entity_id == "tsk_crud")
+                .order_by(SyncOutbox.id.asc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(rows) == 3
     assert rows[0].action == "create"
     assert rows[1].action == "update"
@@ -152,10 +161,14 @@ async def test_base_service_skips_events_when_record_sync_events_false(space_ses
     await svc.create({"id": "tsk_silent", "title": "Silent"})
 
     rows = (
-        await space_session.execute(
-            select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_silent")
+        (
+            await space_session.execute(
+                select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_silent")
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(rows) == 0
 
 
@@ -173,10 +186,10 @@ async def test_rollback_rolls_back_ledger_rows(space_session):
         await savepoint.rollback()
 
     rows = (
-        await space_session.execute(
-            select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_rb")
-        )
-    ).scalars().all()
+        (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_rb")))
+        .scalars()
+        .all()
+    )
     assert len(rows) == 0
 
 
@@ -234,10 +247,10 @@ async def test_record_sync_event_payload_is_sorted_and_utf8_safe(space_session):
         payload={"z": "last", "a": "first", "unicode": "你好世界"},
     )
     row = (
-        await space_session.execute(
-            select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_utf8")
-        )
-    ).scalars().first()
+        (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_utf8")))
+        .scalars()
+        .first()
+    )
     raw = row.payload
     assert raw.index('"a"') < raw.index('"unicode"') < raw.index('"z"')
     assert "你好世界" in raw

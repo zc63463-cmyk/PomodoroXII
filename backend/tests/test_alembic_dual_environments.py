@@ -12,6 +12,9 @@ from sqlalchemy import MetaData, create_engine, inspect, text
 
 META_TABLES = {"spaces", "meta_settings"}
 SPACE_TABLES = {
+    "mutation_batches",
+    "mutation_operations",
+    "mutation_steps",
     "folders",
     "habit_check_ins",
     "habits",
@@ -123,7 +126,9 @@ def _index_signature(inspector, table_name: str) -> set[tuple[str, tuple[str, ..
     }
 
 
-def _metadata_index_signature(metadata: MetaData, table_name: str) -> set[tuple[str, tuple[str, ...], bool]]:
+def _metadata_index_signature(
+    metadata: MetaData, table_name: str
+) -> set[tuple[str, tuple[str, ...], bool]]:
     return {
         (index.name, tuple(column.name for column in index.columns), bool(index.unique))
         for index in metadata.tables[table_name].indexes
@@ -258,7 +263,7 @@ def test_downgrade_to_base_then_upgrade_head_roundtrip(tmp_path: Path, environme
         engine = create_engine(f"sqlite:///{db_path.as_posix()}")
         after_down = set(inspect(engine).get_table_names())
         # Only the (now-empty) version table may remain; all business tables must be gone
-        business_tables = (META_TABLES if environment == "meta" else SPACE_TABLES)
+        business_tables = META_TABLES if environment == "meta" else SPACE_TABLES
         assert after_down.isdisjoint(business_tables)
 
         # Upgrade back to head
@@ -284,7 +289,7 @@ def test_downgrade_leaves_no_residual_tables(tmp_path: Path, environment: str) -
         engine = create_engine(f"sqlite:///{db_path.as_posix()}")
         tables = set(inspect(engine).get_table_names())
         # Only the (now-empty) version table may remain; no business tables
-        business_tables = (META_TABLES if environment == "meta" else SPACE_TABLES)
+        business_tables = META_TABLES if environment == "meta" else SPACE_TABLES
         assert tables.isdisjoint(business_tables)
     finally:
         engine.dispose()
@@ -292,8 +297,12 @@ def test_downgrade_leaves_no_residual_tables(tmp_path: Path, environment: str) -
 
 def test_space_chain_revision_ids_are_disjoint_from_meta() -> None:
     """Meta and space revision IDs must never overlap."""
-    meta_revs = {rev.revision for rev in ScriptDirectory.from_config(_config("meta")).walk_revisions()}
-    space_revs = {rev.revision for rev in ScriptDirectory.from_config(_config("space")).walk_revisions()}
+    meta_revs = {
+        rev.revision for rev in ScriptDirectory.from_config(_config("meta")).walk_revisions()
+    }
+    space_revs = {
+        rev.revision for rev in ScriptDirectory.from_config(_config("space")).walk_revisions()
+    }
     assert meta_revs.isdisjoint(space_revs)
     assert len(meta_revs) >= 1
     assert len(space_revs) >= 1

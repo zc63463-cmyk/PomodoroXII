@@ -174,13 +174,11 @@ async def test_coordinator_replaces_managed_space_007_under_bound_authority(
             return None
 
     await asyncio.to_thread(seed_revision)
-    coordinator = MigrationCoordinator(
-        RuntimeLeaseCoordinator(tmp_path / "runtime"), Quiescer()
-    )
+    coordinator = MigrationCoordinator(RuntimeLeaseCoordinator(tmp_path / "runtime"), Quiescer())
     result = await coordinator.upgrade("space", path)
     assert result.changed is True
     assert result.previous_revision == "space_007_session_mood_check"
-    assert result.head == "space_008_sync_retention_snapshot"
+    assert result.head == "space_009_mutation_journal"
     status = await coordinator.verify("space", path)
     assert status.at_head and status.integrity_ok
 
@@ -227,9 +225,13 @@ async def test_upgrade_failure_after_backup_preserves_old_revision_and_releases_
     await asyncio.to_thread(seed_revision)
     leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
     coordinator = MigrationCoordinator(
-        leases, Quiescer(), failpoint=lambda name: (_ for _ in ()).throw(
-            RuntimeError("injected " + name)
-        ) if name == "after_backup" else None
+        leases,
+        Quiescer(),
+        failpoint=lambda name: (
+            (_ for _ in ()).throw(RuntimeError("injected " + name))
+            if name == "after_backup"
+            else None
+        ),
     )
     with pytest.raises(RuntimeError, match="injected after_backup"):
         await coordinator.upgrade("space", path)
@@ -263,9 +265,7 @@ async def test_post_cutover_failure_marks_process_exit_required_without_discard(
         discard_calls += 1
         original_discard(self)
 
-    monkeypatch.setattr(
-        SQLiteReplacementAuthority, "discard_closed_replacement", record_discard
-    )
+    monkeypatch.setattr(SQLiteReplacementAuthority, "discard_closed_replacement", record_discard)
 
     class Quiescer:
         async def drain_identity(self, _identity) -> None:
@@ -278,9 +278,9 @@ async def test_post_cutover_failure_marks_process_exit_required_without_discard(
     coordinator = MigrationCoordinator(
         leases,
         Quiescer(),
-        failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("post-cutover"))
-        if name == "after_replace"
-        else None,
+        failpoint=lambda name: (
+            (_ for _ in ()).throw(RuntimeError("post-cutover")) if name == "after_replace" else None
+        ),
     )
     owner = await leases.acquire_process_owner("post-cutover", 5)
     lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "post-cutover", 5)
@@ -369,9 +369,7 @@ async def test_isolated_close_failure_registers_same_task_cleanup(tmp_path: Path
     coordinator = MigrationCoordinator(
         leases,
         Quiescer(),
-        migrate_target=lambda _kind, _target: (_ for _ in ()).throw(
-            RuntimeError("create body")
-        ),
+        migrate_target=lambda _kind, _target: (_ for _ in ()).throw(RuntimeError("create body")),
     )
     owner = await leases.acquire_process_owner("isolated", 5)
     global_lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "isolated", 5)
@@ -427,14 +425,10 @@ async def test_isolated_persistent_cleanup_requires_process_exit(tmp_path: Path)
     coordinator = MigrationCoordinator(
         leases,
         type("Q", (), {})(),
-        migrate_target=lambda _kind, _target: (_ for _ in ()).throw(
-            RuntimeError("isolated body")
-        ),
+        migrate_target=lambda _kind, _target: (_ for _ in ()).throw(RuntimeError("isolated body")),
     )
     owner = await leases.acquire_process_owner("isolated-persistent", 5)
-    lease = await leases.acquire_global(
-        LeaseMode.EXCLUSIVE, "isolated-persistent", 5
-    )
+    lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "isolated-persistent", 5)
     marker = Marker()
     try:
         with pytest.raises(BaseExceptionGroup) as captured:
@@ -511,8 +505,7 @@ async def test_fleet_preflight_sorts_meta_then_canonical_space_ids(
     for name in ("a", "b"):
         await asyncio.to_thread(run_migrations, "space", paths[name])
     targets = {
-        name: _bind_existing_target(path, create_authority=False)
-        for name, path in paths.items()
+        name: _bind_existing_target(path, create_authority=False) for name, path in paths.items()
     }
     labels = {target.identity: name for name, target in targets.items()}
     observed: list[str] = []
@@ -704,9 +697,7 @@ async def test_fleet_identity_property_error_closes_all_targets(tmp_path: Path) 
     leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
     coordinator = MigrationCoordinator(leases, type("Q", (), {})())
     owner = await leases.acquire_process_owner("fleet-identity-error", 5)
-    lease = await leases.acquire_global(
-        LeaseMode.EXCLUSIVE, "fleet-identity-error", 5
-    )
+    lease = await leases.acquire_global(LeaseMode.EXCLUSIVE, "fleet-identity-error", 5)
     try:
         with pytest.raises(RuntimeError, match="identity probe"):
             await coordinator.preflight_fleet_under_lease(
@@ -769,11 +760,7 @@ async def test_fleet_probe_failure_is_zero_write_and_byte_identical(
                     for name, target in zip(("a", "b", "c"), targets, strict=True)
                 ],
                 lease,
-                [
-                    MigrationPreflightPolicy(
-                        "space", _single_head(_config("space")), reject
-                    )
-                ],
+                [MigrationPreflightPolicy("space", _single_head(_config("space")), reject)],
             )
         assert side_effects == dict.fromkeys(side_effects, 0)
         assert [_sha256(path) for path in paths] == before
@@ -834,9 +821,7 @@ async def test_nonterminal_checkpoint_keeps_process_owner_fail_closed(
         lambda _self: (1, 4, 3),
     )
     runtime_root = tmp_path / "runtime"
-    coordinator = MigrationCoordinator(
-        RuntimeLeaseCoordinator(runtime_root), Quiescer()
-    )
+    coordinator = MigrationCoordinator(RuntimeLeaseCoordinator(runtime_root), Quiescer())
     with pytest.raises(BaseExceptionGroup) as captured:
         await coordinator.upgrade("space", path)
     leaves = list(captured.value.exceptions)
@@ -852,10 +837,15 @@ async def test_nonterminal_checkpoint_keeps_process_owner_fail_closed(
 
     with pytest.raises(LeaseTimeoutError):
         await asyncio.to_thread(asyncio.run, acquire_from_fresh_task())
+
+
 import app.db.migrations as migrations_module
 
 META_TABLES = {"spaces", "meta_settings"}
 SPACE_TABLES = {
+    "mutation_batches",
+    "mutation_operations",
+    "mutation_steps",
     "folders",
     "habit_check_ins",
     "habits",
@@ -917,7 +907,9 @@ def test_fresh_database_upgrades_to_single_head(
     try:
         assert set(inspect(engine).get_table_names()) == expected_tables | {version_table}
         with engine.connect() as connection:
-            rows = connection.execute(text(f"SELECT version_num FROM {version_table}")).scalars().all()
+            rows = (
+                connection.execute(text(f"SELECT version_num FROM {version_table}")).scalars().all()
+            )
         assert len(rows) == 1
     finally:
         engine.dispose()
@@ -969,9 +961,9 @@ def test_exact_create_all_legacy_schema_is_adopted_without_data_loss(
     try:
         with engine.connect() as connection:
             assert connection.execute(text(marker_query)).scalar_one() == "yes"
-            assert connection.execute(
-                text(f"SELECT count(*) FROM {version_table}")
-            ).scalar_one() == 1
+            assert (
+                connection.execute(text(f"SELECT count(*) FROM {version_table}")).scalar_one() == 1
+            )
     finally:
         engine.dispose()
 
@@ -1062,12 +1054,18 @@ def test_managed_space_007_upgrades_to_008_with_existing_outbox_cursor(tmp_path:
     try:
         assert {"sync_state", "sync_snapshots"}.issubset(inspect(engine).get_table_names())
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT current_cursor FROM sync_state WHERE id = 1")
-            ).scalar_one() == 2
-            assert connection.execute(
-                text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_008_sync_retention_snapshot"
+            assert (
+                connection.execute(
+                    text("SELECT current_cursor FROM sync_state WHERE id = 1")
+                ).scalar_one()
+                == 2
+            )
+            assert (
+                connection.execute(
+                    text("SELECT version_num FROM alembic_version_space")
+                ).scalar_one()
+                == "space_009_mutation_journal"
+            )
     finally:
         engine.dispose()
 
@@ -1092,15 +1090,67 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
     engine = create_engine(_sqlite_url(path))
     try:
         with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT value FROM settings WHERE key = 'preserved'")
+                ).scalar_one()
+                == "yes"
+            )
+            assert (
+                connection.execute(
+                    text("SELECT updated_at FROM settings WHERE key = 'preserved'")
+                ).scalar_one()
+                == "2026-01-01T00:00:00.000Z"
+            )
+            assert (
+                connection.execute(
+                    text("SELECT version_num FROM alembic_version_space")
+                ).scalar_one()
+                == "space_009_mutation_journal"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_exact_space_legacy_adoption_backfills_outbox_visibility(tmp_path: Path) -> None:
+    from app.db.migrations import run_migrations
+
+    path = tmp_path / "legacy-space-visibility.db"
+    _create_legacy_schema(path, "space")
+    engine = create_engine(_sqlite_url(path))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO sync_outbox "
+                    "(entity_type, entity_id, action, payload, created_at, synced_at) "
+                    "VALUES ('note', 'legacy-visible', 'create', '{}', "
+                    "'2026-01-01T00:00:00.000Z', NULL)"
+                )
+            )
             assert connection.execute(
-                text("SELECT value FROM settings WHERE key = 'preserved'")
-            ).scalar_one() == "yes"
+                text(
+                    "SELECT visible FROM sync_outbox "
+                    "WHERE entity_id='legacy-visible'"
+                )
+            ).scalar_one() == 0
+    finally:
+        engine.dispose()
+
+    run_migrations("space", path)
+
+    engine = create_engine(_sqlite_url(path))
+    try:
+        with engine.connect() as connection:
             assert connection.execute(
-                text("SELECT updated_at FROM settings WHERE key = 'preserved'")
-            ).scalar_one() == "2026-01-01T00:00:00.000Z"
+                text(
+                    "SELECT operation_id, batch_id, version, visible FROM sync_outbox "
+                    "WHERE entity_id='legacy-visible'"
+                )
+            ).one() == (None, None, None, 1)
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_008_sync_retention_snapshot"
+            ).scalar_one() == "space_009_mutation_journal"
     finally:
         engine.dispose()
 
@@ -1159,9 +1209,12 @@ def test_existing_migration_failure_restores_exact_database_bytes(
     try:
         assert "migration_pollution" not in inspect(engine).get_table_names()
         with engine.connect() as connection:
-            assert connection.execute(
-                text("SELECT value FROM meta_settings WHERE id = 'marker'")
-            ).scalar_one() == "yes"
+            assert (
+                connection.execute(
+                    text("SELECT value FROM meta_settings WHERE id = 'marker'")
+                ).scalar_one()
+                == "yes"
+            )
     finally:
         engine.dispose()
 
@@ -1224,8 +1277,9 @@ def test_legacy_single_chain_wrong_or_multiple_versions_fail_closed(
     try:
         assert set(inspect(engine).get_table_names()) == before
         with engine.connect() as connection:
-            assert connection.execute(
-                text(f"SELECT version_num FROM {version_table}")
-            ).scalars().all() == version_rows
+            assert (
+                connection.execute(text(f"SELECT version_num FROM {version_table}")).scalars().all()
+                == version_rows
+            )
     finally:
         engine.dispose()

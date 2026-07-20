@@ -7,6 +7,7 @@ This service only flushes; the caller owns the surrounding transaction.
 H2-E retention helpers are service-internal. No public client-facing prune
 endpoint is exposed until client ACKs can establish a safe deletion floor.
 """
+
 from __future__ import annotations
 
 import json
@@ -58,6 +59,8 @@ async def record_sync_event(
             sort_keys=True,
             allow_nan=False,
         ),
+        version=None,
+        visible=True,
     )
     db.add(event)
     if flush:

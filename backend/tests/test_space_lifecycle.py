@@ -78,7 +78,7 @@ async def _start_owner_executor(runtime):
 
 
 @pytest.mark.asyncio
-async def test_provision_is_at_space_008_and_index_v2_before_meta_visibility(
+async def test_provision_is_at_space_009_and_index_v2_before_meta_visibility(
     _isolate_env: Path, tmp_path: Path
 ) -> None:
     from app.db.meta_session import close_meta_db, init_meta_db
@@ -87,9 +87,7 @@ async def test_provision_is_at_space_008_and_index_v2_before_meta_visibility(
     await init_meta_db()
     runtime, engines = _build_real_runtime(tmp_path)
     executor = await _start_owner_executor(runtime)
-    provisioned = await runtime.provision(
-        SpaceProvisionSpec(space_id="space-new", name="New")
-    )
+    provisioned = await runtime.provision(SpaceProvisionSpec(space_id="space-new", name="New"))
     handle = None
     try:
         registered = await runtime.get_registered("space-new")
@@ -115,10 +113,8 @@ async def test_provision_is_at_space_008_and_index_v2_before_meta_visibility(
                 "read",
             )
         async with handle.scope.containment.open_verified() as opens:
-            migration = await runtime.migrations.verify_open(
-                "space", opens.database_target
-            )
-            assert migration.revision == "space_008_sync_retention_snapshot"
+            migration = await runtime.migrations.verify_open("space", opens.database_target)
+            assert migration.revision == "space_009_mutation_journal"
             assert runtime.index_schema.verify_open(opens.index_target).version == 2
     finally:
         if handle is not None:
@@ -231,9 +227,7 @@ async def test_mutation_open_defers_space_resources_until_exclusive_guard() -> N
         calls.append("activate")
 
     runtime._verify_registered_open = lambda scope: None
-    handle = await runtime.open_resolved(
-        scope, "mutation", global_lease, owns_global_lease=False
-    )
+    handle = await runtime.open_resolved(scope, "mutation", global_lease, owns_global_lease=False)
     handle.activate_space_resources_under_lease = forbidden_activation
     assert handle.engine is None
     assert handle.file_system is None
@@ -412,9 +406,7 @@ async def test_activation_exit_fault_collects_filesystem_and_releases_engine(
     async def open_file_system(_opens):
         return file_system
 
-    monkeypatch.setattr(
-        "app.file_system.api.open_existing_file_system", open_file_system
-    )
+    monkeypatch.setattr("app.file_system.api.open_existing_file_system", open_file_system)
     runtime = SpaceRuntime(
         leases=SimpleNamespace(register_pending_cleanup=lambda *args, **kwargs: None),
         engines=Engines(),
@@ -478,9 +470,7 @@ async def test_borrowed_body_cancellation_pins_lease_on_cleanup_failure() -> Non
 
     runtime.open_resolved = opened
     with pytest.raises(BaseExceptionGroup) as captured:
-        async with runtime.borrow_prepared_space(
-            handle.scope, global_lease, space_lease
-        ):
+        async with runtime.borrow_prepared_space(handle.scope, global_lease, space_lease):
             raise asyncio.CancelledError()
     assert isinstance(captured.value.exceptions[0], asyncio.CancelledError)
     assert isinstance(captured.value.exceptions[1], OSError)
