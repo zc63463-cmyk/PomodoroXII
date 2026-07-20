@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from sqlalchemy import inspect as sa_inspect
@@ -41,7 +42,7 @@ from app.mutation.types import (
     validate_operation_id,
 )
 from app.registry.catalog import CompiledEntityCatalog
-from app.registry.entities import EntitySpec
+from app.registry.entities import EntitySpec, StorageType
 from app.runtime.leases import Lease
 from app.runtime.space import SpaceRuntimeHandle
 from app.services.sync_outbox import record_sync_event
@@ -108,6 +109,8 @@ class DbMutationPlanFactoryImpl(_CatalogRowFactory):
         after_spec, after_row = self._spec_and_row(after)
         if before_spec is not after_spec:
             raise TypeError("update rows must belong to the same catalog entity")
+        if before_row[before_spec.primary_key] != after_row[after_spec.primary_key]:
+            raise ValueError("update rows must preserve the primary key")
         version = before_row.get("version")
         if version is not None and type(version) is not int:
             raise TypeError("catalog row version must be an integer")
@@ -296,33 +299,96 @@ class AuthorityOverlay:
                 raise SpaceRecoveryRequiredError("mutation plan is not owned by the compiled catalog")
             identity = plan.primary_key[spec.primary_key]
             key = (spec.name, identity)
-            if plan.operation == "delete":
-                rows.pop(key, None)
-            elif plan.after_row is None:
-                raise SpaceRecoveryRequiredError("mutation plan has no complete after image")
-            else:
+            current = rows.get(key)
+
+            def require_complete_row(
+                row: Mapping[str, object] | None, label: str
+            ) -> Mapping[str, object]:
+                if (
+                    row is None
+                    or set(row) != set(spec.field_names)
+                    or row.get(spec.primary_key) != identity
+                ):
+                    raise SpaceRecoveryRequiredError(
+                        f"mutation plan has no complete {label} image"
+                    )
+                return row
+
+            if plan.operation == "insert":
+                after = require_complete_row(plan.after_row, "after")
+                if current is not None or plan.before_row is not None:
+                    raise SpaceRecoveryRequiredError(
+                        "insert plan conflicts with authoritative state"
+                    )
+                rows[key] = after
+            elif plan.operation == "update":
+                before = require_complete_row(plan.before_row, "before")
+                after = require_complete_row(plan.after_row, "after")
+                if current is None or current != before:
+                    raise SpaceRecoveryRequiredError(
+                        "update plan conflicts with authoritative state"
+                    )
+                if (
+                    plan.expected_version is not None
+                    and current.get("version") != plan.expected_version
+                ):
+                    raise SpaceRecoveryRequiredError(
+                        "update plan version conflicts with authoritative state"
+                    )
                 rows[key] = plan.after_row
+            else:
+                before = require_complete_row(plan.before_row, "before")
+                if current is None or current != before or plan.after_row is not None:
+                    raise SpaceRecoveryRequiredError(
+                        "delete plan conflicts with authoritative state"
+                    )
+                if (
+                    plan.expected_version is not None
+                    and current.get("version") != plan.expected_version
+                ):
+                    raise SpaceRecoveryRequiredError(
+                        "delete plan version conflicts with authoritative state"
+                    )
+                rows.pop(key)
 
         for projection in command.projections:
             target = str(projection.target)
             if projection.tag.value == "markdown_write":
                 if projection.after is None:
                     raise SpaceRecoveryRequiredError("markdown projection has no after image")
+                if projection.before != markdown.get(target):
+                    raise SpaceRecoveryRequiredError(
+                        "markdown projection conflicts with authoritative state"
+                    )
                 markdown[target] = projection.after
                 reserved.add(target)
             elif projection.tag.value == "path_rename":
                 if projection.source is None:
                     raise SpaceRecoveryRequiredError("path rename has no source")
                 source = str(projection.source)
-                body = markdown.pop(source, None)
-                if body is not None:
-                    markdown[target] = body
+                if source not in markdown or (target != source and target in reserved):
+                    raise SpaceRecoveryRequiredError(
+                        "path rename conflicts with authoritative state"
+                    )
+                body = markdown.pop(source)
+                markdown[target] = body
                 reserved.discard(source)
                 reserved.add(target)
             elif projection.tag.value == "path_remove":
-                markdown.pop(target, None)
+                if (
+                    target not in markdown
+                    or projection.before != markdown.get(target)
+                ):
+                    raise SpaceRecoveryRequiredError(
+                        "path remove conflicts with authoritative state"
+                    )
+                markdown.pop(target)
                 reserved.discard(target)
             else:
+                if projection.before != derived.get((projection.tag, target)):
+                    raise SpaceRecoveryRequiredError(
+                        "derived projection conflicts with authoritative state"
+                    )
                 derived[(projection.tag, target)] = projection.after
 
         self._rows = rows
@@ -360,10 +426,20 @@ def _require_current_version(
         authoritative = current.get("updated_at")
         if not isinstance(authoritative, str):
             details["resolution"] = "manual"
-        elif request.client_updated_at > authoritative:
-            return "remote"
         else:
-            details["resolution"] = "local"
+            try:
+                client_instant = datetime.fromisoformat(
+                    request.client_updated_at[:-1] + "+00:00"
+                )
+                authoritative_instant = datetime.fromisoformat(
+                    authoritative[:-1] + "+00:00"
+                )
+            except ValueError:
+                details["resolution"] = "manual"
+            else:
+                if client_instant > authoritative_instant:
+                    return "remote"
+                details["resolution"] = "local"
     raise MutationRuleViolation("version_conflict", details)
 
 
@@ -542,6 +618,14 @@ class MutationCompiler:
         )
         if policy is not None:
             return await policy.compile(context, request)
+        spec = _require_catalog_spec(self.catalog, request.entity_type)
+        if (
+            spec.storage_type is StorageType.FS_DB_SPLIT
+            or spec.delete_strategy == "cascade_soft_delete"
+        ):
+            raise SpaceRecoveryRequiredError(
+                "projection-backed entity requires a registered domain policy"
+            )
         return await compile_catalog_entity_command(context, request)
 
     async def compile_batch(
@@ -578,6 +662,89 @@ class MutationCompiler:
         return BatchCompilation(tuple(accepted_ids), tuple(commands), tuple(rejected))
 
 
+def _validate_persisted_plan_against_catalog(
+    plan: DbMutationPlan, catalog: CompiledEntityCatalog
+) -> EntitySpec:
+    for spec in catalog.list():
+        if spec.table_name == plan.table:
+            if set(plan.primary_key) != {spec.primary_key}:
+                raise SpaceRecoveryRequiredError(
+                    "persisted mutation primary key conflicts with the catalog"
+                )
+            identity = plan.primary_key[spec.primary_key]
+            for row in (plan.before_row, plan.after_row):
+                if row is not None and (
+                    set(row) != set(spec.field_names)
+                    or row.get(spec.primary_key) != identity
+                ):
+                    raise SpaceRecoveryRequiredError(
+                        "persisted mutation row conflicts with the catalog"
+                    )
+            if plan.operation == "insert":
+                valid_shape = (
+                    plan.before_row is None
+                    and plan.after_row is not None
+                    and plan.expected_version is None
+                )
+            elif plan.operation == "update":
+                valid_shape = plan.before_row is not None and plan.after_row is not None
+            else:
+                valid_shape = plan.before_row is not None and plan.after_row is None
+            if not valid_shape:
+                raise SpaceRecoveryRequiredError(
+                    "persisted mutation operation has invalid row images"
+                )
+            if (
+                plan.operation != "insert"
+                and plan.expected_version is not None
+                and plan.before_row is not None
+                and plan.before_row.get("version") != plan.expected_version
+            ):
+                raise SpaceRecoveryRequiredError(
+                    "persisted mutation CAS conflicts with its before image"
+                )
+            return spec
+    raise SpaceRecoveryRequiredError(f"unknown persisted mutation table: {plan.table}")
+
+
+def decode_and_validate_persisted_command(
+    command_json: str, *, catalog: CompiledEntityCatalog
+) -> PersistedMutationCommand:
+    command = decode_persisted_command(command_json)
+    try:
+        catalog.get(command.request.entity_type)
+    except KeyError as exc:
+        raise SpaceRecoveryRequiredError(
+            "persisted request entity is outside the compiled catalog"
+        ) from exc
+    for plan in command.db_plans:
+        _validate_persisted_plan_against_catalog(plan, catalog)
+    for event in command.sync_events:
+        try:
+            spec = catalog.get(event.entity_type)
+        except KeyError as exc:
+            raise SpaceRecoveryRequiredError(
+                "persisted sync entity is outside the compiled catalog"
+            ) from exc
+        if not spec.sync_enabled:
+            raise SpaceRecoveryRequiredError(
+                "persisted sync entity is not sync-enabled"
+            )
+        if event.action in {"create", "update"}:
+            valid_payload = (
+                set(event.payload) == set(spec.field_names)
+                and str(event.payload.get(spec.primary_key)) == event.entity_id
+                and event.payload.get("version") == event.version
+            )
+        else:
+            valid_payload = event.payload == {"deleted_at": event.created_at}
+        if not valid_payload:
+            raise SpaceRecoveryRequiredError(
+                "persisted sync event conflicts with the catalog"
+            )
+    return command
+
+
 class DbMutationInterpreter:
     """Interpret typed journal plans using models from the frozen catalog."""
 
@@ -585,13 +752,16 @@ class DbMutationInterpreter:
         self.catalog = catalog
 
     def decode_command(self, command_json: str) -> PersistedMutationCommand:
-        return decode_persisted_command(command_json)
+        return decode_and_validate_persisted_command(
+            command_json, catalog=self.catalog
+        )
+
+    def _spec_for_plan(self, plan: DbMutationPlan) -> EntitySpec:
+        return _validate_persisted_plan_against_catalog(plan, self.catalog)
 
     def _model_for_plan(self, plan: DbMutationPlan):
-        for spec in self.catalog.list():
-            if spec.table_name == plan.table:
-                return self.catalog.model_for(spec.name), spec.primary_key
-        raise SpaceRecoveryRequiredError(f"unknown persisted mutation table: {plan.table}")
+        spec = self._spec_for_plan(plan)
+        return self.catalog.model_for(spec.name), spec.primary_key
 
     async def apply(
         self, session: AsyncSession, plans: Sequence[DbMutationPlan]

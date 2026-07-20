@@ -333,13 +333,121 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
     assert overlay.row("task", "overlay-task") == after
 
 
+def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -> None:
+    current = {
+        "id": "overlay-existing",
+        "title": "before",
+        "description": "",
+        "status": "todo",
+        "priority": "medium",
+        "tags": "[]",
+        "plan": "",
+        "completion": "",
+        "due_date": None,
+        "estimated_pomodoros": 1,
+        "actual_pomodoros": 0,
+        "archived_at": None,
+        "created_at": "2026-07-20T00:00:00Z",
+        "updated_at": "2026-07-20T00:00:00Z",
+        "version": 1,
+    }
+    missing = {**current, "id": "overlay-missing"}
+    updated_missing = {
+        **missing,
+        "title": "after",
+        "updated_at": "2026-07-20T00:00:01Z",
+        "version": 2,
+    }
+    request = MutationRequest.from_payload(
+        name="overlay.probe",
+        entity_type="task",
+        entity_id="overlay-existing",
+        payload={},
+        expected_version=None,
+    )
+    cases = (
+        MutationCommand.from_effects(
+            request=request,
+            db_plans=(
+                DbMutationPlan(
+                    "tasks",
+                    {"id": "overlay-existing"},
+                    "insert",
+                    None,
+                    None,
+                    current,
+                ),
+            ),
+            projections=(),
+            sync_events=(),
+            result_value=current,
+        ),
+        MutationCommand.from_effects(
+            request=request,
+            db_plans=(
+                DbMutationPlan(
+                    "tasks",
+                    {"id": "overlay-missing"},
+                    "update",
+                    1,
+                    missing,
+                    updated_missing,
+                ),
+            ),
+            projections=(),
+            sync_events=(),
+            result_value=updated_missing,
+        ),
+        MutationCommand.from_effects(
+            request=request,
+            db_plans=(
+                DbMutationPlan(
+                    "tasks",
+                    {"id": "overlay-missing"},
+                    "delete",
+                    1,
+                    missing,
+                    None,
+                ),
+            ),
+            projections=(),
+            sync_events=(),
+            result_value={"id": "overlay-missing"},
+        ),
+        MutationCommand.from_effects(
+            request=request,
+            db_plans=(),
+            projections=(
+                _projection_plan(
+                    "path_rename",
+                    "notes/missing-target.md",
+                    0,
+                    None,
+                    None,
+                    source="notes/missing-source.md",
+                ),
+            ),
+            sync_events=(),
+            result_value={"id": "overlay-existing"},
+        ),
+    )
+
+    for command in cases:
+        overlay = AuthorityOverlay(
+            CATALOG, {("task", "overlay-existing"): current}
+        )
+        with pytest.raises(SpaceRecoveryRequiredError):
+            overlay.apply(command)
+        assert overlay.row("task", "overlay-existing") == current
+
+
 @pytest.mark.asyncio
 async def test_batch_overlay_exposes_folder_create_to_note_child(uow_fixture) -> None:
     class FolderChildPolicy:
-        entity_types = frozenset({"note"})
+        entity_types = frozenset({"folder", "note"})
 
         async def compile(self, context, request):
-            if request.name == "entity.create":
+            if request.entity_type == "note" and request.name == "entity.create":
                 folder_id = request.payload.get("folder_id")
                 assert isinstance(folder_id, str)
                 assert context.authority.row("folder", folder_id) is not None
@@ -409,6 +517,49 @@ async def test_batch_overlay_exposes_quick_note_create_to_junction_child(uow_fix
     assert compilation.rejected == ()
     assert compilation.commands[1].db_plans[0].after_row["quick_note_id"] == (
         "quick-note-parent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_overlay_exposes_note_create_to_schedule_junction_child(
+    uow_fixture,
+) -> None:
+    class NoteJunctionPolicy:
+        entity_types = frozenset({"note", "schedule_quick_note"})
+
+        async def compile(self, context, request):
+            if request.entity_type == "schedule_quick_note":
+                note_id = request.payload.get("quick_note_id")
+                assert context.authority.row("note", note_id) is not None
+            return await compile_catalog_entity_command(context, request)
+
+    compilation = await _compile_production_batch(
+        uow_fixture,
+        (
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="note",
+                entity_id="junction-note-parent",
+                payload={"title": "Parent", "content_hash": "body"},
+                expected_version=None,
+            ),
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="schedule_quick_note",
+                entity_id="schedule-note-link",
+                payload={
+                    "schedule_id": "schedule-parent",
+                    "quick_note_id": "junction-note-parent",
+                },
+                expected_version=None,
+            ),
+        ),
+        policies=(NoteJunctionPolicy(),),
+    )
+
+    assert compilation.rejected == ()
+    assert compilation.commands[1].db_plans[0].after_row["quick_note_id"] == (
+        "junction-note-parent"
     )
 
 
@@ -690,7 +841,7 @@ async def test_timestamp_lww_remote_win_executes_against_authoritative_version(
                 id="remote-win-task",
                 title="local",
                 created_at="2026-07-20T00:00:00Z",
-                updated_at="2026-07-20T00:00:02Z",
+                updated_at="2026-07-20T00:00:03Z",
                 version=3,
             )
         )
@@ -700,7 +851,7 @@ async def test_timestamp_lww_remote_win_executes_against_authoritative_version(
         entity_id="remote-win-task",
         payload={"title": "remote"},
         expected_version=2,
-        client_updated_at="2026-07-20T00:00:03Z",
+        client_updated_at="2026-07-20T00:00:03.1Z",
     )
     uow = MutationUnitOfWork(
         catalog=CATALOG,
@@ -799,6 +950,23 @@ async def test_production_compiler_injects_closed_plan_factories(uow_fixture) ->
                 updated_at="2026-07-20T00:00:01Z",
                 version=2,
             )
+            moved = task_model(
+                id="factory-task-moved",
+                title="after",
+                description="",
+                status="todo",
+                priority="medium",
+                tags="[]",
+                plan="",
+                completion="",
+                due_date=None,
+                estimated_pomodoros=1,
+                actual_pomodoros=0,
+                archived_at=None,
+                created_at="2026-07-20T00:00:00Z",
+                updated_at="2026-07-20T00:00:01Z",
+                version=2,
+            )
             db_insert = context.db.insert(before)
             db_update = context.db.update(before, after)
             db_delete = context.db.delete(after)
@@ -813,9 +981,11 @@ async def test_production_compiler_injects_closed_plan_factories(uow_fixture) ->
             assert sync_create.entity_type == "task" and sync_create.version == 1
             assert sync_update.entity_type == "task" and sync_update.version == 2
             assert sync_delete.action == "delete" and sync_delete.version == 3
+            with pytest.raises(ValueError, match="primary key"):
+                context.db.update(before, moved)
             return context.command(
                 request=request,
-                db_plans=(),
+                db_plans=(db_insert,),
                 sync_events=(sync_create,),
                 value={"id": request.entity_id},
             )
@@ -836,6 +1006,139 @@ async def test_production_compiler_injects_closed_plan_factories(uow_fixture) ->
         )
 
     assert compiled.operation_ids == ("factory-operation",)
+    assert compiled.commands[0].db_plans[0].after_row["title"] == "before"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entity_type", "payload"),
+    (
+        ("note", {"title": "Unsafe", "content_hash": "body"}),
+        ("folder", {"name": "Unsafe"}),
+    ),
+)
+async def test_production_compiler_requires_policy_for_projection_backed_entity(
+    uow_fixture, entity_type, payload
+) -> None:
+    request = MutationRequest.from_payload(
+        name="entity.create",
+        entity_type=entity_type,
+        entity_id=f"unsafe-{entity_type}",
+        payload=payload,
+        expected_version=None,
+    )
+    item = mutation_types.PreparedBatchItem(
+        0, f"unsafe-{entity_type}-operation", request.request_hash, request, None
+    )
+
+    async with uow_fixture.sessions() as session:
+        with pytest.raises(
+            SpaceRecoveryRequiredError, match="projection-backed entity"
+        ):
+            await MutationCompiler(CATALOG).compile_batch(
+                uow_fixture.scope, (item,), session
+            )
+
+
+def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
+    request = MutationRequest.from_payload(
+        name="decode.probe",
+        entity_type="task",
+        entity_id="decode-task",
+        payload={},
+        expected_version=None,
+    )
+    complete_task = {
+        "id": "decode-task",
+        "title": "decode",
+        "description": "",
+        "status": "todo",
+        "priority": "medium",
+        "tags": "[]",
+        "plan": "",
+        "completion": "",
+        "due_date": None,
+        "estimated_pomodoros": 1,
+        "actual_pomodoros": 0,
+        "archived_at": None,
+        "created_at": "2026-07-20T00:00:00Z",
+        "updated_at": "2026-07-20T00:00:00Z",
+        "version": 1,
+    }
+    commands = (
+        MutationCommand.from_effects(
+            request=request,
+            db_plans=(
+                DbMutationPlan(
+                    "unknown_table",
+                    {"id": "decode-task"},
+                    "insert",
+                    None,
+                    None,
+                    {"id": "decode-task"},
+                ),
+            ),
+            projections=(),
+            sync_events=(),
+            result_value={"id": "decode-task"},
+        ),
+        MutationCommand.from_effects(
+            request=request,
+            db_plans=(),
+            projections=(),
+            sync_events=(
+                SyncEventPlan(
+                    "unknown_entity",
+                    "decode-task",
+                    "create",
+                    {"id": "decode-task"},
+                    1,
+                    "2026-07-20T00:00:00Z",
+                ),
+            ),
+            result_value={"id": "decode-task"},
+        ),
+        MutationCommand.from_effects(
+            request=request,
+            db_plans=(
+                DbMutationPlan(
+                    "tasks",
+                    {"id": "decode-task"},
+                    "insert",
+                    None,
+                    complete_task,
+                    complete_task,
+                ),
+            ),
+            projections=(),
+            sync_events=(),
+            result_value={"id": "decode-task"},
+        ),
+        MutationCommand.from_effects(
+            request=request,
+            db_plans=(),
+            projections=(),
+            sync_events=(
+                SyncEventPlan(
+                    "task",
+                    "decode-task",
+                    "create",
+                    {"id": "decode-task"},
+                    1,
+                    "2026-07-20T00:00:00Z",
+                ),
+            ),
+            result_value={"id": "decode-task"},
+        ),
+    )
+    interpreter = DbMutationInterpreter(CATALOG)
+
+    for command in commands:
+        encoded = mutation_types.persisted_command_bytes(command.persisted()).decode(
+            "utf-8"
+        )
+        with pytest.raises(SpaceRecoveryRequiredError):
+            interpreter.decode_command(encoded)
 
 
 @pytest.mark.asyncio
@@ -843,26 +1146,15 @@ async def test_production_compiler_persists_aliases_through_invisible_and_visibl
     uow_fixture, monkeypatch
 ) -> None:
     internal_names = ("quick_note", "time_block", "schedule_quick_note")
-
-    class AliasPolicy:
-        entity_types = frozenset(internal_names)
-
-        async def compile(self, context, request):
-            return context.command(
-                request=request,
-                db_plans=(),
-                sync_events=(
-                    SyncEventPlan(
-                        request.entity_type,
-                        request.entity_id,
-                        "create",
-                        {"id": request.entity_id},
-                        1,
-                        "2026-07-20T00:00:00Z",
-                    ),
-                ),
-                value={"id": request.entity_id},
-            )
+    payloads = (
+        {"content": "alias"},
+        {
+            "date": "2026-07-20",
+            "start_time": "09:00",
+            "end_time": "10:00",
+        },
+        {"schedule_id": "schedule-alias", "quick_note_id": "alias-0"},
+    )
 
     visibility_snapshots: list[tuple[tuple[str, bool], ...]] = []
     original_finalize = MutationJournal.finalize_batch
@@ -901,17 +1193,17 @@ async def test_production_compiler_persists_aliases_through_invisible_and_visibl
     monkeypatch.setattr(MutationJournal, "finalize_batch", observed_finalize)
     requests = tuple(
         MutationRequest.from_payload(
-            name="alias.create",
+            name="entity.create",
             entity_type=entity_type,
             entity_id=f"alias-{index}",
-            payload={},
+            payload=payloads[index],
             expected_version=None,
         )
         for index, entity_type in enumerate(internal_names)
     )
     uow = MutationUnitOfWork(
         catalog=CATALOG,
-        compiler=MutationCompiler(CATALOG, (AliasPolicy(),)),
+        compiler=MutationCompiler(CATALOG),
         interpreter=DbMutationInterpreter(CATALOG),
         projection_executor=FileSystemProjectionExecutor(),
         recovery_gate=_CleanGate(),
@@ -1177,7 +1469,7 @@ def test_storage_base_owns_all_contained_projection_primitives() -> None:
 
 @pytest.mark.asyncio
 async def test_production_projection_executor_applies_all_tags_through_contained_authorities(
-    tmp_path,
+    uow_fixture, tmp_path
 ) -> None:
     from app.file_system.api import open_contained_file_system
     from app.runtime.contained_io import open_bound_space
@@ -1250,17 +1542,44 @@ async def test_production_projection_executor_applies_all_tags_through_contained
                 "fts_replace",
                 "fts/n-production",
                 4,
-                None,
+                (await file_system.snapshot_projection_authority()).fts[
+                    "fts/n-production"
+                ],
                 canonical({"content": "fresh searchable term", "title": "Original"}),
             ),
         )
-        command = MutationCommand.from_effects(
-            request=_request("n-production"),
-            db_plans=(),
-            projections=plans,
-            sync_events=(),
-            result_value={"id": "n-production"},
+        request = _request("n-production")
+
+        class ProjectionPolicy:
+            entity_types = frozenset({"note"})
+
+            async def compile(self, context, compiled_request):
+                return context.command(
+                    request=compiled_request,
+                    db_plans=(),
+                    projections=plans,
+                    sync_events=(),
+                    value={"id": compiled_request.entity_id},
+                )
+
+        scope = SimpleNamespace(
+            mutation_stages=stages,
+            file_system=file_system,
+            scope=SimpleNamespace(space_id="space-production"),
         )
+        item = mutation_types.PreparedBatchItem(
+            0,
+            "production-projection",
+            request.request_hash,
+            request,
+            None,
+        )
+        async with uow_fixture.sessions() as session:
+            compilation = await MutationCompiler(
+                CATALOG, (ProjectionPolicy(),)
+            ).compile_batch(scope, (item,), session)
+        assert compilation.rejected == ()
+        command = compilation.commands[0]
         manifest = await stages.publish(
             "production-projection",
             plans,
@@ -1269,7 +1588,6 @@ async def test_production_projection_executor_applies_all_tags_through_contained
         )
         assert tuple(step.descriptor for step in manifest.steps) == command.persisted().projections
 
-        scope = SimpleNamespace(mutation_stages=stages, file_system=file_system)
         receipt = space_lease.fence_receipt("space-production")
         await FileSystemProjectionExecutor().apply_forward(
             scope, "production-projection", command.persisted(), receipt
