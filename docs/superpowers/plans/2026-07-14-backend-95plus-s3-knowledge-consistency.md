@@ -1143,54 +1143,73 @@ git commit -m "feat(mutation): enforce closed journal state machine"
 ## Task 3: Build Durable Staging And Safe Orphan Collection
 
 **Files:**
+- Modify: `backend/app/runtime/contained_io.py`
+- Modify: `backend/app/runtime/space.py`
 - Create: `backend/app/mutation/staging.py`
 - Create: `backend/tests/test_mutation_staging.py`
+- Modify: `backend/tests/test_space_lifecycle.py`
+- Modify: `backend/tests/test_space_path_containment.py`
 
 **Interfaces:**
-- Consumes: Task 2 `ProjectionPlan`/`PersistedProjectionDescriptor`, S1 contained Space paths, and S2 Space-exclusive `FenceReceipt` ownership.
-- Produces: `StageStore.publish(operation_id, plans) -> PublishedManifest`, `verify(operation_id) -> VerifiedManifest`, bounded orphan collection, and content-addressed before/after blob descriptors used identically by happy path and recovery.
+- Consumes: Task 2 `ProjectionPlan`/`PersistedProjectionDescriptor`, S1 opaque contained-handle authority, and S2 same-Task Space-exclusive `Lease`/`FenceReceipt` ownership.
+- Produces: package-private `BoundStageDirectory` transferred by `ContainedSpaceOpens`; `SpaceRuntimeHandle.mutation_stages`; `StageStore.publish(operation_id, plans, *, lease, space_id) -> StageManifest`, `verify(operation_id) -> StageManifest`, bounded orphan collection, and content-addressed before/after blob descriptors used identically by happy path and recovery.
 
 - [ ] **Step 1: Write failing stage publication, hash, containment, and orphan tests**
 
 ```python
 @pytest.mark.asyncio
 async def test_stage_is_published_only_after_all_blobs_and_manifest_are_fsynced(
-    tmp_path: Path, monkeypatch
+    bound_stage_fixture,
 ) -> None:
     calls: list[str] = []
-    store = StageStore(tmp_path / ".mutations", observer=calls.append)
+    store = StageStore(bound_stage_fixture.authority, observer=calls.append)
     plans = (
         ProjectionPlan("markdown", "notes/n1.md", 0, b"old", b"new"),
         ProjectionPlan("index", "rows/n1.json", 1, None, b'{"id":"n1"}'),
     )
 
-    manifest = await store.publish("op-1", plans)
+    manifest = await store.publish(
+        "op-1", plans,
+        lease=bound_stage_fixture.space_exclusive,
+        space_id=bound_stage_fixture.space_id,
+    )
 
     assert calls[-3:] == [
         "fsync-temp-directory",
         "rename-published-directory",
         "fsync-parent-directory",
     ]
-    assert store.operation_dir("op-1").is_dir()
+    assert bound_stage_fixture.published_names() == (manifest.directory_key,)
     assert manifest.manifest_sha256 == store.verify("op-1").manifest_sha256
 
 
 @pytest.mark.parametrize("target", ["../escape", "/absolute", "C:/escape", "notes/../../escape"])
-def test_projection_target_must_be_relative_and_contained(tmp_path: Path, target: str) -> None:
+def test_projection_target_must_be_relative_and_contained(bound_stage_fixture, target: str) -> None:
     with pytest.raises(UnsafeProjectionPathError):
-        StageStore(tmp_path).validate_target(target)
+        StageStore(bound_stage_fixture.authority).validate_target(target)
 
 
 @pytest.mark.asyncio
 async def test_orphan_collection_requires_space_exclusive_and_no_live_owner(stage_fixture) -> None:
     stage_fixture.create_temp("orphan")
     with pytest.raises(LeaseOrderError):
-        await stage_fixture.store.collect_orphans(live_operation_ids=set(), lease=None)
+        await stage_fixture.store.collect_orphans(
+            live_operation_ids=set(), lease=None,
+            space_id=stage_fixture.space_id,
+        )
     removed = await stage_fixture.store.collect_orphans(
-        live_operation_ids=set(), lease=stage_fixture.space_exclusive
+        live_operation_ids=set(), lease=stage_fixture.space_exclusive,
+        space_id=stage_fixture.space_id,
     )
     assert removed == ("orphan",)
 ```
+
+相邻 runtime tests 必须证明 `ContainedSpaceOpens.take_mutation_stage_authority()`
+只转交 opaque capability，不返回 `Path`、fd 或 HANDLE；`SpaceRuntimeHandle` 激活时从同一
+`open_verified()` 取得它，构造 `mutation_stages`，并在仍持 Space lease 时按
+FileSystem -> StageStore -> engine 顺序 collect-all 关闭。read/startup activation 只绑定
+authority，不创建 `.mutations` 或其他目录；任一 StageStore close fail-once/persistent
+failure 都进入 S2 pending-cleanup owner，资源未关闭前不得释放 Space/global lease。
 
 - [ ] **Step 2: Run staging tests and verify missing StageStore**
 
@@ -1202,7 +1221,27 @@ Expected: FAIL on missing `app.mutation.staging`.
 
 - [ ] **Step 3: Implement content-addressed manifest publication**
 
-`StageStore.publish(operation_id, plans)` 固定：先计算 `directory_key = sha256(operation_id.encode("utf-8")).hexdigest()`，创建 `.tmp-{directory_key}-{nonce}`；每 step 分别写 `before/{ordinal}.bin` 和 `after/{ordinal}.bin`（None 在 manifest 显式记 null）；每个 file fsync；写 canonical ASCII JSON manifest，内容保留原始 operation ID、directory key、ordinal、store、relative target、before/after SHA-256 和 size；manifest fsync；temp directory fsync；原子 rename 为 `{directory_key}`；parent fsync；若 final 已存在则 verify 原始 ID 与相同 hash 后幂等返回，不同则 fail closed。caller-controlled ID 从不直接进入 Windows/POSIX 文件名。
+`BoundStageDirectory` 只能由 `ContainedSpaceOpens` 从已验证 notes authority 的独立
+descriptor/HANDLE 创建，并把所有操作固定在 `.mutations` 命名空间。它只暴露 StageStore
+所需的 exact-relative create/read/fsync/rename/direct-child-enumeration/remove-tree 方法；
+不暴露 host `Path`、URI、fd/HANDLE 或通用 pathname reopen。Windows 使用相对
+handle operations 并拒绝 reparse point，POSIX 使用 `dir_fd` + no-follow；两者都逐级
+验证 exact child。StageStore 和 tests 禁止 `Path`, `resolve`, `os.open`、absolute path
+或 pathname fallback；测试 fixture 只负责从 `tmp_path` 建立真实 opaque authority，绝不
+冒充生产 runtime bootstrap。
+
+`StageStore.publish(operation_id, plans, *, lease, space_id)` 先在 caller owner Task 调用
+`lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope=space_id)` 并取得
+`FenceReceipt`，再进入 blocking worker。固定：计算
+`directory_key = sha256(operation_id.encode("utf-8")).hexdigest()`，创建
+`.tmp-{directory_key}-{nonce}`；每 step 分别写 `before/{ordinal}.bin` 和
+`after/{ordinal}.bin`（None 在 manifest 显式记 null）；每个 file fsync；写 canonical
+ASCII JSON manifest，内容保留原始 operation ID、directory key、ordinal、store、relative
+target、before/after SHA-256 和 size；manifest fsync；temp directory fsync；原子 rename
+为 `{directory_key}`；`.mutations` parent fsync。每个 namespace/temp/subdirectory
+mkdir/create、destructive write、rename、remove 紧邻前先调用同一
+`FenceReceipt.assert_current()`。若 final 已存在则 verify 原始 ID 与
+相同 hash 后幂等返回，不同则 fail closed。caller-controlled ID 从不进入任何文件名。
 
 公开 records：
 
@@ -1210,27 +1249,49 @@ Expected: FAIL on missing `app.mutation.staging`.
 @dataclass(frozen=True)
 class StageManifest:
     operation_id: str
+    directory_key: str
     steps: tuple[StagedStep, ...]
     manifest_sha256: str
 
 
 class StageStore:
     async def publish(
-        self, operation_id: str, plans: tuple[ProjectionPlan, ...]
+        self, operation_id: str, plans: tuple[ProjectionPlan, ...],
+        *, lease: Lease, space_id: str,
     ) -> StageManifest:
-        return await asyncio.to_thread(self._publish_sync, operation_id, plans)
+        lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope=space_id)
+        receipt = lease.fence_receipt(space_id)
+        return await run_joined_thread(
+            lambda: self._publish_sync(operation_id, plans, receipt)
+        )
 
     def verify(self, operation_id: str) -> StageManifest:
         return self._load_and_verify(self.operation_dir(operation_id))
 
     async def collect_orphans(
-        self, *, live_operation_ids: set[str], lease: Lease | None
+        self, *, live_operation_ids: set[str], lease: Lease | None,
+        space_id: str,
     ) -> tuple[str, ...]:
-        self._require_space_exclusive(lease)
-        return await asyncio.to_thread(self._collect_sync, live_operation_ids)
+        receipt = self._require_space_exclusive(lease, space_id)
+        return await run_joined_thread(
+            lambda: self._collect_sync(live_operation_ids, receipt)
+        )
 ```
 
-删除只允许 root 的直接 child，名称必须匹配 `.tmp-{64-lowercase-hex}-{nonce}` 或 `{64-lowercase-hex}`，resolve 后仍在 stage root；published operation dir 没有 matching durable record 时也只能在 Space exclusive 且 journal 确认 manifest 中原始 operation ID 无 live owner 后删除。测试必须包含由 `bounded_child_operation_id("batch", "0000")` 生成的 batch child ID `childp:5:batch:0000`，证明其 stage 目录只含 SHA-256 hex、manifest 仍可还原原始 ID。
+删除只允许 opaque authority 枚举出的 `.mutations` 直接 child，名称必须匹配
+`.tmp-{64-lowercase-hex}-{nonce}` 或 `{64-lowercase-hex}`；任何 symlink/reparse、非直接
+child 或未知名称 fail closed。collector 先把全部 `live_operation_ids` 计算为 SHA-256
+directory-key 集合；任何 `.tmp-{directory_key}-{nonce}` 的 key 在 live 集合中必须保留，
+即使 crash 发生在 manifest 完整写入前；只有 unknown temp 才可删除。published operation
+dir 没有 matching durable record 时也只能
+在 same-Task Space-exclusive 且 journal 确认 manifest 中原始 operation ID 无 live owner后
+删除。测试必须包含由 `bounded_child_operation_id("batch", "0000")` 生成的 batch child ID
+`childp:5:batch:0000`，证明 stage 目录只含 SHA-256 hex、manifest 仍可还原原始 ID；另测
+stale fence 在 `.mutations` namespace、temp、before、after 的每次 mkdir/create 以及每个
+blob/manifest write、rename/delete boundary 前阻止写入。分别测试 live INTENT temp 保留、
+unknown temp 删除、published orphan 删除；cancellation 在每个 worker boundary 发生时由
+S2 `run_joined_thread` 等待 physical terminal，worker 结束、StageStore 关闭后才允许 lease
+release。
 
 - [ ] **Step 4: Run staging and path-safety tests**
 
@@ -1238,8 +1299,8 @@ class StageStore:
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
-.\.venv\Scripts\python.exe -m pytest -q tests/test_mutation_staging.py -p no:cacheprovider
-.\.venv\Scripts\ruff.exe check --no-cache app/mutation/staging.py tests/test_mutation_staging.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_mutation_staging.py tests/test_space_lifecycle.py tests/test_space_path_containment.py -p no:cacheprovider
+.\.venv\Scripts\ruff.exe check --no-cache app/runtime/contained_io.py app/runtime/space.py app/mutation/staging.py tests/test_mutation_staging.py tests/test_space_lifecycle.py tests/test_space_path_containment.py
 ```
 
 Expected: PASS; temp publication ordering、manifest hash、path containment 和 orphan ownership 都有断言。
@@ -1247,7 +1308,7 @@ Expected: PASS; temp publication ordering、manifest hash、path containment 和
 - [ ] **Step 5: Commit durable staging**
 
 ```powershell
-git add app/mutation/staging.py tests/test_mutation_staging.py
+git add app/runtime/contained_io.py app/runtime/space.py app/mutation/staging.py tests/test_mutation_staging.py tests/test_space_lifecycle.py tests/test_space_path_containment.py
 git commit -m "feat(mutation): persist verified projection stages"
 ```
 
@@ -1983,7 +2044,7 @@ class MutationUnitOfWork:
                 rejections,
             )
             manifests = await self._publish_stages(
-                compilation.operation_ids, compilation.commands
+                scope, lease, compilation.operation_ids, compilation.commands
             )
             await self.journal.mark_staged(batch_id, manifests)
             await self._commit_business(
@@ -2019,7 +2080,15 @@ Every Sync-enabled effect in `MutationCommand.sync_events` is a complete persist
 
 Phase boundary: S3 tests only compiler/internal-name -> persisted effective wire key and complete `SyncEventPlan` at the UoW/ledger boundary. End-to-end alias equality through SyncProtocol, REST/MCP pull, snapshot, and frontend merge is an S4 gate and does not block S3 on code that cannot exist before the S4 branch.
 
-Stage publication may be sequential on disk, but journal visibility is batch-atomic: `_publish_stages` never advances an individual operation; only `mark_staged(batch_id, manifests)` verifies the complete accepted manifest set and changes batch plus every accepted child from INTENT to STAGED in one transaction. Failure/crash after any child publish leaves the whole journal batch INTENT for Task 5's batch-level recovery; normal exception cleanup cannot call a child-only abort.
+Stage publication may be sequential on disk, but journal visibility is batch-atomic:
+`_publish_stages(scope, lease, ...)` requires `scope.mutation_stages` from the active
+S2 runtime handle and passes the same Space-exclusive `lease`/Space ID to every
+`StageStore.publish`; it never constructs a StageStore from `Path` or reopens the
+namespace. `_publish_stages` never advances an individual operation; only
+`mark_staged(batch_id, manifests)` verifies the complete accepted manifest set and
+changes batch plus every accepted child from INTENT to STAGED in one transaction.
+Failure/crash after any child publish leaves the whole journal batch INTENT for Task
+5's batch-level recovery; normal exception cleanup cannot call a child-only abort.
 
 `record_sync_event` 的 `visible` 参数 required、没有 Python/ORM/DB true default。Task 4 在改变签名前枚举当前全部 legacy caller：`base.py`、`cascade.py`、`note.py`、`quick_note.py`、`relation.py`、`sync.py`、`task.py` 均暂时显式传 `visible=True`；UoW 内部唯一 ledger append 显式传 `visible=False`。后续 S3 tasks 删除或迁移这些 legacy writes，S4 删除 `SyncService` 最后 bypass。AST regression 扫描整个 `BACKEND_APP`：`mutation/unit_of_work.py` 只允许 literal false，`services/**` legacy caller只允许 literal true，其他目录出现 writer 直接失败，所以新增 caller 或省略/nonliteral keyword 会立即失败。`SyncState.current_cursor` 是权威 allocated high watermark，不是 visible-row max：每次 ledger append 分配 row ID，并在同一个 business transaction 把 singleton `current_cursor` 单调推进到该 ID；invisible UoW ledger row 与水位线同提交、同回滚，最终 visibility commit 不再推进 cursor。任何状态都必须满足 `0 <= retention_floor <= current_cursor`，prune 删除 ledger rows也不降低 `current_cursor`。所有读取该水位线的 consumer 必须先通过当前 Space 的 clean recovery gate；因此 S3 legacy current stats 可以读取 allocated watermark，但 pull 仍只返回 visible rows，S4 才将该 authoritative value用于未来游标、snapshot与ACK边界。
 
