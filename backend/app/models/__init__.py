@@ -10,6 +10,7 @@ from app.models.habit import Habit
 from app.models.habit_check_in import HabitCheckIn
 from app.models.memo_comment import MemoComment
 from app.models.mixins import SyncMixin
+from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.note import Note
 from app.models.quick_note import QuickNote
 from app.models.reflection import Reflection
@@ -48,4 +49,7 @@ __all__ = [
     "SyncState",
     "SyncSnapshot",
     "SyncAuditLog",
+    "MutationBatch",
+    "MutationOperation",
+    "MutationStep",
 ]

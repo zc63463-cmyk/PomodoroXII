@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from alembic.config import Config
 from sqlalchemy import Engine, create_engine
@@ -26,6 +28,8 @@ def run_bound_command(
     db_path: Path,
     operation,
     revision: str,
+    *,
+    after: Callable[[Any], None] | None = None,
 ) -> Config:
     import asyncio
 
@@ -42,13 +46,24 @@ def run_bound_command(
         with target.open_maintenance(
             MaintenanceOptions(read_only=False, create_if_missing=False)
         ) as maintenance:
-            with _alembic_maintenance_adapter(
-                maintenance,
-                expected_identity=target.identity,
-                require_write=True,
-            ) as adapter:
-                config.attributes["maintenance_adapter"] = adapter
-                operation(config, revision)
+            try:
+                with _alembic_maintenance_adapter(
+                    maintenance,
+                    expected_identity=target.identity,
+                    require_write=True,
+                ) as adapter:
+                    config.attributes["maintenance_adapter"] = adapter
+                    operation(config, revision)
+                if after is not None:
+                    after(maintenance)
+                if maintenance.in_transaction:
+                    maintenance.commit()
+            except BaseException:
+                if maintenance.in_transaction:
+                    maintenance.rollback()
+                raise
+            if maintenance.in_transaction:
+                raise AssertionError("bound migration helper left a transaction open")
     finally:
         asyncio.run(target.aclose())
     return config
