@@ -4161,6 +4161,7 @@ function verifyCrossWave(plans) {
     'backend/app/errors.py',
     'backend/app/file_system/interfaces.py',
     'backend/app/file_system/engine/base.py',
+    'backend/app/mutation/staging.py',
     'backend/app/mutation/unit_of_work.py',
     'backend/app/mutation/types.py',
     'backend/app/mutation/journal.py',
@@ -4173,9 +4174,14 @@ function verifyCrossWave(plans) {
     'backend/app/services/sync.py',
     'backend/app/services/task.py',
     'backend/tests/fixtures/task_space_session_child_operation_id_vectors.json',
+    'backend/tests/fixtures/certification/populate_n_minus_one.py',
     'backend/tests/test_mutation_journal.py',
+    'backend/tests/test_mutation_staging.py',
     'backend/tests/test_note_workspace_atomicity.py',
+    'backend/tests/test_sync_ledger_retention.py',
+    'backend/tests/test_sync_legacy_fail_closed.py',
     'backend/tests/test_sync_outbox_service.py',
+    'backend/tests/test_sync_routes.py',
     'backend/tests/test_sync_cursor_pagination.py',
   ];
   const s3Task4Mutable = parseFileEntries(s3Task4Entry).filter((entry) => mutableFileActions.has(entry.action));
@@ -4203,7 +4209,49 @@ function verifyCrossWave(plans) {
     'test_dirty_recovery_gate_raises_canonical_error_before_batch_read',
     'test_projection_executor_asserts_fence_immediately_before_each_destructive_action',
   ]) requireTaskText('S3', s3Task4Entry, contract, `Task 4 recovery/projection amendment ${contract}`);
-  requireSha256('S3 Task 4', s3Task4, 'bcf3fb5bb85d86725f4975be98906b9156812bcb8f038461874ba4ac87ca5aec');
+  for (const contract of [
+    'Modify: `backend/app/mutation/staging.py`',
+    'Modify: `backend/tests/test_mutation_staging.py`',
+    'Modify: `backend/tests/test_sync_ledger_retention.py`',
+    'Modify: `backend/tests/test_sync_legacy_fail_closed.py`',
+    'Modify: `backend/tests/test_sync_routes.py`',
+    'Modify: `backend/tests/fixtures/certification/populate_n_minus_one.py`',
+    'Task 4 replaces Task 2\'s provisional `ProjectionPlan.store: str` / `PersistedProjectionDescriptor.store: str` fields',
+    'do not add `operation_id` to `PersistedMutationCommand`',
+    'class ProjectionActionTag(StrEnum):',
+    'MARKDOWN_WRITE = "markdown_write"',
+    'PATH_RENAME = "path_rename"',
+    'PATH_REMOVE = "path_remove"',
+    'INDEX_REPLACE = "index_replace"',
+    'FTS_REPLACE = "fts_replace"',
+    'source` is required exactly for `ProjectionActionTag.PATH_RENAME`',
+    'must be `None` for every other tag',
+    '`PATH_REMOVE` requires a non-null before image and null after image',
+    '`MARKDOWN_WRITE` requires a non-null after image and permits a null before image',
+    'class MaterializedProjectionAction:',
+    'async def materialize(',
+    'derives the SHA-256 directory key internally',
+    'canonical manifest operation identity',
+    'exact ordered descriptor tuple',
+    'selected blob SHA-256/size',
+    'test_stage_materialize_before_derives_exact_inverse_actions',
+    '`before` swaps `PATH_RENAME` source/target',
+    'maps `PATH_REMOVE` with its required non-null before bytes to `MARKDOWN_WRITE`',
+    'maps `MARKDOWN_WRITE` with a null before image to `PATH_REMOVE`',
+    'a returned action tag may differ from the verified persisted descriptor tag, but only by this closed inverse table',
+    'cannot supply or receive a stage-relative path',
+    'without reopening any namespace or host path',
+    'for operation_id, command in zip(operation_ids, commands, strict=True):',
+    'Task 5 restart recovery reads `MutationOperation.operation_id` beside `command_json`',
+    'test_stage_materialize_after_returns_closed_actions',
+    'test_uow_nonempty_projection_stages_materialize_all_closed_tags',
+    'test_stale_projection_fence_performs_zero_actions',
+    '每个现有 `record_sync_event(...)` call site 都在原调用处传 literal `visible=True`',
+    '不得通过恢复参数 default、fixture wrapper、monkeypatch 或 shared shim 隐藏选择',
+    'python_call_sites(BACKEND_TESTS, "record_sync_event")',
+    'python_call_sites(CERTIFICATION_FIXTURES, "record_sync_event")',
+  ]) requireTaskText('S3', s3Task4Entry, contract, `Task 4 staged projection amendment ${contract}`);
+  requireSha256('S3 Task 4', s3Task4, '1c56cf4a125cc2776f8a1aa15db7f97003f664b9b0d56c19715f85d4c161b6ce');
   requireTaskText('S3', s3Task4Entry, 'Modify: `backend/app/mutation/types.py`', 'Task 4 extends the shared mutation identity owner');
   requireTaskText('S3', s3Task4Entry, 'Create: `backend/tests/fixtures/task_space_session_child_operation_id_vectors.json`', 'Task 4 owns authoritative child-ID vectors');
   requireTaskText('S3', s3Task4Entry, '`types.py` owns and exports the cross-wave helper', 'single backend child-ID implementation owner');
@@ -4267,18 +4315,74 @@ function verifyCrossWave(plans) {
   );
   const s3ProjectionBlock = codeBlocks(s3Task4Entry.body, 'python')
     .find((block) => block.includes('class FileSystemProjectionExecutor(')) || '';
-  const s3ProjectionLines = pythonLineInfo(s3ProjectionBlock);
-  const fenceAssertionIndices = s3ProjectionLines
-    .map((line, index) => line.text === 'receipt.assert_current()' ? index : -1)
-    .filter((index) => index >= 0);
+  const s3ProjectionInterfaceBlock = codeBlocks(s3Task4Entry.body, 'python')
+    .find((block) => block.includes('class FencedProjectionExecutor(')) || '';
   check(
-    fenceAssertionIndices.length === 1
-      && s3ProjectionLines[fenceAssertionIndices[0] + 1]?.text
-        === 'self._apply_exactly_one_destructive_primitive(scope, action)'
-      && s3ProjectionBlock.includes(
-        'self._apply_one_contained_action, scope, action, receipt',
-      ),
-    'S3 Task 4: fence receipt assertion must immediately precede every destructive projection action',
+    (s3ProjectionInterfaceBlock.match(/^\s+operation_id: str,$/gm) || []).length === 2,
+    'S3 Task 4: projection interface must carry operation_id for forward and restore',
+  );
+  const s3ProjectionTypesBlock = codeBlocks(s3Task4Entry.body, 'python')
+    .find((block) => block.includes('class ProjectionActionTag(')) || '';
+  forbidPattern('S3 Task 4 projection types', s3ProjectionTypesBlock, /\bstore:\s*str\b/g, 'permissive projection store string');
+  for (const tag of ['markdown_write', 'path_rename', 'path_remove', 'index_replace', 'fts_replace']) {
+    requireText('S3 Task 4 projection types', s3ProjectionTypesBlock, `= "${tag}"`, `closed projection tag ${tag}`);
+  }
+  const s3MaterializeBlock = codeBlocks(s3Task4Entry.body, 'python')
+    .find((block) => block.includes('class MaterializedProjectionAction:')) || '';
+  for (const required of [
+    'operation_id: str,',
+    'descriptors: tuple[PersistedProjectionDescriptor, ...],',
+    'image: Literal["before", "after"],',
+    'receipt: FenceReceipt,',
+    'tuple[MaterializedProjectionAction, ...]',
+    'self._materialize_sync, operation_id, descriptors, image, receipt',
+  ]) requireText('S3 Task 4 materialize', s3MaterializeBlock, required, `opaque materialize contract ${required}`);
+  forbidPattern(
+    'S3 Task 4 materialize Python',
+    s3MaterializeBlock,
+    /\b(?:stage_path|caller_filename|staged_filename|directory_key|blob_key|Path|URI|HANDLE)\b|\bfd\s*:/g,
+    'stage path, key, or caller filename exposure',
+  );
+  const s3ProjectionLines = pythonLineInfo(s3ProjectionBlock);
+  const s3ProjectionPrimitives = [
+    'self._apply_markdown_write(scope, action)',
+    'self._apply_path_rename(scope, action)',
+    'self._apply_path_remove(scope, action)',
+    'self._apply_index_replace(scope, action)',
+    'self._apply_fts_replace(scope, action)',
+  ];
+  const fenceAssertionIndices = s3ProjectionLines.flatMap((line, index) => (
+    line.text === 'receipt.assert_current()' ? [index] : []
+  ));
+  check(
+    fenceAssertionIndices.length === s3ProjectionPrimitives.length
+      && fenceAssertionIndices.every((index, ordinal) => (
+        s3ProjectionLines[index + 1]?.text === s3ProjectionPrimitives[ordinal]
+      ))
+      && s3ProjectionPrimitives.every((primitive) => (
+        s3ProjectionLines.filter((line) => line.text === primitive).length === 1
+      ))
+      && s3ProjectionBlock.includes('self._apply_one_contained_action, scope, action, receipt')
+      && s3ProjectionBlock.includes('assert_never(unreachable)'),
+    'S3 Task 4: every closed projection action must fence immediately before exactly one contained primitive',
+  );
+  check(
+    (s3ProjectionBlock.match(/\.materialize\s*\(/g) || []).length === 2
+      && s3ProjectionBlock.includes('operation_id, command.projections, image="after", receipt=receipt')
+      && s3ProjectionBlock.includes('operation_id, command.projections, image="before", receipt=receipt'),
+    'S3 Task 4: projection executor must materialize both images by operation_id',
+  );
+  requireText(
+    'S3 Task 4 projection executor',
+    s3ProjectionBlock,
+    'actions: Sequence[MaterializedProjectionAction]',
+    'executor consumes only materialized actions',
+  );
+  forbidPattern(
+    'S3 Task 4 projection executor',
+    s3ProjectionBlock,
+    /PersistedProjectionAction/g,
+    'persisted action passed directly to contained executor',
   );
   const s3UowBlock = codeBlocks(s3Task4Entry.body, 'python').find((block) => block.includes('class MutationUnitOfWork:')) || '';
   for (const required of [
@@ -4294,6 +4398,11 @@ function verifyCrossWave(plans) {
     'journal_factory: MutationJournalFactory,',
     'self.recovery_gate = recovery_gate',
     'self.journal_factory = journal_factory',
+    'for operation_id, command in zip(operation_ids, commands, strict=True):',
+    'scope, operation_id, command.persisted(), receipt',
+    'await journal.transition(',
+    'MutationState.FINALIZING,',
+    'MutationState.FORWARD_APPLIED,',
   ]) {
     requireText('S3 Task 4 UoW', s3UowBlock, required, `continuous UoW contract ${required}`);
   }
@@ -4327,7 +4436,7 @@ function verifyCrossWave(plans) {
   requireTaskText('S3', s3Task4Entry, 'test_operation_id_cannot_move_to_another_batch_before_compilation', 'cross-batch operation binding test');
   requireTaskText('S3', s3Task4Entry, 'assert uow_fixture.compiler_compile_count == compiler_calls', 'cross-batch zero compiler assertion');
   requireTaskText('S3', s3Task4Entry, 'assert uow_fixture.authority_read_count == authority_reads', 'cross-batch zero authority-read assertion');
-  requireSha256('S3 Task 4 UoW', s3UowBlock, '1438b409c9e0d8d1391f1fe8beaf99eee3c59da8141f57b05afa89566808d4bc');
+  requireSha256('S3 Task 4 UoW', s3UowBlock, 'a5dbca5a609b898530210c306908366684090da43f2b9b3cb4656c4cc04d3d9a');
   for (const caller of ['base.py', 'cascade.py', 'note.py', 'quick_note.py', 'relation.py', 'sync.py', 'task.py']) {
     requireText('S3', s3, `\`${caller}\``, `legacy ledger caller ownership for ${caller}`);
   }
@@ -6169,6 +6278,10 @@ function runS3Task4AmendmentVerifierAtPaths(paths) {
   return runVerifierAtPaths(paths);
 }
 
+function runS3Task4ProjectionAmendmentVerifierAtPaths(paths) {
+  return runVerifierAtPaths(paths);
+}
+
 function verifyAuthorityRedirectRejection() {
   const nodeOptionsChild = spawnSync(process.execPath, [__filename], {
     cwd: root,
@@ -6210,7 +6323,7 @@ function verifyAuthorityRedirectRejection() {
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status !== 2
-      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\|--self-test-s3-task4-amendment\]/.test(output)
+      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\|--self-test-s3-task4-amendment\|--self-test-s3-task4-projection-amendment\]/.test(output)
       || /VERIFY_OK(?:_INTERNAL)?|SELF_TEST_OK/.test(output)) {
       throw new Error(`${label} did not fail closed:\n${output}`);
     }
@@ -6222,7 +6335,7 @@ function verifyAuthorityRedirectRejection() {
     env: { ...process.env },
   });
   const legacyOutput = `${legacyChild.stdout}\n${legacyChild.stderr}`;
-  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\|--self-test-s3-task4-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
+  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\|--self-test-s3-task4-amendment\|--self-test-s3-task4-projection-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
     throw new Error(`legacy internal-child entry remains callable:\n${legacyOutput}`);
   }
 }
@@ -6241,6 +6354,29 @@ function replaceRequiredInTask(filePath, taskNumber, before, after, label) {
   }
   const taskStart = source.indexOf(task.body);
   const mutatedBody = task.body.replace(before, after);
+  fs.writeFileSync(
+    filePath,
+    source.slice(0, taskStart) + mutatedBody + source.slice(taskStart + task.body.length),
+    'utf8',
+  );
+}
+
+function removeTaskFileAndGitAddToken(filePath, taskNumber, filesLine, stagedToken, label) {
+  const source = fs.readFileSync(filePath, 'utf8');
+  const task = parseTasks(source).find((candidate) => candidate.number === taskNumber);
+  if (!task || !task.body.includes(filesLine)) {
+    throw new Error(`self-test mutation source missing for ${label}`);
+  }
+  const taskStart = source.indexOf(task.body);
+  const lines = task.body.replace(filesLine, '').split('\n');
+  const gitAddIndex = lines.findIndex((line) => line.startsWith('git add '));
+  if (gitAddIndex < 0) throw new Error(`self-test git add source missing for ${label}`);
+  const tokens = lines[gitAddIndex].split(' ');
+  if (!tokens.includes(stagedToken)) {
+    throw new Error(`self-test git add token missing for ${label}: ${stagedToken}`);
+  }
+  lines[gitAddIndex] = tokens.filter((token) => token !== stagedToken).join(' ');
+  const mutatedBody = lines.join('\n');
   fs.writeFileSync(
     filePath,
     source.slice(0, taskStart) + mutatedBody + source.slice(taskStart + task.body.length),
@@ -8043,13 +8179,13 @@ function runMutationSelfTests(
     },
     {
       name: 's3-task4-fence-receipt-assertion-omission',
-      expected: /fence receipt assertion must immediately precede every destructive projection action/,
+      expected: /every closed projection action must fence immediately before exactly one contained primitive/,
       mutate(paths) {
         const file = path.join(paths.plans, expectedPlans[3].filename);
         replaceRequiredInTask(
           file, 4,
-          '        receipt.assert_current()\n        self._apply_exactly_one_destructive_primitive(scope, action)\n',
-          '        self._apply_exactly_one_destructive_primitive(scope, action)\n',
+          '                receipt.assert_current()\n                self._apply_markdown_write(scope, action)\n',
+          '                self._apply_markdown_write(scope, action)\n',
           this.name,
         );
       },
@@ -8067,8 +8203,192 @@ function runMutationSelfTests(
         );
         replaceRequiredInTask(
           file, 4,
-          'app/file_system/engine/base.py app/mutation/unit_of_work.py',
-          'app/file_system/engine/base.py app/runtime/bootstrap.py app/mutation/unit_of_work.py',
+          'app/file_system/engine/base.py app/mutation/staging.py app/mutation/unit_of_work.py',
+          'app/file_system/engine/base.py app/runtime/bootstrap.py app/mutation/staging.py app/mutation/unit_of_work.py',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-projection-staging-whitelist-omission',
+      expected: /Task 4 staged projection amendment .*mutation\/staging\.py|S3 Task 4 (?:mutable Files|git add) closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        removeTaskFileAndGitAddToken(
+          file, 4, '- Modify: `backend/app/mutation/staging.py`\n',
+          'app/mutation/staging.py', this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-projection-staging-test-whitelist-omission',
+      expected: /Task 4 staged projection amendment .*test_mutation_staging\.py|S3 Task 4 (?:mutable Files|git add) closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        removeTaskFileAndGitAddToken(
+          file, 4, '- Modify: `backend/tests/test_mutation_staging.py`\n',
+          'tests/test_mutation_staging.py', this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-ledger-retention-whitelist-omission',
+      expected: /Task 4 staged projection amendment .*test_sync_ledger_retention\.py|S3 Task 4 (?:mutable Files|git add) closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        removeTaskFileAndGitAddToken(
+          file, 4, '- Modify: `backend/tests/test_sync_ledger_retention.py`\n',
+          'tests/test_sync_ledger_retention.py', this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-legacy-fail-closed-whitelist-omission',
+      expected: /Task 4 staged projection amendment .*test_sync_legacy_fail_closed\.py|S3 Task 4 (?:mutable Files|git add) closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        removeTaskFileAndGitAddToken(
+          file, 4, '- Modify: `backend/tests/test_sync_legacy_fail_closed.py`\n',
+          'tests/test_sync_legacy_fail_closed.py', this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-sync-routes-whitelist-omission',
+      expected: /Task 4 staged projection amendment .*test_sync_routes\.py|S3 Task 4 (?:mutable Files|git add) closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        removeTaskFileAndGitAddToken(
+          file, 4, '- Modify: `backend/tests/test_sync_routes.py`\n',
+          'tests/test_sync_routes.py', this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-certification-fixture-whitelist-omission',
+      expected: /Task 4 staged projection amendment .*populate_n_minus_one\.py|S3 Task 4 (?:mutable Files|git add) closed set drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        removeTaskFileAndGitAddToken(
+          file, 4, '- Modify: `backend/tests/fixtures/certification/populate_n_minus_one.py`\n',
+          'tests/fixtures/certification/populate_n_minus_one.py', this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-projection-interface-operation-id-dropped',
+      expected: /projection interface must carry operation_id/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '        scope: SpaceRuntimeHandle,\n        operation_id: str,\n        command: PersistedMutationCommand,\n',
+          '        scope: SpaceRuntimeHandle,\n        command: PersistedMutationCommand,\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-uow-operation-id-dropped',
+      expected: /continuous UoW contract for operation_id, command in zip|S3 Task 4 UoW critical body SHA-256 drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '        for operation_id, command in zip(operation_ids, commands, strict=True):\n',
+          '        for command in commands:\n',
+          this.name,
+        );
+        replaceRequiredInTask(
+          file, 4,
+          '                scope, operation_id, command.persisted(), receipt\n',
+          '                scope, command.persisted(), receipt\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-materialize-missing',
+      expected: /Task 4 staged projection amendment .*async def materialize|opaque materialize contract/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(file, 4, '    async def materialize(\n', '    async def verify_only(\n', this.name);
+      },
+    },
+    {
+      name: 's3-task4-materialize-unsafe-verification',
+      expected: /Task 4 staged projection amendment .*canonical manifest operation identity/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          'verifies canonical manifest operation identity, the exact ordered descriptor tuple',
+          'trusts caller operation identity and descriptor order',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-permissive-projection-store',
+      expected: /permissive projection store string/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          'class ProjectionPlan:\n    tag: ProjectionActionTag\n',
+          'class ProjectionPlan:\n    store: str\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-rename-source-made-optional',
+      expected: /Task 4 staged projection amendment .*source.*required exactly/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '`source` is required exactly for `ProjectionActionTag.PATH_RENAME`',
+          '`source` is optional for `ProjectionActionTag.PATH_RENAME`',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-materialized-stage-path-leak',
+      expected: /stage path, key, or caller filename exposure/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          'class MaterializedProjectionAction:\n    tag: ProjectionActionTag\n',
+          'class MaterializedProjectionAction:\n    stage_path: Path\n    tag: ProjectionActionTag\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-materialize-caller-filename',
+      expected: /stage path, key, or caller filename exposure/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '        operation_id: str,\n        descriptors: tuple[PersistedProjectionDescriptor, ...],\n',
+          '        operation_id: str,\n        caller_filename: str,\n        descriptors: tuple[PersistedProjectionDescriptor, ...],\n',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task4-projection-action-multiple-primitives',
+      expected: /every closed projection action must fence immediately before exactly one contained primitive/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequiredInTask(
+          file, 4,
+          '                self._apply_markdown_write(scope, action)\n',
+          '                self._apply_markdown_write(scope, action)\n                self._apply_index_replace(scope, action)\n',
           this.name,
         );
       },
@@ -12037,9 +12357,28 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's3-task4-fence-receipt-assertion-omission',
     's3-task4-premature-bootstrap-registration',
   ]), runS3Task4AmendmentVerifierAtPaths, 's3-task4-amendment', 11);
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s3-task4-projection-amendment') {
+  runMutationSelfTests(new Set([
+    's3-task4-projection-staging-whitelist-omission',
+    's3-task4-projection-staging-test-whitelist-omission',
+    's3-task4-ledger-retention-whitelist-omission',
+    's3-task4-legacy-fail-closed-whitelist-omission',
+    's3-task4-sync-routes-whitelist-omission',
+    's3-task4-certification-fixture-whitelist-omission',
+    's3-task4-projection-interface-operation-id-dropped',
+    's3-task4-uow-operation-id-dropped',
+    's3-task4-materialize-missing',
+    's3-task4-materialize-unsafe-verification',
+    's3-task4-permissive-projection-store',
+    's3-task4-rename-source-made-optional',
+    's3-task4-materialized-stage-path-leak',
+    's3-task4-materialize-caller-filename',
+    's3-task4-projection-action-multiple-primitives',
+    's3-task4-fence-receipt-assertion-omission',
+  ]), runS3Task4ProjectionAmendmentVerifierAtPaths, 's3-task4-projection-amendment', 16);
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment|--self-test-s3-task1-amendment|--self-test-s3-task2-amendment|--self-test-s3-task3-amendment|--self-test-s3-task4-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment|--self-test-s3-task1-amendment|--self-test-s3-task2-amendment|--self-test-s3-task3-amendment|--self-test-s3-task4-amendment|--self-test-s3-task4-projection-amendment]\n');
   process.exitCode = 2;
 }
