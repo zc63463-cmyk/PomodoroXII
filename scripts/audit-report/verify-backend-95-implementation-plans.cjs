@@ -3158,6 +3158,7 @@ function verifyCrossWave(plans) {
   const s2Task10Entry = taskEntry(s2, 10);
   const s3Task1Entry = taskEntry(s3, 1);
   const s3Task2Entry = taskEntry(s3, 2);
+  const s3Task3Entry = taskEntry(s3, 3);
   const s3Task4Entry = taskEntry(s3, 4);
   const s3Task11Entry = taskEntry(s3, 11);
   const s4Task2Entry = taskEntry(s4, 2);
@@ -3168,6 +3169,7 @@ function verifyCrossWave(plans) {
   const s4Task8Entry = taskEntry(s4, 8);
   const s3Task1 = task(s3, 1);
   const s3Task2 = task(s3, 2);
+  const s3Task3 = task(s3, 3);
   const s4Task2 = task(s4, 2);
   const s4Task3 = task(s4, 3);
   const s4Task7 = task(s4, 7);
@@ -4129,6 +4131,31 @@ function verifyCrossWave(plans) {
     '`not_found` 同时属于 S3 与 TS reserved 集合',
   ]) requireTaskText('S3', s3Task2Entry, contract, `Task 2 authority amendment ${contract}`);
   forbidPattern('S3 Task 2', s3Task2, /catalog_fixture\.compile_spec\s*\(/g, 'nonexistent catalog fixture compile API');
+  requireSha256('S3 Task 3', s3Task3, '3dff2c705c945272ab7a99f599aaab2d2a25b19951866d01f088a84eccad298e');
+  for (const contract of [
+    'Modify: `backend/app/runtime/contained_io.py`',
+    'Modify: `backend/app/runtime/space.py`',
+    'Modify: `backend/tests/test_space_lifecycle.py`',
+    'Modify: `backend/tests/test_space_path_containment.py`',
+    'package-private `BoundStageDirectory`',
+    '`SpaceRuntimeHandle.mutation_stages`',
+    'take_mutation_stage_authority()',
+    'FileSystem -> StageStore -> engine',
+    '不创建 `.mutations` 或其他目录',
+    '不暴露 host `Path`、URI、fd/HANDLE',
+    '`StageStore.publish(operation_id, plans, *, lease, space_id)`',
+    'lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope=space_id)',
+    'mkdir/create、destructive write、rename、remove',
+    'FenceReceipt.assert_current()',
+    'StageStore 和 tests 禁止',
+    'S2 `run_joined_thread` 等待 physical terminal',
+    'live 集合中必须保留',
+  ]) requireTaskText('S3', s3Task3Entry, contract, `Task 3 contained staging amendment ${contract}`);
+  forbidPattern('S3 Task 3', s3Task3, /StageStore\s*\(\s*tmp_path|\.operation_dir\s*\([^)]*\)\.is_dir\s*\(/g, 'pathname StageStore authority restored');
+  for (const contract of [
+    '_publish_stages(scope, lease, ...)',
+    'requires `scope.mutation_stages`',
+  ]) requireTaskText('S3', s3Task4Entry, contract, `Task 3 downstream UoW amendment ${contract}`);
   requireTaskText('S3', s3Task4Entry, 'Modify: `backend/app/mutation/types.py`', 'Task 4 extends the shared mutation identity owner');
   requireTaskText('S3', s3Task4Entry, 'Create: `backend/tests/fixtures/task_space_session_child_operation_id_vectors.json`', 'Task 4 owns authoritative child-ID vectors');
   requireTaskText('S3', s3Task4Entry, '`types.py` owns and exports the cross-wave helper', 'single backend child-ID implementation owner');
@@ -4216,7 +4243,7 @@ function verifyCrossWave(plans) {
   requireTaskText('S3', s3Task4Entry, 'test_operation_id_cannot_move_to_another_batch_before_compilation', 'cross-batch operation binding test');
   requireTaskText('S3', s3Task4Entry, 'assert uow_fixture.compiler_compile_count == compiler_calls', 'cross-batch zero compiler assertion');
   requireTaskText('S3', s3Task4Entry, 'assert uow_fixture.authority_read_count == authority_reads', 'cross-batch zero authority-read assertion');
-  requireSha256('S3 Task 4 UoW', s3UowBlock, '7443b692d5bc1b83a40808cb2ce64861976f1159635a78a3b44f87d3da711a1e');
+  requireSha256('S3 Task 4 UoW', s3UowBlock, '379b602970ac15e1c03eaf4a1df5c9e9eb4d9bdfb34b67a2c68a41f4f4e0902e');
   for (const caller of ['base.py', 'cascade.py', 'note.py', 'quick_note.py', 'relation.py', 'sync.py', 'task.py']) {
     requireText('S3', s3, `\`${caller}\``, `legacy ledger caller ownership for ${caller}`);
   }
@@ -6050,6 +6077,10 @@ function runS3Task2AmendmentVerifierAtPaths(paths) {
   return runVerifierAtPaths(paths);
 }
 
+function runS3Task3AmendmentVerifierAtPaths(paths) {
+  return runVerifierAtPaths(paths);
+}
+
 function verifyAuthorityRedirectRejection() {
   const nodeOptionsChild = spawnSync(process.execPath, [__filename], {
     cwd: root,
@@ -6091,7 +6122,7 @@ function verifyAuthorityRedirectRejection() {
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (result.status !== 2
-      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\]/.test(output)
+      || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\]/.test(output)
       || /VERIFY_OK(?:_INTERNAL)?|SELF_TEST_OK/.test(output)) {
       throw new Error(`${label} did not fail closed:\n${output}`);
     }
@@ -6103,7 +6134,7 @@ function verifyAuthorityRedirectRejection() {
     env: { ...process.env },
   });
   const legacyOutput = `${legacyChild.stdout}\n${legacyChild.stderr}`;
-  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
+  if (legacyChild.status !== 2 || !/Usage: node verify-backend-95-implementation-plans\.cjs \[--self-test\|--self-test-s1-task4-amendment\|--self-test-s2-task1-amendment\|--self-test-s2-task3-amendment\|--self-test-s2-task4-amendment\|--self-test-s2-task7-amendment\|--self-test-s2-task9-amendment\|--self-test-s3-task1-amendment\|--self-test-s3-task2-amendment\|--self-test-s3-task3-amendment\]/.test(legacyOutput) || /VERIFY_OK(?:_INTERNAL)?/.test(legacyOutput)) {
     throw new Error(`legacy internal-child entry remains callable:\n${legacyOutput}`);
   }
 }
@@ -8338,6 +8369,94 @@ function runMutationSelfTests(
           '`not_found` belongs only to the TS reserved set',
           this.name,
         );
+      },
+    },
+    {
+      name: 's3-task3-contained-runtime-whitelist-omission',
+      expected: /Task 3 contained staging amendment .*runtime\/contained_io\.py|Files\/git add mismatch/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, '- Modify: `backend/app/runtime/contained_io.py`\n', '', this.name);
+        replaceRequired(file, 'app/runtime/contained_io.py ', '', this.name);
+      },
+    },
+    {
+      name: 's3-task3-pathname-stage-authority-restored',
+      expected: /pathname StageStore authority restored|Task 3 contained staging amendment .*Path/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'store = StageStore(bound_stage_fixture.authority, observer=calls.append)',
+          'store = StageStore(tmp_path / ".mutations", observer=calls.append)',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task3-exclusive-lease-removal',
+      expected: /Task 3 contained staging amendment .*assert_active_owner|S3 Task 3 critical body SHA-256 drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope=space_id)',
+          'lease.assert_active_owner(scope=space_id)',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task3-fence-boundary-removal',
+      expected: /Task 3 contained staging amendment .*mkdir\/create/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(
+          file,
+          'mkdir/create、destructive write、rename、remove',
+          'destructive write、rename、remove',
+          this.name,
+        );
+      },
+    },
+    {
+      name: 's3-task3-unjoined-worker-restored',
+      expected: /Task 3 contained staging amendment .*run_joined_thread|S3 Task 3 critical body SHA-256 drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, 'return await run_joined_thread(', 'return await asyncio.to_thread(', this.name);
+      },
+    },
+    {
+      name: 's3-task3-live-temp-protection-removal',
+      expected: /Task 3 contained staging amendment .*live 集合中必须保留/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, 'live 集合中必须保留', 'live 集合也可以删除', this.name);
+      },
+    },
+    {
+      name: 's3-task3-runtime-lifecycle-removal',
+      expected: /Task 3 contained staging amendment .*FileSystem -> StageStore -> engine/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, 'FileSystem -> StageStore -> engine', 'FileSystem -> engine', this.name);
+      },
+    },
+    {
+      name: 's3-task3-uow-path-reopen-restored',
+      expected: /Task 3 downstream UoW amendment .*scope\.mutation_stages/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, 'requires `scope.mutation_stages`', 'constructs `StageStore(scope.path)`', this.name);
+      },
+    },
+    {
+      name: 's3-task3-body-sha-drift',
+      expected: /S3 Task 3 critical body SHA-256 drift/,
+      mutate(paths) {
+        const file = path.join(paths.plans, expectedPlans[3].filename);
+        replaceRequired(file, 'Expected: PASS; temp publication ordering', 'Expected: PASS; publication ordering', this.name);
       },
     },
     {
@@ -11651,9 +11770,21 @@ if (process.argv.length === 3 && process.argv[2] === '--self-test') {
     's3-task2-mcp-authorization-whitelist-omission',
     's3-task2-not-found-s3-ownership-removal',
   ]), runS3Task2AmendmentVerifierAtPaths, 's3-task2-amendment');
+} else if (process.argv.length === 3 && process.argv[2] === '--self-test-s3-task3-amendment') {
+  runMutationSelfTests(new Set([
+    's3-task3-contained-runtime-whitelist-omission',
+    's3-task3-pathname-stage-authority-restored',
+    's3-task3-exclusive-lease-removal',
+    's3-task3-fence-boundary-removal',
+    's3-task3-unjoined-worker-restored',
+    's3-task3-live-temp-protection-removal',
+    's3-task3-runtime-lifecycle-removal',
+    's3-task3-uow-path-reopen-restored',
+    's3-task3-body-sha-drift',
+  ]), runS3Task3AmendmentVerifierAtPaths, 's3-task3-amendment');
 } else if (process.argv.length === 2) {
   main();
 } else {
-  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment|--self-test-s3-task1-amendment|--self-test-s3-task2-amendment]\n');
+  process.stderr.write('Usage: node verify-backend-95-implementation-plans.cjs [--self-test|--self-test-s1-task4-amendment|--self-test-s2-task1-amendment|--self-test-s2-task3-amendment|--self-test-s2-task4-amendment|--self-test-s2-task7-amendment|--self-test-s2-task9-amendment|--self-test-s3-task1-amendment|--self-test-s3-task2-amendment|--self-test-s3-task3-amendment]\n');
   process.exitCode = 2;
 }
