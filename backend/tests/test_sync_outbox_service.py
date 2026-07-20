@@ -31,12 +31,15 @@ from app.services.sync_outbox import get_current_cursor, record_sync_event
 
 def test_every_record_sync_event_call_chooses_visibility_explicitly():
     """Ledger callers must declare whether an event is pull-visible."""
-    app_root = Path(__file__).resolve().parents[1] / "app"
+    backend_root = Path(__file__).resolve().parents[1]
     calls: list[tuple[Path, ast.Call]] = []
-    for source_path in app_root.rglob("*.py"):
+    for source_path in (
+        *sorted((backend_root / "app").rglob("*.py")),
+        *sorted((backend_root / "tests").rglob("*.py")),
+    ):
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         calls.extend(
-            (source_path.relative_to(app_root), node)
+            (source_path.relative_to(backend_root), node)
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -48,11 +51,24 @@ def test_every_record_sync_event_call_chooses_visibility_explicitly():
         visibility = [keyword.value for keyword in call.keywords if keyword.arg == "visible"]
         assert len(visibility) == 1, f"{source_path}:{call.lineno} must set visible explicitly"
         assert isinstance(visibility[0], ast.Constant) and type(visibility[0].value) is bool
-        expected_visible = source_path != Path("mutation/unit_of_work.py")
-        assert visibility[0].value is expected_visible, (
-            f"{source_path}:{call.lineno} must use "
-            f"visible={expected_visible}"
-        )
+        if source_path == Path("app/mutation/unit_of_work.py"):
+            assert visibility[0].value is False
+        elif source_path.parts[:2] == ("app", "services"):
+            assert visibility[0].value is True
+        elif source_path.parts[0] == "app":
+            pytest.fail(f"unowned sync ledger writer: {source_path}:{call.lineno}")
+
+    certification = tuple(
+        (source_path, call)
+        for source_path, call in calls
+        if source_path == Path("tests/fixtures/certification/populate_n_minus_one.py")
+    )
+    assert len(certification) == 2
+    assert all(
+        next(keyword.value.value for keyword in call.keywords if keyword.arg == "visible")
+        is True
+        for _source_path, call in certification
+    )
 
 
 @pytest.mark.asyncio
@@ -149,6 +165,7 @@ async def test_record_sync_event_flush_false_does_not_assign_id_until_caller_flu
     )
     assert len(rows) == 1
     assert rows[0].id is not None
+    assert await get_current_cursor(space_session) == event.id
 
 
 @pytest.mark.asyncio

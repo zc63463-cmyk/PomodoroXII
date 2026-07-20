@@ -8,8 +8,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db.base import Base as SpaceBase
 from app.errors import (
     IdempotencyConflictError,
     MutationRejectedError,
@@ -33,11 +36,15 @@ from app.mutation.types import (
     bounded_child_operation_id,
     canonical_json_bytes,
     decode_persisted_command,
+    require_frozen_object,
     validate_operation_id,
 )
+from app.registry.catalog import CompiledEntityCatalog
+from app.registry.entities import EntitySpec
 from app.runtime.leases import Lease
 from app.runtime.space import SpaceRuntimeHandle
 from app.services.sync_outbox import record_sync_event
+from app.services.time import utc_now_iso_ms
 
 
 def hash_prepared_batch_identity(
@@ -77,7 +84,7 @@ class MutationDomainPolicy(Protocol):
 class MutationCompileContext:
     scope: SpaceRuntimeHandle
     authority: "AuthorityOverlay"
-    catalog: object
+    catalog: CompiledEntityCatalog
 
     def require_space(self, payload_space_id: str) -> None:
         if payload_space_id != self.scope.scope.space_id:
@@ -86,27 +93,323 @@ class MutationCompileContext:
                 {"scopeSpaceId": self.scope.scope.space_id, "payloadSpaceId": payload_space_id},
             )
 
+    def command(
+        self,
+        *,
+        request: MutationRequest,
+        db_plans: Sequence[DbMutationPlan],
+        sync_events: Sequence[SyncEventPlan],
+        value: Mapping[str, object],
+        projections: Sequence[object] = (),
+        resolution: str | None = None,
+    ) -> MutationCommand:
+        return MutationCommand.from_effects(
+            request=request,
+            db_plans=tuple(db_plans),
+            projections=tuple(projections),
+            sync_events=tuple(sync_events),
+            result_value=require_frozen_object(value),
+            resolution=resolution,  # type: ignore[arg-type]
+        )
+
 
 class AuthorityOverlay:
     """A deterministic in-memory projection of accepted commands in this batch."""
 
-    def __init__(self) -> None:
-        self.commands: list[MutationCommand] = []
+    def __init__(
+        self,
+        catalog: CompiledEntityCatalog,
+        rows: Mapping[tuple[str, object], Mapping[str, object]],
+        *,
+        markdown: Mapping[str, bytes] | None = None,
+    ) -> None:
+        self.catalog = catalog
+        self._rows = dict(rows)
+        self._markdown = dict(markdown or {})
+        self._derived: dict[tuple[object, str], bytes | None] = {}
+        self._reserved_paths = set(self._markdown)
+        self._spec_by_table = {spec.table_name: spec for spec in catalog.list()}
 
     @classmethod
-    async def from_locked_authorities(cls, scope, session, catalog) -> "AuthorityOverlay":
-        # The enclosing UoW holds the Space-exclusive lease before this read.
-        del scope, session, catalog
-        return cls()
+    async def from_locked_authorities(
+        cls,
+        scope: SpaceRuntimeHandle,
+        session: AsyncSession,
+        catalog: CompiledEntityCatalog,
+    ) -> "AuthorityOverlay":
+        rows: dict[tuple[str, object], Mapping[str, object]] = {}
+        for spec in catalog.list():
+            model = catalog.model_for(spec.name)
+            if model.metadata is not SpaceBase.metadata:
+                continue
+            mapper = sa_inspect(model)
+            for item in tuple(await session.scalars(select(model))):
+                row = require_frozen_object(
+                    {column.key: getattr(item, column.key) for column in mapper.columns}
+                )
+                rows[(spec.name, row[spec.primary_key])] = row
+
+        markdown: dict[str, bytes] = {}
+        file_system = scope.file_system
+        if file_system is not None and all(
+            hasattr(file_system, name) for name in ("_iter_markdown", "_read_text")
+        ):
+            from app.runtime.joined_thread import run_joined_thread
+
+            def read_markdown() -> dict[str, bytes]:
+                return {
+                    relative: file_system._read_text(relative).encode("utf-8")
+                    for relative in file_system._iter_markdown()
+                }
+
+            markdown = await run_joined_thread(read_markdown)
+        return cls(catalog, rows, markdown=markdown)
+
+    def row(self, entity_type: str, entity_id: object) -> Mapping[str, object] | None:
+        return self._rows.get((entity_type, entity_id))
+
+    def markdown(self, target: str) -> bytes | None:
+        return self._markdown.get(target)
+
+    def derived_projection(self, tag: object, target: str) -> bytes | None:
+        return self._derived.get((tag, target))
+
+    def path_is_reserved(self, target: str) -> bool:
+        return target in self._reserved_paths
 
     def apply(self, command: MutationCommand) -> None:
-        self.commands.append(command)
+        rows = dict(self._rows)
+        markdown = dict(self._markdown)
+        derived = dict(self._derived)
+        reserved = set(self._reserved_paths)
+        for plan in command.db_plans:
+            spec = self._spec_by_table.get(plan.table)
+            if spec is None or set(plan.primary_key) != {spec.primary_key}:
+                raise SpaceRecoveryRequiredError("mutation plan is not owned by the compiled catalog")
+            identity = plan.primary_key[spec.primary_key]
+            key = (spec.name, identity)
+            if plan.operation == "delete":
+                rows.pop(key, None)
+            elif plan.after_row is None:
+                raise SpaceRecoveryRequiredError("mutation plan has no complete after image")
+            else:
+                rows[key] = plan.after_row
+
+        for projection in command.projections:
+            target = str(projection.target)
+            if projection.tag.value == "markdown_write":
+                if projection.after is None:
+                    raise SpaceRecoveryRequiredError("markdown projection has no after image")
+                markdown[target] = projection.after
+                reserved.add(target)
+            elif projection.tag.value == "path_rename":
+                if projection.source is None:
+                    raise SpaceRecoveryRequiredError("path rename has no source")
+                source = str(projection.source)
+                body = markdown.pop(source, None)
+                if body is not None:
+                    markdown[target] = body
+                reserved.discard(source)
+                reserved.add(target)
+            elif projection.tag.value == "path_remove":
+                markdown.pop(target, None)
+                reserved.discard(target)
+            else:
+                derived[(projection.tag, target)] = projection.after
+
+        self._rows = rows
+        self._markdown = markdown
+        self._derived = derived
+        self._reserved_paths = reserved
+
+
+def _require_catalog_spec(
+    catalog: CompiledEntityCatalog, entity_type: str
+) -> EntitySpec:
+    try:
+        return catalog.get(entity_type)
+    except KeyError as exc:
+        raise MutationRuleViolation("not_found", {"entityType": entity_type}) from exc
+
+
+def _require_payload_fields(spec: EntitySpec, payload: Mapping[str, object]) -> None:
+    unknown = tuple(sorted(set(payload) - set(spec.field_names)))
+    if unknown:
+        raise ValueError(f"payload contains fields outside the compiled catalog: {unknown!r}")
+
+
+def _require_current_version(
+    spec: EntitySpec,
+    request: MutationRequest,
+    current: Mapping[str, object],
+) -> str | None:
+    expected = request.expected_version
+    actual = current.get("version")
+    if expected is None or actual == expected:
+        return None
+    details: dict[str, object] = {"entityId": request.entity_id}
+    if spec.sync_conflict_policy == "timestamp_lww" and request.client_updated_at is not None:
+        authoritative = current.get("updated_at")
+        if not isinstance(authoritative, str):
+            details["resolution"] = "manual"
+        elif request.client_updated_at > authoritative:
+            return "remote"
+        else:
+            details["resolution"] = "local"
+    raise MutationRuleViolation("version_conflict", details)
+
+
+def _complete_create_row(
+    spec: EntitySpec,
+    request: MutationRequest,
+    timestamp: str,
+) -> Mapping[str, object]:
+    _require_payload_fields(spec, request.payload)
+    supplied_id = request.payload.get(spec.primary_key)
+    if supplied_id is not None and supplied_id != request.entity_id:
+        raise MutationRuleViolation(
+            "entity_id_mismatch",
+            {"entityType": spec.name, "entityId": request.entity_id},
+        )
+    row: dict[str, object] = {}
+    for field in spec.fields:
+        if field.name == spec.primary_key:
+            row[field.name] = request.entity_id
+        elif field.name == "created_at":
+            row[field.name] = request.payload.get(field.name, timestamp)
+        elif field.name == "updated_at":
+            row[field.name] = request.client_updated_at or timestamp
+        elif field.name == "version":
+            row[field.name] = 1
+        elif field.name in request.payload:
+            row[field.name] = request.payload[field.name]
+        elif field.default is not None:
+            row[field.name] = field.default
+        elif field.nullable:
+            row[field.name] = None
+        else:
+            raise ValueError(f"required catalog field is missing: {spec.name}.{field.name}")
+    return require_frozen_object(row)
+
+
+async def compile_catalog_entity_command(
+    context: MutationCompileContext,
+    request: MutationRequest,
+) -> MutationCommand:
+    spec = _require_catalog_spec(context.catalog, request.entity_type)
+    _require_payload_fields(spec, request.payload)
+    timestamp = utc_now_iso_ms()
+    current = context.authority.row(spec.name, request.entity_id)
+
+    if request.name == "entity.create":
+        if current is not None:
+            raise MutationRuleViolation(
+                "version_conflict", {"entityId": request.entity_id}
+            )
+        if request.expected_version is not None:
+            raise MutationRuleViolation(
+                "version_conflict", {"entityId": request.entity_id}
+            )
+        after = _complete_create_row(spec, request, timestamp)
+        plan = DbMutationPlan(
+            spec.table_name,
+            {spec.primary_key: request.entity_id},
+            "insert",
+            None,
+            None,
+            after,
+        )
+        action = "create"
+        resolution = None
+    elif request.name == "entity.update":
+        if current is None:
+            raise MutationRuleViolation("not_found", {"entityId": request.entity_id})
+        supplied_id = request.payload.get(spec.primary_key)
+        if supplied_id is not None and supplied_id != request.entity_id:
+            raise MutationRuleViolation(
+                "entity_id_mismatch",
+                {"entityType": spec.name, "entityId": request.entity_id},
+            )
+        resolution = _require_current_version(spec, request, current)
+        after_mutable = dict(current)
+        for key, value in request.payload.items():
+            if key not in {spec.primary_key, "created_at", "updated_at", "version"}:
+                after_mutable[key] = value
+        version = current.get("version")
+        if type(version) is not int or version < 0:
+            raise SpaceRecoveryRequiredError("authoritative entity version is invalid")
+        after_mutable["version"] = version + 1
+        after_mutable["updated_at"] = request.client_updated_at or timestamp
+        after = require_frozen_object(after_mutable)
+        plan = DbMutationPlan(
+            spec.table_name,
+            {spec.primary_key: request.entity_id},
+            "update",
+            request.expected_version,
+            current,
+            after,
+        )
+        action = "update"
+    elif request.name == "entity.delete":
+        if current is None:
+            raise MutationRuleViolation("not_found", {"entityId": request.entity_id})
+        if request.payload not in ({}, {spec.primary_key: request.entity_id}):
+            raise MutationRuleViolation(
+                "delete_payload_not_empty", {"entityId": request.entity_id}
+            )
+        resolution = _require_current_version(spec, request, current)
+        plan = DbMutationPlan(
+            spec.table_name,
+            {spec.primary_key: request.entity_id},
+            "delete",
+            request.expected_version,
+            current,
+            None,
+        )
+        action = "delete"
+        after = require_frozen_object(
+            {"id": request.entity_id, "deleted_at": timestamp}
+        )
+    else:
+        raise ValueError(f"unsupported catalog mutation request: {request.name}")
+
+    sync_events: tuple[SyncEventPlan, ...] = ()
+    if spec.sync_enabled:
+        version_value = (
+            after.get("version")
+            if action != "delete"
+            else int(current.get("version", 0)) + 1  # type: ignore[union-attr]
+        )
+        if type(version_value) is not int or version_value < 0:
+            raise SpaceRecoveryRequiredError("compiled sync version is invalid")
+        payload = after if action != "delete" else {"deleted_at": timestamp}
+        sync_events = (
+            SyncEventPlan(
+                spec.name,
+                request.entity_id,
+                action,  # type: ignore[arg-type]
+                payload,
+                version_value,
+                timestamp,
+            ),
+        )
+    return context.command(
+        request=request,
+        db_plans=(plan,),
+        sync_events=sync_events,
+        value=after,
+        resolution=resolution,
+    )
 
 
 class MutationCompiler:
     """Compile policies against one lease-scoped authority overlay."""
 
-    def __init__(self, catalog: object, policies: Sequence[MutationDomainPolicy] = ()) -> None:
+    def __init__(
+        self,
+        catalog: CompiledEntityCatalog,
+        policies: Sequence[MutationDomainPolicy] = (),
+    ) -> None:
         self.catalog = catalog
         self._policies: dict[str, MutationDomainPolicy] = {}
         for policy in policies:
@@ -119,9 +422,10 @@ class MutationCompiler:
         self, scope: SpaceRuntimeHandle, request: MutationRequest, overlay: AuthorityOverlay
     ) -> MutationCommand:
         policy = self._policies.get(request.entity_type)
-        if policy is None:
-            raise MutationRuleViolation("not_found", {"entityType": request.entity_type})
-        return await policy.compile(MutationCompileContext(scope, overlay, self.catalog), request)
+        context = MutationCompileContext(scope, overlay, self.catalog)
+        if policy is not None:
+            return await policy.compile(context, request)
+        return await compile_catalog_entity_command(context, request)
 
     async def compile_batch(
         self,
@@ -160,7 +464,7 @@ class MutationCompiler:
 class DbMutationInterpreter:
     """Interpret typed journal plans using models from the frozen catalog."""
 
-    def __init__(self, catalog: object) -> None:
+    def __init__(self, catalog: CompiledEntityCatalog) -> None:
         self.catalog = catalog
 
     def decode_command(self, command_json: str) -> PersistedMutationCommand:
@@ -237,7 +541,7 @@ class MutationUnitOfWork:
     def __init__(
         self,
         *,
-        catalog: object,
+        catalog: CompiledEntityCatalog,
         compiler: MutationCompiler,
         interpreter: DbMutationInterpreter,
         projection_executor: FencedProjectionExecutor,

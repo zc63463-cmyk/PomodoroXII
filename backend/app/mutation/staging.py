@@ -15,6 +15,7 @@ from app.mutation.types import (
     PersistedProjectionDescriptor,
     ProjectionActionTag,
     ProjectionPlan,
+    validate_operation_id,
     validate_projection_ordinals,
 )
 from app.runtime.contained_io import BoundStageDirectory
@@ -100,6 +101,7 @@ class StageStore:
 
     @staticmethod
     def directory_key(operation_id: str) -> str:
+        validate_operation_id(operation_id)
         return hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
 
     @staticmethod

@@ -67,7 +67,8 @@ def test_authoritative_child_operation_id_vectors_match_in_process_and_fresh_pro
         "suffix_513",
         "suffix_non_ascii",
     ]
-    assert raw.endswith(b"\n") and b"\r\n" not in raw
+    assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
+    assert b"\r\n" not in raw
     for vector in vectors["valid"]:
         actual = bounded_child_operation_id(vector["parent_id"], vector["suffix"])
         assert actual == vector["expected"], vector["name"]
@@ -433,7 +434,27 @@ async def test_closed_transitions_and_batch_visibility_barrier(space_session) ->
                 select(MutationOperation.state).where(MutationOperation.batch_id == "batch-1")
             )
         )
-    assert states == {MutationState.FINALIZED}
+        assert states == {MutationState.FINALIZED}
+
+
+@pytest.mark.asyncio
+async def test_rejected_batch_uses_intent_to_aborted_batch_transition(space_session, monkeypatch) -> None:
+    observed: list[tuple[str, MutationState, MutationState]] = []
+    original = MutationJournal.transition_batch_in_transaction
+
+    async def wrapped(session, batch_id, expected, target):
+        observed.append((batch_id, expected, target))
+        return await original(session, batch_id, expected, target)
+
+    monkeypatch.setattr(MutationJournal, "transition_batch_in_transaction", wrapped)
+    assert space_session.bind is not None
+    journal = MutationJournal(async_sessionmaker(space_session.bind, expire_on_commit=False))
+    result = await journal.record_rejected_batch("rejected-batch", "h" * 64, ())
+
+    assert result.batch_id == "rejected-batch"
+    assert observed == [
+        ("rejected-batch", MutationState.INTENT, MutationState.ABORTED),
+    ]
     with pytest.raises(IllegalMutationTransition):
         await journal.transition("op-1", MutationState.ABORTED)
 

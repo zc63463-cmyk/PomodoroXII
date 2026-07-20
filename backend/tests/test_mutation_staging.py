@@ -416,6 +416,13 @@ async def test_stage_materialize_binds_operation_and_rejects_invalid_image_side(
                 image=cast(str, "sideways"),
                 receipt=cast(FenceReceipt, lease.fence_receipt("space-a")),
             )
+        with pytest.raises(ValueError, match="operation"):
+            await store.materialize(
+                "计划",
+                descriptors,
+                image="after",
+                receipt=lease.fence_receipt("space-a"),
+            )
     finally:
         store.close()
         await lease.release()
