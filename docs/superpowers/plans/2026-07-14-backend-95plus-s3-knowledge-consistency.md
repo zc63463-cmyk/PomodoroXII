@@ -1316,6 +1316,9 @@ git commit -m "feat(mutation): persist verified projection stages"
 
 **Files:**
 - Create: `backend/app/mutation/unit_of_work.py`
+- Modify: `backend/app/errors.py`
+- Modify: `backend/app/file_system/interfaces.py`
+- Modify: `backend/app/file_system/engine/base.py`
 - Modify: `backend/app/mutation/types.py`
 - Modify: `backend/app/mutation/journal.py`
 - Modify: `backend/app/services/sync_outbox.py`
@@ -1333,8 +1336,8 @@ git commit -m "feat(mutation): persist verified projection stages"
 - Modify: `backend/tests/test_sync_cursor_pagination.py`
 
 **Interfaces:**
-- Consumes: Task 2 closed journal/types, Task 3 verified stages, S2 `SpaceRuntimeHandle`/combined Space-exclusive lease/fence, and `CompiledEntityCatalog.effective_sync_entity_type`.
-- Produces: `MutationUnitOfWork.execute(scope, request, operation_id) -> MutationResult`, `execute_batch(scope, requests, batch_id, *, operation_ids=None) -> BatchMutationResult`, `execute_prepared_batch(scope, items, batch_id) -> BatchMutationResult`; `MutationJournal.find_operation_batch_bindings(operation_ids)` as one pre-authority query; ordered zero-to-many invisible ledger appends per accepted command that advance `SyncState.current_cursor` in the same transaction; the authoritative tracked `child-v1` vector fixture consumed byte-for-byte by TS3.
+- Consumes: Task 2 closed journal/types, Task 3 verified stages, S1 canonical `AppError`, S2 `SpaceRuntimeHandle`/combined Space-exclusive lease/fence, and `CompiledEntityCatalog.effective_sync_entity_type`.
+- Produces: `MutationUnitOfWork.execute(scope, request, operation_id) -> MutationResult`, `execute_batch(scope, requests, batch_id, *, operation_ids=None) -> BatchMutationResult`, `execute_prepared_batch(scope, items, batch_id) -> BatchMutationResult`; mandatory read-only `RecoveryGate.require_clean_under_lease(scope, lease, journal)`; one `FencedProjectionExecutor` interface; `MutationJournal.find_operation_batch_bindings(operation_ids)` as one pre-authority query; ordered zero-to-many invisible ledger appends per accepted command that advance `SyncState.current_cursor` in the same transaction; the authoritative tracked `child-v1` vector fixture consumed byte-for-byte by TS3.
 
 - [ ] **Step 1: Author the shared child-ID oracle and write failing single-command, retry, conflict, and visibility tests**
 
@@ -1718,6 +1721,8 @@ def test_authoritative_child_operation_id_vectors_match_in_process_and_fresh_pro
     assert completed.stdout.strip() == probe["expected"]
 ```
 
+The same files add `test_dirty_recovery_gate_raises_canonical_error_before_batch_read`, which injects a read-only dirty gate and asserts `SpaceRecoveryRequiredError.code == "space_recovery_required"` plus zero batch/authority/compiler/stage writes, and `test_projection_executor_asserts_fence_immediately_before_each_destructive_action`, parameterized over Markdown write, relative-path rename/remove, index update, and FTS update. A stale receipt must fail before the observed action count changes. Test fixtures must inject an explicit gate and journal factory; an omitted dependency or unconditional clean/no-op gate is not a valid fixture.
+
 - [ ] **Step 2: Run focused UoW tests and verify missing orchestrator failures**
 
 ```powershell
@@ -1727,6 +1732,61 @@ def test_authoritative_child_operation_id_vectors_match_in_process_and_fresh_pro
 Expected: FAIL on missing `MutationUnitOfWork`.
 
 - [ ] **Step 3: Implement the exact public interface and commit barriers**
+
+`errors.py` owns the canonical fail-closed carrier used by the Task 4 gate and the Task 5 recovery/runtime paths; no mutation-local exception or plain `RuntimeError` may replace it:
+
+```python
+class SpaceRecoveryRequiredError(AppError):
+    detail = "Space mutation recovery is required"
+    status_code = 503
+    legacy_error_type = "service_unavailable"
+    code = "space_recovery_required"
+    retryable = True
+```
+
+`file_system/interfaces.py` owns the only projection execution protocol, while `file_system/engine/base.py` owns its contained-authority implementation. Both forward and compensation receive the current `FenceReceipt`; the base interpreter decodes persisted descriptors into exactly one Markdown/path/index/FTS destructive action per iteration and asserts the receipt on the immediately preceding line. The executor never accepts an absolute/host path, never reopens a path or URI, and never falls back to a path-backed constructor.
+
+```python
+class FencedProjectionExecutor(Protocol):
+    async def apply_forward(
+        self,
+        scope: SpaceRuntimeHandle,
+        command: PersistedMutationCommand,
+        receipt: FenceReceipt,
+    ) -> None: ...
+
+    async def restore_before(
+        self,
+        scope: SpaceRuntimeHandle,
+        command: PersistedMutationCommand,
+        receipt: FenceReceipt,
+    ) -> None: ...
+```
+
+```python
+class FileSystemProjectionExecutor(FencedProjectionExecutor):
+    async def _execute_actions(
+        self,
+        scope: SpaceRuntimeHandle,
+        actions: Sequence[PersistedProjectionAction],
+        receipt: FenceReceipt,
+    ) -> None:
+        for action in actions:
+            await run_joined_thread(
+                self._apply_one_contained_action, scope, action, receipt
+            )
+
+    def _apply_one_contained_action(
+        self,
+        scope: SpaceRuntimeHandle,
+        action: PersistedProjectionAction,
+        receipt: FenceReceipt,
+    ) -> None:
+        receipt.assert_current()
+        self._apply_exactly_one_destructive_primitive(scope, action)
+```
+
+Task 4's injected `RecoveryGate` is intentionally read-only and has only two legal outcomes: return after a durable clean proof, or raise canonical `SpaceRecoveryRequiredError`. It never repairs, replays, aborts, compensates, mutates journal state, or supplies an unconditional/no-op success path. The constructor requires the gate with no default. Concrete `MutationRecovery`, `SpaceDataView`, `MutationUnitOfWork.recover_under_lease`, and `MutationUnitOfWork.inspect_recovery` belong to Task 5.
 
 `types.py` owns and exports the cross-wave helper so TS1/TS2 do not import the UoW orchestrator or create a second implementation:
 
@@ -1878,7 +1938,9 @@ class MutationCompiler:
         items: Sequence[PreparedBatchItem],
         session: AsyncSession,
     ) -> BatchCompilation:
-        overlay = await AuthorityOverlay.from_locked_session(session, self.catalog)
+        overlay = await AuthorityOverlay.from_locked_authorities(
+            scope, session, self.catalog
+        )
         accepted_ids: list[str] = []
         commands: list[MutationCommand] = []
         rejected: list[MutationRejection] = []
@@ -1926,7 +1988,37 @@ def child_operation_ids(batch_id: str, count: int) -> tuple[str, ...]:
     )
 
 
+class RecoveryGate(Protocol):
+    async def require_clean_under_lease(
+        self,
+        scope: SpaceRuntimeHandle,
+        lease: Lease,
+        journal: MutationJournal,
+    ) -> None: ...
+
+
+class MutationJournalFactory(Protocol):
+    def __call__(self, session_factory: async_sessionmaker[AsyncSession]) -> MutationJournal: ...
+
+
 class MutationUnitOfWork:
+    def __init__(
+        self,
+        *,
+        catalog: CompiledEntityCatalog,
+        compiler: MutationCompiler,
+        interpreter: DbMutationInterpreter,
+        projection_executor: FencedProjectionExecutor,
+        recovery_gate: RecoveryGate,
+        journal_factory: MutationJournalFactory,
+    ) -> None:
+        self.catalog = catalog
+        self.compiler = compiler
+        self.interpreter = interpreter
+        self.projection_executor = projection_executor
+        self.recovery_gate = recovery_gate
+        self.journal_factory = journal_factory
+
     async def execute(
         self,
         scope: SpaceRuntimeHandle,
@@ -1998,13 +2090,14 @@ class MutationUnitOfWork:
             )
         )
         async with scope.exclusive_space_resources("mutation", 5) as lease:
-            await self.recover_under_lease(scope, lease)
-            existing = await self.journal.find_batch(batch_id)
+            journal = self.journal_factory(scope.session_factory)
+            await self.recovery_gate.require_clean_under_lease(scope, lease, journal)
+            existing = await journal.find_batch(batch_id)
             if existing is not None:
                 return await self._resume_or_return(
-                    scope, existing, request_hash, lease
+                    scope, journal, existing, request_hash, lease
                 )
-            bindings = await self.journal.find_operation_batch_bindings(operation_ids)
+            bindings = await journal.find_operation_batch_bindings(operation_ids)
             foreign_bindings = tuple(sorted(
                 (operation_id, owner_batch_id)
                 for operation_id, owner_batch_id in bindings.items()
@@ -2033,10 +2126,10 @@ class MutationUnitOfWork:
                 key=lambda rejection: rejection.request_index,
             ))
             if not compilation.commands:
-                return await self.journal.record_rejected_batch(
+                return await journal.record_rejected_batch(
                     batch_id, request_hash, rejections
                 )
-            await self.journal.create_batch_intent(
+            await journal.create_batch_intent(
                 batch_id,
                 request_hash,
                 compilation.operation_ids,
@@ -2046,35 +2139,28 @@ class MutationUnitOfWork:
             manifests = await self._publish_stages(
                 scope, lease, compilation.operation_ids, compilation.commands
             )
-            await self.journal.mark_staged(batch_id, manifests)
+            await journal.mark_staged(batch_id, manifests)
             await self._commit_business(
-                scope, batch_id, compilation.operation_ids, compilation.commands
+                scope, journal, batch_id, compilation.operation_ids, compilation.commands
             )
-            await self.journal.mark_finalizing(batch_id)
+            await journal.mark_finalizing(batch_id)
             await self._finalize_forward(
                 scope,
+                journal,
                 batch_id,
                 compilation.operation_ids,
                 lease.fence_receipt(scope.scope.space_id),
             )
-            return await self.journal.finalize_batch(batch_id)
-
-    async def recover_under_lease(
-        self, scope: SpaceRuntimeHandle, lease: Lease
-    ) -> RecoveryResult:
-        scope.global_lease.assert_active_owner(scope="global")
-        if scope.global_lease.mode not in {LeaseMode.SHARED, LeaseMode.EXCLUSIVE}:
-            raise LeaseOrderError("recovery requires a matching global lease")
-        require_matching_space_exclusive(scope, lease)
-        return await self.recovery.recover_under_lease(scope, lease)
-
-    async def inspect_recovery(self, view: SpaceDataView) -> RecoveryInspection:
-        return await self.recovery.inspect_read_only(view)
+            return await journal.finalize_batch(batch_id)
 ```
 
-Direct `execute` 的 operation ID 同时作为 one-command batch ID，child ID 仍等于 caller ID，不追加 suffix。`execute_batch` 有 caller IDs 时逐项原样持久化；没有 caller IDs 的内部 knowledge batch 才使用 `bounded_child_operation_id(batch_id, f"{index:04d}")`，然后包装为全-request `PreparedBatchItem`。所有内部派生 ID（包括后续 TS1/TS2 envelope、receipt、recovery child）必须调用公开 `bounded_child_operation_id(parent_id, suffix)`；禁止手工字符串拼接。短 preimage 使用可解析且单射的 `childp:<parent-byte-length>:<parent>:<suffix>`；超过 128 ASCII bytes 时，版本标签、parent byte length、完整 parent 与 suffix 进入 SHA-256 并使用独立 `childh:` namespace，journal/result 同时保留原 parent/suffix 映射。测试覆盖 127/128-byte parent、首次超界、`("a:receipt", "pending") != ("a", "receipt:pending")` 的显式冒号歧义向量、不同 suffix/parent 不碰撞、fresh-process/restart 稳定、suffix 大小上限，以及返回值重新通过 `validate_operation_id`。`execute_prepared_batch` 要求原始 index 严格为 `0..n-1`、operation ID 唯一、每项恰有 request/pre-rejection 之一；batch request hash 只覆盖 ordered `(request_index, operation_id, intent_hash)` identity，`intent_hash` 是 authority/rule 读取前对完整 caller intent 的 canonical SHA-256。取得 combined Space-exclusive、完成 recovery 后且在 compiler/stage 前，UoW 一次查询所有 caller operation IDs；任何 ID 已绑定其他 batch 时，无论 intent 相同与否都抛 canonical `idempotency_conflict`，并产生零新 batch/operation/stage/ledger/entity。相同原始事件在 mapper 分类或 catalog 改变后仍命中同 batch 的持久 receipt，同 batch ID 换 payload、顺序或 caller ID 也触发 conflict。
+Direct `execute` 的 operation ID 同时作为 one-command batch ID，child ID 仍等于 caller ID，不追加 suffix。`execute_batch` 有 caller IDs 时逐项原样持久化；没有 caller IDs 的内部 knowledge batch 才使用 `bounded_child_operation_id(batch_id, f"{index:04d}")`，然后包装为全-request `PreparedBatchItem`。所有内部派生 ID（包括后续 TS1/TS2 envelope、receipt、recovery child）必须调用公开 `bounded_child_operation_id(parent_id, suffix)`；禁止手工字符串拼接。短 preimage 使用可解析且单射的 `childp:<parent-byte-length>:<parent>:<suffix>`；超过 128 ASCII bytes 时，版本标签、parent byte length、完整 parent 与 suffix 进入 SHA-256 并使用独立 `childh:` namespace，journal/result 同时保留原 parent/suffix 映射。测试覆盖 127/128-byte parent、首次超界、`("a:receipt", "pending") != ("a", "receipt:pending")` 的显式冒号歧义向量、不同 suffix/parent 不碰撞、fresh-process/restart 稳定、suffix 大小上限，以及返回值重新通过 `validate_operation_id`。`execute_prepared_batch` 要求原始 index 严格为 `0..n-1`、operation ID 唯一、每项恰有 request/pre-rejection 之一；batch request hash 只覆盖 ordered `(request_index, operation_id, intent_hash)` identity，`intent_hash` 是 authority/rule 读取前对完整 caller intent 的 canonical SHA-256。取得 combined Space-exclusive、获得 read-only recovery gate clean proof 后且在 compiler/stage 前，UoW 一次查询所有 caller operation IDs；任何 ID 已绑定其他 batch 时，无论 intent 相同与否都抛 canonical `idempotency_conflict`，并产生零新 batch/operation/stage/ledger/entity。相同原始事件在 mapper 分类或 catalog 改变后仍命中同 batch 的持久 receipt，同 batch ID 换 payload、顺序或 caller ID 也触发 conflict。
 
-`MutationCompiler.compile_batch(...)` 只能在 UoW 已持 Space-exclusive 后读取一次 `space.db`/Markdown/index authority。它跳过已经封闭的 pre-rejection，但保留每个 request 的 original `request_index`。`AuthorityOverlay` 是 deterministic in-memory authority view；`apply(command: MutationCommand)` 原子更新 DB after-row/delete、权威 Markdown body after-bytes、planned relative path reservations，以及下一 child 编译所需的 derived index/FTS descriptors。它不是只接收 `db_plans` 的 row overlay。所以下一 child 的 parent/relation/CAS/body/path/projection compiler 看见前一 accepted child 的完整 planned state；rejected child 不更新 overlay。它不 flush/write真实 session。测试至少覆盖 Folder-create→Note-create、Note-create→junction-create、同一 Note 连续内容更新、move→metadata update 和 QuickNote conversion dependent children。若任何 command 无法完整投影进 overlay，则整批在创建 INTENT 前 fail closed，而不是用 stale authority 编译。注册的 domain policy 与 generic compiler 必须返回同一个 `MutationCommand` 类型；generic path 根据 compiled `sync_conflict_policy` 选择 LWW 或 strict CAS，strict CAS mismatch 只能返回 `version_conflict`，不能产生 remote resolution。compiler只用 `MutationRuleViolation` 表示可返回的逐事件拒绝；I/O、decode、programming 和 cancellation 异常绝不能被降级为 reject。UoW 把 pre-rejections 与 compiler rejections 按 original index 合并；每条 reject 在 `create_batch_intent` 前确定，不创建 operation/stage/ledger，其 caller ID、input index、code/details/retryable 存在 batch `result_json`。全 reject（包括全 mapper reject）batch 由 `record_rejected_batch()` 在一个 transaction 内执行合法 INTENT -> ABORTED 并保存结果；mixed batch 将所有 rejection receipt 与 accepted intent 一起持久化。`_commit_business` 开一个 outer transaction，逐 accepted child 使用 nested SAVEPOINT 调用共享 `DbMutationInterpreter.apply(session, command.db_plans)`；accepted commands 全部成功后，在同一 outer commit 写 DB before/after JSON、调用 `transition_in_transaction(..., DB_COMMITTED)`，并按每个 `command.sync_events` 的稳定 tuple 顺序调用 `record_sync_event(... operation_id=..., batch_id=..., visible=False)`。任一 event append 失败会回滚该 command 的所有 business rows、journal transition、cursor advance 与全部 ledger events。写 ledger 前必须通过注入的 compiled catalog 验证每个 event 的 internal entity type 并解析成唯一 `spec.effective_sync_entity_type`；outbox、未来 S4 pull/snapshot/REST/MCP/frontend 永远看到同一个 wire key，不能把 internal snake_case name 写入 ledger。S3 alias tests 至少覆盖 `quick_note`、`time_block` 和仍存在的 `schedule_quick_note` junction，并只证明 compiler internal name -> persisted `SyncEventPlan.entity_type` -> invisible/visible ledger effective key 逐字等于 catalog camelCase key；跨 SyncProtocol、REST/MCP、snapshot 和 frontend 的端到端相等证明留给 S4。journal 中 persisted command 足以让全新进程通过 `DbMutationInterpreter.decode_command()` 重建并从 STAGED 重放，且先与 StageStore descriptors核对；compensation只调用同一实例的 `restore_before()`。happy path 与 `MutationRecovery` 都从 UoW constructor 注入这一个 compiler/interpreter；不得另写 SQL 分支或 callable。outer failure 回滚全部 business rows、journal transition 和 ledger，并让 accepted batch 保持 STAGED 供 recovery。UoW 向 forward/compensation executor 传 `FenceReceipt` 而不是裸整数；每次 Markdown/path/index/FTS/version/trash destructive write/rename 的紧邻前一行都调用 `receipt.assert_current()`，recovery重放同样执行。stale receipt fault test在每一种 store 写入前推进持久 fence并断言零写入、零 visibility。
+`MutationCompiler.compile_batch(...)` 只能在 UoW 已持 Space-exclusive 后通过 `AuthorityOverlay.from_locked_authorities(scope, session, catalog)` 读取一次同一 runtime scope 的 `space.db`/Markdown/index authority；只传 session 的 overlay 构造被禁止。它跳过已经封闭的 pre-rejection，但保留每个 request 的 original `request_index`。`AuthorityOverlay` 是 deterministic in-memory authority view；`apply(command: MutationCommand)` 原子更新 DB after-row/delete、权威 Markdown body after-bytes、planned relative path reservations，以及下一 child 编译所需的 derived index/FTS descriptors。它不是只接收 `db_plans` 的 row overlay。所以下一 child 的 parent/relation/CAS/body/path/projection compiler 看见前一 accepted child 的完整 planned state；rejected child 不更新 overlay。它不 flush/write真实 session。测试至少覆盖 Folder-create→Note-create、Note-create→junction-create、同一 Note 连续内容更新、move→metadata update 和 QuickNote conversion dependent children。若任何 command 无法完整投影进 overlay，则整批在创建 INTENT 前 fail closed，而不是用 stale authority 编译。注册的 domain policy 与 generic compiler 必须返回同一个 `MutationCommand` 类型；generic path 根据 compiled `sync_conflict_policy` 选择 LWW 或 strict CAS，strict CAS mismatch 只能返回 `version_conflict`，不能产生 remote resolution。compiler只用 `MutationRuleViolation` 表示可返回的逐事件拒绝；I/O、decode、programming 和 cancellation 异常绝不能被降级为 reject。UoW 把 pre-rejections 与 compiler rejections 按 original index 合并；每条 reject 在 `create_batch_intent` 前确定，不创建 operation/stage/ledger，其 caller ID、input index、code/details/retryable 存在 batch `result_json`。全 reject（包括全 mapper reject）batch 由 `record_rejected_batch()` 在一个 transaction 内执行合法 INTENT -> ABORTED 并保存结果；mixed batch 将所有 rejection receipt 与 accepted intent 一起持久化。`_commit_business` 开一个 outer transaction，逐 accepted child 使用 nested SAVEPOINT 调用共享 `DbMutationInterpreter.apply(session, command.db_plans)`；accepted commands 全部成功后，在同一 outer commit 写 DB before/after JSON、调用 `transition_in_transaction(..., DB_COMMITTED)`，并按每个 `command.sync_events` 的稳定 tuple 顺序调用 `record_sync_event(... operation_id=..., batch_id=..., visible=False)`。任一 event append 失败会回滚该 command 的所有 business rows、journal transition、cursor advance 与全部 ledger events。写 ledger 前必须通过注入的 compiled catalog 验证每个 event 的 internal entity type并解析成唯一 `spec.effective_sync_entity_type`；outbox、未来 S4 pull/snapshot/REST/MCP/frontend 永远看到同一个 wire key，不能把 internal snake_case name 写入 ledger。S3 alias tests 至少覆盖 `quick_note`、`time_block` 和仍存在的 `schedule_quick_note` junction，并只证明 compiler internal name -> persisted `SyncEventPlan.entity_type` -> invisible/visible ledger effective key 逐字等于 catalog camelCase key；跨 SyncProtocol、REST/MCP、snapshot 和 frontend 的端到端相等证明留给 S4。journal 中 persisted command 足以让 Task 5 的 fresh-process recovery 通过同一个 `DbMutationInterpreter.decode_command()` 重建并从 STAGED 重放，且先与 StageStore descriptors核对；compensation只调用同一实例的 `restore_before()`。Task 4 happy path 从 UoW constructor 注入 catalog/compiler/interpreter/projection executor/recovery gate/journal factory；Task 5 构造具体 `MutationRecovery` 时必须复用相同 compiler/interpreter/projection executor，不得另写 SQL 分支或 callable。outer failure 回滚全部 business rows、journal transition 和 ledger，并让 accepted batch 保持 STAGED，Task 4 gate 随后只会 fail closed，直到 Task 5 recovery 消化它。UoW 向唯一 `FencedProjectionExecutor` 传 `FenceReceipt` 而不是裸整数；每次 Markdown/path/index/FTS/version/trash destructive write/rename 的紧邻前一行都调用 `receipt.assert_current()`，Task 5 recovery重放使用同一个 executor。stale receipt fault test在每一种 store 写入前推进持久 fence并断言零写入、零 visibility。
+
+`MutationJournal` 绝不作为 UoW 的固定 cross-Space field。只有 `exclusive_space_resources(...)` 已激活当前 Space 的资源后，UoW 才调用 `journal_factory(scope.session_factory)` 创建本次 guard-local journal，并把它显式传给所有 helper；不得缓存 journal、session factory 或 session 到下一 Space/下一次 lease。
+
+Task 4 只提供可注入 seams 和测试 composition。生产 runtime/bootstrap registration 明确推迟到 Task 5（或第一个明确的 post-Task-5 consumer）；Task 4 不修改或注册 `app/runtime/bootstrap.py`、`app/main.py`、FastAPI 或 FastMCP composition。
 
 Every Sync-enabled effect in `MutationCommand.sync_events` is a complete persisted `SyncEventPlan`; a command with no Sync effect uses `sync_events=()`. Each event `version` is a required non-boolean, nonnegative `int`; `None`, negative values, numeric strings, floats, and booleans fail before INTENT. Before INTENT, the compiler freezes create/update as the complete authoritative after-entity: declared primary key, explicitly generated and stored version/UTC `updated_at`, every schema field, and for Note the staged authoritative Markdown after-body. It never stores only the caller patch, a derived frontmatter/index view, or a value left to an ORM/database default. Delete freezes payload exactly as `{"deleted_at": <canonical UTC>}`, its top-level entity ID, last incremented version, and the same outbox `created_at`. Retry and restart recovery write ledger payload/version/timestamp only from the persisted tuple. S4's snapshot serializer must produce the same payload/version/updated_at for each surviving entity, and cross-wave vectors compare them field-for-field.
 
@@ -2101,7 +2187,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 .\.venv\Scripts\python.exe -m pytest -q tests/test_mutation_journal.py tests/test_note_workspace_atomicity.py tests/test_sync_outbox_service.py tests/test_sync_cursor_pagination.py -p no:cacheprovider
-.\.venv\Scripts\ruff.exe check --no-cache app/mutation app/services/base.py app/services/cascade.py app/services/note.py app/services/quick_note.py app/services/relation.py app/services/sync.py app/services/sync_outbox.py app/services/task.py tests/test_note_workspace_atomicity.py tests/test_sync_outbox_service.py
+.\.venv\Scripts\ruff.exe check --no-cache app/errors.py app/file_system/interfaces.py app/file_system/engine/base.py app/mutation app/services/base.py app/services/cascade.py app/services/note.py app/services/quick_note.py app/services/relation.py app/services/sync.py app/services/sync_outbox.py app/services/task.py tests/test_note_workspace_atomicity.py tests/test_sync_outbox_service.py
 ```
 
 Expected: PASS; retry is one logical result, mismatched key fails before staging, and no invisible event appears in pull.
@@ -2109,7 +2195,7 @@ Expected: PASS; retry is one logical result, mismatched key fails before staging
 - [ ] **Step 5: Commit UoW happy path**
 
 ```powershell
-git add app/mutation/unit_of_work.py app/mutation/types.py app/mutation/journal.py app/services/base.py app/services/cascade.py app/services/note.py app/services/quick_note.py app/services/relation.py app/services/sync.py app/services/sync_outbox.py app/services/task.py tests/fixtures/task_space_session_child_operation_id_vectors.json tests/test_mutation_journal.py tests/test_note_workspace_atomicity.py tests/test_sync_outbox_service.py tests/test_sync_cursor_pagination.py
+git add app/errors.py app/file_system/interfaces.py app/file_system/engine/base.py app/mutation/unit_of_work.py app/mutation/types.py app/mutation/journal.py app/services/base.py app/services/cascade.py app/services/note.py app/services/quick_note.py app/services/relation.py app/services/sync.py app/services/sync_outbox.py app/services/task.py tests/fixtures/task_space_session_child_operation_id_vectors.json tests/test_mutation_journal.py tests/test_note_workspace_atomicity.py tests/test_sync_outbox_service.py tests/test_sync_cursor_pagination.py
 git commit -m "feat(mutation): execute durable idempotent units of work"
 ```
 
