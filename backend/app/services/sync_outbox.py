@@ -14,9 +14,10 @@ import json
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from app.errors import RetentionAckRequiredError, to_wire_json
 from app.models.sync_outbox import SyncOutbox
@@ -24,6 +25,38 @@ from app.models.sync_state import SyncState
 
 SyncAction = Literal["create", "update", "delete"]
 _VALID_ACTIONS = frozenset({"create", "update", "delete"})
+_DEFERRED_WATERMARK_EVENTS = "pomodoroxii_deferred_watermark_events"
+
+
+def _advance_deferred_watermarks(session: Session, _flush_context: object) -> None:
+    pending = tuple(session.info.pop(_DEFERRED_WATERMARK_EVENTS, ()))
+    allocated = tuple(
+        item.id for item in pending if getattr(item, "id", None) is not None
+    )
+    if not allocated:
+        return
+    highest = max(allocated)
+    session.connection().execute(
+        sqlite_insert(SyncState)
+        .values(id=1, retention_floor=0, current_cursor=highest)
+        .on_conflict_do_update(
+            index_elements=[SyncState.id],
+            set_={"current_cursor": func.max(SyncState.current_cursor, highest)},
+        )
+    )
+    for state in session.identity_map.values():
+        if getattr(getattr(state, "__table__", None), "name", None) == "sync_state":
+            session.expire(state, ("current_cursor",))
+
+
+def _discard_deferred_watermarks(session: Session) -> None:
+    session.info.pop(_DEFERRED_WATERMARK_EVENTS, None)
+
+
+if not getattr(Session, "_pomodoroxii_watermark_listeners", False):
+    event.listen(Session, "after_flush_postexec", _advance_deferred_watermarks)
+    event.listen(Session, "after_rollback", _discard_deferred_watermarks)
+    Session._pomodoroxii_watermark_listeners = True
 
 
 async def record_sync_event(
@@ -93,6 +126,8 @@ async def record_sync_event(
                 set_={"current_cursor": func.max(SyncState.current_cursor, event.id)},
             )
         )
+    else:
+        db.sync_session.info.setdefault(_DEFERRED_WATERMARK_EVENTS, []).append(event)
     return event
 
 

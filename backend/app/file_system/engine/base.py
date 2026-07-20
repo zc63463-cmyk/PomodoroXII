@@ -23,6 +23,7 @@ from slugify import slugify
 from sqlalchemy import create_engine
 from sqlalchemy.schema import CreateTable
 
+from app.errors import SpaceRecoveryRequiredError
 from app.file_system.interfaces import (
     FencedProjectionExecutor,
     NoteLevel,
@@ -48,7 +49,7 @@ class FileSystemProjectionExecutor(FencedProjectionExecutor):
     async def apply_forward(self, scope, operation_id, command, receipt) -> None:
         stages = scope.mutation_stages
         if stages is None:
-            raise RuntimeError("Space mutation stages are not active")
+            raise SpaceRecoveryRequiredError("Space mutation stages are not active")
         actions = await stages.materialize(
             operation_id, command.projections, image="after", receipt=receipt
         )
@@ -57,7 +58,7 @@ class FileSystemProjectionExecutor(FencedProjectionExecutor):
     async def restore_before(self, scope, operation_id, command, receipt) -> None:
         stages = scope.mutation_stages
         if stages is None:
-            raise RuntimeError("Space mutation stages are not active")
+            raise SpaceRecoveryRequiredError("Space mutation stages are not active")
         actions = await stages.materialize(
             operation_id, command.projections, image="before", receipt=receipt
         )
@@ -462,6 +463,133 @@ class StorageBase:
             "(SELECT rowid FROM notes WHERE note_id = ?)",
             (content, note_id),
         )
+
+    @staticmethod
+    def _projection_payload(action: MaterializedProjectionAction) -> dict[str, object]:
+        if action.blob is None:
+            raise ValueError("projection action requires a JSON payload")
+        try:
+            payload = json.loads(action.blob)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("projection action payload is not canonical JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("projection action payload must be a JSON object")
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        if canonical != action.blob:
+            raise ValueError("projection action payload is not canonical JSON")
+        return payload
+
+    def _apply_projection_markdown_write(
+        self, action: MaterializedProjectionAction
+    ) -> None:
+        if action.blob is None:
+            raise ValueError("markdown write requires bytes")
+        try:
+            content = action.blob.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("markdown projection must be UTF-8") from exc
+        self._atomic_write(str(action.target), content)
+
+    def _apply_projection_path_rename(
+        self, action: MaterializedProjectionAction
+    ) -> None:
+        if action.source is None:
+            raise ValueError("path rename requires a source")
+        source = str(action.source)
+        target = str(action.target)
+        if not self._file_exists(source):
+            if self._file_exists(target):
+                return
+            raise FileNotFoundError(source)
+        self._rename_file(source, target)
+
+    def _apply_projection_path_remove(
+        self, action: MaterializedProjectionAction
+    ) -> None:
+        target = str(action.target)
+        if self._file_exists(target):
+            self._unlink_file(target)
+
+    def _index_projection_identity(
+        self, action: MaterializedProjectionAction
+    ) -> tuple[object, str, str]:
+        parts = str(action.target).split("/")
+        if len(parts) != 4 or parts[0] != "index":
+            raise ValueError("index target must be index/<table>/<primary-key>/<value>")
+        _prefix, table_name, primary_key, identity = parts
+        table = Base.metadata.tables.get(table_name)
+        if table is None or tuple(column.name for column in table.primary_key) != (primary_key,):
+            raise ValueError("index target is not owned by the index schema")
+        return table, primary_key, identity
+
+    def _apply_projection_index_replace(
+        self, action: MaterializedProjectionAction
+    ) -> None:
+        table, primary_key, identity = self._index_projection_identity(action)
+        quoted_table = f'"{table.name}"'
+        quoted_primary_key = f'"{primary_key}"'
+        with self._connect() as connection:
+            if action.blob is None:
+                connection.execute(
+                    f"DELETE FROM {quoted_table} WHERE {quoted_primary_key} = ?",
+                    (identity,),
+                )
+                connection.commit()
+                return
+            payload = self._projection_payload(action)
+            if set(payload) != {"row"} or not isinstance(payload["row"], dict):
+                raise ValueError("index projection payload must contain one complete row")
+            row = payload["row"]
+            columns = tuple(column.name for column in table.columns)
+            if set(row) != set(columns) or str(row[primary_key]) != identity:
+                raise ValueError("index projection row does not match its target")
+            quoted_columns = ",".join(f'"{column}"' for column in columns)
+            placeholders = ",".join("?" for _column in columns)
+            updates = ",".join(
+                f'"{column}"=excluded."{column}"'
+                for column in columns
+                if column != primary_key
+            )
+            connection.execute(
+                f"INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders}) "
+                f"ON CONFLICT ({quoted_primary_key}) DO UPDATE SET {updates}",
+                tuple(row[column] for column in columns),
+            )
+            connection.commit()
+
+    def _apply_projection_fts_replace(
+        self, action: MaterializedProjectionAction
+    ) -> None:
+        parts = str(action.target).split("/")
+        if len(parts) != 2 or parts[0] != "fts":
+            raise ValueError("FTS target must be fts/<note-id>")
+        note_id = parts[1]
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT rowid FROM notes WHERE note_id = ?", (note_id,)
+            ).fetchone()
+            if row is None:
+                if action.blob is None:
+                    return
+                raise KeyError(f"Note {note_id} not found")
+            rowid = row[0]
+            connection.execute("DELETE FROM notes_fts WHERE rowid = ?", (rowid,))
+            if action.blob is not None:
+                payload = self._projection_payload(action)
+                if set(payload) != {"content", "title"} or not all(
+                    isinstance(payload[key], str) for key in payload
+                ):
+                    raise ValueError("FTS projection payload is invalid")
+                connection.execute(
+                    "INSERT INTO notes_fts(rowid, title, content) VALUES (?, ?, ?)",
+                    (rowid, payload["title"], payload["content"]),
+                )
+            connection.commit()
 
     # ─── Lifecycle ───────────────────────────────────────
 

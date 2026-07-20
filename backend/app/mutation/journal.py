@@ -252,12 +252,42 @@ class MutationJournal:
                 MutationBatch(
                     batch_id=batch_id,
                     command_hash=request_hash,
-                    state=MutationState.ABORTED,
+                    state=MutationState.INTENT,
                     accepted_count=0,
                     result_json=_encode_result(result),
                 )
             )
+            await session.flush()
+            await MutationJournal.transition_batch_in_transaction(
+                session,
+                batch_id,
+                MutationState.INTENT,
+                MutationState.ABORTED,
+            )
         return result
+
+    @staticmethod
+    async def transition_batch_in_transaction(
+        session: AsyncSession,
+        batch_id: str,
+        expected: MutationState,
+        target: MutationState,
+    ) -> None:
+        if target not in LEGAL_TRANSITIONS[expected]:
+            raise IllegalMutationTransition(f"illegal transition: {expected} -> {target}")
+        result = await session.execute(
+            update(MutationBatch)
+            .where(
+                MutationBatch.batch_id == batch_id,
+                MutationBatch.state == expected,
+            )
+            .values(state=target)
+        )
+        if result.rowcount != 1:
+            raise IllegalMutationTransition(
+                f"batch {batch_id} is not in expected state {expected}"
+            )
+        await session.flush()
 
     async def mark_staged(self, batch_id: str, manifests: tuple[object, ...]) -> None:
         async with self._sessions.begin() as session:
