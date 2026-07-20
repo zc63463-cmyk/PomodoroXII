@@ -18,7 +18,7 @@ from app.errors import (
     MutationRejectedError,
     SpaceRecoveryRequiredError,
 )
-from app.file_system.interfaces import FencedProjectionExecutor
+from app.file_system.interfaces import FencedProjectionExecutor, ProjectionAuthoritySnapshot
 from app.models.mutation import MutationOperation
 from app.mutation.journal import JournalBatch, MutationJournal
 from app.mutation.types import (
@@ -32,6 +32,7 @@ from app.mutation.types import (
     MutationState,
     PersistedMutationCommand,
     PreparedBatchItem,
+    ProjectionActionTag,
     SyncEventPlan,
     bounded_child_operation_id,
     canonical_json_bytes,
@@ -73,6 +74,108 @@ class SyncEventPlanFactory(Protocol):
     def delete(self, row: object, *, deleted_at: str) -> SyncEventPlan: ...
 
 
+class _CatalogRowFactory:
+    def __init__(self, catalog: CompiledEntityCatalog) -> None:
+        self.catalog = catalog
+
+    def _spec_and_row(
+        self, row: object
+    ) -> tuple[EntitySpec, Mapping[str, object]]:
+        for spec in self.catalog.list():
+            model = self.catalog.model_for(spec.name)
+            if isinstance(row, model):
+                mapper = sa_inspect(model)
+                return spec, require_frozen_object(
+                    {column.key: getattr(row, column.key) for column in mapper.columns}
+                )
+        raise TypeError("row is not owned by the compiled catalog")
+
+
+class DbMutationPlanFactoryImpl(_CatalogRowFactory):
+    def insert(self, row: object) -> DbMutationPlan:
+        spec, after = self._spec_and_row(row)
+        return DbMutationPlan(
+            spec.table_name,
+            {spec.primary_key: after[spec.primary_key]},
+            "insert",
+            None,
+            None,
+            after,
+        )
+
+    def update(self, before: object, after: object) -> DbMutationPlan:
+        before_spec, before_row = self._spec_and_row(before)
+        after_spec, after_row = self._spec_and_row(after)
+        if before_spec is not after_spec:
+            raise TypeError("update rows must belong to the same catalog entity")
+        version = before_row.get("version")
+        if version is not None and type(version) is not int:
+            raise TypeError("catalog row version must be an integer")
+        return DbMutationPlan(
+            before_spec.table_name,
+            {before_spec.primary_key: before_row[before_spec.primary_key]},
+            "update",
+            version,
+            before_row,
+            after_row,
+        )
+
+    def delete(self, row: object) -> DbMutationPlan:
+        spec, before = self._spec_and_row(row)
+        version = before.get("version")
+        if version is not None and type(version) is not int:
+            raise TypeError("catalog row version must be an integer")
+        return DbMutationPlan(
+            spec.table_name,
+            {spec.primary_key: before[spec.primary_key]},
+            "delete",
+            version,
+            before,
+            None,
+        )
+
+
+class SyncEventPlanFactoryImpl(_CatalogRowFactory):
+    def _event(self, row: object, action: str) -> SyncEventPlan:
+        spec, payload = self._spec_and_row(row)
+        if not spec.sync_enabled:
+            raise ValueError("catalog entity is not sync-enabled")
+        version = payload.get("version")
+        created_at = payload.get("updated_at") or payload.get("created_at")
+        if type(version) is not int or not isinstance(created_at, str):
+            raise ValueError("sync row requires a version and canonical timestamp")
+        return SyncEventPlan(
+            spec.name,
+            str(payload[spec.primary_key]),
+            action,  # type: ignore[arg-type]
+            payload,
+            version,
+            created_at,
+        )
+
+    def create(self, row: object) -> SyncEventPlan:
+        return self._event(row, "create")
+
+    def update(self, row: object) -> SyncEventPlan:
+        return self._event(row, "update")
+
+    def delete(self, row: object, *, deleted_at: str) -> SyncEventPlan:
+        spec, before = self._spec_and_row(row)
+        if not spec.sync_enabled:
+            raise ValueError("catalog entity is not sync-enabled")
+        version = before.get("version")
+        if type(version) is not int:
+            raise ValueError("sync row requires a version")
+        return SyncEventPlan(
+            spec.name,
+            str(before[spec.primary_key]),
+            "delete",
+            {"deleted_at": deleted_at},
+            version + 1,
+            deleted_at,
+        )
+
+
 class MutationDomainPolicy(Protocol):
     @property
     def entity_types(self) -> frozenset[str]: ...
@@ -85,6 +188,8 @@ class MutationCompileContext:
     scope: SpaceRuntimeHandle
     authority: "AuthorityOverlay"
     catalog: CompiledEntityCatalog
+    db: DbMutationPlanFactory
+    sync: SyncEventPlanFactory
 
     def require_space(self, payload_space_id: str) -> None:
         if payload_space_id != self.scope.scope.space_id:
@@ -122,11 +227,12 @@ class AuthorityOverlay:
         rows: Mapping[tuple[str, object], Mapping[str, object]],
         *,
         markdown: Mapping[str, bytes] | None = None,
+        derived: Mapping[tuple[ProjectionActionTag, str], bytes | None] | None = None,
     ) -> None:
         self.catalog = catalog
         self._rows = dict(rows)
         self._markdown = dict(markdown or {})
-        self._derived: dict[tuple[object, str], bytes | None] = {}
+        self._derived = dict(derived or {})
         self._reserved_paths = set(self._markdown)
         self._spec_by_table = {spec.table_name: spec for spec in catalog.list()}
 
@@ -149,21 +255,23 @@ class AuthorityOverlay:
                 )
                 rows[(spec.name, row[spec.primary_key])] = row
 
-        markdown: dict[str, bytes] = {}
         file_system = scope.file_system
-        if file_system is not None and all(
-            hasattr(file_system, name) for name in ("_iter_markdown", "_read_text")
-        ):
-            from app.runtime.joined_thread import run_joined_thread
-
-            def read_markdown() -> dict[str, bytes]:
-                return {
-                    relative: file_system._read_text(relative).encode("utf-8")
-                    for relative in file_system._iter_markdown()
-                }
-
-            markdown = await run_joined_thread(read_markdown)
-        return cls(catalog, rows, markdown=markdown)
+        if file_system is None or not hasattr(file_system, "snapshot_projection_authority"):
+            raise SpaceRecoveryRequiredError("projection authority is not active")
+        snapshot = await file_system.snapshot_projection_authority()
+        if not isinstance(snapshot, ProjectionAuthoritySnapshot):
+            raise SpaceRecoveryRequiredError("projection authority snapshot is invalid")
+        derived = {
+            **{
+                (ProjectionActionTag.INDEX_REPLACE, target): payload
+                for target, payload in snapshot.index.items()
+            },
+            **{
+                (ProjectionActionTag.FTS_REPLACE, target): payload
+                for target, payload in snapshot.fts.items()
+            },
+        }
+        return cls(catalog, rows, markdown=snapshot.markdown, derived=derived)
 
     def row(self, entity_type: str, entity_id: object) -> Mapping[str, object] | None:
         return self._rows.get((entity_type, entity_id))
@@ -171,7 +279,7 @@ class AuthorityOverlay:
     def markdown(self, target: str) -> bytes | None:
         return self._markdown.get(target)
 
-    def derived_projection(self, tag: object, target: str) -> bytes | None:
+    def derived_projection(self, tag: ProjectionActionTag, target: str) -> bytes | None:
         return self._derived.get((tag, target))
 
     def path_is_reserved(self, target: str) -> bool:
@@ -345,7 +453,7 @@ async def compile_catalog_entity_command(
             spec.table_name,
             {spec.primary_key: request.entity_id},
             "update",
-            request.expected_version,
+            version if resolution == "remote" else request.expected_version,
             current,
             after,
         )
@@ -358,11 +466,14 @@ async def compile_catalog_entity_command(
                 "delete_payload_not_empty", {"entityId": request.entity_id}
             )
         resolution = _require_current_version(spec, request, current)
+        version = current.get("version")
+        if type(version) is not int or version < 0:
+            raise SpaceRecoveryRequiredError("authoritative entity version is invalid")
         plan = DbMutationPlan(
             spec.table_name,
             {spec.primary_key: request.entity_id},
             "delete",
-            request.expected_version,
+            version if resolution == "remote" else request.expected_version,
             current,
             None,
         )
@@ -422,7 +533,13 @@ class MutationCompiler:
         self, scope: SpaceRuntimeHandle, request: MutationRequest, overlay: AuthorityOverlay
     ) -> MutationCommand:
         policy = self._policies.get(request.entity_type)
-        context = MutationCompileContext(scope, overlay, self.catalog)
+        context = MutationCompileContext(
+            scope,
+            overlay,
+            self.catalog,
+            DbMutationPlanFactoryImpl(self.catalog),
+            SyncEventPlanFactoryImpl(self.catalog),
+        )
         if policy is not None:
             return await policy.compile(context, request)
         return await compile_catalog_entity_command(context, request)

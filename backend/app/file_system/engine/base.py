@@ -29,6 +29,7 @@ from app.file_system.interfaces import (
     NoteLevel,
     NoteMeta,
     NoteStatus,
+    ProjectionAuthoritySnapshot,
 )
 from app.file_system.schema import (
     FTS5_CREATE_SQL,
@@ -38,7 +39,11 @@ from app.file_system.schema import (
     Base,
     _run_migrations,
 )
-from app.mutation.types import MaterializedProjectionAction, ProjectionActionTag
+from app.mutation.types import (
+    ContainedProjectionActionField,
+    MaterializedProjectionAction,
+    ProjectionActionTag,
+)
 from app.runtime.contained_io import BoundDirectoryHandle
 from app.runtime.sqlite_vfs import BoundSQLiteTarget, MaintenanceOptions
 
@@ -74,40 +79,52 @@ class FileSystemProjectionExecutor(FencedProjectionExecutor):
                 lambda: self._apply_one_contained_action(scope, action, receipt)
             )
 
-    def _apply_one_contained_action(self, scope, action: MaterializedProjectionAction, receipt) -> None:
+    def _apply_one_contained_action(
+        self, scope, action: MaterializedProjectionAction, receipt
+    ) -> None:
         match action.tag:
             case ProjectionActionTag.MARKDOWN_WRITE:
                 receipt.assert_current()
-                self._apply_markdown_write(scope, action)
+                self._apply_markdown_write(scope, action, receipt)
             case ProjectionActionTag.PATH_RENAME:
                 receipt.assert_current()
-                self._apply_path_rename(scope, action)
+                self._apply_path_rename(scope, action, receipt)
             case ProjectionActionTag.PATH_REMOVE:
                 receipt.assert_current()
-                self._apply_path_remove(scope, action)
+                self._apply_path_remove(scope, action, receipt)
             case ProjectionActionTag.INDEX_REPLACE:
                 receipt.assert_current()
-                self._apply_index_replace(scope, action)
+                self._apply_index_replace(scope, action, receipt)
             case ProjectionActionTag.FTS_REPLACE:
                 receipt.assert_current()
-                self._apply_fts_replace(scope, action)
+                self._apply_fts_replace(scope, action, receipt)
             case unreachable:
                 assert_never(unreachable)
 
-    def _apply_markdown_write(self, scope, action: MaterializedProjectionAction) -> None:
-        scope.file_system._apply_projection_markdown_write(action)
+    def _apply_markdown_write(
+        self, scope, action: MaterializedProjectionAction, receipt
+    ) -> None:
+        scope.file_system._apply_projection_markdown_write(action, receipt)
 
-    def _apply_path_rename(self, scope, action: MaterializedProjectionAction) -> None:
-        scope.file_system._apply_projection_path_rename(action)
+    def _apply_path_rename(
+        self, scope, action: MaterializedProjectionAction, receipt
+    ) -> None:
+        scope.file_system._apply_projection_path_rename(action, receipt)
 
-    def _apply_path_remove(self, scope, action: MaterializedProjectionAction) -> None:
-        scope.file_system._apply_projection_path_remove(action)
+    def _apply_path_remove(
+        self, scope, action: MaterializedProjectionAction, receipt
+    ) -> None:
+        scope.file_system._apply_projection_path_remove(action, receipt)
 
-    def _apply_index_replace(self, scope, action: MaterializedProjectionAction) -> None:
-        scope.file_system._apply_projection_index_replace(action)
+    def _apply_index_replace(
+        self, scope, action: MaterializedProjectionAction, receipt
+    ) -> None:
+        scope.file_system._apply_projection_index_replace(action, receipt)
 
-    def _apply_fts_replace(self, scope, action: MaterializedProjectionAction) -> None:
-        scope.file_system._apply_projection_fts_replace(action)
+    def _apply_fts_replace(
+        self, scope, action: MaterializedProjectionAction, receipt
+    ) -> None:
+        scope.file_system._apply_projection_fts_replace(action, receipt)
 
 
 def _utc_now_iso() -> str:
@@ -456,6 +473,57 @@ class StorageBase:
     def _iter_markdown(self, relative_name: str = "notes") -> list[str]:
         return self._notes.iter_markdown(relative_name)
 
+    async def snapshot_projection_authority(self) -> ProjectionAuthoritySnapshot:
+        from app.runtime.joined_thread import run_joined_thread
+
+        return await run_joined_thread(self._snapshot_projection_authority_sync)
+
+    @staticmethod
+    def _canonical_projection_blob(value: object) -> bytes:
+        return json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+
+    def _snapshot_projection_authority_sync(self) -> ProjectionAuthoritySnapshot:
+        markdown = {
+            relative: self._read_text(relative).encode("utf-8")
+            for relative in self._iter_markdown()
+        }
+        index: dict[str, bytes] = {}
+        fts: dict[str, bytes] = {}
+        with self._connect() as connection:
+            for table in Base.metadata.sorted_tables:
+                primary_keys = tuple(column.name for column in table.primary_key)
+                if len(primary_keys) != 1:
+                    raise RuntimeError("projection authority requires one index primary key")
+                primary_key = primary_keys[0]
+                columns = tuple(column.name for column in table.columns)
+                quoted_columns = ",".join(f'"{column}"' for column in columns)
+                rows = connection.execute(
+                    f'SELECT {quoted_columns} FROM "{table.name}"'
+                ).fetchall()
+                primary_index = columns.index(primary_key)
+                for values in rows:
+                    identity = str(values[primary_index])
+                    target = ContainedProjectionActionField(
+                        f"index/{table.name}/{primary_key}/{identity}"
+                    )
+                    index[str(target)] = self._canonical_projection_blob(
+                        {"row": dict(zip(columns, values, strict=True))}
+                    )
+            for note_id, title, content in connection.execute(
+                "SELECT notes.note_id, notes_fts.title, notes_fts.content "
+                "FROM notes_fts JOIN notes ON notes_fts.rowid = notes.rowid"
+            ).fetchall():
+                target = ContainedProjectionActionField(f"fts/{note_id}")
+                fts[str(target)] = self._canonical_projection_blob(
+                    {"content": content or "", "title": title or ""}
+                )
+        return ProjectionAuthoritySnapshot(markdown, index, fts)
+
     def _update_fts_content(self, conn: sqlite3.Connection, note_id: str, content: str) -> None:
         """Update the FTS5 content column for a note."""
         conn.execute(
@@ -485,7 +553,7 @@ class StorageBase:
         return payload
 
     def _apply_projection_markdown_write(
-        self, action: MaterializedProjectionAction
+        self, action: MaterializedProjectionAction, receipt
     ) -> None:
         if action.blob is None:
             raise ValueError("markdown write requires bytes")
@@ -493,10 +561,11 @@ class StorageBase:
             content = action.blob.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("markdown projection must be UTF-8") from exc
+        receipt.assert_current()
         self._atomic_write(str(action.target), content)
 
     def _apply_projection_path_rename(
-        self, action: MaterializedProjectionAction
+        self, action: MaterializedProjectionAction, receipt
     ) -> None:
         if action.source is None:
             raise ValueError("path rename requires a source")
@@ -506,13 +575,15 @@ class StorageBase:
             if self._file_exists(target):
                 return
             raise FileNotFoundError(source)
+        receipt.assert_current()
         self._rename_file(source, target)
 
     def _apply_projection_path_remove(
-        self, action: MaterializedProjectionAction
+        self, action: MaterializedProjectionAction, receipt
     ) -> None:
         target = str(action.target)
         if self._file_exists(target):
+            receipt.assert_current()
             self._unlink_file(target)
 
     def _index_projection_identity(
@@ -528,17 +599,19 @@ class StorageBase:
         return table, primary_key, identity
 
     def _apply_projection_index_replace(
-        self, action: MaterializedProjectionAction
+        self, action: MaterializedProjectionAction, receipt
     ) -> None:
         table, primary_key, identity = self._index_projection_identity(action)
         quoted_table = f'"{table.name}"'
         quoted_primary_key = f'"{primary_key}"'
         with self._connect() as connection:
             if action.blob is None:
+                receipt.assert_current()
                 connection.execute(
                     f"DELETE FROM {quoted_table} WHERE {quoted_primary_key} = ?",
                     (identity,),
                 )
+                receipt.assert_current()
                 connection.commit()
                 return
             payload = self._projection_payload(action)
@@ -555,15 +628,17 @@ class StorageBase:
                 for column in columns
                 if column != primary_key
             )
+            receipt.assert_current()
             connection.execute(
                 f"INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders}) "
                 f"ON CONFLICT ({quoted_primary_key}) DO UPDATE SET {updates}",
                 tuple(row[column] for column in columns),
             )
+            receipt.assert_current()
             connection.commit()
 
     def _apply_projection_fts_replace(
-        self, action: MaterializedProjectionAction
+        self, action: MaterializedProjectionAction, receipt
     ) -> None:
         parts = str(action.target).split("/")
         if len(parts) != 2 or parts[0] != "fts":
@@ -578,6 +653,7 @@ class StorageBase:
                     return
                 raise KeyError(f"Note {note_id} not found")
             rowid = row[0]
+            receipt.assert_current()
             connection.execute("DELETE FROM notes_fts WHERE rowid = ?", (rowid,))
             if action.blob is not None:
                 payload = self._projection_payload(action)
@@ -585,10 +661,12 @@ class StorageBase:
                     isinstance(payload[key], str) for key in payload
                 ):
                     raise ValueError("FTS projection payload is invalid")
+                receipt.assert_current()
                 connection.execute(
                     "INSERT INTO notes_fts(rowid, title, content) VALUES (?, ?, ?)",
                     (rowid, payload["title"], payload["content"]),
                 )
+            receipt.assert_current()
             connection.commit()
 
     # ─── Lifecycle ───────────────────────────────────────

@@ -12,7 +12,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 import app.mutation.types as mutation_types
 from app.errors import IdempotencyConflictError, SpaceRecoveryRequiredError
 from app.file_system.engine.base import FileSystemProjectionExecutor, StorageBase
+from app.file_system.interfaces import ProjectionAuthoritySnapshot
 from app.models.mutation import MutationBatch, MutationOperation
+from app.models.note import Note
+from app.models.quick_note import QuickNote
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
 from app.models.task import Task
@@ -31,6 +34,7 @@ from app.mutation.unit_of_work import (
     DbMutationInterpreter,
     MutationCompiler,
     MutationUnitOfWork,
+    compile_catalog_entity_command,
 )
 from app.registry import CATALOG
 from app.runtime.contained_io import BoundDirectoryHandle, BoundStageDirectory
@@ -139,8 +143,12 @@ class _Scope:
         self.session_factory = sessions
         self.scope = SimpleNamespace(space_id="space-test")
         self.mutation_stages = _StageStore()
-        self.file_system = SimpleNamespace()
+        self.file_system = self
+        self.projection_snapshot = ProjectionAuthoritySnapshot({}, {}, {})
         self._receipt = receipt
+
+    async def snapshot_projection_authority(self) -> ProjectionAuthoritySnapshot:
+        return self.projection_snapshot
 
     @asynccontextmanager
     async def exclusive_space_resources(self, purpose: str, timeout_seconds: float):
@@ -252,6 +260,29 @@ def _request(entity_id: str, body: str = "body") -> MutationRequest:
     )
 
 
+async def _compile_production_batch(uow_fixture, requests, policies=()):
+    compiler = MutationCompiler(CATALOG, policies)
+    items = tuple(
+        mutation_types.PreparedBatchItem(
+            index, f"overlay-op-{index}", request.request_hash, request, None
+        )
+        for index, request in enumerate(requests)
+    )
+    async with uow_fixture.sessions() as session:
+        return await compiler.compile_batch(uow_fixture.scope, items, session)
+
+
+def _with_projection(base, *, projections):
+    return MutationCommand.from_effects(
+        request=base.request,
+        db_plans=base.db_plans,
+        projections=projections,
+        sync_events=base.sync_events,
+        result_value=base.result_value,
+        resolution=base.resolution,
+    )
+
+
 @pytest.mark.asyncio
 async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_fixture) -> None:
     async with uow_fixture.sessions.begin() as session:
@@ -303,6 +334,303 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
 
 
 @pytest.mark.asyncio
+async def test_batch_overlay_exposes_folder_create_to_note_child(uow_fixture) -> None:
+    class FolderChildPolicy:
+        entity_types = frozenset({"note"})
+
+        async def compile(self, context, request):
+            if request.name == "entity.create":
+                folder_id = request.payload.get("folder_id")
+                assert isinstance(folder_id, str)
+                assert context.authority.row("folder", folder_id) is not None
+            return await compile_catalog_entity_command(context, request)
+
+    compilation = await _compile_production_batch(
+        uow_fixture,
+        (
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="folder",
+                entity_id="folder-child-parent",
+                payload={"name": "Parent"},
+                expected_version=None,
+            ),
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="note",
+                entity_id="note-child",
+                payload={"title": "Child", "folder_id": "folder-child-parent"},
+                expected_version=None,
+            ),
+        ),
+        policies=(FolderChildPolicy(),),
+    )
+
+    assert compilation.rejected == ()
+    assert compilation.operation_ids == ("overlay-op-0", "overlay-op-1")
+    assert compilation.commands[1].db_plans[0].after_row["folder_id"] == (
+        "folder-child-parent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_overlay_exposes_quick_note_create_to_junction_child(uow_fixture) -> None:
+    class JunctionParentPolicy:
+        entity_types = frozenset({"task_quick_note"})
+
+        async def compile(self, context, request):
+            if request.name == "entity.create":
+                quick_note_id = request.payload.get("quick_note_id")
+                assert isinstance(quick_note_id, str)
+                assert context.authority.row("quick_note", quick_note_id) is not None
+            return await compile_catalog_entity_command(context, request)
+
+    compilation = await _compile_production_batch(
+        uow_fixture,
+        (
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="quick_note",
+                entity_id="quick-note-parent",
+                payload={"content": "captured"},
+                expected_version=None,
+            ),
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="task_quick_note",
+                entity_id="task-quick-note-link",
+                payload={"task_id": "task-parent", "quick_note_id": "quick-note-parent"},
+                expected_version=None,
+            ),
+        ),
+        policies=(JunctionParentPolicy(),),
+    )
+
+    assert compilation.rejected == ()
+    assert compilation.commands[1].db_plans[0].after_row["quick_note_id"] == (
+        "quick-note-parent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_overlay_carries_consecutive_note_body_updates(uow_fixture) -> None:
+    async with uow_fixture.sessions.begin() as session:
+        session.add(
+            Note(
+                id="body-note",
+                title="Body",
+                content_hash="original",
+                word_count=1,
+                summary="",
+                tags="[]",
+                category=None,
+                folder_id=None,
+                status="active",
+                trashed_at=None,
+                created_at="2026-07-20T00:00:00Z",
+                updated_at="2026-07-20T00:00:00Z",
+                version=1,
+            )
+        )
+    uow_fixture.scope.projection_snapshot = ProjectionAuthoritySnapshot(
+        {"notes/body-note.md": b"original"}, {}, {}
+    )
+
+    class BodyPolicy:
+        entity_types = frozenset({"note"})
+
+        async def compile(self, context, request):
+            base = await compile_catalog_entity_command(context, request)
+            target = "notes/body-note.md"
+            before = context.authority.markdown(target)
+            assert before is not None
+            body = str(request.payload["content_hash"]).encode("utf-8")
+            assert before == (b"original" if request.expected_version == 1 else b"first")
+            _, _, tag_type, plan_type = _projection_api()
+            projection = plan_type(
+                tag_type.MARKDOWN_WRITE,
+                None,
+                mutation_types.ContainedProjectionActionField(target),
+                0,
+                before,
+                body,
+            )
+            return _with_projection(base, projections=(projection,))
+
+    compilation = await _compile_production_batch(
+        uow_fixture,
+        (
+            MutationRequest.from_payload(
+                name="entity.update",
+                entity_type="note",
+                entity_id="body-note",
+                payload={"content_hash": "first"},
+                expected_version=1,
+            ),
+            MutationRequest.from_payload(
+                name="entity.update",
+                entity_type="note",
+                entity_id="body-note",
+                payload={"content_hash": "second"},
+                expected_version=2,
+            ),
+        ),
+        policies=(BodyPolicy(),),
+    )
+
+    assert compilation.rejected == ()
+    assert compilation.commands[1].projections[0].before == b"first"
+    async with uow_fixture.sessions() as session:
+        stored = await session.get(Note, "body-note")
+    assert stored is not None and stored.content_hash == "original"
+
+
+@pytest.mark.asyncio
+async def test_batch_overlay_carries_move_target_into_metadata_update(uow_fixture) -> None:
+    async with uow_fixture.sessions.begin() as session:
+        session.add(
+            Note(
+                id="move-note",
+                title="Original",
+                content_hash="body",
+                word_count=1,
+                summary="",
+                tags="[]",
+                category=None,
+                folder_id="folder-one",
+                status="active",
+                trashed_at=None,
+                created_at="2026-07-20T00:00:00Z",
+                updated_at="2026-07-20T00:00:00Z",
+                version=1,
+            )
+        )
+    uow_fixture.scope.projection_snapshot = ProjectionAuthoritySnapshot(
+        {"notes/folder-one/Original.md": b"body"}, {}, {}
+    )
+
+    class MoveMetadataPolicy:
+        entity_types = frozenset({"note"})
+
+        async def compile(self, context, request):
+            base = await compile_catalog_entity_command(context, request)
+            current = context.authority.row("note", request.entity_id)
+            assert current is not None
+            source = f"notes/{current['folder_id']}/{current['title']}.md"
+            target_folder = request.payload.get("folder_id", current["folder_id"])
+            target_title = request.payload.get("title", current["title"])
+            target = f"notes/{target_folder}/{target_title}.md"
+            assert context.authority.markdown(source) == b"body"
+            _, _, tag_type, plan_type = _projection_api()
+            projection = plan_type(
+                tag_type.PATH_RENAME,
+                mutation_types.ContainedProjectionActionField(source),
+                mutation_types.ContainedProjectionActionField(target),
+                0,
+                None,
+                None,
+            )
+            return _with_projection(base, projections=(projection,))
+
+    compilation = await _compile_production_batch(
+        uow_fixture,
+        (
+            MutationRequest.from_payload(
+                name="entity.update",
+                entity_type="note",
+                entity_id="move-note",
+                payload={"folder_id": "folder-two"},
+                expected_version=1,
+            ),
+            MutationRequest.from_payload(
+                name="entity.update",
+                entity_type="note",
+                entity_id="move-note",
+                payload={"title": "Renamed"},
+                expected_version=2,
+            ),
+        ),
+        policies=(MoveMetadataPolicy(),),
+    )
+
+    assert compilation.rejected == ()
+    second = compilation.commands[1].projections[0]
+    assert str(second.source) == "notes/folder-two/Original.md"
+    assert str(second.target) == "notes/folder-two/Renamed.md"
+
+
+@pytest.mark.asyncio
+async def test_batch_overlay_carries_quick_note_conversion_children(uow_fixture) -> None:
+    async with uow_fixture.sessions.begin() as session:
+        session.add(
+            QuickNote(
+                id="conversion-quick-note",
+                content="captured",
+                mood=None,
+                tags="[]",
+                pinned=False,
+                archived_at=None,
+                archive_file_path=None,
+                folder_id=None,
+                trashed_at=None,
+                migrated_to_note_id=None,
+                session_id=None,
+                created_at="2026-07-20T00:00:00Z",
+                updated_at="2026-07-20T00:00:00Z",
+                version=1,
+            )
+        )
+
+    class ConversionPolicy:
+        entity_types = frozenset({"note", "memo_comment"})
+
+        async def compile(self, context, request):
+            if request.entity_type == "note" and request.name == "entity.create":
+                assert context.authority.row("quick_note", "conversion-quick-note") is not None
+            if request.entity_type == "memo_comment" and request.name == "entity.create":
+                note_id = request.payload.get("note_id")
+                assert context.authority.row("note", note_id) is not None
+                quick_note = context.authority.row("quick_note", "conversion-quick-note")
+                assert quick_note is not None
+                assert quick_note["migrated_to_note_id"] == "converted-note"
+            return await compile_catalog_entity_command(context, request)
+
+    compilation = await _compile_production_batch(
+        uow_fixture,
+        (
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="note",
+                entity_id="converted-note",
+                payload={"title": "Converted", "content_hash": "captured"},
+                expected_version=None,
+            ),
+            MutationRequest.from_payload(
+                name="entity.update",
+                entity_type="quick_note",
+                entity_id="conversion-quick-note",
+                payload={
+                    "archived_at": "2026-07-20T00:00:01Z",
+                    "migrated_to_note_id": "converted-note",
+                },
+                expected_version=1,
+            ),
+            MutationRequest.from_payload(
+                name="entity.create",
+                entity_type="memo_comment",
+                entity_id="converted-comment",
+                payload={"note_id": "converted-note", "content": "copied"},
+                expected_version=None,
+            ),
+        ),
+        policies=(ConversionPolicy(),),
+    )
+
+    assert compilation.rejected == ()
+    assert compilation.commands[2].db_plans[0].after_row["note_id"] == "converted-note"
+
+
+@pytest.mark.asyncio
 async def test_catalog_compiler_and_interpreter_execute_unregistered_entity_policy(
     uow_fixture,
 ) -> None:
@@ -350,6 +678,164 @@ async def test_catalog_compiler_and_interpreter_execute_unregistered_entity_poli
 
     assert result.state is MutationState.FINALIZED
     assert stored is not None and stored.title == "after" and stored.version == 2
+
+
+@pytest.mark.asyncio
+async def test_timestamp_lww_remote_win_executes_against_authoritative_version(
+    uow_fixture,
+) -> None:
+    async with uow_fixture.sessions.begin() as session:
+        session.add(
+            Task(
+                id="remote-win-task",
+                title="local",
+                created_at="2026-07-20T00:00:00Z",
+                updated_at="2026-07-20T00:00:02Z",
+                version=3,
+            )
+        )
+    request = MutationRequest.from_payload(
+        name="entity.update",
+        entity_type="task",
+        entity_id="remote-win-task",
+        payload={"title": "remote"},
+        expected_version=2,
+        client_updated_at="2026-07-20T00:00:03Z",
+    )
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=MutationCompiler(CATALOG),
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+        recovery_gate=_CleanGate(),
+        journal_factory=MutationJournal,
+    )
+
+    result = await uow.execute(uow_fixture.scope, request, "remote-win-operation")
+    async with uow_fixture.sessions() as session:
+        stored = await session.get(Task, "remote-win-task")
+
+    assert result.resolution == "remote"
+    assert stored is not None and stored.title == "remote" and stored.version == 4
+
+
+@pytest.mark.asyncio
+async def test_timestamp_lww_remote_delete_executes_against_authoritative_version(
+    uow_fixture,
+) -> None:
+    async with uow_fixture.sessions.begin() as session:
+        session.add(
+            Task(
+                id="remote-delete-task",
+                title="local",
+                created_at="2026-07-20T00:00:00Z",
+                updated_at="2026-07-20T00:00:02Z",
+                version=3,
+            )
+        )
+    request = MutationRequest.from_payload(
+        name="entity.delete",
+        entity_type="task",
+        entity_id="remote-delete-task",
+        payload={},
+        expected_version=2,
+        client_updated_at="2026-07-20T00:00:03Z",
+    )
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=MutationCompiler(CATALOG),
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+        recovery_gate=_CleanGate(),
+        journal_factory=MutationJournal,
+    )
+
+    result = await uow.execute(uow_fixture.scope, request, "remote-delete-operation")
+    async with uow_fixture.sessions() as session:
+        stored = await session.get(Task, "remote-delete-task")
+
+    assert result.resolution == "remote"
+    assert stored is None
+
+
+@pytest.mark.asyncio
+async def test_production_compiler_injects_closed_plan_factories(uow_fixture) -> None:
+    class FactoryPolicy:
+        entity_types = frozenset({"task"})
+
+        async def compile(self, context, request):
+            task_model = context.catalog.model_for("task")
+            before = task_model(
+                id=request.entity_id,
+                title="before",
+                description="",
+                status="todo",
+                priority="medium",
+                tags="[]",
+                plan="",
+                completion="",
+                due_date=None,
+                estimated_pomodoros=1,
+                actual_pomodoros=0,
+                archived_at=None,
+                created_at="2026-07-20T00:00:00Z",
+                updated_at="2026-07-20T00:00:00Z",
+                version=1,
+            )
+            after = task_model(
+                id=request.entity_id,
+                title="after",
+                description="",
+                status="todo",
+                priority="medium",
+                tags="[]",
+                plan="",
+                completion="",
+                due_date=None,
+                estimated_pomodoros=1,
+                actual_pomodoros=0,
+                archived_at=None,
+                created_at="2026-07-20T00:00:00Z",
+                updated_at="2026-07-20T00:00:01Z",
+                version=2,
+            )
+            db_insert = context.db.insert(before)
+            db_update = context.db.update(before, after)
+            db_delete = context.db.delete(after)
+            sync_create = context.sync.create(before)
+            sync_update = context.sync.update(after)
+            sync_delete = context.sync.delete(
+                after, deleted_at="2026-07-20T00:00:02Z"
+            )
+            assert db_insert.table == "tasks" and db_insert.operation == "insert"
+            assert db_update.expected_version == 1
+            assert db_delete.expected_version == 2
+            assert sync_create.entity_type == "task" and sync_create.version == 1
+            assert sync_update.entity_type == "task" and sync_update.version == 2
+            assert sync_delete.action == "delete" and sync_delete.version == 3
+            return context.command(
+                request=request,
+                db_plans=(),
+                sync_events=(sync_create,),
+                value={"id": request.entity_id},
+            )
+
+    request = MutationRequest.from_payload(
+        name="factory.probe",
+        entity_type="task",
+        entity_id="factory-task",
+        payload={},
+        expected_version=None,
+    )
+    item = mutation_types.PreparedBatchItem(
+        0, "factory-operation", request.request_hash, request, None
+    )
+    async with uow_fixture.sessions() as session:
+        compiled = await MutationCompiler(CATALOG, (FactoryPolicy(),)).compile_batch(
+            uow_fixture.scope, (item,), session
+        )
+
+    assert compiled.operation_ids == ("factory-operation",)
 
 
 @pytest.mark.asyncio
@@ -602,19 +1088,19 @@ async def test_projection_executor_asserts_fence_immediately_before_each_destruc
         def __init__(self) -> None:
             self.observed: list[str] = []
 
-        def _apply_markdown_write(self, scope, action) -> None:
+        def _apply_markdown_write(self, scope, action, receipt) -> None:
             self.observed.append("markdown_write")
 
-        def _apply_path_rename(self, scope, action) -> None:
+        def _apply_path_rename(self, scope, action, receipt) -> None:
             self.observed.append("path_rename")
 
-        def _apply_path_remove(self, scope, action) -> None:
+        def _apply_path_remove(self, scope, action, receipt) -> None:
             self.observed.append("path_remove")
 
-        def _apply_index_replace(self, scope, action) -> None:
+        def _apply_index_replace(self, scope, action, receipt) -> None:
             self.observed.append("index_replace")
 
-        def _apply_fts_replace(self, scope, action) -> None:
+        def _apply_fts_replace(self, scope, action, receipt) -> None:
             self.observed.append("fts_replace")
 
     executor = _Executor()
@@ -645,19 +1131,19 @@ class _RecordingProjectionExecutor(FileSystemProjectionExecutor):
     def _record(self, action) -> None:
         self.actions.append((action.tag.value, str(action.target), action.blob))
 
-    def _apply_markdown_write(self, scope, action) -> None:
+    def _apply_markdown_write(self, scope, action, receipt) -> None:
         self._record(action)
 
-    def _apply_path_rename(self, scope, action) -> None:
+    def _apply_path_rename(self, scope, action, receipt) -> None:
         self._record(action)
 
-    def _apply_path_remove(self, scope, action) -> None:
+    def _apply_path_remove(self, scope, action, receipt) -> None:
         self._record(action)
 
-    def _apply_index_replace(self, scope, action) -> None:
+    def _apply_index_replace(self, scope, action, receipt) -> None:
         self._record(action)
 
-    def _apply_fts_replace(self, scope, action) -> None:
+    def _apply_fts_replace(self, scope, action, receipt) -> None:
         self._record(action)
 
 
@@ -800,6 +1286,150 @@ async def test_production_projection_executor_applies_all_tags_through_contained
         await file_system.close()
         await space_lease.release()
         await global_lease.release()
+
+
+@pytest.mark.asyncio
+async def test_authority_overlay_loads_existing_index_and_fts_authority(
+    uow_fixture, tmp_path
+) -> None:
+    from app.file_system.api import open_contained_file_system
+    from app.runtime.contained_io import open_bound_space
+    from app.runtime.scope import _walk_existing_ancestors
+
+    root = tmp_path / "overlay-contained-space"
+    notes = root / "notes"
+    notes.mkdir(parents=True)
+    (root / "space.db").touch()
+    (root / "index.db").touch()
+    paths = SimpleNamespace(
+        space_root=root.parent,
+        db_path=root / "space.db",
+        notes_dir=notes,
+        index_db=root / "index.db",
+    )
+    opens = open_bound_space(paths, _walk_existing_ancestors(paths))
+    file_system = await open_contained_file_system(opens)
+    try:
+        await file_system.create_folder(
+            "Existing", external_id="f-existing"
+        )
+        await file_system.create_note(
+            title="Existing note",
+            content="existing searchable body",
+            folder_id="f-existing",
+            external_id="n-existing",
+        )
+        scope = SimpleNamespace(file_system=file_system)
+        async with uow_fixture.sessions() as session:
+            overlay = await AuthorityOverlay.from_locked_authorities(
+                scope, session, CATALOG
+            )
+        tag_type = _projection_api()[2]
+
+        index_blob = overlay.derived_projection(
+            tag_type.INDEX_REPLACE, "index/folders/id/f-existing"
+        )
+        fts_blob = overlay.derived_projection(
+            tag_type.FTS_REPLACE, "fts/n-existing"
+        )
+        assert index_blob is not None
+        assert json.loads(index_blob)["row"]["name"] == "Existing"
+        assert fts_blob is not None
+        assert json.loads(fts_blob) == {
+            "content": "existing searchable body",
+            "title": "Existing note",
+        }
+    finally:
+        await file_system.close()
+        await opens.close_all()
+
+
+@pytest.mark.asyncio
+async def test_fts_projection_rechecks_fence_between_delete_and_insert(
+    tmp_path, monkeypatch
+) -> None:
+    from app.file_system.api import open_contained_file_system
+    from app.runtime.contained_io import open_bound_space
+    from app.runtime.scope import _walk_existing_ancestors
+
+    class StaleAfterFirstWrite:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        def assert_current(self) -> None:
+            self.checks += 1
+            if self.checks == 2:
+                raise RuntimeError("stale between FTS writes")
+
+    root = tmp_path / "fts-fence-space"
+    notes = root / "notes"
+    notes.mkdir(parents=True)
+    (root / "space.db").touch()
+    (root / "index.db").touch()
+    paths = SimpleNamespace(
+        space_root=root.parent,
+        db_path=root / "space.db",
+        notes_dir=notes,
+        index_db=root / "index.db",
+    )
+    opens = open_bound_space(paths, _walk_existing_ancestors(paths))
+    file_system = await open_contained_file_system(opens)
+    try:
+        await file_system.create_note(
+            title="Fence",
+            content="original searchable phrase",
+            external_id="n-fence",
+        )
+        action = _materialized_action(
+            "fts_replace",
+            "fts/n-fence",
+            0,
+            json.dumps(
+                {"content": "replacement phrase", "title": "Fence"},
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii"),
+        )
+        receipt = StaleAfterFirstWrite()
+        executed_sql: list[str] = []
+        original_connect = file_system._connect
+
+        class RecordingConnection:
+            def __init__(self, connection) -> None:
+                self.connection = connection
+
+            def execute(self, statement, *args, **kwargs):
+                executed_sql.append(statement)
+                return self.connection.execute(statement, *args, **kwargs)
+
+            def commit(self) -> None:
+                self.connection.commit()
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def recording_connect():
+            with original_connect() as connection:
+                yield RecordingConnection(connection)
+
+        monkeypatch.setattr(file_system, "_connect", recording_connect)
+
+        with pytest.raises(RuntimeError, match="stale between FTS writes"):
+            file_system._apply_projection_fts_replace(action, receipt)
+
+        assert receipt.checks == 2
+        assert not any(
+            statement.lstrip().startswith("INSERT INTO notes_fts")
+            for statement in executed_sql
+        )
+        assert [item.note_id for item in await file_system.search("original searchable phrase")] == [
+            "n-fence"
+        ]
+        assert await file_system.search("replacement phrase") == []
+    finally:
+        await file_system.close()
+        await opens.close_all()
 
 
 @pytest.mark.asyncio
