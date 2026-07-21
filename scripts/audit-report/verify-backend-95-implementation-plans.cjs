@@ -4280,6 +4280,16 @@ function verifyCrossWave(plans) {
     'S3 Task 4: commit omits authoritative child-ID vector fixture',
   );
   requireText('S3', s3, 'class PreparedBatchItem:', 'durable prepared batch union');
+  for (const contract of [
+    'Task 5 may extend `StageStore` only with an opaque side-selective verifier/materializer',
+    'selected side blob',
+    'Per-descriptor before/after/neither classification',
+    'ascending forward and descending compensation ordering',
+    '`PATH_RENAME` byte hash proof',
+    'after blob corrupt + before blob valid',
+    'lease-pinned pending cleanup owner',
+    'retries close and drain before releasing either lease',
+  ]) requireText('S3', s3, contract, `Task 5 recovery amendment ${contract}`);
   requireText('S3', s3, 'execute_prepared_batch(scope, items, batch_id) -> BatchMutationResult', 'prepared batch public interface');
   requireText('S3', s3, 'hash_prepared_batch_identity', 'all-input prepared batch identity hash');
   requireText('S3', s3, 'client_updated_at: str | None', 'canonical Sync timestamp in mutation intent');
@@ -12110,6 +12120,10 @@ function verifyCurrentPaths(immutableS0SandboxBytes = null) {
     requireText('REPORT', report, 'S1 POSIX companion <code>xDelete</code> fail-closed', 'S1 POSIX delete fail-closed mirror');
     requireText('REPORT', report, 'S5 recovery-only delete authority', 'S5 POSIX delete handoff mirror');
     requireText('REPORT', report, 'POSIX deferred-delete', 'POSIX deferred-delete gate mirror');
+    for (const contract of [
+      'recovery 按 descriptor ordinal side-selective materialize',
+      'partial forward、corrupt after/valid before、rename wrong-bytes、mixed-child reverse-order',
+    ]) requireText('REPORT', report, contract, `Task 5 recovery report mirror ${contract}`);
   }
   const actualFiles = fs.readdirSync(planDirectory)
     .filter((name) => /^2026-07-14-backend-95plus-s[0-6]-.*\.md$/.test(name))

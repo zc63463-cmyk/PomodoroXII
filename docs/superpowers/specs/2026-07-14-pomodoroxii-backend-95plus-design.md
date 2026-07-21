@@ -604,6 +604,23 @@ INTENT -> STAGED -> DB_COMMITTED -> FINALIZING -> FORWARD_APPLIED -> FINALIZED
   marks the Space degraded, blocks reads and writes, and exposes a repair CLI;
   it never guesses or silently discards an artifact.
 
+Recovery evidence is per projection descriptor, not an all-before/all-after
+operation shortcut. `StageStore` may expose only an opaque, side-selective
+materializer which first proves the canonical manifest identity and the exact
+ordered descriptor tuple, then validates only the requested `before` or `after`
+blob set. A damaged after blob must not prevent an intact before side from
+driving compensation. Forward recovery classifies every ordinal as before,
+after, or neither and replays only missing ordinals in ascending order;
+compensation processes accepted children in reverse sequence and descriptors in
+descending ordinal order. `PATH_RENAME` proof includes authoritative source and
+target bytes (hash and size), not merely directory-entry existence. A neither
+state is unprovable and becomes `FAILED_MANUAL`.
+
+If degraded cleanup cannot close resources or drain the engine identity, the
+runtime records a lease-pinned pending cleanup owner. The owner retains the
+matching global and Space leases and retries close and drain before releasing
+either lease; cleanup errors cannot turn into an apparently completed release.
+
 Each accepted Sync event has a child operation under one batch record. Rejected
 events create no operation or ledger row. Accepted children share the outer
 database transaction. After commit, the Space remains leased and the entire
