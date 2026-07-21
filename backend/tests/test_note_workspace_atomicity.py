@@ -1429,7 +1429,7 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
                 },
                 expected_version=None,
             ),
-            "complete bound projections",
+            "authoritative Markdown after-body",
         ),
     )
     for index, (policy, request, message) in enumerate(cases):
@@ -1592,6 +1592,101 @@ async def test_note_projection_rejects_prefix_collision_with_authoritative_path(
             await MutationCompiler(
                 CATALOG, (CollidingDeletePolicy(),)
             ).compile_batch(uow_fixture.scope, (item,), session)
+
+
+@pytest.mark.asyncio
+async def test_note_projection_rejects_index_row_divergent_from_db_after_image(
+    uow_fixture,
+) -> None:
+    body = b"authoritative body"
+
+    class DivergentIndexPolicy:
+        entity_types = frozenset({"note"})
+
+        async def compile(self, context, request):
+            base = await compile_catalog_entity_command(context, request)
+            row = base.db_plans[0].after_row
+            assert row is not None
+            projections = list(_note_create_projections(base, body))
+            projections[1] = _projection_plan(
+                "index_replace",
+                f"index/notes/note_id/{request.entity_id}",
+                1,
+                None,
+                _note_index_blob({**row, "title": "Divergent"}, f"notes/{request.entity_id}.md"),
+            )
+            return _with_projection(base, projections=tuple(projections))
+
+    request = MutationRequest.from_payload(
+        name="entity.create",
+        entity_type="note",
+        entity_id="divergent-index-note",
+        payload={
+            "content_hash": hashlib.sha256(body).hexdigest(),
+            "title": "Authoritative",
+        },
+        expected_version=None,
+    )
+    item = mutation_types.PreparedBatchItem(
+        0, "divergent-index-operation", request.request_hash, request, None
+    )
+
+    async with uow_fixture.sessions() as session:
+        with pytest.raises(
+            SpaceRecoveryRequiredError, match="index row.*database image"
+        ):
+            await MutationCompiler(
+                CATALOG, (DivergentIndexPolicy(),)
+            ).compile_batch(uow_fixture.scope, (item,), session)
+
+
+@pytest.mark.asyncio
+async def test_business_receipt_preserves_null_insert_before_and_delete_after(
+    uow_fixture,
+) -> None:
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=MutationCompiler(CATALOG),
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=uow_fixture.executor,
+        recovery_gate=_CleanGate(),
+        journal_factory=MutationJournal,
+    )
+    created = MutationRequest.from_payload(
+        name="entity.create",
+        entity_type="task",
+        entity_id="receipt-image-task",
+        payload={"title": "created"},
+        expected_version=None,
+    )
+    deleted = MutationRequest.from_payload(
+        name="entity.delete",
+        entity_type="task",
+        entity_id="receipt-image-task",
+        payload={},
+        expected_version=1,
+    )
+
+    await uow.execute_batch(
+        uow_fixture.scope,
+        (created, deleted),
+        "receipt-image-batch",
+        operation_ids=("receipt-image-create", "receipt-image-delete"),
+    )
+
+    async with uow_fixture.sessions() as session:
+        create_operation = await session.get(
+            MutationOperation, "receipt-image-create"
+        )
+        delete_operation = await session.get(
+            MutationOperation, "receipt-image-delete"
+        )
+    assert create_operation is not None
+    assert delete_operation is not None
+    assert json.loads(create_operation.db_before_json) == [None]
+    assert json.loads(create_operation.db_after_json)[0]["id"] == "receipt-image-task"
+    assert json.loads(delete_operation.db_before_json)[0]["id"] == "receipt-image-task"
+    assert json.loads(delete_operation.db_after_json) == [None]
 
 
 def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
@@ -2329,6 +2424,10 @@ async def test_production_note_policy_executes_db_markdown_index_fts_and_ledger(
             note_id
         ]
         assert event is not None and event.visible is True
+        assert json.loads(event.payload) == {
+            **{field: getattr(stored, field) for field in CATALOG.get("note").field_names},
+            "content": body.decode("utf-8"),
+        }
     finally:
         stages.close()
         await file_system.close()

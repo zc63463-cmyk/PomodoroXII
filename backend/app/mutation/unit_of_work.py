@@ -20,6 +20,7 @@ from app.errors import (
     SpaceRecoveryRequiredError,
 )
 from app.file_system.interfaces import FencedProjectionExecutor, ProjectionAuthoritySnapshot
+from app.file_system.schema import NoteModel as ProjectionNoteModel
 from app.models.mutation import MutationOperation
 from app.mutation.journal import JournalBatch, MutationJournal
 from app.mutation.types import (
@@ -673,6 +674,9 @@ class MutationCompiler:
                     )
                 )
             else:
+                command = _bind_authoritative_note_event_bodies(
+                    command, self.catalog, overlay
+                )
                 _validate_compiled_command(
                     command, self.catalog, authority=overlay
                 )
@@ -739,11 +743,21 @@ def _validate_sync_event_against_catalog(
     if not spec.sync_enabled:
         raise SpaceRecoveryRequiredError("persisted sync entity is not sync-enabled")
     if event.action in {"create", "update"}:
+        expected_fields = set(spec.field_names)
+        if spec.name == "note":
+            expected_fields.add("content")
         valid_payload = (
-            set(event.payload) == set(spec.field_names)
+            set(event.payload) == expected_fields
             and str(event.payload.get(spec.primary_key)) == event.entity_id
             and event.payload.get("version") == event.version
         )
+        if spec.name == "note" and valid_payload:
+            content = event.payload.get("content")
+            valid_payload = (
+                isinstance(content, str)
+                and hashlib.sha256(content.encode("utf-8")).hexdigest()
+                == event.payload.get("content_hash")
+            )
     else:
         valid_payload = event.payload == {"deleted_at": event.created_at}
     if not valid_payload:
@@ -759,12 +773,12 @@ class _NoteProjectionPaths:
     after: str | None
 
 
-def _note_path_from_index_blob(
+def _note_index_row_from_blob(
     payload: bytes | None,
     identity: str,
     *,
     label: str,
-) -> str | None:
+) -> Mapping[str, object] | None:
     if payload is None:
         return None
     try:
@@ -778,12 +792,55 @@ def _note_path_from_index_blob(
             f"{label} Note path projection is invalid"
         )
     row = decoded["row"]
+    expected_fields = {
+        column.name for column in ProjectionNoteModel.__table__.columns
+    }
+    if set(row) != expected_fields:
+        raise SpaceRecoveryRequiredError(
+            f"{label} Note index row is incomplete"
+        )
     current_path = row.get("current_path")
     if row.get("note_id") != identity or not isinstance(current_path, str) or not current_path:
         raise SpaceRecoveryRequiredError(
             f"{label} Note path projection is invalid"
         )
-    return current_path
+    return require_frozen_object(row)
+
+
+def _note_path_from_index_blob(
+    payload: bytes | None,
+    identity: str,
+    *,
+    label: str,
+) -> str | None:
+    row = _note_index_row_from_blob(payload, identity, label=label)
+    return None if row is None else str(row["current_path"])
+
+
+def _validate_note_index_row_against_db_image(
+    index_row: Mapping[str, object] | None,
+    db_row: Mapping[str, object] | None,
+    *,
+    label: str,
+) -> None:
+    if index_row is None or db_row is None:
+        if index_row is db_row:
+            return
+        raise SpaceRecoveryRequiredError(
+            f"{label} Note index row does not match the database image"
+        )
+    if index_row["note_id"] != db_row.get("id") or any(
+        index_row[field] != value
+        for field, value in db_row.items()
+        if field in index_row
+    ):
+        raise SpaceRecoveryRequiredError(
+            f"{label} Note index row does not match the database image"
+        )
+    if bool(index_row["is_deleted"]) != (db_row.get("trashed_at") is not None):
+        raise SpaceRecoveryRequiredError(
+            f"{label} Note index row does not match the database image"
+        )
 
 
 def _note_projection_paths(
@@ -804,12 +861,20 @@ def _note_projection_paths(
             "projection-backed entity requires complete bound projections"
         )
     projection = index_projections[0]
-    before = _note_path_from_index_blob(
+    before_row = _note_index_row_from_blob(
         projection.before, identity, label="before-image"
     )
-    after = _note_path_from_index_blob(
+    after_row = _note_index_row_from_blob(
         projection.after, identity, label="after-image"
     )
+    _validate_note_index_row_against_db_image(
+        before_row, plan.before_row, label="before-image"
+    )
+    _validate_note_index_row_against_db_image(
+        after_row, plan.after_row, label="after-image"
+    )
+    before = None if before_row is None else str(before_row["current_path"])
+    after = None if after_row is None else str(after_row["current_path"])
     authoritative = authority.note_path(identity)
     if plan.operation == "insert":
         valid = authoritative is None and before is None and after is not None
@@ -822,6 +887,101 @@ def _note_projection_paths(
             "projection does not match the authoritative Note path"
         )
     return _NoteProjectionPaths(before, after)
+
+
+def _matching_sync_events(
+    command: MutationCommand | PersistedMutationCommand,
+    plan: DbMutationPlan,
+    spec: EntitySpec,
+) -> tuple[SyncEventPlan, ...]:
+    return tuple(
+        event
+        for event in command.sync_events
+        if (
+            event.entity_type == spec.name
+            and event.entity_id == str(plan.primary_key[spec.primary_key])
+            and event.action
+            == {"insert": "create", "update": "update", "delete": "delete"}[
+                plan.operation
+            ]
+        )
+    )
+
+
+def _note_after_body(
+    command: MutationCommand,
+    plan: DbMutationPlan,
+    identity: str,
+    authority: AuthorityOverlay,
+) -> str:
+    paths = _note_projection_paths(command, plan, identity, authority)
+    writes = tuple(
+        projection
+        for projection in command.projections
+        if projection.tag is ProjectionActionTag.MARKDOWN_WRITE
+        and str(projection.target) == paths.after
+    )
+    if len(writes) > 1:
+        raise SpaceRecoveryRequiredError(
+            "Note mutation has multiple authoritative Markdown bodies"
+        )
+    if writes:
+        body = writes[0].after
+    else:
+        body = None if paths.before is None else authority.markdown(paths.before)
+    if body is None:
+        raise SpaceRecoveryRequiredError(
+            "Note mutation has no authoritative Markdown after-body"
+        )
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SpaceRecoveryRequiredError(
+            "Note Markdown after-body is not valid UTF-8"
+        ) from exc
+
+
+def _bind_authoritative_note_event_bodies(
+    command: MutationCommand,
+    catalog: CompiledEntityCatalog,
+    authority: AuthorityOverlay,
+) -> MutationCommand:
+    events = list(command.sync_events)
+    changed = False
+    for plan in command.db_plans:
+        spec = _validate_persisted_plan_against_catalog(plan, catalog)
+        if spec.name != "note" or plan.operation == "delete":
+            continue
+        matching = _matching_sync_events(command, plan, spec)
+        if len(matching) != 1:
+            continue
+        event = matching[0]
+        identity = str(plan.primary_key[spec.primary_key])
+        content = _note_after_body(command, plan, identity, authority)
+        if "content" in event.payload and event.payload["content"] != content:
+            raise SpaceRecoveryRequiredError(
+                "compiled Note event conflicts with the authoritative Markdown body"
+            )
+        replacement = SyncEventPlan(
+            event.entity_type,
+            event.entity_id,
+            event.action,
+            {**event.payload, "content": content},
+            event.version,
+            event.created_at,
+        )
+        events[events.index(event)] = replacement
+        changed = True
+    if not changed:
+        return command
+    return MutationCommand.from_effects(
+        request=command.request,
+        db_plans=command.db_plans,
+        projections=command.projections,
+        sync_events=tuple(events),
+        result_value=command.result_value,
+        resolution=command.resolution,
+    )
 
 
 def _projection_belongs_to_plan(
@@ -971,18 +1131,7 @@ def _validate_compiled_command(
     for plan_index, (plan, spec) in enumerate(
         zip(command.db_plans, plan_specs, strict=True)
     ):
-        matching_events = tuple(
-            event
-            for event in command.sync_events
-            if (
-                event.entity_type == spec.name
-                and event.entity_id == str(plan.primary_key[spec.primary_key])
-                and event.action
-                == {"insert": "create", "update": "update", "delete": "delete"}[
-                    plan.operation
-                ]
-            )
-        )
+        matching_events = _matching_sync_events(command, plan, spec)
         if spec.sync_enabled and len(matching_events) != 1:
             raise SpaceRecoveryRequiredError(
                 "compiled sync event is missing for a database mutation"
@@ -990,8 +1139,11 @@ def _validate_compiled_command(
         if matching_events:
             event = matching_events[0]
             if plan.operation in {"insert", "update"}:
+                event_after = dict(event.payload)
+                if spec.name == "note":
+                    event_after.pop("content", None)
                 if (
-                    event.payload != plan.after_row
+                    event_after != plan.after_row
                     or plan.after_row is None
                     or event.version != plan.after_row.get("version")
                 ):
@@ -1007,7 +1159,7 @@ def _validate_compiled_command(
                 if type(before_version) is not int or event.version != before_version + 1:
                     raise SpaceRecoveryRequiredError(
                         "compiled delete event version differs from the database before image"
-                )
+                    )
         identity = str(plan.primary_key[spec.primary_key])
         owned = tuple(
             projection
@@ -1339,15 +1491,23 @@ class MutationUnitOfWork:
         async with scope.session_factory.begin() as session:
             for operation_id, command in zip(operation_ids, commands, strict=True):
                 async with session.begin_nested():
-                    before_after = await self.interpreter.apply(session, command.db_plans)
+                    await self.interpreter.apply(session, command.db_plans)
                     operation = await session.get(MutationOperation, operation_id)
                     if operation is None or operation.batch_id != batch_id:
                         raise SpaceRecoveryRequiredError("journal operation disappeared during business commit")
                     operation.db_before_json = json.dumps(
-                        [dict(plan.before_row or {}) for plan in command.db_plans], separators=(",", ":")
+                        [
+                            None if plan.before_row is None else dict(plan.before_row)
+                            for plan in command.db_plans
+                        ],
+                        separators=(",", ":"),
                     )
                     operation.db_after_json = json.dumps(
-                        [dict(item) for item in before_after], separators=(",", ":")
+                        [
+                            None if plan.after_row is None else dict(plan.after_row)
+                            for plan in command.db_plans
+                        ],
+                        separators=(",", ":"),
                     )
             for operation_id, command in zip(operation_ids, commands, strict=True):
                 await MutationJournal.transition_in_transaction(
