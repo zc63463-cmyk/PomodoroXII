@@ -804,6 +804,10 @@ def _note_index_row_from_blob(
         raise SpaceRecoveryRequiredError(
             f"{label} Note path projection is invalid"
         )
+    if row.get("level") not in {"L1", "L2", "L3"} or type(row.get("is_deleted")) is not bool:
+        raise SpaceRecoveryRequiredError(
+            f"{label} Note index row does not match the database image"
+        )
     return require_frozen_object(row)
 
 

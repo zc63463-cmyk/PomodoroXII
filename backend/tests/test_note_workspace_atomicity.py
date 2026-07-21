@@ -1595,8 +1595,12 @@ async def test_note_projection_rejects_prefix_collision_with_authoritative_path(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("index_field", "index_value"),
+    (("title", "Divergent"), ("level", "L9")),
+)
 async def test_note_projection_rejects_index_row_divergent_from_db_after_image(
-    uow_fixture,
+    uow_fixture, index_field, index_value
 ) -> None:
     body = b"authoritative body"
 
@@ -1608,12 +1612,16 @@ async def test_note_projection_rejects_index_row_divergent_from_db_after_image(
             row = base.db_plans[0].after_row
             assert row is not None
             projections = list(_note_create_projections(base, body))
+            index_payload = json.loads(
+                _note_index_blob(row, f"notes/{request.entity_id}.md")
+            )
+            index_payload["row"][index_field] = index_value
             projections[1] = _projection_plan(
                 "index_replace",
                 f"index/notes/note_id/{request.entity_id}",
                 1,
                 None,
-                _note_index_blob({**row, "title": "Divergent"}, f"notes/{request.entity_id}.md"),
+                _canonical_projection_blob(index_payload),
             )
             return _with_projection(base, projections=tuple(projections))
 
