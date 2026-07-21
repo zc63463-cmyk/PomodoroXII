@@ -1612,50 +1612,59 @@ EXPECTED_RECOVERY_OUTCOME = {
 }
 
 
-def test_legacy_or_assertion_would_misaccept_wrong_terminal_state() -> None:
-    """RED: prove that ``first.aborted or first.compensated`` is too loose.
+@pytest.mark.parametrize(
+    "left_state,bad_result",
+    [
+        (
+            MutationState.INTENT,
+            RecoveryResult((), (), ("batch-1",), ()),
+        ),
+        (
+            MutationState.COMPENSATING,
+            RecoveryResult((), ("batch-1",), (), ()),
+        ),
+        (
+            MutationState.INTENT,
+            RecoveryResult((), ("batch-1",), ("batch-1",), ()),
+        ),
+        (
+            MutationState.STAGED,
+            RecoveryResult((), ("batch-1",), (), ()),
+        ),
+        (
+            MutationState.STAGED,
+            RecoveryResult((), (), ("batch-1",), ()),
+        ),
+        (
+            MutationState.FORWARD_APPLIED,
+            RecoveryResult((), ("batch-1",), (), ()),
+        ),
+    ],
+    ids=[
+        "intent_wrongly_compensated",
+        "compensating_wrongly_aborted",
+        "both_aborted_and_compensated",
+        "finalized_wrongly_aborted",
+        "finalized_wrongly_compensated",
+        "forward_applied_wrongly_aborted",
+    ],
+)
+def test_precise_recovery_result_rejects_wrong_terminal_state(
+    left_state: MutationState,
+    bad_result: RecoveryResult,
+) -> None:
+    """The precise assertion must reject every wrong terminal-state mapping.
 
-    The legacy disjunction would accept an INTENT batch that wrongly
-    transitioned to COMPENSATED, or a COMPENSATING batch that wrongly
-    transitioned to ABORTED, or both outcomes simultaneously.  The precise
-    outcome matrix must not allow any of those misclassifications.
+    This test calls ``_assert_precise_first_recovery_result`` with inputs
+    that the legacy ``first.aborted or first.compensated`` disjunction would
+    accept, and verifies the precise assertion raises ``AssertionError``.
+    A regression that weakens the assertion back to the disjunction would
+    cause this test to fail.
     """
-    intent_wrongly_compensated = RecoveryResult(
-        (), (), ("recovery-batch",), ()
-    )
-    compensating_wrongly_aborted = RecoveryResult(
-        (), ("recovery-batch",), (), ()
-    )
-    both_wrongly_set = RecoveryResult(
-        (), ("recovery-batch",), ("recovery-batch",), ()
-    )
-    # All three bad results pass the legacy ``first.aborted or first.compensated``
-    # disjunction, proving it cannot distinguish the correct terminal state.
-    for bad in (
-        intent_wrongly_compensated,
-        compensating_wrongly_aborted,
-        both_wrongly_set,
-    ):
-        assert bad.aborted or bad.compensated, (
-            "legacy disjunction must accept this bad result to prove the gap"
+    with pytest.raises(AssertionError):
+        _assert_precise_first_recovery_result(
+            left_state, bad_result, "batch-1"
         )
-    # For INTENT (expected=aborted), the legacy disjunction wrongly accepts
-    # a compensated result, and vice versa for COMPENSATING.
-    assert intent_wrongly_compensated.compensated, (
-        "INTENT batch must not be compensated, but legacy accepts it"
-    )
-    assert not intent_wrongly_compensated.aborted, (
-        "INTENT batch wrongly compensated has no aborted tuple"
-    )
-    assert compensating_wrongly_aborted.aborted, (
-        "COMPENSATING batch must not be aborted, but legacy accepts it"
-    )
-    assert not compensating_wrongly_aborted.compensated, (
-        "COMPENSATING batch wrongly aborted has no compensated tuple"
-    )
-    assert both_wrongly_set.aborted and both_wrongly_set.compensated, (
-        "legacy accepts both aborted and compensated simultaneously"
-    )
 
 
 def test_recovery_action_map_covers_every_nonterminal_state() -> None:
