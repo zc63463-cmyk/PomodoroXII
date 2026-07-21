@@ -18,7 +18,7 @@ from app.errors import (
     MutationRejectedError,
     to_wire_json,
 )
-from app.models.mutation import MutationBatch, MutationOperation
+from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.sync_outbox import SyncOutbox
 from app.mutation.journal import IllegalMutationTransition, MutationJournal
 from app.mutation.types import (
@@ -37,6 +37,7 @@ from app.mutation.types import (
     PreparedBatchItem,
     ProjectionActionTag,
     ProjectionPlan,
+    StepState,
     SyncEventPlan,
     bounded_child_operation_id,
     canonical_payload_hash,
@@ -195,6 +196,47 @@ def _command() -> MutationCommand:
             ),
         ),
         result_value={"id": "n1", "title": "A"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_intent_creates_exact_pending_projection_steps(space_session) -> None:
+    sessions = async_sessionmaker(space_session.bind, expire_on_commit=False)
+    journal = MutationJournal(sessions)
+    command = _command()
+
+    await journal.create_batch_intent(
+        "batch-steps", "request-hash", ("operation-steps",), (command,), ()
+    )
+
+    async with sessions() as session:
+        steps = tuple(
+            await session.scalars(
+                select(MutationStep).order_by(MutationStep.ordinal)
+            )
+        )
+    descriptor = command.persisted().projections[0]
+    assert len(steps) == 1
+    assert (
+        steps[0].operation_id,
+        steps[0].ordinal,
+        steps[0].name,
+        steps[0].store,
+        steps[0].target,
+        steps[0].before_hash,
+        steps[0].after_hash,
+        StepState(steps[0].state),
+        steps[0].applied_hash,
+    ) == (
+        "operation-steps",
+        0,
+        descriptor.tag.value,
+        descriptor.tag.value,
+        str(descriptor.target),
+        descriptor.before_sha256,
+        descriptor.after_sha256,
+        StepState.PENDING,
+        None,
     )
 
 

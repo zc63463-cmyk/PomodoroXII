@@ -161,6 +161,7 @@ class SpaceRuntimeHandle:
     _runtime: "SpaceRuntime" = field(repr=False)
     mutation_stages: "StageStore | None" = field(default=None, repr=False)
     _storage_identity: StorageIdentity | None = field(default=None, repr=False)
+    _degraded_evict_pending: bool = field(default=False, repr=False)
     _closed: bool = False
 
     @property
@@ -227,6 +228,21 @@ class SpaceRuntimeHandle:
                 errors.append(exc)
             else:
                 self.engine = None
+        if (
+            not errors
+            and self._degraded_evict_pending
+            and self.engine is None
+            and self.file_system is None
+            and self.mutation_stages is None
+        ):
+            try:
+                if self.space_lease is None:
+                    raise LeaseOrderError("degraded cleanup lost its Space lease")
+                await self._runtime.finish_degraded_evict_under_lease(
+                    self, self.space_lease
+                )
+            except BaseException as exc:
+                errors.append(exc)
         if errors:
             raise BaseExceptionGroup("Space runtime resource close failed", errors)
 
@@ -244,6 +260,7 @@ class SpaceRuntimeHandle:
             and self.mutation_stages is None
             and self.owns_space_lease
             and self.space_lease is not None
+            and not self._degraded_evict_pending
         ):
             try:
                 await self.space_lease.release()
@@ -303,7 +320,12 @@ class SpaceRuntimeHandle:
             await self.close_space_resources()
         except BaseExceptionGroup as group:
             cleanup_errors.extend(group.exceptions)
-        if self.engine is None and self.file_system is None and self.mutation_stages is None:
+        if (
+            self.engine is None
+            and self.file_system is None
+            and self.mutation_stages is None
+            and not self._degraded_evict_pending
+        ):
             try:
                 await lease.release()
             except BaseException as exc:
@@ -372,6 +394,7 @@ class SpaceRuntime:
     async def begin_degraded_under_lease(self, handle, reason: str, space_lease) -> None:
         space_lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope=handle.scope.space_id)
         self._degraded_spaces[handle.scope.space_id] = reason
+        handle._degraded_evict_pending = True
 
     async def finish_degraded_evict_under_lease(self, handle, space_lease) -> None:
         space_lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope=handle.scope.space_id)
@@ -381,6 +404,7 @@ class SpaceRuntime:
         if identity is None:
             raise LeaseOrderError("degraded Space has no bound storage identity")
         await self.engines.drain_identity(identity)
+        handle._degraded_evict_pending = False
         self._degraded_spaces[handle.scope.space_id] = self._degraded_spaces.get(
             handle.scope.space_id, "mutation_recovery_required"
         )
@@ -908,7 +932,11 @@ class SpaceRuntime:
         )
 
     def register_pending_cleanup(self, handle: SpaceRuntimeHandle) -> None:
-        dependencies = (handle.space_lease,) if handle.space_lease is not None else ()
+        dependencies = (
+            (handle.space_lease,)
+            if handle.space_lease is not None and not handle.owns_space_lease
+            else ()
+        )
         self.leases.register_pending_cleanup(
             handle,
             retry=handle.aclose,

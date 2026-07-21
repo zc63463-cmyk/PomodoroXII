@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.file_system.interfaces import ProjectionAuthoritySnapshot
 from app.models.folder import Folder
-from app.models.mutation import MutationBatch, MutationOperation
+from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.sync_outbox import SyncOutbox
 from app.mutation.journal import MutationJournal
 from app.mutation.recovery import (
@@ -33,6 +33,7 @@ from app.mutation.types import (
     ProjectionPlan,
     RecoveryInspection,
     RecoveryResult,
+    StepState,
     SyncEventPlan,
 )
 from app.mutation.unit_of_work import DbMutationInterpreter
@@ -455,6 +456,65 @@ async def _publish_without_mark_staged(fixture: _RecoveryFixture) -> None:
     )
 
 
+def _folder_projection_command(
+    fixture: _RecoveryFixture,
+    entity_ids: tuple[str, ...],
+) -> MutationCommand:
+    base_plan = fixture.command.db_plans[0]
+    base_event = fixture.command.sync_events[0]
+    plans = []
+    projections = []
+    events = []
+    for ordinal, entity_id in enumerate(entity_ids):
+        after_row = dict(base_plan.after_row or {})
+        after_row["id"] = entity_id
+        after_row["name"] = entity_id
+        plans.append(
+            DbMutationPlan(
+                table=base_plan.table,
+                primary_key={"id": entity_id},
+                operation="insert",
+                expected_version=None,
+                before_row=None,
+                after_row=after_row,
+            )
+        )
+        projections.append(
+            ProjectionPlan(
+                ProjectionActionTag.INDEX_REPLACE,
+                None,
+                ContainedProjectionActionField(f"index/folders/id/{entity_id}"),
+                ordinal,
+                None,
+                f"projection-{entity_id}".encode(),
+            )
+        )
+        events.append(
+            SyncEventPlan(
+                entity_type=base_event.entity_type,
+                entity_id=entity_id,
+                action=base_event.action,
+                payload=after_row,
+                version=base_event.version,
+                created_at=base_event.created_at,
+            )
+        )
+    first = entity_ids[0]
+    return MutationCommand.from_effects(
+        request=MutationRequest.from_payload(
+            name="folder.create",
+            entity_type="folder",
+            entity_id=first,
+            payload={"id": first, "name": first},
+            expected_version=None,
+        ),
+        db_plans=tuple(plans),
+        projections=tuple(projections),
+        sync_events=tuple(events),
+        result_value={"id": first},
+    )
+
+
 async def _arrange_fault(
     fixture: _RecoveryFixture,
     fault_point: FaultPoint,
@@ -735,134 +795,58 @@ async def test_recovery_result_and_inspection_are_durable_types(mutation_fixture
 
 
 @pytest.mark.asyncio
-async def test_degraded_cleanup_failure_registers_lease_pinned_retry() -> None:
-    events: list[str] = []
-    pending: list[object] = []
-
-    class _Leases:
-        def register_pending_cleanup(self, owner, **kwargs) -> None:
-            pending.append((owner, kwargs))
-
-    class _Runtime:
-        leases = _Leases()
-
-        async def begin_degraded_under_lease(self, scope, reason, lease) -> None:
-            events.append(f"begin:{reason}")
-
-        async def finish_degraded_evict_under_lease(self, scope, lease) -> None:
-            events.append("finish")
-
-    attempts = 0
-
-    async def close_space_resources() -> None:
-        nonlocal attempts
-        attempts += 1
-        events.append(f"close:{attempts}")
-        if attempts == 1:
-            raise RuntimeError("close once")
-
-    lease = object()
-    scope = SimpleNamespace(
-        _runtime=_Runtime(),
-        close_space_resources=close_space_resources,
-    )
-    provider = MutationRecovery(
-        catalog=CATALOG,
-        interpreter=DbMutationInterpreter(CATALOG),
-        projection_executor=_ProjectionExecutor(),
-    )
-
-    with pytest.raises(RuntimeError, match="close once"):
-        await provider._degrade_space(scope, lease)
-
-    assert len(pending) == 1
-    owner, registration = pending[0]
-    assert registration["dependencies"] == (lease,)
-    assert registration["physical_terminal"]() is False
-    await registration["retry"]()
-    assert registration["physical_terminal"]() is True
-    assert events == [
-        "begin:mutation_recovery_required",
-        "close:1",
-        "close:2",
-        "finish",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_partial_forward_resumes_missing_ordinals_and_compensates_reverse(
+async def test_partial_forward_restart_resumes_only_missing_durable_ordinals(
     mutation_fixture,
 ):
-    plans = (
-        ProjectionPlan(
-            ProjectionActionTag.INDEX_REPLACE,
-            None,
-            ContainedProjectionActionField("index/folders/id/folder-recovery"),
-            0,
-            None,
-            b"one",
-        ),
-        ProjectionPlan(
-            ProjectionActionTag.INDEX_REPLACE,
-            None,
-            ContainedProjectionActionField("index/folders/id/folder-recovery-2"),
-            1,
-            None,
-            b"two",
-        ),
-        ProjectionPlan(
-            ProjectionActionTag.FTS_REPLACE,
-            None,
-            ContainedProjectionActionField("fts/folder-recovery"),
-            2,
-            None,
-            b"three",
-        ),
+    command = _folder_projection_command(
+        mutation_fixture,
+        ("folder-recovery", "folder-recovery-2", "folder-recovery-3"),
     )
-    command = MutationCommand.from_effects(
-        request=mutation_fixture.command.request,
-        db_plans=mutation_fixture.command.db_plans,
-        projections=plans,
-        sync_events=mutation_fixture.command.sync_events,
-        result_value=mutation_fixture.command.result_value,
-    ).persisted()
-    await mutation_fixture.scope.mutation_stages.publish(
+    journal = MutationJournal(mutation_fixture.sessions)
+    await journal.create_batch_intent(
+        mutation_fixture.batch_id,
+        "request-hash",
+        (mutation_fixture.operation_id,),
+        (command,),
+        (),
+    )
+    manifest = await mutation_fixture.scope.mutation_stages.publish(
         mutation_fixture.operation_id,
-        plans,
+        command.projections,
         lease=mutation_fixture.space_lease,
         space_id="space-test",
     )
+    await journal.mark_staged(mutation_fixture.batch_id, (manifest,))
     receipt = mutation_fixture.space_lease.fence_receipt("space-test")
     executor = _OrdinalProjectionExecutor()
-    provider = MutationRecovery(
-        catalog=CATALOG,
-        interpreter=DbMutationInterpreter(CATALOG),
-        projection_executor=executor,
-    )
     await executor.apply_forward(
         mutation_fixture.scope,
         mutation_fixture.operation_id,
-        command,
+        command.persisted(),
         receipt,
         ordinals=(0,),
     )
-    operation = SimpleNamespace(
-        row=SimpleNamespace(operation_id=mutation_fixture.operation_id),
-        command=command,
-        manifest=None,
-    )
-    provider.journal_factory = lambda _sessions: SimpleNamespace(
-        transition=lambda *_args: None
-    )
     executor.forward_ordinals.clear()
-    await provider._finish_projection_steps(
-        mutation_fixture.scope, operation, receipt
+    result = await MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=executor,
+    ).recover_under_lease(
+        mutation_fixture.scope,
+        mutation_fixture.space_lease,
     )
+    assert result.finalized == (mutation_fixture.batch_id,)
     assert executor.forward_ordinals == [1, 2]
-    await provider._compensate_projection_steps(
-        mutation_fixture.scope, operation, receipt
-    )
-    assert executor.inverse_ordinals == [2, 1, 0]
+    async with mutation_fixture.sessions() as session:
+        steps = tuple(
+            await session.scalars(
+                select(MutationStep).order_by(MutationStep.ordinal)
+            )
+        )
+    assert [StepState(step.state) for step in steps] == [StepState.APPLIED] * 3
+    assert [step.applied_hash for step in steps] == [
+        descriptor.after_sha256 for descriptor in command.persisted().projections
+    ]
 
 
 @pytest.mark.asyncio
@@ -902,6 +886,20 @@ async def test_compensation_reverses_children_then_ordinals(mutation_fixture) ->
     events: list[tuple[str, int]] = []
 
     class _OrderExecutor(_ProjectionExecutor):
+        async def apply_forward(
+            self, scope, operation_id, command, receipt, *, ordinals=None
+        ) -> None:
+            assert ordinals is not None
+            if operation_id == "child-1" and ordinals == (1,):
+                raise RuntimeError("injected child projection failure")
+            await super().apply_forward(
+                scope,
+                operation_id,
+                command,
+                receipt,
+                ordinals=ordinals,
+            )
+
         async def restore_before(
             self, scope, operation_id, command, receipt, *, ordinals=None
         ) -> None:
@@ -915,66 +913,112 @@ async def test_compensation_reverses_children_then_ordinals(mutation_fixture) ->
                 ordinals=ordinals,
             )
 
-    operations = []
+    commands = []
     for child in ("child-0", "child-1"):
-        plans = (
-            ProjectionPlan(
-                ProjectionActionTag.INDEX_REPLACE,
-                None,
-                ContainedProjectionActionField(f"index/{child}/0"),
-                0,
-                None,
-                f"{child}-0".encode(),
-            ),
-            ProjectionPlan(
-                ProjectionActionTag.FTS_REPLACE,
-                None,
-                ContainedProjectionActionField(f"fts/{child}/1"),
-                1,
-                None,
-                f"{child}-1".encode(),
-            ),
+        command = _folder_projection_command(
+            mutation_fixture,
+            (f"{child}-0", f"{child}-1"),
         )
-        command = MutationCommand.from_effects(
-            request=mutation_fixture.command.request,
-            db_plans=mutation_fixture.command.db_plans,
-            projections=plans,
-            sync_events=mutation_fixture.command.sync_events,
-            result_value=mutation_fixture.command.result_value,
-        ).persisted()
-        await mutation_fixture.scope.mutation_stages.publish(
-            child,
-            plans,
-            lease=mutation_fixture.space_lease,
-            space_id="space-test",
-        )
-        operations.append(
-            SimpleNamespace(
-                row=SimpleNamespace(operation_id=child),
-                command=command,
-                manifest=None,
+        commands.append(command)
+    journal = MutationJournal(mutation_fixture.sessions)
+    await journal.create_batch_intent(
+        mutation_fixture.batch_id,
+        "request-hash",
+        ("child-0", "child-1"),
+        tuple(commands),
+        (),
+    )
+    manifests = []
+    for child, command in zip(("child-0", "child-1"), commands, strict=True):
+        manifests.append(
+            await mutation_fixture.scope.mutation_stages.publish(
+                child,
+                command.projections,
+                lease=mutation_fixture.space_lease,
+                space_id="space-test",
             )
         )
+    await journal.mark_staged(mutation_fixture.batch_id, tuple(manifests))
     executor = _OrderExecutor()
-    receipt = mutation_fixture.space_lease.fence_receipt("space-test")
-    for operation in operations:
-        await executor.apply_forward(
-            mutation_fixture.scope,
-            operation.row.operation_id,
-            operation.command,
-            receipt,
-        )
-    provider = MutationRecovery(
+    result = await MutationRecovery(
         catalog=CATALOG,
         interpreter=DbMutationInterpreter(CATALOG),
         projection_executor=executor,
+    ).recover_under_lease(
+        mutation_fixture.scope,
+        mutation_fixture.space_lease,
     )
-    await provider._compensate_projection_batch(
-        mutation_fixture.scope, tuple(operations), receipt
-    )
+    assert result.compensated == (mutation_fixture.batch_id,)
     assert events == [
-        ("child-1", 1),
         ("child-1", 0),
         ("child-0", 1),
         ("child-0", 0),
     ]
+    async with mutation_fixture.sessions() as session:
+        steps = tuple(
+            await session.scalars(
+                select(MutationStep).order_by(
+                    MutationStep.operation_id,
+                    MutationStep.ordinal,
+                )
+            )
+        )
+    assert all(StepState(step.state) is StepState.COMPENSATED for step in steps)
+    assert all(step.applied_hash == step.before_hash for step in steps)
+
+
+@pytest.mark.asyncio
+async def test_first_failed_manual_stops_later_batch_recovery(mutation_fixture) -> None:
+    journal = MutationJournal(mutation_fixture.sessions)
+    first_command = _folder_projection_command(
+        mutation_fixture,
+        ("failed-manual",),
+    )
+    second_command = _folder_projection_command(
+        mutation_fixture,
+        ("later",),
+    )
+    await journal.create_batch_intent(
+        "batch-1",
+        "request-hash-1",
+        ("operation-1",),
+        (first_command,),
+        (),
+    )
+    first_manifest = await mutation_fixture.scope.mutation_stages.publish(
+        "operation-1",
+        first_command.projections,
+        lease=mutation_fixture.space_lease,
+        space_id="space-test",
+    )
+    await journal.mark_staged("batch-1", (first_manifest,))
+    await journal.create_batch_intent(
+        "batch-2",
+        "request-hash-2",
+        ("operation-2",),
+        (second_command,),
+        (),
+    )
+    state = mutation_fixture.scope.file_system._load()
+    first_target = str(first_command.projections[0].target)
+    state["index"][first_target] = b"unprovable".hex()
+    mutation_fixture.scope.file_system._save(state)
+
+    result = await MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=_ProjectionExecutor(),
+    ).recover_under_lease(
+        mutation_fixture.scope,
+        mutation_fixture.space_lease,
+    )
+
+    assert result.failed_manual == ("batch-1",)
+    async with mutation_fixture.sessions() as session:
+        first = await session.get(MutationBatch, "batch-1")
+        second = await session.get(MutationBatch, "batch-2")
+        second_operation = await session.get(MutationOperation, "operation-2")
+    assert first is not None and MutationState(first.state) is MutationState.FAILED_MANUAL
+    assert second is not None and MutationState(second.state) is MutationState.INTENT
+    assert second_operation is not None
+    assert MutationState(second_operation.state) is MutationState.INTENT
