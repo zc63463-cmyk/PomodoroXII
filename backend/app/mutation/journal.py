@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.mutation import MutationBatch, MutationOperation, MutationStep
@@ -489,6 +489,23 @@ class MutationJournal:
                 )
             )
         )
+        invalid_step_count = await session.scalar(
+            select(func.count())
+            .select_from(MutationStep)
+            .join(
+                MutationOperation,
+                MutationOperation.operation_id == MutationStep.operation_id,
+            )
+            .where(
+                MutationOperation.batch_id == batch_id,
+                or_(
+                    MutationStep.state != StepState.APPLIED,
+                    MutationStep.applied_hash.is_distinct_from(
+                        MutationStep.after_hash
+                    ),
+                ),
+            )
+        )
         if (
             batch_row is None
             or MutationState(batch_row.state) is not MutationState.FORWARD_APPLIED
@@ -499,6 +516,7 @@ class MutationJournal:
             or any(
                 visible or operation_id not in child_ids for operation_id, visible in ledger_rows
             )
+            or invalid_step_count
         ):
             raise IllegalMutationTransition(
                 "all accepted children must be FORWARD_APPLIED before finalization"

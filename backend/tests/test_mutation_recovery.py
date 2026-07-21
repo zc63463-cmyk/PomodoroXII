@@ -81,7 +81,7 @@ ALL_FAULT_POINTS = tuple(FaultPoint)
 
 
 def _stage_authority(path: Path) -> BoundStageDirectory:
-    path.mkdir(parents=True)
+    path.mkdir(parents=True, exist_ok=True)
     parent = BoundDirectoryHandle._create(path.parent)
     try:
         return BoundStageDirectory._from_parent_handle(parent, path.name)
@@ -109,8 +109,10 @@ class _DiskProjection:
         )
 
     def _bucket(self, target: str) -> str:
-        return "markdown" if target.startswith("notes/") else (
-            "index" if target.startswith("index/") else "fts"
+        return (
+            "markdown"
+            if target.startswith("notes/")
+            else ("index" if target.startswith("index/") else "fts")
         )
 
     def _apply(self, action, receipt) -> None:
@@ -155,9 +157,7 @@ class _DiskProjection:
     async def snapshot_projection_authority(self) -> ProjectionAuthoritySnapshot:
         state = self._load()
         return ProjectionAuthoritySnapshot(
-            {
-                key: bytes.fromhex(value) for key, value in state["markdown"].items()
-            },
+            {key: bytes.fromhex(value) for key, value in state["markdown"].items()},
             {key: bytes.fromhex(value) for key, value in state["index"].items()},
             {key: bytes.fromhex(value) for key, value in state["fts"].items()},
         )
@@ -169,9 +169,7 @@ class _ProjectionExecutor:
         self.forward_calls = 0
         self.inverse_calls = 0
 
-    async def apply_forward(
-        self, scope, operation_id, command, receipt, *, ordinals=None
-    ) -> None:
+    async def apply_forward(self, scope, operation_id, command, receipt, *, ordinals=None) -> None:
         self.forward_calls += 1
         if self.fail_forward:
             raise RuntimeError("injected forward failure")
@@ -180,18 +178,14 @@ class _ProjectionExecutor:
             command.projections,
             image="after",
             ordinals=(
-                tuple(range(len(command.projections)))
-                if ordinals is None
-                else tuple(ordinals)
+                tuple(range(len(command.projections))) if ordinals is None else tuple(ordinals)
             ),
             receipt=receipt,
         )
         for action in actions:
             scope.file_system._apply(action, receipt)
 
-    async def restore_before(
-        self, scope, operation_id, command, receipt, *, ordinals=None
-    ) -> None:
+    async def restore_before(self, scope, operation_id, command, receipt, *, ordinals=None) -> None:
         self.inverse_calls += 1
         actions = await scope.mutation_stages.materialize_side(
             operation_id,
@@ -214,9 +208,7 @@ class _OrdinalProjectionExecutor(_ProjectionExecutor):
         self.forward_ordinals: list[int] = []
         self.inverse_ordinals: list[int] = []
 
-    async def apply_forward(
-        self, scope, operation_id, command, receipt, *, ordinals=None
-    ) -> None:
+    async def apply_forward(self, scope, operation_id, command, receipt, *, ordinals=None) -> None:
         self.forward_ordinals.extend(ordinals or range(len(command.projections)))
         await super().apply_forward(
             scope,
@@ -226,12 +218,8 @@ class _OrdinalProjectionExecutor(_ProjectionExecutor):
             ordinals=ordinals,
         )
 
-    async def restore_before(
-        self, scope, operation_id, command, receipt, *, ordinals=None
-    ) -> None:
-        self.inverse_ordinals.extend(
-            ordinals or reversed(range(len(command.projections)))
-        )
+    async def restore_before(self, scope, operation_id, command, receipt, *, ordinals=None) -> None:
+        self.inverse_ordinals.extend(ordinals or reversed(range(len(command.projections))))
         await super().restore_before(
             scope,
             operation_id,
@@ -239,6 +227,7 @@ class _OrdinalProjectionExecutor(_ProjectionExecutor):
             receipt,
             ordinals=ordinals,
         )
+
 
 class _Receipt:
     def assert_current(self) -> None:
@@ -327,9 +316,7 @@ async def mutation_fixture(space_session, tmp_path):
             ProjectionPlan(
                 ProjectionActionTag.INDEX_REPLACE,
                 None,
-                ContainedProjectionActionField(
-                    f"index/folders/id/{row['id']}"
-                ),
+                ContainedProjectionActionField(f"index/folders/id/{row['id']}"),
                 0,
                 None,
                 index_blob,
@@ -384,6 +371,36 @@ async def mutation_fixture(space_session, tmp_path):
         await fixture.close()
 
 
+async def _recover_from_fresh_process_objects(
+    fixture: _RecoveryFixture,
+) -> RecoveryResult:
+    sessions = async_sessionmaker(
+        fixture.sessions.kw["bind"],
+        expire_on_commit=False,
+    )
+    stages = StageStore(_stage_authority(fixture.stage_root))
+    scope = SimpleNamespace(
+        scope=SimpleNamespace(space_id="space-test"),
+        file_system=_DiskProjection(fixture.projection_root),
+        mutation_stages=stages,
+        session_factory=sessions,
+        global_lease=fixture.global_lease,
+        space_lease=fixture.space_lease,
+        _runtime=None,
+    )
+    try:
+        return await MutationRecovery(
+            catalog=CATALOG,
+            interpreter=DbMutationInterpreter(CATALOG),
+            projection_executor=FileSystemProjectionExecutor(),
+        ).recover_under_lease(
+            scope,
+            fixture.space_lease,
+        )
+    finally:
+        stages.close()
+
+
 async def _persist_intent(fixture: _RecoveryFixture, *, publish: bool) -> None:
     journal = MutationJournal(fixture.sessions)
     await journal.create_batch_intent(
@@ -423,9 +440,7 @@ async def _leave_db_committed(fixture: _RecoveryFixture) -> None:
         operation = await session.get(MutationOperation, fixture.operation_id)
         assert operation is not None
         operation.db_before_json = "[null]"
-        operation.db_after_json = json.dumps(
-            [dict(fixture.command.db_plans[0].after_row)]
-        )
+        operation.db_after_json = json.dumps([dict(fixture.command.db_plans[0].after_row)])
         event = fixture.command.sync_events[0]
         spec = CATALOG.get(event.entity_type)
         await record_sync_event(
@@ -486,14 +501,14 @@ UOW_CONTROL_FAULTS = (
     FaultPoint.OUTER_COMMIT,
     FaultPoint.FINALIZING_COMMIT,
     FaultPoint.TERMINAL_VISIBILITY,
+    FaultPoint.MISSING_AFTER,
+    FaultPoint.CORRUPT_IMAGES,
+    FaultPoint.BATCH_CHILD_FAILURE,
 )
 
 LEGACY_RECOVERY_FAULTS = (
-    FaultPoint.MISSING_AFTER,
-    FaultPoint.CORRUPT_IMAGES,
     FaultPoint.ORPHAN_STAGE,
     FaultPoint.RESTART_NONTERMINAL,
-    FaultPoint.BATCH_CHILD_FAILURE,
 )
 
 
@@ -570,9 +585,8 @@ class _CrashAfterNamedProjection(FileSystemProjectionExecutor):
             return FaultPoint.INDEX_COMMIT
         if action.tag is ProjectionActionTag.FTS_REPLACE:
             return FaultPoint.FTS_COMMIT
-        if (
-            action.tag is ProjectionActionTag.PATH_REMOVE
-            and str(action.target).startswith("notes/.versions/")
+        if action.tag is ProjectionActionTag.PATH_REMOVE and str(action.target).startswith(
+            "notes/.versions/"
         ):
             return FaultPoint.VERSION_TRASH
         return None
@@ -585,6 +599,20 @@ class _CrashAfterNamedProjection(FileSystemProjectionExecutor):
                 raise RuntimeError(f"crash after {self.fault_point.value}")
 
 
+class _CrashAfterAppliedStepJournal(MutationJournal):
+    def __init__(self, sessions) -> None:
+        super().__init__(sessions)
+        self._crashed = False
+
+    async def mark_step_applied(
+        self, operation_id: str, ordinal: int, applied_hash: str | None
+    ) -> None:
+        await super().mark_step_applied(operation_id, ordinal, applied_hash)
+        if ordinal == 0 and not self._crashed:
+            self._crashed = True
+            raise RuntimeError("crash after durable step receipt")
+
+
 async def _prove_control_boundary_crash_restarts_through_durable_uow(
     mutation_fixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -595,12 +623,10 @@ async def _prove_control_boundary_crash_restarts_through_durable_uow(
             _folder_projection_command(mutation_fixture, (entity_id,))
             for entity_id in ("folder-control-a", "folder-control-b")
         )
-        if fault_point is FaultPoint.CHILD_STAGE_PUBLISH
+        if fault_point in {FaultPoint.CHILD_STAGE_PUBLISH, FaultPoint.BATCH_CHILD_FAILURE}
         else (_folder_projection_command(mutation_fixture, ("folder-control-a",)),)
     )
-    operation_ids = tuple(
-        f"control-operation-{index}" for index in range(len(commands))
-    )
+    operation_ids = tuple(f"control-operation-{index}" for index in range(len(commands)))
     items = tuple(
         PreparedBatchItem(
             index,
@@ -609,9 +635,7 @@ async def _prove_control_boundary_crash_restarts_through_durable_uow(
             command.request,
             None,
         )
-        for index, (operation_id, command) in enumerate(
-            zip(operation_ids, commands, strict=True)
-        )
+        for index, (operation_id, command) in enumerate(zip(operation_ids, commands, strict=True))
     )
 
     @asynccontextmanager
@@ -655,7 +679,17 @@ async def _prove_control_boundary_crash_restarts_through_durable_uow(
             crash_after_ledger,
         )
 
-    _FaultingJournal.fault_point = fault_point
+    injected_fault = (
+        FaultPoint.FINALIZING_COMMIT
+        if fault_point
+        in {
+            FaultPoint.MISSING_AFTER,
+            FaultPoint.CORRUPT_IMAGES,
+            FaultPoint.BATCH_CHILD_FAILURE,
+        }
+        else fault_point
+    )
+    _FaultingJournal.fault_point = injected_fault
     _FaultingInterpreter.fault_point = fault_point
     _FaultingUnitOfWork.fault_point = fault_point
     interpreter = _FaultingInterpreter(CATALOG)
@@ -685,23 +719,17 @@ async def _prove_control_boundary_crash_restarts_through_durable_uow(
         _FaultingInterpreter.fault_point = None
         _FaultingUnitOfWork.fault_point = None
         mutation_fixture.scope.mutation_stages._observer = lambda _event: None
-    restarted = MutationRecovery(
-        catalog=CATALOG,
-        interpreter=DbMutationInterpreter(CATALOG),
-        projection_executor=FileSystemProjectionExecutor(),
-    )
-    first = await restarted.recover_under_lease(
-        mutation_fixture.scope,
-        mutation_fixture.space_lease,
-    )
-    second = await MutationRecovery(
-        catalog=CATALOG,
-        interpreter=DbMutationInterpreter(CATALOG),
-        projection_executor=FileSystemProjectionExecutor(),
-    ).recover_under_lease(
-        mutation_fixture.scope,
-        mutation_fixture.space_lease,
-    )
+    if fault_point in {FaultPoint.MISSING_AFTER, FaultPoint.BATCH_CHILD_FAILURE}:
+        damaged_operation = operation_ids[-1]
+        stage_key = StageStore.directory_key(damaged_operation)
+        (mutation_fixture.stage_root / ".mutations" / stage_key / "after" / "0.bin").unlink()
+    elif fault_point is FaultPoint.CORRUPT_IMAGES:
+        state = mutation_fixture.scope.file_system._load()
+        target = str(commands[0].projections[0].target)
+        state["index"][target] = b"unprovable".hex()
+        mutation_fixture.scope.file_system._save(state)
+    first = await _recover_from_fresh_process_objects(mutation_fixture)
+    second = await _recover_from_fresh_process_objects(mutation_fixture)
 
     expected = FAULT_OUTCOME[fault_point]
     async with mutation_fixture.sessions() as session:
@@ -729,14 +757,20 @@ async def _prove_control_boundary_crash_restarts_through_durable_uow(
             MutationState.ABORTED,
             MutationState.COMPENSATED,
         }
-    else:
-        assert expected == "all-new"
+    elif expected == "all-new":
         assert len(rows) == len(commands)
         assert len(events) == len(commands)
         assert all(event.visible is True for event in events)
         assert len({event.operation_id for event in events}) == len(commands)
         assert len(projection) == len(commands)
         assert batch is not None and MutationState(batch.state) is MutationState.FINALIZED
+    else:
+        assert expected == "failed-manual"
+        assert batch is not None
+        assert MutationState(batch.state) is MutationState.FAILED_MANUAL
+        assert first.failed_manual == ("control-fault-batch",)
+        assert second.failed_manual == ("control-fault-batch",)
+        return
     assert first.failed_manual == ()
     assert second == RecoveryResult((), (), (), ())
 
@@ -801,9 +835,7 @@ def _durable_fault_commands(
                 ProjectionPlan(
                     ProjectionActionTag.INDEX_REPLACE,
                     None,
-                    ContainedProjectionActionField(
-                        "index/notes/note_id/note-durable-create"
-                    ),
+                    ContainedProjectionActionField("index/notes/note_id/note-durable-create"),
                     1,
                     None,
                     b"create index",
@@ -859,9 +891,7 @@ def _durable_fault_commands(
                 ProjectionPlan(
                     ProjectionActionTag.INDEX_REPLACE,
                     None,
-                    ContainedProjectionActionField(
-                        "index/notes/note_id/note-durable-rename"
-                    ),
+                    ContainedProjectionActionField("index/notes/note_id/note-durable-rename"),
                     1,
                     b"rename index old",
                     b"rename index new",
@@ -909,9 +939,7 @@ def _durable_fault_commands(
                 ProjectionPlan(
                     ProjectionActionTag.PATH_REMOVE,
                     None,
-                    ContainedProjectionActionField(
-                        "notes/.versions/note-durable-delete-v1.md"
-                    ),
+                    ContainedProjectionActionField("notes/.versions/note-durable-delete-v1.md"),
                     0,
                     b"version bytes",
                     None,
@@ -919,9 +947,7 @@ def _durable_fault_commands(
                 ProjectionPlan(
                     ProjectionActionTag.INDEX_REPLACE,
                     None,
-                    ContainedProjectionActionField(
-                        "index/notes/note_id/note-durable-delete"
-                    ),
+                    ContainedProjectionActionField("index/notes/note_id/note-durable-delete"),
                     1,
                     b"delete index",
                     None,
@@ -1010,9 +1036,7 @@ async def _prove_named_store_boundary_crash_restarts_through_durable_batch(
             command.request,
             None,
         )
-        for index, (operation_id, command) in enumerate(
-            zip(operation_ids, commands, strict=True)
-        )
+        for index, (operation_id, command) in enumerate(zip(operation_ids, commands, strict=True))
     )
 
     @asynccontextmanager
@@ -1070,12 +1094,8 @@ async def _prove_named_store_boundary_crash_restarts_through_durable_batch(
     assert renamed is not None and renamed.title == "After"
     assert deleted is None
     assert len(events) == 3 and all(event.visible is False for event in events)
-    applied_steps = tuple(
-        step for step in steps if StepState(step.state) is StepState.APPLIED
-    )
-    pending_steps = tuple(
-        step for step in steps if StepState(step.state) is StepState.PENDING
-    )
+    applied_steps = tuple(step for step in steps if StepState(step.state) is StepState.APPLIED)
+    pending_steps = tuple(step for step in steps if StepState(step.state) is StepState.PENDING)
     assert len(applied_steps) + len(pending_steps) == 9
     assert all(step.applied_hash == step.after_hash for step in applied_steps)
     assert all(step.applied_hash is None for step in pending_steps)
@@ -1086,23 +1106,8 @@ async def _prove_named_store_boundary_crash_restarts_through_durable_batch(
         for step in steps
     )
 
-    restarted = MutationRecovery(
-        catalog=CATALOG,
-        interpreter=DbMutationInterpreter(CATALOG),
-        projection_executor=FileSystemProjectionExecutor(),
-    )
-    first = await restarted.recover_under_lease(
-        mutation_fixture.scope,
-        mutation_fixture.space_lease,
-    )
-    second = await MutationRecovery(
-        catalog=CATALOG,
-        interpreter=DbMutationInterpreter(CATALOG),
-        projection_executor=FileSystemProjectionExecutor(),
-    ).recover_under_lease(
-        mutation_fixture.scope,
-        mutation_fixture.space_lease,
-    )
+    first = await _recover_from_fresh_process_objects(mutation_fixture)
+    second = await _recover_from_fresh_process_objects(mutation_fixture)
 
     assert first.finalized == ("durable-fault-batch",), first
     assert second == RecoveryResult((), (), (), ())
@@ -1143,6 +1148,80 @@ async def _prove_named_store_boundary_crash_restarts_through_durable_batch(
             "fts/note-durable-rename": b"rename fts new".hex(),
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_restart_after_step_receipt_commit_resumes_subsequent_ordinals(
+    mutation_fixture,
+) -> None:
+    command = _durable_fault_commands(mutation_fixture)[0][0]
+    item = PreparedBatchItem(
+        0,
+        "step-receipt-operation",
+        command.request.request_hash,
+        command.request,
+        None,
+    )
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        assert (purpose, timeout_seconds) == ("mutation", 5)
+        yield mutation_fixture.space_lease
+
+    mutation_fixture.scope.exclusive_space_resources = exclusive_space_resources
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=_PreparedCommandCompiler((command,)),
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+        recovery_gate=MutationRecovery(
+            catalog=CATALOG,
+            interpreter=DbMutationInterpreter(CATALOG),
+            projection_executor=FileSystemProjectionExecutor(),
+        ),
+        journal_factory=_CrashAfterAppliedStepJournal,
+    )
+
+    with pytest.raises(RuntimeError, match="durable step receipt"):
+        await uow.execute_prepared_batch(
+            mutation_fixture.scope,
+            (item,),
+            "step-receipt-batch",
+        )
+
+    async with mutation_fixture.sessions() as session:
+        steps = tuple(
+            await session.scalars(
+                select(MutationStep)
+                .where(MutationStep.operation_id == "step-receipt-operation")
+                .order_by(MutationStep.ordinal)
+            )
+        )
+    assert [StepState(step.state) for step in steps] == [
+        StepState.APPLIED,
+        StepState.PENDING,
+        StepState.PENDING,
+    ]
+    assert steps[0].applied_hash == steps[0].after_hash
+    assert all(step.applied_hash is None for step in steps[1:])
+
+    first = await _recover_from_fresh_process_objects(mutation_fixture)
+    second = await _recover_from_fresh_process_objects(mutation_fixture)
+
+    assert first.finalized == ("step-receipt-batch",)
+    assert second == RecoveryResult((), (), (), ())
+    async with mutation_fixture.sessions() as session:
+        steps = tuple(
+            await session.scalars(
+                select(MutationStep)
+                .where(MutationStep.operation_id == "step-receipt-operation")
+                .order_by(MutationStep.ordinal)
+            )
+        )
+    assert all(
+        StepState(step.state) is StepState.APPLIED and step.applied_hash == step.after_hash
+        for step in steps
+    )
 
 
 def _folder_projection_command(
@@ -1402,13 +1481,7 @@ async def test_missing_after_blob_compensates_from_proven_before_authority(
     journal = MutationJournal(mutation_fixture.sessions)
     await journal.mark_finalizing(mutation_fixture.batch_id)
     key = StageStore.directory_key(mutation_fixture.operation_id)
-    (
-        mutation_fixture.stage_root
-        / ".mutations"
-        / key
-        / "after"
-        / "0.bin"
-    ).unlink()
+    (mutation_fixture.stage_root / ".mutations" / key / "after" / "0.bin").unlink()
 
     result = await _recover(mutation_fixture)
 
@@ -1512,11 +1585,7 @@ async def test_partial_forward_restart_resumes_only_missing_durable_ordinals(
     assert result.finalized == (mutation_fixture.batch_id,)
     assert executor.forward_ordinals == [1, 2]
     async with mutation_fixture.sessions() as session:
-        steps = tuple(
-            await session.scalars(
-                select(MutationStep).order_by(MutationStep.ordinal)
-            )
-        )
+        steps = tuple(await session.scalars(select(MutationStep).order_by(MutationStep.ordinal)))
     assert [StepState(step.state) for step in steps] == [StepState.APPLIED] * 3
     assert [step.applied_hash for step in steps] == [
         descriptor.after_sha256 for descriptor in command.persisted().projections
@@ -1534,13 +1603,17 @@ async def test_rename_wrong_target_bytes_are_unprovable(mutation_fixture) -> Non
         body,
         body,
     )
-    descriptor = MutationCommand.from_effects(
-        request=mutation_fixture.command.request,
-        db_plans=mutation_fixture.command.db_plans,
-        projections=(plan,),
-        sync_events=mutation_fixture.command.sync_events,
-        result_value=mutation_fixture.command.result_value,
-    ).persisted().projections[0]
+    descriptor = (
+        MutationCommand.from_effects(
+            request=mutation_fixture.command.request,
+            db_plans=mutation_fixture.command.db_plans,
+            projections=(plan,),
+            sync_events=mutation_fixture.command.sync_events,
+            result_value=mutation_fixture.command.result_value,
+        )
+        .persisted()
+        .projections[0]
+    )
     state = mutation_fixture.scope.file_system._load()
     state["markdown"]["notes/new.md"] = b"wrong-body".hex()
     mutation_fixture.scope.file_system._save(state)
@@ -1550,9 +1623,7 @@ async def test_rename_wrong_target_bytes_are_unprovable(mutation_fixture) -> Non
         projection_executor=_ProjectionExecutor(),
     )
 
-    assert await provider._descriptor_state(
-        mutation_fixture.scope, descriptor
-    ) == "neither"
+    assert await provider._descriptor_state(mutation_fixture.scope, descriptor) == "neither"
 
 
 @pytest.mark.asyncio
@@ -1653,7 +1724,7 @@ async def test_first_failed_manual_stops_later_batch_recovery(mutation_fixture) 
         ("later",),
     )
     await journal.create_batch_intent(
-        "batch-1",
+        "z-failed-batch",
         "request-hash-1",
         ("operation-1",),
         (first_command,),
@@ -1665,18 +1736,20 @@ async def test_first_failed_manual_stops_later_batch_recovery(mutation_fixture) 
         lease=mutation_fixture.space_lease,
         space_id="space-test",
     )
-    await journal.mark_staged("batch-1", (first_manifest,))
+    await journal.mark_staged("z-failed-batch", (first_manifest,))
     await journal.create_batch_intent(
-        "batch-2",
+        "a-later-batch",
         "request-hash-2",
         ("operation-2",),
         (second_command,),
         (),
     )
-    state = mutation_fixture.scope.file_system._load()
-    first_target = str(first_command.projections[0].target)
-    state["index"][first_target] = b"unprovable".hex()
-    mutation_fixture.scope.file_system._save(state)
+    async with mutation_fixture.sessions.begin() as session:
+        first = await session.get(MutationBatch, "z-failed-batch")
+        first_operation = await session.get(MutationOperation, "operation-1")
+        assert first is not None and first_operation is not None
+        first.state = MutationState.FAILED_MANUAL
+        first_operation.state = MutationState.FAILED_MANUAL
 
     result = await MutationRecovery(
         catalog=CATALOG,
@@ -1687,10 +1760,10 @@ async def test_first_failed_manual_stops_later_batch_recovery(mutation_fixture) 
         mutation_fixture.space_lease,
     )
 
-    assert result.failed_manual == ("batch-1",)
+    assert result.failed_manual == ("z-failed-batch",)
     async with mutation_fixture.sessions() as session:
-        first = await session.get(MutationBatch, "batch-1")
-        second = await session.get(MutationBatch, "batch-2")
+        first = await session.get(MutationBatch, "z-failed-batch")
+        second = await session.get(MutationBatch, "a-later-batch")
         second_operation = await session.get(MutationOperation, "operation-2")
     assert first is not None and MutationState(first.state) is MutationState.FAILED_MANUAL
     assert second is not None and MutationState(second.state) is MutationState.INTENT
@@ -1731,22 +1804,16 @@ async def test_durable_step_state_never_bypasses_physical_hash_revalidation(
     descriptor = command.persisted().projections[0]
     async with mutation_fixture.sessions.begin() as session:
         batch = await session.get(MutationBatch, mutation_fixture.batch_id)
-        operation = await session.get(
-            MutationOperation, mutation_fixture.operation_id
-        )
+        operation = await session.get(MutationOperation, mutation_fixture.operation_id)
         step = await session.scalar(
-            select(MutationStep).where(
-                MutationStep.operation_id == mutation_fixture.operation_id
-            )
+            select(MutationStep).where(MutationStep.operation_id == mutation_fixture.operation_id)
         )
         assert batch is not None and operation is not None and step is not None
         batch.state = batch_state
         operation.state = batch_state
         step.state = step_state
         step.applied_hash = (
-            descriptor.after_sha256
-            if applied_side == "after"
-            else descriptor.before_sha256
+            descriptor.after_sha256 if applied_side == "after" else descriptor.before_sha256
         )
     state = mutation_fixture.scope.file_system._load()
     state["index"][str(descriptor.target)] = b"wrong-physical-bytes".hex()
@@ -1761,4 +1828,69 @@ async def test_durable_step_state_never_bypasses_physical_hash_revalidation(
         mutation_fixture.space_lease,
     )
 
+    assert result.failed_manual == (mutation_fixture.batch_id,)
+
+
+@pytest.mark.asyncio
+async def test_forward_applied_child_requires_applied_step_receipts(
+    mutation_fixture,
+) -> None:
+    command = _folder_projection_command(mutation_fixture, ("pending-step",))
+    journal = MutationJournal(mutation_fixture.sessions)
+    await journal.create_batch_intent(
+        mutation_fixture.batch_id,
+        "request-hash",
+        (mutation_fixture.operation_id,),
+        (command,),
+        (),
+    )
+    manifest = await mutation_fixture.scope.mutation_stages.publish(
+        mutation_fixture.operation_id,
+        command.projections,
+        lease=mutation_fixture.space_lease,
+        space_id="space-test",
+    )
+    await journal.mark_staged(mutation_fixture.batch_id, (manifest,))
+    await _leave_db_committed(
+        _RecoveryFixture(
+            mutation_fixture.sessions,
+            mutation_fixture.scope,
+            mutation_fixture.coordinator,
+            mutation_fixture.stage_root,
+            mutation_fixture.projection_root,
+            mutation_fixture.operation_id,
+            mutation_fixture.batch_id,
+            command,
+        )
+    )
+    await journal.mark_finalizing(mutation_fixture.batch_id)
+    descriptor = command.persisted().projections[0]
+    await FileSystemProjectionExecutor().apply_forward(
+        mutation_fixture.scope,
+        mutation_fixture.operation_id,
+        command.persisted(),
+        mutation_fixture.space_lease.fence_receipt("space-test"),
+    )
+    async with mutation_fixture.sessions.begin() as session:
+        batch = await session.get(MutationBatch, mutation_fixture.batch_id)
+        operation = await session.get(MutationOperation, mutation_fixture.operation_id)
+        step = await session.scalar(
+            select(MutationStep).where(MutationStep.operation_id == mutation_fixture.operation_id)
+        )
+        assert batch is not None and operation is not None and step is not None
+        batch.state = MutationState.FORWARD_APPLIED
+        operation.state = MutationState.FORWARD_APPLIED
+        assert StepState(step.state) is StepState.PENDING
+        assert step.applied_hash is None
+
+    result = await MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+    ).recover_under_lease(
+        mutation_fixture.scope,
+        mutation_fixture.space_lease,
+    )
+
+    assert descriptor.after_sha256 is not None
     assert result.failed_manual == (mutation_fixture.batch_id,)
