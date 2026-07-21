@@ -18,10 +18,15 @@ from app.db.migrations import (
     MigrationSafetyError,
 )
 from app.db.models.meta import Space
-from app.errors import SpaceStorageMissingError
+from app.errors import SpaceRecoveryRequiredError, SpaceStorageMissingError
 from app.file_system.interfaces import FileSystem
 from app.runtime.contained_io import StorageIdentity
-from app.runtime.leases import Lease, LeaseMode, LeaseOrderError
+from app.runtime.leases import (
+    Lease,
+    LeaseMode,
+    LeaseOrderError,
+    RuntimeCleanupPendingError,
+)
 from app.runtime.scope import (
     AuthorizedSpaceScope,
     AuthorizedSpaceScopeResult,
@@ -155,6 +160,7 @@ class SpaceRuntimeHandle:
     fence: int
     _runtime: "SpaceRuntime" = field(repr=False)
     mutation_stages: "StageStore | None" = field(default=None, repr=False)
+    _storage_identity: StorageIdentity | None = field(default=None, repr=False)
     _closed: bool = False
 
     @property
@@ -174,8 +180,13 @@ class SpaceRuntimeHandle:
             or self.mutation_stages is not None
         ):
             raise LeaseOrderError("Space resources are already active")
+        if self._runtime.is_degraded(self.scope.space_id):
+            raise SpaceRecoveryRequiredError("space recovery is required")
         try:
             async with self.scope.containment.open_verified() as opens:
+                database_target = getattr(opens, "database_target", None)
+                if database_target is not None:
+                    self._storage_identity = database_target.identity
                 self.engine = await self._runtime.engines.acquire(self.scope.space_id, opens)
                 self.mutation_stages = StageStore(opens.take_mutation_stage_authority())
                 self.file_system = await open_existing_file_system(opens)
@@ -334,6 +345,8 @@ class SpaceRuntime:
         self.index_schema = index_schema
         self._owner_executor: object | None = None
         self._admission_gate: object | None = None
+        self._recovery_provider: object | None = None
+        self._degraded_spaces: dict[str, str] = {}
         self._frozen_registrations: tuple[tuple[str, str, str, str, bool, str, str], ...] | None = (
             None
         )
@@ -343,6 +356,61 @@ class SpaceRuntime:
             raise RuntimeError("SpaceRuntime owner executor is already installed")
         self._owner_executor = executor
         self._admission_gate = getattr(executor, "gate", None)
+
+    def install_recovery_provider(self, provider: object) -> None:
+        if self._recovery_provider is not None and self._recovery_provider is not provider:
+            raise RuntimeError("SpaceRuntime recovery provider is already installed")
+        self._recovery_provider = provider
+
+    @property
+    def recovery_provider(self) -> object | None:
+        return self._recovery_provider
+
+    def is_degraded(self, space_id: str) -> bool:
+        return space_id in self._degraded_spaces
+
+    async def begin_degraded_under_lease(self, handle, reason: str, space_lease) -> None:
+        space_lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope=handle.scope.space_id)
+        self._degraded_spaces[handle.scope.space_id] = reason
+
+    async def finish_degraded_evict_under_lease(self, handle, space_lease) -> None:
+        space_lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope=handle.scope.space_id)
+        if handle.engine is not None or handle.file_system is not None or handle.mutation_stages is not None:
+            raise LeaseOrderError("cannot evict a Space with live resources")
+        identity = handle._storage_identity
+        if identity is None:
+            raise LeaseOrderError("degraded Space has no bound storage identity")
+        await self.engines.drain_identity(identity)
+        self._degraded_spaces[handle.scope.space_id] = self._degraded_spaces.get(
+            handle.scope.space_id, "mutation_recovery_required"
+        )
+
+    async def inspect_recovery(self, handle):
+        provider = self._recovery_provider
+        if provider is None:
+            return None
+        inspect = getattr(provider, "inspect_recovery", None)
+        if inspect is None:
+            inspect = getattr(provider, "inspect", None)
+        return await inspect(handle) if inspect is not None else None
+
+    async def recover_under_lease(self, handle, space_lease):
+        provider = self._recovery_provider
+        if provider is None:
+            return None
+        recover = getattr(provider, "recover_under_lease", None)
+        if recover is None:
+            return None
+        return await recover(handle, space_lease)
+
+    async def close(self) -> None:
+        errors = await self.leases.retry_pending_cleanups_for_current_task()
+        if errors:
+            raise BaseExceptionGroup("runtime cleanup failed", errors)
+        if self.leases.has_pending_cleanups_for_current_task():
+            raise RuntimeCleanupPendingError("runtime cleanup remains pending")
+        await self.engines.dispose_all()
+        self.leases.assert_ready()
 
     async def provision(self, spec: SpaceProvisionSpec) -> ProvisionedSpace:
         """Submit one exclusive provision command to the installed owner Task."""
@@ -676,8 +744,14 @@ class SpaceRuntime:
                     )
                     if not status.valid:
                         raise RuntimeError("registered index schema is invalid")
-                async with self.borrow_prepared_space(scope, global_lease, space_lease):
-                    pass
+                async with self.borrow_prepared_space(
+                    scope, global_lease, space_lease
+                ) as handle:
+                    result = await self.recover_under_lease(handle, space_lease)
+                    if result is not None and getattr(result, "failed_manual", ()):
+                        raise SpaceRecoveryRequiredError(
+                            "space recovery requires manual intervention"
+                        )
 
     def _cleanup_marked_provision_tree(
         self, provision_root: Path, nonce: str
@@ -717,6 +791,7 @@ class SpaceRuntime:
         *,
         owns_global_lease: bool,
         borrowed_space_lease: Lease | None = None,
+        _skip_recovery: bool = False,
     ) -> SpaceRuntimeHandle:
         space_lease = borrowed_space_lease
         owns_space_lease = False
@@ -727,6 +802,8 @@ class SpaceRuntime:
                     [scope.space_id], LeaseMode.SHARED, "read", 5
                 )
                 owns_space_lease = True
+            if self.is_degraded(scope.space_id):
+                raise SpaceRecoveryRequiredError("space recovery is required")
             verified = self._verify_registered_open(scope)
             if inspect.isawaitable(verified):
                 await verified
@@ -744,6 +821,42 @@ class SpaceRuntime:
             if mode == "read" or borrowed_space_lease is not None:
                 assert space_lease is not None
                 await handle.activate_space_resources_under_lease(space_lease)
+            if mode == "read" and borrowed_space_lease is None and not _skip_recovery:
+                inspection = await self.inspect_recovery(handle)
+                if inspection is not None and not inspection.clean:
+                    # A shared read lease may never be upgraded in place.  Close
+                    # all read resources first, then release it, then recover
+                    # through a temporary exclusive handle.
+                    await handle.close_space_resources()
+                    await space_lease.release()
+                    handle.space_lease = None
+                    handle.owns_space_lease = False
+                    transferred_global_lease = handle.owns_global_lease
+                    exclusive = await self.leases.acquire_spaces(
+                        [scope.space_id], LeaseMode.EXCLUSIVE, "recovery", 5
+                    )
+                    async with exclusive:
+                        async with self.borrow_prepared_space(
+                            scope, global_lease, exclusive
+                        ) as recovery_handle:
+                            result = await self.recover_under_lease(
+                                recovery_handle, exclusive
+                            )
+                            if result is not None and getattr(
+                                result, "failed_manual", ()
+                            ):
+                                raise SpaceRecoveryRequiredError(
+                                    "space recovery requires manual intervention"
+                                )
+                    reopened = await self.open_resolved(
+                        scope,
+                        "read",
+                        global_lease,
+                        owns_global_lease=transferred_global_lease,
+                        _skip_recovery=False,
+                    )
+                    handle.owns_global_lease = False
+                    return reopened
             return handle
         except BaseException as primary:
             cleanup_errors: list[BaseException] = []
@@ -776,6 +889,8 @@ class SpaceRuntime:
             migration = await self.migrations.verify_open("space", opens.database_target)
             index_status = self.index_schema.verify_open(opens.index_target)
         available = bool(migration.at_head and index_status.valid)
+        if self.is_degraded(scope.space_id):
+            available = False
         return SpaceHealth(
             scope.space_id,
             available,
@@ -800,6 +915,8 @@ class SpaceRuntime:
             raise RuntimeError("RuntimeAdmissionGate is not installed")
         self._admission_gate.assert_ready()
         self.leases.assert_ready()
+        if self._degraded_spaces:
+            raise SpaceRecoveryRequiredError("one or more Spaces require recovery")
 
     @asynccontextmanager
     async def borrow_prepared_space(

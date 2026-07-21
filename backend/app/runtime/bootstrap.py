@@ -426,6 +426,8 @@ class RuntimeServices:
     ]
     catalog: CompiledEntityCatalog
     executor: _OwnerTaskExecutor
+    recovery_provider: object
+    mutation_uow: object
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,6 +475,33 @@ async def _startup_owned(
         await init_meta_db()
         await bootstrap_credential_epoch()
         catalog = CATALOG
+        if runtime.recovery_provider is None:
+            from app.file_system.engine.base import FileSystemProjectionExecutor
+            from app.mutation.journal import MutationJournal
+            from app.mutation.recovery import MutationRecovery
+            from app.mutation.unit_of_work import (
+                DbMutationInterpreter,
+                MutationCompiler,
+                MutationUnitOfWork,
+            )
+
+            interpreter = DbMutationInterpreter(catalog)
+            projection_executor = FileSystemProjectionExecutor()
+            recovery = MutationRecovery(
+                catalog=catalog,
+                interpreter=interpreter,
+                projection_executor=projection_executor,
+            )
+            runtime.install_recovery_provider(
+                MutationUnitOfWork(
+                    catalog=catalog,
+                    compiler=MutationCompiler(catalog, policies=()),
+                    interpreter=interpreter,
+                    projection_executor=projection_executor,
+                    recovery_gate=recovery,
+                    journal_factory=MutationJournal,
+                )
+            )
         await runtime.prepare_registered_spaces(catalog, global_lease, fleet)
     return RuntimeServices(
         runtime=runtime,
@@ -480,6 +509,8 @@ async def _startup_owned(
         credential_verifier=verify_with_fresh_meta_session,
         catalog=catalog,
         executor=executor,
+        recovery_provider=runtime.recovery_provider,
+        mutation_uow=runtime.recovery_provider,
     )
 
 

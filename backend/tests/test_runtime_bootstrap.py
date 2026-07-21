@@ -61,6 +61,8 @@ async def test_registered_space_is_prepared_before_runtime_ready(
     async with bootstrap_runtime("test") as services:
         assert services.executor.state is OwnerExecutorState.READY
         services.runtime.assert_ready()
+        assert services.recovery_provider is services.runtime.recovery_provider
+        assert services.mutation_uow is services.recovery_provider
         assert await services.runtime.get_registered(space_id) is not None
         assert (root / "index.db").is_file()
 
