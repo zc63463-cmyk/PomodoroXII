@@ -1207,6 +1207,37 @@ def _validate_compiled_command(
                     raise SpaceRecoveryRequiredError(
                         "Markdown projection differs from the Note content hash"
                     )
+            elif tag is ProjectionActionTag.PATH_RENAME:
+                rename = matching_projections[0]
+                before_hash = (
+                    None
+                    if plan.before_row is None
+                    else plan.before_row.get("content_hash")
+                )
+                after_hash = (
+                    None
+                    if plan.after_row is None
+                    else plan.after_row.get("content_hash")
+                )
+                rename_before = (
+                    hashlib.sha256(rename.before).hexdigest()
+                    if hasattr(rename, "before")
+                    else rename.before_sha256
+                )
+                rename_after = (
+                    hashlib.sha256(rename.after).hexdigest()
+                    if hasattr(rename, "after")
+                    else rename.after_sha256
+                )
+                if (
+                    not isinstance(before_hash, str)
+                    or before_hash != after_hash
+                    or rename_before != before_hash
+                    or rename_after != after_hash
+                ):
+                    raise SpaceRecoveryRequiredError(
+                        "path rename projection differs from the Note content hash"
+                    )
     if command.projections and not plan_specs:
         raise SpaceRecoveryRequiredError(
             "compiled projection effects require a database mutation"

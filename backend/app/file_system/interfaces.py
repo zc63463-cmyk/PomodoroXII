@@ -27,6 +27,8 @@ class FencedProjectionExecutor(Protocol):
         operation_id: str,
         command: "PersistedMutationCommand",
         receipt: "FenceReceipt",
+        *,
+        ordinals: tuple[int, ...] | None = None,
     ) -> None: ...
 
     async def restore_before(
@@ -35,6 +37,8 @@ class FencedProjectionExecutor(Protocol):
         operation_id: str,
         command: "PersistedMutationCommand",
         receipt: "FenceReceipt",
+        *,
+        ordinals: tuple[int, ...] | None = None,
     ) -> None: ...
 
 

@@ -193,8 +193,10 @@ def _validate_projection_images(
 ) -> None:
     if (tag is ProjectionActionTag.PATH_RENAME) != (source is not None):
         raise ValueError("projection source is required only for path rename")
-    if tag is ProjectionActionTag.PATH_RENAME and (before is not None or after is not None):
-        raise ValueError("path rename has no byte images")
+    if tag is ProjectionActionTag.PATH_RENAME and (
+        before is None or after is None or before != after
+    ):
+        raise ValueError("path rename requires equal before and after images")
     if tag is ProjectionActionTag.PATH_REMOVE and (before is None or after is not None):
         raise ValueError("path remove requires before and no after image")
     if tag is ProjectionActionTag.MARKDOWN_WRITE and after is None:
