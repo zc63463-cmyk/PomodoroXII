@@ -1556,6 +1556,8 @@ class MutationUnitOfWork:
 
     async def _commit_business(self, scope, journal, batch_id, operation_ids, commands) -> None:
         async with scope.session_factory.begin() as session:
+            connection = await session.connection()
+            await connection.exec_driver_sql("BEGIN IMMEDIATE")
             for operation_id, command in zip(operation_ids, commands, strict=True):
                 async with session.begin_nested():
                     await self.interpreter.apply(session, command.db_plans)
@@ -1599,5 +1601,18 @@ class MutationUnitOfWork:
 
     async def _finalize_forward(self, scope, journal, batch_id, operation_ids, commands, receipt) -> None:
         for operation_id, command in zip(operation_ids, commands, strict=True):
-            await self.projection_executor.apply_forward(scope, operation_id, command.persisted(), receipt)
+            persisted = command.persisted()
+            for descriptor in persisted.projections:
+                await self.projection_executor.apply_forward(
+                    scope,
+                    operation_id,
+                    persisted,
+                    receipt,
+                    ordinals=(descriptor.ordinal,),
+                )
+                await journal.mark_step_applied(
+                    operation_id,
+                    descriptor.ordinal,
+                    descriptor.after_sha256,
+                )
             await journal.transition(operation_id, MutationState.FORWARD_APPLIED)

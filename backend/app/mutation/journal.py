@@ -446,6 +446,31 @@ class MutationJournal:
                 session, operation_id, MutationState(current), target
             )
 
+    async def mark_step_applied(
+        self,
+        operation_id: str,
+        ordinal: int,
+        applied_hash: str | None,
+    ) -> None:
+        async with self._sessions.begin() as session:
+            result = await session.execute(
+                update(MutationStep)
+                .where(
+                    MutationStep.operation_id == operation_id,
+                    MutationStep.ordinal == ordinal,
+                    MutationStep.state == StepState.PENDING,
+                    MutationStep.after_hash == applied_hash,
+                    MutationStep.applied_hash.is_(None),
+                )
+                .values(state=StepState.APPLIED, applied_hash=applied_hash)
+            )
+            if result.rowcount != 1:
+                raise IllegalMutationTransition(
+                    f"projection step {operation_id}:{ordinal} is not pending "
+                    "with the expected after hash"
+                )
+            await session.flush()
+
     @staticmethod
     async def finalize_batch_in_transaction(session: AsyncSession, batch_id: str) -> None:
         batch_row = await session.get(MutationBatch, batch_id)
