@@ -35,6 +35,8 @@ from app.mutation.types import (
     PersistedMutationCommand,
     PreparedBatchItem,
     ProjectionActionTag,
+    RecoveryInspection,
+    RecoveryResult,
     SyncEventPlan,
     bounded_child_operation_id,
     canonical_json_bytes,
@@ -1316,6 +1318,12 @@ class RecoveryGate(Protocol):
         self, scope: SpaceRuntimeHandle, lease: Lease, journal: MutationJournal
     ) -> None: ...
 
+    async def recover_under_lease(
+        self, scope: SpaceRuntimeHandle, lease: Lease
+    ) -> RecoveryResult: ...
+
+    async def inspect(self, view: SpaceRuntimeHandle) -> RecoveryInspection: ...
+
 
 class MutationJournalFactory(Protocol):
     def __call__(self, session_factory: async_sessionmaker[AsyncSession]) -> MutationJournal: ...
@@ -1338,6 +1346,26 @@ class MutationUnitOfWork:
         self.projection_executor = projection_executor
         self.recovery_gate = recovery_gate
         self.journal_factory = journal_factory
+
+    async def recover_under_lease(
+        self, scope: SpaceRuntimeHandle, lease: Lease
+    ) -> RecoveryResult:
+        recover = getattr(self.recovery_gate, "recover_under_lease", None)
+        if recover is not None:
+            return await recover(scope, lease)
+        journal = self.journal_factory(scope.session_factory)
+        await self.recovery_gate.require_clean_under_lease(scope, lease, journal)
+        return RecoveryResult((), (), (), ())
+
+    async def inspect_recovery(
+        self, view: SpaceRuntimeHandle
+    ) -> RecoveryInspection:
+        inspect_recovery = getattr(self.recovery_gate, "inspect", None)
+        if inspect_recovery is not None:
+            return await inspect_recovery(view)
+        journal = self.journal_factory(view.session_factory)
+        clean = await journal.is_clean()
+        return RecoveryInspection((), (), (), clean, ())
 
     async def execute(
         self, scope: SpaceRuntimeHandle, request: MutationRequest, operation_id: str
@@ -1415,7 +1443,11 @@ class MutationUnitOfWork:
         )
         async with scope.exclusive_space_resources("mutation", 5) as lease:
             journal = self.journal_factory(scope.session_factory)
-            await self.recovery_gate.require_clean_under_lease(scope, lease, journal)
+            recovery = await self.recover_under_lease(scope, lease)
+            if recovery.failed_manual:
+                raise SpaceRecoveryRequiredError(
+                    "space recovery requires manual intervention"
+                )
             existing = await journal.find_batch(batch_id)
             if existing is not None:
                 return await self._resume_or_return(existing, request_hash)

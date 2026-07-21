@@ -385,6 +385,49 @@ async def test_health_uses_verified_open_targets_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_manual_degrade_closes_before_identity_drain() -> None:
+    from app.runtime.contained_io import StorageIdentity
+    from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
+
+    events: list[str] = []
+    identity = StorageIdentity(7, 11)
+
+    class Engines:
+        async def drain_identity(self, actual) -> None:
+            assert actual == identity
+            events.append("drain")
+
+    runtime = SpaceRuntime(
+        leases=SimpleNamespace(),
+        engines=Engines(),
+        migrations=SimpleNamespace(),
+        index_schema=SimpleNamespace(),
+    )
+    lease = _FakeLease("space-a")
+    handle = SpaceRuntimeHandle(
+        SimpleNamespace(space_id="space-a"),
+        None,
+        None,
+        _FakeLease("global"),
+        lease,
+        False,
+        False,
+        1,
+        runtime,
+        _storage_identity=identity,
+    )
+
+    await runtime.begin_degraded_under_lease(
+        handle, "mutation_recovery_required", lease
+    )
+    assert runtime.is_degraded("space-a")
+    events.append("resources-closed")
+    await runtime.finish_degraded_evict_under_lease(handle, lease)
+
+    assert events == ["resources-closed", "drain"]
+
+
+@pytest.mark.asyncio
 async def test_activation_exit_fault_collects_filesystem_and_releases_engine(
     monkeypatch,
     tmp_path,
