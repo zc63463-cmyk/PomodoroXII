@@ -425,6 +425,8 @@ class MutationRecovery:
         operations: tuple[_Operation, ...],
     ) -> None:
         async with scope.session_factory.begin() as session:
+            connection = await session.connection()
+            await connection.exec_driver_sql("BEGIN IMMEDIATE")
             for operation in operations:
                 if MutationState(operation.row.state) is not MutationState.STAGED:
                     raise RecoveryUnprovableError(
@@ -530,10 +532,13 @@ class MutationRecovery:
         for operation in operations:
             child_state = MutationState(operation.row.state)
             if child_state is MutationState.FORWARD_APPLIED:
-                if any(
-                    await self._descriptor_state(scope, descriptor) != "after"
-                    for descriptor in operation.command.projections
-                ):
+                descriptor_states = tuple(
+                    [
+                        await self._descriptor_state(scope, descriptor)
+                        for descriptor in operation.command.projections
+                    ]
+                )
+                if any(state != "after" for state in descriptor_states):
                     raise RecoveryUnprovableError(
                         "FORWARD_APPLIED child does not match its after images"
                     )

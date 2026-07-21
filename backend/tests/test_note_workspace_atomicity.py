@@ -15,7 +15,7 @@ import app.mutation.types as mutation_types
 from app.errors import IdempotencyConflictError, SpaceRecoveryRequiredError
 from app.file_system.engine.base import FileSystemProjectionExecutor, StorageBase
 from app.file_system.interfaces import ProjectionAuthoritySnapshot
-from app.models.mutation import MutationBatch, MutationOperation
+from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.note import Note
 from app.models.quick_note import QuickNote
 from app.models.sync_outbox import SyncOutbox
@@ -28,6 +28,7 @@ from app.mutation.types import (
     MutationCommand,
     MutationRequest,
     MutationState,
+    StepState,
     SyncEventPlan,
     bounded_child_operation_id,
 )
@@ -216,11 +217,15 @@ class _ProjectionExecutor:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def apply_forward(self, scope, operation_id, command, receipt) -> None:
+    async def apply_forward(
+        self, scope, operation_id, command, receipt, *, ordinals=None
+    ) -> None:
         receipt.assert_current()
         self.calls += 1
 
-    async def restore_before(self, scope, operation_id, command, receipt) -> None:
+    async def restore_before(
+        self, scope, operation_id, command, receipt, *, ordinals=None
+    ) -> None:
         receipt.assert_current()
 
 
@@ -1961,6 +1966,9 @@ async def test_production_compiler_persists_aliases_through_invisible_and_visibl
 
 @pytest.mark.asyncio
 async def test_execute_finalizes_once_and_makes_ledger_visible_at_final_boundary(uow_fixture) -> None:
+    uow_fixture.compiler.projections = (
+        _projection_plan("markdown_write", "notes/n1.md", 0, None, b"body"),
+    )
     first = await uow_fixture.uow.execute(uow_fixture.scope, _request("n1"), "op-n1")
     writes = uow_fixture.executor.calls
     second = await uow_fixture.uow.execute(uow_fixture.scope, _request("n1"), "op-n1")
@@ -1970,8 +1978,13 @@ async def test_execute_finalizes_once_and_makes_ledger_visible_at_final_boundary
     assert uow_fixture.executor.calls == writes == 1
     async with uow_fixture.sessions() as session:
         event = await session.scalar(select(SyncOutbox).where(SyncOutbox.operation_id == "op-n1"))
+        step = await session.scalar(
+            select(MutationStep).where(MutationStep.operation_id == "op-n1")
+        )
         state = await session.get(SyncState, 1)
     assert event is not None and event.visible is True and event.entity_type == "wire-note"
+    assert step is not None and StepState(step.state) is StepState.APPLIED
+    assert step.applied_hash == step.after_hash
     assert state is not None and state.current_cursor == event.id
 
 
@@ -2054,9 +2067,25 @@ async def test_execute_orders_every_durable_boundary_before_visibility(
         observed.append("FINALIZING-committed")
         return result
 
-    async def apply_forward(scope, operation_id, command, receipt):
-        result = await original_apply_forward(scope, operation_id, command, receipt)
-        observed.extend(f"projection:{item.tag.value}" for item in command.projections)
+    async def apply_forward(
+        scope, operation_id, command, receipt, *, ordinals=None
+    ):
+        result = await original_apply_forward(
+            scope,
+            operation_id,
+            command,
+            receipt,
+            ordinals=ordinals,
+        )
+        selected = (
+            tuple(range(len(command.projections)))
+            if ordinals is None
+            else tuple(ordinals)
+        )
+        observed.extend(
+            f"projection:{command.projections[ordinal].tag.value}"
+            for ordinal in selected
+        )
         return result
 
     async def transition(journal, operation_id, target):

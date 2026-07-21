@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -12,9 +13,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+import app.mutation.unit_of_work as unit_of_work_module
+from app.file_system.engine.base import FileSystemProjectionExecutor
 from app.file_system.interfaces import ProjectionAuthoritySnapshot
 from app.models.folder import Folder
 from app.models.mutation import MutationBatch, MutationOperation, MutationStep
+from app.models.note import Note
 from app.models.sync_outbox import SyncOutbox
 from app.mutation.journal import MutationJournal
 from app.mutation.recovery import (
@@ -29,6 +33,7 @@ from app.mutation.types import (
     MutationCommand,
     MutationRequest,
     MutationState,
+    PreparedBatchItem,
     ProjectionActionTag,
     ProjectionPlan,
     RecoveryInspection,
@@ -36,7 +41,11 @@ from app.mutation.types import (
     StepState,
     SyncEventPlan,
 )
-from app.mutation.unit_of_work import DbMutationInterpreter
+from app.mutation.unit_of_work import (
+    BatchCompilation,
+    DbMutationInterpreter,
+    MutationUnitOfWork,
+)
 from app.registry import CATALOG
 from app.runtime.contained_io import BoundDirectoryHandle, BoundStageDirectory
 from app.runtime.leases import LeaseMode
@@ -456,6 +465,686 @@ async def _publish_without_mark_staged(fixture: _RecoveryFixture) -> None:
     )
 
 
+STORE_FINALIZE_FAULTS = (
+    FaultPoint.MARKDOWN_FINALIZE,
+    FaultPoint.PATH_FINALIZE,
+    FaultPoint.INDEX_COMMIT,
+    FaultPoint.FTS_COMMIT,
+    FaultPoint.VERSION_TRASH,
+)
+
+UOW_CONTROL_FAULTS = (
+    FaultPoint.BEFORE_INTENT,
+    FaultPoint.TEMP_STAGE_BLOB,
+    FaultPoint.MANIFEST_WRITE,
+    FaultPoint.ATOMIC_STAGE_RENAME,
+    FaultPoint.CHILD_STAGE_PUBLISH,
+    FaultPoint.BATCH_MARK_STAGED,
+    FaultPoint.STAGED_COMMIT,
+    FaultPoint.ORM_FLUSH_SAVEPOINT,
+    FaultPoint.LEDGER_INSERT,
+    FaultPoint.OUTER_COMMIT,
+    FaultPoint.FINALIZING_COMMIT,
+    FaultPoint.TERMINAL_VISIBILITY,
+)
+
+LEGACY_RECOVERY_FAULTS = (
+    FaultPoint.MISSING_AFTER,
+    FaultPoint.CORRUPT_IMAGES,
+    FaultPoint.ORPHAN_STAGE,
+    FaultPoint.RESTART_NONTERMINAL,
+    FaultPoint.BATCH_CHILD_FAILURE,
+)
+
+
+class _PreparedCommandCompiler:
+    def __init__(self, commands: tuple[MutationCommand, ...]) -> None:
+        self._commands = commands
+
+    async def compile_batch(self, scope, items, session) -> BatchCompilation:
+        del scope, session
+        return BatchCompilation(
+            tuple(item.operation_id for item in items),
+            self._commands,
+            (),
+        )
+
+
+class _FaultingJournal(MutationJournal):
+    fault_point: FaultPoint | None = None
+
+    async def create_batch_intent(self, *args, **kwargs) -> None:
+        await super().create_batch_intent(*args, **kwargs)
+        if self.fault_point is FaultPoint.BEFORE_INTENT:
+            raise RuntimeError(f"crash after {self.fault_point.value}")
+
+    async def mark_staged(self, *args, **kwargs) -> None:
+        if self.fault_point is FaultPoint.BATCH_MARK_STAGED:
+            raise RuntimeError(f"crash before {self.fault_point.value}")
+        await super().mark_staged(*args, **kwargs)
+        if self.fault_point is FaultPoint.STAGED_COMMIT:
+            raise RuntimeError(f"crash after {self.fault_point.value}")
+
+    async def mark_finalizing(self, *args, **kwargs) -> None:
+        await super().mark_finalizing(*args, **kwargs)
+        if self.fault_point is FaultPoint.FINALIZING_COMMIT:
+            raise RuntimeError(f"crash after {self.fault_point.value}")
+
+    async def finalize_batch(self, *args, **kwargs):
+        result = await super().finalize_batch(*args, **kwargs)
+        if self.fault_point is FaultPoint.TERMINAL_VISIBILITY:
+            raise RuntimeError(f"crash after {self.fault_point.value}")
+        return result
+
+
+class _FaultingInterpreter(DbMutationInterpreter):
+    fault_point: FaultPoint | None = None
+
+    async def apply(self, session, plans) -> None:
+        await super().apply(session, plans)
+        if self.fault_point is FaultPoint.ORM_FLUSH_SAVEPOINT:
+            raise RuntimeError(f"crash after {self.fault_point.value}")
+
+
+class _FaultingUnitOfWork(MutationUnitOfWork):
+    fault_point: FaultPoint | None = None
+
+    async def _commit_business(self, *args, **kwargs) -> None:
+        await super()._commit_business(*args, **kwargs)
+        if self.fault_point is FaultPoint.OUTER_COMMIT:
+            raise RuntimeError(f"crash after {self.fault_point.value}")
+
+
+class _CrashAfterNamedProjection(FileSystemProjectionExecutor):
+    def __init__(self, fault_point: FaultPoint) -> None:
+        self.fault_point = fault_point
+        self.applied_boundary: tuple[str, str] | None = None
+
+    @staticmethod
+    def _boundary_for(action) -> FaultPoint | None:
+        if action.tag is ProjectionActionTag.MARKDOWN_WRITE:
+            return FaultPoint.MARKDOWN_FINALIZE
+        if action.tag is ProjectionActionTag.PATH_RENAME:
+            return FaultPoint.PATH_FINALIZE
+        if action.tag is ProjectionActionTag.INDEX_REPLACE:
+            return FaultPoint.INDEX_COMMIT
+        if action.tag is ProjectionActionTag.FTS_REPLACE:
+            return FaultPoint.FTS_COMMIT
+        if (
+            action.tag is ProjectionActionTag.PATH_REMOVE
+            and str(action.target).startswith("notes/.versions/")
+        ):
+            return FaultPoint.VERSION_TRASH
+        return None
+
+    async def _execute_actions(self, scope, actions, receipt) -> None:
+        for action in actions:
+            await super()._execute_actions(scope, (action,), receipt)
+            if self._boundary_for(action) is self.fault_point:
+                self.applied_boundary = (action.tag.value, str(action.target))
+                raise RuntimeError(f"crash after {self.fault_point.value}")
+
+
+async def _prove_control_boundary_crash_restarts_through_durable_uow(
+    mutation_fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_point: FaultPoint,
+) -> None:
+    commands = (
+        tuple(
+            _folder_projection_command(mutation_fixture, (entity_id,))
+            for entity_id in ("folder-control-a", "folder-control-b")
+        )
+        if fault_point is FaultPoint.CHILD_STAGE_PUBLISH
+        else (_folder_projection_command(mutation_fixture, ("folder-control-a",)),)
+    )
+    operation_ids = tuple(
+        f"control-operation-{index}" for index in range(len(commands))
+    )
+    items = tuple(
+        PreparedBatchItem(
+            index,
+            operation_id,
+            command.request.request_hash,
+            command.request,
+            None,
+        )
+        for index, (operation_id, command) in enumerate(
+            zip(operation_ids, commands, strict=True)
+        )
+    )
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        assert (purpose, timeout_seconds) == ("mutation", 5)
+        yield mutation_fixture.space_lease
+
+    mutation_fixture.scope.exclusive_space_resources = exclusive_space_resources
+    stage_events = {
+        FaultPoint.TEMP_STAGE_BLOB: "before-after-blob-0-write",
+        FaultPoint.MANIFEST_WRITE: "before-manifest-write",
+        FaultPoint.ATOMIC_STAGE_RENAME: "rename-published-directory",
+    }
+    if fault_point in stage_events:
+        boundary = stage_events[fault_point]
+
+        def crash_at_stage(event: str) -> None:
+            if event == boundary:
+                raise RuntimeError(f"crash at {fault_point.value}")
+
+        mutation_fixture.scope.mutation_stages._observer = crash_at_stage
+    elif fault_point is FaultPoint.CHILD_STAGE_PUBLISH:
+        original_publish = mutation_fixture.scope.mutation_stages.publish
+
+        async def crash_after_child(*args, **kwargs):
+            await original_publish(*args, **kwargs)
+            raise RuntimeError(f"crash after {fault_point.value}")
+
+        mutation_fixture.scope.mutation_stages.publish = crash_after_child
+
+    original_record_sync_event = unit_of_work_module.record_sync_event
+    if fault_point is FaultPoint.LEDGER_INSERT:
+
+        async def crash_after_ledger(*args, **kwargs):
+            await original_record_sync_event(*args, **kwargs)
+            raise RuntimeError(f"crash after {fault_point.value}")
+
+        monkeypatch.setattr(
+            unit_of_work_module,
+            "record_sync_event",
+            crash_after_ledger,
+        )
+
+    _FaultingJournal.fault_point = fault_point
+    _FaultingInterpreter.fault_point = fault_point
+    _FaultingUnitOfWork.fault_point = fault_point
+    interpreter = _FaultingInterpreter(CATALOG)
+    recovery = MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+    )
+    uow = _FaultingUnitOfWork(
+        catalog=CATALOG,
+        compiler=_PreparedCommandCompiler(commands),
+        interpreter=interpreter,
+        projection_executor=FileSystemProjectionExecutor(),
+        recovery_gate=recovery,
+        journal_factory=_FaultingJournal,
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="crash"):
+            await uow.execute_prepared_batch(
+                mutation_fixture.scope,
+                items,
+                "control-fault-batch",
+            )
+    finally:
+        _FaultingJournal.fault_point = None
+        _FaultingInterpreter.fault_point = None
+        _FaultingUnitOfWork.fault_point = None
+        mutation_fixture.scope.mutation_stages._observer = lambda _event: None
+    restarted = MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+    )
+    first = await restarted.recover_under_lease(
+        mutation_fixture.scope,
+        mutation_fixture.space_lease,
+    )
+    second = await MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+    ).recover_under_lease(
+        mutation_fixture.scope,
+        mutation_fixture.space_lease,
+    )
+
+    expected = FAULT_OUTCOME[fault_point]
+    async with mutation_fixture.sessions() as session:
+        rows = tuple(
+            await session.scalars(
+                select(Folder)
+                .where(Folder.id.in_(("folder-control-a", "folder-control-b")))
+                .order_by(Folder.id)
+            )
+        )
+        events = tuple(
+            await session.scalars(
+                select(SyncOutbox)
+                .where(SyncOutbox.batch_id == "control-fault-batch")
+                .order_by(SyncOutbox.id)
+            )
+        )
+        batch = await session.get(MutationBatch, "control-fault-batch")
+    projection = mutation_fixture.scope.file_system._load()["index"]
+    if expected == "all-old":
+        assert rows == ()
+        assert events == ()
+        assert projection == {}
+        assert batch is not None and MutationState(batch.state) in {
+            MutationState.ABORTED,
+            MutationState.COMPENSATED,
+        }
+    else:
+        assert expected == "all-new"
+        assert len(rows) == len(commands)
+        assert len(events) == len(commands)
+        assert all(event.visible is True for event in events)
+        assert len({event.operation_id for event in events}) == len(commands)
+        assert len(projection) == len(commands)
+        assert batch is not None and MutationState(batch.state) is MutationState.FINALIZED
+    assert first.failed_manual == ()
+    assert second == RecoveryResult((), (), (), ())
+
+
+def _durable_fault_commands(
+    fixture: _RecoveryFixture,
+) -> tuple[tuple[MutationCommand, ...], tuple[dict[str, object], ...]]:
+    del fixture
+    timestamp = "2026-07-21T00:00:00.000Z"
+
+    def note_row(note_id: str, title: str, content: bytes) -> dict[str, object]:
+        return {
+            "id": note_id,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "version": 1,
+            "title": title,
+            "content_hash": hashlib.sha256(content).hexdigest(),
+            "word_count": 2,
+            "summary": "",
+            "tags": "[]",
+            "category": None,
+            "folder_id": None,
+            "status": "active",
+            "trashed_at": None,
+        }
+
+    create_content = b"durable markdown"
+    create_after = note_row("note-durable-create", "Created", create_content)
+    rename_content = b"rename bytes"
+    rename_before = note_row("note-durable-rename", "Before", rename_content)
+    rename_after = {**rename_before, "title": "After", "version": 2}
+    delete_before = note_row("note-durable-delete", "Deleted", b"version bytes")
+    commands = (
+        MutationCommand.from_effects(
+            request=MutationRequest.from_payload(
+                name="note.create",
+                entity_type="note",
+                entity_id="note-durable-create",
+                payload={"title": "Created"},
+                expected_version=None,
+            ),
+            db_plans=(
+                DbMutationPlan(
+                    "notes",
+                    {"id": "note-durable-create"},
+                    "insert",
+                    None,
+                    None,
+                    create_after,
+                ),
+            ),
+            projections=(
+                ProjectionPlan(
+                    ProjectionActionTag.MARKDOWN_WRITE,
+                    None,
+                    ContainedProjectionActionField("notes/durable.md"),
+                    0,
+                    None,
+                    create_content,
+                ),
+                ProjectionPlan(
+                    ProjectionActionTag.INDEX_REPLACE,
+                    None,
+                    ContainedProjectionActionField(
+                        "index/notes/note_id/note-durable-create"
+                    ),
+                    1,
+                    None,
+                    b"create index",
+                ),
+                ProjectionPlan(
+                    ProjectionActionTag.FTS_REPLACE,
+                    None,
+                    ContainedProjectionActionField("fts/note-durable-create"),
+                    2,
+                    None,
+                    b"create fts",
+                ),
+            ),
+            sync_events=(
+                SyncEventPlan(
+                    "note",
+                    "note-durable-create",
+                    "create",
+                    {**create_after, "content": create_content.decode("utf-8")},
+                    1,
+                    timestamp,
+                ),
+            ),
+            result_value={"id": "note-durable-create"},
+        ),
+        MutationCommand.from_effects(
+            request=MutationRequest.from_payload(
+                name="note.update",
+                entity_type="note",
+                entity_id="note-durable-rename",
+                payload={"title": "After"},
+                expected_version=1,
+            ),
+            db_plans=(
+                DbMutationPlan(
+                    "notes",
+                    {"id": "note-durable-rename"},
+                    "update",
+                    1,
+                    rename_before,
+                    rename_after,
+                ),
+            ),
+            projections=(
+                ProjectionPlan(
+                    ProjectionActionTag.PATH_RENAME,
+                    ContainedProjectionActionField("notes/rename-source.md"),
+                    ContainedProjectionActionField("notes/rename-target.md"),
+                    0,
+                    rename_content,
+                    rename_content,
+                ),
+                ProjectionPlan(
+                    ProjectionActionTag.INDEX_REPLACE,
+                    None,
+                    ContainedProjectionActionField(
+                        "index/notes/note_id/note-durable-rename"
+                    ),
+                    1,
+                    b"rename index old",
+                    b"rename index new",
+                ),
+                ProjectionPlan(
+                    ProjectionActionTag.FTS_REPLACE,
+                    None,
+                    ContainedProjectionActionField("fts/note-durable-rename"),
+                    2,
+                    b"rename fts old",
+                    b"rename fts new",
+                ),
+            ),
+            sync_events=(
+                SyncEventPlan(
+                    "note",
+                    "note-durable-rename",
+                    "update",
+                    {**rename_after, "content": rename_content.decode("utf-8")},
+                    2,
+                    timestamp,
+                ),
+            ),
+            result_value={"id": "note-durable-rename"},
+        ),
+        MutationCommand.from_effects(
+            request=MutationRequest.from_payload(
+                name="note.delete",
+                entity_type="note",
+                entity_id="note-durable-delete",
+                payload={},
+                expected_version=1,
+            ),
+            db_plans=(
+                DbMutationPlan(
+                    "notes",
+                    {"id": "note-durable-delete"},
+                    "delete",
+                    1,
+                    delete_before,
+                    None,
+                ),
+            ),
+            projections=(
+                ProjectionPlan(
+                    ProjectionActionTag.PATH_REMOVE,
+                    None,
+                    ContainedProjectionActionField(
+                        "notes/.versions/note-durable-delete-v1.md"
+                    ),
+                    0,
+                    b"version bytes",
+                    None,
+                ),
+                ProjectionPlan(
+                    ProjectionActionTag.INDEX_REPLACE,
+                    None,
+                    ContainedProjectionActionField(
+                        "index/notes/note_id/note-durable-delete"
+                    ),
+                    1,
+                    b"delete index",
+                    None,
+                ),
+                ProjectionPlan(
+                    ProjectionActionTag.FTS_REPLACE,
+                    None,
+                    ContainedProjectionActionField("fts/note-durable-delete"),
+                    2,
+                    b"delete fts",
+                    None,
+                ),
+            ),
+            sync_events=(
+                SyncEventPlan(
+                    "note",
+                    "note-durable-delete",
+                    "delete",
+                    {"deleted_at": timestamp},
+                    2,
+                    timestamp,
+                ),
+            ),
+            result_value={"id": "note-durable-delete"},
+        ),
+    )
+    return commands, (rename_before, delete_before)
+
+
+def _seed_durable_fault_before_images(fixture: _RecoveryFixture) -> None:
+    fixture.scope.file_system._save(
+        {
+            "markdown": {
+                "notes/rename-source.md": b"rename bytes".hex(),
+                "notes/.versions/note-durable-delete-v1.md": b"version bytes".hex(),
+            },
+            "index": {
+                "index/notes/note_id/note-durable-rename": b"rename index old".hex(),
+                "index/notes/note_id/note-durable-delete": b"delete index".hex(),
+            },
+            "fts": {
+                "fts/note-durable-rename": b"rename fts old".hex(),
+                "fts/note-durable-delete": b"delete fts".hex(),
+            },
+        }
+    )
+
+
+def _assert_named_boundary_was_applied(
+    fixture: _RecoveryFixture,
+    fault_point: FaultPoint,
+) -> None:
+    state = fixture.scope.file_system._load()
+    if fault_point is FaultPoint.MARKDOWN_FINALIZE:
+        assert state["markdown"]["notes/durable.md"] == b"durable markdown".hex()
+    elif fault_point is FaultPoint.PATH_FINALIZE:
+        assert "notes/rename-source.md" not in state["markdown"]
+        assert state["markdown"]["notes/rename-target.md"] == b"rename bytes".hex()
+    elif fault_point is FaultPoint.INDEX_COMMIT:
+        assert state["index"]["index/notes/note_id/note-durable-create"] == b"create index".hex()
+    elif fault_point is FaultPoint.FTS_COMMIT:
+        assert state["fts"]["fts/note-durable-create"] == b"create fts".hex()
+    else:
+        assert fault_point is FaultPoint.VERSION_TRASH
+        assert "notes/.versions/note-durable-delete-v1.md" not in state["markdown"]
+
+
+async def _prove_named_store_boundary_crash_restarts_through_durable_batch(
+    mutation_fixture,
+    fault_point: FaultPoint,
+) -> None:
+    commands, existing_rows = _durable_fault_commands(mutation_fixture)
+    _seed_durable_fault_before_images(mutation_fixture)
+    async with mutation_fixture.sessions.begin() as session:
+        session.add_all(Note(**row) for row in existing_rows)
+    operation_ids = (
+        "durable-operation-create",
+        "durable-operation-rename",
+        "durable-operation-delete",
+    )
+    items = tuple(
+        PreparedBatchItem(
+            index,
+            operation_id,
+            command.request.request_hash,
+            command.request,
+            None,
+        )
+        for index, (operation_id, command) in enumerate(
+            zip(operation_ids, commands, strict=True)
+        )
+    )
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        assert (purpose, timeout_seconds) == ("mutation", 5)
+        yield mutation_fixture.space_lease
+
+    mutation_fixture.scope.exclusive_space_resources = exclusive_space_resources
+    crashing_executor = _CrashAfterNamedProjection(fault_point)
+    initial_recovery = MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+    )
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=_PreparedCommandCompiler(commands),
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=crashing_executor,
+        recovery_gate=initial_recovery,
+        journal_factory=MutationJournal,
+    )
+
+    with pytest.raises(RuntimeError, match=f"crash after {fault_point.value}"):
+        await uow.execute_prepared_batch(
+            mutation_fixture.scope,
+            items,
+            "durable-fault-batch",
+        )
+
+    assert crashing_executor.applied_boundary is not None
+    _assert_named_boundary_was_applied(mutation_fixture, fault_point)
+    async with mutation_fixture.sessions() as session:
+        batch = await session.get(MutationBatch, "durable-fault-batch")
+        created = await session.get(Note, "note-durable-create")
+        renamed = await session.get(Note, "note-durable-rename")
+        deleted = await session.get(Note, "note-durable-delete")
+        events = tuple(
+            await session.scalars(
+                select(SyncOutbox)
+                .where(SyncOutbox.batch_id == "durable-fault-batch")
+                .order_by(SyncOutbox.id)
+            )
+        )
+        steps = tuple(
+            await session.scalars(
+                select(MutationStep)
+                .join(MutationOperation)
+                .where(MutationOperation.batch_id == "durable-fault-batch")
+                .order_by(MutationStep.operation_id, MutationStep.ordinal)
+            )
+        )
+    assert batch is not None and MutationState(batch.state) is MutationState.FINALIZING
+    assert created is not None
+    assert renamed is not None and renamed.title == "After"
+    assert deleted is None
+    assert len(events) == 3 and all(event.visible is False for event in events)
+    applied_steps = tuple(
+        step for step in steps if StepState(step.state) is StepState.APPLIED
+    )
+    pending_steps = tuple(
+        step for step in steps if StepState(step.state) is StepState.PENDING
+    )
+    assert len(applied_steps) + len(pending_steps) == 9
+    assert all(step.applied_hash == step.after_hash for step in applied_steps)
+    assert all(step.applied_hash is None for step in pending_steps)
+    assert any(
+        step.name == crashing_executor.applied_boundary[0]
+        and step.target == crashing_executor.applied_boundary[1]
+        and StepState(step.state) is StepState.PENDING
+        for step in steps
+    )
+
+    restarted = MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+    )
+    first = await restarted.recover_under_lease(
+        mutation_fixture.scope,
+        mutation_fixture.space_lease,
+    )
+    second = await MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=FileSystemProjectionExecutor(),
+    ).recover_under_lease(
+        mutation_fixture.scope,
+        mutation_fixture.space_lease,
+    )
+
+    assert first.finalized == ("durable-fault-batch",), first
+    assert second == RecoveryResult((), (), (), ())
+    async with mutation_fixture.sessions() as session:
+        events = tuple(
+            await session.scalars(
+                select(SyncOutbox)
+                .where(SyncOutbox.batch_id == "durable-fault-batch")
+                .order_by(SyncOutbox.id)
+            )
+        )
+        steps = tuple(
+            await session.scalars(
+                select(MutationStep)
+                .join(MutationOperation)
+                .where(MutationOperation.batch_id == "durable-fault-batch")
+                .order_by(MutationStep.operation_id, MutationStep.ordinal)
+            )
+        )
+    assert len(events) == 3 and all(event.visible is True for event in events)
+    assert len({event.operation_id for event in events}) == 3
+    assert len(steps) == 9 and all(
+        StepState(step.state) is StepState.APPLIED and step.applied_hash == step.after_hash
+        for step in steps
+    )
+    state = mutation_fixture.scope.file_system._load()
+    assert state == {
+        "markdown": {
+            "notes/durable.md": b"durable markdown".hex(),
+            "notes/rename-target.md": b"rename bytes".hex(),
+        },
+        "index": {
+            "index/notes/note_id/note-durable-create": b"create index".hex(),
+            "index/notes/note_id/note-durable-rename": b"rename index new".hex(),
+        },
+        "fts": {
+            "fts/note-durable-create": b"create fts".hex(),
+            "fts/note-durable-rename": b"rename fts new".hex(),
+        },
+    }
+
+
 def _folder_projection_command(
     fixture: _RecoveryFixture,
     entity_ids: tuple[str, ...],
@@ -519,36 +1208,6 @@ async def _arrange_fault(
     fixture: _RecoveryFixture,
     fault_point: FaultPoint,
 ) -> bool:
-    early_abort = {
-        FaultPoint.TEMP_STAGE_BLOB,
-        FaultPoint.MANIFEST_WRITE,
-        FaultPoint.CHILD_STAGE_PUBLISH,
-    }
-    staged = {
-        FaultPoint.STAGED_COMMIT,
-        FaultPoint.ORM_FLUSH_SAVEPOINT,
-        FaultPoint.LEDGER_INSERT,
-    }
-    finalizing = {
-        FaultPoint.FINALIZING_COMMIT,
-        FaultPoint.MARKDOWN_FINALIZE,
-        FaultPoint.PATH_FINALIZE,
-        FaultPoint.INDEX_COMMIT,
-        FaultPoint.FTS_COMMIT,
-        FaultPoint.VERSION_TRASH,
-        FaultPoint.TERMINAL_VISIBILITY,
-    }
-    if fault_point is FaultPoint.BEFORE_INTENT:
-        return False
-    if fault_point in early_abort:
-        await _persist_intent(fixture, publish=False)
-        return False
-    if fault_point in {
-        FaultPoint.ATOMIC_STAGE_RENAME,
-        FaultPoint.BATCH_MARK_STAGED,
-    }:
-        await _publish_without_mark_staged(fixture)
-        return False
     if fault_point is FaultPoint.ORPHAN_STAGE:
         await fixture.scope.mutation_stages.publish(
             fixture.operation_id,
@@ -558,15 +1217,9 @@ async def _arrange_fault(
         )
         return False
     await _persist_intent(fixture, publish=True)
-    if fault_point in staged:
-        return False
     await _leave_db_committed(fixture)
-    if fault_point is FaultPoint.OUTER_COMMIT:
-        return False
     journal = MutationJournal(fixture.sessions)
     await journal.mark_finalizing(fixture.batch_id)
-    if fault_point in finalizing:
-        return False
     if fault_point in {FaultPoint.MISSING_AFTER, FaultPoint.BATCH_CHILD_FAILURE}:
         return True
     if fault_point is FaultPoint.RESTART_NONTERMINAL:
@@ -585,14 +1238,35 @@ async def _arrange_fault(
     raise AssertionError(f"unmapped fault point: {fault_point}")
 
 
+def test_durable_fault_suites_cover_every_declared_boundary() -> None:
+    assert set(UOW_CONTROL_FAULTS) | set(STORE_FINALIZE_FAULTS) | set(
+        LEGACY_RECOVERY_FAULTS
+    ) == set(ALL_FAULT_POINTS)
+
+
 @pytest.mark.parametrize("fault_point", ALL_FAULT_POINTS)
 @pytest.mark.asyncio
 async def test_restart_converges_to_declared_all_old_or_all_new(
     mutation_fixture,
+    monkeypatch: pytest.MonkeyPatch,
     fault_point: FaultPoint,
 ) -> None:
     assert fault_point in FAULT_OUTCOME
     assert FAULT_OUTCOME[fault_point] in {"all-old", "all-new", "failed-manual"}
+    if fault_point in UOW_CONTROL_FAULTS:
+        await _prove_control_boundary_crash_restarts_through_durable_uow(
+            mutation_fixture,
+            monkeypatch,
+            fault_point,
+        )
+        return
+    if fault_point in STORE_FINALIZE_FAULTS:
+        await _prove_named_store_boundary_crash_restarts_through_durable_batch(
+            mutation_fixture,
+            fault_point,
+        )
+        return
+    assert fault_point in LEGACY_RECOVERY_FAULTS
     fail_forward = await _arrange_fault(mutation_fixture, fault_point)
     result = await _recover(mutation_fixture, fail_forward=fail_forward)
     async with mutation_fixture.sessions() as session:
