@@ -428,6 +428,72 @@ async def test_failed_manual_degrade_closes_before_identity_drain() -> None:
 
 
 @pytest.mark.asyncio
+async def test_degraded_handle_cleanup_retries_without_dependency_deadlock(
+    tmp_path,
+) -> None:
+    from app.runtime.contained_io import StorageIdentity
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
+
+    identity = StorageIdentity(17, 23)
+    close_resource = _FailOnceResource()
+
+    class Engines:
+        def __init__(self) -> None:
+            self.drain_attempts = 0
+
+        async def drain_identity(self, actual) -> None:
+            assert actual == identity
+            self.drain_attempts += 1
+
+    leases = RuntimeLeaseCoordinator(tmp_path / "runtime")
+    engines = Engines()
+    runtime = SpaceRuntime(
+        leases=leases,
+        engines=engines,
+        migrations=SimpleNamespace(),
+        index_schema=SimpleNamespace(),
+    )
+    global_lease = await leases.acquire_global(
+        LeaseMode.SHARED, "degrade-test", 2
+    )
+    space_lease = await leases.acquire_spaces(
+        ["space-a"], LeaseMode.EXCLUSIVE, "degrade-test", 2
+    )
+    handle = SpaceRuntimeHandle(
+        SimpleNamespace(space_id="space-a"),
+        None,
+        close_resource,
+        global_lease,
+        space_lease,
+        True,
+        True,
+        space_lease.fence,
+        runtime,
+        _storage_identity=identity,
+    )
+    await runtime.begin_degraded_under_lease(
+        handle, "mutation_recovery_required", space_lease
+    )
+
+    with pytest.raises(BaseExceptionGroup):
+        await handle.aclose()
+
+    assert leases.has_pending_cleanups_for_current_task()
+    assert space_lease._released is False
+    assert global_lease._released is False
+    assert engines.drain_attempts == 0
+
+    assert await leases.retry_pending_cleanups_for_current_task() == ()
+    assert leases.has_pending_cleanups_for_current_task() is False
+    assert handle._closed is True
+    assert space_lease._released is True
+    assert global_lease._released is True
+    assert close_resource.successes == 1
+    assert engines.drain_attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_dirty_read_cleanup_failure_defers_retry_and_keeps_leases() -> None:
     from app.file_system.interfaces import ProjectionAuthoritySnapshot
     from app.runtime.space import SpaceRuntime

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.mutation import MutationBatch, MutationOperation
+from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.sync_outbox import SyncOutbox
 from app.mutation.types import (
     BatchMutationResult,
@@ -17,6 +17,7 @@ from app.mutation.types import (
     MutationRejection,
     MutationResult,
     MutationState,
+    StepState,
     persisted_command_bytes,
 )
 
@@ -237,13 +238,14 @@ class MutationJournal:
             for sequence, (operation_id, command) in enumerate(
                 zip(operation_ids, commands, strict=True)
             ):
+                persisted = command.persisted()
                 session.add(
                     MutationOperation(
                         operation_id=operation_id,
                         batch_id=batch_id,
                         sequence=sequence,
                         command_hash=command.command_hash,
-                        command_json=persisted_command_bytes(command.persisted()).decode("utf-8"),
+                        command_json=persisted_command_bytes(persisted).decode("utf-8"),
                         expected_versions_json=json.dumps(
                             [plan.expected_version for plan in command.db_plans], separators=(",", ":")
                         ),
@@ -253,6 +255,19 @@ class MutationJournal:
                         state=MutationState.INTENT,
                     )
                 )
+                for descriptor in persisted.projections:
+                    session.add(
+                        MutationStep(
+                            operation_id=operation_id,
+                            ordinal=descriptor.ordinal,
+                            name=descriptor.tag.value,
+                            store=descriptor.tag.value,
+                            target=str(descriptor.target),
+                            before_hash=descriptor.before_sha256,
+                            after_hash=descriptor.after_sha256,
+                            state=StepState.PENDING,
+                        )
+                    )
 
     async def record_rejected_batch(
         self,

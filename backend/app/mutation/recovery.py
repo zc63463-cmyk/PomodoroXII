@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import delete, select
 
 from app.errors import SpaceRecoveryRequiredError
-from app.models.mutation import MutationBatch, MutationOperation
+from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.sync_outbox import SyncOutbox
 from app.mutation.journal import LEGAL_TRANSITIONS, IllegalMutationTransition, MutationJournal
 from app.mutation.staging import StageIntegrityError
@@ -20,6 +20,7 @@ from app.mutation.types import (
     ProjectionActionTag,
     RecoveryInspection,
     RecoveryResult,
+    StepState,
     persisted_command_bytes,
 )
 from app.runtime.leases import Lease, LeaseMode, LeaseOrderError
@@ -85,28 +86,7 @@ class _Operation:
     row: MutationOperation
     command: PersistedMutationCommand
     manifest: Any | None
-
-
-@dataclass(slots=True)
-class _DegradedCleanup:
-    scope: Any
-    runtime: Any
-    lease: Any
-    closed: bool = False
-    finished: bool = False
-
-    async def run(self) -> None:
-        if not self.closed:
-            await self.scope.close_space_resources()
-            self.closed = True
-        if not self.finished:
-            await self.runtime.finish_degraded_evict_under_lease(
-                self.scope, self.lease
-            )
-            self.finished = True
-
-    def complete(self) -> bool:
-        return self.closed and self.finished
+    steps: tuple[MutationStep, ...]
 
 
 def _require_matching_leases(scope: Any, space_lease: Lease) -> None:
@@ -224,7 +204,7 @@ class MutationRecovery:
                 continue
             if state is MutationState.FAILED_MANUAL:
                 failed_manual.append(batch.batch_id)
-                continue
+                break
             try:
                 outcome = await self._recover_batch(
                     scope,
@@ -235,7 +215,7 @@ class MutationRecovery:
             except RecoveryUnprovableError:
                 await self._mark_failed_manual(scope, batch.batch_id)
                 failed_manual.append(batch.batch_id)
-                continue
+                break
             if outcome is MutationState.FINALIZED:
                 finalized.append(batch.batch_id)
             elif outcome is MutationState.ABORTED:
@@ -270,6 +250,16 @@ class MutationRecovery:
                     .order_by(MutationOperation.sequence)
                 )
             )
+            step_rows = {
+                row.operation_id: tuple(
+                    await session.scalars(
+                        select(MutationStep)
+                        .where(MutationStep.operation_id == row.operation_id)
+                        .order_by(MutationStep.ordinal)
+                    )
+                )
+                for row in rows
+            }
         if batch is None or len(rows) != batch.accepted_count or not rows:
             raise RecoveryUnprovableError(
                 "mutation batch child set is not complete"
@@ -320,7 +310,34 @@ class MutationRecovery:
                         raise RecoveryUnprovableError(
                             "published stage hash does not match the journal"
                         )
-            loaded.append(_Operation(row, command, manifest))
+            steps = step_rows[row.operation_id]
+            if len(steps) != len(command.projections):
+                raise RecoveryUnprovableError(
+                    "mutation projection step set is incomplete"
+                )
+            for step, descriptor in zip(steps, command.projections, strict=True):
+                if (
+                    step.ordinal != descriptor.ordinal
+                    or step.name != descriptor.tag.value
+                    or step.store != descriptor.tag.value
+                    or step.target != str(descriptor.target)
+                    or step.before_hash != descriptor.before_sha256
+                    or step.after_hash != descriptor.after_sha256
+                ):
+                    raise RecoveryUnprovableError(
+                        "mutation projection step differs from persisted command"
+                    )
+                step_state = StepState(step.state)
+                expected_applied = {
+                    StepState.PENDING: None,
+                    StepState.APPLIED: descriptor.after_sha256,
+                    StepState.COMPENSATED: descriptor.before_sha256,
+                }[step_state]
+                if step.applied_hash != expected_applied:
+                    raise RecoveryUnprovableError(
+                        "mutation projection step hash evidence is invalid"
+                    )
+            loaded.append(_Operation(row, command, manifest, steps))
         return tuple(loaded)
 
     async def _recover_batch(
@@ -535,8 +552,19 @@ class MutationRecovery:
         self, scope: Any, operation: _Operation, receipt: Any
     ) -> None:
         for descriptor in operation.command.projections:
+            step = operation.steps[descriptor.ordinal]
+            step_state = StepState(step.state)
+            if step_state is StepState.APPLIED:
+                continue
+            if step_state is not StepState.PENDING:
+                raise RecoveryUnprovableError(
+                    "forward projection step has an invalid durable state"
+                )
             state = await self._descriptor_state(scope, descriptor)
             if state == "after":
+                await self._mark_step(
+                    scope, step, StepState.APPLIED, descriptor.after_sha256
+                )
                 continue
             if state != "before":
                 raise RecoveryUnprovableError(
@@ -553,6 +581,9 @@ class MutationRecovery:
                 raise RecoveryUnprovableError(
                     "forward projection step did not produce its after image"
                 )
+            await self._mark_step(
+                scope, step, StepState.APPLIED, descriptor.after_sha256
+            )
 
     async def _compensate(
         self,
@@ -609,8 +640,15 @@ class MutationRecovery:
         self, scope: Any, operation: _Operation, receipt: Any
     ) -> None:
         for descriptor in reversed(operation.command.projections):
+            step = operation.steps[descriptor.ordinal]
+            step_state = StepState(step.state)
+            if step_state is StepState.COMPENSATED:
+                continue
             state = await self._descriptor_state(scope, descriptor)
             if state == "before":
+                await self._mark_step(
+                    scope, step, StepState.COMPENSATED, descriptor.before_sha256
+                )
                 continue
             if state != "after":
                 raise RecoveryUnprovableError(
@@ -627,6 +665,27 @@ class MutationRecovery:
                 raise RecoveryUnprovableError(
                     "inverse projection step did not produce its before image"
                 )
+            await self._mark_step(
+                scope, step, StepState.COMPENSATED, descriptor.before_sha256
+            )
+
+    async def _mark_step(
+        self,
+        scope: Any,
+        step: MutationStep,
+        state: StepState,
+        applied_hash: str | None,
+    ) -> None:
+        async with scope.session_factory.begin() as session:
+            row = await session.get(MutationStep, step.id)
+            if row is None:
+                raise RecoveryUnprovableError(
+                    "mutation projection step disappeared"
+                )
+            row.state = state
+            row.applied_hash = applied_hash
+        step.state = state
+        step.applied_hash = applied_hash
 
     async def _descriptor_state(self, scope: Any, descriptor: Any) -> str:
         snapshot = await scope.file_system.snapshot_projection_authority()
@@ -745,18 +804,7 @@ class MutationRecovery:
             "mutation_recovery_required",
             lease,
         )
-        cleanup = _DegradedCleanup(scope, runtime, lease)
-        try:
-            await cleanup.run()
-        except BaseException:
-            runtime.leases.register_pending_cleanup(
-                cleanup,
-                retry=cleanup.run,
-                holds=(scope, runtime),
-                physical_terminal=cleanup.complete,
-                dependencies=(lease,),
-            )
-            raise
+        await scope.close_space_resources()
 
 
 async def inspect_recovery(view: Any) -> RecoveryInspection:
