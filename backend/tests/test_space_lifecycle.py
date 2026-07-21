@@ -428,6 +428,83 @@ async def test_failed_manual_degrade_closes_before_identity_drain() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dirty_read_cleanup_failure_defers_retry_and_keeps_leases() -> None:
+    from app.file_system.interfaces import ProjectionAuthoritySnapshot
+    from app.runtime.space import SpaceRuntime
+
+    global_lease = _FakeLease("global")
+    space_lease = _FakeLease("space-a")
+    file_system = _FailOnceResource()
+    engine = _EngineResource()
+    pending: list[object] = []
+
+    class Leases:
+        async def acquire_spaces(self, *_args):
+            return space_lease
+
+        def register_pending_cleanup(self, handle, **_kwargs):
+            pending.append(handle)
+
+    class Engines:
+        async def acquire(self, *_args):
+            return engine
+
+    class Opens:
+        database_target = SimpleNamespace(identity=SimpleNamespace())
+
+        def take_mutation_stage_authority(self):
+            return SimpleNamespace(close=lambda: None)
+
+    class Containment:
+        @asynccontextmanager
+        async def open_verified(self):
+            yield Opens()
+
+    class FileSystem(_FailOnceResource):
+        async def snapshot_projection_authority(self):
+            return ProjectionAuthoritySnapshot({}, {}, {})
+
+    file_system = FileSystem()
+    runtime = SpaceRuntime(
+        leases=Leases(),
+        engines=Engines(),
+        migrations=SimpleNamespace(),
+        index_schema=SimpleNamespace(),
+    )
+    runtime._verify_registered_open = lambda _scope: None
+    runtime.inspect_recovery = lambda _handle: asyncio.sleep(
+        0, result=SimpleNamespace(clean=False)
+    )
+
+    async def open_file_system(_opens):
+        return file_system
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        "app.file_system.api.open_existing_file_system", open_file_system
+    )
+    monkeypatch.setattr(
+        "app.mutation.staging.StageStore", lambda _authority: SimpleNamespace(close=lambda: None)
+    )
+    try:
+        with pytest.raises(BaseExceptionGroup):
+            await runtime.open_resolved(
+                SimpleNamespace(space_id="space-a", containment=Containment()),
+                "read",
+                global_lease,
+                owns_global_lease=True,
+            )
+    finally:
+        monkeypatch.undo()
+
+    assert len(pending) == 1
+    assert file_system.attempts == 1
+    assert engine.attempts == 1
+    assert space_lease.release_count == 0
+    assert global_lease.release_count == 0
+
+
+@pytest.mark.asyncio
 async def test_activation_exit_fault_collects_filesystem_and_releases_engine(
     monkeypatch,
     tmp_path,

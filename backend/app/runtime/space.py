@@ -796,6 +796,7 @@ class SpaceRuntime:
         space_lease = borrowed_space_lease
         owns_space_lease = False
         handle = None
+        defer_handle_cleanup = False
         try:
             if mode == "read" and space_lease is None:
                 space_lease = await self.leases.acquire_spaces(
@@ -827,7 +828,12 @@ class SpaceRuntime:
                     # A shared read lease may never be upgraded in place.  Close
                     # all read resources first, then release it, then recover
                     # through a temporary exclusive handle.
-                    await handle.close_space_resources()
+                    try:
+                        await handle.close_space_resources()
+                    except BaseException:
+                        defer_handle_cleanup = True
+                        self.register_pending_cleanup(handle)
+                        raise
                     await space_lease.release()
                     handle.space_lease = None
                     handle.owns_space_lease = False
@@ -861,10 +867,11 @@ class SpaceRuntime:
         except BaseException as primary:
             cleanup_errors: list[BaseException] = []
             if handle is not None:
-                try:
-                    await handle.aclose()
-                except BaseExceptionGroup as group:
-                    cleanup_errors.extend(group.exceptions)
+                if not defer_handle_cleanup:
+                    try:
+                        await handle.aclose()
+                    except BaseExceptionGroup as group:
+                        cleanup_errors.extend(group.exceptions)
             else:
                 if owns_space_lease and space_lease is not None:
                     try:
