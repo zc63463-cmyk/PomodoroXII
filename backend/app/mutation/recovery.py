@@ -87,6 +87,28 @@ class _Operation:
     manifest: Any | None
 
 
+@dataclass(slots=True)
+class _DegradedCleanup:
+    scope: Any
+    runtime: Any
+    lease: Any
+    closed: bool = False
+    finished: bool = False
+
+    async def run(self) -> None:
+        if not self.closed:
+            await self.scope.close_space_resources()
+            self.closed = True
+        if not self.finished:
+            await self.runtime.finish_degraded_evict_under_lease(
+                self.scope, self.lease
+            )
+            self.finished = True
+
+    def complete(self) -> bool:
+        return self.closed and self.finished
+
+
 def _require_matching_leases(scope: Any, space_lease: Lease) -> None:
     global_lease = getattr(scope, "global_lease", None)
     if global_lease is None or not hasattr(global_lease, "assert_active_owner"):
@@ -491,10 +513,9 @@ class MutationRecovery:
         for operation in operations:
             child_state = MutationState(operation.row.state)
             if child_state is MutationState.FORWARD_APPLIED:
-                if not await self._projection_matches(
-                    scope,
-                    operation.command,
-                    image="after",
+                if any(
+                    await self._descriptor_state(scope, descriptor) != "after"
+                    for descriptor in operation.command.projections
                 ):
                     raise RecoveryUnprovableError(
                         "FORWARD_APPLIED child does not match its after images"
@@ -504,37 +525,34 @@ class MutationRecovery:
                 raise RecoveryUnprovableError(
                     "FINALIZING batch has an invalid child state"
                 )
-            if not await self._projection_matches(
-                scope,
-                operation.command,
-                image="after",
-            ):
-                if not await self._projection_matches(
-                    scope,
-                    operation.command,
-                    image="before",
-                ):
-                    raise RecoveryUnprovableError(
-                        "projection matches neither before nor after evidence"
-                    )
-                await self.projection_executor.apply_forward(
-                    scope,
-                    operation.row.operation_id,
-                    operation.command,
-                    receipt,
-                )
-                if not await self._projection_matches(
-                    scope,
-                    operation.command,
-                    image="after",
-                ):
-                    raise RecoveryUnprovableError(
-                        "forward projection did not produce its after image"
-                    )
+            await self._finish_projection_steps(scope, operation, receipt)
             await journal.transition(
                 operation.row.operation_id,
                 MutationState.FORWARD_APPLIED,
             )
+
+    async def _finish_projection_steps(
+        self, scope: Any, operation: _Operation, receipt: Any
+    ) -> None:
+        for descriptor in operation.command.projections:
+            state = await self._descriptor_state(scope, descriptor)
+            if state == "after":
+                continue
+            if state != "before":
+                raise RecoveryUnprovableError(
+                    "projection step matches neither before nor after evidence"
+                )
+            await self.projection_executor.apply_forward(
+                scope,
+                operation.row.operation_id,
+                operation.command,
+                receipt,
+                ordinals=(descriptor.ordinal,),
+            )
+            if await self._descriptor_state(scope, descriptor) != "after":
+                raise RecoveryUnprovableError(
+                    "forward projection step did not produce its after image"
+                )
 
     async def _compensate(
         self,
@@ -564,26 +582,7 @@ class MutationRecovery:
             MutationState.COMPENSATING,
         )
         receipt = lease.fence_receipt(scope.scope.space_id)
-        for operation in reversed(operations):
-            if not await self._projection_matches(
-                scope,
-                operation.command,
-                image="before",
-            ):
-                await self.projection_executor.restore_before(
-                    scope,
-                    operation.row.operation_id,
-                    operation.command,
-                    receipt,
-                )
-            if not await self._projection_matches(
-                scope,
-                operation.command,
-                image="before",
-            ):
-                raise RecoveryUnprovableError(
-                    "inverse projection did not restore its before image"
-                )
+        await self._compensate_projection_batch(scope, operations, receipt)
         async with scope.session_factory.begin() as session:
             for operation in reversed(operations):
                 await self.interpreter.restore_before(
@@ -600,72 +599,60 @@ class MutationRecovery:
         )
         return MutationState.COMPENSATED
 
-    async def _projection_matches(
-        self,
-        scope: Any,
-        command: PersistedMutationCommand,
-        *,
-        image: str,
-    ) -> bool:
-        file_system = getattr(scope, "file_system", None)
-        snapshot_method = getattr(
-            file_system,
-            "snapshot_projection_authority",
-            None,
-        )
-        if snapshot_method is None:
-            raise RecoveryUnprovableError(
-                "projection authority cannot be inspected"
-            )
-        snapshot = await snapshot_method()
-        for descriptor in command.projections:
-            target = str(descriptor.target)
-            source = None if descriptor.source is None else str(descriptor.source)
-            if descriptor.tag in {
-                ProjectionActionTag.MARKDOWN_WRITE,
-                ProjectionActionTag.PATH_REMOVE,
-            }:
-                actual = snapshot.markdown.get(target)
-                expected = (
-                    getattr(descriptor, f"{image}_sha256"),
-                    getattr(descriptor, f"{image}_size"),
-                )
-                if _digest(actual) != expected:
-                    return False
-            elif descriptor.tag is ProjectionActionTag.PATH_RENAME:
-                if source is None:
-                    return False
-                source_exists = source in snapshot.markdown
-                target_exists = target in snapshot.markdown
-                expected_pair = (
-                    (True, False)
-                    if image == "before"
-                    else (False, True)
-                )
-                if (source_exists, target_exists) != expected_pair:
-                    return False
-            elif descriptor.tag is ProjectionActionTag.INDEX_REPLACE:
-                actual = snapshot.index.get(target)
-                expected = (
-                    getattr(descriptor, f"{image}_sha256"),
-                    getattr(descriptor, f"{image}_size"),
-                )
-                if _digest(actual) != expected:
-                    return False
-            elif descriptor.tag is ProjectionActionTag.FTS_REPLACE:
-                actual = snapshot.fts.get(target)
-                expected = (
-                    getattr(descriptor, f"{image}_sha256"),
-                    getattr(descriptor, f"{image}_size"),
-                )
-                if _digest(actual) != expected:
-                    return False
-            else:
-                raise RecoveryUnprovableError(
-                    "persisted projection tag is not recoverable"
-                )
-        return True
+    async def _compensate_projection_batch(
+        self, scope: Any, operations: tuple[_Operation, ...], receipt: Any
+    ) -> None:
+        for operation in reversed(operations):
+            await self._compensate_projection_steps(scope, operation, receipt)
 
+    async def _compensate_projection_steps(
+        self, scope: Any, operation: _Operation, receipt: Any
+    ) -> None:
+        for descriptor in reversed(operation.command.projections):
+            state = await self._descriptor_state(scope, descriptor)
+            if state == "before":
+                continue
+            if state != "after":
+                raise RecoveryUnprovableError(
+                    "inverse projection step matches neither before nor after evidence"
+                )
+            await self.projection_executor.restore_before(
+                scope,
+                operation.row.operation_id,
+                operation.command,
+                receipt,
+                ordinals=(descriptor.ordinal,),
+            )
+            if await self._descriptor_state(scope, descriptor) != "before":
+                raise RecoveryUnprovableError(
+                    "inverse projection step did not produce its before image"
+                )
+
+    async def _descriptor_state(self, scope: Any, descriptor: Any) -> str:
+        snapshot = await scope.file_system.snapshot_projection_authority()
+        target = str(descriptor.target)
+        source = None if descriptor.source is None else str(descriptor.source)
+        if descriptor.tag is ProjectionActionTag.PATH_RENAME:
+            before = (
+                source is not None
+                and _digest(snapshot.markdown.get(source))
+                == (descriptor.before_sha256, descriptor.before_size)
+                and target not in snapshot.markdown
+            )
+            after = (
+                source is not None
+                and source not in snapshot.markdown
+                and _digest(snapshot.markdown.get(target))
+                == (descriptor.after_sha256, descriptor.after_size)
+            )
+            return "after" if after else "before" if before else "neither"
+        bucket = snapshot.markdown if target.startswith("notes/") else (
+            snapshot.index if target.startswith("index/") else snapshot.fts
+        )
+        actual = _digest(bucket.get(target))
+        before = actual == (descriptor.before_sha256, descriptor.before_size)
+        after = actual == (descriptor.after_sha256, descriptor.after_size)
+        return "after" if after else "before" if before else "neither"
     async def _set_batch_state(
         self,
         scope: Any,
@@ -758,8 +745,18 @@ class MutationRecovery:
             "mutation_recovery_required",
             lease,
         )
-        await scope.close_space_resources()
-        await runtime.finish_degraded_evict_under_lease(scope, lease)
+        cleanup = _DegradedCleanup(scope, runtime, lease)
+        try:
+            await cleanup.run()
+        except BaseException:
+            runtime.leases.register_pending_cleanup(
+                cleanup,
+                retry=cleanup.run,
+                holds=(scope, runtime),
+                physical_terminal=cleanup.complete,
+                dependencies=(lease,),
+            )
+            raise
 
 
 async def inspect_recovery(view: Any) -> RecoveryInspection:

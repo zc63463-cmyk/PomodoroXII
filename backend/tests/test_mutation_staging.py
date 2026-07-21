@@ -218,8 +218,8 @@ async def test_stage_materialize_after_returns_closed_actions(tmp_path) -> None:
             "path_rename",
             "notes/renamed.md",
             1,
-            None,
-            None,
+            b"new",
+            b"new",
             source="notes/n.md",
         ),
         _plan("path_remove", "notes/deleted.md", 2, b"deleted", None),
@@ -240,7 +240,7 @@ async def test_stage_materialize_after_returns_closed_actions(tmp_path) -> None:
 
         assert tuple(_action_shape(action) for action in actions) == (
             ("markdown_write", None, "notes/n.md", 0, b"new"),
-            ("path_rename", "notes/n.md", "notes/renamed.md", 1, None),
+            ("path_rename", "notes/n.md", "notes/renamed.md", 1, b"new"),
             ("path_remove", None, "notes/deleted.md", 2, None),
             ("index_replace", None, "rows/n.json", 3, b"new-index"),
             ("fts_replace", None, "fts/n.json", 4, None),
@@ -286,8 +286,8 @@ async def test_stage_materialize_before_derives_exact_inverse_actions(tmp_path) 
             "path_rename",
             "notes/new-name.md",
             2,
-            None,
-            None,
+            b"renamed-body",
+            b"renamed-body",
             source="notes/old-name.md",
         ),
         _plan("path_remove", "notes/removed.md", 3, b"removed", None),
@@ -308,7 +308,7 @@ async def test_stage_materialize_before_derives_exact_inverse_actions(tmp_path) 
         assert tuple(_action_shape(action) for action in actions) == (
             ("path_remove", None, "notes/created.md", 0, None),
             ("markdown_write", None, "notes/updated.md", 1, b"old"),
-            ("path_rename", "notes/new-name.md", "notes/old-name.md", 2, None),
+            ("path_rename", "notes/new-name.md", "notes/old-name.md", 2, b"renamed-body"),
             ("markdown_write", None, "notes/removed.md", 3, b"removed"),
             ("index_replace", None, "rows/n.json", 4, b"old-index"),
             ("fts_replace", None, "fts/n.json", 5, None),
@@ -317,6 +317,67 @@ async def test_stage_materialize_before_derives_exact_inverse_actions(tmp_path) 
         store.close()
         await lease.release()
         await global_lease.release()
+
+
+@pytest.mark.asyncio
+async def test_stage_materialize_side_validates_only_requested_ordinals_and_side(
+    tmp_path,
+) -> None:
+    authority = _authority(tmp_path)
+    store = StageStore(authority)
+    global_lease, lease = await _exclusive(tmp_path)
+    plans = (
+        _plan("markdown_write", "notes/a.md", 0, b"a0", b"a1"),
+        _plan("index_replace", "rows/a.json", 1, b"i0", b"i1"),
+        _plan("fts_replace", "fts/a.json", 2, b"f0", b"f1"),
+    )
+    try:
+        manifest = await store.publish(
+            "selective-side", plans, lease=lease, space_id="space-a"
+        )
+        descriptors = tuple(step.descriptor for step in manifest.steps)
+        key = manifest.directory_key
+        relative = f"{key}/after/2.bin"
+        authority._handle._atomic_write_relative(
+            authority._relative(relative), b"corrupt"
+        )
+
+        actions = await store.materialize_side(
+            "selective-side",
+            descriptors,
+            image="before",
+            ordinals=(2, 0),
+            receipt=lease.fence_receipt("space-a"),
+        )
+
+        assert tuple(_action_shape(action) for action in actions) == (
+            ("fts_replace", None, "fts/a.json", 2, b"f0"),
+            ("markdown_write", None, "notes/a.md", 0, b"a0"),
+        )
+        with pytest.raises(StageIntegrityError, match="hash or size"):
+            await store.materialize_side(
+                "selective-side",
+                descriptors,
+                image="after",
+                ordinals=(2,),
+                receipt=lease.fence_receipt("space-a"),
+            )
+    finally:
+        store.close()
+        await lease.release()
+        await global_lease.release()
+
+
+def test_path_rename_requires_equal_non_null_content_images() -> None:
+    with pytest.raises(ValueError, match="equal before and after"):
+        _plan(
+            "path_rename",
+            "notes/new.md",
+            0,
+            b"old",
+            b"different",
+            source="notes/old.md",
+        )
 
 
 @pytest.mark.parametrize("drift", ["target", "hash", "size"])

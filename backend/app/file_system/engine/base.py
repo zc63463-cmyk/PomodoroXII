@@ -51,21 +51,41 @@ from app.runtime.sqlite_vfs import BoundSQLiteTarget, MaintenanceOptions
 class FileSystemProjectionExecutor(FencedProjectionExecutor):
     """Execute only verified, contained actions from the active stage authority."""
 
-    async def apply_forward(self, scope, operation_id, command, receipt) -> None:
+    async def apply_forward(
+        self, scope, operation_id, command, receipt, *, ordinals=None
+    ) -> None:
         stages = scope.mutation_stages
         if stages is None:
             raise SpaceRecoveryRequiredError("Space mutation stages are not active")
-        actions = await stages.materialize(
-            operation_id, command.projections, image="after", receipt=receipt
+        actions = await stages.materialize_side(
+            operation_id,
+            command.projections,
+            image="after",
+            ordinals=(
+                tuple(range(len(command.projections)))
+                if ordinals is None
+                else tuple(ordinals)
+            ),
+            receipt=receipt,
         )
         await self._execute_actions(scope, actions, receipt)
 
-    async def restore_before(self, scope, operation_id, command, receipt) -> None:
+    async def restore_before(
+        self, scope, operation_id, command, receipt, *, ordinals=None
+    ) -> None:
         stages = scope.mutation_stages
         if stages is None:
             raise SpaceRecoveryRequiredError("Space mutation stages are not active")
-        actions = await stages.materialize(
-            operation_id, command.projections, image="before", receipt=receipt
+        actions = await stages.materialize_side(
+            operation_id,
+            command.projections,
+            image="before",
+            ordinals=(
+                tuple(reversed(range(len(command.projections))))
+                if ordinals is None
+                else tuple(ordinals)
+            ),
+            receipt=receipt,
         )
         await self._execute_actions(scope, actions, receipt)
 

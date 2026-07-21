@@ -140,6 +140,13 @@ class _StageStore:
         receipt.assert_current()
         return tuple(descriptors)
 
+    async def materialize_side(
+        self, operation_id, descriptors, *, image, ordinals, receipt
+    ):
+        self.materialize_calls.append((operation_id, image))
+        receipt.assert_current()
+        return tuple(descriptors[ordinal] for ordinal in ordinals)
+
 
 class _Scope:
     def __init__(self, sessions, receipt: _FenceReceipt) -> None:
@@ -509,8 +516,8 @@ def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -
                     "path_rename",
                     "notes/missing-target.md",
                     0,
-                    None,
-                    None,
+                    b"missing-body",
+                    b"missing-body",
                     source="notes/missing-source.md",
                 ),
             ),
@@ -845,8 +852,8 @@ async def test_batch_overlay_carries_move_target_into_metadata_update(uow_fixtur
                     mutation_types.ContainedProjectionActionField(source),
                     mutation_types.ContainedProjectionActionField(target),
                     0,
-                    None,
-                    None,
+                    b"body",
+                    b"body",
                 ),
                 plan_type(
                     tag_type.INDEX_REPLACE,
@@ -2198,8 +2205,8 @@ def _all_projection_plans() -> tuple[object, ...]:
             "path_rename",
             "notes/new.md",
             1,
-            None,
-            None,
+            b"body",
+            b"body",
             source="notes/old.md",
         ),
         _projection_plan("path_remove", "notes/deleted.md", 2, b"deleted", None),
@@ -2276,8 +2283,8 @@ async def test_production_projection_executor_applies_all_tags_through_contained
                 "path_rename",
                 "notes/renamed.md",
                 1,
-                None,
-                None,
+                b"projected body",
+                b"projected body",
                 source="notes/projected.md",
             ),
             _projection_plan(
@@ -2610,7 +2617,7 @@ async def test_uow_nonempty_projection_stages_materialize_all_closed_tags(
         assert result.state is MutationState.FINALIZED
         assert executor.actions == [
             ("markdown_write", "notes/n.md", b"body"),
-            ("path_rename", "notes/new.md", None),
+            ("path_rename", "notes/new.md", b"body"),
             ("path_remove", "notes/deleted.md", None),
             ("index_replace", "rows/n.json", b"index"),
             ("fts_replace", "fts/n.json", b"fts"),
@@ -2624,9 +2631,15 @@ async def test_stale_projection_fence_performs_zero_actions(
     uow_fixture, tmp_path
 ) -> None:
     class _StalingStageStore(StageStore):
-        async def materialize(self, operation_id, descriptors, *, image, receipt):
-            actions = await super().materialize(
-                operation_id, descriptors, image=image, receipt=receipt
+        async def materialize_side(
+            self, operation_id, descriptors, *, image, ordinals, receipt
+        ):
+            actions = await super().materialize_side(
+                operation_id,
+                descriptors,
+                image=image,
+                ordinals=ordinals,
+                receipt=receipt,
             )
             receipt.current = False
             return actions

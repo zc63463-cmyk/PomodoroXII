@@ -288,8 +288,42 @@ class StageStore:
     ) -> tuple[MaterializedProjectionAction, ...]:
         if image not in ("before", "after"):
             raise ValueError("image must be before or after")
+        return await self.materialize_side(
+            operation_id,
+            descriptors,
+            image=image,
+            ordinals=tuple(range(len(descriptors))),
+            receipt=receipt,
+        )
+
+    async def materialize_side(
+        self,
+        operation_id: str,
+        descriptors: tuple[PersistedProjectionDescriptor, ...],
+        *,
+        image: Literal["before", "after"],
+        ordinals: tuple[int, ...],
+        receipt,
+    ) -> tuple[MaterializedProjectionAction, ...]:
+        if image not in ("before", "after"):
+            raise ValueError("image must be before or after")
+        frozen_descriptors = tuple(descriptors)
+        frozen_ordinals = tuple(ordinals)
+        if len(set(frozen_ordinals)) != len(frozen_ordinals) or any(
+            type(ordinal) is not int
+            or ordinal < 0
+            or ordinal >= len(frozen_descriptors)
+            for ordinal in frozen_ordinals
+        ):
+            raise ValueError("ordinals must be a unique canonical descriptor subset")
         return await run_joined_thread(
-            lambda: self._materialize_sync(operation_id, tuple(descriptors), image, receipt)
+            lambda: self._materialize_sync(
+                operation_id,
+                frozen_descriptors,
+                image,
+                frozen_ordinals,
+                receipt,
+            )
         )
 
     def _materialize_sync(
@@ -297,22 +331,94 @@ class StageStore:
         operation_id: str,
         descriptors: tuple[PersistedProjectionDescriptor, ...],
         image: Literal["before", "after"],
+        ordinals: tuple[int, ...],
         receipt,
     ) -> tuple[MaterializedProjectionAction, ...]:
         receipt.assert_current()
-        manifest = self.verify(operation_id)
-        expected = tuple(step.descriptor for step in manifest.steps)
-        if descriptors != expected:
+        key = self.directory_key(operation_id)
+        try:
+            encoded = self._authority.read_bytes(f"{key}/manifest.json")
+            value = json.loads(encoded)
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            raise StageIntegrityError("stage manifest is missing or invalid") from exc
+        if _canonical(value) != encoded:
+            raise StageIntegrityError("stage manifest is not canonical")
+        value = _require_keys(
+            value, {"directoryKey", "operationId", "steps"}, label="manifest"
+        )
+        if value["operationId"] != operation_id or value["directoryKey"] != key:
+            raise StageIntegrityError("stage identity mismatch")
+        if not isinstance(value["steps"], list) or len(value["steps"]) != len(
+            descriptors
+        ):
             raise StageIntegrityError("staged descriptors do not exactly match manifest")
+        manifest_descriptors: list[PersistedProjectionDescriptor] = []
+        referenced_files = {"manifest.json"}
+        for expected_ordinal, raw_item in enumerate(value["steps"]):
+            item = _require_keys(
+                raw_item,
+                {"after", "before", "ordinal", "source", "tag", "target"},
+                label="manifest step",
+            )
+            if type(item["ordinal"]) is not int or item["ordinal"] != expected_ordinal:
+                raise StageIntegrityError("manifest ordinals must be contiguous")
+            try:
+                tag = ProjectionActionTag(item["tag"])
+                source = (
+                    None
+                    if item["source"] is None
+                    else type(self)._contained(item["source"])
+                )
+                target = type(self)._contained(item["target"])
+            except (TypeError, ValueError) as exc:
+                raise StageIntegrityError("manifest projection action is invalid") from exc
+            images: dict[str, tuple[str | None, int | None]] = {}
+            for side in ("before", "after"):
+                raw_image = item[side]
+                if raw_image is None:
+                    images[side] = (None, None)
+                    continue
+                raw_image = _require_keys(
+                    raw_image, {"path", "sha256", "size"}, label=f"{side} image"
+                )
+                expected_path = f"{side}/{expected_ordinal}.bin"
+                if (
+                    raw_image["path"] != expected_path
+                    or not isinstance(raw_image["sha256"], str)
+                    or re.fullmatch(_KEY, raw_image["sha256"]) is None
+                    or type(raw_image["size"]) is not int
+                    or raw_image["size"] < 0
+                ):
+                    raise StageIntegrityError("staged image descriptor is invalid")
+                referenced_files.add(expected_path)
+                images[side] = (raw_image["sha256"], raw_image["size"])
+            manifest_descriptors.append(
+                PersistedProjectionDescriptor(
+                    tag,
+                    source,
+                    target,
+                    expected_ordinal,
+                    *images["before"],
+                    *images["after"],
+                )
+            )
+        if tuple(manifest_descriptors) != descriptors:
+            raise StageIntegrityError("staged descriptors do not exactly match manifest")
+        if not set(self._authority.relative_files(key)).issubset(referenced_files):
+            raise StageIntegrityError("stage contains an unreferenced file")
         actions: list[MaterializedProjectionAction] = []
-        for descriptor in descriptors:
+        for ordinal in ordinals:
+            descriptor = descriptors[ordinal]
             digest = getattr(descriptor, f"{image}_sha256")
             size = getattr(descriptor, f"{image}_size")
             blob = None
             if digest is not None:
-                blob = self._authority.read_bytes(
-                    f"{manifest.directory_key}/{image}/{descriptor.ordinal}.bin"
-                )
+                try:
+                    blob = self._authority.read_bytes(
+                        f"{key}/{image}/{descriptor.ordinal}.bin"
+                    )
+                except FileNotFoundError as exc:
+                    raise StageIntegrityError("selected staged image is missing") from exc
                 if hashlib.sha256(blob).hexdigest() != digest or len(blob) != size:
                     raise StageIntegrityError("staged image hash or size mismatch")
             tag = descriptor.tag
