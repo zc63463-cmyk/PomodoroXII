@@ -494,6 +494,72 @@ async def test_degraded_handle_cleanup_retries_without_dependency_deadlock(
 
 
 @pytest.mark.asyncio
+async def test_borrowed_cleanup_retry_eventually_releases_outer_space_lease(
+    tmp_path,
+) -> None:
+    from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+    from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
+
+    class FailTwiceResource:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def close(self) -> None:
+            self.attempts += 1
+            if self.attempts <= 2:
+                raise OSError("persistent borrowed close failure")
+
+    leases = RuntimeLeaseCoordinator(tmp_path / "borrowed-runtime")
+    runtime = SpaceRuntime(
+        leases=leases,
+        engines=SimpleNamespace(),
+        migrations=SimpleNamespace(),
+        index_schema=SimpleNamespace(),
+    )
+    global_lease = await leases.acquire_global(
+        LeaseMode.SHARED, "borrowed-test", 2
+    )
+    space_lease = await leases.acquire_spaces(
+        ["space-a"], LeaseMode.EXCLUSIVE, "borrowed-test", 2
+    )
+    resource = FailTwiceResource()
+    handle = SpaceRuntimeHandle(
+        SimpleNamespace(space_id="space-a"),
+        None,
+        resource,
+        global_lease,
+        space_lease,
+        False,
+        False,
+        space_lease.fence,
+        runtime,
+    )
+
+    async def opened(*_args, **_kwargs):
+        return handle
+
+    runtime.open_resolved = opened
+    with pytest.raises(BaseExceptionGroup):
+        async with space_lease:
+            async with runtime.borrow_prepared_space(
+                handle.scope, global_lease, space_lease
+            ):
+                pass
+
+    assert space_lease._released is False
+    assert leases.has_pending_cleanups_for_current_task()
+    retry_errors = await leases.retry_pending_cleanups_for_current_task()
+    assert len(retry_errors) == 1
+    assert isinstance(retry_errors[0], OSError)
+    assert space_lease._released is False
+    assert await leases.retry_pending_cleanups_for_current_task() == ()
+    assert handle._closed is True
+    assert space_lease._released is True
+    assert leases.has_pending_cleanups_for_current_task() is False
+    await global_lease.release()
+
+
+@pytest.mark.asyncio
 async def test_dirty_read_cleanup_failure_defers_retry_and_keeps_leases() -> None:
     from app.file_system.interfaces import ProjectionAuthoritySnapshot
     from app.runtime.space import SpaceRuntime

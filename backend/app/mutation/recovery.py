@@ -555,6 +555,10 @@ class MutationRecovery:
             step = operation.steps[descriptor.ordinal]
             step_state = StepState(step.state)
             if step_state is StepState.APPLIED:
+                if await self._descriptor_state(scope, descriptor) != "after":
+                    raise RecoveryUnprovableError(
+                        "applied projection step no longer matches its after evidence"
+                    )
                 continue
             if step_state is not StepState.PENDING:
                 raise RecoveryUnprovableError(
@@ -643,6 +647,10 @@ class MutationRecovery:
             step = operation.steps[descriptor.ordinal]
             step_state = StepState(step.state)
             if step_state is StepState.COMPENSATED:
+                if await self._descriptor_state(scope, descriptor) != "before":
+                    raise RecoveryUnprovableError(
+                        "compensated projection step no longer matches its before evidence"
+                    )
                 continue
             state = await self._descriptor_state(scope, descriptor)
             if state == "before":

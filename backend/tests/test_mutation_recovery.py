@@ -1022,3 +1022,69 @@ async def test_first_failed_manual_stops_later_batch_recovery(mutation_fixture) 
     assert second is not None and MutationState(second.state) is MutationState.INTENT
     assert second_operation is not None
     assert MutationState(second_operation.state) is MutationState.INTENT
+
+
+@pytest.mark.parametrize(
+    ("batch_state", "step_state", "applied_side"),
+    [
+        (MutationState.FINALIZING, StepState.APPLIED, "after"),
+        (MutationState.COMPENSATING, StepState.COMPENSATED, "before"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_durable_step_state_never_bypasses_physical_hash_revalidation(
+    mutation_fixture,
+    batch_state: MutationState,
+    step_state: StepState,
+    applied_side: str,
+) -> None:
+    command = _folder_projection_command(mutation_fixture, ("step-proof",))
+    journal = MutationJournal(mutation_fixture.sessions)
+    await journal.create_batch_intent(
+        mutation_fixture.batch_id,
+        "request-hash",
+        (mutation_fixture.operation_id,),
+        (command,),
+        (),
+    )
+    manifest = await mutation_fixture.scope.mutation_stages.publish(
+        mutation_fixture.operation_id,
+        command.projections,
+        lease=mutation_fixture.space_lease,
+        space_id="space-test",
+    )
+    await journal.mark_staged(mutation_fixture.batch_id, (manifest,))
+    descriptor = command.persisted().projections[0]
+    async with mutation_fixture.sessions.begin() as session:
+        batch = await session.get(MutationBatch, mutation_fixture.batch_id)
+        operation = await session.get(
+            MutationOperation, mutation_fixture.operation_id
+        )
+        step = await session.scalar(
+            select(MutationStep).where(
+                MutationStep.operation_id == mutation_fixture.operation_id
+            )
+        )
+        assert batch is not None and operation is not None and step is not None
+        batch.state = batch_state
+        operation.state = batch_state
+        step.state = step_state
+        step.applied_hash = (
+            descriptor.after_sha256
+            if applied_side == "after"
+            else descriptor.before_sha256
+        )
+    state = mutation_fixture.scope.file_system._load()
+    state["index"][str(descriptor.target)] = b"wrong-physical-bytes".hex()
+    mutation_fixture.scope.file_system._save(state)
+
+    result = await MutationRecovery(
+        catalog=CATALOG,
+        interpreter=DbMutationInterpreter(CATALOG),
+        projection_executor=_ProjectionExecutor(),
+    ).recover_under_lease(
+        mutation_fixture.scope,
+        mutation_fixture.space_lease,
+    )
+
+    assert result.failed_manual == (mutation_fixture.batch_id,)
