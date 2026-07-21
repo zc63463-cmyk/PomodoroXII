@@ -691,26 +691,30 @@ async def test_batch_overlay_exposes_quick_note_create_to_schedule_junction_chil
 
 @pytest.mark.asyncio
 async def test_batch_overlay_carries_consecutive_note_body_updates(uow_fixture) -> None:
+    existing = Note(
+        id="body-note",
+        title="Body",
+        content_hash=hashlib.sha256(b"original").hexdigest(),
+        word_count=1,
+        summary="",
+        tags="[]",
+        category=None,
+        folder_id=None,
+        status="active",
+        trashed_at=None,
+        created_at="2026-07-20T00:00:00Z",
+        updated_at="2026-07-20T00:00:00Z",
+        version=1,
+    )
     async with uow_fixture.sessions.begin() as session:
-        session.add(
-            Note(
-                id="body-note",
-                title="Body",
-                content_hash=hashlib.sha256(b"original").hexdigest(),
-                word_count=1,
-                summary="",
-                tags="[]",
-                category=None,
-                folder_id=None,
-                status="active",
-                trashed_at=None,
-                created_at="2026-07-20T00:00:00Z",
-                updated_at="2026-07-20T00:00:00Z",
-                version=1,
-            )
-        )
+        session.add(existing)
+    note_fields = CATALOG.get("note").field_names
+    existing_row = {field: getattr(existing, field) for field in note_fields}
+    target = "notes/body-note.md"
     uow_fixture.scope.projection_snapshot = ProjectionAuthoritySnapshot(
-        {"notes/body-note.md": b"original"}, {}, {}
+        {target: b"original"},
+        {"index/notes/note_id/body-note": _note_index_blob(existing_row, target)},
+        {"fts/body-note": _fts_blob(existing_row, b"original")},
     )
 
     class BodyPolicy:
@@ -791,26 +795,30 @@ async def test_batch_overlay_carries_consecutive_note_body_updates(uow_fixture) 
 
 @pytest.mark.asyncio
 async def test_batch_overlay_carries_move_target_into_metadata_update(uow_fixture) -> None:
+    existing = Note(
+        id="move-note",
+        title="Original",
+        content_hash=hashlib.sha256(b"body").hexdigest(),
+        word_count=1,
+        summary="",
+        tags="[]",
+        category=None,
+        folder_id="folder-one",
+        status="active",
+        trashed_at=None,
+        created_at="2026-07-20T00:00:00Z",
+        updated_at="2026-07-20T00:00:00Z",
+        version=1,
+    )
     async with uow_fixture.sessions.begin() as session:
-        session.add(
-            Note(
-                id="move-note",
-                title="Original",
-                content_hash=hashlib.sha256(b"body").hexdigest(),
-                word_count=1,
-                summary="",
-                tags="[]",
-                category=None,
-                folder_id="folder-one",
-                status="active",
-                trashed_at=None,
-                created_at="2026-07-20T00:00:00Z",
-                updated_at="2026-07-20T00:00:00Z",
-                version=1,
-            )
-        )
+        session.add(existing)
+    note_fields = CATALOG.get("note").field_names
+    existing_row = {field: getattr(existing, field) for field in note_fields}
+    target = "notes/folder-one/move-note-Original.md"
     uow_fixture.scope.projection_snapshot = ProjectionAuthoritySnapshot(
-        {"notes/folder-one/move-note-Original.md": b"body"}, {}, {}
+        {target: b"body"},
+        {"index/notes/note_id/move-note": _note_index_blob(existing_row, target)},
+        {"fts/move-note": _fts_blob(existing_row, b"body")},
     )
 
     class MoveMetadataPolicy:
@@ -1433,6 +1441,157 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
                 await MutationCompiler(CATALOG, (policy,)).compile_batch(
                     uow_fixture.scope, (item,), session
                 )
+
+
+@pytest.mark.asyncio
+async def test_production_compiler_accepts_event_only_multi_effect_command(
+    uow_fixture,
+) -> None:
+    class EventOnlyPolicy:
+        entity_types = frozenset({"task"})
+
+        async def compile(self, context, request):
+            base = await compile_catalog_entity_command(context, request)
+            first = base.sync_events[0]
+            second_payload = {**first.payload, "id": "event-only-second"}
+            second = SyncEventPlan(
+                first.entity_type,
+                "event-only-second",
+                first.action,
+                second_payload,
+                first.version,
+                first.created_at,
+            )
+            return context.command(
+                request=request,
+                db_plans=(),
+                sync_events=(first, second),
+                value={"event_ids": (first.entity_id, second.entity_id)},
+            )
+
+    request = MutationRequest.from_payload(
+        name="entity.create",
+        entity_type="task",
+        entity_id="event-only-first",
+        payload={"title": "event-only"},
+        expected_version=None,
+    )
+    item = mutation_types.PreparedBatchItem(
+        0, "event-only-operation", request.request_hash, request, None
+    )
+
+    async with uow_fixture.sessions() as session:
+        compilation = await MutationCompiler(
+            CATALOG, (EventOnlyPolicy(),)
+        ).compile_batch(uow_fixture.scope, (item,), session)
+
+    assert compilation.operation_ids == ("event-only-operation",)
+    assert compilation.commands[0].db_plans == ()
+    assert tuple(
+        event.entity_id for event in compilation.commands[0].sync_events
+    ) == ("event-only-first", "event-only-second")
+
+
+@pytest.mark.asyncio
+async def test_note_projection_rejects_prefix_collision_with_authoritative_path(
+    uow_fixture,
+) -> None:
+    def note(note_id: str, title: str, content: bytes) -> Note:
+        return Note(
+            id=note_id,
+            title=title,
+            content_hash=hashlib.sha256(content).hexdigest(),
+            word_count=1,
+            summary="",
+            tags="[]",
+            category=None,
+            folder_id=None,
+            status="active",
+            trashed_at=None,
+            created_at="2026-07-20T00:00:00Z",
+            updated_at="2026-07-20T00:00:00Z",
+            version=1,
+        )
+
+    first = note("n1", "Title", b"first body")
+    second = note("n1-other", "Title", b"second body")
+    async with uow_fixture.sessions.begin() as session:
+        session.add_all((first, second))
+
+    note_fields = CATALOG.get("note").field_names
+    first_row = {field: getattr(first, field) for field in note_fields}
+    second_row = {field: getattr(second, field) for field in note_fields}
+    first_path = "notes/n1-title.md"
+    colliding_path = "notes/n1-other-title.md"
+    first_index = _note_index_blob(first_row, first_path)
+    second_index = _note_index_blob(second_row, colliding_path)
+    first_fts = _fts_blob(first_row, b"first body")
+    second_fts = _fts_blob(second_row, b"second body")
+    uow_fixture.scope.projection_snapshot = ProjectionAuthoritySnapshot(
+        {
+            first_path: b"first body",
+            colliding_path: b"second body",
+        },
+        {
+            "index/notes/note_id/n1": first_index,
+            "index/notes/note_id/n1-other": second_index,
+        },
+        {
+            "fts/n1": first_fts,
+            "fts/n1-other": second_fts,
+        },
+    )
+
+    class CollidingDeletePolicy:
+        entity_types = frozenset({"note"})
+
+        async def compile(self, context, request):
+            base = await compile_catalog_entity_command(context, request)
+            return _with_projection(
+                base,
+                projections=(
+                    _projection_plan(
+                        "path_remove",
+                        colliding_path,
+                        0,
+                        b"second body",
+                        None,
+                    ),
+                    _projection_plan(
+                        "index_replace",
+                        "index/notes/note_id/n1",
+                        1,
+                        first_index,
+                        None,
+                    ),
+                    _projection_plan(
+                        "fts_replace",
+                        "fts/n1",
+                        2,
+                        first_fts,
+                        None,
+                    ),
+                ),
+            )
+
+    request = MutationRequest.from_payload(
+        name="entity.delete",
+        entity_type="note",
+        entity_id="n1",
+        payload={},
+        expected_version=1,
+    )
+    item = mutation_types.PreparedBatchItem(
+        0, "note-prefix-collision", request.request_hash, request, None
+    )
+
+    async with uow_fixture.sessions() as session:
+        with pytest.raises(
+            SpaceRecoveryRequiredError, match="complete bound projections"
+        ):
+            await MutationCompiler(
+                CATALOG, (CollidingDeletePolicy(),)
+            ).compile_batch(uow_fixture.scope, (item,), session)
 
 
 def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:

@@ -285,6 +285,13 @@ class AuthorityOverlay:
     def derived_projection(self, tag: ProjectionActionTag, target: str) -> bytes | None:
         return self._derived.get((tag, target))
 
+    def note_path(self, identity: str) -> str | None:
+        payload = self.derived_projection(
+            ProjectionActionTag.INDEX_REPLACE,
+            f"index/notes/note_id/{identity}",
+        )
+        return _note_path_from_index_blob(payload, identity, label="authority")
+
     def path_is_reserved(self, target: str) -> bool:
         return target in self._reserved_paths
 
@@ -666,7 +673,9 @@ class MutationCompiler:
                     )
                 )
             else:
-                _validate_compiled_command(command, self.catalog)
+                _validate_compiled_command(
+                    command, self.catalog, authority=overlay
+                )
                 overlay.apply(command)
                 accepted_ids.append(item.operation_id)
                 commands.append(command)
@@ -744,24 +753,105 @@ def _validate_sync_event_against_catalog(
     return spec
 
 
-def _note_path_belongs_to_identity(value: object, identity: str) -> bool:
-    if value is None:
-        return False
-    filename = str(value).rsplit("/", 1)[-1]
-    return filename == f"{identity}.md" or filename.startswith(f"{identity}-")
+@dataclass(frozen=True, slots=True)
+class _NoteProjectionPaths:
+    before: str | None
+    after: str | None
 
 
-def _projection_belongs_to_plan(projection, spec: EntitySpec, identity: str) -> bool:
+def _note_path_from_index_blob(
+    payload: bytes | None,
+    identity: str,
+    *,
+    label: str,
+) -> str | None:
+    if payload is None:
+        return None
+    try:
+        decoded = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise SpaceRecoveryRequiredError(
+            f"{label} Note path projection is invalid"
+        ) from exc
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("row"), dict):
+        raise SpaceRecoveryRequiredError(
+            f"{label} Note path projection is invalid"
+        )
+    row = decoded["row"]
+    current_path = row.get("current_path")
+    if row.get("note_id") != identity or not isinstance(current_path, str) or not current_path:
+        raise SpaceRecoveryRequiredError(
+            f"{label} Note path projection is invalid"
+        )
+    return current_path
+
+
+def _note_projection_paths(
+    command: MutationCommand,
+    plan: DbMutationPlan,
+    identity: str,
+    authority: AuthorityOverlay,
+) -> _NoteProjectionPaths:
+    index_target = f"index/notes/note_id/{identity}"
+    index_projections = tuple(
+        projection
+        for projection in command.projections
+        if projection.tag is ProjectionActionTag.INDEX_REPLACE
+        and str(projection.target) == index_target
+    )
+    if len(index_projections) != 1:
+        raise SpaceRecoveryRequiredError(
+            "projection-backed entity requires complete bound projections"
+        )
+    projection = index_projections[0]
+    before = _note_path_from_index_blob(
+        projection.before, identity, label="before-image"
+    )
+    after = _note_path_from_index_blob(
+        projection.after, identity, label="after-image"
+    )
+    authoritative = authority.note_path(identity)
+    if plan.operation == "insert":
+        valid = authoritative is None and before is None and after is not None
+    elif plan.operation == "update":
+        valid = authoritative is not None and before == authoritative and after is not None
+    else:
+        valid = authoritative is not None and before == authoritative and after is None
+    if not valid:
+        raise SpaceRecoveryRequiredError(
+            "projection does not match the authoritative Note path"
+        )
+    return _NoteProjectionPaths(before, after)
+
+
+def _projection_belongs_to_plan(
+    projection,
+    spec: EntitySpec,
+    identity: str,
+    *,
+    note_paths: _NoteProjectionPaths | None = None,
+    persisted_path_owner: bool = False,
+) -> bool:
     target = str(projection.target)
     if spec.name == "note":
-        if projection.tag in {
-            ProjectionActionTag.MARKDOWN_WRITE,
-            ProjectionActionTag.PATH_RENAME,
-            ProjectionActionTag.PATH_REMOVE,
-        }:
-            return _note_path_belongs_to_identity(projection.target, identity) and (
-                projection.tag is not ProjectionActionTag.PATH_RENAME
-                or _note_path_belongs_to_identity(projection.source, identity)
+        if projection.tag is ProjectionActionTag.MARKDOWN_WRITE:
+            return (
+                persisted_path_owner
+                if note_paths is None
+                else target == note_paths.after
+            )
+        if projection.tag is ProjectionActionTag.PATH_RENAME:
+            return (
+                persisted_path_owner
+                if note_paths is None
+                else str(projection.source) == note_paths.before
+                and target == note_paths.after
+            )
+        if projection.tag is ProjectionActionTag.PATH_REMOVE:
+            return (
+                persisted_path_owner
+                if note_paths is None
+                else target == note_paths.before
             )
         if projection.tag is ProjectionActionTag.INDEX_REPLACE:
             return target == f"index/notes/note_id/{identity}"
@@ -824,6 +914,8 @@ def _projection_after_digest(projection) -> str | None:
 def _validate_compiled_command(
     command: MutationCommand | PersistedMutationCommand,
     catalog: CompiledEntityCatalog,
+    *,
+    authority: AuthorityOverlay | None = None,
 ) -> None:
     try:
         request_spec = catalog.get(command.request.entity_type)
@@ -841,7 +933,44 @@ def _validate_compiled_command(
         )
     for event in command.sync_events:
         _validate_sync_event_against_catalog(event, catalog)
-    for plan, spec in zip(command.db_plans, plan_specs, strict=True):
+    required_tags = tuple(
+        _required_projection_tags(plan, spec)
+        for plan, spec in zip(command.db_plans, plan_specs, strict=True)
+    )
+    persisted_path_owners: dict[ProjectionActionTag, int] = {}
+    if isinstance(command, PersistedMutationCommand):
+        for tag in (
+            ProjectionActionTag.MARKDOWN_WRITE,
+            ProjectionActionTag.PATH_RENAME,
+            ProjectionActionTag.PATH_REMOVE,
+        ):
+            owners = tuple(
+                index
+                for index, (spec, required) in enumerate(
+                    zip(plan_specs, required_tags, strict=True)
+                )
+                if spec.name == "note" and tag in required
+            )
+            if len(owners) == 1:
+                persisted_path_owners[tag] = owners[0]
+    note_paths_by_plan: dict[int, _NoteProjectionPaths] = {}
+    if isinstance(command, MutationCommand):
+        for plan_index, (plan, spec) in enumerate(
+            zip(command.db_plans, plan_specs, strict=True)
+        ):
+            if spec.name != "note":
+                continue
+            if authority is None:
+                raise SpaceRecoveryRequiredError(
+                    "compiled Note projections require authoritative paths"
+                )
+            identity = str(plan.primary_key[spec.primary_key])
+            note_paths_by_plan[plan_index] = _note_projection_paths(
+                command, plan, identity, authority
+            )
+    for plan_index, (plan, spec) in enumerate(
+        zip(command.db_plans, plan_specs, strict=True)
+    ):
         matching_events = tuple(
             event
             for event in command.sync_events
@@ -878,14 +1007,22 @@ def _validate_compiled_command(
                 if type(before_version) is not int or event.version != before_version + 1:
                     raise SpaceRecoveryRequiredError(
                         "compiled delete event version differs from the database before image"
-                    )
+                )
         identity = str(plan.primary_key[spec.primary_key])
         owned = tuple(
             projection
             for projection in command.projections
-            if _projection_belongs_to_plan(projection, spec, identity)
+            if _projection_belongs_to_plan(
+                projection,
+                spec,
+                identity,
+                note_paths=note_paths_by_plan.get(plan_index),
+                persisted_path_owner=(
+                    persisted_path_owners.get(projection.tag) == plan_index
+                ),
+            )
         )
-        required = _required_projection_tags(plan, spec)
+        required = required_tags[plan_index]
         for tag in required:
             matching_projections = tuple(
                 projection for projection in owned if projection.tag is tag
@@ -912,24 +1049,30 @@ def _validate_compiled_command(
                     raise SpaceRecoveryRequiredError(
                         "Markdown projection differs from the Note content hash"
                     )
-    if len(command.sync_events) != sum(spec.sync_enabled for spec in plan_specs):
-        raise SpaceRecoveryRequiredError(
-            "compiled sync events do not align with database mutations"
-        )
     if command.projections and not plan_specs:
         raise SpaceRecoveryRequiredError(
             "compiled projection effects require a database mutation"
         )
     for projection in command.projections:
-        if not any(
-            _projection_belongs_to_plan(
+        bound = False
+        for plan_index, (plan, spec) in enumerate(
+            zip(command.db_plans, plan_specs, strict=True)
+        ):
+            if spec.name not in {"folder", "note"}:
+                continue
+            identity = str(plan.primary_key[spec.primary_key])
+            if _projection_belongs_to_plan(
                 projection,
                 spec,
-                str(plan.primary_key[spec.primary_key]),
-            )
-            for plan, spec in zip(command.db_plans, plan_specs, strict=True)
-            if spec.name in {"folder", "note"}
-        ):
+                identity,
+                note_paths=note_paths_by_plan.get(plan_index),
+                persisted_path_owner=(
+                    persisted_path_owners.get(projection.tag) == plan_index
+                ),
+            ):
+                bound = True
+                break
+        if not bound:
             raise SpaceRecoveryRequiredError(
                 "compiled projection target is not bound to a database mutation"
             )
