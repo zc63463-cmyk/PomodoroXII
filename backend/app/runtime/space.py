@@ -262,6 +262,7 @@ class SpaceRuntimeHandle:
             and self.space_lease is not None
             and not self._degraded_evict_pending
         ):
+            self.space_lease.complete_cleanup_dependency(self)
             try:
                 await self.space_lease.release()
             except BaseException as exc:
@@ -972,9 +973,11 @@ class SpaceRuntime:
             primary = exc
         cleanup_errors: list[BaseException] = []
         try:
+            await handle.close_space_resources()
             await handle.aclose()
         except BaseExceptionGroup as group:
             cleanup_errors.extend(group.exceptions)
+            handle.owns_space_lease = True
             self.register_pending_cleanup(handle)
         if handle._closed:
             space_lease.complete_cleanup_dependency(handle)
