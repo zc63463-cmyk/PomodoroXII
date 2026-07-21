@@ -4287,6 +4287,8 @@ function verifyCrossWave(plans) {
     'ascending forward and descending compensation ordering',
     '`PATH_RENAME` byte hash proof',
     'Modify: `backend/app/mutation/types.py`',
+    'Modify: `backend/app/mutation/journal.py`',
+    'Modify: `backend/tests/test_mutation_journal.py`',
     'Modify: `backend/app/file_system/interfaces.py`',
     'Modify: `backend/app/file_system/engine/base.py`',
     'Modify: `backend/tests/test_note_workspace_atomicity.py`',
@@ -4295,6 +4297,10 @@ function verifyCrossWave(plans) {
     'after blob corrupt + before blob valid',
     'lease-pinned pending cleanup owner',
     'retries close and drain before releasing either lease',
+    'MutationStep(PENDING)',
+    '已有或新产生首个 `FAILED_MANUAL` 后必须立即停止',
+    'degraded cleanup 只能由单一 handle pending owner',
+    '直接调用私有 helper 不算 Exit Gate 证据',
   ]) requireText('S3', s3, contract, `Task 5 recovery amendment ${contract}`);
   requireText('S3', s3, 'execute_prepared_batch(scope, items, batch_id) -> BatchMutationResult', 'prepared batch public interface');
   requireText('S3', s3, 'hash_prepared_batch_identity', 'all-input prepared batch identity hash');

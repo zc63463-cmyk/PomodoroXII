@@ -624,6 +624,11 @@ If degraded cleanup cannot close resources or drain the engine identity, the
 runtime records a lease-pinned pending cleanup owner. The owner retains the
 matching global and Space leases and retries close and drain before releasing
 either lease; cleanup errors cannot turn into an apparently completed release.
+This is the existing runtime handle cleanup owner, not a second dependency
+owner. INTENT creates one durable `MutationStep(PENDING)` per canonical
+descriptor; forward and compensation persist the proven hash and state. The
+first `FAILED_MANUAL` stops all later batch recovery in that Space before
+degraded cleanup begins.
 
 Each accepted Sync event has a child operation under one batch record. Rejected
 events create no operation or ledger row. Accepted children share the outer
