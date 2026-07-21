@@ -615,6 +615,10 @@ compensation processes accepted children in reverse sequence and descriptors in
 descending ordinal order. `PATH_RENAME` proof includes authoritative source and
 target bytes (hash and size), not merely directory-entry existence. A neither
 state is unprovable and becomes `FAILED_MANUAL`.
+Rename plans therefore carry equal, non-null before/after bytes and their
+manifest descriptor persists both hashes and sizes. The fenced executor accepts
+only an exact ordinal subset of the already validated canonical command; callers
+cannot submit, reorder, or replace descriptors.
 
 If degraded cleanup cannot close resources or drain the engine identity, the
 runtime records a lease-pinned pending cleanup owner. The owner retains the

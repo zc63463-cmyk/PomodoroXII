@@ -2340,7 +2340,10 @@ git commit -m "feat(mutation): execute durable idempotent units of work"
 
 **Files:**
 - Create: `backend/app/mutation/recovery.py`
+- Modify: `backend/app/mutation/types.py`
 - Modify: `backend/app/mutation/staging.py`
+- Modify: `backend/app/file_system/interfaces.py`
+- Modify: `backend/app/file_system/engine/base.py`
 - Modify: `backend/app/mutation/unit_of_work.py`
 - Modify: `backend/app/runtime/scope.py`
 - Modify: `backend/app/runtime/space.py`
@@ -2349,6 +2352,7 @@ git commit -m "feat(mutation): execute durable idempotent units of work"
 - Modify: `backend/app/mcp/server.py`
 - Create: `backend/tests/test_mutation_recovery.py`
 - Modify: `backend/tests/test_mutation_staging.py`
+- Modify: `backend/tests/test_note_workspace_atomicity.py`
 - Modify: `backend/tests/test_space_lifecycle.py`
 - Modify: `backend/tests/test_runtime_bootstrap.py`
 - Modify: `backend/tests/test_mcp_http_lifespan.py`
@@ -2551,7 +2555,7 @@ INTENT/STAGED recovery 只允许 batch 级决策，绝不逐 child transition：
 
 为避免完整 manifest 校验把“after blob 损坏但 before blob 仍可证明”的合法补偿错误升级为 `FAILED_MANUAL`，Task 5 明确授权修改 `backend/app/mutation/staging.py` 与 `backend/tests/test_mutation_staging.py`。新增 adapter 必须先验证 canonical manifest identity 与 exact ordered descriptor tuple，再只读取调用方指定 side 的 blob并验证其 SHA-256/size；另一 side 缺失/损坏不得阻止已选 side 的证明。它仍由 `StageStore` 的 opaque `BoundStageDirectory` authority 实现，不返回或接受任何 namespace/path/key。Recovery 对每个 operation 的每个 descriptor ordinal 独立分类 actual 为 before/after/neither：forward 按 ascending ordinal 只重放未达 after 的 step；compensation 按 reverse child sequence、descending ordinal 只逆转未达 before 的 step。`PATH_RENAME` 的 before/after proof 必须绑定源/目标字节 SHA-256/size，不能只证明名称存在。测试必须包含一个 operation 至少三个 projection steps 的 partial-forward restart、两个 accepted children 的 mixed finalize failure、reverse child/ordinal observer，以及 after blob corrupt + before blob valid 的 `COMPENSATED` 路径。
 
-Normative recovery terms are: selected side blob validation; Per-descriptor before/after/neither classification; ascending forward and descending compensation ordering; and `PATH_RENAME` byte hash proof. FAILED_MANUAL degrade cleanup 必须由 lease-pinned pending cleanup owner 持有 matching global/Space leases；close 或 engine identity drain 任一步 fail-once 时，owner retries close and drain before releasing either lease。borrowed/exclusive context cleanup 不得绕过该 pending owner 直接 release。
+Normative recovery terms are: selected side blob validation; Per-descriptor before/after/neither classification; ascending forward and descending compensation ordering; and `PATH_RENAME` byte hash proof. Task 5 可修改 `mutation/types.py`，把 rename 从无 image 的旧临时合同收紧为 before/after bytes 必须同时存在且字节相同，manifest 因而持久化两侧 SHA-256/size。它可扩展 `FencedProjectionExecutor`/`FileSystemProjectionExecutor` 为只接受 canonical command 的 exact ordinal subset executor；caller 不能提交、重排或替换 descriptor。FAILED_MANUAL degrade cleanup 必须由 lease-pinned pending cleanup owner 持有 matching global/Space leases；close 或 engine identity drain 任一步 fail-once 时，owner retries close and drain before releasing either lease。borrowed/exclusive context cleanup 不得绕过该 pending owner 直接 release。
 
 S3 给 S2 runtime 安装 recovery hook。唯一 composition owner 是 FastAPI/FastMCP 共用的 `app/runtime/bootstrap.py::bootstrap_runtime()`：它在 `prepare_registered_spaces()` 前构造同一个 UoW/recovery provider并注入 runtime，`app/main.py` 与 `app/mcp/server.py` 只消费 `RuntimeServices`，不得各安装一套 hook。`tests/test_runtime_bootstrap.py` 与 `test_mcp_http_lifespan.py` 对同一 pending/FAILED_MANUAL fixture 断言两入口执行同一 recovery path、相同 readiness failure 和相同 cleanup。
 
@@ -2571,7 +2575,7 @@ $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 .\.venv\Scripts\python.exe -m pytest -q tests/test_mutation_recovery.py -p no:cacheprovider
 .\.venv\Scripts\python.exe -m pytest -q tests/test_mutation_recovery.py -p no:cacheprovider
-.\.venv\Scripts\ruff.exe check --no-cache app/mutation/recovery.py app/mutation/staging.py app/mutation/unit_of_work.py app/runtime/scope.py app/runtime/space.py app/runtime/bootstrap.py app/main.py app/mcp/server.py tests/test_mutation_recovery.py tests/test_mutation_staging.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_mcp_http_lifespan.py tests/test_main.py
+.\.venv\Scripts\ruff.exe check --no-cache app/file_system/interfaces.py app/file_system/engine/base.py app/mutation/recovery.py app/mutation/staging.py app/mutation/types.py app/mutation/unit_of_work.py app/runtime/scope.py app/runtime/space.py app/runtime/bootstrap.py app/main.py app/mcp/server.py tests/test_mutation_recovery.py tests/test_mutation_staging.py tests/test_note_workspace_atomicity.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_mcp_http_lifespan.py tests/test_main.py
 ```
 
 Expected: both runs PASS with identical parameter count; no intermittent orphan/fence failure. The test summary must list every matrix row, including each finalize store and every nonterminal restart state.
@@ -2579,7 +2583,7 @@ Expected: both runs PASS with identical parameter count; no intermittent orphan/
 - [ ] **Step 5: Commit recovery and fault injection**
 
 ```powershell
-git add app/mutation/recovery.py app/mutation/staging.py app/mutation/unit_of_work.py app/runtime/scope.py app/runtime/space.py app/runtime/bootstrap.py app/main.py app/mcp/server.py tests/test_mutation_recovery.py tests/test_mutation_staging.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_mcp_http_lifespan.py tests/test_main.py
+git add app/file_system/interfaces.py app/file_system/engine/base.py app/mutation/recovery.py app/mutation/staging.py app/mutation/types.py app/mutation/unit_of_work.py app/runtime/scope.py app/runtime/space.py app/runtime/bootstrap.py app/main.py app/mcp/server.py tests/test_mutation_recovery.py tests/test_mutation_staging.py tests/test_note_workspace_atomicity.py tests/test_space_lifecycle.py tests/test_runtime_bootstrap.py tests/test_mcp_http_lifespan.py tests/test_main.py
 git commit -m "feat(mutation): recover or compensate interrupted writes"
 ```
 
