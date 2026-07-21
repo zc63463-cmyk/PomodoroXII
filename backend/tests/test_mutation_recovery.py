@@ -1380,6 +1380,166 @@ async def test_restart_converges_to_declared_all_old_or_all_new(
         assert result.failed_manual == (mutation_fixture.batch_id,)
 
 
+async def _assert_persisted_state_matches_left_state(
+    fixture: _RecoveryFixture,
+    left_state: MutationState,
+) -> None:
+    """Re-open the database and prove the durable state equals ``left_state``."""
+    sessions = async_sessionmaker(
+        fixture.sessions.kw["bind"],
+        expire_on_commit=False,
+    )
+    async with sessions() as session:
+        batch = await session.get(MutationBatch, fixture.batch_id)
+        operation = await session.get(MutationOperation, fixture.operation_id)
+        steps = tuple(
+            await session.scalars(
+                select(MutationStep)
+                .where(MutationStep.operation_id == fixture.operation_id)
+                .order_by(MutationStep.ordinal)
+            )
+        )
+    assert batch is not None, "batch must exist before recovery"
+    assert operation is not None, "operation must exist before recovery"
+    assert MutationState(batch.state) is left_state, (
+        f"batch state {batch.state!r} != left_state {left_state!r}"
+    )
+    assert MutationState(operation.state) is left_state, (
+        f"operation state {operation.state!r} != left_state {left_state!r}"
+    )
+    assert operation.batch_id == fixture.batch_id, (
+        "operation must belong to the expected batch"
+    )
+    assert len(steps) == len(fixture.command.projections), (
+        "step count must match the persisted command projection set"
+    )
+    persisted = fixture.command.persisted()
+    for step, descriptor in zip(steps, persisted.projections, strict=True):
+        assert step.ordinal == descriptor.ordinal, "step ordinal mismatch"
+        assert step.name == descriptor.tag.value, "step name mismatch"
+        assert step.store == descriptor.tag.value, "step store mismatch"
+        assert step.target == str(descriptor.target), "step target mismatch"
+        assert step.before_hash == descriptor.before_sha256, (
+            "step before_hash mismatch"
+        )
+        assert step.after_hash == descriptor.after_sha256, (
+            "step after_hash mismatch"
+        )
+    if left_state is MutationState.FORWARD_APPLIED:
+        for step, descriptor in zip(steps, persisted.projections, strict=True):
+            assert StepState(step.state) is StepState.APPLIED, (
+                f"FORWARD_APPLIED step {step.ordinal} must be APPLIED, "
+                f"got {step.state}"
+            )
+            assert step.applied_hash == descriptor.after_sha256, (
+                f"FORWARD_APPLIED step {step.ordinal} applied_hash "
+                f"{step.applied_hash!r} != after_sha256 "
+                f"{descriptor.after_sha256!r}"
+            )
+
+
+async def _assert_terminal_state_after_recovery(
+    fixture: _RecoveryFixture,
+    left_state: MutationState,
+) -> None:
+    """Re-open the database and prove the durable terminal state is precise."""
+    expected = EXPECTED_RECOVERY_OUTCOME[left_state]
+    sessions = async_sessionmaker(
+        fixture.sessions.kw["bind"],
+        expire_on_commit=False,
+    )
+    async with sessions() as session:
+        batch = await session.get(MutationBatch, fixture.batch_id)
+        operation = await session.get(MutationOperation, fixture.operation_id)
+        row = await session.get(Folder, "folder-recovery")
+        events = tuple(await session.scalars(select(SyncOutbox)))
+    projection = fixture.scope.file_system._load()["index"]
+    assert batch is not None, "batch must exist after recovery"
+    assert operation is not None, "operation must exist after recovery"
+    if expected == "aborted":
+        assert MutationState(batch.state) is MutationState.ABORTED, (
+            f"batch state {batch.state!r} must be ABORTED"
+        )
+        assert MutationState(operation.state) is MutationState.ABORTED, (
+            f"operation state {operation.state!r} must be ABORTED"
+        )
+        assert row is None, "no business row may remain for aborted batch"
+        assert events == (), "no ledger events may remain for aborted batch"
+        assert projection == {}, "no projection may remain for aborted batch"
+    elif expected == "compensated":
+        assert MutationState(batch.state) is MutationState.COMPENSATED, (
+            f"batch state {batch.state!r} must be COMPENSATED"
+        )
+        assert MutationState(operation.state) is MutationState.COMPENSATED, (
+            f"operation state {operation.state!r} must be COMPENSATED"
+        )
+        assert row is None, "no business row may remain for compensated batch"
+        assert events == (), "no ledger events may remain for compensated batch"
+        assert projection == {}, "no projection may remain for compensated batch"
+    else:
+        assert MutationState(batch.state) is MutationState.FINALIZED, (
+            f"batch state {batch.state!r} must be FINALIZED"
+        )
+        assert MutationState(operation.state) is MutationState.FINALIZED, (
+            f"operation state {operation.state!r} must be FINALIZED"
+        )
+        assert row is not None, "business row must exist for finalized batch"
+        assert len(events) == 1 and events[0].visible is True, (
+            "exactly one visible ledger event must remain"
+        )
+        assert projection, "projection must exist for finalized batch"
+
+
+def _assert_precise_first_recovery_result(
+    left_state: MutationState,
+    result: RecoveryResult,
+    batch_id: str,
+) -> None:
+    """Assert the first recovery result matches the precise outcome matrix."""
+    expected = EXPECTED_RECOVERY_OUTCOME[left_state]
+    if expected == "aborted":
+        assert result.aborted == (batch_id,), (
+            f"INTENT must produce only aborted=({batch_id!r}), "
+            f"got aborted={result.aborted!r} compensated={result.compensated!r} "
+            f"finalized={result.finalized!r}"
+        )
+        assert result.compensated == (), (
+            "INTENT must not produce compensated"
+        )
+        assert result.finalized == (), "INTENT must not produce finalized"
+        assert result.failed_manual == (), "INTENT must not produce failed_manual"
+    elif expected == "compensated":
+        assert result.compensated == (batch_id,), (
+            f"COMPENSATING must produce only compensated=({batch_id!r}), "
+            f"got aborted={result.aborted!r} compensated={result.compensated!r} "
+            f"finalized={result.finalized!r}"
+        )
+        assert result.aborted == (), (
+            "COMPENSATING must not produce aborted"
+        )
+        assert result.finalized == (), (
+            "COMPENSATING must not produce finalized"
+        )
+        assert result.failed_manual == (), (
+            "COMPENSATING must not produce failed_manual"
+        )
+    else:
+        assert result.finalized == (batch_id,), (
+            f"{left_state.value} must produce only finalized=({batch_id!r}), "
+            f"got aborted={result.aborted!r} compensated={result.compensated!r} "
+            f"finalized={result.finalized!r}"
+        )
+        assert result.aborted == (), (
+            f"{left_state.value} must not produce aborted"
+        )
+        assert result.compensated == (), (
+            f"{left_state.value} must not produce compensated"
+        )
+        assert result.failed_manual == (), (
+            f"{left_state.value} must not produce failed_manual"
+        )
+
+
 @pytest.mark.parametrize("left_state", NONTERMINAL_MUTATION_STATES)
 @pytest.mark.asyncio
 async def test_restart_from_every_nonterminal_state_uses_fresh_process_objects(
@@ -1430,24 +1590,72 @@ async def test_restart_from_every_nonterminal_state_uses_fresh_process_objects(
             batch.state = MutationState.COMPENSATING
             operation.state = MutationState.COMPENSATING
 
-    first = await _recover_from_fresh_process_objects(mutation_fixture)
-    second = await _recover_from_fresh_process_objects(mutation_fixture)
+    await _assert_persisted_state_matches_left_state(mutation_fixture, left_state)
 
-    async with mutation_fixture.sessions() as session:
-        row = await session.get(Folder, "folder-recovery")
-        events = tuple(await session.scalars(select(SyncOutbox)))
-    projection = mutation_fixture.scope.file_system._load()["index"]
-    if left_state in {MutationState.INTENT, MutationState.COMPENSATING}:
-        assert row is None
-        assert events == ()
-        assert projection == {}
-        assert first.aborted or first.compensated
-    else:
-        assert row is not None
-        assert len(events) == 1 and events[0].visible is True
-        assert projection
-        assert first.finalized == (mutation_fixture.batch_id,)
+    first = await _recover_from_fresh_process_objects(mutation_fixture)
+    _assert_precise_first_recovery_result(
+        left_state, first, mutation_fixture.batch_id
+    )
+    await _assert_terminal_state_after_recovery(mutation_fixture, left_state)
+
+    second = await _recover_from_fresh_process_objects(mutation_fixture)
     assert second == RecoveryResult((), (), (), ())
+
+
+EXPECTED_RECOVERY_OUTCOME = {
+    MutationState.INTENT: "aborted",
+    MutationState.STAGED: "finalized",
+    MutationState.DB_COMMITTED: "finalized",
+    MutationState.FINALIZING: "finalized",
+    MutationState.FORWARD_APPLIED: "finalized",
+    MutationState.COMPENSATING: "compensated",
+}
+
+
+def test_legacy_or_assertion_would_misaccept_wrong_terminal_state() -> None:
+    """RED: prove that ``first.aborted or first.compensated`` is too loose.
+
+    The legacy disjunction would accept an INTENT batch that wrongly
+    transitioned to COMPENSATED, or a COMPENSATING batch that wrongly
+    transitioned to ABORTED, or both outcomes simultaneously.  The precise
+    outcome matrix must not allow any of those misclassifications.
+    """
+    intent_wrongly_compensated = RecoveryResult(
+        (), (), ("recovery-batch",), ()
+    )
+    compensating_wrongly_aborted = RecoveryResult(
+        (), ("recovery-batch",), (), ()
+    )
+    both_wrongly_set = RecoveryResult(
+        (), ("recovery-batch",), ("recovery-batch",), ()
+    )
+    # All three bad results pass the legacy ``first.aborted or first.compensated``
+    # disjunction, proving it cannot distinguish the correct terminal state.
+    for bad in (
+        intent_wrongly_compensated,
+        compensating_wrongly_aborted,
+        both_wrongly_set,
+    ):
+        assert bad.aborted or bad.compensated, (
+            "legacy disjunction must accept this bad result to prove the gap"
+        )
+    # For INTENT (expected=aborted), the legacy disjunction wrongly accepts
+    # a compensated result, and vice versa for COMPENSATING.
+    assert intent_wrongly_compensated.compensated, (
+        "INTENT batch must not be compensated, but legacy accepts it"
+    )
+    assert not intent_wrongly_compensated.aborted, (
+        "INTENT batch wrongly compensated has no aborted tuple"
+    )
+    assert compensating_wrongly_aborted.aborted, (
+        "COMPENSATING batch must not be aborted, but legacy accepts it"
+    )
+    assert not compensating_wrongly_aborted.compensated, (
+        "COMPENSATING batch wrongly aborted has no compensated tuple"
+    )
+    assert both_wrongly_set.aborted and both_wrongly_set.compensated, (
+        "legacy accepts both aborted and compensated simultaneously"
+    )
 
 
 def test_recovery_action_map_covers_every_nonterminal_state() -> None:
