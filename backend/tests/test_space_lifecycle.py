@@ -497,6 +497,7 @@ async def test_degraded_handle_cleanup_retries_without_dependency_deadlock(
 async def test_borrowed_cleanup_retry_eventually_releases_outer_space_lease(
     tmp_path,
 ) -> None:
+    from app.runtime.contained_io import StorageIdentity
     from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
     from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
 
@@ -509,10 +510,23 @@ async def test_borrowed_cleanup_retry_eventually_releases_outer_space_lease(
             if self.attempts <= 2:
                 raise OSError("persistent borrowed close failure")
 
+    identity = StorageIdentity(29, 31)
+
+    class FailOnceDrain:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def drain_identity(self, actual) -> None:
+            assert actual == identity
+            self.attempts += 1
+            if self.attempts == 1:
+                raise OSError("transient degraded identity drain failure")
+
     leases = RuntimeLeaseCoordinator(tmp_path / "borrowed-runtime")
+    engines = FailOnceDrain()
     runtime = SpaceRuntime(
         leases=leases,
-        engines=SimpleNamespace(),
+        engines=engines,
         migrations=SimpleNamespace(),
         index_schema=SimpleNamespace(),
     )
@@ -533,7 +547,12 @@ async def test_borrowed_cleanup_retry_eventually_releases_outer_space_lease(
         False,
         space_lease.fence,
         runtime,
+        _storage_identity=identity,
     )
+    await runtime.begin_degraded_under_lease(
+        handle, "mutation_recovery_required", space_lease
+    )
+    assert runtime.is_degraded("space-a") is True
 
     async def opened(*_args, **_kwargs):
         return handle
@@ -552,9 +571,16 @@ async def test_borrowed_cleanup_retry_eventually_releases_outer_space_lease(
     assert len(retry_errors) == 1
     assert isinstance(retry_errors[0], OSError)
     assert space_lease._released is False
+    retry_errors = await leases.retry_pending_cleanups_for_current_task()
+    assert len(retry_errors) == 1
+    assert isinstance(retry_errors[0], OSError)
+    assert engines.attempts == 1
+    assert space_lease._released is False
     assert await leases.retry_pending_cleanups_for_current_task() == ()
     assert handle._closed is True
     assert space_lease._released is True
+    assert engines.attempts == 2
+    assert runtime.is_degraded("space-a") is True
     assert leases.has_pending_cleanups_for_current_task() is False
     await global_lease.release()
 

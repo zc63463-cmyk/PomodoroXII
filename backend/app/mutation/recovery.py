@@ -176,6 +176,13 @@ class MutationRecovery:
             raise SpaceRecoveryRequiredError("Space mutation stages are not active")
 
         async with scope.session_factory() as session:
+            existing_failed_manual = tuple(
+                await session.scalars(
+                    select(MutationBatch.batch_id)
+                    .where(MutationBatch.state == MutationState.FAILED_MANUAL)
+                    .order_by(MutationBatch.batch_id)
+                )
+            )
             live = frozenset(
                 await session.scalars(
                     select(MutationOperation.operation_id).where(
@@ -188,6 +195,9 @@ class MutationRecovery:
                     select(MutationBatch).order_by(MutationBatch.batch_id)
                 )
             )
+        if existing_failed_manual:
+            await self._degrade_space(scope, space_lease)
+            return RecoveryResult((), (), (), existing_failed_manual)
         await stages.collect_orphans(
             live_operation_ids=set(live),
             lease=space_lease,
@@ -412,6 +422,7 @@ class MutationRecovery:
             state = MutationState.FORWARD_APPLIED
 
         if state is MutationState.FORWARD_APPLIED:
+            await self._finish_forward(scope, lease, batch_id)
             await self._finalize_batch(scope, batch_id)
             return MutationState.FINALIZED
         if state is MutationState.COMPENSATING:
@@ -532,6 +543,14 @@ class MutationRecovery:
         for operation in operations:
             child_state = MutationState(operation.row.state)
             if child_state is MutationState.FORWARD_APPLIED:
+                if any(
+                    StepState(step.state) is not StepState.APPLIED
+                    or step.applied_hash != step.after_hash
+                    for step in operation.steps
+                ):
+                    raise RecoveryUnprovableError(
+                        "FORWARD_APPLIED child has incomplete step receipts"
+                    )
                 descriptor_states = tuple(
                     [
                         await self._descriptor_state(scope, descriptor)
@@ -636,6 +655,11 @@ class MutationRecovery:
             scope,
             batch_id,
             MutationState.COMPENSATED,
+        )
+        await scope.mutation_stages.collect_terminal_operations(
+            tuple(operation.row.operation_id for operation in operations),
+            lease=lease,
+            space_id=scope.scope.space_id,
         )
         return MutationState.COMPENSATED
 

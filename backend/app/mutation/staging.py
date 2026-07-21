@@ -445,6 +445,38 @@ class StageStore:
         live = frozenset(live_operation_ids)
         return await run_joined_thread(lambda: self._collect_sync(live, receipt))
 
+    async def collect_terminal_operations(
+        self,
+        operation_ids: tuple[str, ...],
+        *,
+        lease: Lease | None,
+        space_id: str,
+    ) -> tuple[str, ...]:
+        receipt = self._require_space_exclusive(lease, space_id)
+        expected = tuple(operation_ids)
+        return await run_joined_thread(
+            lambda: self._collect_terminal_sync(expected, receipt)
+        )
+
+    def _collect_terminal_sync(
+        self, operation_ids: tuple[str, ...], receipt
+    ) -> tuple[str, ...]:
+        removed: list[str] = []
+        for operation_id in operation_ids:
+            key = self.directory_key(operation_id)
+            if not self._authority.exists(key):
+                continue
+            encoded = self._authority.read_bytes(f"{key}/manifest.json")
+            try:
+                manifest_operation_id = json.loads(encoded)["operationId"]
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise StageIntegrityError("terminal manifest is invalid") from exc
+            if manifest_operation_id != operation_id:
+                raise StageIntegrityError("terminal manifest identity mismatch")
+            self._authority.remove_tree(key, receipt)
+            removed.append(operation_id)
+        return tuple(removed)
+
     def _collect_sync(self, live_operation_ids: frozenset[str], receipt) -> tuple[str, ...]:
         live_keys = {self.directory_key(item) for item in live_operation_ids}
         candidates: list[str] = []
