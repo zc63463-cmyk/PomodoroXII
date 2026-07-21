@@ -511,6 +511,15 @@ LEGACY_RECOVERY_FAULTS = (
     FaultPoint.RESTART_NONTERMINAL,
 )
 
+NONTERMINAL_MUTATION_STATES = (
+    MutationState.INTENT,
+    MutationState.STAGED,
+    MutationState.DB_COMMITTED,
+    MutationState.FINALIZING,
+    MutationState.FORWARD_APPLIED,
+    MutationState.COMPENSATING,
+)
+
 
 class _PreparedCommandCompiler:
     def __init__(self, commands: tuple[MutationCommand, ...]) -> None:
@@ -1347,7 +1356,11 @@ async def test_restart_converges_to_declared_all_old_or_all_new(
         return
     assert fault_point in LEGACY_RECOVERY_FAULTS
     fail_forward = await _arrange_fault(mutation_fixture, fault_point)
-    result = await _recover(mutation_fixture, fail_forward=fail_forward)
+    assert fail_forward is False
+    result = await _recover_from_fresh_process_objects(mutation_fixture)
+    assert await _recover_from_fresh_process_objects(mutation_fixture) == RecoveryResult(
+        (), (), (), ()
+    )
     async with mutation_fixture.sessions() as session:
         row = await session.get(Folder, "folder-recovery")
         events = tuple(await session.scalars(select(SyncOutbox)))
@@ -1365,6 +1378,76 @@ async def test_restart_converges_to_declared_all_old_or_all_new(
         assert result.failed_manual == ()
     else:
         assert result.failed_manual == (mutation_fixture.batch_id,)
+
+
+@pytest.mark.parametrize("left_state", NONTERMINAL_MUTATION_STATES)
+@pytest.mark.asyncio
+async def test_restart_from_every_nonterminal_state_uses_fresh_process_objects(
+    mutation_fixture,
+    left_state: MutationState,
+) -> None:
+    await _persist_intent(
+        mutation_fixture,
+        publish=left_state is not MutationState.INTENT,
+    )
+    if left_state in {
+        MutationState.DB_COMMITTED,
+        MutationState.FINALIZING,
+        MutationState.FORWARD_APPLIED,
+        MutationState.COMPENSATING,
+    }:
+        await _leave_db_committed(mutation_fixture)
+    journal = MutationJournal(mutation_fixture.sessions)
+    if left_state in {
+        MutationState.FINALIZING,
+        MutationState.FORWARD_APPLIED,
+    }:
+        await journal.mark_finalizing(mutation_fixture.batch_id)
+    if left_state is MutationState.FORWARD_APPLIED:
+        persisted = mutation_fixture.command.persisted()
+        descriptor = persisted.projections[0]
+        await FileSystemProjectionExecutor().apply_forward(
+            mutation_fixture.scope,
+            mutation_fixture.operation_id,
+            persisted,
+            mutation_fixture.space_lease.fence_receipt("space-test"),
+            ordinals=(descriptor.ordinal,),
+        )
+        await journal.mark_step_applied(
+            mutation_fixture.operation_id,
+            descriptor.ordinal,
+            descriptor.after_sha256,
+        )
+        await journal.transition(
+            mutation_fixture.operation_id,
+            MutationState.FORWARD_APPLIED,
+        )
+    elif left_state is MutationState.COMPENSATING:
+        async with mutation_fixture.sessions.begin() as session:
+            batch = await session.get(MutationBatch, mutation_fixture.batch_id)
+            operation = await session.get(MutationOperation, mutation_fixture.operation_id)
+            assert batch is not None and operation is not None
+            batch.state = MutationState.COMPENSATING
+            operation.state = MutationState.COMPENSATING
+
+    first = await _recover_from_fresh_process_objects(mutation_fixture)
+    second = await _recover_from_fresh_process_objects(mutation_fixture)
+
+    async with mutation_fixture.sessions() as session:
+        row = await session.get(Folder, "folder-recovery")
+        events = tuple(await session.scalars(select(SyncOutbox)))
+    projection = mutation_fixture.scope.file_system._load()["index"]
+    if left_state in {MutationState.INTENT, MutationState.COMPENSATING}:
+        assert row is None
+        assert events == ()
+        assert projection == {}
+        assert first.aborted or first.compensated
+    else:
+        assert row is not None
+        assert len(events) == 1 and events[0].visible is True
+        assert projection
+        assert first.finalized == (mutation_fixture.batch_id,)
+    assert second == RecoveryResult((), (), (), ())
 
 
 def test_recovery_action_map_covers_every_nonterminal_state() -> None:
