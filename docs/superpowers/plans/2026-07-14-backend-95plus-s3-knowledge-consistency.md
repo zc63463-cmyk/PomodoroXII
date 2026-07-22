@@ -2596,10 +2596,36 @@ git commit -m "feat(mutation): recover or compensate interrupted writes"
 **Files:**
 - Create: `backend/app/commands/__init__.py`
 - Create: `backend/app/commands/entity.py`
+- Modify: `backend/app/registry/entities.py`
+- Modify: `backend/app/registry/catalog.py`
+- Modify: `backend/app/registry/builtin.py`
+- Modify: `backend/app/services/base.py`
+- Modify: `backend/app/services/schedule.py`
+- Modify: `backend/app/services/folder.py`
+- Modify: `backend/app/services/task.py`
+- Modify: `backend/app/services/session.py`
+- Modify: `backend/app/services/habit.py`
+- Modify: `backend/app/services/quick_note.py`
+- Modify: `backend/app/services/reflection.py`
+- Modify: `backend/app/services/time_block.py`
 - Create: `backend/tests/test_entity_invariants.py`
 - Create: `backend/tests/test_entity_concurrency.py`
 - Modify: `backend/tests/test_routes_pagination.py`
 - Modify: `backend/tests/test_sync_integration.py`
+
+**Production Contracts (amendment):**
+
+1. **Junction endpoint metadata:** `EntitySpec` gains `junction_endpoints: tuple[tuple[str, str], ...] | None = None` field. Each tuple is `(field_name, endpoint_entity_type)`. `CompiledEntityCatalog` exposes `junction_endpoints_for(entity_type) -> tuple[tuple[str, str], ...] | None`. Catalog compile validates that endpoint entity types exist in the catalog. Only `schedule_quick_note` defines junction endpoints: `(("schedule_id", "schedule"), ("quick_note_id", "quick_note"))`. `task_quick_note`, `session_quick_note`, and `task_relation` must NOT be S3 gate dependencies.
+
+2. **Endpoint active判定:** `RelationDomainPolicy` checks `context.authority.row(entity_type, endpoint_id)` is not None AND, for entities with `soft_delete=True`, the row's `trashed_at` is None. For entities with `soft_delete=False`, existence alone is sufficient. Metadata missing, duplicate, or unparseable causes catalog compile fail-closed.
+
+3. **Production stable-order owner:** Every service `list()` method MUST append `model.id.asc()` (or `.desc()` for descending sorts) as the final `ORDER BY` tiebreaker. This must be implemented in the production query, not faked by test helpers or SQLite row order.
+
+4. **SyncEventLike contract:** Must declare `expected_version: int | None`, `client_updated_at: str`, `action: Literal["create", "update", "delete"]`. `from_sync_event` uses direct attribute access (`event.expected_version`, `event.client_updated_at`), not `getattr`. Canonical timestamp missing or invalid must fail-closed. Regular REST create/update/delete pass `client_updated_at=None`. `client_updated_at` only flows from `from_sync_event` to private `_build_*` methods — not added to public `update()` parameters. Public signatures use `SpaceRuntimeHandle`, not `object`.
+
+5. **Unknown payload rejection:** `EntityCommand` MUST NOT filter payload. Unknown fields flow into `MutationRequest` where `_require_payload_fields` rejects them. Different unknown caller intent must NOT collapse to the same request hash/receipt. Rejection produces zero operation/stage/ledger/entity writes. ID authority comparison must be precise — no `str()` coercion.
+
+6. **No Task 7 changes:** This amendment does not alter Task 7 or subsequent phases. No S4 transport integration.
 
 **Interfaces:**
 - Consumes: `CompiledEntityCatalog`, Task 2 `MutationRequest`/`MutationRuleViolation`, Task 4 compiler/UoW, and authoritative rows read only under its Space-exclusive compiler phase.
@@ -2841,7 +2867,7 @@ Expected: PASS; one CAS winner, stable tie order, and the single `MutationReject
 - [ ] **Step 5: Commit EntityCommand**
 
 ```powershell
-git add app/commands/__init__.py app/commands/entity.py tests/test_entity_invariants.py tests/test_entity_concurrency.py tests/test_routes_pagination.py tests/test_sync_integration.py
+git add app/commands/__init__.py app/commands/entity.py app/registry/entities.py app/registry/catalog.py app/registry/builtin.py app/services/base.py app/services/schedule.py app/services/folder.py app/services/task.py app/services/session.py app/services/habit.py app/services/quick_note.py app/services/reflection.py app/services/time_block.py tests/test_entity_invariants.py tests/test_entity_concurrency.py tests/test_routes_pagination.py tests/test_sync_integration.py
 git commit -m "feat(commands): centralize entity invariants and cas"
 ```
 
