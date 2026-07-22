@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -118,6 +119,29 @@ class _MutationScope:
         self._stage_store.close()
 
 
+class _ConcurrentMutationScope(_MutationScope):
+    """A mutation scope that serializes exclusive_space_resources via asyncio.Lock.
+
+    Each scope gets its own _Lease to avoid cross-task owner_task conflicts.
+    The asyncio.Lock ensures writers are serialized at the exclusive_space_resources
+    boundary — real concurrency, not private helper simulation.
+    """
+
+    def __init__(self, fixture: EntityFixture, lock: asyncio.Lock) -> None:
+        super().__init__(fixture)
+        self._lock = lock
+        self._own_lease = _Lease(LeaseMode.EXCLUSIVE, "space-test")
+        self.space_lease = self._own_lease
+        self.global_lease = _Lease(LeaseMode.SHARED, "global")
+
+        @asynccontextmanager
+        async def exclusive_space_resources(purpose: str, timeout_seconds: int):
+            async with self._lock:
+                yield self._own_lease
+
+        self.exclusive_space_resources = exclusive_space_resources
+
+
 class EntityFixture:
     """End-to-end mutation fixture with FolderDomainPolicy and RelationDomainPolicy."""
 
@@ -171,6 +195,9 @@ class EntityFixture:
 
     def open_mutation_scope(self) -> _MutationScope:
         return _MutationScope(self)
+
+    def open_concurrent_scope(self, lock: asyncio.Lock) -> _ConcurrentMutationScope:
+        return _ConcurrentMutationScope(self, lock)
 
     async def folder_tree(self, *ids: str) -> None:
         now = "2026-07-21T00:00:00.000Z"
