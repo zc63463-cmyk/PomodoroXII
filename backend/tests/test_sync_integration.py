@@ -427,3 +427,93 @@ async def test_sync_pagination_has_more(client):
     assert data["cursor_version"] == 2
     assert data["has_more"] is True
     assert len(data["tasks"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# LWW conflict resolution & cursor tiebreaker
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_sync_push_rejects_stale_update_with_lww_conflict(client):
+    """LWW rejects updates with older client_updated_at - conflict reported."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+    eid = uuid.uuid4().hex
+
+    # Create at 12:00.
+    await _push(client, headers, [
+        _make_event(
+            entity_id=eid, action="create",
+            payload={
+                "id": eid, "title": "Original", "status": "todo",
+                "priority": "medium", "tags": "[]",
+            },
+            client_updated_at="2026-07-04T12:00:00.000Z",
+        )
+    ])
+
+    # Try to update at 10:00 (older) - should be rejected.
+    data = await _push(client, headers, [
+        _make_event(
+            entity_id=eid, action="update",
+            payload={"title": "Stale Update"},
+            client_updated_at="2026-07-04T10:00:00.000Z",
+        )
+    ])
+
+    assert len(data["conflicts"]) == 1
+    assert data["conflicts"][0]["entity_id"] == eid
+    assert data["conflicts"][0]["resolution"] == "local"
+    assert all(item["entity_id"] != eid for item in data["applied"])
+
+    # Verify original title is preserved.
+    resp = await client.get(
+        "/api/v1/sync/pull?since=&limit=100", headers=headers
+    )
+    tasks = {t["id"]: t for t in resp.json()["tasks"]}
+    assert tasks[eid]["title"] == "Original"
+
+
+@pytest.mark.asyncio
+async def test_sync_pull_since_id_advances_past_tied_timestamps(client):
+    """since_id tiebreaker correctly advances through rows sharing updated_at."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    tied_ts = "2026-07-04T10:00:00.000Z"
+    eids = [uuid.uuid4().hex for _ in range(3)]
+    await _push(client, headers, [
+        _make_event(
+            entity_id=eid, action="create",
+            payload={
+                "id": eid, "title": f"Tie-{i}", "status": "todo",
+                "priority": "medium", "tags": "[]",
+            },
+            client_updated_at=tied_ts,
+        )
+        for i, eid in enumerate(eids)
+    ])
+
+    # First pull: get all 3 tasks.
+    resp = await client.get(
+        "/api/v1/sync/pull?since=&limit=100", headers=headers
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    task_ids = {t["id"] for t in data["tasks"]}
+    for eid in eids:
+        assert eid in task_ids
+    assert data["next_since"] == tied_ts
+    assert data["next_since_id"], "next_since_id must be non-empty for tied timestamps"
+
+    # Second pull with since + since_id: should return 0 tasks.
+    resp = await client.get(
+        f"/api/v1/sync/pull?since={data['next_since']}"
+        f"&since_id={data['next_since_id']}&limit=100",
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data2 = resp.json()
+    assert len(data2["tasks"]) == 0, (
+        "since_id should advance past all rows sharing the same updated_at"
+    )
