@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Literal, Protocol
 
 from app.mutation.types import (
     ContainedProjectionActionField,
@@ -22,6 +22,7 @@ from app.mutation.types import (
     ProjectionPlan,
     SyncEventPlan,
     require_frozen_object,
+    validate_canonical_timestamp,
 )
 from app.mutation.unit_of_work import (
     MutationCompileContext,
@@ -30,6 +31,7 @@ from app.mutation.unit_of_work import (
 )
 from app.registry.catalog import CompiledEntityCatalog
 from app.registry.entities import EntitySpec
+from app.runtime.space import SpaceRuntimeHandle
 from app.services.time import utc_now_iso_ms
 
 
@@ -38,8 +40,10 @@ class SyncEventLike(Protocol):
 
     entity_type: str
     entity_id: str
-    action: str
+    action: Literal["create", "update", "delete"]
     payload: Mapping[str, object]
+    expected_version: int | None
+    client_updated_at: str
 
 
 def _serialize_folder_row(row: Mapping[str, object]) -> bytes:
@@ -73,7 +77,7 @@ class EntityCommand:
 
     def create(
         self,
-        scope: object,
+        scope: SpaceRuntimeHandle,
         entity_type: str,
         payload: Mapping[str, object],
         expected_version: int | None,
@@ -83,7 +87,7 @@ class EntityCommand:
 
     def update(
         self,
-        scope: object,
+        scope: SpaceRuntimeHandle,
         entity_type: str,
         entity_id: str,
         patch: Mapping[str, object],
@@ -94,7 +98,7 @@ class EntityCommand:
 
     def delete(
         self,
-        scope: object,
+        scope: SpaceRuntimeHandle,
         entity_type: str,
         entity_id: str,
         expected_version: int | None,
@@ -102,17 +106,20 @@ class EntityCommand:
         spec = self._catalog.get(entity_type)
         return self._build_delete(spec, entity_id, expected_version)
 
-    def from_sync_event(self, scope: object, event: SyncEventLike) -> MutationRequest:
+    def from_sync_event(self, scope: SpaceRuntimeHandle, event: SyncEventLike) -> MutationRequest:
         spec = self._catalog.get_by_sync_key(event.entity_type)
         payload = dict(event.payload)
         supplied_id = payload.get(spec.primary_key)
-        if supplied_id is not None and str(supplied_id) != event.entity_id:
+        if supplied_id is not None and supplied_id != event.entity_id:
             raise MutationRuleViolation(
                 "entity_id_mismatch",
                 {"entityId": event.entity_id, "field": spec.primary_key},
             )
-        expected = getattr(event, "expected_version", None)
-        client_ts = getattr(event, "client_updated_at", None)
+        expected = event.expected_version
+        client_ts = event.client_updated_at
+        if client_ts is None:
+            raise ValueError("sync event client_updated_at must not be None")
+        validate_canonical_timestamp(client_ts)
         if event.action == "create":
             payload[spec.primary_key] = event.entity_id
             return self._build_create(spec, payload, expected, client_updated_at=client_ts)
