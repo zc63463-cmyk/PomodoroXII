@@ -4,6 +4,13 @@ Covers:
 1. strict_cas rejects stale expected_version — no LWW fallback
 2. timestamp_lww accepts remote-wins update when client is newer
 3. timestamp_lww rejects local-wins update when client is older
+4. Real dual-writer asyncio.gather concurrency (one winner, one conflict)
+5. LWW equal-timestamp: local wins
+6. LWW unparseable authority timestamp: manual resolution
+7. Expected version equal: no conflict (resolution=None)
+8. strict_cas rejects even with newer client timestamp (no LWW fallback)
+9. LWW remote wins writes durable FINALIZED receipt
+10. Idempotent retry reads original receipt without re-execution
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ import pytest
 from sqlalchemy import text
 
 from app.errors import MutationRejectedError
+from app.mutation.types import MutationState
 from tests.test_entity_invariants import EntityFixture, entity_fixture  # noqa: F401
 
 
@@ -53,6 +61,8 @@ async def test_lww_remote_wins_when_client_is_newer(entity_fixture: EntityFixtur
         assert result.resolution == "remote"
     finally:
         await scope.aclose()
+    # Fresh restart reads the original durable receipt — not recomputed.
+    assert await entity_fixture.read_stored_resolution("op-lww-remote") == "remote"
 
 
 async def test_lww_local_wins_when_client_is_older(entity_fixture: EntityFixture):
@@ -76,6 +86,8 @@ async def test_lww_local_wins_when_client_is_older(entity_fixture: EntityFixture
         assert exc_info.value.rejection.details.get("resolution") == "local"
     finally:
         await scope.aclose()
+    # Fresh restart reads the original durable receipt — not recomputed.
+    assert await entity_fixture.read_stored_resolution("op-lww-local") == "local"
 
 
 async def test_concurrent_writers_one_wins_one_version_conflict(
@@ -122,3 +134,146 @@ async def test_concurrent_writers_one_wins_one_version_conflict(
 
     await scope_a.aclose()
     await scope_b.aclose()
+
+# --- Task 6: Comprehensive LWW/CAS evidence tests ---
+
+
+async def test_lww_local_wins_when_client_timestamp_equal(entity_fixture: EntityFixture):
+    """Equal client and authority timestamps: local wins (client is not newer)."""
+    await entity_fixture.seed_schedule(
+        "sch-eq", version=1, updated_at="2026-07-14T00:00:00.000Z"
+    )
+    outcome = await entity_fixture.execute_sync_update(
+        "sch-eq",
+        entity_type="schedule",
+        expected_version=2,
+        client_updated_at="2026-07-14T00:00:00.000Z",
+        operation_id="op-lww-equal",
+    )
+    assert outcome.applied == ()
+    assert len(outcome.rejected) == 1
+    assert outcome.rejected[0].code == "version_conflict"
+    assert outcome.rejected[0].details.get("resolution") == "local"
+
+
+async def test_lww_manual_resolution_when_authority_timestamp_unparseable(
+    entity_fixture: EntityFixture,
+):
+    """Unparseable authority timestamp: manual resolution required."""
+    await entity_fixture.seed_schedule(
+        "sch-manual", version=1, updated_at="not-a-timestamp"
+    )
+    outcome = await entity_fixture.execute_sync_update(
+        "sch-manual",
+        entity_type="schedule",
+        expected_version=2,
+        client_updated_at="2026-07-14T00:00:00.000Z",
+        operation_id="op-lww-manual",
+    )
+    assert outcome.applied == ()
+    assert len(outcome.rejected) == 1
+    assert outcome.rejected[0].code == "version_conflict"
+    assert outcome.rejected[0].details.get("resolution") == "manual"
+
+
+async def test_expected_version_equal_returns_no_conflict(entity_fixture: EntityFixture):
+    """Matching expected_version: no conflict, resolution is None."""
+    await entity_fixture.seed_schedule(
+        "sch-match", version=1, updated_at="2026-07-01T00:00:00.000Z"
+    )
+    outcome = await entity_fixture.execute_sync_update(
+        "sch-match",
+        entity_type="schedule",
+        expected_version=1,
+        client_updated_at="2026-07-14T00:00:00.000Z",
+        operation_id="op-version-match",
+    )
+    assert len(outcome.applied) == 1
+    assert outcome.rejected == ()
+    assert outcome.applied[0].resolution is None
+
+
+async def test_strict_cas_rejects_even_with_newer_client_timestamp(
+    entity_fixture: EntityFixture,
+):
+    """strict_cas policy rejects stale version even when client timestamp is newer."""
+    await entity_fixture.seed_strict_cas_entity(
+        "strict-newer", version=1, updated_at="2026-07-01T00:00:00.000Z"
+    )
+    outcome = await entity_fixture.execute_sync_update(
+        "strict-newer",
+        entity_type="strict_fixture",
+        expected_version=2,
+        client_updated_at="2026-07-14T00:00:00.000Z",
+        operation_id="op-strict-newer",
+    )
+    assert outcome.applied == ()
+    assert len(outcome.rejected) == 1
+    assert outcome.rejected[0].code == "version_conflict"
+    assert "resolution" not in outcome.rejected[0].details
+
+
+async def test_lww_remote_wins_writes_durable_receipt(entity_fixture: EntityFixture):
+    """LWW remote-wins update writes a durable FINALIZED receipt with resolution='remote'."""
+    await entity_fixture.seed_schedule(
+        "sch-durable", version=1, updated_at="2026-07-01T00:00:00.000Z"
+    )
+    outcome = await entity_fixture.execute_sync_update(
+        "sch-durable",
+        entity_type="schedule",
+        expected_version=2,
+        client_updated_at="2026-07-14T00:00:00.000Z",
+        operation_id="op-durable-remote",
+    )
+    assert len(outcome.applied) == 1
+    assert outcome.applied[0].resolution == "remote"
+    assert outcome.applied[0].state == MutationState.FINALIZED
+
+    # Durable version incremented exactly once.
+    async with entity_fixture._sessions() as session:
+        result = await session.execute(
+            text("SELECT version FROM schedules WHERE id = 'sch-durable'")
+        )
+        row = result.fetchone()
+    assert row is not None
+    assert row[0] == 2
+
+    # Fresh restart reads the original durable receipt.
+    assert await entity_fixture.read_stored_resolution("op-durable-remote") == "remote"
+
+
+async def test_idempotent_retry_reads_original_receipt(entity_fixture: EntityFixture):
+    """Re-executing the same operation_id returns the original receipt without re-execution."""
+    await entity_fixture.seed_schedule(
+        "sch-retry", version=1, updated_at="2026-07-01T00:00:00.000Z"
+    )
+    # First execution: succeeds, version becomes 2.
+    first = await entity_fixture.execute_sync_update(
+        "sch-retry",
+        entity_type="schedule",
+        expected_version=2,
+        client_updated_at="2026-07-14T00:00:00.000Z",
+        operation_id="op-retry-test",
+    )
+    assert len(first.applied) == 1
+    assert first.applied[0].resolution == "remote"
+
+    # Second execution with same operation_id: returns original receipt.
+    second = await entity_fixture.execute_sync_update(
+        "sch-retry",
+        entity_type="schedule",
+        expected_version=2,
+        client_updated_at="2026-07-14T00:00:00.000Z",
+        operation_id="op-retry-test",
+    )
+    assert len(second.applied) == 1
+    assert second.applied[0].resolution == "remote"
+
+    # DB version still 2 — not incremented again.
+    async with entity_fixture._sessions() as session:
+        result = await session.execute(
+            text("SELECT version FROM schedules WHERE id = 'sch-retry'")
+        )
+        row = result.fetchone()
+    assert row is not None
+    assert row[0] == 2
