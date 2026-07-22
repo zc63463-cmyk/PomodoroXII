@@ -20,7 +20,7 @@ from typing import Protocol, Sequence, assert_never
 from filelock import FileLock
 from nanoid import generate
 from slugify import slugify
-from sqlalchemy import create_engine
+from sqlalchemy import Boolean, create_engine
 from sqlalchemy.schema import CreateTable
 
 from app.errors import SpaceRecoveryRequiredError
@@ -531,8 +531,16 @@ class StorageBase:
                     target = ContainedProjectionActionField(
                         f"index/{table.name}/{primary_key}/{identity}"
                     )
+                    normalized = {
+                        column.name: (
+                            bool(value)
+                            if isinstance(column.type, Boolean)
+                            else value
+                        )
+                        for column, value in zip(table.columns, values, strict=True)
+                    }
                     index[str(target)] = self._canonical_projection_blob(
-                        {"row": dict(zip(columns, values, strict=True))}
+                        {"row": normalized}
                     )
             for note_id, title, content in connection.execute(
                 "SELECT notes.note_id, notes_fts.title, notes_fts.content "

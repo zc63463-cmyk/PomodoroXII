@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +24,7 @@ from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
 from app.models.task import Task
 from app.mutation.journal import MutationJournal
+from app.mutation.recovery import MutationRecovery
 from app.mutation.staging import StageStore
 from app.mutation.types import (
     DbMutationPlan,
@@ -43,6 +46,737 @@ from app.mutation.unit_of_work import (
 from app.registry import CATALOG
 from app.runtime.contained_io import BoundDirectoryHandle, BoundStageDirectory
 from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
+
+
+def test_knowledge_commands_preserve_note_body_as_canonical_intent() -> None:
+    from app.knowledge.commands import KnowledgeCommands
+
+    commands = KnowledgeCommands()
+    request = commands.create_note_request(
+        {
+            "id": "n-knowledge",
+            "title": "Paper",
+            "folder_id": None,
+            "content": "Body term",
+        },
+        expected_version=None,
+    )
+
+    assert request.name == "knowledge.note.create"
+    assert request.entity_type == "note"
+    assert request.entity_id == "n-knowledge"
+    assert request.payload["content"] == "Body term"
+
+
+def test_frontmatter_serialization_has_canonical_order_and_lf() -> None:
+    from app.file_system.frontmatter import serialize_frontmatter
+
+    encoded = serialize_frontmatter(
+        {
+            "updated_at": "2026-07-22T00:00:01.000Z",
+            "folder_id": "f1",
+            "tags": ["research"],
+            "id": "n1",
+            "created_at": "2026-07-22T00:00:00.000Z",
+            "title": "Paper",
+            "content_hash": "sha256:body",
+        }
+    )
+
+    assert encoded == (
+        "---\n"
+        "id: n1\n"
+        "title: Paper\n"
+        "tags: [research]\n"
+        "folder_id: f1\n"
+        "content_hash: sha256:body\n"
+        "created_at: 2026-07-22T00:00:00.000Z\n"
+        "updated_at: 2026-07-22T00:00:01.000Z\n"
+        "---\n"
+    )
+    assert "\r" not in encoded
+
+
+def test_projection_rebuild_requires_one_projection_per_authority_row() -> None:
+    from app.knowledge.commands import KnowledgeCommands
+    from app.mutation.unit_of_work import _validate_compiled_command
+
+    request = KnowledgeCommands().rebuild_projection_request("space-test")
+    command = MutationCommand.from_effects(
+        request=request,
+        db_plans=(),
+        projections=(),
+        sync_events=(),
+        result_value={"rebuiltFolders": 1, "rebuiltNotes": 0},
+    )
+    authority = AuthorityOverlay(
+        CATALOG,
+        {("folder", "f-required"): {"id": "f-required"}},
+    )
+
+    with pytest.raises(
+        SpaceRecoveryRequiredError,
+        match="complete locked authority",
+    ):
+        _validate_compiled_command(command, CATALOG, authority=authority)
+
+
+@pytest.mark.asyncio
+async def test_consistency_verify_requires_existing_paths_without_creating(
+    tmp_path,
+) -> None:
+    from app.knowledge.consistency import KnowledgeConsistencyChecker, SpaceDataView
+
+    view = SpaceDataView(
+        space_id="missing",
+        db_path=tmp_path / "missing-space.db",
+        notes_dir=tmp_path / "missing-notes",
+        index_db=tmp_path / "missing-index.db",
+        catalog_hash=CATALOG.hash,
+    )
+
+    with pytest.raises(FileNotFoundError):
+        await KnowledgeConsistencyChecker().verify(view)
+
+    assert not view.db_path.exists()
+    assert not view.notes_dir.exists()
+    assert not view.index_db.exists()
+
+
+def test_note_create_projection_set_is_deterministic_and_complete() -> None:
+    from app.knowledge.projections import KnowledgeProjectionBuilder
+
+    row = {
+        "id": "n1",
+        "title": "Paper",
+        "content_hash": hashlib.sha256(b"Body term").hexdigest(),
+        "word_count": 2,
+        "summary": "",
+        "tags": '["research"]',
+        "category": None,
+        "folder_id": "f1",
+        "status": "active",
+        "trashed_at": None,
+        "created_at": "2026-07-22T00:00:00.000Z",
+        "updated_at": "2026-07-22T00:00:00.000Z",
+        "version": 1,
+    }
+    builder = KnowledgeProjectionBuilder()
+
+    first = builder.build_note(
+        before_row=None,
+        after_row=row,
+        before_path=None,
+        before_markdown=None,
+        body="Body term",
+    )
+    second = builder.build_note(
+        before_row=None,
+        after_row=row,
+        before_path=None,
+        before_markdown=None,
+        body="Body term",
+    )
+
+    assert first == second
+    assert [projection.ordinal for projection in first] == [0, 1, 2]
+    assert [projection.tag.value for projection in first] == [
+        "markdown_write",
+        "index_replace",
+        "fts_replace",
+    ]
+    assert str(first[0].target) == "notes/f1/n1-paper.md"
+    assert b"tags: [research]" in first[0].after
+
+
+@pytest.mark.asyncio
+async def test_knowledge_note_create_compiles_db_markdown_index_fts_and_sync(
+    uow_fixture,
+) -> None:
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+
+    request = KnowledgeCommands().create_note_request(
+        {
+            "id": "n-compiled",
+            "title": "Compiled",
+            "folder_id": None,
+            "tags": ["atomic"],
+            "content": "authoritative body",
+        },
+        expected_version=None,
+    )
+    compiler = MutationCompiler(CATALOG, [KnowledgeDomainPolicy()])
+    item = mutation_types.PreparedBatchItem(
+        0,
+        "knowledge-create",
+        request.request_hash,
+        request,
+        None,
+    )
+
+    async with uow_fixture.sessions() as session:
+        compiled = await compiler.compile_batch(uow_fixture.scope, (item,), session)
+
+    command = compiled.commands[0]
+    after = command.db_plans[0].after_row
+    assert after is not None
+    assert after["content_hash"] == hashlib.sha256(b"authoritative body").hexdigest()
+    assert after["tags"] == '["atomic"]'
+    assert [projection.tag.value for projection in command.projections] == [
+        "markdown_write",
+        "index_replace",
+        "fts_replace",
+    ]
+    assert command.sync_events[0].payload["content"] == "authoritative body"
+
+
+@pytest.mark.asyncio
+async def test_folder_create_is_visible_to_note_create_in_same_compilation(
+    uow_fixture,
+) -> None:
+    from app.commands import EntityCommand, FolderDomainPolicy
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+
+    folder = EntityCommand(CATALOG).create(
+        uow_fixture.scope,
+        "folder",
+        {"id": "f-batch", "name": "Research"},
+        expected_version=None,
+    )
+    note = KnowledgeCommands().create_note_request(
+        {
+            "id": "n-batch",
+            "title": "Paper",
+            "folder_id": "f-batch",
+            "content": "Batch body",
+        },
+        expected_version=None,
+    )
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    items = tuple(
+        mutation_types.PreparedBatchItem(
+            index,
+            f"knowledge-batch-{index}",
+            request.request_hash,
+            request,
+            None,
+        )
+        for index, request in enumerate((folder, note))
+    )
+
+    async with uow_fixture.sessions() as session:
+        compiled = await compiler.compile_batch(uow_fixture.scope, items, session)
+
+    assert compiled.rejected == ()
+    assert [command.request.entity_type for command in compiled.commands] == [
+        "folder",
+        "note",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_note_metadata_update_compiles_rename_frontmatter_index_and_fts(
+    uow_fixture,
+) -> None:
+    from app.commands import EntityCommand, FolderDomainPolicy
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+
+    commands = KnowledgeCommands()
+    folder = EntityCommand(CATALOG).create(
+        uow_fixture.scope,
+        "folder",
+        {"id": "f2", "name": "Destination"},
+        expected_version=None,
+    )
+    create = commands.create_note_request(
+        {
+            "id": "n-meta",
+            "title": "Old",
+            "folder_id": None,
+            "content": "Body term",
+        },
+        expected_version=None,
+    )
+    update = commands.update_note_metadata_request(
+        "n-meta",
+        {"title": "New", "folder_id": "f2", "tags": ["tag"]},
+        expected_version=1,
+    )
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    items = tuple(
+        mutation_types.PreparedBatchItem(
+            index,
+            f"knowledge-meta-{index}",
+            request.request_hash,
+            request,
+            None,
+        )
+        for index, request in enumerate((folder, create, update))
+    )
+
+    async with uow_fixture.sessions() as session:
+        compiled = await compiler.compile_batch(uow_fixture.scope, items, session)
+
+    update_command = compiled.commands[2]
+    assert update_command.result_value["version"] == 2
+    assert [projection.tag.value for projection in update_command.projections] == [
+        "path_rename",
+        "markdown_write",
+        "index_replace",
+        "fts_replace",
+    ]
+    assert update_command.sync_events[0].payload["content"] == "Body term"
+    markdown = next(
+        projection.after
+        for projection in update_command.projections
+        if projection.tag.value == "markdown_write"
+    )
+    assert markdown is not None
+    assert b"title: New" in markdown
+    assert b"folder_id: f2" in markdown
+    assert b"tags: [tag]" in markdown
+
+
+@pytest.mark.asyncio
+async def test_note_content_update_rewrites_body_index_fts_and_sync(uow_fixture) -> None:
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+
+    commands = KnowledgeCommands()
+    requests = (
+        commands.create_note_request(
+            {"id": "n-content", "title": "Paper", "content": "Old body"},
+            expected_version=None,
+        ),
+        commands.update_note_content_request(
+            "n-content", "New body term", expected_version=1
+        ),
+    )
+    compiler = MutationCompiler(CATALOG, [KnowledgeDomainPolicy()])
+    items = tuple(
+        mutation_types.PreparedBatchItem(
+            index, f"knowledge-content-{index}", request.request_hash, request, None
+        )
+        for index, request in enumerate(requests)
+    )
+
+    async with uow_fixture.sessions() as session:
+        compiled = await compiler.compile_batch(uow_fixture.scope, items, session)
+
+    command = compiled.commands[1]
+    assert [projection.tag.value for projection in command.projections] == [
+        "markdown_write",
+        "index_replace",
+        "fts_replace",
+    ]
+    assert command.result_value["version"] == 2
+    assert command.result_value["content_hash"] == hashlib.sha256(
+        b"New body term"
+    ).hexdigest()
+    assert command.sync_events[0].payload["content"] == "New body term"
+
+
+@pytest.mark.asyncio
+async def test_note_combined_update_renames_and_rewrites_authorities(uow_fixture) -> None:
+    from app.file_system.frontmatter import extract_frontmatter
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+
+    commands = KnowledgeCommands()
+    requests = (
+        commands.create_note_request(
+            {"id": "n-combined", "title": "Old", "content": "Old body"},
+            expected_version=None,
+        ),
+        commands.update_note_request(
+            "n-combined",
+            {"title": "New", "tags": ["combined"], "content": "Combined body"},
+            expected_version=1,
+        ),
+    )
+    compiler = MutationCompiler(CATALOG, [KnowledgeDomainPolicy()])
+    items = tuple(
+        mutation_types.PreparedBatchItem(
+            index, f"knowledge-combined-{index}", request.request_hash, request, None
+        )
+        for index, request in enumerate(requests)
+    )
+
+    async with uow_fixture.sessions() as session:
+        compiled = await compiler.compile_batch(uow_fixture.scope, items, session)
+
+    command = compiled.commands[1]
+    assert [projection.tag.value for projection in command.projections] == [
+        "path_rename",
+        "markdown_write",
+        "index_replace",
+        "fts_replace",
+    ]
+    markdown = next(
+        projection.after
+        for projection in command.projections
+        if projection.tag.value == "markdown_write"
+    )
+    assert markdown is not None
+    metadata, body = extract_frontmatter(markdown.decode("utf-8"))
+    assert metadata is not None
+    assert metadata["title"] == "New"
+    assert metadata["tags"] == ["combined"]
+    assert body == "Combined body"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("folder_state", ["missing", "trashed"])
+async def test_note_create_rejects_inactive_folder(uow_fixture, folder_state) -> None:
+    from app.commands import EntityCommand, FolderDomainPolicy
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+
+    requests = []
+    if folder_state == "trashed":
+        requests.append(
+            EntityCommand(CATALOG).create(
+                uow_fixture.scope,
+                "folder",
+                {
+                    "id": "f-inactive",
+                    "name": "Inactive",
+                    "trashed_at": "2026-07-22T00:00:00.000Z",
+                },
+                expected_version=None,
+            )
+        )
+    requests.append(
+        KnowledgeCommands().create_note_request(
+            {
+                "id": f"n-{folder_state}",
+                "title": "Rejected",
+                "folder_id": "f-inactive",
+                "content": "Body",
+            },
+            expected_version=None,
+        )
+    )
+    compiler = MutationCompiler(
+        CATALOG, [FolderDomainPolicy(), KnowledgeDomainPolicy()]
+    )
+    items = tuple(
+        mutation_types.PreparedBatchItem(
+            index, f"inactive-folder-{index}", request.request_hash, request, None
+        )
+        for index, request in enumerate(requests)
+    )
+
+    async with uow_fixture.sessions() as session:
+        compiled = await compiler.compile_batch(uow_fixture.scope, items, session)
+
+    assert [rejection.code for rejection in compiled.rejected] == [
+        "relation_endpoint_missing"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_folder_rename_and_move_keep_descendant_note_path_stable(
+    uow_fixture,
+) -> None:
+    from app.commands import EntityCommand, FolderDomainPolicy
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+
+    entities = EntityCommand(CATALOG)
+    requests = (
+        entities.create(
+            uow_fixture.scope,
+            "folder",
+            {"id": "f-root-a", "name": "Root A"},
+            expected_version=None,
+        ),
+        entities.create(
+            uow_fixture.scope,
+            "folder",
+            {"id": "f-root-b", "name": "Root B"},
+            expected_version=None,
+        ),
+        entities.create(
+            uow_fixture.scope,
+            "folder",
+            {"id": "f-child", "name": "Child", "parent_id": "f-root-a"},
+            expected_version=None,
+        ),
+        KnowledgeCommands().create_note_request(
+            {
+                "id": "n-descendant",
+                "title": "Stable",
+                "folder_id": "f-child",
+                "content": "Body",
+            },
+            expected_version=None,
+        ),
+        entities.update(
+            uow_fixture.scope,
+            "folder",
+            "f-child",
+            {"name": "Renamed", "parent_id": "f-root-b"},
+            expected_version=1,
+        ),
+    )
+    compiler = MutationCompiler(
+        CATALOG, [FolderDomainPolicy(), KnowledgeDomainPolicy()]
+    )
+    items = tuple(
+        mutation_types.PreparedBatchItem(
+            index, f"folder-stable-{index}", request.request_hash, request, None
+        )
+        for index, request in enumerate(requests)
+    )
+
+    async with uow_fixture.sessions() as session:
+        compiled = await compiler.compile_batch(uow_fixture.scope, items, session)
+
+    note_command = compiled.commands[3]
+    assert str(note_command.projections[0].target) == (
+        "notes/f-child/n-descendant-stable.md"
+    )
+    folder_update = compiled.commands[4]
+    assert [(projection.tag.value, str(projection.target)) for projection in folder_update.projections] == [
+        ("index_replace", "index/folders/id/f-child")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_store_projects_folder_and_note_through_one_uow(
+    uow_fixture,
+    tmp_path,
+) -> None:
+    from app.commands import EntityCommand, FolderDomainPolicy, RelationDomainPolicy
+    from app.file_system.api import get_file_system
+    from app.file_system.frontmatter import extract_frontmatter
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.knowledge.store import KnowledgeStore
+    from tests.test_mutation_recovery import _Lease as RecoveryLease
+
+    file_system = await get_file_system(
+        root_dir=tmp_path / "knowledge-files",
+        index_db=tmp_path / "knowledge-index.db",
+    )
+    stage_store = StageStore(_stage_authority(tmp_path / "knowledge-stages"))
+    scope = _Scope(uow_fixture.sessions, uow_fixture.receipt)
+    scope.file_system = file_system
+    scope.mutation_stages = stage_store
+    scope.global_lease = RecoveryLease(LeaseMode.SHARED, "global")
+    scope.space_lease = RecoveryLease(LeaseMode.EXCLUSIVE, "space-test")
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose: str, timeout_seconds: int):
+        assert purpose == "mutation"
+        assert timeout_seconds == 5
+        yield scope.space_lease
+
+    scope.exclusive_space_resources = exclusive_space_resources
+    executor = FileSystemProjectionExecutor()
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), RelationDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    interpreter = DbMutationInterpreter(CATALOG)
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=compiler,
+        interpreter=interpreter,
+        projection_executor=executor,
+        recovery_gate=MutationRecovery(
+            catalog=CATALOG,
+            interpreter=interpreter,
+            projection_executor=executor,
+        ),
+        journal_factory=MutationJournal,
+    )
+    store = KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(CATALOG),
+        uow=uow,
+    )
+    try:
+        folder = await store.create_folder(
+            scope,
+            {"id": "f-store", "name": "Research"},
+            expected_version=None,
+            operation_id="folder-store",
+        )
+        note = await store.create_note(
+            scope,
+            {
+                "id": "n-store",
+                "title": "Paper",
+                "folder_id": "f-store",
+                "tags": ["atomic"],
+                "content": "Stored body term",
+            },
+            expected_version=None,
+            operation_id="note-store",
+        )
+
+        assert folder.value["id"] == "f-store"
+        assert note.value["folder_id"] == "f-store"
+        assert await file_system.read_note("n-store") == "Stored body term"
+        snapshot = await file_system.snapshot_projection_authority()
+        assert "index/folders/id/f-store" in snapshot.index
+        assert "index/notes/note_id/n-store" in snapshot.index
+        assert "fts/n-store" in snapshot.fts
+
+        updated = await store.update_note_metadata(
+            scope,
+            "n-store",
+            {"title": "Revised", "tags": ["atomic", "updated"]},
+            expected_version=1,
+            operation_id="note-store-meta",
+        )
+
+        assert updated.value["version"] == 2
+        assert await file_system.read_note("n-store") == "Stored body term"
+        updated_snapshot = await file_system.snapshot_projection_authority()
+        assert "notes/f-store/n-store-paper.md" not in updated_snapshot.markdown
+        raw = updated_snapshot.markdown["notes/f-store/n-store-revised.md"].decode()
+        metadata, body = extract_frontmatter(raw)
+        assert metadata is not None
+        assert metadata["title"] == "Revised"
+        assert metadata["tags"] == ["atomic", "updated"]
+        assert body == "Stored body term"
+        search = await file_system.search("Stored body term")
+        assert [(item.note_id, item.title) for item in search] == [
+            ("n-store", "Revised")
+        ]
+
+        from app.knowledge.consistency import KnowledgeConsistencyChecker, SpaceDataView
+
+        database_path = uow_fixture.sessions.kw["bind"].url.database
+        assert database_path is not None
+        report = await KnowledgeConsistencyChecker().verify(
+            SpaceDataView(
+                space_id="space-test",
+                db_path=Path(database_path),
+                notes_dir=tmp_path / "knowledge-files",
+                index_db=tmp_path / "knowledge-index.db",
+                catalog_hash=CATALOG.hash,
+            )
+        )
+        assert report.valid, report.issues
+
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                "UPDATE mutation_batches SET state = 'FAILED_MANUAL' "
+                "WHERE batch_id = 'folder-store'"
+            )
+            connection.commit()
+        dirty_journal = await KnowledgeConsistencyChecker().verify(
+            SpaceDataView(
+                space_id="space-test",
+                db_path=Path(database_path),
+                notes_dir=tmp_path / "knowledge-files",
+                index_db=tmp_path / "knowledge-index.db",
+                catalog_hash=CATALOG.hash,
+            )
+        )
+        assert [
+            (issue.code, issue.entity_id, issue.actual)
+            for issue in dirty_journal.issues
+        ] == [("journal_not_clean", "folder-store", '"FAILED_MANUAL"')]
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                "UPDATE mutation_batches SET state = 'FINALIZED' "
+                "WHERE batch_id = 'folder-store'"
+            )
+            connection.commit()
+
+        orphan = tmp_path / "knowledge-files" / "notes" / "orphan.md"
+        orphan.write_text("unowned projection", encoding="utf-8")
+        damaged = await KnowledgeConsistencyChecker().verify(
+            SpaceDataView(
+                space_id="space-test",
+                db_path=Path(database_path),
+                notes_dir=tmp_path / "knowledge-files",
+                index_db=tmp_path / "knowledge-index.db",
+                catalog_hash=CATALOG.hash,
+            )
+        )
+        assert not damaged.valid
+        assert [(issue.code, issue.actual) for issue in damaged.issues] == [
+            ("markdown_extra", "notes/orphan.md")
+        ]
+        assert orphan.read_text(encoding="utf-8") == "unowned projection"
+        orphan.unlink()
+
+        index_path = tmp_path / "knowledge-index.db"
+        with sqlite3.connect(index_path) as connection:
+            connection.execute(
+                "UPDATE notes_fts SET content = 'stale projection' WHERE rowid = "
+                "(SELECT rowid FROM notes WHERE note_id = 'n-store')"
+            )
+            connection.commit()
+        rebuilt = await KnowledgeConsistencyChecker(uow=uow).rebuild(scope)
+        assert rebuilt.applied
+        assert rebuilt.rebuilt_folders == 1
+        assert rebuilt.rebuilt_notes == 1
+        assert rebuilt.failed_note_ids == ()
+        converged = await KnowledgeConsistencyChecker().verify(
+            SpaceDataView(
+                space_id="space-test",
+                db_path=Path(database_path),
+                notes_dir=tmp_path / "knowledge-files",
+                index_db=index_path,
+                catalog_hash=CATALOG.hash,
+            )
+        )
+        assert converged.valid, converged.issues
+
+        note_path = tmp_path / "knowledge-files" / "notes" / "f-store" / "n-store-revised.md"
+        canonical_markdown = note_path.read_text(encoding="utf-8")
+        note_path.write_text(
+            canonical_markdown.replace(
+                "\n---\n\nStored body term",
+                "\nextra: derived\n---\n\nStored body term",
+                1,
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        noncanonical = await KnowledgeConsistencyChecker().verify(
+            SpaceDataView(
+                space_id="space-test",
+                db_path=Path(database_path),
+                notes_dir=tmp_path / "knowledge-files",
+                index_db=index_path,
+                catalog_hash=CATALOG.hash,
+            )
+        )
+        assert [issue.code for issue in noncanonical.issues] == [
+            "frontmatter_keys_mismatch"
+        ]
+        canonicalized = await KnowledgeConsistencyChecker(uow=uow).rebuild(scope)
+        assert canonicalized.applied
+        assert note_path.read_text(encoding="utf-8") == canonical_markdown
+
+        corrupted = note_path.read_text(encoding="utf-8").replace(
+            "Stored body term", "corrupted body"
+        )
+        note_path.write_text(corrupted, encoding="utf-8", newline="\n")
+        rejected = await KnowledgeConsistencyChecker(uow=uow).rebuild(scope)
+        assert not rejected.applied
+        assert rejected.failed_note_ids == ("n-store",)
+        assert "corrupted body" in note_path.read_text(encoding="utf-8")
+    finally:
+        stage_store.close()
+        await file_system.close()
 
 
 def _projection_api():

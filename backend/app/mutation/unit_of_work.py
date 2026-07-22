@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +20,8 @@ from app.errors import (
     MutationRejectedError,
     SpaceRecoveryRequiredError,
 )
+from app.file_system.engine.base import _make_filename
+from app.file_system.frontmatter import strip_frontmatter
 from app.file_system.interfaces import FencedProjectionExecutor, ProjectionAuthoritySnapshot
 from app.file_system.schema import NoteModel as ProjectionNoteModel
 from app.models.mutation import MutationOperation
@@ -35,6 +38,7 @@ from app.mutation.types import (
     PersistedMutationCommand,
     PreparedBatchItem,
     ProjectionActionTag,
+    ProjectionPlan,
     RecoveryInspection,
     RecoveryResult,
     SyncEventPlan,
@@ -281,6 +285,18 @@ class AuthorityOverlay:
 
     def row(self, entity_type: str, entity_id: object) -> Mapping[str, object] | None:
         return self._rows.get((entity_type, entity_id))
+
+    def rows(self, entity_type: str) -> tuple[Mapping[str, object], ...]:
+        """Return one entity's locked rows in deterministic primary-key order."""
+        spec = self.catalog.get(entity_type)
+        return tuple(
+            row
+            for (kind, _identity), row in sorted(
+                self._rows.items(),
+                key=lambda item: (item[0][0], str(item[0][1])),
+            )
+            if kind == entity_type and spec.primary_key in row
+        )
 
     def markdown(self, target: str) -> bytes | None:
         return self._markdown.get(target)
@@ -940,7 +956,7 @@ def _note_after_body(
             "Note mutation has no authoritative Markdown after-body"
         )
     try:
-        return body.decode("utf-8")
+        return strip_frontmatter(body.decode("utf-8"))
     except UnicodeDecodeError as exc:
         raise SpaceRecoveryRequiredError(
             "Note Markdown after-body is not valid UTF-8"
@@ -1077,6 +1093,18 @@ def _projection_after_digest(projection) -> str | None:
     return projection.after_sha256
 
 
+def _note_projection_body_digest(projection: ProjectionPlan) -> str:
+    if projection.after is None:
+        raise SpaceRecoveryRequiredError("Note Markdown projection has no after image")
+    try:
+        body = strip_frontmatter(projection.after.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise SpaceRecoveryRequiredError(
+            "Note Markdown projection is not valid UTF-8"
+        ) from exc
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
 def _validate_compiled_command(
     command: MutationCommand | PersistedMutationCommand,
     catalog: CompiledEntityCatalog,
@@ -1093,6 +1121,9 @@ def _validate_compiled_command(
         _validate_persisted_plan_against_catalog(plan, catalog)
         for plan in command.db_plans
     )
+    if command.request.name == "knowledge.projection.rebuild":
+        _validate_knowledge_rebuild_command(command, authority)
+        return
     if plan_specs and request_spec.name not in {spec.name for spec in plan_specs}:
         raise SpaceRecoveryRequiredError(
             "compiled database effects do not include the request entity"
@@ -1202,23 +1233,15 @@ def _validate_compiled_command(
                 if (
                     tag is ProjectionActionTag.MARKDOWN_WRITE
                     and plan.after_row is not None
-                    and after_digest != plan.after_row.get("content_hash")
+                    and isinstance(command, MutationCommand)
+                    and _note_projection_body_digest(matching_projections[0])
+                    != plan.after_row.get("content_hash")
                 ):
                     raise SpaceRecoveryRequiredError(
                         "Markdown projection differs from the Note content hash"
                     )
             elif tag is ProjectionActionTag.PATH_RENAME:
                 rename = matching_projections[0]
-                before_hash = (
-                    None
-                    if plan.before_row is None
-                    else plan.before_row.get("content_hash")
-                )
-                after_hash = (
-                    None
-                    if plan.after_row is None
-                    else plan.after_row.get("content_hash")
-                )
                 rename_before = (
                     hashlib.sha256(rename.before).hexdigest()
                     if hasattr(rename, "before")
@@ -1229,15 +1252,17 @@ def _validate_compiled_command(
                     if hasattr(rename, "after")
                     else rename.after_sha256
                 )
-                if (
-                    not isinstance(before_hash, str)
-                    or before_hash != after_hash
-                    or rename_before != before_hash
-                    or rename_after != after_hash
-                ):
+                if rename_before != rename_after:
                     raise SpaceRecoveryRequiredError(
-                        "path rename projection differs from the Note content hash"
+                        "path rename projection changes the Note artifact"
                     )
+                if isinstance(command, MutationCommand):
+                    assert authority is not None
+                    source = None if rename.source is None else str(rename.source)
+                    if source is None or authority.markdown(source) != rename.before:
+                        raise SpaceRecoveryRequiredError(
+                            "path rename projection differs from authoritative Markdown"
+                        )
     if command.projections and not plan_specs:
         raise SpaceRecoveryRequiredError(
             "compiled projection effects require a database mutation"
@@ -1265,6 +1290,111 @@ def _validate_compiled_command(
             raise SpaceRecoveryRequiredError(
                 "compiled projection target is not bound to a database mutation"
             )
+
+
+def _validate_knowledge_rebuild_command(
+    command: MutationCommand | PersistedMutationCommand,
+    authority: AuthorityOverlay | None,
+) -> None:
+    request = command.request
+    if (
+        request.entity_type != "note"
+        or request.payload
+        or request.expected_version is not None
+        or request.client_updated_at is not None
+        or command.db_plans
+        or command.sync_events
+        or set(command.result_value) != {"rebuiltFolders", "rebuiltNotes"}
+        or any(
+            type(command.result_value[key]) is not int
+            or command.result_value[key] < 0
+            for key in ("rebuiltFolders", "rebuiltNotes")
+        )
+    ):
+        raise SpaceRecoveryRequiredError("knowledge rebuild command shape is invalid")
+    allowed_tags = {
+        ProjectionActionTag.MARKDOWN_WRITE,
+        ProjectionActionTag.PATH_RENAME,
+        ProjectionActionTag.INDEX_REPLACE,
+        ProjectionActionTag.FTS_REPLACE,
+    }
+    if any(projection.tag not in allowed_tags for projection in command.projections):
+        raise SpaceRecoveryRequiredError("knowledge rebuild projection tag is invalid")
+    if authority is None:
+        for projection in command.projections:
+            target = str(projection.target)
+            if not (
+                target.startswith("notes/")
+                or target.startswith("index/folders/id/")
+                or target.startswith("index/notes/note_id/")
+                or target.startswith("fts/")
+            ):
+                raise SpaceRecoveryRequiredError(
+                    "knowledge rebuild projection target is invalid"
+                )
+        return
+
+    folder_ids = {str(row["id"]) for row in authority.rows("folder")}
+    note_rows = {str(row["id"]): row for row in authority.rows("note")}
+    if command.result_value != {
+        "rebuiltFolders": len(folder_ids),
+        "rebuiltNotes": len(note_rows),
+    }:
+        raise SpaceRecoveryRequiredError("knowledge rebuild result count is invalid")
+    folder_targets = {f"index/folders/id/{identity}" for identity in folder_ids}
+    note_index_targets = {
+        f"index/notes/note_id/{identity}" for identity in note_rows
+    }
+    fts_targets = {f"fts/{identity}" for identity in note_rows}
+    note_paths = set()
+    for identity, row in note_rows.items():
+        filename = _make_filename(identity, str(row["title"]))
+        folder_id = row.get("folder_id")
+        note_paths.add(
+            f"notes/{filename}"
+            if folder_id is None
+            else f"notes/{folder_id}/{filename}"
+        )
+    for projection in command.projections:
+        target = str(projection.target)
+        valid = (
+            projection.tag is ProjectionActionTag.INDEX_REPLACE
+            and target in folder_targets | note_index_targets
+        ) or (
+            projection.tag is ProjectionActionTag.FTS_REPLACE
+            and target in fts_targets
+        ) or (
+            projection.tag is ProjectionActionTag.MARKDOWN_WRITE
+            and target in note_paths
+        ) or (
+            projection.tag is ProjectionActionTag.PATH_RENAME
+            and target in note_paths
+            and projection.source is not None
+            and authority.markdown(str(projection.source)) is not None
+        )
+        if not valid:
+            raise SpaceRecoveryRequiredError(
+                "knowledge rebuild projection is outside locked authority"
+            )
+    counts = Counter(
+        (projection.tag, str(projection.target))
+        for projection in command.projections
+    )
+    required = {
+        *((ProjectionActionTag.INDEX_REPLACE, target) for target in folder_targets),
+        *((ProjectionActionTag.INDEX_REPLACE, target) for target in note_index_targets),
+        *((ProjectionActionTag.FTS_REPLACE, target) for target in fts_targets),
+    }
+    optional = {
+        *((ProjectionActionTag.MARKDOWN_WRITE, target) for target in note_paths),
+        *((ProjectionActionTag.PATH_RENAME, target) for target in note_paths),
+    }
+    if any(counts[item] != 1 for item in required) or any(
+        counts[item] > 1 for item in optional
+    ):
+        raise SpaceRecoveryRequiredError(
+            "knowledge rebuild projections do not cover complete locked authority"
+        )
 
 
 def decode_and_validate_persisted_command(
