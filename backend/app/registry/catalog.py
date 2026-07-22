@@ -36,6 +36,7 @@ def _canonical_spec(spec: EntitySpec) -> dict[str, Any]:
         "route_enabled": spec.route_enabled,
         "mcp_schema_enabled": spec.mcp_schema_enabled,
         "sync_conflict_policy": spec.sync_conflict_policy,
+        "junction_endpoints": spec.junction_endpoints,
     }
 
 
@@ -115,6 +116,13 @@ class CompiledEntityCatalog:
                 raise CatalogCompilationError(f"unknown delete strategy: {spec.delete_strategy}")
             if spec.primary_key not in spec.field_names:
                 raise CatalogCompilationError(f"primary key missing: {spec.primary_key}")
+            if spec.junction_endpoints is not None:
+                for field_name, endpoint_type in spec.junction_endpoints:
+                    if field_name not in spec.field_names:
+                        raise CatalogCompilationError(
+                            f"junction endpoint field not in spec fields: {field_name}"
+                        )
+                    # endpoint_type existence is validated after the loop
             names.add(spec.name)
             tables.add(spec.table_name)
             models[spec.name] = _resolve_model(spec)
@@ -138,6 +146,15 @@ class CompiledEntityCatalog:
                     raise CatalogCompilationError(
                         f"sync primary key must be nonnullable string: {spec.primary_key}"
                     )
+        # Validate junction endpoint entity types exist in the catalog.
+        for spec in ordered:
+            if spec.junction_endpoints is not None:
+                for _field_name, endpoint_type in spec.junction_endpoints:
+                    if endpoint_type not in names:
+                        raise CatalogCompilationError(
+                            f"junction endpoint entity type not in catalog: {endpoint_type}"
+                        )
+
         canonical = json.dumps(
             [_canonical_spec(spec) for spec in ordered],
             ensure_ascii=True,
@@ -178,6 +195,14 @@ class CompiledEntityCatalog:
 
     def list_soft_delete(self) -> tuple[EntitySpec, ...]:
         return tuple(spec for spec in self._by_name.values() if spec.soft_delete)
+
+    def junction_endpoints_for(self, entity_type: str) -> tuple[tuple[str, str], ...] | None:
+        """Return junction endpoint metadata for an entity type, or None.
+
+        Each tuple is (field_name, endpoint_entity_type).
+        """
+        spec = self._by_name.get(entity_type)
+        return spec.junction_endpoints if spec else None
 
     def __contains__(self, name: str) -> bool:
         return name in self._by_name

@@ -398,3 +398,41 @@ async def test_rejection_precedence_cycle_before_version_conflict(entity_fixture
         assert exc_info.value.rejection.code == "cycle_detected"
     finally:
         await scope.aclose()
+
+
+
+# --- Task 2: Junction endpoint metadata from catalog ---
+
+
+def test_junction_endpoints_not_hardcoded():
+    """JUNCTION_ENDPOINTS hardcoded dict must not exist - metadata comes from catalog."""
+    import app.commands.entity as entity_module
+    assert not hasattr(entity_module, "JUNCTION_ENDPOINTS"), (
+        "JUNCTION_ENDPOINTS must be removed - use catalog junction metadata instead"
+    )
+
+
+def test_catalog_exposes_junction_endpoints():
+    """CompiledEntityCatalog exposes junction endpoint metadata from EntitySpec."""
+    endpoints = _TEST_CATALOG.junction_endpoints_for("schedule_quick_note")
+    assert endpoints is not None
+    assert ("schedule_id", "schedule") in endpoints
+    assert ("quick_note_id", "quick_note") in endpoints
+    # Non-junction entities return None.
+    assert _TEST_CATALOG.junction_endpoints_for("schedule") is None
+
+
+def test_relation_uses_catalog_metadata_not_hardcoded():
+    """RelationDomainPolicy.compile uses context.catalog, not JUNCTION_ENDPOINTS."""
+    import inspect
+    from app.commands.entity import RelationDomainPolicy
+    source = inspect.getsource(RelationDomainPolicy)
+    assert "JUNCTION_ENDPOINTS" not in source, (
+        "RelationDomainPolicy must not reference JUNCTION_ENDPOINTS"
+    )
+    assert "junction_endpoints_for" in source, (
+        "RelationDomainPolicy must use catalog.junction_endpoints_for()"
+    )
+    assert "removesuffix" not in source, (
+        "RelationDomainPolicy must not use removesuffix - use catalog metadata"
+    )

@@ -1,7 +1,6 @@
 """Centralized entity commands and domain policies."""
 
 from app.commands.entity import (
-    JUNCTION_ENDPOINTS,
     EntityCommand,
     FolderDomainPolicy,
     RelationDomainPolicy,
@@ -11,7 +10,6 @@ from app.commands.entity import (
 __all__ = [
     "EntityCommand",
     "FolderDomainPolicy",
-    "JUNCTION_ENDPOINTS",
     "RelationDomainPolicy",
     "SyncEventLike",
 ]

@@ -42,11 +42,6 @@ class SyncEventLike(Protocol):
     payload: Mapping[str, object]
 
 
-JUNCTION_ENDPOINTS: dict[str, tuple[str, ...]] = {
-    "schedule_quick_note": ("schedule_id", "quick_note_id"),
-}
-
-
 def _serialize_folder_row(row: Mapping[str, object]) -> bytes:
     """Serialize a folder row to an INDEX_REPLACE blob."""
     return json.dumps(
@@ -450,21 +445,26 @@ class RelationDomainPolicy:
 
     @property
     def entity_types(self) -> frozenset[str]:
-        return frozenset(JUNCTION_ENDPOINTS.keys())
+        return frozenset({"schedule_quick_note"})
 
     async def compile(
         self,
         context: MutationCompileContext,
         request: MutationRequest,
     ) -> MutationCommand:
-        endpoints = JUNCTION_ENDPOINTS.get(request.entity_type)
+        endpoints = context.catalog.junction_endpoints_for(request.entity_type)
         if endpoints is not None and request.name == "entity.create":
-            for field_name in endpoints:
+            for field_name, endpoint_entity_type in endpoints:
                 endpoint_id = request.payload.get(field_name)
                 if endpoint_id is not None:
-                    entity_type = field_name.removesuffix("_id")
-                    row = context.authority.row(entity_type, endpoint_id)
+                    endpoint_spec = context.catalog.get(endpoint_entity_type)
+                    row = context.authority.row(endpoint_entity_type, endpoint_id)
                     if row is None:
+                        raise MutationRuleViolation(
+                            "relation_endpoint_missing",
+                            {"field": field_name, "entityId": str(endpoint_id)},
+                        )
+                    if endpoint_spec.soft_delete and row.get("trashed_at") is not None:
                         raise MutationRuleViolation(
                             "relation_endpoint_missing",
                             {"field": field_name, "entityId": str(endpoint_id)},

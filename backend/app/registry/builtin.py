@@ -424,6 +424,7 @@ REGISTRY.register(EntitySpec(
     sync_entity_type="scheduleQuickNote",
     pull_key="scheduleQuickNotes",
     description="Junction: schedule <-> quick note",
+    junction_endpoints=(("schedule_id", "schedule"), ("quick_note_id", "quick_note")),
 ))
 
 REGISTRY.register(EntitySpec(

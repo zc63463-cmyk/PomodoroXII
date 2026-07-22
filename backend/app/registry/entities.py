@@ -96,6 +96,9 @@ class EntitySpec:
     route_enabled: bool = False
     mcp_schema_enabled: bool = True
     sync_conflict_policy: SyncConflictPolicy = "timestamp_lww"
+    # S3 Task 6: junction endpoint metadata for relation domain policy.
+    # Each tuple is (field_name, endpoint_entity_type).
+    junction_endpoints: tuple[tuple[str, str], ...] | None = None
 
     @property
     def field_names(self) -> tuple[str, ...]:
