@@ -300,3 +300,53 @@ async def test_list_trash_returns_paginated_envelope(client):
     # Trash may include tombstones + trashed items; total >= 1.
     _assert_paginated_envelope(data, expected_total=len(data["items"]))
     assert data["total"] >= 1, "Expected at least one trashed item"
+
+
+# --------------------------------------------------------------------------- #
+# Stable tie ordering
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_pagination_is_stable_with_tied_sort_keys(client):
+    """Pagination returns all items exactly once when sort keys collide.
+
+    Creates 5 schedules sharing the same due_at, then paginates with
+    per_page=2.  Every item must appear exactly once across all pages -
+    no skips, no duplicates - even though the sort key is identical.
+    """
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+    future = "2099-12-31T23:59:59Z"
+    created_ids: set[str] = set()
+    for i in range(5):
+        resp = await client.post(
+            "/api/v1/schedules",
+            json={"title": f"Tie-{i}", "due_at": future},
+            headers=headers,
+        )
+        assert resp.status_code == 201
+        created_ids.add(resp.json()["id"])
+
+    seen_ids: set[str] = set()
+    page = 1
+    while True:
+        resp = await client.get(
+            f"/api/v1/schedules?page={page}&per_page=2",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        _assert_paginated_envelope(data, expected_total=5)
+        for item in data["items"]:
+            assert item["id"] not in seen_ids, (
+                f"Duplicate id {item['id']} on page {page}"
+            )
+            seen_ids.add(item["id"])
+        if not data["has_more"]:
+            break
+        page += 1
+        assert page <= 20, "Pagination loop detected"
+
+    assert seen_ids == created_ids, (
+        f"Missing items: {created_ids - seen_ids}"
+    )
