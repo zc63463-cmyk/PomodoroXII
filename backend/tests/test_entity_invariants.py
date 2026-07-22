@@ -499,3 +499,68 @@ def test_from_sync_event_rejects_type_mismatched_id():
     assert "str(supplied_id)" not in source, (
         "from_sync_event must not use str() coercion — precise comparison required"
     )
+
+
+# --- Task 4: Unknown payload fields must not be silently dropped ---
+
+
+def test_unknown_payload_field_not_silently_dropped():
+    """Payloads with different unknown fields must produce different request hashes."""
+    from app.commands.entity import EntityCommand
+    from app.registry import REGISTRY
+    from app.registry.catalog import CompiledEntityCatalog
+
+    catalog = CompiledEntityCatalog.compile(list(REGISTRY.list()), version="test")
+    commands = EntityCommand(catalog)
+    now = "2026-07-21T00:00:00.000Z"
+    base_payload: dict[str, object] = {
+        "id": "sch-filter-1",
+        "title": "Test",
+        "due_at": "2026-07-22T00:00:00.000Z",
+        "completed_at": None,
+        "priority": "medium",
+        "color": "#3b82f6",
+        "all_day": False,
+        "start_time": None,
+        "end_time": None,
+        "created_at": now,
+        "updated_at": now,
+        "version": 1,
+    }
+    payload_with_unknown = dict(base_payload)
+    payload_with_unknown["unknown_field"] = "malicious"
+    req_clean = commands.create(None, "schedule", base_payload, expected_version=None)
+    req_dirty = commands.create(None, "schedule", payload_with_unknown, expected_version=None)
+    assert req_clean.request_hash != req_dirty.request_hash, (
+        "Unknown field must not be silently dropped — different caller intent "
+        "must produce different request hashes"
+    )
+
+
+async def test_unknown_payload_field_rejected_at_compile(entity_fixture):
+    """Unknown payload fields must be rejected by the compiler, not silently filtered."""
+    scope = entity_fixture.open_mutation_scope()
+    try:
+        now = "2026-07-21T00:00:00.000Z"
+        payload: dict[str, object] = {
+            "id": "sch-filter-2",
+            "title": "Test",
+            "due_at": "2026-07-22T00:00:00.000Z",
+            "completed_at": None,
+            "priority": "medium",
+            "color": "#3b82f6",
+            "all_day": False,
+            "start_time": None,
+            "end_time": None,
+            "created_at": now,
+            "updated_at": now,
+            "version": 1,
+            "unknown_field": "should_be_rejected",
+        }
+        request = entity_fixture.commands.create(
+            scope, "schedule", payload, expected_version=None
+        )
+        with pytest.raises((ValueError, MutationRejectedError)):
+            await entity_fixture.uow.execute(scope, request, "op-unknown-field")
+    finally:
+        await scope.aclose()

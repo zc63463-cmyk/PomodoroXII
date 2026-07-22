@@ -66,8 +66,8 @@ class EntityCommand:
 
     All create/update/delete methods build a MutationRequest using the
     canonical ``entity.*`` name convention expected by
-    ``compile_catalog_entity_command``.  Unknown payload fields are silently
-    filtered so callers can pass wire-level payloads without pre-validation.
+    ``compile_catalog_entity_command``.  Unknown payload fields flow through
+    to the compiler where they are rejected by ``_require_payload_fields``.
     """
 
     def __init__(self, catalog: CompiledEntityCatalog) -> None:
@@ -141,12 +141,6 @@ class EntityCommand:
 
     # -- private helpers ----------------------------------------------------
 
-    def _filter_payload(
-        self, spec: EntitySpec, payload: Mapping[str, object]
-    ) -> Mapping[str, object]:
-        allowed = frozenset(spec.field_names)
-        return {k: v for k, v in payload.items() if k in allowed}
-
     def _build_create(
         self,
         spec: EntitySpec,
@@ -155,13 +149,12 @@ class EntityCommand:
         *,
         client_updated_at: str | None = None,
     ) -> MutationRequest:
-        entity_id = str(payload[spec.primary_key])
-        filtered = self._filter_payload(spec, payload)
+        entity_id = payload[spec.primary_key]
         return MutationRequest.from_payload(
             name="entity.create",
             entity_type=spec.name,
             entity_id=entity_id,
-            payload=filtered,
+            payload=payload,
             expected_version=expected_version,
             client_updated_at=client_updated_at,
         )
@@ -175,12 +168,11 @@ class EntityCommand:
         *,
         client_updated_at: str | None = None,
     ) -> MutationRequest:
-        filtered = self._filter_payload(spec, patch)
         return MutationRequest.from_payload(
             name="entity.update",
             entity_type=spec.name,
             entity_id=entity_id,
-            payload=filtered,
+            payload=patch,
             expected_version=expected_version,
             client_updated_at=client_updated_at,
         )
