@@ -28,7 +28,7 @@ from app.errors import MutationRejectedError
 from app.mutation.journal import MutationJournal
 from app.mutation.recovery import MutationRecovery
 from app.mutation.staging import StageStore
-from app.mutation.types import MutationRuleViolation
+from app.mutation.types import BatchMutationResult, MutationRuleViolation
 from app.mutation.unit_of_work import (
     DbMutationInterpreter,
     MutationCompiler,
@@ -310,6 +310,57 @@ class EntityFixture:
             client_updated_at=client_updated_at,
             expected_version=expected_version,
         )
+
+
+    async def execute_sync_update(
+        self,
+        entity_id: str,
+        *,
+        entity_type: str,
+        expected_version: int | None,
+        client_updated_at: str,
+        payload: Mapping[str, object] | None = None,
+        operation_id: str = "op-sync-update",
+    ) -> BatchMutationResult:
+        """Execute a sync-event update and return the full batch result."""
+        scope = self.open_mutation_scope()
+        try:
+            event = _SyncEvent(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                action="update",
+                payload=payload or {"title": "Updated"},
+                client_updated_at=client_updated_at,
+                expected_version=expected_version,
+            )
+            request = self.commands.from_sync_event(scope, event)
+            return await self.uow.execute_batch(
+                scope, (request,), operation_id, operation_ids=(operation_id,)
+            )
+        finally:
+            await scope.aclose()
+
+    async def read_stored_resolution(self, operation_id: str) -> str | None:
+        """Read the persisted resolution for an operation from the journal.
+
+        In the test harness operation_id is always used as batch_id,
+        so we can look up the batch directly. Rejected batches are
+        journaled in MutationBatch but do not create MutationOperation
+        rows, so find_operation_batch_bindings would miss them.
+        """
+        journal = self.uow.journal_factory(self._sessions)
+        batch = await journal.find_batch(operation_id)
+        if batch is None:
+            return None
+        for applied in batch.result.applied:
+            if applied.operation_id == operation_id:
+                return applied.resolution
+        for rejected in batch.result.rejected:
+            if rejected.operation_id == operation_id:
+                resolution = rejected.details.get("resolution")
+                if resolution is not None:
+                    return str(resolution)
+        return None
 
 
 @pytest.fixture
