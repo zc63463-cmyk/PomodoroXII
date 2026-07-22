@@ -46,17 +46,32 @@ class SyncEventLike(Protocol):
     client_updated_at: str
 
 
-def _serialize_folder_row(row: Mapping[str, object]) -> bytes:
+def serialize_folder_index_row(row: Mapping[str, object]) -> bytes:
     """Serialize a folder row to an INDEX_REPLACE blob."""
+    projected = {
+        key: row[key]
+        for key in (
+            "id",
+            "name",
+            "parent_id",
+            "icon",
+            "color",
+            "sort_order",
+            "is_system",
+            "trashed_at",
+            "created_at",
+            "updated_at",
+        )
+    }
     return json.dumps(
-        {"row": dict(row)},
+        {"row": projected},
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("ascii")
 
 
-def _folder_index_target(identity: str) -> ContainedProjectionActionField:
+def folder_index_target(identity: str) -> ContainedProjectionActionField:
     """Build the INDEX_REPLACE target path for a folder identity."""
     return ContainedProjectionActionField(f"index/folders/id/{identity}")
 
@@ -287,12 +302,12 @@ class FolderDomainPolicy:
         spec = context.catalog.get("folder")
         plan = base.db_plans[0]
         identity = str(plan.primary_key[spec.primary_key])
-        target = _folder_index_target(identity)
+        target = folder_index_target(identity)
         before = context.authority.derived_projection(
             ProjectionActionTag.INDEX_REPLACE,
             str(target),
         )
-        after = _serialize_folder_row(plan.after_row)
+        after = serialize_folder_index_row(plan.after_row)
         projection = ProjectionPlan(
             tag=ProjectionActionTag.INDEX_REPLACE,
             source=None,
@@ -379,12 +394,12 @@ class FolderDomainPolicy:
             after["updated_at"] = now
             after_frozen = require_frozen_object(after)
 
-            target = _folder_index_target(folder_id)
+            target = folder_index_target(folder_id)
             before_blob = context.authority.derived_projection(
                 ProjectionActionTag.INDEX_REPLACE,
                 str(target),
             )
-            after_blob = _serialize_folder_row(after_frozen)
+            after_blob = serialize_folder_index_row(after_frozen)
 
             db_plans.append(
                 DbMutationPlan(
