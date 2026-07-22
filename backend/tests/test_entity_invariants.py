@@ -425,6 +425,7 @@ def test_catalog_exposes_junction_endpoints():
 def test_relation_uses_catalog_metadata_not_hardcoded():
     """RelationDomainPolicy.compile uses context.catalog, not JUNCTION_ENDPOINTS."""
     import inspect
+
     from app.commands.entity import RelationDomainPolicy
     source = inspect.getsource(RelationDomainPolicy)
     assert "JUNCTION_ENDPOINTS" not in source, (
@@ -435,4 +436,66 @@ def test_relation_uses_catalog_metadata_not_hardcoded():
     )
     assert "removesuffix" not in source, (
         "RelationDomainPolicy must not use removesuffix - use catalog metadata"
+    )
+
+
+# --- Task 3: SyncEventLike contract and direct attribute access ---
+
+
+def test_sync_event_like_requires_expected_version_and_client_updated_at():
+    """SyncEventLike must declare expected_version and client_updated_at."""
+    import typing
+
+    from app.commands.entity import SyncEventLike
+    hints = typing.get_type_hints(SyncEventLike)
+    assert "expected_version" in hints, (
+        "SyncEventLike must declare expected_version"
+    )
+    assert "client_updated_at" in hints, (
+        "SyncEventLike must declare client_updated_at"
+    )
+    assert hints["client_updated_at"] is str, (
+        "client_updated_at must be str (not Optional)"
+    )
+
+
+def test_from_sync_event_uses_direct_attribute_access():
+    """from_sync_event must access event.expected_version and event.client_updated_at directly."""
+    import inspect
+
+    from app.commands.entity import EntityCommand
+    source = inspect.getsource(EntityCommand.from_sync_event)
+    assert "getattr" not in source, (
+        "from_sync_event must not use getattr — direct attribute access required"
+    )
+    assert "event.expected_version" in source, (
+        "from_sync_event must access event.expected_version directly"
+    )
+    assert "event.client_updated_at" in source, (
+        "from_sync_event must access event.client_updated_at directly"
+    )
+
+
+async def test_from_sync_event_rejects_non_canonical_timestamp(entity_fixture):
+    """from_sync_event must fail-closed on invalid client_updated_at."""
+    commands = entity_fixture.commands
+    bad_event = _SyncEvent(
+        entity_type="schedule",
+        entity_id="sched-1",
+        action="create",
+        payload={"id": "sched-1", "title": "Test"},
+        client_updated_at="not-a-timestamp",
+    )
+    with pytest.raises((ValueError, MutationRuleViolation)):
+        commands.from_sync_event(None, bad_event)
+
+
+def test_from_sync_event_rejects_type_mismatched_id():
+    """from_sync_event must not use str() coercion for ID comparison."""
+    import inspect
+
+    from app.commands.entity import EntityCommand
+    source = inspect.getsource(EntityCommand.from_sync_event)
+    assert "str(supplied_id)" not in source, (
+        "from_sync_event must not use str() coercion — precise comparison required"
     )
