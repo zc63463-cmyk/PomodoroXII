@@ -66,6 +66,7 @@ class TaskService(BaseService):
                 select(func.count()).select_from(q.subquery())
             )
         ).scalar() or 0
+        q = q.order_by(self.model.id.asc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()

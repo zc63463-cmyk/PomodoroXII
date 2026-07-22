@@ -59,7 +59,7 @@ class QuickNoteService(BaseService):
             await self.db.execute(select(func.count()).select_from(q.subquery()))
         ).scalar() or 0
         # Pinned first, then newest.
-        q = q.order_by(QuickNote.pinned.desc(), QuickNote.created_at.desc())
+        q = q.order_by(QuickNote.pinned.desc(), QuickNote.created_at.desc(), QuickNote.id.desc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()

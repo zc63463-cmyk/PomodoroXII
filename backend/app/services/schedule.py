@@ -35,7 +35,7 @@ class ScheduleService(BaseService):
         total = (
             await self.db.execute(select(func.count()).select_from(q.subquery()))
         ).scalar() or 0
-        q = q.order_by(Schedule.due_at.asc())
+        q = q.order_by(Schedule.due_at.asc(), Schedule.id.asc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()
