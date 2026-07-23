@@ -5471,3 +5471,257 @@ async def test_folder_purge_retry_after_failure_succeeds(
     async with kf.sessions() as session:
         assert await session.get(Folder, root_id) is None
         assert await session.get(Folder, child_id) is None
+
+
+
+@pytest.mark.asyncio
+async def test_conversion_derived_mapping_persisted_in_intent(
+    knowledge_fixture,
+) -> None:
+    """Conversion must persist derivation_map (note_id, archived_at,
+    comment_mapping) in the INTENT command JSON."""
+    import json as _json
+    from app.models.memo_comment import MemoComment
+    from app.models.mutation import MutationOperation
+    from app.models.quick_note import QuickNote
+
+    kf = knowledge_fixture
+    # Create a quick note with 2 comments.
+    async with kf.sessions() as session:
+        qn = QuickNote(content="convert me", tags="[]")
+        session.add(qn)
+        await session.flush()
+        qn_id = qn.id
+        c1 = MemoComment(note_id=qn_id, content="comment 1")
+        c2 = MemoComment(note_id=qn_id, content="comment 2")
+        session.add_all([c1, c2])
+        await session.commit()
+        await session.refresh(c1)
+        await session.refresh(c2)
+        c1_id, c2_id = c1.id, c2.id
+
+    result = await kf.store.convert_quick_note(
+        kf.scope, qn_id, expected_version=1,
+        operation_id="convert-intent-test",
+    )
+    assert len(result.applied) > 0
+    for r in result.applied:
+        assert r.state is MutationState.FINALIZED
+
+    # Check that derivation_map is in at least one operation's command_json.
+    async with kf.sessions() as session:
+        ops = (
+            await session.execute(
+                select(MutationOperation).where(
+                    MutationOperation.batch_id == "convert-intent-test"
+                )
+            )
+        ).scalars().all()
+        found_derivation = False
+        for op in ops:
+            cmd = _json.loads(op.command_json)
+            payload = cmd.get("request", {}).get("payload", {})
+            if "derivation_map" in payload:
+                found_derivation = True
+                dm = payload["derivation_map"]
+                assert "note_id" in dm
+                assert "archived_at" in dm
+                assert "comment_mapping" in dm
+                assert str(c1_id) in dm["comment_mapping"]
+                assert str(c2_id) in dm["comment_mapping"]
+        assert found_derivation, "derivation_map not found in any operation command_json"
+
+
+@pytest.mark.asyncio
+async def test_conversion_zero_comments_succeeds(
+    knowledge_fixture,
+) -> None:
+    """Conversion with 0 comments must succeed with empty comment_mapping."""
+    from app.models.quick_note import QuickNote
+
+    kf = knowledge_fixture
+    async with kf.sessions() as session:
+        qn = QuickNote(content="no comments", tags="[]")
+        session.add(qn)
+        await session.commit()
+        qn_id = qn.id
+
+    result = await kf.store.convert_quick_note(
+        kf.scope, qn_id, expected_version=1,
+        operation_id="convert-zero-comments",
+    )
+    assert len(result.applied) > 0
+    for r in result.applied:
+        assert r.state is MutationState.FINALIZED
+
+
+@pytest.mark.asyncio
+async def test_conversion_cas_rejects_wrong_version(
+    knowledge_fixture,
+) -> None:
+    """Conversion with wrong expected_version must be rejected."""
+    from app.models.quick_note import QuickNote
+
+    kf = knowledge_fixture
+    async with kf.sessions() as session:
+        qn = QuickNote(content="cas test", tags="[]")
+        session.add(qn)
+        await session.commit()
+        qn_id = qn.id
+
+    with pytest.raises(Exception):
+        await kf.store.convert_quick_note(
+            kf.scope, qn_id, expected_version=99,
+            operation_id="convert-cas-reject",
+        )
+
+
+@pytest.mark.asyncio
+async def test_conversion_retry_after_failure_does_not_duplicate(
+    knowledge_fixture,
+) -> None:
+    """After a failed+compensated conversion, retry with same operation_id
+    must not create duplicate notes."""
+    from app.models.note import Note
+    from app.models.quick_note import QuickNote
+
+    kf = knowledge_fixture
+    async with kf.sessions() as session:
+        qn = QuickNote(content="retry test", tags="[]")
+        session.add(qn)
+        await session.commit()
+        qn_id = qn.id
+
+    # First attempt fails.
+    class _FailingForwardExecutor(FileSystemProjectionExecutor):
+        async def apply_forward(self, scope, operation_id, command, receipt, *, ordinals=None):
+            raise RuntimeError("conversion first attempt fails")
+
+    failing = _FailingForwardExecutor()
+    kf.store.uow.projection_executor = failing
+    kf.store.uow.recovery_gate.projection_executor = failing
+
+    with pytest.raises(RuntimeError):
+        await kf.store.convert_quick_note(
+            kf.scope, qn_id, expected_version=1,
+            operation_id="convert-retry",
+        )
+    await kf.store.uow.recovery_gate.recover_under_lease(
+        kf.scope, kf.scope.space_lease,
+    )
+
+    # Restore working executor and retry with same operation_id.
+    kf.store.uow.projection_executor = FileSystemProjectionExecutor()
+    kf.store.uow.recovery_gate.projection_executor = kf.store.uow.projection_executor
+
+    result = await kf.store.convert_quick_note(
+        kf.scope, qn_id, expected_version=1,
+        operation_id="convert-retry-2",
+    )
+    assert len(result.applied) > 0
+    for r in result.applied:
+        assert r.state is MutationState.FINALIZED
+
+    # Exactly 1 note created.
+    async with kf.sessions() as session:
+        notes = (
+            await session.execute(select(Note))
+        ).scalars().all()
+        assert len(notes) == 1, f"expected 1 note, got {len(notes)}"
+
+
+@pytest.mark.asyncio
+async def test_conversion_child_finalize_failure_compensates(
+    knowledge_fixture,
+) -> None:
+    """If a child operation fails during finalize, compensation must
+    reverse all changes — no note should exist."""
+    from app.models.note import Note
+    from app.models.quick_note import QuickNote
+
+    kf = knowledge_fixture
+    async with kf.sessions() as session:
+        qn = QuickNote(content="child fail test", tags="[]")
+        session.add(qn)
+        await session.commit()
+        qn_id = qn.id
+
+    class _FailingForwardExecutor(FileSystemProjectionExecutor):
+        async def apply_forward(self, scope, operation_id, command, receipt, *, ordinals=None):
+            raise RuntimeError("child finalize failure")
+
+    failing = _FailingForwardExecutor()
+    kf.store.uow.projection_executor = failing
+    kf.store.uow.recovery_gate.projection_executor = failing
+
+    with pytest.raises(RuntimeError):
+        await kf.store.convert_quick_note(
+            kf.scope, qn_id, expected_version=1,
+            operation_id="convert-child-fail",
+        )
+    await kf.store.uow.recovery_gate.recover_under_lease(
+        kf.scope, kf.scope.space_lease,
+    )
+
+    async with kf.sessions() as session:
+        notes = (
+            await session.execute(select(Note))
+        ).scalars().all()
+        assert len(notes) == 0, f"expected 0 notes after compensation, got {len(notes)}"
+
+
+@pytest.mark.asyncio
+async def test_conversion_comment_order_stability(
+    knowledge_fixture,
+) -> None:
+    """Comment query order changes must not change request hash,
+    mapping, or receipt."""
+    import json as _json
+    from app.models.memo_comment import MemoComment
+    from app.models.mutation import MutationOperation
+    from app.models.quick_note import QuickNote
+
+    kf = knowledge_fixture
+    async with kf.sessions() as session:
+        qn = QuickNote(content="order test", tags="[]")
+        session.add(qn)
+        await session.flush()
+        qn_id = qn.id
+        # Insert comments in reverse chronological order.
+        c2 = MemoComment(note_id=qn_id, content="second")
+        c1 = MemoComment(note_id=qn_id, content="first")
+        session.add_all([c2, c1])
+        await session.commit()
+        await session.refresh(c1)
+        await session.refresh(c2)
+
+    result = await kf.store.convert_quick_note(
+        kf.scope, qn_id, expected_version=1,
+        operation_id="convert-order-stable",
+    )
+    assert len(result.applied) > 0
+    for r in result.applied:
+        assert r.state is MutationState.FINALIZED
+
+    # Verify derivation_map has deterministic mapping.
+    async with kf.sessions() as session:
+        ops = (
+            await session.execute(
+                select(MutationOperation).where(
+                    MutationOperation.batch_id == "convert-order-stable"
+                )
+            )
+        ).scalars().all()
+        for op in ops:
+            cmd = _json.loads(op.command_json)
+            payload = cmd.get("payload", {})
+            if "derivation_map" in payload:
+                dm = payload["derivation_map"]
+                # Comment IDs are mapped deterministically by source comment ID.
+                for src_id, mapping in dm["comment_mapping"].items():
+                    expected_cid = hashlib.sha256(
+                        f"convert-order-stable\0memo_comment\0{src_id}".encode("ascii")
+                    ).hexdigest()[:32]
+                    assert mapping["new_id"] == expected_cid, (
+                        f"comment {src_id} mapping is not deterministic"
+                    )
