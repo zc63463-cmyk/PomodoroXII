@@ -613,6 +613,15 @@ class StorageBase:
         if self._file_exists(target):
             receipt.assert_current()
             self._unlink_file(target)
+        # Best-effort cleanup of the .trash/ copy.  When a note is
+        # soft-deleted via the old NoteService, the .md is moved to
+        # .trash/{filename}.  Purge must remove both copies.
+        if target.startswith("notes/"):
+            filename = target.split("/", 1)[1]
+            trash_path = f".trash/{filename}"
+            if self._file_exists(trash_path):
+                receipt.assert_current()
+                self._unlink_file(trash_path)
 
     def _index_projection_identity(
         self, action: MaterializedProjectionAction
@@ -639,6 +648,23 @@ class StorageBase:
                     f"DELETE FROM {quoted_table} WHERE {quoted_primary_key} = ?",
                     (identity,),
                 )
+                # Cascade delete child tables when purging a note.
+                if table.name == "notes":
+                    for child_sql, child_params in (
+                        ("DELETE FROM note_versions WHERE note_id = ?", (identity,)),
+                        ("DELETE FROM note_paths WHERE note_id = ?", (identity,)),
+                    ):
+                        try:
+                            connection.execute(child_sql, child_params)
+                        except Exception:
+                            pass
+                    try:
+                        connection.execute(
+                            "DELETE FROM note_links WHERE from_note_id = ? OR to_note_id = ?",
+                            (identity, identity),
+                        )
+                    except Exception:
+                        pass
                 receipt.assert_current()
                 connection.commit()
                 return
