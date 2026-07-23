@@ -166,23 +166,26 @@ class KnowledgeStore:
         before parent rows.  Each descendant becomes a separate operation in
         the batch, sharing one visibility barrier.
         """
-        from sqlalchemy import select as sa_select
+        from app.mutation.unit_of_work import AuthorityOverlay
 
-        from app.models.folder import Folder
-
-        # Read all folders from DB to build the descendant tree.
+        # Read all folders from the authority overlay (locked snapshot)
+        # to avoid TOCTOU: the snapshot is taken under the same lease
+        # that will guard the batch execution.
         async with scope.session_factory() as session:
-            all_folders = (
-                await session.execute(
-                    sa_select(Folder.id, Folder.parent_id, Folder.trashed_at, Folder.version)
-                )
-            ).all()
+            authority = await AuthorityOverlay.from_locked_authorities(
+                scope, session, self.uow.catalog,
+            )
 
-        # Build parent->children map (including trashed folders).
+        folder_rows = authority.rows("folder")
+
+        # Build parent->children map from authority snapshot.
         children_map: dict[str, list[str]] = {}
-        for fid, parent_id, _trashed, _ver in all_folders:
+        for row in folder_rows:
+            parent_id = row.get("parent_id")
             if parent_id is not None:
-                children_map.setdefault(str(parent_id), []).append(str(fid))
+                children_map.setdefault(str(parent_id), []).append(
+                    str(row["id"])
+                )
 
         def _descendants_deepest_first(folder_id: str) -> list[str]:
             """Post-order traversal: children before parents."""
@@ -199,9 +202,14 @@ class KnowledgeStore:
         requests = []
         operation_ids = []
         for idx, fid in enumerate(all_ids):
+            if fid == folder_id:
+                exp_ver = expected_version
+            else:
+                row = authority.row("folder", fid)
+                exp_ver = row["version"] if row else None
             req = self.commands.purge_folder_request(
                 fid,
-                expected_version=expected_version if fid == folder_id else None,
+                expected_version=exp_ver,
             )
             requests.append(req)
             operation_ids.append(
