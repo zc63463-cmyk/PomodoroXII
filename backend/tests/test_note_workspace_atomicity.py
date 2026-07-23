@@ -5167,3 +5167,121 @@ async def test_purge_creates_tombstone_via_commit_business(
         ).scalars().all()
         assert len(tombstones) == 1, f"expected 1 tombstone, got {len(tombstones)}"
         assert tombstones[0].deleted_at is not None
+
+
+
+@pytest.mark.asyncio
+async def test_note_purge_full_before_image_manifest(
+    knowledge_fixture,
+) -> None:
+    """Purge must remove ORM row, markdown, index, FTS, and create
+    exactly one tombstone + one visible delete event."""
+    kf = knowledge_fixture
+    note_id = "n-manifest"
+    purge_version = await kf.create_and_trash_note(
+        note_id, title="Manifest", versions=3,
+    )
+
+    result = await kf.store.purge_note(
+        kf.scope, note_id, expected_version=purge_version,
+        operation_id="purge-manifest",
+    )
+    assert result.state is MutationState.FINALIZED
+
+    await kf.assert_note_absent_everywhere(note_id)
+    await kf.assert_single_tombstone_and_visible_delete("note", note_id)
+
+
+@pytest.mark.asyncio
+async def test_purge_cleans_old_tombstone_and_creates_new(
+    knowledge_fixture,
+) -> None:
+    """Purge must delete any pre-existing tombstone and create a fresh one."""
+    from app.models.tombstone import Tombstone
+
+    kf = knowledge_fixture
+    note_id = "n-old-tomb"
+    purge_version = await kf.create_and_trash_note(note_id, title="OldTomb")
+
+    # Manually insert a stale tombstone.
+    async with kf.sessions() as session:
+        session.add(Tombstone(
+            entity_type="note", entity_id=note_id,
+            deleted_at="2020-01-01T00:00:00.000Z",
+        ))
+        await session.commit()
+
+    result = await kf.store.purge_note(
+        kf.scope, note_id, expected_version=purge_version,
+        operation_id="purge-old-tomb",
+    )
+    assert result.state is MutationState.FINALIZED
+
+    async with kf.sessions() as session:
+        tombstones = (
+            await session.execute(
+                select(Tombstone).where(
+                    Tombstone.entity_type == "note",
+                    Tombstone.entity_id == note_id,
+                )
+            )
+        ).scalars().all()
+        assert len(tombstones) == 1, f"expected 1 tombstone, got {len(tombstones)}"
+        assert tombstones[0].deleted_at != "2020-01-01T00:00:00.000Z", \
+            "stale tombstone was not replaced"
+
+
+@pytest.mark.asyncio
+async def test_purge_compensation_restores_orm_and_deletes_tombstone(
+    knowledge_fixture,
+) -> None:
+    """When forward projection fails, compensation must restore the ORM
+    row and delete the tombstone created by _commit_business."""
+    from app.models.tombstone import Tombstone
+
+    kf = knowledge_fixture
+    note_id = "n-compensate"
+    purge_version = await kf.create_and_trash_note(note_id, title="Compensate")
+
+    # Inject a failing executor that raises on apply_forward but
+    # allows restore_before to succeed (inherits from parent).
+    class _FailingForwardExecutor(FileSystemProjectionExecutor):
+        async def apply_forward(self, scope, operation_id, command, receipt, *, ordinals=None):
+            raise RuntimeError("injected forward failure")
+
+    failing = _FailingForwardExecutor()
+    kf.store.uow.projection_executor = failing
+    kf.store.uow.recovery_gate.projection_executor = failing
+
+    # Purge will fail during _finalize_forward.
+    with pytest.raises(RuntimeError, match="injected forward failure"):
+        await kf.store.purge_note(
+            kf.scope, note_id, expected_version=purge_version,
+            operation_id="purge-compensate",
+        )
+
+    # Batch is in FINALIZING state. Trigger recovery -> compensation.
+    recovery_result = await kf.store.uow.recovery_gate.recover_under_lease(
+        kf.scope, kf.scope.space_lease,
+    )
+    assert "purge-compensate" in recovery_result.compensated, (
+        f"expected compensation, got {recovery_result}"
+    )
+
+    # ORM row should be restored.
+    async with kf.sessions() as session:
+        note = await session.get(Note, note_id)
+        assert note is not None, "Note ORM row was not restored by compensation"
+        assert note.trashed_at is not None, "Note should still be trashed after restore"
+
+        tombstones = (
+            await session.execute(
+                select(Tombstone).where(
+                    Tombstone.entity_type == "note",
+                    Tombstone.entity_id == note_id,
+                )
+            )
+        ).scalars().all()
+        assert len(tombstones) == 0, (
+            f"expected 0 tombstones after compensation, got {len(tombstones)}"
+        )
