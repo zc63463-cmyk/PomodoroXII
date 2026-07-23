@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select
@@ -1733,6 +1734,182 @@ def uow_fixture(space_session):
         receipt=receipt,
         uow=uow,
     )
+
+
+@dataclass
+class KnowledgeFixture:
+    """Self-contained fixture for knowledge lifecycle tests.
+
+    Wraps a real KnowledgeStore with production compiler, interpreter,
+    projection executor, and recovery gate — not mocks.
+    """
+    scope: Any
+    store: "KnowledgeStore"
+    sessions: Any  # async_sessionmaker
+    file_system: Any
+    stage_store: Any
+    tmp_path: Path
+
+    async def create_and_trash_note(
+        self, note_id: str, title: str = "Test", versions: int = 1
+    ) -> int:
+        """Create a note, update content N times, then trash it.
+        Returns the expected_version for purge."""
+        await self.store.create_note(
+            self.scope,
+            {"id": note_id, "title": title, "content": f"v1-{title}", "tags": []},
+            expected_version=None,
+            operation_id=f"create-{note_id}",
+        )
+        for i in range(2, versions + 2):
+            await self.store.update_note_content(
+                self.scope, note_id, f"v{i}-{title}",
+                expected_version=i - 1,
+                operation_id=f"update-{note_id}-{i}",
+            )
+        final_version = versions + 1
+        await self.store.update_note(
+            self.scope, note_id,
+            {"trashed_at": "2026-01-01T00:00:00+00:00"},
+            expected_version=final_version,
+            operation_id=f"trash-{note_id}",
+        )
+        return final_version + 1
+
+    async def assert_note_absent_everywhere(self, note_id: str) -> None:
+        """Assert note is gone from ORM, markdown, index, FTS."""
+        async with self.sessions() as session:
+            note = await session.get(Note, note_id)
+            assert note is None, f"Note {note_id} still in ORM"
+
+        snapshot = await self.file_system.snapshot_projection_authority()
+        for key in snapshot.markdown:
+            assert note_id not in str(key), f"Note {note_id} still in markdown: {key}"
+        for key in snapshot.index:
+            assert note_id not in str(key), f"Note {note_id} still in index: {key}"
+        for key in snapshot.fts:
+            assert note_id not in str(key), f"Note {note_id} still in FTS: {key}"
+
+    async def assert_single_tombstone_and_visible_delete(
+        self, entity_type: str, entity_id: str
+    ) -> None:
+        """Assert exactly 1 tombstone and 1 visible delete event."""
+        from app.models.tombstone import Tombstone
+
+        async with self.sessions() as session:
+            tombstones = (
+                await session.execute(
+                    select(Tombstone).where(
+                        Tombstone.entity_type == entity_type,
+                        Tombstone.entity_id == entity_id,
+                    )
+                )
+            ).scalars().all()
+            assert len(tombstones) == 1, (
+                f"expected 1 tombstone for {entity_type}/{entity_id}, "
+                f"got {len(tombstones)}"
+            )
+
+            visible_deletes = (
+                await session.execute(
+                    select(SyncOutbox).where(
+                        SyncOutbox.entity_type == entity_type,
+                        SyncOutbox.entity_id == entity_id,
+                        SyncOutbox.action == "delete",
+                        SyncOutbox.visible.is_(True),
+                    )
+                )
+            ).scalars().all()
+            assert len(visible_deletes) == 1, (
+                f"expected 1 visible delete for {entity_type}/{entity_id}, "
+                f"got {len(visible_deletes)}"
+            )
+
+    async def visible_batch_events(self, batch_id: str) -> list:
+        """Return all visible sync events for a batch."""
+        async with self.sessions() as session:
+            return list((
+                await session.execute(
+                    select(SyncOutbox).where(
+                        SyncOutbox.batch_id == batch_id,
+                        SyncOutbox.visible.is_(True),
+                    )
+                )
+            ).scalars().all())
+
+    async def all_batch_events(self, batch_id: str) -> list:
+        """Return ALL sync events (visible + invisible) for a batch."""
+        async with self.sessions() as session:
+            return list((
+                await session.execute(
+                    select(SyncOutbox).where(
+                        SyncOutbox.batch_id == batch_id,
+                    )
+                )
+            ).scalars().all())
+
+
+@pytest.fixture
+async def knowledge_fixture(uow_fixture, tmp_path):
+    """Real KnowledgeStore with file system, stage store, and UoW."""
+    from app.commands import EntityCommand, FolderDomainPolicy, RelationDomainPolicy
+    from app.file_system.api import get_file_system
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.knowledge.store import KnowledgeStore
+    from tests.test_mutation_recovery import _Lease as RecoveryLease
+
+    file_system = await get_file_system(
+        root_dir=tmp_path / "kf-files",
+        index_db=tmp_path / "kf-index.db",
+    )
+    stage_store = StageStore(_stage_authority(tmp_path / "kf-stages"))
+    scope = _Scope(uow_fixture.sessions, uow_fixture.receipt)
+    scope.file_system = file_system
+    scope.mutation_stages = stage_store
+    scope.global_lease = RecoveryLease(LeaseMode.SHARED, "global")
+    scope.space_lease = RecoveryLease(LeaseMode.EXCLUSIVE, "space-test")
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        yield scope.space_lease
+
+    scope.exclusive_space_resources = exclusive_space_resources
+
+    executor = FileSystemProjectionExecutor()
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), RelationDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    interpreter = DbMutationInterpreter(CATALOG)
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=compiler,
+        interpreter=interpreter,
+        projection_executor=executor,
+        recovery_gate=MutationRecovery(
+            catalog=CATALOG,
+            interpreter=interpreter,
+            projection_executor=executor,
+        ),
+        journal_factory=MutationJournal,
+    )
+    store = KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(CATALOG),
+        uow=uow,
+    )
+
+    fixture = KnowledgeFixture(
+        scope=scope, store=store, sessions=uow_fixture.sessions,
+        file_system=file_system, stage_store=stage_store, tmp_path=tmp_path,
+    )
+
+    try:
+        yield fixture
+    finally:
+        stage_store.close()
+        await file_system.close()
 
 
 def _request(entity_id: str, body: str = "body") -> MutationRequest:
