@@ -247,6 +247,8 @@ class FolderDomainPolicy:
             return self._with_folder_projection(context, base)
         if request.name == "entity.delete":
             return await self._compile_cascade_soft_delete(context, request)
+        if request.name == "knowledge.folder.purge":
+            return await self._compile_hard_purge(context, request)
         raise ValueError(f"unsupported folder mutation request: {request.name}")
 
     # -- invariant checks ---------------------------------------------------
@@ -443,6 +445,112 @@ class FolderDomainPolicy:
             db_plans=tuple(db_plans),
             sync_events=tuple(sync_events),
             value=root_after if root_after is not None else after_frozen,
+            projections=tuple(projections),
+            resolution=resolution,
+        )
+
+
+    # -- hard purge ---------------------------------------------------------
+
+    def _all_children_of(
+        self,
+        context: MutationCompileContext,
+        folder_id: str,
+    ) -> list[str]:
+        """Find ALL children of *folder_id* including trashed ones."""
+        return [
+            str(row_id)
+            for (entity_type, row_id), row in context.authority._rows.items()
+            if entity_type == "folder"
+            and row.get("parent_id") is not None
+            and str(row["parent_id"]) == folder_id
+        ]
+
+    def _find_all_descendants_deepest_first(
+        self,
+        context: MutationCompileContext,
+        folder_id: str,
+    ) -> list[str]:
+        """Post-order traversal: children before parents (deepest first)."""
+        result: list[str] = []
+        for child_id in self._all_children_of(context, folder_id):
+            result.extend(
+                self._find_all_descendants_deepest_first(context, child_id)
+            )
+            result.append(child_id)
+        return result
+
+    async def _compile_hard_purge(
+        self,
+        context: MutationCompileContext,
+        request: MutationRequest,
+    ) -> MutationCommand:
+        spec = context.catalog.get("folder")
+        if request.payload:
+            raise MutationRuleViolation(
+                "delete_payload_not_empty",
+                {"entityId": request.entity_id},
+            )
+        current = context.authority.row("folder", request.entity_id)
+        if current is None:
+            raise MutationRuleViolation(
+                "not_found",
+                {"entityId": request.entity_id},
+            )
+        resolution = _require_current_version(spec, request, current)
+
+        # Deepest-first: descendants first, root last.
+        all_ids = self._find_all_descendants_deepest_first(
+            context, request.entity_id
+        )
+        all_ids.append(request.entity_id)
+
+        db_plans: list[DbMutationPlan] = []
+        sync_events: list[SyncEventPlan] = []
+        projections: list[ProjectionPlan] = []
+
+        for ordinal, folder_id in enumerate(all_ids):
+            row = context.authority.row("folder", folder_id)
+            if row is None:
+                raise MutationRuleViolation(
+                    "not_found",
+                    {"entityId": folder_id},
+                )
+
+            # Hard delete via catalog compiler (bypasses cascade soft delete).
+            del_request = MutationRequest.from_payload(
+                name="entity.delete",
+                entity_type="folder",
+                entity_id=folder_id,
+                payload={},
+                expected_version=row.get("version"),
+            )
+            base = await compile_catalog_entity_command(context, del_request)
+            db_plans.extend(base.db_plans)
+            sync_events.extend(base.sync_events)
+
+            # Folder index removal projection.
+            target = folder_index_target(folder_id)
+            before_blob = context.authority.derived_projection(
+                ProjectionActionTag.INDEX_REPLACE,
+                str(target),
+            )
+            projections.append(
+                ProjectionPlan(
+                    tag=ProjectionActionTag.INDEX_REPLACE,
+                    source=None,
+                    target=target,
+                    ordinal=ordinal,
+                    before=before_blob,
+                    after=None,
+                )
+            )
+
+        return context.command(
+            request=request,
+            db_plans=tuple(db_plans),
+            sync_events=tuple(sync_events),
+            value={"purged_ids": all_ids},
             projections=tuple(projections),
             resolution=resolution,
         )

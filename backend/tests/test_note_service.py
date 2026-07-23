@@ -215,8 +215,11 @@ async def test_delete_idempotent(space_session, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_create_db_failure_compensates_fs_delete(space_session, tmp_path):
-    """If DB flush fails after FS write, the .md file should be deleted."""
+async def test_create_db_failure_does_not_compensate_fs_delete(space_session, tmp_path):
+    """After compensation removal, DB failure leaves orphan .md file.
+
+    The durable recovery/journal mechanism handles cleanup, not NoteService.
+    """
     from unittest.mock import AsyncMock, patch
 
     from app.services.base import BaseService
@@ -230,14 +233,14 @@ async def test_create_db_failure_compensates_fs_delete(space_session, tmp_path):
         with pytest.raises(RuntimeError, match="DB down"):
             await svc.create({"title": "Saga", "content": "compensate me"})
 
-    # Compensation: no .md file should remain.
+    # No compensation: orphan .md file remains (durable recovery handles it).
     notes = await fs.list_notes()
-    assert len(notes) == 0, "Orphan .md file left after DB failure"
+    assert len(notes) == 1, "Orphan .md file should remain after DB failure"
 
 
 @pytest.mark.asyncio
-async def test_update_content_db_failure_restores_old_content(space_session, tmp_path):
-    """If DB flush fails after FS rewrite, old .md content should be restored."""
+async def test_update_content_db_failure_does_not_restore_old_content(space_session, tmp_path):
+    """After compensation removal, DB failure leaves new content in .md file."""
     from unittest.mock import AsyncMock
 
     from app.services.note import NoteService
@@ -258,9 +261,9 @@ async def test_update_content_db_failure_restores_old_content(space_session, tmp
     finally:
         space_session.flush = original_flush
 
-    # Compensation: FS content should be restored to old value.
+    # No compensation: FS keeps new content (durable recovery handles it).
     content = await fs.read_note(note_id)
-    assert content == "Old content", f"Content not restored: {content!r}"
+    assert content == "New content", f"FS should keep new content: {content!r}"
 
 
 # --------------------------------------------------------------------------- #

@@ -779,6 +779,742 @@ async def test_knowledge_store_projects_folder_and_note_through_one_uow(
         await file_system.close()
 
 
+@pytest.mark.asyncio
+async def test_note_purge_removes_orm_markdown_index_fts_and_emits_delete_event(
+    uow_fixture, tmp_path,
+) -> None:
+    from sqlalchemy import select
+
+    from app.commands import EntityCommand, FolderDomainPolicy, RelationDomainPolicy
+    from app.file_system.api import get_file_system
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.knowledge.store import KnowledgeStore
+    from app.models.note import Note
+    from app.models.sync_outbox import SyncOutbox
+    from app.mutation.types import MutationState
+    from tests.test_mutation_recovery import _Lease as RecoveryLease
+
+    file_system = await get_file_system(
+        root_dir=tmp_path / "purge-files",
+        index_db=tmp_path / "purge-index.db",
+    )
+    stage_store = StageStore(_stage_authority(tmp_path / "purge-stages"))
+    scope = _Scope(uow_fixture.sessions, uow_fixture.receipt)
+    scope.file_system = file_system
+    scope.mutation_stages = stage_store
+    scope.global_lease = RecoveryLease(LeaseMode.SHARED, "global")
+    scope.space_lease = RecoveryLease(LeaseMode.EXCLUSIVE, "space-test")
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        yield scope.space_lease
+
+    scope.exclusive_space_resources = exclusive_space_resources
+
+    executor = FileSystemProjectionExecutor()
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), RelationDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    interpreter = DbMutationInterpreter(CATALOG)
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=compiler,
+        interpreter=interpreter,
+        projection_executor=executor,
+        recovery_gate=MutationRecovery(
+            catalog=CATALOG,
+            interpreter=interpreter,
+            projection_executor=executor,
+        ),
+        journal_factory=MutationJournal,
+    )
+    store = KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(CATALOG),
+        uow=uow,
+    )
+
+    try:
+        await store.create_note(
+            scope,
+            {"id": "n-purge", "title": "Purge", "content": "body to purge"},
+            expected_version=None,
+            operation_id="create-n-purge",
+        )
+        await store.update_note(
+            scope,
+            "n-purge",
+            {"trashed_at": "2026-01-01T00:00:00+00:00"},
+            expected_version=1,
+            operation_id="trash-n-purge",
+        )
+
+        result = await store.purge_note(
+            scope,
+            "n-purge",
+            expected_version=2,
+            operation_id="purge-n-purge",
+        )
+
+        assert result.state is MutationState.FINALIZED
+
+        async with uow_fixture.sessions() as session:
+            note = await session.get(Note, "n-purge")
+            assert note is None, "ORM Note row should be deleted"
+
+            delete_events = (
+                await session.execute(
+                    select(SyncOutbox).where(
+                        SyncOutbox.entity_type == "note",
+                        SyncOutbox.entity_id == "n-purge",
+                        SyncOutbox.action == "delete",
+                        SyncOutbox.visible.is_(True),
+                    )
+                )
+            ).scalars().all()
+            assert len(delete_events) == 1, "exactly one visible delete event"
+
+        snapshot = await file_system.snapshot_projection_authority()
+        assert all(
+            "n-purge" not in key for key in snapshot.markdown
+        ), "markdown removed"
+        assert all(
+            "n-purge" not in key for key in snapshot.index
+        ), "index removed"
+        assert all(
+            "n-purge" not in key for key in snapshot.fts
+        ), "fts removed"
+    finally:
+        stage_store.close()
+        await file_system.close()
+
+
+@pytest.mark.asyncio
+async def test_folder_purge_deletes_all_descendants_deepest_first(
+    uow_fixture, tmp_path,
+) -> None:
+    """Folder purge hard-deletes the folder and all descendants (including
+    trashed ones) in a single atomic batch.  Descendants are processed
+    deepest-first so no partial state is observable."""
+    from sqlalchemy import select
+
+    from app.commands import EntityCommand, FolderDomainPolicy, RelationDomainPolicy
+    from app.file_system.api import get_file_system
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.knowledge.store import KnowledgeStore
+    from app.models.folder import Folder
+    from app.models.sync_outbox import SyncOutbox
+    from app.mutation.types import MutationState
+    from tests.test_mutation_recovery import _Lease as RecoveryLease
+
+    file_system = await get_file_system(
+        root_dir=tmp_path / "folder-purge-files",
+        index_db=tmp_path / "folder-purge-index.db",
+    )
+    stage_store = StageStore(_stage_authority(tmp_path / "folder-purge-stages"))
+    scope = _Scope(uow_fixture.sessions, uow_fixture.receipt)
+    scope.file_system = file_system
+    scope.mutation_stages = stage_store
+    scope.global_lease = RecoveryLease(LeaseMode.SHARED, "global")
+    scope.space_lease = RecoveryLease(LeaseMode.EXCLUSIVE, "space-test")
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        yield scope.space_lease
+
+    scope.exclusive_space_resources = exclusive_space_resources
+
+    executor = FileSystemProjectionExecutor()
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), RelationDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    interpreter = DbMutationInterpreter(CATALOG)
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=compiler,
+        interpreter=interpreter,
+        projection_executor=executor,
+        recovery_gate=MutationRecovery(
+            catalog=CATALOG,
+            interpreter=interpreter,
+            projection_executor=executor,
+        ),
+        journal_factory=MutationJournal,
+    )
+    store = KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(CATALOG),
+        uow=uow,
+    )
+
+    try:
+        # Create tree: root -> child1 -> grandchild1, root -> child2
+        await store.create_folder(
+            scope,
+            {"id": "root", "name": "Root", "parent_id": None},
+            expected_version=None,
+            operation_id="create-root",
+        )
+        await store.create_folder(
+            scope,
+            {"id": "child1", "name": "Child1", "parent_id": "root"},
+            expected_version=None,
+            operation_id="create-child1",
+        )
+        await store.create_folder(
+            scope,
+            {"id": "grandchild1", "name": "GC1", "parent_id": "child1"},
+            expected_version=None,
+            operation_id="create-gc1",
+        )
+        await store.create_folder(
+            scope,
+            {"id": "child2", "name": "Child2", "parent_id": "root"},
+            expected_version=None,
+            operation_id="create-child2",
+        )
+
+        # Trash the root (cascade soft-deletes all descendants)
+        await store.update_folder(
+            scope,
+            "root",
+            {"trashed_at": "2026-01-01T00:00:00+00:00"},
+            expected_version=1,
+            operation_id="trash-root",
+        )
+
+        # Purge the root folder — should hard-delete all 4 folders
+        result = await store.purge_folder(
+            scope,
+            "root",
+            expected_version=2,
+            operation_id="purge-root",
+        )
+
+        assert result.state is MutationState.FINALIZED
+
+        # All 4 folders should be gone from ORM
+        async with uow_fixture.sessions() as session:
+            for fid in ("root", "child1", "grandchild1", "child2"):
+                folder = await session.get(Folder, fid)
+                assert folder is None, f"folder {fid} should be deleted"
+
+            # 4 visible delete events
+            delete_events = (
+                await session.execute(
+                    select(SyncOutbox).where(
+                        SyncOutbox.entity_type == "folder",
+                        SyncOutbox.entity_id.in_(
+                            ("root", "child1", "grandchild1", "child2")
+                        ),
+                        SyncOutbox.action == "delete",
+                        SyncOutbox.visible.is_(True),
+                    )
+                )
+            ).scalars().all()
+            assert len(delete_events) == 4, (
+                f"expected 4 visible delete events, got {len(delete_events)}"
+            )
+
+        # All folder index entries removed
+        snapshot = await file_system.snapshot_projection_authority()
+        for fid in ("root", "child1", "grandchild1", "child2"):
+            assert all(
+                fid not in key for key in snapshot.index
+            ), f"folder index for {fid} should be removed"
+    finally:
+        stage_store.close()
+        await file_system.close()
+
+
+@pytest.mark.asyncio
+async def test_restore_note_clears_trashed_at_through_uow(
+    uow_fixture, tmp_path,
+) -> None:
+    """Note restore must go through UoW, produce an update event, and
+    rebuild projections so the note is visible again."""
+    from sqlalchemy import select
+
+    from app.commands import EntityCommand, FolderDomainPolicy, RelationDomainPolicy
+    from app.file_system.api import get_file_system
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.knowledge.store import KnowledgeStore
+    from app.models.note import Note
+    from app.models.sync_outbox import SyncOutbox
+    from app.mutation.types import MutationState
+    from tests.test_mutation_recovery import _Lease as RecoveryLease
+
+    file_system = await get_file_system(
+        root_dir=tmp_path / "restore-note-files",
+        index_db=tmp_path / "restore-note-index.db",
+    )
+    stage_store = StageStore(_stage_authority(tmp_path / "restore-note-stages"))
+    scope = _Scope(uow_fixture.sessions, uow_fixture.receipt)
+    scope.file_system = file_system
+    scope.mutation_stages = stage_store
+    scope.global_lease = RecoveryLease(LeaseMode.SHARED, "global")
+    scope.space_lease = RecoveryLease(LeaseMode.EXCLUSIVE, "space-test")
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        yield scope.space_lease
+
+    scope.exclusive_space_resources = exclusive_space_resources
+
+    executor = FileSystemProjectionExecutor()
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), RelationDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    interpreter = DbMutationInterpreter(CATALOG)
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=compiler,
+        interpreter=interpreter,
+        projection_executor=executor,
+        recovery_gate=MutationRecovery(
+            catalog=CATALOG,
+            interpreter=interpreter,
+            projection_executor=executor,
+        ),
+        journal_factory=MutationJournal,
+    )
+    store = KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(CATALOG),
+        uow=uow,
+    )
+
+    try:
+        await store.create_note(
+            scope,
+            {"id": "n-restore", "title": "Restore", "content": "body"},
+            expected_version=None,
+            operation_id="create-n-restore",
+        )
+        await store.update_note(
+            scope,
+            "n-restore",
+            {"trashed_at": "2026-01-01T00:00:00+00:00"},
+            expected_version=1,
+            operation_id="trash-n-restore",
+        )
+
+        result = await store.restore_note(
+            scope,
+            "n-restore",
+            expected_version=2,
+            operation_id="restore-n-restore",
+        )
+
+        assert result.state is MutationState.FINALIZED
+
+        async with uow_fixture.sessions() as session:
+            note = await session.get(Note, "n-restore")
+            assert note is not None
+            assert note.trashed_at is None, "trashed_at should be cleared"
+
+            update_events = (
+                await session.execute(
+                    select(SyncOutbox).where(
+                        SyncOutbox.entity_type == "note",
+                        SyncOutbox.entity_id == "n-restore",
+                        SyncOutbox.action == "update",
+                        SyncOutbox.visible.is_(True),
+                    )
+                )
+            ).scalars().all()
+            # At least one update event from restore (there may be more from trash)
+            assert len(update_events) >= 1, "restore should emit a visible update event"
+    finally:
+        stage_store.close()
+        await file_system.close()
+
+
+@pytest.mark.asyncio
+async def test_restore_folder_clears_trashed_at_through_uow(
+    uow_fixture, tmp_path,
+) -> None:
+    """Folder restore must go through UoW and produce an update event."""
+    from sqlalchemy import select
+
+    from app.commands import EntityCommand, FolderDomainPolicy, RelationDomainPolicy
+    from app.file_system.api import get_file_system
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.knowledge.store import KnowledgeStore
+    from app.models.folder import Folder
+    from app.models.sync_outbox import SyncOutbox
+    from app.mutation.types import MutationState
+    from tests.test_mutation_recovery import _Lease as RecoveryLease
+
+    file_system = await get_file_system(
+        root_dir=tmp_path / "restore-folder-files",
+        index_db=tmp_path / "restore-folder-index.db",
+    )
+    stage_store = StageStore(_stage_authority(tmp_path / "restore-folder-stages"))
+    scope = _Scope(uow_fixture.sessions, uow_fixture.receipt)
+    scope.file_system = file_system
+    scope.mutation_stages = stage_store
+    scope.global_lease = RecoveryLease(LeaseMode.SHARED, "global")
+    scope.space_lease = RecoveryLease(LeaseMode.EXCLUSIVE, "space-test")
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        yield scope.space_lease
+
+    scope.exclusive_space_resources = exclusive_space_resources
+
+    executor = FileSystemProjectionExecutor()
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), RelationDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    interpreter = DbMutationInterpreter(CATALOG)
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=compiler,
+        interpreter=interpreter,
+        projection_executor=executor,
+        recovery_gate=MutationRecovery(
+            catalog=CATALOG,
+            interpreter=interpreter,
+            projection_executor=executor,
+        ),
+        journal_factory=MutationJournal,
+    )
+    store = KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(CATALOG),
+        uow=uow,
+    )
+
+    try:
+        await store.create_folder(
+            scope,
+            {"id": "f-restore", "name": "Folder", "parent_id": None},
+            expected_version=None,
+            operation_id="create-f-restore",
+        )
+        await store.update_folder(
+            scope,
+            "f-restore",
+            {"trashed_at": "2026-01-01T00:00:00+00:00"},
+            expected_version=1,
+            operation_id="trash-f-restore",
+        )
+
+        result = await store.restore_folder(
+            scope,
+            "f-restore",
+            expected_version=2,
+            operation_id="restore-f-restore",
+        )
+
+        assert result.state is MutationState.FINALIZED
+
+        async with uow_fixture.sessions() as session:
+            folder = await session.get(Folder, "f-restore")
+            assert folder is not None
+            assert folder.trashed_at is None, "trashed_at should be cleared"
+
+            update_events = (
+                await session.execute(
+                    select(SyncOutbox).where(
+                        SyncOutbox.entity_type == "folder",
+                        SyncOutbox.entity_id == "f-restore",
+                        SyncOutbox.action == "update",
+                        SyncOutbox.visible.is_(True),
+                    )
+                )
+            ).scalars().all()
+            assert len(update_events) >= 1, "restore should emit a visible update event"
+    finally:
+        stage_store.close()
+        await file_system.close()
+
+
+@pytest.mark.asyncio
+async def test_restore_quick_note_clears_trashed_at_through_uow(
+    uow_fixture, tmp_path,
+) -> None:
+    """QuickNote restore must go through UoW and produce an update event."""
+    from sqlalchemy import select
+
+    from app.commands import EntityCommand, FolderDomainPolicy, RelationDomainPolicy
+    from app.file_system.api import get_file_system
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.knowledge.store import KnowledgeStore
+    from app.models.quick_note import QuickNote
+    from app.models.sync_outbox import SyncOutbox
+    from app.mutation.types import MutationState
+    from tests.test_mutation_recovery import _Lease as RecoveryLease
+
+    file_system = await get_file_system(
+        root_dir=tmp_path / "restore-qn-files",
+        index_db=tmp_path / "restore-qn-index.db",
+    )
+    stage_store = StageStore(_stage_authority(tmp_path / "restore-qn-stages"))
+    scope = _Scope(uow_fixture.sessions, uow_fixture.receipt)
+    scope.file_system = file_system
+    scope.mutation_stages = stage_store
+    scope.global_lease = RecoveryLease(LeaseMode.SHARED, "global")
+    scope.space_lease = RecoveryLease(LeaseMode.EXCLUSIVE, "space-test")
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        yield scope.space_lease
+
+    scope.exclusive_space_resources = exclusive_space_resources
+
+    executor = FileSystemProjectionExecutor()
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), RelationDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    interpreter = DbMutationInterpreter(CATALOG)
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=compiler,
+        interpreter=interpreter,
+        projection_executor=executor,
+        recovery_gate=MutationRecovery(
+            catalog=CATALOG,
+            interpreter=interpreter,
+            projection_executor=executor,
+        ),
+        journal_factory=MutationJournal,
+    )
+    store = KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(CATALOG),
+        uow=uow,
+    )
+
+    try:
+        # Create a QuickNote through entity_commands
+        create_req = store.entity_commands.create(
+            scope, "quick_note",
+            {"id": "qn-restore", "content": "quick note content"},
+            expected_version=None,
+        )
+        await store.uow.execute(scope, create_req, "create-qn-restore")
+
+        # Trash the QuickNote
+        trash_req = store.entity_commands.update(
+            scope, "quick_note", "qn-restore",
+            {"trashed_at": "2026-01-01T00:00:00+00:00"},
+            expected_version=1,
+        )
+        await store.uow.execute(scope, trash_req, "trash-qn-restore")
+
+        # Restore
+        result = await store.restore_quick_note(
+            scope,
+            "qn-restore",
+            expected_version=2,
+            operation_id="restore-qn-restore",
+        )
+
+        assert result.state is MutationState.FINALIZED
+
+        async with uow_fixture.sessions() as session:
+            qn = await session.get(QuickNote, "qn-restore")
+            assert qn is not None
+            assert qn.trashed_at is None, "trashed_at should be cleared"
+
+            update_events = (
+                await session.execute(
+                    select(SyncOutbox).where(
+                        SyncOutbox.entity_type == "quickNote",
+                        SyncOutbox.entity_id == "qn-restore",
+                        SyncOutbox.action == "update",
+                        SyncOutbox.visible.is_(True),
+                    )
+                )
+            ).scalars().all()
+            assert len(update_events) >= 1, "restore should emit a visible update event"
+    finally:
+        stage_store.close()
+        await file_system.close()
+
+
+@pytest.mark.asyncio
+async def test_quick_note_conversion_is_atomic_batch_with_deterministic_ids(
+    uow_fixture, tmp_path,
+) -> None:
+    """QuickNote conversion must be an atomic batch:
+    - Note create
+    - QuickNote CAS update (archive + link)
+    - MemoComment copies with deterministic IDs
+    - Retry with same operation_id returns same result (idempotent)
+    """
+    import hashlib
+
+    from sqlalchemy import select
+
+    from app.commands import EntityCommand, FolderDomainPolicy, RelationDomainPolicy
+    from app.file_system.api import get_file_system
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.knowledge.store import KnowledgeStore
+    from app.models.memo_comment import MemoComment
+    from app.models.note import Note
+    from app.models.quick_note import QuickNote
+    from app.mutation.types import MutationState
+    from tests.test_mutation_recovery import _Lease as RecoveryLease
+
+    file_system = await get_file_system(
+        root_dir=tmp_path / "convert-qn-files",
+        index_db=tmp_path / "convert-qn-index.db",
+    )
+    stage_store = StageStore(_stage_authority(tmp_path / "convert-qn-stages"))
+    scope = _Scope(uow_fixture.sessions, uow_fixture.receipt)
+    scope.file_system = file_system
+    scope.mutation_stages = stage_store
+    scope.global_lease = RecoveryLease(LeaseMode.SHARED, "global")
+    scope.space_lease = RecoveryLease(LeaseMode.EXCLUSIVE, "space-test")
+
+    @asynccontextmanager
+    async def exclusive_space_resources(purpose, timeout_seconds):
+        yield scope.space_lease
+
+    scope.exclusive_space_resources = exclusive_space_resources
+
+    executor = FileSystemProjectionExecutor()
+    compiler = MutationCompiler(
+        CATALOG,
+        [FolderDomainPolicy(), RelationDomainPolicy(), KnowledgeDomainPolicy()],
+    )
+    interpreter = DbMutationInterpreter(CATALOG)
+    uow = MutationUnitOfWork(
+        catalog=CATALOG,
+        compiler=compiler,
+        interpreter=interpreter,
+        projection_executor=executor,
+        recovery_gate=MutationRecovery(
+            catalog=CATALOG,
+            interpreter=interpreter,
+            projection_executor=executor,
+        ),
+        journal_factory=MutationJournal,
+    )
+    store = KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(CATALOG),
+        uow=uow,
+    )
+
+    try:
+        # Create a QuickNote with content and tags
+        create_qn_req = store.entity_commands.create(
+            scope, "quick_note",
+            {
+                "id": "qn-convert",
+                "content": "Convert me to a note",
+                "tags": '["test"]',
+            },
+            expected_version=None,
+        )
+        await store.uow.execute(scope, create_qn_req, "create-qn-convert")
+
+        # Create 2 MemoComments on the quick note
+        for cid, ctext in (("src-c1", "First comment"), ("src-c2", "Second comment")):
+            create_comment_req = store.entity_commands.create(
+                scope, "memo_comment",
+                {"id": cid, "note_id": "qn-convert", "content": ctext},
+                expected_version=None,
+            )
+            await store.uow.execute(
+                scope, create_comment_req, f"create-comment-{cid}",
+            )
+
+        # Convert the QuickNote to a Note
+        first = await store.convert_quick_note(
+            scope,
+            "qn-convert",
+            expected_version=1,
+            operation_id="convert-qn-convert",
+        )
+
+        # Determine deterministic note ID
+        expected_note_id = hashlib.sha256(
+            "convert-qn-convert\0note".encode("ascii")
+        ).hexdigest()[:32]
+
+        # Verify Note was created
+        async with uow_fixture.sessions() as session:
+            note = await session.get(Note, expected_note_id)
+            assert note is not None, "converted Note should exist"
+            assert note.title, "note should have a title derived from content"
+
+            # Verify QuickNote was archived
+            qn = await session.get(QuickNote, "qn-convert")
+            assert qn is not None
+            assert qn.archived_at is not None, "quick note should be archived"
+            assert qn.migrated_to_note_id == expected_note_id
+
+            # Verify MemoComments were copied with deterministic IDs
+            expected_c1 = hashlib.sha256(
+                "convert-qn-convert\0memo_comment\0src-c1".encode("ascii")
+            ).hexdigest()[:32]
+            expected_c2 = hashlib.sha256(
+                "convert-qn-convert\0memo_comment\0src-c2".encode("ascii")
+            ).hexdigest()[:32]
+
+            copied_comments = (
+                await session.execute(
+                    select(MemoComment).where(
+                        MemoComment.note_id == expected_note_id
+                    )
+                )
+            ).scalars().all()
+            assert len(copied_comments) == 2, (
+                f"expected 2 copied comments, got {len(copied_comments)}"
+            )
+            copied_ids = {c.id for c in copied_comments}
+            assert expected_c1 in copied_ids, "first comment should have deterministic ID"
+            assert expected_c2 in copied_ids, "second comment should have deterministic ID"
+
+        # Retry with same operation_id — should be idempotent
+        second = await store.convert_quick_note(
+            scope,
+            "qn-convert",
+            expected_version=1,
+            operation_id="convert-qn-convert",
+        )
+
+        # Same batch_id → same result (idempotent)
+        assert second.batch_id == first.batch_id
+
+        # Verify no duplicate Notes or comments
+        async with uow_fixture.sessions() as session:
+            notes_with_id = (
+                await session.execute(
+                    select(Note).where(Note.id == expected_note_id)
+                )
+            ).scalars().all()
+            assert len(notes_with_id) == 1, "no duplicate Note from retry"
+
+            all_copied = (
+                await session.execute(
+                    select(MemoComment).where(
+                        MemoComment.note_id == expected_note_id
+                    )
+                )
+            ).scalars().all()
+            assert len(all_copied) == 2, "no duplicate comments from retry"
+    finally:
+        stage_store.close()
+        await file_system.close()
+
+
 def _projection_api():
     names = (
         "ContainedProjectionActionField",

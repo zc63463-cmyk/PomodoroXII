@@ -2,12 +2,12 @@
 
 The Note model stores metadata only (content_hash, word_count).  The
 full Markdown content lives in the filesystem.  This service coordinates
-both stores using a Saga Try-Compensate pattern:
+both stores without compensation: if the DB flush fails after an FS
+write, the orphan .md file is left for durable recovery/journal to
+clean up.
 
-- ``create``: FS write → DB flush; on DB failure compensate by deleting
-  the .md file.
-- ``update_content``: save old content → FS rewrite → DB flush; on DB
-  failure compensate by restoring the old .md content.
+- ``create``: FS write → DB flush.
+- ``update_content``: FS rewrite → DB flush.
 - ``delete``: default soft-delete (sets trashed_at + moves .md to .trash/);
   hard=True (sync/REST purge) does DB delete + tombstone + FS best-effort.
 
@@ -51,10 +51,8 @@ class NoteService(BaseService):
 
     - ``create`` writes the .md file via the filesystem, then inserts
       the ORM row with content_hash and word_count from the file system.
-      If the DB flush fails, the .md file is deleted as compensation.
     - ``get_content`` reads the .md file.
     - ``update_content`` rewrites the .md file and syncs hash/count.
-      If the DB flush fails, the old .md content is restored.
     - ``update_metadata`` updates DB-only fields (title, tags, etc.).
     - ``delete`` (default) soft-deletes: sets trashed_at + moves .md to
       .trash/; hard=True removes DB row + tombstone + FS best-effort. Both idempotent.
@@ -74,11 +72,7 @@ class NoteService(BaseService):
         self.sync_mode = sync_mode
 
     async def create(self, data: dict[str, Any]) -> Any:
-        """Create a note: write .md via fs, then insert ORM row.
-
-        Saga: if DB flush fails after FS write, the .md file is deleted
-        to avoid leaving an orphan.
-        """
+        """Create a note: write .md via fs, then insert ORM row."""
         data = dict(data)
         content = data.pop("content", "")
         title = data.get("title", "")
@@ -101,27 +95,19 @@ class NoteService(BaseService):
         if "tags" in data and isinstance(data["tags"], list):
             data["tags"] = json.dumps(data["tags"])
 
-        try:
-            obj = await super().create(data, record_event=False)
-            if self.record_sync_events:
-                payload = serialize_entity(obj)
-                payload["content"] = content
-                await record_sync_event(
-                    self.db,
-                    entity_type=self.entity_type,
-                    entity_id=obj.id,
-                    action="create",
-                    payload=payload,
-                    visible=True,
-                )
-            return obj
-        except Exception:
-            # Compensate: delete the orphan .md file.
-            try:
-                await self.fs.delete_note(meta.id)
-            except (KeyError, FileNotFoundError):
-                pass
-            raise
+        obj = await super().create(data, record_event=False)
+        if self.record_sync_events:
+            payload = serialize_entity(obj)
+            payload["content"] = content
+            await record_sync_event(
+                self.db,
+                entity_type=self.entity_type,
+                entity_id=obj.id,
+                action="create",
+                payload=payload,
+                visible=True,
+            )
+        return obj
 
     async def get_content(self, id: str) -> str:
         """Read the .md content for a note."""
@@ -137,55 +123,36 @@ class NoteService(BaseService):
     ) -> Any:
         """Rewrite the .md file and sync content_hash/word_count.
 
-        Saga: save old content before FS rewrite; if DB flush fails,
-        restore the old .md content.
-
         When *updated_at_override* is provided (sync_mode=True), the DB
         row's updated_at is set to this value instead of server-now.
         """
-        # Save old content for compensation.
-        old_content: str | None = None
-        try:
-            old_content = await self.fs.read_note(id)
-        except (KeyError, FileNotFoundError):
-            pass
-
         meta = await self.fs.edit_note(id, content)
-        try:
-            obj = await self.get(id)
-            obj.content_hash = meta.content_hash
-            obj.word_count = meta.word_count
-            obj.updated_at = (
-                updated_at_override if updated_at_override is not None
-                else utc_now_iso()
+        obj = await self.get(id)
+        obj.content_hash = meta.content_hash
+        obj.word_count = meta.word_count
+        obj.updated_at = (
+            updated_at_override if updated_at_override is not None
+            else utc_now_iso()
+        )
+        if updated_at_override is not None:
+            # P1-3: Force updated_at into the UPDATE SET clause so
+            # SyncMixin.onupdate=utc_now_iso_ms does not fire and
+            # overwrite the client-provided timestamp.
+            flag_modified(obj, "updated_at")
+        await self.db.flush()
+        await self.db.refresh(obj)
+        if self.record_sync_events and record_event:
+            payload = serialize_entity(obj)
+            payload["content"] = content
+            await record_sync_event(
+                self.db,
+                entity_type=self.entity_type,
+                entity_id=obj.id,
+                action="update",
+                payload=payload,
+                visible=True,
             )
-            if updated_at_override is not None:
-                # P1-3: Force updated_at into the UPDATE SET clause so
-                # SyncMixin.onupdate=utc_now_iso_ms does not fire and
-                # overwrite the client-provided timestamp.
-                flag_modified(obj, "updated_at")
-            await self.db.flush()
-            await self.db.refresh(obj)
-            if self.record_sync_events and record_event:
-                payload = serialize_entity(obj)
-                payload["content"] = content
-                await record_sync_event(
-                    self.db,
-                    entity_type=self.entity_type,
-                    entity_id=obj.id,
-                    action="update",
-                    payload=payload,
-                    visible=True,
-                )
-            return obj
-        except Exception:
-            # Compensate: restore old .md content.
-            if old_content is not None:
-                try:
-                    await self.fs.edit_note(id, old_content)
-                except (KeyError, FileNotFoundError):
-                    pass
-            raise
+        return obj
 
     async def update_metadata(
         self,
