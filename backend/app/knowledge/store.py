@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from app.commands import EntityCommand
 from app.knowledge.commands import KnowledgeCommands
-from app.mutation.types import MutationResult
+from app.mutation.types import BatchMutationResult, MutationResult, bounded_child_operation_id
 from app.mutation.unit_of_work import MutationUnitOfWork
 from app.runtime.space import SpaceRuntimeHandle
 
@@ -159,9 +159,59 @@ class KnowledgeStore:
         folder_id: str,
         expected_version: int,
         operation_id: str,
-    ) -> MutationResult:
-        request = self.commands.purge_folder_request(folder_id, expected_version)
-        return await self.uow.execute(scope, request, operation_id)
+    ) -> BatchMutationResult:
+        """Hard-delete a folder and all its descendants (trashed or not).
+
+        Descendants are deleted deepest-first so that child rows are removed
+        before parent rows.  Each descendant becomes a separate operation in
+        the batch, sharing one visibility barrier.
+        """
+        from sqlalchemy import select as sa_select
+
+        from app.models.folder import Folder
+
+        # Read all folders from DB to build the descendant tree.
+        async with scope.session_factory() as session:
+            all_folders = (
+                await session.execute(
+                    sa_select(Folder.id, Folder.parent_id, Folder.trashed_at, Folder.version)
+                )
+            ).all()
+
+        # Build parent->children map (including trashed folders).
+        children_map: dict[str, list[str]] = {}
+        for fid, parent_id, _trashed, _ver in all_folders:
+            if parent_id is not None:
+                children_map.setdefault(str(parent_id), []).append(str(fid))
+
+        def _descendants_deepest_first(folder_id: str) -> list[str]:
+            """Post-order traversal: children before parents."""
+            result: list[str] = []
+            for child_id in sorted(children_map.get(folder_id, [])):
+                result.extend(_descendants_deepest_first(child_id))
+                result.append(child_id)
+            return result
+
+        all_ids = _descendants_deepest_first(folder_id)
+        all_ids.append(folder_id)
+
+        # Build individual purge requests for each folder (deepest-first).
+        requests = []
+        operation_ids = []
+        for idx, fid in enumerate(all_ids):
+            req = self.commands.purge_folder_request(
+                fid,
+                expected_version=expected_version if fid == folder_id else None,
+            )
+            requests.append(req)
+            operation_ids.append(
+                bounded_child_operation_id(operation_id, f"{idx:04d}")
+            )
+
+        return await self.uow.execute_batch(
+            scope, requests, batch_id=operation_id,
+            operation_ids=operation_ids,
+        )
 
     async def restore_note(
         self,
@@ -237,9 +287,9 @@ class KnowledgeStore:
                 )
             comments = (
                 await session.execute(
-                    select(MemoComment).where(
-                        MemoComment.note_id == quick_note_id
-                    )
+                    select(MemoComment)
+                    .where(MemoComment.note_id == quick_note_id)
+                    .order_by(MemoComment.created_at, MemoComment.id)
                 )
             ).scalars().all()
 
