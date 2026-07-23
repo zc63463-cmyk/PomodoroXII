@@ -78,6 +78,36 @@ class KnowledgeCommands:
             expected_version,
         )
 
+    def purge_note_request(
+        self,
+        note_id: str,
+        expected_version: int,
+    ) -> MutationRequest:
+        if not isinstance(note_id, str) or not note_id:
+            raise ValueError("note purge requires a non-empty string id")
+        return MutationRequest.from_payload(
+            name="knowledge.note.purge",
+            entity_type="note",
+            entity_id=note_id,
+            payload={},
+            expected_version=expected_version,
+        )
+
+    def purge_folder_request(
+        self,
+        folder_id: str,
+        expected_version: int,
+    ) -> MutationRequest:
+        if not isinstance(folder_id, str) or not folder_id:
+            raise ValueError("folder purge requires a non-empty string id")
+        return MutationRequest.from_payload(
+            name="knowledge.folder.purge",
+            entity_type="folder",
+            entity_id=folder_id,
+            payload={},
+            expected_version=expected_version,
+        )
+
     def rebuild_projection_request(self, space_id: str) -> MutationRequest:
         if not isinstance(space_id, str) or not space_id:
             raise ValueError("knowledge rebuild requires a non-empty Space id")

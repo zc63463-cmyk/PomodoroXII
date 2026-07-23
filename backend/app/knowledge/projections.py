@@ -255,6 +255,8 @@ class KnowledgeDomainPolicy:
     ) -> MutationCommand:
         if request.name == "knowledge.projection.rebuild":
             return self._compile_rebuild(context, request)
+        if request.name == "knowledge.note.purge":
+            return await self._compile_purge(context, request)
         if request.name not in {
             "knowledge.note.create",
             "knowledge.note.update",
@@ -305,6 +307,39 @@ class KnowledgeDomainPolicy:
             before_path=before_path,
             before_markdown=before_markdown,
             body=content,
+        )
+        return context.command(
+            request=request,
+            db_plans=base.db_plans,
+            sync_events=base.sync_events,
+            value=base.result_value,
+            projections=projections,
+            resolution=base.resolution,
+        )
+
+    async def _compile_purge(
+        self, context: MutationCompileContext, request: MutationRequest
+    ) -> MutationCommand:
+        entity_request = MutationRequest.from_payload(
+            name="entity.delete",
+            entity_type="note",
+            entity_id=request.entity_id,
+            payload={},
+            expected_version=request.expected_version,
+            client_updated_at=request.client_updated_at,
+        )
+        base = await compile_catalog_entity_command(context, entity_request)
+        plan = base.db_plans[0]
+        before_path = context.authority.note_path(request.entity_id)
+        before_markdown = (
+            None if before_path is None else context.authority.markdown(before_path)
+        )
+        projections = self.builder.build_note(
+            before_row=plan.before_row,
+            after_row=None,
+            before_path=before_path,
+            before_markdown=before_markdown,
+            body=None,
         )
         return context.command(
             request=request,
