@@ -5136,3 +5136,34 @@ async def test_quick_note_conversion_visible_batch_events(
     finally:
         stage_store.close()
         await file_system.close()
+
+
+@pytest.mark.asyncio
+async def test_purge_creates_tombstone_via_commit_business(
+    knowledge_fixture,
+) -> None:
+    """Purge must create exactly one tombstone in the space database,
+    processed atomically within _commit_business alongside sync_events."""
+    from app.models.tombstone import Tombstone
+
+    kf = knowledge_fixture
+    note_id = "n-tomb"
+    purge_version = await kf.create_and_trash_note(note_id, title="Tomb", versions=1)
+
+    result = await kf.store.purge_note(
+        kf.scope, note_id, expected_version=purge_version,
+        operation_id="purge-tomb",
+    )
+    assert result.state is MutationState.FINALIZED
+
+    async with kf.sessions() as session:
+        tombstones = (
+            await session.execute(
+                select(Tombstone).where(
+                    Tombstone.entity_type == "note",
+                    Tombstone.entity_id == note_id,
+                )
+            )
+        ).scalars().all()
+        assert len(tombstones) == 1, f"expected 1 tombstone, got {len(tombstones)}"
+        assert tombstones[0].deleted_at is not None
