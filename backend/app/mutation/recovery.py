@@ -648,6 +648,24 @@ class MutationRecovery:
                     session,
                     operation.command.db_plans,
                 )
+            # Reverse tombstone creation: delete tombstones created by
+            # this batch's delete operations.
+            from sqlalchemy import text as sa_text
+            for operation in reversed(operations):
+                for event in operation.command.sync_events:
+                    if event.action != "delete":
+                        continue
+                    spec = self.catalog.get(event.entity_type)
+                    await session.execute(
+                        sa_text(
+                            "DELETE FROM tombstones "
+                            "WHERE entity_type = :et AND entity_id = :eid"
+                        ),
+                        {
+                            "et": spec.effective_sync_entity_type,
+                            "eid": event.entity_id,
+                        },
+                    )
             await session.execute(
                 delete(SyncOutbox).where(SyncOutbox.batch_id == batch_id)
             )

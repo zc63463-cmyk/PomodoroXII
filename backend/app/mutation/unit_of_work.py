@@ -1729,6 +1729,37 @@ class MutationUnitOfWork:
                         visible=False,
                     )
 
+            # Tombstone creation: for each delete sync_event, create a
+            # tombstone in the space database. Delete any old tombstone
+            # first to ensure exactly one current deletion proof.
+            from sqlalchemy import text as sa_text
+            for operation_id, command in zip(operation_ids, commands, strict=True):
+                for event in command.sync_events:
+                    if event.action != "delete":
+                        continue
+                    spec = self.catalog.get(event.entity_type)
+                    await session.execute(
+                        sa_text(
+                            "DELETE FROM tombstones "
+                            "WHERE entity_type = :et AND entity_id = :eid"
+                        ),
+                        {
+                            "et": spec.effective_sync_entity_type,
+                            "eid": event.entity_id,
+                        },
+                    )
+                    await session.execute(
+                        sa_text(
+                            "INSERT INTO tombstones (entity_type, entity_id, deleted_at) "
+                            "VALUES (:et, :eid, :dt)"
+                        ),
+                        {
+                            "et": spec.effective_sync_entity_type,
+                            "eid": event.entity_id,
+                            "dt": event.created_at,
+                        },
+                    )
+
     async def _finalize_forward(self, scope, journal, batch_id, operation_ids, commands, receipt) -> None:
         for operation_id, command in zip(operation_ids, commands, strict=True):
             persisted = command.persisted()
