@@ -267,6 +267,7 @@ class KnowledgeDomainPolicy:
             raise ValueError(f"unsupported knowledge mutation request: {request.name}")
         payload = dict(request.payload)
         content = payload.pop("content", None)
+        derivation_map = payload.pop("derivation_map", None)
         creating = request.name == "knowledge.note.create"
         if creating and not isinstance(content, str):
             raise ValueError("note create content must be a string")

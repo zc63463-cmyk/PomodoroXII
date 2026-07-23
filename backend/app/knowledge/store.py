@@ -313,6 +313,29 @@ class KnowledgeStore:
             title = "(converted quick note)"
         tags = json.loads(qn.tags) if qn.tags else []
 
+        # Build derivation map for INTENT persistence.
+        # This map is embedded in the note create payload and popped by
+        # the knowledge compiler so it stays in the command_json but
+        # does not leak into the after_row.
+        comment_mapping: dict[str, dict[str, str]] = {}
+        for comment in comments:
+            cid = hashlib.sha256(
+                f"{operation_id}\0memo_comment\0{comment.id}".encode("ascii")
+            ).hexdigest()[:32]
+            cop = bounded_child_operation_id(
+                operation_id, f"memo:{comment.id}",
+            )
+            comment_mapping[str(comment.id)] = {
+                "new_id": cid,
+                "child_op_id": cop,
+            }
+
+        derivation_map: dict[str, object] = {
+            "note_id": note_id,
+            "archived_at": archived_at,
+            "comment_mapping": comment_mapping,
+        }
+
         # Build batch requests with deterministic operation IDs.
         requests = []
         operation_ids = []
@@ -326,6 +349,7 @@ class KnowledgeStore:
                 "content": qn.content or "",
                 "tags": tags,
                 "folder_id": qn.folder_id,
+                "derivation_map": derivation_map,
             },
             expected_version=None,
         ))
@@ -362,7 +386,11 @@ class KnowledgeStore:
             ))
             operation_ids.append(comment_op)
 
-        return await self.uow.execute_batch(
+        result = await self.uow.execute_batch(
             scope, requests, batch_id=operation_id,
             operation_ids=operation_ids,
         )
+        if result.rejected:
+            from app.errors import MutationRejectedError
+            raise MutationRejectedError(result.rejected[0])
+        return result
