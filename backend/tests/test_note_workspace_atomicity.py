@@ -5285,3 +5285,189 @@ async def test_purge_compensation_restores_orm_and_deletes_tombstone(
         assert len(tombstones) == 0, (
             f"expected 0 tombstones after compensation, got {len(tombstones)}"
         )
+
+
+
+@pytest.mark.asyncio
+async def test_folder_purge_per_child_orm_projection_event_tombstone(
+    knowledge_fixture,
+) -> None:
+    """Folder purge must delete each descendant deepest-first, with
+    per-child ORM deletion, visible delete event, and tombstone."""
+    from app.models.folder import Folder
+
+    kf = knowledge_fixture
+    # Create root -> child -> grandchild
+    root_id = "f-root"
+    child_id = "f-child"
+    grand_id = "f-grand"
+
+    await kf.store.create_folder(
+        kf.scope, {"id": root_id, "name": "Root"},
+        expected_version=None, operation_id="create-root",
+    )
+    await kf.store.create_folder(
+        kf.scope, {"id": child_id, "name": "Child", "parent_id": root_id},
+        expected_version=None, operation_id="create-child",
+    )
+    await kf.store.create_folder(
+        kf.scope, {"id": grand_id, "name": "Grand", "parent_id": child_id},
+        expected_version=None, operation_id="create-grand",
+    )
+
+    result = await kf.store.purge_folder(
+        kf.scope, root_id, expected_version=1,
+        operation_id="purge-folder-tree",
+    )
+    assert len(result.applied) == 3, f"expected 3 applied, got {len(result.applied)}"
+    for r in result.applied:
+        assert r.state is MutationState.FINALIZED
+
+    # All three folders deleted from ORM.
+    async with kf.sessions() as session:
+        for fid in (root_id, child_id, grand_id):
+            folder = await session.get(Folder, fid)
+            assert folder is None, f"Folder {fid} still in ORM"
+
+    # Each folder has a tombstone and visible delete event.
+    for fid in (root_id, child_id, grand_id):
+        await kf.assert_single_tombstone_and_visible_delete("folder", fid)
+
+
+@pytest.mark.asyncio
+async def test_folder_purge_multi_layer_tree_all_deleted(
+    knowledge_fixture,
+) -> None:
+    """4-folder tree: root -> a -> b -> c. Purge root, verify all gone."""
+    from app.models.folder import Folder
+
+    kf = knowledge_fixture
+    ids = ["f-mt-root", "f-mt-a", "f-mt-b", "f-mt-c"]
+    await kf.store.create_folder(
+        kf.scope, {"id": ids[0], "name": "Root"},
+        expected_version=None, operation_id="mt-create-root",
+    )
+    for i in range(1, 4):
+        await kf.store.create_folder(
+            kf.scope, {"id": ids[i], "name": f"L{i}", "parent_id": ids[i-1]},
+            expected_version=None, operation_id=f"mt-create-{i}",
+        )
+
+    result = await kf.store.purge_folder(
+        kf.scope, ids[0], expected_version=1,
+        operation_id="mt-purge",
+    )
+    assert len(result.applied) == 4
+    for r in result.applied:
+        assert r.state is MutationState.FINALIZED
+
+    async with kf.sessions() as session:
+        for fid in ids:
+            assert await session.get(Folder, fid) is None, f"{fid} still exists"
+    for fid in ids:
+        await kf.assert_single_tombstone_and_visible_delete("folder", fid)
+
+
+@pytest.mark.asyncio
+async def test_folder_purge_mid_batch_failure_compensates_all(
+    knowledge_fixture,
+) -> None:
+    """If forward projection fails mid-batch, compensation must restore
+    ALL folders — proving all-old-or-all-new semantics."""
+    from app.models.folder import Folder
+
+    kf = knowledge_fixture
+    ids = ["f-fail-root", "f-fail-child", "f-fail-grand"]
+    await kf.store.create_folder(
+        kf.scope, {"id": ids[0], "name": "Root"},
+        expected_version=None, operation_id="fail-create-root",
+    )
+    await kf.store.create_folder(
+        kf.scope, {"id": ids[1], "name": "Child", "parent_id": ids[0]},
+        expected_version=None, operation_id="fail-create-child",
+    )
+    await kf.store.create_folder(
+        kf.scope, {"id": ids[2], "name": "Grand", "parent_id": ids[1]},
+        expected_version=None, operation_id="fail-create-grand",
+    )
+
+    class _FailingForwardExecutor(FileSystemProjectionExecutor):
+        async def apply_forward(self, scope, operation_id, command, receipt, *, ordinals=None):
+            raise RuntimeError("injected mid-batch failure")
+
+    failing = _FailingForwardExecutor()
+    kf.store.uow.projection_executor = failing
+    kf.store.uow.recovery_gate.projection_executor = failing
+
+    with pytest.raises(RuntimeError, match="injected mid-batch failure"):
+        await kf.store.purge_folder(
+            kf.scope, ids[0], expected_version=1,
+            operation_id="fail-purge",
+        )
+
+    recovery_result = await kf.store.uow.recovery_gate.recover_under_lease(
+        kf.scope, kf.scope.space_lease,
+    )
+    assert "fail-purge" in recovery_result.compensated
+
+    # ALL folders restored — all-old-or-all-new.
+    async with kf.sessions() as session:
+        for fid in ids:
+            folder = await session.get(Folder, fid)
+            assert folder is not None, f"Folder {fid} was not restored"
+
+
+@pytest.mark.asyncio
+async def test_folder_purge_retry_after_failure_succeeds(
+    knowledge_fixture,
+) -> None:
+    """After a failed+compensated purge, a retry with a new operation_id
+    must succeed — proving all-new semantics."""
+    from app.models.folder import Folder
+
+    kf = knowledge_fixture
+    root_id = "f-retry-root"
+    child_id = "f-retry-child"
+    await kf.store.create_folder(
+        kf.scope, {"id": root_id, "name": "Root"},
+        expected_version=None, operation_id="retry-create-root",
+    )
+    await kf.store.create_folder(
+        kf.scope, {"id": child_id, "name": "Child", "parent_id": root_id},
+        expected_version=None, operation_id="retry-create-child",
+    )
+
+    # First attempt fails.
+    class _FailingForwardExecutor(FileSystemProjectionExecutor):
+        async def apply_forward(self, scope, operation_id, command, receipt, *, ordinals=None):
+            raise RuntimeError("first attempt fails")
+
+    failing = _FailingForwardExecutor()
+    kf.store.uow.projection_executor = failing
+    kf.store.uow.recovery_gate.projection_executor = failing
+
+    with pytest.raises(RuntimeError):
+        await kf.store.purge_folder(
+            kf.scope, root_id, expected_version=1,
+            operation_id="retry-purge-1",
+        )
+    await kf.store.uow.recovery_gate.recover_under_lease(
+        kf.scope, kf.scope.space_lease,
+    )
+
+    # Restore working executor.
+    kf.store.uow.projection_executor = FileSystemProjectionExecutor()
+    kf.store.uow.recovery_gate.projection_executor = kf.store.uow.projection_executor
+
+    # Retry with new operation_id.
+    result = await kf.store.purge_folder(
+        kf.scope, root_id, expected_version=1,
+        operation_id="retry-purge-2",
+    )
+    assert len(result.applied) == 2
+    for r in result.applied:
+        assert r.state is MutationState.FINALIZED
+
+    async with kf.sessions() as session:
+        assert await session.get(Folder, root_id) is None
+        assert await session.get(Folder, child_id) is None
