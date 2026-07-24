@@ -11,12 +11,17 @@ clean up.
 - ``delete``: default soft-delete (sets trashed_at + moves .md to .trash/);
   hard=True (sync/REST purge) does DB delete + tombstone + FS best-effort.
 
+When ``store`` and ``scope`` are provided, ``restore`` and ``delete(hard=True)``
+delegate to ``KnowledgeStore`` so the write goes through the durable mutation
+pipeline (journal + UoW + projections).  FS cleanup remains best-effort.
+
 Does NOT import FastAPI.  Only flushes, never commits.
 """
 
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,6 +61,11 @@ class NoteService(BaseService):
     - ``update_metadata`` updates DB-only fields (title, tags, etc.).
     - ``delete`` (default) soft-deletes: sets trashed_at + moves .md to
       .trash/; hard=True removes DB row + tombstone + FS best-effort. Both idempotent.
+    - ``restore`` clears trashed_at + moves .md back from .trash/.
+
+    When ``store`` and ``scope`` are provided, ``restore`` and
+    ``delete(hard=True)`` delegate to the KnowledgeStore's durable
+    mutation pipeline.
     """
 
     entity_type = "note"
@@ -65,11 +75,16 @@ class NoteService(BaseService):
         db: AsyncSession,
         fs: FileSystem,
         sync_mode: bool = False,
+        *,
+        store: Any | None = None,
+        scope: Any | None = None,
     ) -> None:
         super().__init__(db, record_sync_events=not sync_mode)
         self.fs = fs
         self.model = Note
         self.sync_mode = sync_mode
+        self.store = store
+        self.scope = scope
 
     async def create(self, data: dict[str, Any]) -> Any:
         """Create a note: write .md via fs, then insert ORM row."""
@@ -253,6 +268,10 @@ class NoteService(BaseService):
           a tombstone (skipped in sync_mode -- the sync layer writes it),
           and best-effort deletes the .md file. Idempotent.
 
+        When ``store`` and ``scope`` are provided and ``hard=True``,
+        delegates to ``KnowledgeStore.purge_note`` so the purge goes
+        through the durable mutation pipeline.
+
         DB delete and tombstone creation happen before FS deletion so
         that if FS fails, the DB state is still consistent (the orphan
         .md file is harmless and can be cleaned by a consistency check).
@@ -260,7 +279,23 @@ class NoteService(BaseService):
         obj = await self.db.get(self.model, id)
 
         if self.sync_mode or hard:
-            # Hard delete: DB delete + tombstone + FS best-effort.
+            # Durable path: delegate purge to KnowledgeStore.
+            if self.store is not None and self.scope is not None and not self.sync_mode:
+                if obj is not None:
+                    operation_id = (
+                        f"purge:note:{id}:{uuid.uuid4().hex[:16]}"
+                    )
+                    await self.store.purge_note(
+                        self.scope, id, obj.version, operation_id,
+                    )
+                # Best-effort FS cleanup (orphan .md is harmless).
+                try:
+                    await self.fs.delete_note(id)
+                except (KeyError, FileNotFoundError):
+                    pass
+                return
+
+            # Legacy hard delete: DB delete + tombstone + FS best-effort.
             if obj is not None:
                 await self.db.delete(obj)
                 await self.db.flush()
@@ -305,16 +340,36 @@ class NoteService(BaseService):
     async def restore(self, id: str) -> Any:
         """Restore a soft-deleted note: clear ``trashed_at`` + move .md back.
 
+        When ``store`` and ``scope`` are provided, delegates the DB
+        restore to ``KnowledgeStore.restore_note`` so the write goes
+        through the durable mutation pipeline.  FS restore remains
+        best-effort.
+
         Raises ``NotFoundError`` if the note does not exist, or
-        ``ValidationError`` if it is not in the trash. The filesystem
-        ``restore`` may raise ``FileExistsError`` if the target path is
-        occupied -- the route layer maps this to a 409 ConflictError.
+        ``ValidationError`` if it is not in the trash.
         """
         obj = await self.get(id)  # raises NotFoundError if missing
         if obj.trashed_at is None:
             from app.errors import ValidationError
 
             raise ValidationError(f"Note {id} is not in trash")
+
+        # Durable path: delegate to KnowledgeStore.
+        if self.store is not None and self.scope is not None:
+            operation_id = f"restore:note:{id}:{uuid.uuid4().hex[:16]}"
+            await self.store.restore_note(
+                self.scope, id, obj.version, operation_id,
+            )
+            # Best-effort FS restore (orphan .trash/ file is harmless).
+            try:
+                await self.fs.restore(id)
+            except (FileNotFoundError, FileExistsError, KeyError):
+                pass
+            # Re-read to get the updated row.
+            await self.db.refresh(obj)
+            return obj
+
+        # Legacy path: direct ORM + FS.
         obj.trashed_at = None
         await self.db.flush()
         await self.fs.restore(id)
@@ -325,7 +380,7 @@ class NoteService(BaseService):
             await record_sync_event(
                 self.db,
                 entity_type=self.entity_type,
-                entity_id=id,
+                entity_id=obj.id,
                 action="update",
                 payload=payload,
                 visible=True,

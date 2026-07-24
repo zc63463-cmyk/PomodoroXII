@@ -345,6 +345,30 @@ class SpaceRuntimeHandle:
         if cleanup_errors:
             raise BaseExceptionGroup("Space operation cleanup failed", cleanup_errors) from None
 
+    @asynccontextmanager
+    async def mutation_lease(
+        self, purpose: str, timeout_seconds: float
+    ) -> AsyncIterator[Lease]:
+        """Acquire an exclusive mutation lease, or reuse an existing one.
+
+        When the handle was opened in ``read`` mode (e.g., by the REST
+        API dependency layer), a shared space lease is already held and
+        resources are already active.  In that case, yield the existing
+        lease so the UoW can execute mutations without acquiring a
+        conflicting exclusive lease.
+
+        When the handle has no space lease (e.g., opened in ``mutation``
+        mode by test fixtures), delegate to ``exclusive_space_resources``
+        which acquires the lease and activates resources.
+        """
+        if self.space_lease is not None:
+            yield self.space_lease
+        else:
+            async with self.exclusive_space_resources(
+                purpose, timeout_seconds
+            ) as lease:
+                yield lease
+
     async def __aenter__(self) -> "SpaceRuntimeHandle":
         return self
 

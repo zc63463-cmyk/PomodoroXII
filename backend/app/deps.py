@@ -185,3 +185,32 @@ async def get_file_system(
     if handle.file_system is None:
         raise RuntimeError("Space runtime has no active filesystem")
     yield handle.file_system
+
+
+# --------------------------------------------------------------------------- #
+# KnowledgeStore (durable mutation facade)
+# --------------------------------------------------------------------------- #
+def get_knowledge_store(
+    request: Request,
+    handle: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+) -> Any:
+    """Construct a KnowledgeStore from the runtime's MutationUnitOfWork.
+
+    The KnowledgeStore delegates all writes through the durable mutation
+    pipeline (journal + UoW + projections).  Reads stay on the direct
+    DB session.
+    """
+    from app.commands import EntityCommand
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.store import KnowledgeStore
+    from app.registry import CATALOG
+
+    runtime = get_space_runtime(request)
+    uow = runtime.recovery_provider
+    if uow is None:
+        raise RuntimeError("MutationUnitOfWork is not installed")
+    return KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(CATALOG),
+        uow=uow,
+    )

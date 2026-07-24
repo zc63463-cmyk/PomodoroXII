@@ -495,6 +495,12 @@ class FolderDomainPolicy:
             ProjectionActionTag.INDEX_REPLACE,
             str(target),
         )
+        if before_blob is None:
+            # Folder was created outside the mutation pipeline (e.g., via
+            # REST API direct DB insert without a file-system index entry).
+            # Synthesize the before image from the authority row so the
+            # INDEX_REPLACE projection can represent the removal.
+            before_blob = serialize_folder_index_row(current)
         projections = (
             ProjectionPlan(
                 tag=ProjectionActionTag.INDEX_REPLACE,

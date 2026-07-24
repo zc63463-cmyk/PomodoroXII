@@ -2,8 +2,9 @@
 
 Does NOT import FastAPI.  Only flushes, never commits.
 """
-
 from __future__ import annotations
+
+from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,8 +18,16 @@ from app.services.time import utc_now_iso
 class CascadeService:
     """Handle cascading deletions across the folder tree and junction tables."""
 
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(
+        self,
+        db: AsyncSession,
+        *,
+        store: Any | None = None,
+        scope: Any | None = None,
+    ) -> None:
         self.db = db
+        self.store = store
+        self.scope = scope
 
     async def get_descendant_ids(self, folder_id: str) -> list[str]:
         """BFS-collect all descendant folder ids (including trashed).
@@ -54,6 +63,15 @@ class CascadeService:
     async def soft_delete_folder(self, folder_id: str) -> dict:
         """Soft-delete a folder and all its descendants.
 
+        When ``store`` and ``scope`` are provided, delegates to
+        ``KnowledgeStore.soft_delete_folder`` which routes the cascade
+        soft-delete through the durable mutation pipeline.  This ensures
+        sync events, projections, and journal entries are created
+        atomically for the folder and every descendant.
+
+        Without ``store``/``scope``, falls back to the legacy direct
+        ORM path.
+
         - Sets ``trashed_at`` on the folder and every non-trashed descendant.
         - Clears ``folder_id`` on notes and quick_notes in the subtree
           (they become "unfiled" but remain visible).
@@ -61,14 +79,29 @@ class CascadeService:
         - Raises ``ValidationError`` if the folder is a system folder.
         """
         from app.models.folder import Folder
-        from app.models.note import Note
-        from app.models.quick_note import QuickNote
 
         folder = await self.db.get(Folder, folder_id)
         if folder is None:
             raise NotFoundError(f"Folder '{folder_id}' not found")
         if folder.is_system:
             raise ValidationError("System folder cannot be deleted")
+
+        # ── Durable path: delegate to KnowledgeStore ──
+        if self.store is not None and self.scope is not None:
+            import uuid
+
+            operation_id = (
+                f"soft_delete:folder:{folder_id}:{uuid.uuid4().hex[:16]}"
+            )
+            await self.store.soft_delete_folder(
+                self.scope, folder_id, folder.version, operation_id,
+            )
+            desc_ids = await self.get_descendant_ids(folder_id)
+            return {"trashed_folder_ids": [folder_id, *desc_ids]}
+
+        # ── Legacy path: direct ORM ──
+        from app.models.note import Note
+        from app.models.quick_note import QuickNote
 
         now = utc_now_iso()
         desc_ids = await self.get_descendant_ids(folder_id)

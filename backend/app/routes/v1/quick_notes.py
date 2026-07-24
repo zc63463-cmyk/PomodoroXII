@@ -8,11 +8,20 @@ Routes commit; the service only flushes.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_file_system, get_space_context, get_space_db
+from app.deps import (
+    get_file_system,
+    get_knowledge_store,
+    get_space_context,
+    get_space_db,
+    get_space_runtime_handle,
+)
 from app.file_system.interfaces import FileSystem
+from app.runtime.space import SpaceRuntimeHandle
 from app.schemas.common import PaginatedResponse
 from app.schemas.quick_note import (
     QuickNoteConvertResponse,
@@ -45,18 +54,22 @@ async def convert_quick_note(
     db: AsyncSession = Depends(get_space_db),
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
+    store: Any = Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
 ):
     """Convert a quick note into a full Note (transactional).
 
-    - Creates a Note with the quick note's content/tags/folder_id.
-    - Marks the quick note as archived (``archived_at`` + ``migrated_to_note_id``).
-    - Copies ``memo_comments`` rows to the new Note.
+    Delegates to ``KnowledgeStore.convert_quick_note`` via the durable
+    mutation pipeline, which creates the Note, archives the QuickNote,
+    and copies memo_comments atomically.
 
     The original quick note row is kept (GET /{id} still 200) but excluded
     from GET /quick-notes listings. Repeated convert returns 409.
     """
     note_svc = NoteService(db, fs)
-    result = await QuickNoteService(db).convert(id, note_service=note_svc)
+    result = await QuickNoteService(db).convert(
+        id, note_service=note_svc, store=store, scope=scope,
+    )
     await db.commit()
     return result
 

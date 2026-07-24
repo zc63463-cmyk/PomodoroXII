@@ -258,6 +258,26 @@ class KnowledgeStore:
         )
         return await self.uow.execute(scope, request, operation_id)
 
+    async def soft_delete_folder(
+        self,
+        scope: SpaceRuntimeHandle,
+        folder_id: str,
+        expected_version: int,
+        operation_id: str,
+    ) -> MutationResult:
+        """Cascade soft-delete a folder and all its descendants.
+
+        Delegates to ``entity_commands.delete`` which triggers
+        ``FolderDomainPolicy._compile_cascade_soft_delete`` to trash
+        the folder and every non-trashed descendant in one durable
+        mutation.  The mutation pipeline handles sync events and
+        INDEX_REPLACE projections atomically.
+        """
+        request = self.entity_commands.delete(
+            scope, "folder", folder_id, expected_version,
+        )
+        return await self.uow.execute(scope, request, operation_id)
+
     async def convert_quick_note(
         self,
         scope: SpaceRuntimeHandle,
