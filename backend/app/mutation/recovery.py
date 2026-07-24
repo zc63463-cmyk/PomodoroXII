@@ -99,9 +99,12 @@ def _require_matching_leases(scope: Any, space_lease: Lease) -> None:
     if getattr(scope, "space_lease", None) is not space_lease:
         raise LeaseOrderError("recovery requires the handle's matching Space lease")
     space_lease.assert_active_owner(
-        mode=LeaseMode.EXCLUSIVE,
         scope=scope.scope.space_id,
     )
+    if space_lease.mode not in (LeaseMode.SHARED, LeaseMode.EXCLUSIVE):
+        raise LeaseOrderError(
+            "recovery requires a shared or exclusive Space lease"
+        )
 
 
 def _digest(value: bytes | None) -> tuple[str | None, int | None]:
@@ -111,7 +114,7 @@ def _digest(value: bytes | None) -> tuple[str | None, int | None]:
 
 
 class MutationRecovery:
-    """Recover every pending batch under an already-held Space-exclusive lease."""
+    """Recover every pending batch under an already-held Space lease."""
 
     def __init__(
         self,

@@ -107,8 +107,12 @@ class StageStore:
     @staticmethod
     def _require_space_exclusive(lease: Lease | None, space_id: str):
         if lease is None:
-            raise LeaseOrderError("staging requires a Space-exclusive lease")
-        lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope=space_id)
+            raise LeaseOrderError("staging requires a Space lease")
+        lease.assert_active_owner(scope=space_id)
+        if lease.mode not in (LeaseMode.SHARED, LeaseMode.EXCLUSIVE):
+            raise LeaseOrderError(
+                "staging requires a shared or exclusive Space lease"
+            )
         return lease.fence_receipt(space_id)
 
     def _manifest_value(

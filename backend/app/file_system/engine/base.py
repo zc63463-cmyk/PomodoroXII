@@ -512,6 +512,12 @@ class StorageBase:
             relative: self._read_text(relative).encode("utf-8")
             for relative in self._iter_markdown()
         }
+        # Also include trashed notes' markdown files (.trash/ directory)
+        # so the projection authority has a complete before image for
+        # purge and restore operations on trashed notes.
+        for relative in self._iter_markdown(".trash"):
+            if relative not in markdown:
+                markdown[relative] = self._read_text(relative).encode("utf-8")
         index: dict[str, bytes] = {}
         fts: dict[str, bytes] = {}
         with self._connect() as connection:

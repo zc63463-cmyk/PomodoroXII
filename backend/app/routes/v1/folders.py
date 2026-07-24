@@ -5,14 +5,24 @@ subclass of ``BaseService`` that excludes trashed folders from listings
 and orders by ``sort_order`` then ``name``.  Deletion is a *soft* delete
 performed by ``CascadeService.soft_delete_folder`` which trashes the
 folder and all its descendants, and detaches contained notes / quick notes.
+When a KnowledgeStore is available, the cascade soft-delete is routed
+through the durable mutation pipeline.
 Routes commit; the service only flushes.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_space_context, get_space_db
+from app.deps import (
+    get_knowledge_store,
+    get_space_context,
+    get_space_db,
+    get_space_runtime_handle,
+)
+from app.runtime.space import SpaceRuntimeHandle
 from app.schemas.common import PaginatedResponse
 from app.schemas.folder import FolderCreate, FolderResponse, FolderUpdate
 from app.services.cascade import CascadeService
@@ -91,6 +101,8 @@ async def delete_folder(
     id: str,
     db: AsyncSession = Depends(get_space_db),
     ctx: dict = Depends(get_space_context),
+    store: Any = Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
 ):
     """Soft-delete a folder and all its descendants via cascade.
 
@@ -98,6 +110,6 @@ async def delete_folder(
     quick notes inside the subtree are detached (folder_id set to None)
     so they remain visible as "unfiled".
     """
-    result = await CascadeService(db).soft_delete_folder(id)
+    result = await CascadeService(db, store=store, scope=scope).soft_delete_folder(id)
     await db.commit()
     return {"message": "Deleted", **result}

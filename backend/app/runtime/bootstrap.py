@@ -492,10 +492,20 @@ async def _startup_owned(
                 interpreter=interpreter,
                 projection_executor=projection_executor,
             )
+            from app.commands import FolderDomainPolicy, RelationDomainPolicy
+            from app.knowledge.projections import KnowledgeDomainPolicy
+
             runtime.install_recovery_provider(
                 MutationUnitOfWork(
                     catalog=catalog,
-                    compiler=MutationCompiler(catalog, policies=()),
+                    compiler=MutationCompiler(
+                        catalog,
+                        policies=(
+                            FolderDomainPolicy(),
+                            RelationDomainPolicy(),
+                            KnowledgeDomainPolicy(),
+                        ),
+                    ),
                     interpreter=interpreter,
                     projection_executor=projection_executor,
                     recovery_gate=recovery,

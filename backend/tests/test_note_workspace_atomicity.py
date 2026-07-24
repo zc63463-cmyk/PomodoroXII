@@ -1587,8 +1587,12 @@ class _FenceReceipt:
 class _Lease:
     def __init__(self, receipt: _FenceReceipt) -> None:
         self._receipt = receipt
+        # staging._require_space_exclusive reads lease.mode to verify
+        # the lease is shared or exclusive.
+        from app.runtime.leases import LeaseMode
+        self.mode = LeaseMode.SHARED
 
-    def assert_active_owner(self, *, mode, scope) -> None:
+    def assert_active_owner(self, *, mode=None, scope=None) -> None:
         assert scope == "space-test"
 
     def fence_receipt(self, _space_id: str) -> _FenceReceipt:

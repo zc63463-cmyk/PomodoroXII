@@ -53,6 +53,8 @@ def test_every_record_sync_event_call_chooses_visibility_explicitly():
         assert isinstance(visibility[0], ast.Constant) and type(visibility[0].value) is bool
         if source_path == Path("app/mutation/unit_of_work.py"):
             assert visibility[0].value is False
+        elif source_path == Path("app/mutation/recovery.py"):
+            assert visibility[0].value is False
         elif source_path.parts[:2] == ("app", "services"):
             assert visibility[0].value is True
         elif source_path.parts[0] == "app":
