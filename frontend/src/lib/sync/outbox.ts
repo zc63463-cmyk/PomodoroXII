@@ -23,6 +23,11 @@ export interface OutboxFailurePatch {
   failedAt?: string
 }
 
+/** S3-Task10: Options for enqueueOutbox to pass expected version. */
+export interface EnqueueOutboxOptions {
+  expectedVersion?: number | null
+}
+
 /**
  * 纯函数：outbox merge 矩阵（F1 §3.1，与 Vue database.ts 一致）。
  *
@@ -67,6 +72,7 @@ export async function enqueueOutbox(
   entityId: string,
   action: OutboxAction,
   payload: unknown,
+  options?: EnqueueOutboxOptions,
 ): Promise<void> {
   // 运行时校验 entityType（编译期 SyncEntityType 已收口，此处额外防御）
   if (!(entityType in ENTITY_TYPE_TO_TABLE)) {
@@ -120,6 +126,11 @@ export async function enqueueOutbox(
     if (merge.action === 'keep_existing') {
       latest.createdAt = now
       clearOutboxFailure(latest)
+      // S3-Task10: preserve operationId; update base version if missing
+      if (latest.action !== 'create' && latest.expectedVersion == null && action !== 'create') {
+        latest.expectedVersion = assertValidBaseVersion(action, options?.expectedVersion)
+        latest.requiresVersionRebase = false
+      }
       await db.outbox.put(latest)
       return
     }
@@ -129,6 +140,18 @@ export async function enqueueOutbox(
     latest.createdAt = now
     clearOutboxFailure(latest)
     if (merge.newAction) latest.action = merge.newAction
+    // S3-Task10: preserve operationId; create chain → no base version
+    if (latest.action === 'create') {
+      latest.expectedVersion = null
+      latest.requiresVersionRebase = false
+    } else if (latest.expectedVersion == null && !latest.requiresVersionRebase && action !== 'create') {
+      // No reliable version and not a rebase row; use incoming base version
+      latest.expectedVersion = assertValidBaseVersion(action, options?.expectedVersion)
+      latest.requiresVersionRebase = false
+    }
+    // else: preserve existing expectedVersion and requiresVersionRebase
+    //   (update→update, update→delete, delete→create with known version,
+    //    or rebase row with requiresVersionRebase=true)
     await db.outbox.put(latest)
 
     // 删除其余重复行
@@ -140,6 +163,7 @@ export async function enqueueOutbox(
   }
 
   // 无已有行 → 直接 add
+  const baseVersion = assertValidBaseVersion(action, options?.expectedVersion)
   await db.outbox.add({
     entityType,
     entityId,
@@ -151,6 +175,9 @@ export async function enqueueOutbox(
     lastErrorCode: null,
     failedAt: null,
     attemptCount: 0,
+    operationId: crypto.randomUUID(),
+    expectedVersion: baseVersion,
+    requiresVersionRebase: false,
   })
 }
 
@@ -200,6 +227,23 @@ function clearOutboxFailure(row: OutboxEvent): void {
   row.lastErrorCode = null
   row.failedAt = null
   row.attemptCount = 0
+}
+
+function assertValidBaseVersion(
+  action: OutboxAction,
+  expectedVersion: number | null | undefined,
+): number | null {
+  if (action === 'create') return null
+  if (
+    expectedVersion == null ||
+    !Number.isInteger(expectedVersion) ||
+    expectedVersion < 0
+  ) {
+    throw new Error(
+      `enqueueOutbox: action "${action}" requires a non-negative integer expectedVersion, got: ${expectedVersion}`,
+    )
+  }
+  return expectedVersion
 }
 
 function classifyOutboxError(error: string): string {

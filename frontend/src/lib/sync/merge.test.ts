@@ -204,6 +204,9 @@ describe('merge', () => {
       payload: '{}',
       createdAt: Date.now(),
       synced: false,
+      operationId: 'op-merge-outbox',
+      expectedVersion: 1,
+      requiresVersionRebase: false,
     })
     const dirtyConflicts: SyncConflict[] = []
 

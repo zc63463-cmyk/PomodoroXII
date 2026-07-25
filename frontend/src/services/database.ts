@@ -245,5 +245,37 @@ export class PomodoroXIDB extends Dexie {
         })
       }
     })
+    // version(17): S3-Task10 - backfill outbox rows with idempotency fields.
+    // operationId: UUID for each row.
+    // expectedVersion: null for create; payload.version-1 for update/delete with
+    //   reliable version (integer >= 2); null for unreliable update/delete.
+    // requiresVersionRebase: true for update/delete with no reliable version.
+    this.version(17).stores({
+      outbox: '++id, entityType, entityId, synced, createdAt',
+    }).upgrade(async (tx) => {
+      await tx.table('outbox').toCollection().modify((row: Record<string, unknown>) => {
+        row.operationId = crypto.randomUUID()
+        const action = row.action as string
+        if (action === 'create') {
+          row.expectedVersion = null
+          row.requiresVersionRebase = false
+        } else {
+          let payloadVersion: unknown = undefined
+          try {
+            const payload = JSON.parse(row.payload as string) as { version?: unknown }
+            payloadVersion = payload.version
+          } catch {
+            // payload is not valid JSON -- treat as no reliable version
+          }
+          if (Number.isInteger(payloadVersion) && (payloadVersion as number) >= 2) {
+            row.expectedVersion = (payloadVersion as number) - 1
+            row.requiresVersionRebase = false
+          } else {
+            row.expectedVersion = null
+            row.requiresVersionRebase = true
+          }
+        }
+      })
+    })
   }
 }
