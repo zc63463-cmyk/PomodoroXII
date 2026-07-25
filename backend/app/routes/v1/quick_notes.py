@@ -4,23 +4,26 @@ CRUD endpoints for the QuickNote entity.  Uses an inline
 ``QuickNoteService(BaseService)`` subclass that serialises the ``tags``
 list to a JSON string (matching the String column), excludes trashed
 items from listings, and orders pinned notes first (then newest).
-Routes commit; the service only flushes.
+Writes use the durable mutation UoW; read-only endpoints use the query service.
 """
 from __future__ import annotations
 
-from typing import Any
+import json
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import (
-    get_file_system,
+    entity_id_for_operation,
+    expected_version_from_request,
     get_knowledge_store,
+    get_operation_id,
     get_space_context,
     get_space_db,
     get_space_runtime_handle,
 )
-from app.file_system.interfaces import FileSystem
+from app.errors import NotFoundError
+from app.models.quick_note import QuickNote
 from app.runtime.space import SpaceRuntimeHandle
 from app.schemas.common import PaginatedResponse
 from app.schemas.quick_note import (
@@ -29,7 +32,6 @@ from app.schemas.quick_note import (
     QuickNoteResponse,
     QuickNoteUpdate,
 )
-from app.services.note import NoteService
 from app.services.quick_note import QuickNoteService
 
 router = APIRouter()
@@ -38,24 +40,27 @@ router = APIRouter()
 @router.post("", response_model=QuickNoteResponse, status_code=201)
 async def create_quick_note(
     data: QuickNoteCreate,
-    db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Create a new quick note."""
-    obj = await QuickNoteService(db).create(data.model_dump())
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    payload = data.model_dump()
+    payload["id"] = payload.get("id") or entity_id_for_operation(operation_id, "quick_note")
+    payload["tags"] = json.dumps(payload.get("tags", []))
+    request = store.entity_commands.create(scope, "quick_note", payload, None)
+    result = await store.uow.execute(scope, request, operation_id)
+    return dict(result.value)
 
 
 @router.post("/{id}/convert", response_model=QuickNoteConvertResponse)
 async def convert_quick_note(
     id: str,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    fs: FileSystem = Depends(get_file_system),
-    ctx: dict = Depends(get_space_context),
-    store: Any = Depends(get_knowledge_store),
+    store=Depends(get_knowledge_store),
     scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Convert a quick note into a full Note (transactional).
 
@@ -66,12 +71,20 @@ async def convert_quick_note(
     The original quick note row is kept (GET /{id} still 200) but excluded
     from GET /quick-notes listings. Repeated convert returns 409.
     """
-    note_svc = NoteService(db, fs)
-    result = await QuickNoteService(db).convert(
-        id, note_service=note_svc, store=store, scope=scope,
+    current = await db.get(QuickNote, id)
+    if current is None:
+        raise NotFoundError(f"QuickNote '{id}' not found")
+    result = await store.convert_quick_note(
+        scope,
+        id,
+        expected_version_from_request(request, current.version),
+        operation_id,
     )
-    await db.commit()
-    return result
+    return {
+        "note_id": result.applied[0].value["id"],
+        "quick_note_id": id,
+        "migrated_comments_count": max(len(result.applied) - 2, 0),
+    }
 
 
 @router.get("", response_model=PaginatedResponse[QuickNoteResponse])
@@ -109,23 +122,48 @@ async def get_quick_note(
 async def update_quick_note(
     id: str,
     data: QuickNoteUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Update an existing quick note (partial update)."""
-    obj = await QuickNoteService(db).update(id, data.model_dump(exclude_unset=True))
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    current = await db.get(QuickNote, id)
+    if current is None:
+        raise NotFoundError(f"QuickNote '{id}' not found")
+    patch = data.model_dump(exclude_unset=True)
+    if isinstance(patch.get("tags"), list):
+        patch["tags"] = json.dumps(patch["tags"])
+    request_obj = store.entity_commands.update(
+        scope,
+        "quick_note",
+        id,
+        patch,
+        expected_version_from_request(request, current.version),
+    )
+    result = await store.uow.execute(scope, request_obj, operation_id)
+    return dict(result.value)
 
 
 @router.delete("/{id}")
 async def delete_quick_note(
     id: str,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Delete a quick note."""
-    await QuickNoteService(db).delete(id)
-    await db.commit()
+    current = await db.get(QuickNote, id)
+    if current is None:
+        raise NotFoundError(f"QuickNote '{id}' not found")
+    request_obj = store.entity_commands.delete(
+        scope,
+        "quick_note",
+        id,
+        expected_version_from_request(request, current.version),
+    )
+    await store.uow.execute(scope, request_obj, operation_id)
     return {"message": "Deleted"}

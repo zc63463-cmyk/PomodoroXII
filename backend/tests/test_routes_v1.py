@@ -51,6 +51,66 @@ async def _get_space_client(client):
     return space_token, space_id
 
 
+def test_task9_compiled_catalog_is_process_stable() -> None:
+    from app.deps import get_compiled_entity_catalog
+
+    assert get_compiled_entity_catalog() is get_compiled_entity_catalog()
+
+
+def test_task9_operation_id_uses_idempotency_key_and_response_header() -> None:
+    from fastapi import Request, Response
+
+    from app.deps import get_operation_id
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/notes",
+            "headers": [(b"idempotency-key", b"client-note-create-1")],
+        }
+    )
+    response = Response()
+
+    assert get_operation_id(request, response) == "client-note-create-1"
+    assert response.headers["X-Operation-ID"] == "client-note-create-1"
+
+
+def test_task9_operation_id_is_generated_when_header_is_absent() -> None:
+    from fastapi import Request, Response
+
+    from app.deps import get_operation_id
+
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/api/v1/notes", "headers": []}
+    )
+    response = Response()
+
+    operation_id = get_operation_id(request, response)
+
+    assert operation_id.startswith("req-")
+    assert response.headers["X-Operation-ID"] == operation_id
+
+
+def test_task9_operation_id_rejects_blank_idempotency_key() -> None:
+    from fastapi import Request, Response
+
+    from app.deps import get_operation_id
+    from app.errors import ValidationError
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/notes",
+            "headers": [(b"idempotency-key", b"   ")],
+        }
+    )
+
+    with pytest.raises(ValidationError, match="Idempotency-Key"):
+        get_operation_id(request, Response())
+
+
 def _auth(space_token: str) -> dict:
     """Return the Authorization header dict for a space token."""
     return {"Authorization": f"Bearer {space_token}"}
@@ -755,6 +815,50 @@ async def test_schedules_create(client):
         headers=_auth(space_token),
     )
     assert resp.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_schedule_create_retries_with_idempotency_key(client):
+    """A retry with the same key returns the durable original response."""
+    space_token, _ = await _get_space_client(client)
+    headers = {
+        **_auth(space_token),
+        "Idempotency-Key": "schedule-create-retry-1",
+    }
+    payload = {
+        "title": "Retry-safe meeting",
+        "due_at": "2026-01-01T10:00:00.000Z",
+    }
+
+    first = await client.post("/api/v1/schedules", json=payload, headers=headers)
+    second = await client.post("/api/v1/schedules", json=payload, headers=headers)
+
+    assert first.status_code == second.status_code == 201
+    assert first.json() == second.json()
+    assert first.headers["X-Operation-ID"] == "schedule-create-retry-1"
+    assert second.headers["X-Operation-ID"] == "schedule-create-retry-1"
+
+
+@pytest.mark.asyncio
+async def test_schedule_update_honours_if_match_version(client):
+    """A stale If-Match version is rejected by the mutation CAS check."""
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+    created = await client.post(
+        "/api/v1/schedules",
+        json={"title": "CAS meeting", "due_at": "2026-01-01T10:00:00.000Z"},
+        headers=headers,
+    )
+    assert created.status_code == 201
+
+    response = await client.put(
+        f"/api/v1/schedules/{created.json()['id']}",
+        json={"title": "Should conflict"},
+        headers={**headers, "If-Match": '"999"'},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error_type"] == "conflict"
 
 
 @pytest.mark.asyncio

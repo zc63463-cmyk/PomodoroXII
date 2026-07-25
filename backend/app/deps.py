@@ -5,17 +5,21 @@ Token model:
 - ``type == "space"``  → access scoped to a single ``space_id``.
 """
 
+import hashlib
 import logging
 from collections.abc import AsyncIterator
+from functools import lru_cache
 from typing import Any
+from uuid import uuid4
 
-from fastapi import Depends, Request, Security
+from fastapi import Depends, Request, Response, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.authority import Principal, verify_with_fresh_meta_session
-from app.errors import AuthenticationError, AuthorizationError
+from app.errors import AuthenticationError, AuthorizationError, ValidationError
 from app.logging import request_id_var  # noqa: F401  (re-exported for convenience)
+from app.mutation.types import validate_operation_id
 from app.runtime.scope import AuthorizedSpaceScope
 from app.runtime.space import SpaceRuntimeHandle
 
@@ -28,6 +32,85 @@ def get_space_runtime(request: Request):
     if runtime is None:
         raise RuntimeError("SpaceRuntime is not installed")
     return runtime
+
+
+@lru_cache(maxsize=1)
+def get_compiled_entity_catalog():
+    """Return the process-stable catalog used by route mutation dependencies."""
+    from app.registry import CATALOG
+
+    return CATALOG
+
+
+def get_mutation_compiler(catalog=Depends(get_compiled_entity_catalog)):
+    """Build the shared compiler composition for request-scoped UoW wiring."""
+    from app.commands import FolderDomainPolicy, RelationDomainPolicy
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.mutation.unit_of_work import MutationCompiler
+
+    return MutationCompiler(
+        catalog,
+        policies=(
+            FolderDomainPolicy(),
+            RelationDomainPolicy(),
+            KnowledgeDomainPolicy(),
+        ),
+    )
+
+
+def get_mutation_uow(request: Request):
+    """Return the runtime-owned mutation UoW for the current application."""
+    runtime = get_space_runtime(request)
+    uow = getattr(runtime, "recovery_provider", None)
+    if uow is None:
+        raise RuntimeError("MutationUnitOfWork is not installed")
+    return uow
+
+
+def get_entity_command(catalog=Depends(get_compiled_entity_catalog)):
+    """Return the pure EntityCommand factory bound to the shared catalog."""
+    from app.commands import EntityCommand
+
+    return EntityCommand(catalog)
+
+
+def expected_version_from_request(request: Request, current_version: int) -> int:
+    """Resolve an update CAS version from If-Match or the current row."""
+    header = request.headers.get("If-Match")
+    if header is None or not header.strip():
+        return current_version
+    value = header.strip()
+    if value.startswith("W/"):
+        value = value[2:].strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1]
+    try:
+        version = int(value)
+    except ValueError as exc:
+        raise ValidationError("If-Match must contain a nonnegative integer version") from exc
+    if version < 0:
+        raise ValidationError("If-Match must contain a nonnegative integer version")
+    return version
+
+
+def get_operation_id(request: Request, response: Response) -> str:
+    """Resolve the durable operation identity for one mutation request."""
+    supplied = request.headers.get("Idempotency-Key")
+    operation_id = supplied.strip() if supplied else f"req-{uuid4().hex}"
+    try:
+        validate_operation_id(operation_id)
+    except ValueError as exc:
+        raise ValidationError("Idempotency-Key must be 1-128 printable ASCII characters") from exc
+    response.headers["X-Operation-ID"] = operation_id
+    return operation_id
+
+
+def entity_id_for_operation(operation_id: str, entity_type: str) -> str:
+    """Derive a retry-stable entity ID for a create request without one."""
+    validate_operation_id(operation_id)
+    return hashlib.sha256(
+        f"entity-id-v1\\0{entity_type}\\0{operation_id}".encode("ascii")
+    ).hexdigest()[:32]
 
 
 class _LegacyCompatibleHTTPBearer(HTTPBearer):
@@ -203,14 +286,11 @@ def get_knowledge_store(
     from app.commands import EntityCommand
     from app.knowledge.commands import KnowledgeCommands
     from app.knowledge.store import KnowledgeStore
-    from app.registry import CATALOG
-
-    runtime = get_space_runtime(request)
-    uow = runtime.recovery_provider
+    uow = get_mutation_uow(request)
     if uow is None:
         raise RuntimeError("MutationUnitOfWork is not installed")
     return KnowledgeStore(
         commands=KnowledgeCommands(),
-        entity_commands=EntityCommand(CATALOG),
+        entity_commands=EntityCommand(get_compiled_entity_catalog()),
         uow=uow,
     )
