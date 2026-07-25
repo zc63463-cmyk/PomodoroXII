@@ -1,627 +1,2945 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+
+
 import { PomodoroXIDB } from '@/services/database'
+
+
+
 import { db, spaceDBManager } from '@/services/space-db'
+
+
+
 import {
+
+
+
   configureQuickNoteOutboxHook,
+
+
+
   convertQuickNoteToNote,
+
+
+
   createQuickNote,
+
+
+
   createQuickNoteInTransaction,
+
+
+
   commitQuickNoteExistingEdit,
+
+
+
   getQuickNoteRepositoryUserMessage,
+
+
+
   listQuickNoteLifecycleStates,
+
+
+
   listQuickNotes,
+
+
+
   listTrashedQuickNotes,
+
+
+
   moveQuickNoteToTrash,
+
+
+
   purgeQuickNote,
+
+
+
   QuickNoteRepositoryError,
+
+
+
   resetQuickNoteOutboxHook,
+
+
+
   restoreQuickNote,
+
+
+
   updateQuickNote,
+
+
+
   type QuickNoteMutationContext,
+
+
+
 } from '@/lib/quick-notes/quick-note-repository'
 
+
+
+
+
+
+
 describe('quick-note-repository', () => {
+
+
+
   beforeEach(async () => {
+
+
+
     resetQuickNoteOutboxHook()
+
+
+
     await spaceDBManager.switchTo(`quick-note-repo-${crypto.randomUUID()}`)
+
+
+
   })
+
+
+
+
+
+
 
   afterEach(async () => {
+
+
+
     resetQuickNoteOutboxHook()
+
+
+
     await db.delete()
+
+
+
     spaceDBManager.close()
+
+
+
   })
+
+
+
+
+
+
 
   it('creates a complete QuickNote row with sync fields', async () => {
+
+
+
     const note = await createQuickNote({ content: 'hello #Daily_Note', tags: ['work'] })
+
+
+
     const row = await db.quickNotes.get(note.id)
 
+
+
+
+
+
+
     expect(note.content).toBe('hello #Daily_Note')
+
+
+
     expect(row).toMatchObject({
+
+
+
       id: note.id,
+
+
+
       content: 'hello #Daily_Note',
+
+
+
       tags: ['work', 'daily_note'],
+
+
+
       pinned: false,
+
+
+
       trashed_at: null,
+
+
+
       migrated_to_note_id: null,
+
+
+
       deletion_state: 'active',
+
+
+
       version: 1,
+
+
+
       _dirty: true,
+
+
+
     })
+
+
+
   })
+
+
+
+
+
+
 
   it('writes create and default Outbox rows only to the supplied transaction database', async () => {
+
+
+
     const isolatedDB = new PomodoroXIDB(
+
+
+
       `quick-note-repo-concrete-${crypto.randomUUID()}`,
+
+
+
     )
 
+
+
+
+
+
+
     try {
+
+
+
       await isolatedDB.transaction(
+
+
+
         'rw',
+
+
+
         isolatedDB.quickNotes,
+
+
+
         isolatedDB.outbox,
+
+
+
         async () => {
+
+
+
           await createQuickNoteInTransaction(isolatedDB, {
+
+
+
             id: 'concrete-create',
+
+
+
             content: 'captured database #draft',
+
+
+
           })
+
+
+
         },
+
+
+
       )
 
+
+
+
+
+
+
       expect(await isolatedDB.quickNotes.get('concrete-create')).toMatchObject({
+
+
+
         id: 'concrete-create',
+
+
+
         content: 'captured database #draft',
+
+
+
       })
+
+
+
       expect(
+
+
+
         await isolatedDB.outbox.where('entityId').equals('concrete-create').count(),
+
+
+
       ).toBe(1)
+
+
+
       expect(await db.quickNotes.get('concrete-create')).toBeUndefined()
+
+
+
       expect(await db.outbox.where('entityId').equals('concrete-create').count()).toBe(0)
+
+
+
     } finally {
+
+
+
       await isolatedDB.delete()
+
+
+
     }
+
+
+
   })
+
+
+
+
+
+
 
   it('can disable the outbox hook for explicitly local-only tests', async () => {
+
+
+
     configureQuickNoteOutboxHook(null)
+
+
+
     const note = await createQuickNote({ content: 'local create #draft' })
+
+
+
     await updateQuickNote(note.id, { content: 'local update #draft' })
+
+
+
     await moveQuickNoteToTrash(note.id)
+
+
+
     await restoreQuickNote(note.id)
+
+
+
     await moveQuickNoteToTrash(note.id)
+
+
+
     await purgeQuickNote(note.id)
 
+
+
+
+
+
+
     expect(await db.outbox.count()).toBe(0)
+
+
+
   })
+
+
+
+
+
+
 
   it('does not perform a late current lookup for a custom legacy mutation', async () => {
+
+
+
     const database = spaceDBManager.current
+
+
+
     const note = await createQuickNote({ content: 'custom legacy mutation' })
+
+
+
     const hook = vi.fn<(context: QuickNoteMutationContext) => void>()
+
+
+
     configureQuickNoteOutboxHook(hook)
 
+
+
+
+
+
+
     let entityWriteStarted = false
+
+
+
     const markEntityWrite = () => {
+
+
+
       entityWriteStarted = true
+
+
+
     }
+
+
+
     database.quickNotes.hook('updating', markEntityWrite)
+
+
+
     const currentSpy = vi.spyOn(spaceDBManager, 'current', 'get').mockImplementation(() => {
+
+
+
       if (entityWriteStarted) throw new Error('unexpected late current lookup')
+
+
+
       return database
+
+
+
     })
+
+
+
+
+
+
 
     try {
+
+
+
       await expect(updateQuickNote(note.id, { pinned: true })).resolves.toMatchObject({
+
+
+
         id: note.id,
+
+
+
         pinned: true,
+
+
+
       })
+
+
+
       expect(hook).toHaveBeenCalledOnce()
+
+
+
     } finally {
+
+
+
       currentSpy.mockRestore()
+
+
+
       database.quickNotes.hook('updating').unsubscribe(markEntityWrite)
+
+
+
     }
+
+
+
   })
+
+
+
+
+
+
 
   it('enqueues create, update, trash, and restore in the QuickNote outbox by default', async () => {
+
+
+
     const note = await createQuickNote({ content: 'sync create #draft' })
 
+
+
+
+
+
+
     let rows = await db.outbox.where('entityId').equals(note.id).toArray()
+
+
+
     expect(rows).toHaveLength(1)
+
+
+
     expect(rows[0]).toMatchObject({
+
+
+
       entityType: 'quickNote',
+
+
+
       entityId: note.id,
+
+
+
       action: 'create',
+
+
+
       synced: false,
+
+
+
     })
+
+
+
     expect(JSON.parse(rows[0]!.payload)).toMatchObject({
+
+
+
       id: note.id,
+
+
+
       content: 'sync create #draft',
+
+
+
       tags: ['draft'],
+
+
+
     })
+
+
+
+
+
+
 
     await updateQuickNote(note.id, { content: 'sync update #done' })
+
+
+
     rows = await db.outbox.where('entityId').equals(note.id).toArray()
+
+
+
     expect(rows).toHaveLength(1)
+
+
+
     expect(rows[0]?.action).toBe('create')
+
+
+
     expect(JSON.parse(rows[0]!.payload)).toMatchObject({
+
+
+
       id: note.id,
+
+
+
       content: 'sync update #done',
+
+
+
       tags: ['done'],
+
+
+
     })
+
+
+
+
+
+
 
     const trashed = await moveQuickNoteToTrash(note.id)
+
+
+
     rows = await db.outbox.where('entityId').equals(note.id).toArray()
+
+
+
     expect(rows).toHaveLength(1)
+
+
+
     expect(rows[0]?.action).toBe('create')
+
+
+
     expect(JSON.parse(rows[0]!.payload)).toMatchObject({
+
+
+
       id: note.id,
+
+
+
       trashed_at: trashed.trashed_at,
+
+
+
     })
 
+
+
+
+
+
+
     const restored = await restoreQuickNote(note.id)
+
+
+
     rows = await db.outbox.where('entityId').equals(note.id).toArray()
+
+
+
     expect(rows).toHaveLength(1)
+
+
+
     expect(rows[0]?.action).toBe('create')
+
+
+
     const restoredPayload = JSON.parse(rows[0]!.payload)
+
+
+
     expect(restoredPayload).toMatchObject({
+
+
+
       id: note.id,
+
+
+
       trashed_at: restored.trashed_at,
+
+
+
     })
+
+
+
     expect('deletion_state' in restoredPayload).toBe(false)
+
+
+
   })
+
+
+
+
+
+
 
   it('enqueues a delete tombstone when purging an already-synced trashed note', async () => {
+
+
+
     const note = await createQuickNote({ content: 'purge synced #draft' })
+
+
+
     await moveQuickNoteToTrash(note.id)
+
+
+
     await db.outbox.clear()
+
+
+
+
+
+
 
     await purgeQuickNote(note.id)
 
+
+
+
+
+
+
     expect(await db.quickNotes.get(note.id)).toBeUndefined()
+
+
+
     const rows = await db.outbox.where('entityId').equals(note.id).toArray()
+
+
+
     expect(rows).toHaveLength(1)
+
+
+
     expect(rows[0]).toMatchObject({
+
+
+
       entityType: 'quickNote',
+
+
+
       entityId: note.id,
+
+
+
       action: 'delete',
+
+
+
       synced: false,
+
+
+
     })
+
+
+
     expect(JSON.parse(rows[0]!.payload)).toEqual({ id: note.id })
+
+
+
   })
+
+
+
+
+
+
 
   it('collapses create then purge into no outbox row for never-synced notes', async () => {
+
+
+
     const note = await createQuickNote({ content: 'purge unsynced #draft' })
+
+
+
     await moveQuickNoteToTrash(note.id)
 
+
+
+
+
+
+
     await purgeQuickNote(note.id)
+
+
+
+
+
+
 
     expect(await db.quickNotes.get(note.id)).toBeUndefined()
+
+
+
     expect(await db.outbox.where('entityId').equals(note.id).count()).toBe(0)
+
+
+
   })
+
+
+
+
+
+
 
   it('uses the optional outbox hook as the single future sync boundary', async () => {
+
+
+
     const contexts: QuickNoteMutationContext[] = []
+
+
+
     configureQuickNoteOutboxHook((context) => {
+
+
+
       contexts.push({
+
+
+
         ...context,
+
+
+
         payload: { ...context.payload },
+
+
+
       })
+
+
+
     })
+
+
+
+
+
+
 
     const note = await createQuickNote({ content: 'hook create #draft' })
+
+
+
     const updated = await updateQuickNote(note.id, { content: 'hook update #done' })
+
+
+
     const trashed = await moveQuickNoteToTrash(note.id)
+
+
+
     const restored = await restoreQuickNote(note.id)
+
+
+
     await moveQuickNoteToTrash(note.id)
+
+
+
     await purgeQuickNote(note.id)
 
+
+
+
+
+
+
     expect(contexts.map((context) => context.action)).toEqual([
+
+
+
       'create',
+
+
+
       'update',
+
+
+
       'update',
+
+
+
       'update',
+
+
+
       'update',
+
+
+
       'delete',
+
+
+
     ])
+
+
+
     expect(contexts.every((context) => context.entityType === 'quickNote')).toBe(true)
+
+
+
     expect(contexts.every((context) => context.entityId === note.id)).toBe(true)
+
+
+
     expect(contexts[0]?.payload).toMatchObject({ id: note.id, content: 'hook create #draft' })
+
+
+
     expect(contexts[1]?.payload).toMatchObject({ id: note.id, content: updated.content })
+
+
+
     expect(contexts[2]?.payload).toMatchObject({ id: note.id, trashed_at: trashed.trashed_at })
+
+
+
     expect(contexts[3]?.payload).toMatchObject({ id: note.id, trashed_at: restored.trashed_at })
+
+
+
     expect(contexts[5]?.payload).toEqual({ id: note.id })
+
+
+
     expect(contexts).toHaveLength(6)
+
+
+
     expect(await db.outbox.count()).toBe(0)
+
+
+
   })
 
+
+
+
+
+
+
   it('converts an active quick note into a note and archives the quick note', async () => {
+
+
+
     const quickNote = await createQuickNote({
+
+
+
       id: 'convert-source',
+
+
+
       content: 'Converted title\nConverted body #note',
+
+
+
       folder_id: 'folder-1',
+
+
+
     })
+
+
+
     await db.outbox.clear()
+
+
+
+
+
+
 
     const result = await convertQuickNoteToNote(quickNote.id)
 
+
+
+
+
+
+
     const converted = await db.quickNotes.get(quickNote.id)
+
+
+
     const note = await db.notes.get(result.noteId)
+
+
+
     const outboxRows = await db.outbox.toArray()
 
+
+
+
+
+
+
     expect(result.quickNoteId).toBe(quickNote.id)
+
+
+
     expect(note).toMatchObject({
+
+
+
       id: result.noteId,
+
+
+
       title: 'Converted title',
+
+
+
       content: 'Converted title\nConverted body #note',
+
+
+
       summary: 'Converted title\nConverted body #note',
+
+
+
       tags: ['note'],
+
+
+
       folder_id: 'folder-1',
+
+
+
       status: 'active',
+
+
+
       deletion_state: 'active',
+
+
+
       _dirty: true,
+
+
+
     })
+
+
+
     expect(converted).toMatchObject({
+
+
+
       id: quickNote.id,
+
+
+
       archived_at: expect.any(String),
+
+
+
       migrated_to_note_id: result.noteId,
+
+
+
       deletion_state: 'active',
+
+
+
       _dirty: true,
+
+
+
     })
+
+
+
     expect(outboxRows).toHaveLength(2)
+
+
+
     expect(outboxRows.map((row) => `${row.entityType}:${row.action}`).sort()).toEqual([
+
+
+
       'note:create',
+
+
+
       'quickNote:update',
+
+
+
     ])
+
+
+
     expect((await listQuickNotes()).map((item) => item.id)).not.toContain(quickNote.id)
+
+
+
     expect((await listQuickNoteLifecycleStates())[quickNote.id]).toBe('converted')
+
+
+
   })
+
+
+
+
+
+
 
   it('does not perform a late current lookup for a disabled conversion hook', async () => {
+
+
+
     const database = spaceDBManager.current
+
+
+
     const quickNote = await createQuickNote({
+
+
+
       id: 'convert-disabled-late-lookup',
+
+
+
       content: 'disabled conversion hook',
+
+
+
     })
+
+
+
     await database.outbox.clear()
+
+
+
     configureQuickNoteOutboxHook(null)
 
+
+
+
+
+
+
     let noteOutboxWriteStarted = false
+
+
+
     const markNoteOutboxWrite = () => {
+
+
+
       noteOutboxWriteStarted = true
+
+
+
     }
+
+
+
     database.outbox.hook('creating', markNoteOutboxWrite)
+
+
+
     const currentSpy = vi.spyOn(spaceDBManager, 'current', 'get').mockImplementation(() => {
+
+
+
       if (noteOutboxWriteStarted) throw new Error('unexpected late current lookup')
+
+
+
       return database
+
+
+
     })
+
+
+
+
+
+
 
     try {
+
+
+
       await expect(convertQuickNoteToNote(quickNote.id)).resolves.toMatchObject({
+
+
+
         quickNoteId: quickNote.id,
+
+
+
       })
+
+
+
     } finally {
+
+
+
       currentSpy.mockRestore()
+
+
+
       database.outbox.hook('creating').unsubscribe(markNoteOutboxWrite)
+
+
+
     }
 
+
+
+
+
+
+
     expect(await database.outbox.toArray()).toEqual([
+
+
+
       expect.objectContaining({ entityType: 'note', action: 'create' }),
+
+
+
     ])
+
+
+
   })
 
+
+
+
+
+
+
   it('rolls back note creation and quick note conversion when conversion sync fails', async () => {
+
+
+
     const quickNote = await createQuickNote({
+
+
+
       id: 'convert-rollback',
+
+
+
       content: 'rollback source',
+
+
+
     })
+
+
+
     const before = await db.quickNotes.get(quickNote.id)
+
+
+
     await db.outbox.clear()
+
+
+
     configureQuickNoteOutboxHook(async () => {
+
+
+
       throw new Error('convert hook failed')
+
+
+
     })
+
+
+
+
+
+
 
     await expect(convertQuickNoteToNote(quickNote.id)).rejects.toThrow('convert hook failed')
 
+
+
+
+
+
+
     expect(await db.quickNotes.get(quickNote.id)).toEqual(before)
+
+
+
     expect(await db.notes.count()).toBe(0)
+
+
+
     expect(await db.outbox.count()).toBe(0)
+
+
+
   })
+
+
+
+
+
+
 
   it('rejects converting trashed archived or already converted quick notes', async () => {
+
+
+
     const trashed = await createQuickNote({ content: 'trashed convert' })
+
+
+
     await moveQuickNoteToTrash(trashed.id)
+
+
+
     await expect(convertQuickNoteToNote(trashed.id)).rejects.toMatchObject({
+
+
+
       code: 'not_active',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     const archived = await createQuickNote({ content: 'archived convert' })
+
+
+
     await db.quickNotes.update(archived.id, {
+
+
+
       archived_at: '2026-01-02T00:00:00.000Z',
+
+
+
     })
+
+
+
     await expect(convertQuickNoteToNote(archived.id)).rejects.toMatchObject({
+
+
+
       code: 'not_active',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     const converted = await createQuickNote({ content: 'already converted' })
+
+
+
     await db.quickNotes.update(converted.id, {
+
+
+
       migrated_to_note_id: 'note-1',
+
+
+
     })
+
+
+
     await expect(convertQuickNoteToNote(converted.id)).rejects.toMatchObject({
+
+
+
       code: 'converted',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
   })
+
+
+
+
+
+
 
   it('rolls back the entity write when the outbox hook rejects', async () => {
+
+
+
     configureQuickNoteOutboxHook(async () => {
+
+
+
       throw new Error('hook failed')
+
+
+
     })
+
+
+
+
+
+
 
     await expect(
+
+
+
       createQuickNote({
+
+
+
         id: 'hook-rollback',
+
+
+
         content: 'should rollback',
+
+
+
       }),
+
+
+
     ).rejects.toThrow('hook failed')
 
+
+
+
+
+
+
     expect(await db.quickNotes.get('hook-rollback')).toBeUndefined()
+
+
+
     expect(await db.outbox.count()).toBe(0)
+
+
+
   })
+
+
+
+
+
+
 
   it('updates content for autosave and bumps version and dirty state', async () => {
+
+
+
     const note = await createQuickNote({ content: 'before' })
+
+
+
     await updateQuickNote(note.id, {
+
+
+
       content: 'after',
+
+
+
       updated_at: '2026-01-02T00:00:00.000Z',
+
+
+
     })
+
+
+
     const row = await db.quickNotes.get(note.id)
 
+
+
+
+
+
+
     expect(row?.content).toBe('after')
+
+
+
     expect(row?.updated_at).toBe('2026-01-02T00:00:00.000Z')
+
+
+
     expect(row?.version).toBe(2)
+
+
+
     expect(row?._dirty).toBe(true)
+
+
+
   })
+
+
+
+
+
+
 
   it('commits an existing edit and its Outbox update in the supplied database', async () => {
+
+
+
     const isolated = new PomodoroXIDB(`quick-note-existing-edit-${crypto.randomUUID()}`)
+
+
+
     await isolated.open()
+
+
+
     try {
+
+
+
       const created = await isolated.transaction('rw', isolated.quickNotes, isolated.outbox, () =>
+
+
+
         createQuickNoteInTransaction(isolated, { id: 'existing-cas', content: 'before #old' }),
+
+
+
       )
+
+
+
       await isolated.outbox.clear()
 
+
+
+
+
+
+
       const result = await commitQuickNoteExistingEdit(isolated, {
+
+
+
         id: created.id,
+
+
+
         expectedUpdatedAt: created.updated_at,
+
+
+
         content: 'after #new',
+
+
+
       })
 
+
+
+
+
+
+
       expect(result).toMatchObject({ kind: 'saved', note: { id: created.id, content: 'after #new', tags: ['new'] } })
+
+
+
       expect(await isolated.quickNotes.get(created.id)).toMatchObject({ content: 'after #new', version: 2, _dirty: true })
+
+
+
       expect(await isolated.outbox.where('entityId').equals(created.id).count()).toBe(1)
+
+
+
       expect(await db.quickNotes.get(created.id)).toBeUndefined()
+
+
+
     } finally { await isolated.delete() }
+
+
+
   })
+
+
+
+
+
+
 
   it('returns conflict without writing when the captured revision is stale', async () => {
+
+
+
     const note = await createQuickNote({ content: 'before' })
+
+
+
     await updateQuickNote(note.id, { content: 'remote' })
+
+
+
     await db.outbox.clear()
 
+
+
+
+
+
+
     await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+
+
+
       id: note.id, expectedUpdatedAt: note.updated_at, content: 'local',
+
+
+
     })).resolves.toMatchObject({ kind: 'conflict', note: { content: 'remote' } })
+
+
+
     expect(await db.quickNotes.get(note.id)).toMatchObject({ content: 'remote' })
+
+
+
     expect(await db.outbox.count()).toBe(0)
+
+
+
   })
+
+
+
+
+
+
 
   it('returns missing-or-inactive for absent and sync-deleted rows without writes', async () => {
+
+
+
     await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+
+
+
       id: 'missing-existing-edit', expectedUpdatedAt: '2026-07-15T00:00:00.000Z', content: 'local',
+
+
+
     })).resolves.toEqual({ kind: 'missing-or-inactive' })
+
+
+
+
+
+
 
     const note = await createQuickNote({ id: 'sync-deleted-existing-edit', content: 'before' })
+
+
+
     await db.quickNotes.update(note.id, { deletion_state: 'deleted', _dirty: false })
+
+
+
     const before = await db.quickNotes.get(note.id)
+
+
+
     await db.outbox.clear()
 
+
+
+
+
+
+
     await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+
+
+
       id: note.id, expectedUpdatedAt: note.updated_at, content: 'must not revive',
+
+
+
     })).resolves.toEqual({ kind: 'missing-or-inactive' })
+
+
+
     expect(await db.quickNotes.get(note.id)).toEqual(before)
+
+
+
     expect(await db.outbox.count()).toBe(0)
+
+
+
   })
+
+
+
+
+
+
 
   it('rolls back an existing-edit entity write when its Outbox write fails', async () => {
+
+
+
     const note = await createQuickNote({ id: 'existing-edit-rollback', content: 'before' })
+
+
+
     const before = await db.quickNotes.get(note.id)
+
+
+
     await db.outbox.clear()
+
+
+
     configureQuickNoteOutboxHook(async () => {
+
+
+
       throw new Error('existing edit Outbox failed')
+
+
+
     })
 
+
+
+
+
+
+
     await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+
+
+
       id: note.id, expectedUpdatedAt: note.updated_at, content: 'after',
+
+
+
     })).rejects.toThrow('existing edit Outbox failed')
+
+
+
     expect(await db.quickNotes.get(note.id)).toEqual(before)
+
+
+
     expect(await db.outbox.count()).toBe(0)
+
+
+
   })
+
+
+
+
+
+
 
   it('rejects blank creates and exposes stable user and developer messages', async () => {
+
+
+
     await expect(createQuickNote({ content: '   ' })).rejects.toMatchObject({
+
+
+
       code: 'empty_content',
+
+
+
       userMessage: '小记内容不能为空',
+
+
+
       developerMessage: 'QuickNote content must not be blank',
+
+
+
       message: 'QuickNote content must not be blank',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     expect(await db.quickNotes.count()).toBe(0)
+
+
+
     const error = new QuickNoteRepositoryError('invalid_patch')
+
+
+
     expect(getQuickNoteRepositoryUserMessage(error, 'fallback')).toBe('没有可保存的小记改动')
+
+
+
     expect(getQuickNoteRepositoryUserMessage(new Error('raw'), 'fallback')).toBe('fallback')
+
+
+
   })
+
+
+
+
+
+
 
   it('rejects updates for missing trashed and converted quick notes', async () => {
+
+
+
     await expect(updateQuickNote('missing', { content: 'nope' })).rejects.toMatchObject({
+
+
+
       code: 'not_found',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     const trashed = await createQuickNote({ content: 'trashed' })
+
+
+
     await moveQuickNoteToTrash(trashed.id)
+
+
+
     await expect(updateQuickNote(trashed.id, { content: 'blocked' })).rejects.toMatchObject({
+
+
+
       code: 'not_active',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     const converted = await createQuickNote({ content: 'converted' })
+
+
+
     await db.quickNotes.update(converted.id, { migrated_to_note_id: 'note-1' })
+
+
+
     await expect(updateQuickNote(converted.id, { content: 'blocked' })).rejects.toMatchObject({
+
+
+
       code: 'converted',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
   })
 
+
+
+
+
+
+
   it('leaves rows unchanged when transaction-scoped update validation rejects', async () => {
+
+
+
     const trashed = await createQuickNote({ content: 'trashed boundary' })
+
+
+
     await moveQuickNoteToTrash(trashed.id)
+
+
+
     const trashedBefore = await db.quickNotes.get(trashed.id)
 
+
+
+
+
+
+
     await expect(updateQuickNote(trashed.id, { content: 'blocked update' })).rejects.toMatchObject({
+
+
+
       code: 'not_active',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     expect(await db.quickNotes.get(trashed.id)).toEqual(trashedBefore)
 
+
+
+
+
+
+
     const archived = await createQuickNote({ content: 'archived boundary' })
+
+
+
     await db.quickNotes.update(archived.id, {
+
+
+
       archived_at: '2026-01-02T00:00:00.000Z',
+
+
+
     })
+
+
+
     const archivedBefore = await db.quickNotes.get(archived.id)
 
+
+
+
+
+
+
     await expect(moveQuickNoteToTrash(archived.id)).rejects.toMatchObject({
+
+
+
       code: 'not_active',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     expect(await db.quickNotes.get(archived.id)).toEqual(archivedBefore)
+
+
+
   })
+
+
+
+
+
+
 
   it('rejects blank or empty updates without changing the original row', async () => {
+
+
+
     const note = await createQuickNote({ content: 'before #work' })
+
+
+
     const before = await db.quickNotes.get(note.id)
 
+
+
+
+
+
+
     await expect(updateQuickNote(note.id, { content: '   ' })).rejects.toMatchObject({
+
+
+
       code: 'empty_content',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
     await expect(updateQuickNote(note.id, { content: undefined })).rejects.toMatchObject({
+
+
+
       code: 'invalid_patch',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     expect(await db.quickNotes.get(note.id)).toEqual(before)
+
+
+
   })
 
+
+
+
+
+
+
   it('ignores undefined fields when a valid update field is present', async () => {
+
+
+
     const note = await createQuickNote({ content: 'before #work' })
+
+
+
+
+
+
 
     await updateQuickNote(note.id, { content: undefined, pinned: true })
 
+
+
+
+
+
+
     const row = await db.quickNotes.get(note.id)
+
+
+
     expect(row).toMatchObject({
+
+
+
       content: 'before #work',
+
+
+
       tags: ['work'],
+
+
+
       pinned: true,
+
+
+
       version: 2,
+
+
+
     })
+
+
+
   })
+
+
+
+
+
+
 
   it('refreshes tags only when content or explicit tags are updated', async () => {
+
+
+
     const note = await createQuickNote({
+
+
+
       content: 'alpha #Capture #灵感42',
+
+
+
       tags: ['manual', 'CAPTURE'],
+
+
+
     })
 
+
+
+
+
+
+
     expect((await db.quickNotes.get(note.id))?.tags).toEqual([
+
+
+
       'manual',
+
+
+
       'capture',
+
+
+
       '灵感42',
+
+
+
     ])
+
+
+
+
+
+
 
     await updateQuickNote(note.id, { pinned: true })
+
+
+
     expect((await db.quickNotes.get(note.id))?.tags).toEqual([
+
+
+
       'manual',
+
+
+
       'capture',
+
+
+
       '灵感42',
+
+
+
     ])
 
+
+
+
+
+
+
     await updateQuickNote(note.id, {
+
+
+
       content: 'beta #产品-v1 #daily_note #Daily_Note',
+
+
+
     })
+
+
+
     expect((await db.quickNotes.get(note.id))?.tags).toEqual([
+
+
+
       '产品-v1',
+
+
+
       'daily_note',
+
+
+
     ])
 
+
+
+
+
+
+
     await updateQuickNote(note.id, {
+
+
+
       content: 'gamma #灵感42',
+
+
+
       tags: ['Manual', '#灵感42'],
+
+
+
     })
+
+
+
     expect((await db.quickNotes.get(note.id))?.tags).toEqual(['manual', '灵感42'])
+
+
+
   })
+
+
+
+
+
+
 
   it('moves to trash, restores, and purges a quick note', async () => {
+
+
+
     const note = await createQuickNote({ content: 'trash me' })
+
+
+
     const trashed = await moveQuickNoteToTrash(note.id)
+
+
+
     expect(trashed).toMatchObject({ id: note.id })
+
+
+
     expect('deletion_state' in trashed).toBe(false)
+
+
+
     expect(trashed.trashed_at).not.toBeNull()
 
+
+
+
+
+
+
     expect((await listQuickNotes()).map((item) => item.id)).toEqual([])
+
+
+
     expect((await listTrashedQuickNotes()).map((item) => item.id)).toEqual([note.id])
 
+
+
+
+
+
+
     const restored = await restoreQuickNote(note.id)
+
+
+
     expect(restored).toMatchObject({ id: note.id, trashed_at: null })
+
+
+
     expect((await listQuickNotes()).map((item) => item.id)).toEqual([note.id])
+
+
+
     expect(await listTrashedQuickNotes()).toEqual([])
 
+
+
+
+
+
+
     await moveQuickNoteToTrash(note.id)
+
+
+
     await purgeQuickNote(note.id)
+
+
+
     expect(await db.quickNotes.get(note.id)).toBeUndefined()
+
+
+
   })
+
+
+
+
+
+
 
   it('only purges trashed quick notes and leaves active rows intact', async () => {
+
+
+
     const active = await createQuickNote({ content: 'active' })
+
+
+
+
+
+
 
     await expect(purgeQuickNote(active.id)).rejects.toMatchObject({
+
+
+
       code: 'not_trashed',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     expect(await db.quickNotes.get(active.id)).toBeDefined()
+
+
+
   })
+
+
+
+
+
+
 
   it('only restores trashed quick notes and rejects active or converted rows', async () => {
+
+
+
     const active = await createQuickNote({ content: 'active' })
+
+
+
     await expect(restoreQuickNote(active.id)).rejects.toMatchObject({
+
+
+
       code: 'not_trashed',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
+
+
+
 
     const converted = await createQuickNote({ content: 'converted' })
+
+
+
     await db.quickNotes.update(converted.id, {
+
+
+
       migrated_to_note_id: 'note-1',
+
+
+
       trashed_at: '2026-01-02T00:00:00.000Z',
+
+
+
     })
+
+
+
     await expect(restoreQuickNote(converted.id)).rejects.toMatchObject({
+
+
+
       code: 'converted',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
   })
+
+
+
+
+
+
 
   it('rejects update and trash for archived quick notes', async () => {
+
+
+
     const archived = await createQuickNote({ content: 'archived' })
+
+
+
     await db.quickNotes.update(archived.id, {
+
+
+
       archived_at: '2026-01-02T00:00:00.000Z',
+
+
+
     })
 
+
+
+
+
+
+
     await expect(updateQuickNote(archived.id, { content: 'blocked' })).rejects.toMatchObject({
+
+
+
       code: 'not_active',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
     await expect(moveQuickNoteToTrash(archived.id)).rejects.toMatchObject({
+
+
+
       code: 'not_active',
+
+
+
     } satisfies Partial<QuickNoteRepositoryError>)
+
+
+
   })
+
+
+
+
+
+
+
+
+
+
+
+  // -------- S3-Task10: version capture for optimistic concurrency --------
+
+
+
+
+
+
+
+  it('S3T10-QN1: updateQuickNote captures base version as expectedVersion (after create synced)', async () => {
+
+
+
+    // Create a quick note (version=1 after create, enqueues 'create' outbox event)
+
+
+
+    await createQuickNote({ id: 'qn-vc-1', content: 'Original' })
+
+
+
+
+
+
+
+    // Mark the create outbox as synced (simulate successful sync)
+
+
+
+    await db.outbox.where('entityId').equals('qn-vc-1').modify({ synced: true })
+
+
+
+
+
+
+
+    // Manually bump version to 3 to simulate prior syncs
+
+
+
+    await db.quickNotes.update('qn-vc-1', { version: 3, _dirty: false })
+
+
+
+
+
+
+
+    // Update → should capture baseVersion=3, enqueue NEW 'update' event with expectedVersion=3
+
+
+
+    await updateQuickNote('qn-vc-1', { content: 'Updated' })
+
+
+
+
+
+
+
+    // Find the unsynced update outbox event
+
+
+
+    const outbox = await db.outbox
+
+
+
+      .where('entityId')
+
+
+
+      .equals('qn-vc-1')
+
+
+
+      .and((e) => !e.synced)
+
+
+
+      .first()
+
+
+
+    expect(outbox).toBeDefined()
+
+
+
+    expect(outbox!.action).toBe('update')
+
+
+
+    expect(outbox!.expectedVersion).toBe(3)
+
+
+
+
+
+
+
+    // Local version should be 4 (3+1)
+
+
+
+    const row = await db.quickNotes.get('qn-vc-1')
+
+
+
+    expect(row!.version).toBe(4)
+
+
+
+  })
+
+
+
+
+
+
+
+  it('S3T10-QN2: moveQuickNoteToTrash captures base version (after create synced)', async () => {
+
+
+
+    await createQuickNote({ id: 'qn-vc-2', content: 'Trash me' })
+
+
+
+    await db.outbox.where('entityId').equals('qn-vc-2').modify({ synced: true })
+
+
+
+    await db.quickNotes.update('qn-vc-2', { version: 5, _dirty: false })
+
+
+
+
+
+
+
+    await moveQuickNoteToTrash('qn-vc-2')
+
+
+
+
+
+
+
+    const outbox = await db.outbox
+
+
+
+      .where('entityId')
+
+
+
+      .equals('qn-vc-2')
+
+
+
+      .and((e) => !e.synced)
+
+
+
+      .first()
+
+
+
+    expect(outbox).toBeDefined()
+
+
+
+    expect(outbox!.expectedVersion).toBe(5)
+
+
+
+    expect(outbox!.action).toBe('update')
+
+
+
+
+
+
+
+    const row = await db.quickNotes.get('qn-vc-2')
+
+
+
+    expect(row!.version).toBe(6)
+
+
+
+  })
+
+
+
+
+
+
+
+  it('S3T10-QN3: restoreQuickNote captures base version', async () => {
+
+
+
+    await createQuickNote({ id: 'qn-vc-3', content: 'Restore me' })
+
+
+
+    await moveQuickNoteToTrash('qn-vc-3')
+
+
+
+    // Mark all existing outbox as synced
+
+
+
+    await db.outbox.where('entityId').equals('qn-vc-3').modify({ synced: true })
+
+
+
+    await db.quickNotes.update('qn-vc-3', { version: 7, _dirty: false })
+
+
+
+
+
+
+
+    await restoreQuickNote('qn-vc-3')
+
+
+
+
+
+
+
+    const outbox = await db.outbox
+
+
+
+      .where('entityId')
+
+
+
+      .equals('qn-vc-3')
+
+
+
+      .and((e) => !e.synced)
+
+
+
+      .first()
+
+
+
+    expect(outbox).toBeDefined()
+
+
+
+    expect(outbox!.expectedVersion).toBe(7)
+
+
+
+
+
+
+
+    const row = await db.quickNotes.get('qn-vc-3')
+
+
+
+    expect(row!.version).toBe(8)
+
+
+
+  })
+
+
+
+
+
+
+
+  it('S3T10-QN4: purgeQuickNote captures base version in delete event', async () => {
+
+
+
+    await createQuickNote({ id: 'qn-vc-4', content: 'Purge me' })
+
+
+
+    await moveQuickNoteToTrash('qn-vc-4')
+
+
+
+    await db.outbox.where('entityId').equals('qn-vc-4').modify({ synced: true })
+
+
+
+    await db.quickNotes.update('qn-vc-4', { version: 4, _dirty: false })
+
+
+
+
+
+
+
+    await purgeQuickNote('qn-vc-4')
+
+
+
+
+
+
+
+    const outbox = await db.outbox
+
+
+
+      .where('entityId')
+
+
+
+      .equals('qn-vc-4')
+
+
+
+      .and((e) => !e.synced)
+
+
+
+      .first()
+
+
+
+    expect(outbox).toBeDefined()
+
+
+
+    expect(outbox!.action).toBe('delete')
+
+
+
+    expect(outbox!.expectedVersion).toBe(4)
+
+
+
+  })
+
+
+
+
+
+
+
+  it('S3T10-QN5: create+update merge keeps create chain expectedVersion=null', async () => {
+
+
+
+    // Create (version=1, expectedVersion=null)
+
+
+
+    await createQuickNote({ id: 'qn-vc-5', content: 'First' })
+
+
+
+
+
+
+
+    // The create outbox event exists with action='create'
+
+
+
+    const createOutbox = await db.outbox.where('entityId').equals('qn-vc-5').first()
+
+
+
+    expect(createOutbox!.action).toBe('create')
+
+
+
+    expect(createOutbox!.expectedVersion).toBeNull()
+
+
+
+    const originalOpId = createOutbox!.operationId
+
+
+
+
+
+
+
+    // Update → merges with create (create+update → replace, action stays create)
+
+
+
+    await updateQuickNote('qn-vc-5', { content: 'Second' })
+
+
+
+
+
+
+
+    const outbox = await db.outbox.where('entityId').equals('qn-vc-5').first()
+
+
+
+    expect(outbox!.action).toBe('create')
+
+
+
+    expect(outbox!.expectedVersion).toBeNull() // create chain → null
+
+
+
+    expect(outbox!.operationId).toBe(originalOpId) // operationId preserved
+
+
+
+  })
+
+
+
+
+
+
+
 })
