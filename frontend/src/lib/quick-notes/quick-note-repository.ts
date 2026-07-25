@@ -100,6 +100,7 @@ export interface QuickNoteMutationContext {
   entityId: string
   action: OutboxAction
   payload: QuickNote | { id: string }
+  expectedVersion?: number | null
 }
 
 export interface QuickNoteConvertResult {
@@ -261,6 +262,7 @@ export async function updateQuickNote(
     const existing = await getExistingQuickNote(id)
     assertActiveForUpdate(stripSyncFields(existing))
 
+    const baseVersion = existing.version ?? 1
     const updatedAt = patch.updated_at ?? new Date().toISOString()
     const row: CachedQuickNote = {
       ...existing,
@@ -268,13 +270,13 @@ export async function updateQuickNote(
       id,
       updated_at: updatedAt,
       deletion_state: deletionStateFor(existing),
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
 
     await db.quickNotes.put(row)
     const note = stripSyncFields(row)
-    return { result: note, payload: note }
+    return { result: note, payload: note, expectedVersion: baseVersion }
   })
 }
 
@@ -293,19 +295,21 @@ export async function commitQuickNoteExistingEdit(
       return { kind: 'conflict', note: current }
     }
 
+    const baseVersion = existing.version ?? 1
     const content = normalizeContent(input.content)
     const row: CachedQuickNote = {
       ...existing,
       content,
       tags: mergeQuickNoteTags(undefined, extractQuickNoteTags(content)),
       updated_at: new Date().toISOString(),
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
     await database.quickNotes.put(row)
     const note = stripSyncFields(row)
     await runConfiguredQuickNoteOutbox(database, {
       entityType: 'quickNote', entityId: note.id, action: 'update', payload: note,
+      expectedVersion: baseVersion,
     })
     return { kind: 'saved', note }
   })
@@ -316,19 +320,20 @@ export async function moveQuickNoteToTrash(id: string): Promise<QuickNote> {
     const existing = await getExistingQuickNote(id)
     assertActiveForTrash(stripSyncFields(existing))
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const row: CachedQuickNote = {
       ...existing,
       trashed_at: now,
       updated_at: now,
       deletion_state: 'deleted',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
 
     await db.quickNotes.put(row)
     const note = stripSyncFields(row)
-    return { result: note, payload: note }
+    return { result: note, payload: note, expectedVersion: baseVersion }
   })
 }
 
@@ -337,19 +342,20 @@ export async function restoreQuickNote(id: string): Promise<QuickNote> {
     const existing = await getExistingQuickNote(id)
     assertTrashedForRestore(stripSyncFields(existing))
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const row: CachedQuickNote = {
       ...existing,
       trashed_at: null,
       updated_at: now,
       deletion_state: 'active',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
 
     await db.quickNotes.put(row)
     const note = stripSyncFields(row)
-    return { result: note, payload: note }
+    return { result: note, payload: note, expectedVersion: baseVersion }
   })
 }
 
@@ -357,8 +363,9 @@ export async function purgeQuickNote(id: string): Promise<void> {
   await runQuickNoteMutation({ action: 'delete', entityId: id }, async () => {
     const existing = await getExistingQuickNote(id)
     assertTrashedForPurge(stripSyncFields(existing))
+    const baseVersion = existing.version ?? 1
     await db.quickNotes.delete(id)
-    return { result: undefined, payload: { id } }
+    return { result: undefined, payload: { id }, expectedVersion: baseVersion }
   })
 }
 
@@ -368,6 +375,7 @@ export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConve
     const source = stripSyncFields(existing)
     assertActiveForConvert(source)
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const noteId = crypto.randomUUID()
     const note: CachedNote = {
@@ -393,7 +401,7 @@ export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConve
       migrated_to_note_id: noteId,
       updated_at: now,
       deletion_state: 'active',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
 
@@ -406,6 +414,7 @@ export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConve
       entityId: id,
       action: 'update',
       payload: stripSyncFields(convertedRow),
+      expectedVersion: baseVersion,
     })
 
     return { noteId, quickNoteId: id }
@@ -417,11 +426,11 @@ async function runQuickNoteMutation<T>(
     payload?: QuickNote | { id: string }
     sync?: boolean
   },
-  write: () => Promise<T | { result: T; payload: QuickNote | { id: string } }>,
+  write: () => Promise<T | { result: T; payload: QuickNote | { id: string }; expectedVersion?: number | null }>,
 ): Promise<T> {
   return db.transaction('rw', db.quickNotes, db.outbox, async () => {
     const written = await write()
-    const { result, payload } = normalizeQuickNoteMutationResult(written)
+    const { result, payload, expectedVersion } = normalizeQuickNoteMutationResult(written)
     const hookPayload = payload ?? context.payload
 
     if (context.sync !== false && hookPayload) {
@@ -430,6 +439,7 @@ async function runQuickNoteMutation<T>(
         entityId: context.entityId,
         action: context.action,
         payload: hookPayload,
+        expectedVersion,
       })
     }
 
@@ -455,19 +465,20 @@ async function runConfiguredQuickNoteOutbox(
     context.entityId,
     context.action,
     context.payload,
+    { expectedVersion: context.expectedVersion },
   )
 }
 
 function normalizeQuickNoteMutationResult<T>(
-  written: T | { result: T; payload: QuickNote | { id: string } },
-): { result: T; payload?: QuickNote | { id: string } } {
+  written: T | { result: T; payload: QuickNote | { id: string }; expectedVersion?: number | null },
+): { result: T; payload?: QuickNote | { id: string }; expectedVersion?: number | null } {
   if (
     written &&
     typeof written === 'object' &&
     'result' in written &&
     'payload' in written
   ) {
-    return written as { result: T; payload: QuickNote | { id: string } }
+    return written as { result: T; payload: QuickNote | { id: string }; expectedVersion?: number | null }
   }
 
   return { result: written as T }

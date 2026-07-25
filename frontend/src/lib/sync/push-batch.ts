@@ -13,6 +13,7 @@ import type { AxiosInstance } from 'axios'
 import type { PomodoroXIDB } from '@/services/database'
 import type { OutboxEvent } from '@/types'
 import { listUnsyncedOutbox, deleteOutboxByIds, markOutboxEventsFailed } from './outbox'
+import { buildBatchIdempotencyKey } from '@/services/idempotency'
 import {
   ENTITY_TYPE_TO_TABLE,
   type ApiSyncEvent,
@@ -149,7 +150,10 @@ export async function pushBatch(
     }
   }
   const events = buildPushEvents(rows)
-  const res = await api.post<ApiSyncPushResponse>('/sync/push', { events })
+  const idempotencyKey = await buildBatchIdempotencyKey(rows)
+  const res = await api.post<ApiSyncPushResponse>('/sync/push', { events }, {
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
   return handlePushResponse(db, res.data, rows)
 }
 
@@ -172,7 +176,11 @@ export async function pushAllPending(
     const pending = await listUnsyncedOutbox(db)
     if (pending.length === 0) break
 
-    const batch = pending.slice(0, size)
+    // S3-Task10: filter out rows that require version rebase - they must not enter push
+    const pushable = pending.filter((row) => !row.requiresVersionRebase)
+    if (pushable.length === 0) break
+
+    const batch = pushable.slice(0, size)
     const result = await pushBatch(db, api, batch)
 
     aggregated.clearedOutboxIds.push(...result.clearedOutboxIds)

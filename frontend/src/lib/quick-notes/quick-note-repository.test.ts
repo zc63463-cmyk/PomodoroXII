@@ -132,6 +132,8 @@ describe('quick-note-repository', () => {
       entityId: note.id,
       action: 'create',
       synced: false,
+      expectedVersion: null,
+      requiresVersionRebase: false,
     })
     expect(JSON.parse(rows[0]!.payload)).toMatchObject({
       id: note.id,
@@ -185,6 +187,8 @@ describe('quick-note-repository', () => {
       entityId: note.id,
       action: 'delete',
       synced: false,
+      expectedVersion: 2,
+      requiresVersionRebase: false,
     })
     expect(JSON.parse(rows[0]!.payload)).toEqual({ id: note.id })
   })
@@ -231,6 +235,12 @@ describe('quick-note-repository', () => {
     expect(contexts[3]?.payload).toMatchObject({ id: note.id, trashed_at: restored.trashed_at })
     expect(contexts[5]?.payload).toEqual({ id: note.id })
     expect(contexts).toHaveLength(6)
+    expect(contexts[0]?.expectedVersion).toBeUndefined()
+    expect(contexts[1]?.expectedVersion).toBe(1)
+    expect(contexts[2]?.expectedVersion).toBe(2)
+    expect(contexts[3]?.expectedVersion).toBe(3)
+    expect(contexts[4]?.expectedVersion).toBe(4)
+    expect(contexts[5]?.expectedVersion).toBe(5)
     expect(await db.outbox.count()).toBe(0)
   })
 
@@ -272,6 +282,12 @@ describe('quick-note-repository', () => {
       'note:create',
       'quickNote:update',
     ])
+    const noteCreateRow = outboxRows.find((r) => r.entityType === 'note' && r.action === 'create')!
+    expect(noteCreateRow.expectedVersion).toBeNull()
+    expect(noteCreateRow.requiresVersionRebase).toBe(false)
+    const quickNoteUpdateRow = outboxRows.find((r) => r.entityType === 'quickNote' && r.action === 'update')!
+    expect(quickNoteUpdateRow.expectedVersion).toBe(1)
+    expect(quickNoteUpdateRow.requiresVersionRebase).toBe(false)
     expect((await listQuickNotes()).map((item) => item.id)).not.toContain(quickNote.id)
     expect((await listQuickNoteLifecycleStates())[quickNote.id]).toBe('converted')
   })

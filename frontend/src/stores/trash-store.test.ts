@@ -90,6 +90,8 @@ describe('useTrashStore QuickNote actions', () => {
       entityType: 'note',
       action: 'update',
       synced: false,
+      expectedVersion: 2,
+      requiresVersionRebase: false,
     })
     expect(useTrashStore.getState().trashedNotes).toEqual([])
   })
@@ -111,6 +113,8 @@ describe('useTrashStore QuickNote actions', () => {
       entityType: 'folder',
       action: 'delete',
       synced: false,
+      expectedVersion: 1,
+      requiresVersionRebase: false,
     })
     expect(useTrashStore.getState().trashedFolders).toEqual([])
   })

@@ -409,6 +409,10 @@ export interface OutboxEvent {
   lastErrorCode?: string | null
   failedAt?: string | null
   attemptCount?: number
+  /** S3-Task10: idempotency key persistence fields (required) */
+  operationId: string
+  expectedVersion: number | null
+  requiresVersionRebase: boolean
 }
 
 // Sync meta stored in IndexedDB

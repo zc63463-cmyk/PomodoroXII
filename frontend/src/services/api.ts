@@ -16,6 +16,7 @@ import axios, {
 } from 'axios'
 import { tokenStorage } from '@/lib/token-storage'
 import { API_V1_PREFIX } from '@/lib/platform'
+import { ensureMutationIdempotencyKey } from './idempotency'
 
 // ---- Cloudflare retry constants (migrated from pomodoroxi api.ts) ----
 const CF_ERROR_CODES = new Set([530, 521, 522, 523, 524])
@@ -76,6 +77,11 @@ spaceApi.interceptors.request.use((config) => {
   return config
 })
 
+// S3-Task10: inject idempotency key for mutation methods (case-insensitive)
+spaceApi.interceptors.request.use((config) => {
+  return ensureMutationIdempotencyKey(config)
+})
+
 spaceApi.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
@@ -134,10 +140,10 @@ async function tryReissueSpaceToken(): Promise<string | null> {
       return newToken
     } catch {
       return null
-    } finally {
-      reissuePromise = null // Clear single-flight lock
     }
-  })()
+  })().finally(() => {
+    reissuePromise = null // Clear single-flight lock after promise settles
+  })
 
   return reissuePromise
 }

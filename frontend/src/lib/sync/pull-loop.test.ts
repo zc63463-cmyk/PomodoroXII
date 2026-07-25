@@ -375,6 +375,9 @@ describe('pull-loop', () => {
       payload: '{}',
       createdAt: Date.now(),
       synced: false,
+      operationId: 'op-pull-dirty-ghost',
+      expectedVersion: 1,
+      requiresVersionRebase: false,
     })
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       return ok({ ...cursorSinglePage(), tasks: [] }, config)
@@ -429,6 +432,7 @@ describe('pull-loop', () => {
     await db.outbox.add({
       entityType: 'task', entityId: 'outbox-ghost', action: 'update', payload: '{}',
       createdAt: Date.now(), synced: false,
+      operationId: 'op-pull-outbox-ghost', expectedVersion: 1, requiresVersionRebase: false,
     })
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       return ok({ ...cursorSinglePage(), tasks: [] }, config)
