@@ -14,7 +14,6 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.base import Base as SpaceBase
 from app.errors import (
     IdempotencyConflictError,
     MutationRejectedError,
@@ -49,7 +48,7 @@ from app.mutation.types import (
     validate_operation_id,
 )
 from app.registry.catalog import CompiledEntityCatalog
-from app.registry.entities import EntitySpec, StorageType
+from app.registry.entities import EntityCategory, EntitySpec, StorageType
 from app.runtime.leases import Lease
 from app.runtime.space import SpaceRuntimeHandle
 from app.services.sync_outbox import record_sync_event
@@ -255,9 +254,13 @@ class AuthorityOverlay:
     ) -> "AuthorityOverlay":
         rows: dict[tuple[str, object], Mapping[str, object]] = {}
         for spec in catalog.list():
-            model = catalog.model_for(spec.name)
-            if model.metadata is not SpaceBase.metadata:
+            # Catalog models may be reloaded during test/runtime isolation.
+            # Metadata object identity is therefore not a safe database
+            # boundary. Meta entries are the only catalog rows that belong to
+            # the separate meta database and must not be queried here.
+            if spec.category is EntityCategory.META:
                 continue
+            model = catalog.model_for(spec.name)
             mapper = sa_inspect(model)
             for item in tuple(await session.scalars(select(model))):
                 row = require_frozen_object(
@@ -440,7 +443,6 @@ class AuthorityOverlay:
                 #    (format mismatch between FS index and PG row)
                 # In both cases, accept the projection's before image and
                 # proceed with the mutation.
-                current_derived = derived.get((projection.tag, target))
                 # Intentionally do NOT raise on mismatch — the projection
                 # builder's serialization is authoritative for the mutation.
                 derived[(projection.tag, target)] = projection.after

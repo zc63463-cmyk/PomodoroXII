@@ -313,6 +313,16 @@ class KnowledgeStore:
                 raise ValueError(
                     f"quick note {quick_note_id} not found"
                 )
+            if qn.trashed_at is not None:
+                from app.errors import ValidationError
+
+                raise ValidationError(
+                    f"QuickNote {quick_note_id} is in trash; restore before converting"
+                )
+            if qn.archived_at is not None or qn.migrated_to_note_id is not None:
+                from app.errors import ConflictError
+
+                raise ConflictError(f"QuickNote {quick_note_id} already converted")
             comments = (
                 await session.execute(
                     select(MemoComment)

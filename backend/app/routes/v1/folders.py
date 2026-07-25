@@ -7,25 +7,27 @@ performed by ``CascadeService.soft_delete_folder`` which trashes the
 folder and all its descendants, and detaches contained notes / quick notes.
 When a KnowledgeStore is available, the cascade soft-delete is routed
 through the durable mutation pipeline.
-Routes commit; the service only flushes.
+Writes use the durable mutation UoW; read-only endpoints use the query service.
 """
 from __future__ import annotations
 
-from typing import Any
-
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import (
+    entity_id_for_operation,
+    expected_version_from_request,
     get_knowledge_store,
+    get_operation_id,
     get_space_context,
     get_space_db,
     get_space_runtime_handle,
 )
+from app.errors import NotFoundError
+from app.models.folder import Folder
 from app.runtime.space import SpaceRuntimeHandle
 from app.schemas.common import PaginatedResponse
 from app.schemas.folder import FolderCreate, FolderResponse, FolderUpdate
-from app.services.cascade import CascadeService
 from app.services.folder import FolderService
 
 router = APIRouter()
@@ -34,14 +36,15 @@ router = APIRouter()
 @router.post("", response_model=FolderResponse, status_code=201)
 async def create_folder(
     data: FolderCreate,
-    db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Create a new folder."""
-    obj = await FolderService(db).create(data.model_dump())
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    payload = data.model_dump()
+    payload["id"] = payload.get("id") or entity_id_for_operation(operation_id, "folder")
+    result = await store.create_folder(scope, payload, None, operation_id)
+    return dict(result.value)
 
 
 @router.get("", response_model=PaginatedResponse[FolderResponse])
@@ -86,23 +89,34 @@ async def get_folder(
 async def update_folder(
     id: str,
     data: FolderUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Update an existing folder (partial update)."""
-    obj = await FolderService(db).update(id, data.model_dump(exclude_unset=True))
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    current = await db.get(Folder, id)
+    if current is None:
+        raise NotFoundError(f"Folder '{id}' not found")
+    result = await store.update_folder(
+        scope,
+        id,
+        data.model_dump(exclude_unset=True),
+        expected_version_from_request(request, current.version),
+        operation_id,
+    )
+    return dict(result.value)
 
 
 @router.delete("/{id}")
 async def delete_folder(
     id: str,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
-    store: Any = Depends(get_knowledge_store),
+    store=Depends(get_knowledge_store),
     scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Soft-delete a folder and all its descendants via cascade.
 
@@ -110,6 +124,13 @@ async def delete_folder(
     quick notes inside the subtree are detached (folder_id set to None)
     so they remain visible as "unfiled".
     """
-    result = await CascadeService(db, store=store, scope=scope).soft_delete_folder(id)
-    await db.commit()
-    return {"message": "Deleted", **result}
+    current = await db.get(Folder, id)
+    if current is None:
+        raise NotFoundError(f"Folder '{id}' not found")
+    result = await store.soft_delete_folder(
+        scope,
+        id,
+        expected_version_from_request(request, current.version),
+        operation_id,
+    )
+    return {"message": "Deleted", **dict(result.value)}

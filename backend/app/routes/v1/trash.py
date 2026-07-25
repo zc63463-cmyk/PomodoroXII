@@ -14,21 +14,22 @@ writes through the durable mutation pipeline (journal + UoW + projections).
 For notes, filesystem ``.trash/`` coordination is best-effort after the
 durable DB commit.
 
-Uses ``TombstoneService`` (sync deletion tracking).  Routes commit; the
-services only flush.
+Uses ``TombstoneService`` (sync deletion tracking). Writes use the durable
+mutation UoW; the cleanup compatibility route rejects unsafe retention.
 """
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import (
+    expected_version_from_request,
     get_file_system,
     get_knowledge_store,
+    get_operation_id,
     get_space_context,
     get_space_db,
     get_space_runtime_handle,
@@ -148,7 +149,6 @@ async def cleanup_expired(
 ):
     """Retain the compatibility route while S1 rejects unsafe cleanup."""
     removed = await TombstoneService(db).cleanup_expired()
-    await db.commit()
     return {"message": "Cleanup complete", "removed": removed}
 
 
@@ -156,11 +156,13 @@ async def cleanup_expired(
 async def restore_item(
     entity_type: str,
     entity_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
     store: Any = Depends(get_knowledge_store),
     scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Restore a trashed item via the durable mutation pipeline.
 
@@ -177,8 +179,11 @@ async def restore_item(
             raise ValidationError(
                 f"note '{entity_id}' is not trashed; refuse to restore"
             )
-        operation_id = f"restore:note:{entity_id}:{uuid.uuid4().hex[:16]}"
-        await store.restore_note(scope, entity_id, obj.version, operation_id)
+        await store.restore_note(
+            scope, entity_id,
+            expected_version_from_request(request, obj.version),
+            operation_id,
+        )
         # Best-effort FS restore (orphan .trash/ file is harmless).
         # The durable pipeline may have already restored the FS state
         # (is_deleted=0, .md moved back), so ValueError is expected.
@@ -200,8 +205,11 @@ async def restore_item(
             raise ValidationError(
                 f"folder '{entity_id}' is not trashed; refuse to restore"
             )
-        operation_id = f"restore:folder:{entity_id}:{uuid.uuid4().hex[:16]}"
-        await store.restore_folder(scope, entity_id, obj.version, operation_id)
+        await store.restore_folder(
+            scope, entity_id,
+            expected_version_from_request(request, obj.version),
+            operation_id,
+        )
         return {
             "message": "Restored",
             "entity_type": entity_type,
@@ -216,9 +224,10 @@ async def restore_item(
             raise ValidationError(
                 f"quick_note '{entity_id}' is not trashed; refuse to restore"
             )
-        operation_id = f"restore:quick_note:{entity_id}:{uuid.uuid4().hex[:16]}"
         await store.restore_quick_note(
-            scope, entity_id, obj.version, operation_id
+            scope, entity_id,
+            expected_version_from_request(request, obj.version),
+            operation_id,
         )
         return {
             "message": "Restored",
@@ -228,17 +237,20 @@ async def restore_item(
 
     # Unknown entity type — derive model from catalog (raises ValidationError).
     _catalog_model_for(entity_type)
+    raise ValidationError(f"{entity_type!r} does not support restore")
 
 
 @router.delete("/{entity_type}/{entity_id}")
 async def purge_item(
     entity_type: str,
     entity_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
     fs: FileSystem = Depends(get_file_system),
     ctx: dict = Depends(get_space_context),
     store: Any = Depends(get_knowledge_store),
     scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Permanently delete a trashed item via the durable mutation pipeline.
 
@@ -255,8 +267,11 @@ async def purge_item(
             raise ValidationError(
                 f"note '{entity_id}' is not trashed; refuse to purge"
             )
-        operation_id = f"purge:note:{entity_id}:{uuid.uuid4().hex[:16]}"
-        await store.purge_note(scope, entity_id, obj.version, operation_id)
+        await store.purge_note(
+            scope, entity_id,
+            expected_version_from_request(request, obj.version),
+            operation_id,
+        )
         # Best-effort FS cleanup (orphan .trash/ file is harmless).
         try:
             await fs.purge(entity_id)
@@ -272,8 +287,31 @@ async def purge_item(
         obj = await db.get(Folder, entity_id)
         if obj is None:
             raise NotFoundError(f"folder '{entity_id}' not found")
-        operation_id = f"purge:folder:{entity_id}:{uuid.uuid4().hex[:16]}"
-        await store.purge_folder(scope, entity_id, obj.version, operation_id)
+        await store.purge_folder(
+            scope, entity_id,
+            expected_version_from_request(request, obj.version),
+            operation_id,
+        )
+        return {
+            "message": "Purged",
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+        }
+
+    if entity_type == "quick_note":
+        obj = await db.get(QuickNote, entity_id)
+        if obj is None:
+            raise NotFoundError(f"quick_note '{entity_id}' not found")
+        await store.uow.execute(
+            scope,
+            store.entity_commands.delete(
+                scope,
+                "quick_note",
+                entity_id,
+                expected_version_from_request(request, obj.version),
+            ),
+            operation_id,
+        )
         return {
             "message": "Purged",
             "entity_type": entity_type,
@@ -282,3 +320,4 @@ async def purge_item(
 
     # Unknown entity type — derive model from catalog (raises ValidationError).
     _catalog_model_for(entity_type)
+    raise ValidationError(f"{entity_type!r} does not support purge")
