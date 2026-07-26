@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, Protocol, Se
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import MetaData, create_engine, inspect, text
+from sqlalchemy import MetaData, column, create_engine, inspect, select, table
 from sqlalchemy.engine import Connection
 
 if TYPE_CHECKING:
@@ -799,9 +799,8 @@ def _single_head(config: Config) -> str:
 
 
 def _version_rows(connection: Connection, version_table: str) -> list[str]:
-    return list(
-        connection.execute(text(f'SELECT version_num FROM "{version_table}"')).scalars()
-    )
+    version_tbl = table(version_table, column("version_num"))
+    return list(connection.execute(select(version_tbl.c.version_num)).scalars())
 
 
 def _normalize_sql(value: Any) -> str | None:

@@ -145,7 +145,10 @@ async def get_current_cursor(db: AsyncSession) -> int:
     state = await db.get(SyncState, 1)
     if state is not None:
         return state.current_cursor
-    return int(await db.scalar(select(func.max(SyncOutbox.id))) or 0)
+    visible_ids = select(SyncOutbox.id).where(
+        SyncOutbox.visible.is_(True)
+    ).subquery()
+    return int(await db.scalar(select(func.max(visible_ids.c.id))) or 0)
 
 
 async def get_retention_floor(db: AsyncSession) -> int:
@@ -155,12 +158,15 @@ async def get_retention_floor(db: AsyncSession) -> int:
 
 async def get_ledger_stats(db: AsyncSession) -> dict[str, Any]:
     """Return count/min/max using one aggregate query."""
+    visible_ids = select(SyncOutbox.id).where(
+        SyncOutbox.visible.is_(True)
+    ).subquery()
     row = (
         await db.execute(
             select(
-                func.count(SyncOutbox.id),
-                func.min(SyncOutbox.id),
-                func.max(SyncOutbox.id),
+                func.count(visible_ids.c.id),
+                func.min(visible_ids.c.id),
+                func.max(visible_ids.c.id),
             )
         )
     ).one()
