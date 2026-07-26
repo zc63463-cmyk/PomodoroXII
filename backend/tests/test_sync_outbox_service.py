@@ -639,3 +639,70 @@ async def get_current_cursor(session):
     )
     result = _run_authority_gate(app_root)
     assert result.returncode == 0, result.stderr
+
+
+def test_s3_exit_ast_gate_covers_not_ifexp_dead_and_positive_controls(tmp_path):
+    app_root = tmp_path / "app"
+    _make_minimal_app(app_root)
+    service = app_root / "services" / "matrix.py"
+
+    red_cases = (
+        (
+            """
+from sqlalchemy import not_, select
+from app.models.sync_outbox import SyncOutbox
+async def read(session):
+    return await session.scalars(select(SyncOutbox).where(not_(SyncOutbox.visible.is_(True))))
+""",
+            "visibility under OR/NOT/IfExp is forbidden",
+        ),
+        (
+            """
+from sqlalchemy import select
+from app.models.sync_outbox import SyncOutbox
+async def read(session, flag):
+    return await session.scalars(select(SyncOutbox).where(
+        SyncOutbox.visible.is_(True) if flag else SyncOutbox.id > 0
+    ))
+""",
+            "visibility under OR/NOT/IfExp is forbidden",
+        ),
+        (
+            """
+from sqlalchemy import select
+from app.models.sync_outbox import SyncOutbox
+async def read(session):
+    if False:
+        return await session.scalars(select(SyncOutbox).where(SyncOutbox.id > 0))
+    return None
+""",
+            "statically dead SyncOutbox read is forbidden",
+        ),
+    )
+    for source, message in red_cases:
+        service.write_text(textwrap.dedent(source), encoding="utf-8")
+        result = _run_authority_gate(app_root)
+        assert result.returncode != 0
+        assert message in result.stderr
+
+    service.write_text(
+        textwrap.dedent(
+            """
+from sqlalchemy import or_, select, text
+from app.models.sync_outbox import SyncOutbox
+
+async def safe_aggregate(session):
+    return await session.execute(text("SELECT COUNT(*) FROM tasks"))
+
+async def safe_chain(session):
+    return await session.scalars(
+        select(SyncOutbox)
+        .where(SyncOutbox.visible.is_(True), or_(SyncOutbox.id > 0, SyncOutbox.id == 0))
+        .order_by(SyncOutbox.id)
+    )
+"""
+        ),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode == 0, result.stderr
