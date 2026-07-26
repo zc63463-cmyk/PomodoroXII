@@ -270,4 +270,34 @@ describe('api.ts interceptors', () => {
     expect(keys[0]).toBeDefined()
     expect(keys[1]).toBe(keys[0])
   })
+
+  it('T35: metaApi POST gets an Idempotency-Key header', async () => {
+    metaApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      expect(config.headers?.get('Idempotency-Key')).toBeTruthy()
+      return makeResponse(200, { ok: true }, config)
+    }
+
+    await metaApi.post('/spaces', { name: 'Test space' })
+  })
+
+  it('T36: metaApi Cloudflare retry reuses the same Idempotency-Key', async () => {
+    vi.useFakeTimers()
+    const keys: (string | undefined)[] = []
+    metaApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const key = config.headers?.get('Idempotency-Key') as string | undefined
+      keys.push(key)
+      if (keys.length === 1) {
+        throw makeError(522, config)
+      }
+      return makeResponse(200, { ok: true }, config)
+    }
+
+    const promise = metaApi.delete('/spaces/space-1')
+    await vi.advanceTimersByTimeAsync(3000)
+    await promise
+
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBeDefined()
+    expect(keys[1]).toBe(keys[0])
+  })
 })
