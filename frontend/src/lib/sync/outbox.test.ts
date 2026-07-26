@@ -516,4 +516,36 @@ describe('outbox integration', () => {
     expect(merged!.operationId).toBe(original!.operationId)
     expect(merged!.expectedVersion).toBe(4)
   })
+
+  it('S3T10-MG7: legacy rebase delete row + update merge - preserves rebase state', async () => {
+    db = await openTestDb()
+    await db.outbox.add({
+      entityType: 'task', entityId: 't1', action: 'delete', payload: JSON.stringify({ id: 't1' }),
+      createdAt: Date.now(), synced: false, operationId: 'op-rebase-delete',
+      expectedVersion: null, requiresVersionRebase: true,
+    })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'update', { id: 't1', title: 'X' }, { expectedVersion: 5 })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.action).toBe('delete')
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBeNull()
+    expect(merged!.requiresVersionRebase).toBe(true)
+  })
+
+  it('S3T10-MG8: legacy rebase delete row + delete merge - preserves rebase state', async () => {
+    db = await openTestDb()
+    await db.outbox.add({
+      entityType: 'task', entityId: 't1', action: 'delete', payload: JSON.stringify({ id: 't1' }),
+      createdAt: Date.now(), synced: false, operationId: 'op-rebase-delete',
+      expectedVersion: null, requiresVersionRebase: true,
+    })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }, { expectedVersion: 6 })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.action).toBe('delete')
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBeNull()
+    expect(merged!.requiresVersionRebase).toBe(true)
+  })
 })
