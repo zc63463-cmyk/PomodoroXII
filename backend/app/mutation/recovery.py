@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import delete, select
 
-from app.errors import SpaceRecoveryRequiredError
+from app.errors import SpaceRecoveryRequiredError, to_wire_json
 from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.sync_outbox import SyncOutbox
 from app.mutation.journal import LEGAL_TRANSITIONS, IllegalMutationTransition, MutationJournal
@@ -401,6 +401,11 @@ class MutationRecovery:
 
         journal = self.journal_factory(scope.session_factory)
         if state is MutationState.DB_COMMITTED:
+            async with scope.session_factory() as session:
+                for operation in operations:
+                    await self._assert_invisible_ledger(
+                        session, operation, batch_id
+                    )
             await journal.mark_finalizing(batch_id)
             state = MutationState.FINALIZING
 
@@ -523,7 +528,7 @@ class MutationRecovery:
                             event.entity_id,
                             event.action,
                             json.dumps(
-                                event.payload,
+                                to_wire_json(event.payload),
                                 ensure_ascii=False,
                                 sort_keys=True,
                                 separators=(",", ":"),
@@ -571,6 +576,60 @@ class MutationRecovery:
                     MutationState.STAGED,
                     MutationState.DB_COMMITTED,
                 )
+
+    async def _assert_invisible_ledger(
+        self,
+        session: Any,
+        operation: _Operation,
+        batch_id: str,
+    ) -> None:
+        rows = tuple(
+            await session.scalars(
+                select(SyncOutbox)
+                .where(
+                    SyncOutbox.operation_id == operation.row.operation_id,
+                    SyncOutbox.visible.is_(False),
+                )
+                .order_by(SyncOutbox.id)
+            )
+        )
+        expected: list[tuple[Any, ...]] = []
+        for event in operation.command.sync_events:
+            spec = self.catalog.get(event.entity_type)
+            if not spec.sync_enabled:
+                raise RecoveryUnprovableError(
+                    "persisted event entity is not sync enabled"
+                )
+            expected.append(
+                (
+                    spec.effective_sync_entity_type,
+                    event.entity_id,
+                    event.action,
+                    json.dumps(
+                        to_wire_json(event.payload),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    event.version,
+                    batch_id,
+                )
+            )
+        actual = tuple(
+            (
+                row.entity_type,
+                row.entity_id,
+                row.action,
+                row.payload,
+                row.version,
+                row.batch_id,
+            )
+            for row in rows
+        )
+        if sorted(actual) != sorted(expected):
+            raise RecoveryUnprovableError(
+                "replayed ledger set is inconsistent"
+            )
 
     @staticmethod
     def _db_image_json(
