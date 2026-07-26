@@ -765,6 +765,22 @@ def visible_true_relation_ids(node: ast.AST, facts: AliasFacts) -> set[str]:
     return relation_ids(owner, facts)
 
 
+def visible_false_relation_ids(node: ast.AST, facts: AliasFacts) -> set[str]:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "is_"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value is False
+    ):
+        return set()
+    owner = node.func.value
+    if isinstance(owner, ast.Attribute) and owner.attr == "c":
+        owner = owner.value
+    return relation_ids(owner, facts)
+
+
 def read_has_visible_conjunct(
     read: SyncOutboxRead,
     root: ast.AST,
@@ -789,6 +805,21 @@ def read_has_visible_conjunct(
         read.relation_ids <= visible_relations and not unsafe_nested_visibility,
         unsafe_nested_visibility,
     )
+
+
+def read_has_invisible_conjunct(
+    read: SyncOutboxRead,
+    root: ast.AST,
+    facts: AliasFacts,
+) -> bool:
+    relations: set[str] = set()
+    for chained in query_chain_calls(root):
+        if dotted_name(chained.func).rsplit(".", 1)[-1] != "where":
+            continue
+        for predicate in chained.args:
+            for conjunct in top_level_and_conjuncts(predicate, facts):
+                relations.update(visible_false_relation_ids(conjunct, facts))
+    return read.relation_ids <= relations
 
 
 def is_statically_dead(
@@ -1001,6 +1032,10 @@ def run_gate(app_root: Path, include_routes: tuple[Path, ...]) -> tuple[int, int
                 contains_aggregate(root)
                 and enclosing_function_name(read.node, parents)
                 in {"get_current_cursor", "get_ledger_stats"}
+            ) and not (
+                enclosing_function_name(read.node, parents)
+                == "_assert_invisible_ledger"
+                and read_has_invisible_conjunct(read, root, facts)
             ):
                 violations.append(
                     f"{app_file}:{read.node.lineno}: "
