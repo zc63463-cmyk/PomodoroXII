@@ -16,7 +16,7 @@ import uuid
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
@@ -673,7 +673,7 @@ class SyncService:
         for entry in ENTITY_REGISTRY.values():
             result[entry["pull_key"]] = []
 
-        latest: dict[tuple[str, str], SyncOutbox] = {}
+        latest: dict[tuple[str, str], Any] = {}
         order: list[tuple[str, str]] = []
         for event in scanned:
             key = (event.entity_type, event.entity_id)
@@ -913,40 +913,23 @@ class SyncService:
     async def status(self) -> dict[str, Any]:
         """Return server time + per-entity counts + tombstone count.
 
-        D-2 optimization: collapsed 15 sequential COUNT queries (14 entities
-        + tombstones) into a single UNION ALL query — one round-trip to the
-        DB instead of 15.
-
-        Table names come from ORM ``__tablename__`` (hard-coded in models,
-        not user input), so injecting them into the SQL text is safe.
+        Uses individual ORM ``func.count()`` queries rather than a
+        dynamic ``text()`` UNION ALL so the authority gate can prove
+        no raw SQL reader touches ``sync_outbox``.
         """
-        from sqlalchemy import text
-
-        # Build one UNION ALL query covering all 14 entities + tombstones.
-        select_parts: list[str] = []
-        pull_keys: list[str] = []
+        entity_counts: dict[str, int] = {}
         for entry in ENTITY_REGISTRY.values():
             pull_key = entry["pull_key"]
-            table_name = entry["model"].__tablename__
-            select_parts.append(
-                f"SELECT '{pull_key}' AS k, COUNT(*) AS c FROM {table_name}"
+            model = entry["model"]
+            count = await self.db.scalar(
+                select(func.count()).select_from(model)
             )
-            pull_keys.append(pull_key)
-        # Append tombstone count as the last UNION ALL member.
-        select_parts.append(
-            f"SELECT '__tombstones__' AS k, COUNT(*) AS c FROM {Tombstone.__tablename__}"
-        )
-        sql = text(" UNION ALL ".join(select_parts))
-        result = (await self.db.execute(sql)).all()
+            entity_counts[pull_key] = int(count or 0)
 
-        entity_counts: dict[str, int] = {pk: 0 for pk in pull_keys}
-        tombstone_count = 0
-        for row in result:
-            k, c = row[0], int(row[1] or 0)
-            if k == "__tombstones__":
-                tombstone_count = c
-            elif k in entity_counts:
-                entity_counts[k] = c
+        tombstone_count = int(
+            await self.db.scalar(select(func.count()).select_from(Tombstone))
+            or 0
+        )
         return {
             "server_time": utc_now_iso(),
             "entity_counts": entity_counts,

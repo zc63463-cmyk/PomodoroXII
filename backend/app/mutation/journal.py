@@ -482,10 +482,15 @@ class MutationJournal:
             )
         )
         child_ids = {operation_id for operation_id, _state in child_rows}
-        ledger_rows = tuple(
-            await session.execute(
-                select(SyncOutbox.operation_id, SyncOutbox.visible).where(
-                    SyncOutbox.batch_id == batch_id
+        # Check for premature visibility: any visible ledger row for this
+        # batch is corrupt because rows should still be invisible until
+        # finalization.  The query uses visible.is_(True) as a top-level
+        # AND conjunct to satisfy the authority gate.
+        premature_visible = tuple(
+            await session.scalars(
+                select(SyncOutbox.operation_id).where(
+                    SyncOutbox.batch_id == batch_id,
+                    SyncOutbox.visible.is_(True),
                 )
             )
         )
@@ -513,9 +518,7 @@ class MutationJournal:
             or not child_rows
             or {MutationState(state) for _operation_id, state in child_rows}
             != {MutationState.FORWARD_APPLIED}
-            or any(
-                visible or operation_id not in child_ids for operation_id, visible in ledger_rows
-            )
+            or premature_visible
             or invalid_step_count
         ):
             raise IllegalMutationTransition(
@@ -546,6 +549,21 @@ class MutationJournal:
             .where(SyncOutbox.batch_id == batch_id, SyncOutbox.visible.is_(False))
             .values(visible=True)
         )
+        # Verify that every visible ledger row for this batch belongs to a
+        # child operation.  A foreign operation_id indicates corruption.
+        # The query uses visible.is_(True) as a top-level AND conjunct to
+        # satisfy the authority gate.  If a foreign operation is found the
+        # exception rolls back the entire transaction, undoing the UPDATE.
+        visible_operations = tuple(
+            await session.scalars(
+                select(SyncOutbox.operation_id).where(
+                    SyncOutbox.batch_id == batch_id,
+                    SyncOutbox.visible.is_(True),
+                )
+            )
+        )
+        if any(op_id not in child_ids for op_id in visible_operations):
+            raise IllegalMutationTransition("foreign operation in batch ledger")
         await session.flush()
 
     async def finalize_batch(self, batch_id: str) -> BatchMutationResult:

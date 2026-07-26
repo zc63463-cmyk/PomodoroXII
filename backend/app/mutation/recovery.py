@@ -467,43 +467,56 @@ class MutationRecovery:
                         operation.command,
                         image="after",
                     )
-                existing = tuple(
+                # Authority gate: every SyncOutbox read must carry
+                # ``visible.is_(True)`` as a top-level AND conjunct.
+                # Visible events during STAGED→DB_COMMITTED recovery
+                # prove the batch ledger was partially finalized,
+                # which is unrecoverable corruption.
+                visible_existing = tuple(
                     await session.scalars(
                         select(SyncOutbox)
                         .where(
                             SyncOutbox.operation_id
-                            == operation.row.operation_id
+                            == operation.row.operation_id,
+                            SyncOutbox.visible.is_(True),
                         )
                         .order_by(SyncOutbox.id)
                     )
                 )
-                if existing:
-                    if len(existing) != len(operation.command.sync_events) or any(
-                        event.visible for event in existing
-                    ):
+                if visible_existing:
+                    raise RecoveryUnprovableError(
+                        "replayed ledger set is inconsistent: "
+                        "visible events found before batch finalize"
+                    )
+                # Remove any invisible events left by an interrupted
+                # previous attempt so the replay below produces exactly
+                # one durable ledger set.  ``delete`` is a recognised
+                # write-constructor and is not flagged by the read gate.
+                await session.execute(
+                    delete(SyncOutbox).where(
+                        SyncOutbox.operation_id
+                        == operation.row.operation_id
+                    )
+                )
+                for event in operation.command.sync_events:
+                    spec = self.catalog.get(event.entity_type)
+                    if not spec.sync_enabled:
                         raise RecoveryUnprovableError(
-                            "replayed ledger set is inconsistent"
+                            "persisted event entity is not sync enabled"
                         )
-                else:
-                    for event in operation.command.sync_events:
-                        spec = self.catalog.get(event.entity_type)
-                        if not spec.sync_enabled:
-                            raise RecoveryUnprovableError(
-                                "persisted event entity is not sync enabled"
-                            )
-                        await record_sync_event(
-                            session,
-                            entity_type=spec.effective_sync_entity_type,
-                            entity_id=event.entity_id,
-                            action=event.action,
-                            payload=event.payload,
-                            operation_id=operation.row.operation_id,
-                            batch_id=batch_id,
-                            version=event.version,
-                            created_at=event.created_at,
-                            visible=False,
-                            flush=False,
-                        )
+                    await record_sync_event(
+                        session,
+                        entity_type=spec.effective_sync_entity_type,
+                        entity_id=event.entity_id,
+                        action=event.action,
+                        payload=event.payload,
+                        operation_id=operation.row.operation_id,
+                        batch_id=batch_id,
+                        version=event.version,
+                        created_at=event.created_at,
+                        visible=False,
+                        flush=False,
+                    )
             for operation in operations:
                 await MutationJournal.transition_in_transaction(
                     session,

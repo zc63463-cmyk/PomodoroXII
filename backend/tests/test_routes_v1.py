@@ -24,6 +24,222 @@ import pytest
 pytestmark = pytest.mark.provisioned_space_storage
 
 # --------------------------------------------------------------------------- #
+# S3 Exit Gate — AST authority regression tests (Task 11 Step 3)
+# --------------------------------------------------------------------------- #
+# These tests are NOT async and do not need a provisioned space, but they
+# share this file per the canonical plan.  They are excluded from the
+# ``provisioned_space_storage`` mark by using ``@pytest.mark.asyncio``-free
+# plain function definitions with their own markers.
+import pathlib
+import subprocess
+import sys
+import textwrap
+
+
+def _run_authority_gate(app_root):
+    """Run check_backend_authority.py against *app_root* and capture output."""
+    backend_root = pathlib.Path(__file__).resolve().parents[1]
+    script = backend_root / "scripts" / "check_backend_authority.py"
+    return subprocess.run(
+        [sys.executable, str(script), "--app-root", str(app_root)],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _make_minimal_app(app_root):
+    """Create the minimal directory structure the gate requires.
+
+    Includes one safe SyncOutbox read so the gate's ``read_count > 0``
+    invariant is satisfied.
+    """
+    app_root = pathlib.Path(app_root)
+    routes_dir = app_root / "routes" / "v1"
+    routes_dir.mkdir(parents=True, exist_ok=True)
+    for route_file in (
+        "notes.py", "folders.py", "quick_notes.py", "trash.py",
+        "schedules.py", "habits.py", "reflections.py", "time_blocks.py",
+    ):
+        (routes_dir / route_file).write_text("", encoding="utf-8")
+    runtime_dir = app_root / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "space.py").write_text(
+        "class SpaceRuntimeHandle:\n    pass\n", encoding="utf-8"
+    )
+    commands_dir = app_root / "commands"
+    commands_dir.mkdir(parents=True, exist_ok=True)
+    (commands_dir / "entity.py").write_text(
+        "class EntityCommand:\n    pass\n", encoding="utf-8"
+    )
+    services_dir = app_root / "services"
+    services_dir.mkdir(parents=True, exist_ok=True)
+    (services_dir / "ledger.py").write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import select
+            from app.models.sync_outbox import SyncOutbox
+
+            async def read_visible(session):
+                return await session.scalars(
+                    select(SyncOutbox).where(SyncOutbox.visible.is_(True))
+                )
+        """),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.skipif(
+    pytestmark is not None and any(
+        getattr(m, "name", None) == "provisioned_space_storage"
+        for m in getattr(pytestmark, "args", [])
+    ),
+    reason="AST gate test does not need a provisioned space",
+)
+def test_s3_exit_ast_gate_rejects_dynamic_raw_core_table_and_relation_escapes(
+    tmp_path,
+):
+    """The gate must reject dynamic ``text(...)``/``exec_driver_sql(...)``
+    readers that cannot be proven not to read SyncOutbox, imported
+    module-qualified Core ``Table("sync_outbox", ...)`` aliases, and
+    SyncOutbox relations passed to unknown helpers or containers.
+
+    RED: create files with dynamic raw SQL, Core table aliases, and
+    unknown-container relation escapes.
+    GREEN: remove the violations and use recognized select/aliased consumers.
+    """
+    app_root = tmp_path / "app"
+    _make_minimal_app(app_root)
+
+    services_dir = app_root / "services"
+    services_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- RED: dynamic text() reader (non-static string) ---
+    bad_service = services_dir / "dynamic_read.py"
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import text
+
+            async def dynamic_read(session, table_name):
+                sql = "SELECT * FROM " + table_name
+                return await session.execute(text(sql))
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must reject dynamic raw SQL"
+    assert "dynamic raw SQL reader" in result.stderr, (
+        f"missing dynamic raw SQL check: {result.stderr}"
+    )
+
+    # --- RED: Core Table("sync_outbox", ...) alias without visible ---
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import select, Table
+
+            sync_tbl = Table("sync_outbox", None)
+
+            async def core_read(session):
+                return await session.execute(select(sync_tbl))
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must discover Core Table aliases"
+    # Core Table reads are treated as relation reads that need visible
+    assert (
+        "visible predicate must be a top-level AND conjunct" in result.stderr
+        or "unknown SyncOutbox relation escape" in result.stderr
+    ), f"missing Core Table discovery: {result.stderr}"
+
+    # --- RED: SyncOutbox passed to unknown helper/container ---
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import select
+            from app.models.sync_outbox import SyncOutbox
+
+            def my_helper(relation):
+                return [relation]
+
+            async def escape_read(session):
+                box = SyncOutbox
+                return my_helper(box)
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must reject unknown relation escapes"
+    assert "unknown SyncOutbox relation escape" in result.stderr, (
+        f"missing relation escape check: {result.stderr}"
+    )
+
+    # --- GREEN: recognized select consumer with visible predicate ---
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import select
+            from app.models.sync_outbox import SyncOutbox
+
+            async def good_read(session):
+                return await session.scalars(
+                    select(SyncOutbox).where(SyncOutbox.visible.is_(True))
+                )
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode == 0, f"clean read must pass: {result.stderr}"
+    assert "AUTHORITY_GATE_OK" in result.stdout
+
+
+@pytest.mark.skipif(
+    pytestmark is not None and any(
+        getattr(m, "name", None) == "provisioned_space_storage"
+        for m in getattr(pytestmark, "args", [])
+    ),
+    reason="AST gate test does not need a provisioned space",
+)
+def test_s3_exit_ast_gate_counts_class_authorities_from_ast(tmp_path):
+    """``SpaceRuntimeHandle`` must exist only in ``runtime/space.py`` and
+    ``EntityCommand`` must exist only in ``commands/entity.py``.  Duplicate
+    definitions in other files must be rejected.
+
+    RED: add a duplicate ``SpaceRuntimeHandle`` in a service file.
+    GREEN: remove it and verify the gate passes.
+    """
+    app_root = tmp_path / "app"
+    _make_minimal_app(app_root)
+
+    services_dir = app_root / "services"
+    services_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- RED: duplicate SpaceRuntimeHandle in a service file ---
+    bad_service = services_dir / "duplicate_handle.py"
+    bad_service.write_text(
+        "class SpaceRuntimeHandle:\n    pass\n",
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must reject duplicate class authority"
+    assert "SpaceRuntimeHandle authority mismatch" in result.stderr, (
+        f"missing class authority check: {result.stderr}"
+    )
+
+    # --- RED: duplicate EntityCommand in a different file ---
+    bad_service.write_text(
+        "class EntityCommand:\n    pass\n",
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must reject duplicate EntityCommand"
+    assert "EntityCommand authority mismatch" in result.stderr, (
+        f"missing EntityCommand check: {result.stderr}"
+    )
+
+    # --- GREEN: remove duplicate, gate passes ---
+    bad_service.unlink()
+    result = _run_authority_gate(app_root)
+    assert result.returncode == 0, f"clean app must pass: {result.stderr}"
+    assert "AUTHORITY_GATE_OK" in result.stdout
+
+# --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 

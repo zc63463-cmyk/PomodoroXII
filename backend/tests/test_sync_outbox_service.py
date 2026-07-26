@@ -338,3 +338,263 @@ async def test_record_sync_event_payload_is_sorted_and_utf8_safe(space_session):
     raw = row.payload
     assert raw.index('"a"') < raw.index('"unicode"') < raw.index('"z"')
     assert "你好世界" in raw
+
+
+# --------------------------------------------------------------------------- #
+# S3 Exit Gate — AST authority regression tests (Task 11 Step 3)
+# --------------------------------------------------------------------------- #
+
+import subprocess
+import sys
+import textwrap
+
+
+def _run_authority_gate(app_root: Path) -> subprocess.CompletedProcess[str]:
+    """Run check_backend_authority.py against *app_root* and capture output."""
+    backend_root = Path(__file__).resolve().parents[1]
+    script = backend_root / "scripts" / "check_backend_authority.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--app-root", str(app_root)],
+        capture_output=True,
+        text=True,
+    )
+    return result
+
+
+def _make_minimal_app(app_root: Path) -> None:
+    """Create the minimal directory structure the gate requires.
+
+    Includes one safe SyncOutbox read so the gate's ``read_count > 0``
+    invariant is satisfied.
+    """
+    routes_dir = app_root / "routes" / "v1"
+    routes_dir.mkdir(parents=True, exist_ok=True)
+    for route_file in (
+        "notes.py", "folders.py", "quick_notes.py", "trash.py",
+        "schedules.py", "habits.py", "reflections.py", "time_blocks.py",
+    ):
+        (routes_dir / route_file).write_text("", encoding="utf-8")
+    runtime_dir = app_root / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "space.py").write_text(
+        "class SpaceRuntimeHandle:\n    pass\n", encoding="utf-8"
+    )
+    commands_dir = app_root / "commands"
+    commands_dir.mkdir(parents=True, exist_ok=True)
+    (commands_dir / "entity.py").write_text(
+        "class EntityCommand:\n    pass\n", encoding="utf-8"
+    )
+    services_dir = app_root / "services"
+    services_dir.mkdir(parents=True, exist_ok=True)
+    (services_dir / "ledger.py").write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import select
+            from app.models.sync_outbox import SyncOutbox
+
+            async def read_visible(session):
+                return await session.scalars(
+                    select(SyncOutbox).where(SyncOutbox.visible.is_(True))
+                )
+        """),
+        encoding="utf-8",
+    )
+
+
+def test_s3_exit_ast_gate_rejects_orm_alias_and_raw_route_writes(tmp_path):
+    """The gate must reject route files that use ORM write methods,
+    ORM attribute assignment, raw SQL writes, and aliased insert/update/delete.
+
+    RED: create a route with every forbidden pattern and verify the gate
+    rejects it.  GREEN: an empty route passes.
+    """
+    app_root = tmp_path / "app"
+    _make_minimal_app(app_root)
+
+    # --- RED: write a route that violates every ORM/raw-SQL rule ---
+    bad_route = app_root / "routes" / "v1" / "notes.py"
+    bad_route.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import text
+            from app.models import SyncOutbox
+
+            async def handler(db):
+                db.add(SyncOutbox())
+                db.commit()
+                db.flush()
+                db.execute(text("UPDATE sync_outbox SET visible=1"))
+                obj = SyncOutbox()
+                obj.visible = True
+                db.delete(SyncOutbox())
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must reject ORM writes and raw SQL"
+    stderr = result.stderr
+    assert "forbidden route ORM write" in stderr, f"missing ORM write check: {stderr}"
+    assert "forbidden route call" in stderr, f"missing commit/flush check: {stderr}"
+    assert "direct SQL write execute" in stderr or "raw SQL write" in stderr, (
+        f"missing raw SQL write check: {stderr}"
+    )
+    assert "forbidden route ORM attribute assignment" in stderr, (
+        f"missing attribute assignment check: {stderr}"
+    )
+
+    # --- GREEN: replace with a clean route ---
+    bad_route.write_text(
+        'async def handler():\n    pass\n', encoding="utf-8"
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode == 0, f"clean app must pass: {result.stderr}"
+    assert "AUTHORITY_GATE_OK" in result.stdout
+
+
+def test_s3_exit_ast_gate_requires_visible_as_top_level_and_conjunct(tmp_path):
+    """Every SyncOutbox read must have visible.is_(True) as a top-level
+    AND conjunct.  Visibility under OR/NOT/IfExp or in a separate
+    non-conjunct position must be rejected.
+
+    RED: create a service file with unsafe visibility placements.
+    GREEN: fix them to be top-level AND conjuncts.
+    """
+    app_root = tmp_path / "app"
+    _make_minimal_app(app_root)
+
+    services_dir = app_root / "services"
+    services_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- RED: visibility under OR is forbidden ---
+    bad_service = services_dir / "bad_sync.py"
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import or_, select
+            from app.models.sync_outbox import SyncOutbox
+
+            async def bad_read(session):
+                return await session.scalars(
+                    select(SyncOutbox).where(
+                        or_(SyncOutbox.visible.is_(True), SyncOutbox.id > 0)
+                    )
+                )
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must reject OR-nested visibility"
+    assert "visibility under OR/NOT/IfExp is forbidden" in result.stderr, (
+        f"missing OR/NOT check: {result.stderr}"
+    )
+
+    # --- RED: visibility is not a top-level conjunct (missing entirely) ---
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import select
+            from app.models.sync_outbox import SyncOutbox
+
+            async def bad_read(session):
+                return await session.scalars(
+                    select(SyncOutbox).where(SyncOutbox.id > 0)
+                )
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must reject missing visibility"
+    assert "visible predicate must be a top-level AND conjunct" in result.stderr, (
+        f"missing top-level conjunct check: {result.stderr}"
+    )
+
+    # --- GREEN: visible.is_(True) as a top-level AND conjunct ---
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import select
+            from app.models.sync_outbox import SyncOutbox
+
+            async def good_read(session):
+                return await session.scalars(
+                    select(SyncOutbox).where(
+                        SyncOutbox.visible.is_(True),
+                        SyncOutbox.id > 0,
+                    )
+                )
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode == 0, f"clean read must pass: {result.stderr}"
+    assert "AUTHORITY_GATE_OK" in result.stdout
+
+
+def test_s3_exit_ast_gate_discovers_assignment_aliased_module_and_raw_sql_reads(
+    tmp_path,
+):
+    """The gate must discover SyncOutbox reads that use assignment aliases
+    (e.g. ``Box = SyncOutbox``), module-qualified references, and static
+    raw SQL ``SELECT ... sync_outbox`` reads — and reject them if they
+    lack a visible predicate or use raw SQL.
+
+    RED: create files with aliased and raw SQL reads.
+    GREEN: fix the aliased read to include visible, remove raw SQL.
+    """
+    app_root = tmp_path / "app"
+    _make_minimal_app(app_root)
+
+    services_dir = app_root / "services"
+    services_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- RED: assignment alias ``Box = SyncOutbox`` without visible ---
+    bad_service = services_dir / "aliased_sync.py"
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import select
+            from app.models.sync_outbox import SyncOutbox
+
+            Box = SyncOutbox
+
+            async def aliased_read(session):
+                return await session.scalars(
+                    select(Box).where(Box.id > 0)
+                )
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must discover assignment-aliased reads"
+    assert "visible predicate must be a top-level AND conjunct" in result.stderr, (
+        f"missing alias discovery: {result.stderr}"
+    )
+
+    # --- RED: static raw SQL SELECT with sync_outbox ---
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import text
+
+            async def raw_read(session):
+                return await session.execute(text("SELECT * FROM sync_outbox"))
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode != 0, "gate must reject raw SQL sync_outbox reads"
+    assert "raw SQL SyncOutbox read is forbidden" in result.stderr, (
+        f"missing raw SQL read check: {result.stderr}"
+    )
+
+    # --- GREEN: aliased read with visible predicate ---
+    bad_service.write_text(
+        textwrap.dedent("""\
+            from sqlalchemy import select
+            from app.models.sync_outbox import SyncOutbox
+
+            Box = SyncOutbox
+
+            async def aliased_read(session):
+                return await session.scalars(
+                    select(Box).where(Box.visible.is_(True))
+                )
+        """),
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode == 0, f"clean aliased read must pass: {result.stderr}"
+    assert "AUTHORITY_GATE_OK" in result.stdout
