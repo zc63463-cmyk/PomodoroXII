@@ -16,7 +16,7 @@ import uuid
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
@@ -913,23 +913,38 @@ class SyncService:
     async def status(self) -> dict[str, Any]:
         """Return server time + per-entity counts + tombstone count.
 
-        Uses individual ORM ``func.count()`` queries rather than a
-        dynamic ``text()`` UNION ALL so the authority gate can prove
-        no raw SQL reader touches ``sync_outbox``.
+        Keep the registry-driven count query as one round trip without
+        interpolated SQL.  The models and pull keys are static registry data.
         """
-        entity_counts: dict[str, int] = {}
+        count_selects = []
         for entry in ENTITY_REGISTRY.values():
             pull_key = entry["pull_key"]
             model = entry["model"]
-            count = await self.db.scalar(
-                select(func.count()).select_from(model)
+            count_selects.append(
+                select(
+                    literal(pull_key).label("pull_key"),
+                    func.count().label("row_count"),
+                ).select_from(model)
             )
-            entity_counts[pull_key] = int(count or 0)
-
-        tombstone_count = int(
-            await self.db.scalar(select(func.count()).select_from(Tombstone))
-            or 0
+        count_selects.append(
+            select(
+                literal("__tombstones__").label("pull_key"),
+                func.count().label("row_count"),
+            ).select_from(Tombstone)
         )
+        counts = union_all(*count_selects).subquery()
+        rows = (
+            await self.db.execute(select(counts.c.pull_key, counts.c.row_count))
+        ).all()
+        entity_counts = {
+            entry["pull_key"]: 0 for entry in ENTITY_REGISTRY.values()
+        }
+        tombstone_count = 0
+        for pull_key, row_count in rows:
+            if pull_key == "__tombstones__":
+                tombstone_count = int(row_count or 0)
+            else:
+                entity_counts[pull_key] = int(row_count or 0)
         return {
             "server_time": utc_now_iso(),
             "entity_counts": entity_counts,

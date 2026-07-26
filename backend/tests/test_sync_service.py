@@ -7,6 +7,7 @@ C10 integration tested in test_sync_integration.py.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -633,6 +634,8 @@ async def test_status_returns_all_14_pull_keys_in_one_query(space_session):
     from app.services.sync import ENTITY_REGISTRY, SyncService
 
     svc = SyncService(space_session)
+    execute = AsyncMock(wraps=space_session.execute)
+    space_session.execute = execute
     result = await svc.status()
 
     expected_pull_keys = {entry["pull_key"] for entry in ENTITY_REGISTRY.values()}
@@ -648,6 +651,7 @@ async def test_status_returns_all_14_pull_keys_in_one_query(space_session):
     assert isinstance(result["tombstone_count"], int)
     assert result["tombstone_count"] >= 0
     assert "server_time" in result
+    assert execute.await_count == 1
 
 
 # --------------------------------------------------------------------------- #

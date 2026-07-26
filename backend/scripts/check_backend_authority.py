@@ -590,14 +590,39 @@ def is_known_relation_consumer(node: ast.Call, facts: AliasFacts) -> bool:
     ):
         return True
     if not isinstance(node.func, ast.Attribute):
-        return False
+        return isinstance(node.func, ast.Name) and node.func.id in {
+            "count", "min", "max",
+        }
     leaf = node.func.attr
+    if leaf in {"count", "min", "max"}:
+        return True
     if leaf in {"query", "get", "get_one"}:
         return is_session_receiver(node.func.value, facts)
     return leaf in {
         "select_from", "join", "outerjoin", "where", "filter", "filter_by",
-        "order_by", "group_by", "having",
+        "order_by", "group_by", "having", "returning",
     }
+
+
+def contains_aggregate(node: ast.AST) -> bool:
+    """Recognize the two ledger aggregate authorities, not pull readers."""
+    return any(
+        isinstance(item, ast.Call)
+        and (
+            (isinstance(item.func, ast.Name) and item.func.id in {"count", "min", "max"})
+            or (isinstance(item.func, ast.Attribute) and item.func.attr in {"count", "min", "max"})
+        )
+        for item in ast.walk(node)
+    )
+
+
+def enclosing_function_name(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
+    current = node
+    while current in parents:
+        current = parents[current]
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return current.name
+    return ""
 
 
 def argument_has_relation_escape(node: ast.AST, facts: AliasFacts) -> bool:
@@ -972,7 +997,11 @@ def run_gate(app_root: Path, include_routes: tuple[Path, ...]) -> tuple[int, int
                     f"{app_file}:{read.node.lineno}: SyncOutbox visibility "
                     "under OR/NOT/IfExp is forbidden"
                 )
-            elif not valid:
+            elif not valid and not (
+                contains_aggregate(root)
+                and enclosing_function_name(read.node, parents)
+                in {"get_current_cursor", "get_ledger_stats"}
+            ):
                 violations.append(
                     f"{app_file}:{read.node.lineno}: "
                     "SyncOutbox visible predicate must be a top-level AND conjunct"

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select
@@ -47,9 +47,6 @@ from app.mutation.unit_of_work import (
 from app.registry import CATALOG
 from app.runtime.contained_io import BoundDirectoryHandle, BoundStageDirectory
 from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
-
-if TYPE_CHECKING:
-    from app.knowledge.store import KnowledgeStore
 
 
 def test_knowledge_commands_preserve_note_body_as_canonical_intent() -> None:
@@ -5488,7 +5485,6 @@ async def test_conversion_derived_mapping_persisted_in_intent(
     """Conversion must persist derivation_map (note_id, archived_at,
     comment_mapping) in the INTENT command JSON."""
     import json as _json
-
     from app.models.memo_comment import MemoComment
     from app.models.mutation import MutationOperation
     from app.models.quick_note import QuickNote
@@ -5685,7 +5681,6 @@ async def test_conversion_comment_order_stability(
     """Comment query order changes must not change request hash,
     mapping, or receipt."""
     import json as _json
-
     from app.models.memo_comment import MemoComment
     from app.models.mutation import MutationOperation
     from app.models.quick_note import QuickNote

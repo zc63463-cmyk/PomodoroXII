@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -492,18 +493,64 @@ class MutationRecovery:
                 # previous attempt so the replay below produces exactly
                 # one durable ledger set.  ``delete`` is a recognised
                 # write-constructor and is not flagged by the read gate.
-                await session.execute(
-                    delete(SyncOutbox).where(
+                deleted = await session.execute(
+                    delete(SyncOutbox)
+                    .where(
                         SyncOutbox.operation_id
                         == operation.row.operation_id
                     )
+                    .returning(
+                        SyncOutbox.entity_type,
+                        SyncOutbox.entity_id,
+                        SyncOutbox.action,
+                        SyncOutbox.payload,
+                        SyncOutbox.version,
+                        SyncOutbox.batch_id,
+                        SyncOutbox.visible,
+                    )
                 )
+                existing = tuple(deleted.mappings())
+                expected: list[tuple[Any, ...]] = []
                 for event in operation.command.sync_events:
                     spec = self.catalog.get(event.entity_type)
                     if not spec.sync_enabled:
                         raise RecoveryUnprovableError(
                             "persisted event entity is not sync enabled"
                         )
+                    expected.append(
+                        (
+                            spec.effective_sync_entity_type,
+                            event.entity_id,
+                            event.action,
+                            json.dumps(
+                                event.payload,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            event.version,
+                            batch_id,
+                            False,
+                        )
+                    )
+                actual = tuple(
+                    (
+                        row["entity_type"],
+                        row["entity_id"],
+                        row["action"],
+                        row["payload"],
+                        row["version"],
+                        row["batch_id"],
+                        row["visible"],
+                    )
+                    for row in existing
+                )
+                if actual and sorted(actual) != sorted(expected):
+                    raise RecoveryUnprovableError(
+                        "replayed ledger set is inconsistent"
+                    )
+                for event in operation.command.sync_events:
+                    spec = self.catalog.get(event.entity_type)
                     await record_sync_event(
                         session,
                         entity_type=spec.effective_sync_entity_type,
