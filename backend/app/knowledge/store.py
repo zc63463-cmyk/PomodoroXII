@@ -306,6 +306,12 @@ class KnowledgeStore:
             ts_seconds, tz=timezone.utc
         ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
+        # Deterministic note ID from operation_id.  Retries with the same
+        # operation must be allowed to reach the UoW receipt lookup.
+        note_id = hashlib.sha256(
+            f"{operation_id}\0note".encode("ascii")
+        ).hexdigest()[:32]
+
         # Read quick note and comments via scope.session_factory.
         async with scope.session_factory() as session:
             qn = await session.get(QuickNote, quick_note_id)
@@ -320,9 +326,14 @@ class KnowledgeStore:
                     f"QuickNote {quick_note_id} is in trash; restore before converting"
                 )
             if qn.archived_at is not None or qn.migrated_to_note_id is not None:
-                from app.errors import ConflictError
+                # A matching deterministic destination means this is a retry
+                # of the same conversion; the UoW owns idempotent replay.
+                if qn.migrated_to_note_id != note_id:
+                    from app.errors import ConflictError
 
-                raise ConflictError(f"QuickNote {quick_note_id} already converted")
+                    raise ConflictError(
+                        f"QuickNote {quick_note_id} already converted"
+                    )
             comments = (
                 await session.execute(
                     select(MemoComment)
@@ -330,11 +341,6 @@ class KnowledgeStore:
                     .order_by(MemoComment.created_at, MemoComment.id)
                 )
             ).scalars().all()
-
-        # Deterministic note ID from operation_id.
-        note_id = hashlib.sha256(
-            f"{operation_id}\0note".encode("ascii")
-        ).hexdigest()[:32]
 
         # Derive title from content.
         raw = (qn.content or "").strip()

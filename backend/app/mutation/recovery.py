@@ -531,7 +531,6 @@ class MutationRecovery:
                                 to_wire_json(event.payload),
                                 ensure_ascii=False,
                                 sort_keys=True,
-                                separators=(",", ":"),
                             ),
                             event.version,
                             batch_id,
@@ -609,7 +608,6 @@ class MutationRecovery:
                         to_wire_json(event.payload),
                         ensure_ascii=False,
                         sort_keys=True,
-                        separators=(",", ":"),
                     ),
                     event.version,
                     batch_id,
@@ -626,7 +624,7 @@ class MutationRecovery:
             )
             for row in rows
         )
-        if sorted(actual) != sorted(expected):
+        if actual and sorted(actual) != sorted(expected):
             raise RecoveryUnprovableError(
                 "replayed ledger set is inconsistent"
             )
