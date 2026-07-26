@@ -4513,7 +4513,7 @@ if ($LASTEXITCODE -ne 0) { throw 'authority and ledger behavior gate failed' }
 
 Expected:
 
-- the reusable AST gate parses every `backend/app/**/*.py` file and the exact ten S3 route files;
+- the reusable AST gate parses every `backend/app/**/*.py` file and the exact eight S3 route files listed by `S3_ROUTE_FILES`;
 - no route contains direct session/db `add/add_all/merge/delete`, ORM attribute assignment, commit/flush, aliased SQLAlchemy insert/update/delete execution, raw SQL writes, ledger writes, or direct filesystem/index mutation;
 - `SpaceRuntimeHandle` exists only in `app/runtime/space.py`;
 - `EntityCommand` exists only in `app/commands/entity.py`;

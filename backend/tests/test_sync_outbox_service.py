@@ -19,7 +19,7 @@ from math import nan
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models.sync_outbox import SyncOutbox
@@ -273,6 +273,29 @@ async def test_record_sync_event_advances_current_cursor_for_invisible_rows(spac
     assert visible_event.id < invisible_event.id
     assert state is not None
     assert state.current_cursor == invisible_event.id
+    assert await get_current_cursor(space_session) == invisible_event.id
+
+
+@pytest.mark.asyncio
+async def test_missing_sync_state_fallback_preserves_allocated_cursor(space_session):
+    visible_event = await record_sync_event(
+        space_session,
+        entity_type="task",
+        entity_id="fallback-visible",
+        action="create",
+        visible=True,
+    )
+    invisible_event = await record_sync_event(
+        space_session,
+        entity_type="task",
+        entity_id="fallback-invisible",
+        action="update",
+        visible=False,
+    )
+    assert visible_event.id < invisible_event.id
+    await space_session.execute(delete(SyncState).where(SyncState.id == 1))
+    await space_session.flush()
+
     assert await get_current_cursor(space_session) == invisible_event.id
 
 
@@ -598,3 +621,21 @@ def test_s3_exit_ast_gate_discovers_assignment_aliased_module_and_raw_sql_reads(
     result = _run_authority_gate(app_root)
     assert result.returncode == 0, f"clean aliased read must pass: {result.stderr}"
     assert "AUTHORITY_GATE_OK" in result.stdout
+
+
+def test_s3_exit_ast_gate_allows_allocated_ledger_aggregates(tmp_path):
+    app_root = tmp_path / "app"
+    _make_minimal_app(app_root)
+    aggregate_service = app_root / "services" / "ledger_stats.py"
+    aggregate_service.write_text(
+        """
+from sqlalchemy import func, select
+from app.models.sync_outbox import SyncOutbox
+
+async def get_current_cursor(session):
+    return await session.scalar(select(func.max(SyncOutbox.id)))
+""",
+        encoding="utf-8",
+    )
+    result = _run_authority_gate(app_root)
+    assert result.returncode == 0, result.stderr

@@ -1723,6 +1723,29 @@ async def test_finalizing_restart_is_idempotent_and_does_not_duplicate_ledger(mu
 
 
 @pytest.mark.asyncio
+async def test_recovery_rejects_malformed_invisible_ledger(mutation_fixture):
+    await _persist_intent(mutation_fixture, publish=True)
+    await _leave_db_committed(mutation_fixture)
+    async with mutation_fixture.sessions.begin() as session:
+        event = await session.scalar(
+            select(SyncOutbox).where(
+                SyncOutbox.operation_id == mutation_fixture.operation_id,
+                SyncOutbox.visible.is_(False),
+            )
+        )
+        assert event is not None
+        event.payload = "{\"corrupt\":true}"
+
+    result = await _recover(mutation_fixture)
+
+    assert result.failed_manual == (mutation_fixture.batch_id,)
+    async with mutation_fixture.sessions() as session:
+        batch = await session.get(MutationBatch, mutation_fixture.batch_id)
+        assert batch is not None
+        assert MutationState(batch.state) is MutationState.FAILED_MANUAL
+
+
+@pytest.mark.asyncio
 async def test_projection_applied_before_restart_advances_without_second_write(
     mutation_fixture,
 ):
