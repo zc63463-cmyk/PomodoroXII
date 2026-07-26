@@ -421,7 +421,8 @@ describe('quick-note-repository', () => {
 
   it('returns conflict without writing when the captured revision is stale', async () => {
     const note = await createQuickNote({ content: 'before' })
-    await updateQuickNote(note.id, { content: 'remote' })
+    const remoteUpdatedAt = new Date(Date.parse(note.updated_at) + 1000).toISOString()
+    await updateQuickNote(note.id, { content: 'remote', updated_at: remoteUpdatedAt })
     await db.outbox.clear()
 
     await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {

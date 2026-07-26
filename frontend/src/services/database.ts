@@ -254,11 +254,20 @@ export class PomodoroXIDB extends Dexie {
       outbox: '++id, entityType, entityId, synced, createdAt',
     }).upgrade(async (tx) => {
       await tx.table('outbox').toCollection().modify((row: Record<string, unknown>) => {
-        row.operationId = crypto.randomUUID()
+        if (typeof row.operationId !== 'string' || row.operationId.length === 0) {
+          row.operationId = crypto.randomUUID()
+        }
+
+        const needsExpectedVersion = row.expectedVersion === undefined
+        const needsRebaseState = row.requiresVersionRebase === undefined
+        if (!needsExpectedVersion && !needsRebaseState) return
+
         const action = row.action as string
+        let expectedVersion: number | null
+        let requiresVersionRebase: boolean
         if (action === 'create') {
-          row.expectedVersion = null
-          row.requiresVersionRebase = false
+          expectedVersion = null
+          requiresVersionRebase = false
         } else {
           let payloadVersion: unknown = undefined
           try {
@@ -268,13 +277,16 @@ export class PomodoroXIDB extends Dexie {
             // payload is not valid JSON -- treat as no reliable version
           }
           if (Number.isInteger(payloadVersion) && (payloadVersion as number) >= 2) {
-            row.expectedVersion = (payloadVersion as number) - 1
-            row.requiresVersionRebase = false
+            expectedVersion = (payloadVersion as number) - 1
+            requiresVersionRebase = false
           } else {
-            row.expectedVersion = null
-            row.requiresVersionRebase = true
+            expectedVersion = null
+            requiresVersionRebase = true
           }
         }
+
+        if (needsExpectedVersion) row.expectedVersion = expectedVersion
+        if (needsRebaseState) row.requiresVersionRebase = requiresVersionRebase
       })
     })
   }

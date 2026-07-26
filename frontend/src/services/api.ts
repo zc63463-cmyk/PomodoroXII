@@ -44,7 +44,7 @@ metaApi.interceptors.request.use((config) => {
   if (token && config.headers) {
     config.headers.Authorization = `Bearer ${token}`
   }
-  return config
+  return ensureMutationIdempotencyKey(config)
 })
 
 metaApi.interceptors.response.use(

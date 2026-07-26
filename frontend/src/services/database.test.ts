@@ -198,6 +198,45 @@ describe('PomodoroXIDB', () => {
     await db.delete()
   })
 
+  it('v17 upgrade preserves existing outbox identity and version fields', async () => {
+    const dbName = 'pomodoroxi-v17-preserve-' + crypto.randomUUID()
+    const oldDb = new Dexie(dbName)
+    oldDb.version(16).stores({
+      outbox: '++id, entityType, entityId, synced, createdAt',
+    })
+    await oldDb.open()
+    await oldDb.table('outbox').bulkPut([
+      {
+        entityType: 'task', entityId: 'known-version', action: 'update',
+        payload: JSON.stringify({ id: 'known-version', version: 99 }),
+        createdAt: 1, synced: false, operationId: 'persisted-operation',
+        expectedVersion: 12, requiresVersionRebase: false,
+      },
+      {
+        entityType: 'task', entityId: 'needs-rebase', action: 'delete',
+        payload: JSON.stringify({ id: 'needs-rebase', version: 5 }),
+        createdAt: 2, synced: false, operationId: 'persisted-rebase',
+        expectedVersion: null, requiresVersionRebase: true,
+      },
+    ])
+    await oldDb.close()
+
+    const db = new PomodoroXIDB(dbName)
+    await db.open()
+
+    const knownVersion = await db.outbox.where('entityId').equals('known-version').first()
+    expect(knownVersion?.operationId).toBe('persisted-operation')
+    expect(knownVersion?.expectedVersion).toBe(12)
+    expect(knownVersion?.requiresVersionRebase).toBe(false)
+
+    const needsRebase = await db.outbox.where('entityId').equals('needs-rebase').first()
+    expect(needsRebase?.operationId).toBe('persisted-rebase')
+    expect(needsRebase?.expectedVersion).toBeNull()
+    expect(needsRebase?.requiresVersionRebase).toBe(true)
+
+    await db.delete()
+  })
+
   it('v17 upgrade rollback: interruption leaves no partial backfill', async () => {
     const dbName = 'pomodoroxi-v17-interrupt-' + crypto.randomUUID()
 
