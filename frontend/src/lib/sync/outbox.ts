@@ -126,8 +126,9 @@ export async function enqueueOutbox(
     if (merge.action === 'keep_existing') {
       latest.createdAt = now
       clearOutboxFailure(latest)
-      // S3-Task10: preserve operationId; update base version if missing
-      if (latest.action !== 'create' && latest.expectedVersion == null && action !== 'create') {
+      // S3-Task10: preserve operationId; update base version if missing.
+      // 普通 merge 不得清除既有 requiresVersionRebase=true（仅未来明确的 rebase/recovery 操作可清除）。
+      if (latest.action !== 'create' && latest.expectedVersion == null && !latest.requiresVersionRebase && action !== 'create') {
         latest.expectedVersion = assertValidBaseVersion(action, options?.expectedVersion)
         latest.requiresVersionRebase = false
       }
