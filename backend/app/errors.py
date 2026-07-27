@@ -54,7 +54,6 @@ RESERVED_TS_CODES = frozenset(
         "unsupported_content_version",
         "invalid_note_document",
         "invalid_work_item_tree",
-        "not_found",
         "active_child_conflict",
         "active_session_exists",
         "stale_session_owner",
