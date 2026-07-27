@@ -6,7 +6,7 @@ from alembic import context
 from sqlalchemy import inspect
 from sqlalchemy.engine import Connection
 
-from app.db.metadata import get_space_metadata
+from app.db.metadata import get_legacy_space_metadata, get_space_metadata
 
 config = context.config
 if config.config_file_name is not None:
@@ -14,6 +14,7 @@ if config.config_file_name is not None:
 
 target_metadata = get_space_metadata()
 SPACE_TABLES = frozenset(target_metadata.tables)
+LEGACY_SPACE_TABLES = frozenset(get_legacy_space_metadata().tables)
 META_TABLES = {"meta_settings", "spaces"}
 
 
@@ -26,9 +27,9 @@ def _assert_safe_schema(connection: Connection) -> None:
         raise RuntimeError(
             "legacy or mixed database detected; explicit dual-chain adoption is required"
         )
-    if tables == SPACE_TABLES and config.attributes.get("allow_legacy_adoption"):
+    if tables == LEGACY_SPACE_TABLES and config.attributes.get("allow_legacy_adoption"):
         return
-    if tables & SPACE_TABLES:
+    if tables & (SPACE_TABLES | LEGACY_SPACE_TABLES):
         raise RuntimeError(
             "legacy space schema detected; explicit dual-chain adoption is required"
         )

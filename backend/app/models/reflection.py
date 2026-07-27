@@ -15,12 +15,10 @@ class Reflection(Base, SyncMixin):
     date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     content: Mapped[str] = mapped_column(String(50000), default="")
     mood: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
-    related_task_ids: Mapped[str] = mapped_column(String(4000), default="[]")
     tags: Mapped[str] = mapped_column(String(4000), default="[]")
     # Phase 2 extensions: structured reflection + auto-linking
     sections: Mapped[str] = mapped_column(String(4000), default="[]")
     is_structured: Mapped[bool] = mapped_column(Boolean, default=False)
-    auto_linked_session_ids: Mapped[str] = mapped_column(String(4000), default="[]")
 
     __table_args__ = (
         CheckConstraint(

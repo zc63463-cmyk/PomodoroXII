@@ -178,7 +178,7 @@ async def test_coordinator_replaces_managed_space_007_under_bound_authority(
     result = await coordinator.upgrade("space", path)
     assert result.changed is True
     assert result.previous_revision == "space_007_session_mood_check"
-    assert result.head == "space_009_mutation_journal"
+    assert result.head == "space_010_task_space_focus_session"
     status = await coordinator.verify("space", path)
     assert status.at_head and status.integrity_ok
 
@@ -855,17 +855,27 @@ SPACE_TABLES = {
     "reflections",
     "schedule_quick_notes",
     "schedules",
-    "session_quick_notes",
-    "sessions",
     "settings",
     "sync_audit_log",
     "sync_outbox",
     "sync_snapshots",
     "sync_state",
-    "task_quick_notes",
-    "tasks",
     "time_blocks",
     "tombstones",
+    "projects",
+    "status_definitions",
+    "type_definitions",
+    "labels",
+    "work_item_labels",
+    "work_items",
+    "work_item_notes",
+    "focus_sessions",
+    "session_task_contexts",
+    "session_attribution_revisions",
+    "session_work_item_plans",
+    "session_work_item_outcomes",
+    "session_command_envelopes",
+    "session_command_receipts",
 }
 
 
@@ -874,9 +884,13 @@ def _sqlite_url(path: Path) -> str:
 
 
 def _create_legacy_schema(path: Path, database_kind: str) -> None:
-    from app.db.metadata import get_meta_metadata, get_space_metadata
+    from app.db.metadata import get_legacy_space_metadata, get_meta_metadata
 
-    metadata = get_meta_metadata() if database_kind == "meta" else get_space_metadata()
+    metadata = (
+        get_meta_metadata()
+        if database_kind == "meta"
+        else get_legacy_space_metadata()
+    )
 
     engine = create_engine(_sqlite_url(path))
     try:
@@ -1064,7 +1078,7 @@ def test_managed_space_007_upgrades_to_008_with_existing_outbox_cursor(tmp_path:
                 connection.execute(
                     text("SELECT version_num FROM alembic_version_space")
                 ).scalar_one()
-                == "space_009_mutation_journal"
+                == "space_010_task_space_focus_session"
             )
     finally:
         engine.dispose()
@@ -1106,7 +1120,7 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
                 connection.execute(
                     text("SELECT version_num FROM alembic_version_space")
                 ).scalar_one()
-                == "space_009_mutation_journal"
+                == "space_010_task_space_focus_session"
             )
     finally:
         engine.dispose()
@@ -1150,7 +1164,7 @@ def test_exact_space_legacy_adoption_backfills_outbox_visibility(tmp_path: Path)
             ).one() == (None, None, None, 1)
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_009_mutation_journal"
+            ).scalar_one() == "space_010_task_space_focus_session"
     finally:
         engine.dispose()
 

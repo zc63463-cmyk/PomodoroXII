@@ -12,6 +12,10 @@ from sqlalchemy import Inspector, MetaData, inspect
 
 from tests.migrations import migration_engine, run_bound_command
 
+LEGACY_CUTOVER_TABLES = frozenset(
+    {"tasks", "sessions", "task_quick_notes", "session_quick_notes"}
+)
+
 
 def _normalize_sql(value: Any) -> str | None:
     if value is None:
@@ -82,6 +86,7 @@ def _metadata_signature(metadata: MetaData, tmp_path: Path, schema: str) -> dict
         return {
             table_name: _schema_signature(inspector, table_name)
             for table_name in inspector.get_table_names()
+            if table_name not in LEGACY_CUTOVER_TABLES
         }
     finally:
         engine.dispose()
