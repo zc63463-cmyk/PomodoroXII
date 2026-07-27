@@ -21,9 +21,9 @@ from app.file_system.interfaces import ProjectionAuthoritySnapshot
 from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.note import Note
 from app.models.quick_note import QuickNote
+from app.models.schedule import Schedule
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
-from app.models.task import Task
 from app.mutation.journal import MutationJournal
 from app.mutation.recovery import MutationRecovery
 from app.mutation.staging import StageStore
@@ -2040,9 +2040,10 @@ def _note_create_projections(base, body: bytes, *, path: str | None = None):
 async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_fixture) -> None:
     async with uow_fixture.sessions.begin() as session:
         session.add(
-            Task(
+            Schedule(
                 id="overlay-task",
                 title="before",
+                due_at="2026-07-21T00:00:00Z",
                 created_at="2026-07-20T00:00:00Z",
                 updated_at="2026-07-20T00:00:00Z",
                 version=1,
@@ -2051,7 +2052,7 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
 
     request = MutationRequest.from_payload(
         name="entity.update",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="overlay-task",
         payload={"title": "after"},
         expected_version=1,
@@ -2060,7 +2061,7 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
         overlay = await AuthorityOverlay.from_locked_authorities(
             uow_fixture.scope, session, CATALOG
         )
-    before = overlay.row("task", "overlay-task")
+    before = overlay.row("schedule", "overlay-task")
     assert before is not None and before["title"] == "before"
 
     after = dict(before)
@@ -2069,7 +2070,7 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
         request=request,
         db_plans=(
             DbMutationPlan(
-                table="tasks",
+                table="schedules",
                 primary_key={"id": "overlay-task"},
                 operation="update",
                 expected_version=1,
@@ -2083,23 +2084,20 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
     )
     overlay.apply(command)
 
-    assert overlay.row("task", "overlay-task") == after
+    assert overlay.row("schedule", "overlay-task") == after
 
 
 def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -> None:
     current = {
         "id": "overlay-existing",
         "title": "before",
-        "description": "",
-        "status": "todo",
+        "due_at": "2026-07-21T00:00:00Z",
+        "completed_at": None,
         "priority": "medium",
-        "tags": "[]",
-        "plan": "",
-        "completion": "",
-        "due_date": None,
-        "estimated_pomodoros": 1,
-        "actual_pomodoros": 0,
-        "archived_at": None,
+        "color": "#3b82f6",
+        "all_day": False,
+        "start_time": None,
+        "end_time": None,
         "created_at": "2026-07-20T00:00:00Z",
         "updated_at": "2026-07-20T00:00:00Z",
         "version": 1,
@@ -2113,7 +2111,7 @@ def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -
     }
     request = MutationRequest.from_payload(
         name="overlay.probe",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="overlay-existing",
         payload={},
         expected_version=None,
@@ -2123,7 +2121,7 @@ def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -
             request=request,
             db_plans=(
                 DbMutationPlan(
-                    "tasks",
+                    "schedules",
                     {"id": "overlay-existing"},
                     "insert",
                     None,
@@ -2139,7 +2137,7 @@ def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -
             request=request,
             db_plans=(
                 DbMutationPlan(
-                    "tasks",
+                    "schedules",
                     {"id": "overlay-missing"},
                     "update",
                     1,
@@ -2155,7 +2153,7 @@ def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -
             request=request,
             db_plans=(
                 DbMutationPlan(
-                    "tasks",
+                    "schedules",
                     {"id": "overlay-missing"},
                     "delete",
                     1,
@@ -2187,18 +2185,18 @@ def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -
 
     for command in cases:
         overlay = AuthorityOverlay(
-            CATALOG, {("task", "overlay-existing"): current}
+            CATALOG, {("schedule", "overlay-existing"): current}
         )
         with pytest.raises(SpaceRecoveryRequiredError):
             overlay.apply(command)
-        assert overlay.row("task", "overlay-existing") == current
+        assert overlay.row("schedule", "overlay-existing") == current
 
     new_row = {**current, "id": "overlay-new"}
     insert_with_cas = MutationCommand.from_effects(
         request=request,
         db_plans=(
             DbMutationPlan(
-                "tasks",
+                "schedules",
                 {"id": "overlay-new"},
                 "insert",
                 1,
@@ -2270,45 +2268,6 @@ async def test_batch_overlay_exposes_folder_create_to_note_child(uow_fixture) ->
     assert compilation.operation_ids == ("overlay-op-0", "overlay-op-1")
     assert compilation.commands[1].db_plans[0].after_row["folder_id"] == (
         "folder-child-parent"
-    )
-
-
-@pytest.mark.asyncio
-async def test_batch_overlay_exposes_quick_note_create_to_junction_child(uow_fixture) -> None:
-    class JunctionParentPolicy:
-        entity_types = frozenset({"task_quick_note"})
-
-        async def compile(self, context, request):
-            if request.name == "entity.create":
-                quick_note_id = request.payload.get("quick_note_id")
-                assert isinstance(quick_note_id, str)
-                assert context.authority.row("quick_note", quick_note_id) is not None
-            return await compile_catalog_entity_command(context, request)
-
-    compilation = await _compile_production_batch(
-        uow_fixture,
-        (
-            MutationRequest.from_payload(
-                name="entity.create",
-                entity_type="quick_note",
-                entity_id="quick-note-parent",
-                payload={"content": "captured"},
-                expected_version=None,
-            ),
-            MutationRequest.from_payload(
-                name="entity.create",
-                entity_type="task_quick_note",
-                entity_id="task-quick-note-link",
-                payload={"task_id": "task-parent", "quick_note_id": "quick-note-parent"},
-                expected_version=None,
-            ),
-        ),
-        policies=(JunctionParentPolicy(),),
-    )
-
-    assert compilation.rejected == ()
-    assert compilation.commands[1].db_plans[0].after_row["quick_note_id"] == (
-        "quick-note-parent"
     )
 
 
@@ -2586,7 +2545,6 @@ async def test_batch_overlay_carries_quick_note_conversion_children(uow_fixture)
                 folder_id=None,
                 trashed_at=None,
                 migrated_to_note_id=None,
-                session_id=None,
                 created_at="2026-07-20T00:00:00Z",
                 updated_at="2026-07-20T00:00:00Z",
                 version=1,
@@ -2657,9 +2615,10 @@ async def test_catalog_compiler_and_interpreter_execute_unregistered_entity_poli
 ) -> None:
     async with uow_fixture.sessions.begin() as session:
         session.add(
-            Task(
+            Schedule(
                 id="generic-task",
                 title="before",
+                due_at="2026-07-21T00:00:00Z",
                 created_at="2026-07-20T00:00:00Z",
                 updated_at="2026-07-20T00:00:00Z",
                 version=1,
@@ -2667,7 +2626,7 @@ async def test_catalog_compiler_and_interpreter_execute_unregistered_entity_poli
         )
     request = MutationRequest.from_payload(
         name="entity.update",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="generic-task",
         payload={"title": "after"},
         expected_version=1,
@@ -2695,7 +2654,7 @@ async def test_catalog_compiler_and_interpreter_execute_unregistered_entity_poli
     )
     result = await uow.execute(uow_fixture.scope, request, "generic-execution")
     async with uow_fixture.sessions() as session:
-        stored = await session.get(Task, "generic-task")
+        stored = await session.get(Schedule, "generic-task")
 
     assert result.state is MutationState.FINALIZED
     assert stored is not None and stored.title == "after" and stored.version == 2
@@ -2707,9 +2666,10 @@ async def test_timestamp_lww_remote_win_executes_against_authoritative_version(
 ) -> None:
     async with uow_fixture.sessions.begin() as session:
         session.add(
-            Task(
+            Schedule(
                 id="remote-win-task",
                 title="local",
+                due_at="2026-07-21T00:00:00Z",
                 created_at="2026-07-20T00:00:00Z",
                 updated_at="2026-07-20T00:00:03Z",
                 version=3,
@@ -2717,7 +2677,7 @@ async def test_timestamp_lww_remote_win_executes_against_authoritative_version(
         )
     request = MutationRequest.from_payload(
         name="entity.update",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="remote-win-task",
         payload={"title": "remote"},
         expected_version=2,
@@ -2734,7 +2694,7 @@ async def test_timestamp_lww_remote_win_executes_against_authoritative_version(
 
     result = await uow.execute(uow_fixture.scope, request, "remote-win-operation")
     async with uow_fixture.sessions() as session:
-        stored = await session.get(Task, "remote-win-task")
+        stored = await session.get(Schedule, "remote-win-task")
 
     assert result.resolution == "remote"
     assert stored is not None and stored.title == "remote" and stored.version == 4
@@ -2746,9 +2706,10 @@ async def test_timestamp_lww_remote_delete_executes_against_authoritative_versio
 ) -> None:
     async with uow_fixture.sessions.begin() as session:
         session.add(
-            Task(
+            Schedule(
                 id="remote-delete-task",
                 title="local",
+                due_at="2026-07-21T00:00:00Z",
                 created_at="2026-07-20T00:00:00Z",
                 updated_at="2026-07-20T00:00:02Z",
                 version=3,
@@ -2756,7 +2717,7 @@ async def test_timestamp_lww_remote_delete_executes_against_authoritative_versio
         )
     request = MutationRequest.from_payload(
         name="entity.delete",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="remote-delete-task",
         payload={},
         expected_version=2,
@@ -2773,7 +2734,7 @@ async def test_timestamp_lww_remote_delete_executes_against_authoritative_versio
 
     result = await uow.execute(uow_fixture.scope, request, "remote-delete-operation")
     async with uow_fixture.sessions() as session:
-        stored = await session.get(Task, "remote-delete-task")
+        stored = await session.get(Schedule, "remote-delete-task")
 
     assert result.resolution == "remote"
     assert stored is None
@@ -2783,9 +2744,10 @@ async def test_timestamp_lww_remote_delete_executes_against_authoritative_versio
 async def test_strict_cas_rejects_update_without_expected_version(uow_fixture) -> None:
     async with uow_fixture.sessions.begin() as session:
         session.add(
-            Task(
+            Schedule(
                 id="strict-cas-task",
                 title="before",
+                due_at="2026-07-21T00:00:00Z",
                 created_at="2026-07-20T00:00:00Z",
                 updated_at="2026-07-20T00:00:00Z",
                 version=1,
@@ -2795,12 +2757,14 @@ async def test_strict_cas_rejects_update_without_expected_version(uow_fixture) -
         CATALOG,
         _by_name={
             **CATALOG._by_name,
-            "task": replace(CATALOG.get("task"), sync_conflict_policy="strict_cas"),
+            "schedule": replace(
+                CATALOG.get("schedule"), sync_conflict_policy="strict_cas"
+            ),
         },
     )
     request = MutationRequest.from_payload(
         name="entity.update",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="strict-cas-task",
         payload={"title": "after"},
         expected_version=None,
@@ -2821,57 +2785,48 @@ async def test_strict_cas_rejects_update_without_expected_version(uow_fixture) -
 @pytest.mark.asyncio
 async def test_production_compiler_injects_closed_plan_factories(uow_fixture) -> None:
     class FactoryPolicy:
-        entity_types = frozenset({"task"})
+        entity_types = frozenset({"schedule"})
 
         async def compile(self, context, request):
-            task_model = context.catalog.model_for("task")
-            before = task_model(
+            schedule_model = context.catalog.model_for("schedule")
+            before = schedule_model(
                 id=request.entity_id,
                 title="before",
-                description="",
-                status="todo",
+                due_at="2026-07-21T00:00:00Z",
+                completed_at=None,
                 priority="medium",
-                tags="[]",
-                plan="",
-                completion="",
-                due_date=None,
-                estimated_pomodoros=1,
-                actual_pomodoros=0,
-                archived_at=None,
+                color="#3b82f6",
+                all_day=False,
+                start_time=None,
+                end_time=None,
                 created_at="2026-07-20T00:00:00Z",
                 updated_at="2026-07-20T00:00:00Z",
                 version=1,
             )
-            after = task_model(
+            after = schedule_model(
                 id=request.entity_id,
                 title="after",
-                description="",
-                status="todo",
+                due_at="2026-07-21T00:00:00Z",
+                completed_at=None,
                 priority="medium",
-                tags="[]",
-                plan="",
-                completion="",
-                due_date=None,
-                estimated_pomodoros=1,
-                actual_pomodoros=0,
-                archived_at=None,
+                color="#3b82f6",
+                all_day=False,
+                start_time=None,
+                end_time=None,
                 created_at="2026-07-20T00:00:00Z",
                 updated_at="2026-07-20T00:00:01Z",
                 version=2,
             )
-            moved = task_model(
+            moved = schedule_model(
                 id="factory-task-moved",
                 title="after",
-                description="",
-                status="todo",
+                due_at="2026-07-21T00:00:00Z",
+                completed_at=None,
                 priority="medium",
-                tags="[]",
-                plan="",
-                completion="",
-                due_date=None,
-                estimated_pomodoros=1,
-                actual_pomodoros=0,
-                archived_at=None,
+                color="#3b82f6",
+                all_day=False,
+                start_time=None,
+                end_time=None,
                 created_at="2026-07-20T00:00:00Z",
                 updated_at="2026-07-20T00:00:01Z",
                 version=2,
@@ -2884,11 +2839,11 @@ async def test_production_compiler_injects_closed_plan_factories(uow_fixture) ->
             sync_delete = context.sync.delete(
                 after, deleted_at="2026-07-20T00:00:02Z"
             )
-            assert db_insert.table == "tasks" and db_insert.operation == "insert"
+            assert db_insert.table == "schedules" and db_insert.operation == "insert"
             assert db_update.expected_version == 1
             assert db_delete.expected_version == 2
-            assert sync_create.entity_type == "task" and sync_create.version == 1
-            assert sync_update.entity_type == "task" and sync_update.version == 2
+            assert sync_create.entity_type == "schedule" and sync_create.version == 1
+            assert sync_update.entity_type == "schedule" and sync_update.version == 2
             assert sync_delete.action == "delete" and sync_delete.version == 3
             with pytest.raises(ValueError, match="primary key"):
                 context.db.update(before, moved)
@@ -2901,7 +2856,7 @@ async def test_production_compiler_injects_closed_plan_factories(uow_fixture) ->
 
     request = MutationRequest.from_payload(
         name="factory.probe",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="factory-task",
         payload={},
         expected_version=None,
@@ -2960,7 +2915,7 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
             return await compile_catalog_entity_command(context, request)
 
     class MissingSyncPolicy:
-        entity_types = frozenset({"task"})
+        entity_types = frozenset({"schedule"})
 
         async def compile(self, context, request):
             base = await compile_catalog_entity_command(context, request)
@@ -2977,9 +2932,12 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
         async def compile(self, context, request):
             task_request = MutationRequest.from_payload(
                 name="entity.create",
-                entity_type="task",
+                entity_type="schedule",
                 entity_id="cross-entity-task",
-                payload={"title": "cross"},
+                payload={
+                    "title": "cross",
+                    "due_at": "2026-07-21T00:00:00Z",
+                },
                 expected_version=None,
             )
             task_command = await compile_catalog_entity_command(
@@ -3002,7 +2960,7 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
             )
 
     class DivergentSyncPolicy:
-        entity_types = frozenset({"task"})
+        entity_types = frozenset({"schedule"})
 
         async def compile(self, context, request):
             base = await compile_catalog_entity_command(context, request)
@@ -3054,9 +3012,12 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
             MissingSyncPolicy(),
             MutationRequest.from_payload(
                 name="entity.create",
-                entity_type="task",
+                entity_type="schedule",
                 entity_id="missing-sync-task",
-                payload={"title": "Missing sync"},
+                payload={
+                    "title": "Missing sync",
+                    "due_at": "2026-07-21T00:00:00Z",
+                },
                 expected_version=None,
             ),
             "sync event is missing",
@@ -3076,9 +3037,12 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
             DivergentSyncPolicy(),
             MutationRequest.from_payload(
                 name="entity.create",
-                entity_type="task",
+                entity_type="schedule",
                 entity_id="divergent-sync-task",
-                payload={"title": "Database title"},
+                payload={
+                    "title": "Database title",
+                    "due_at": "2026-07-21T00:00:00Z",
+                },
                 expected_version=None,
             ),
             "after image",
@@ -3114,7 +3078,7 @@ async def test_production_compiler_accepts_event_only_multi_effect_command(
     uow_fixture,
 ) -> None:
     class EventOnlyPolicy:
-        entity_types = frozenset({"task"})
+        entity_types = frozenset({"schedule"})
 
         async def compile(self, context, request):
             base = await compile_catalog_entity_command(context, request)
@@ -3137,9 +3101,12 @@ async def test_production_compiler_accepts_event_only_multi_effect_command(
 
     request = MutationRequest.from_payload(
         name="entity.create",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="event-only-first",
-        payload={"title": "event-only"},
+        payload={
+            "title": "event-only",
+            "due_at": "2026-07-21T00:00:00Z",
+        },
         expected_version=None,
     )
     item = mutation_types.PreparedBatchItem(
@@ -3328,14 +3295,17 @@ async def test_business_receipt_preserves_null_insert_before_and_delete_after(
     )
     created = MutationRequest.from_payload(
         name="entity.create",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="receipt-image-task",
-        payload={"title": "created"},
+        payload={
+            "title": "created",
+            "due_at": "2026-07-21T00:00:00Z",
+        },
         expected_version=None,
     )
     deleted = MutationRequest.from_payload(
         name="entity.delete",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="receipt-image-task",
         payload={},
         expected_version=1,
@@ -3366,7 +3336,7 @@ async def test_business_receipt_preserves_null_insert_before_and_delete_after(
 def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
     request = MutationRequest.from_payload(
         name="decode.probe",
-        entity_type="task",
+        entity_type="schedule",
         entity_id="decode-task",
         payload={},
         expected_version=None,
@@ -3374,16 +3344,13 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
     complete_task = {
         "id": "decode-task",
         "title": "decode",
-        "description": "",
-        "status": "todo",
+        "due_at": "2026-07-21T00:00:00Z",
+        "completed_at": None,
         "priority": "medium",
-        "tags": "[]",
-        "plan": "",
-        "completion": "",
-        "due_date": None,
-        "estimated_pomodoros": 1,
-        "actual_pomodoros": 0,
-        "archived_at": None,
+        "color": "#3b82f6",
+        "all_day": False,
+        "start_time": None,
+        "end_time": None,
         "created_at": "2026-07-20T00:00:00Z",
         "updated_at": "2026-07-20T00:00:00Z",
         "version": 1,
@@ -3416,7 +3383,7 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             request=note_request,
             db_plans=(
                 DbMutationPlan(
-                    "tasks",
+                    "schedules",
                     {"id": "decode-task"},
                     "insert",
                     None,
@@ -3427,7 +3394,7 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             projections=(),
             sync_events=(
                 SyncEventPlan(
-                    "task",
+                    "schedule",
                     "decode-task",
                     "create",
                     complete_task,
@@ -3441,7 +3408,7 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             request=request,
             db_plans=(
                 DbMutationPlan(
-                    "tasks",
+                    "schedules",
                     {"id": "decode-task"},
                     "insert",
                     None,
@@ -3452,7 +3419,7 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             projections=(),
             sync_events=(
                 SyncEventPlan(
-                    "task",
+                    "schedule",
                     "decode-task",
                     "create",
                     {**complete_task, "title": "different ledger title"},
@@ -3482,7 +3449,7 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             request=request,
             db_plans=(
                 DbMutationPlan(
-                    "tasks",
+                    "schedules",
                     {"id": "decode-task"},
                     "insert",
                     None,
@@ -3500,7 +3467,7 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             projections=(),
             sync_events=(
                 SyncEventPlan(
-                    "task",
+                    "schedule",
                     "decode-task",
                     "create",
                     {"id": "decode-task"},
