@@ -752,11 +752,14 @@ def test_openapi_uses_operation_specific_active_session_models(
     heartbeat_response = paths["/api/v1/active-session/heartbeat"]["post"]["responses"]["200"]
     end_response = paths["/api/v1/active-session/end"]["post"]["responses"]["200"]
     pause_response = paths["/api/v1/active-session/pause"]["post"]["responses"]["200"]
+    start_response = paths["/api/v1/active-session/start"]["post"]["responses"]["201"]
 
     assert "ResumeActiveSessionRequest" in str(resume_request)
     assert "ActiveSessionLocatorResponse" in str(heartbeat_response)
     assert "EndActiveSessionResponse" in str(end_response)
     assert "ActiveSessionResponse" in str(pause_response)
+    assert "ActiveSessionResponse" in str(start_response)
+    assert "ActivationConflictResponse" not in str(start_response)
 
 
 def test_active_locate_serializes_activation_conflict_union(

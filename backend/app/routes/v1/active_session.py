@@ -289,7 +289,7 @@ async def locate(
 @router.post(
     "/start",
     status_code=201,
-    response_model=ActiveSessionOperationResponse,
+    response_model=ActiveSessionResponse,
     response_model_exclude_none=True,
 )
 async def start(
@@ -297,14 +297,14 @@ async def start(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     coordinator=Depends(get_active_session_coordinator),
     claims=Depends(require_master_token),
-) -> ActiveSessionOperationResponse:
+) -> ActiveSessionResponse:
     """Start a new active session."""
     require_idempotency_key(body.command_id, idempotency_key)
     command = _make_command(
         body, space_id=body.space_id, payload=_map_start_payload(body.payload)
     )
     view = await coordinator.start(_master_principal(claims), command)
-    return _map_active_operation_response(view.value)
+    return ActiveSessionResponse.model_validate(dict(view.value))
 
 
 @router.post(
