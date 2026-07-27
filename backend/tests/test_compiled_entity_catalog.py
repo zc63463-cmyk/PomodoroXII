@@ -7,9 +7,9 @@ from app.registry.catalog import CatalogCompilationError, CompiledEntityCatalog
 
 
 def test_builtin_catalog_is_immutable_and_resolves_effective_sync_key() -> None:
-    catalog = CompiledEntityCatalog.compile(REGISTRY.list(), version="1")
+    catalog = CompiledEntityCatalog.compile(REGISTRY.list(), version="2")
 
-    assert catalog.version == "1"
+    assert catalog.version == "2"
     assert len(catalog.hash) == 64
     assert catalog.get("quick_note").effective_sync_entity_type == "quickNote"
     assert catalog.get_by_sync_key("quickNote").name == "quick_note"
@@ -34,12 +34,12 @@ def test_compile_rejects_every_effective_key_collision(field, value, message) ->
     note = REGISTRY.get("note")
     conflicting = replace(REGISTRY.get("quick_note"), name="conflict", **{field: value})
     with pytest.raises(CatalogCompilationError, match=message):
-        CompiledEntityCatalog.compile([note, conflicting], version="1")
+        CompiledEntityCatalog.compile([note, conflicting], version="2")
 
 
 def test_catalog_hash_is_order_independent_and_models_are_resolved() -> None:
-    forward = CompiledEntityCatalog.compile(REGISTRY.list(), version="1")
-    reverse = CompiledEntityCatalog.compile(list(reversed(REGISTRY.list())), version="1")
+    forward = CompiledEntityCatalog.compile(REGISTRY.list(), version="2")
+    reverse = CompiledEntityCatalog.compile(list(reversed(REGISTRY.list())), version="2")
 
     assert forward.hash == reverse.hash
     assert forward.model_for("note").__name__ == "Note"
@@ -50,13 +50,13 @@ def test_catalog_hash_is_order_independent_and_models_are_resolved() -> None:
 def test_catalog_validates_and_hashes_sync_conflict_policy() -> None:
     base = REGISTRY.get("note")
     strict = replace(base, sync_conflict_policy="strict_cas")
-    strict_catalog = CompiledEntityCatalog.compile((strict,), version="1")
-    default_catalog = CompiledEntityCatalog.compile((base,), version="1")
+    strict_catalog = CompiledEntityCatalog.compile((strict,), version="2")
+    default_catalog = CompiledEntityCatalog.compile((base,), version="2")
     assert strict_catalog.get("note").sync_conflict_policy == "strict_cas"
     assert strict_catalog.hash != default_catalog.hash
     with pytest.raises(ValueError, match="sync_conflict_policy"):
         CompiledEntityCatalog.compile(
-            (replace(base, sync_conflict_policy="merge_magic"),), version="1"
+            (replace(base, sync_conflict_policy="merge_magic"),), version="2"
         )
 
 
@@ -77,7 +77,7 @@ def test_registry_compile_seals_registration() -> None:
             fields=(FieldSpec("id", "string", nullable=False),),
         )
     )
-    registry.compile(version="1")
+    registry.compile(version="2")
     with pytest.raises(CatalogCompilationError, match="sealed"):
         registry.register(replace(registry.get("example"), name="other", table_name="others"))
 
@@ -86,27 +86,27 @@ def test_registry_compile_is_one_shot_fail_closed() -> None:
     from app.registry import EntityRegistry
 
     registry = EntityRegistry()
-    registry.register(REGISTRY.get("task"))
-    first = registry.compile(version="1")
+    registry.register(REGISTRY.get("note"))
+    first = registry.compile(version="2")
     with pytest.raises(CatalogCompilationError, match="catalog_already_compiled"):
-        registry.compile(version="2")
-    assert first.version == "1"
+        registry.compile(version="3")
+    assert first.version == "2"
 
 
 def test_route_contract_requires_service_and_schema_resolution() -> None:
     from app.registry.entities import EntitySpec
 
-    base = REGISTRY.get("task")
+    base = REGISTRY.get("note")
     incomplete = replace(base, service_path=None, schema_module=None, schema_prefix=None)
     with pytest.raises(CatalogCompilationError, match="route contract"):
-        CompiledEntityCatalog.compile([incomplete], version="1")
+        CompiledEntityCatalog.compile([incomplete], version="2")
 
 
 def test_catalog_rejects_sync_nullable_or_integer_primary_key() -> None:
-    nullable = replace(REGISTRY.get("session"), primary_key="task_id")
+    nullable = replace(REGISTRY.get("note"), primary_key="folder_id")
     with pytest.raises(CatalogCompilationError, match="primary key"):
-        CompiledEntityCatalog.compile([nullable], version="1")
+        CompiledEntityCatalog.compile([nullable], version="2")
 
-    integer = replace(REGISTRY.get("session"), primary_key="duration")
+    integer = replace(REGISTRY.get("note"), primary_key="word_count")
     with pytest.raises(CatalogCompilationError, match="primary key"):
-        CompiledEntityCatalog.compile([integer], version="1")
+        CompiledEntityCatalog.compile([integer], version="2")

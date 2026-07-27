@@ -102,10 +102,10 @@ class EntityRegistry:
 # Process-level singleton.
 REGISTRY = EntityRegistry()
 
-# Importing ``builtin`` populates ``REGISTRY`` with the 18 declared
+# Importing ``builtin`` populates ``REGISTRY`` with the 31 declared
 # entities.  This import is placed *after* ``REGISTRY`` is created to
 # avoid a circular dependency: ``builtin`` imports ``REGISTRY`` from
 # this module, and we import ``builtin`` to trigger registration.
 from app.registry import builtin  # noqa: E402, F401
 
-CATALOG = REGISTRY.compile(version="1")
+CATALOG = REGISTRY.compile(version="2")

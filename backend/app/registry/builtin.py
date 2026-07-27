@@ -16,11 +16,11 @@ Each ``EntitySpec`` declares:
 - ``fields``: tuple of ``FieldSpec`` describing each column
 
 Counts (must match the gate test in ``tests/test_registry.py``):
-- 14 BUSINESS entities (sync_enabled=True): 11 first-class + 3 junctions
-- 3 SYNC_INFRA entities (tombstone, sync_outbox, sync_audit_log)
-- 2 META entities (space, meta_setting)
+- 22 BUSINESS entities (sync_enabled=True): includes 12 Task Space entities + 10 legacy entities
+- 5 SYNC_INFRA entities (tombstone, sync_outbox, sync_audit_log, session_command_envelope, session_command_receipt)
+- 3 META entities (space, meta_setting, active_session_locator)
 - 1 SETTING entity (setting)
-- Total: 20 entities
+- Total: 31 entities
 """
 from __future__ import annotations
 
@@ -61,87 +61,8 @@ def _sync_fields() -> tuple[FieldSpec, ...]:
 
 
 # --------------------------------------------------------------------------- #
-# Business entities (14, sync_enabled=True)
+# Legacy business entities (10, sync_enabled=True)
 # --------------------------------------------------------------------------- #
-
-REGISTRY.register(EntitySpec(
-    name="task",
-    model_path="app.models.task.Task",
-    table_name="tasks",
-    storage_type=StorageType.DB_ONLY,
-    category=EntityCategory.BUSINESS,
-    sync_enabled=True,
-    soft_delete=False,  # Task has no trashed_at column (P1-1 confirmed)
-    fields=_sync_fields() + (
-        FieldSpec("title", "string", nullable=False),
-        FieldSpec("description", "string", nullable=False, default=""),
-        FieldSpec(
-            "status", "string", nullable=False, default="todo",
-            description="todo|in_progress|done|archived",
-        ),
-        FieldSpec(
-            "priority", "string", nullable=False, default="medium",
-            description="low|medium|high|urgent",
-        ),
-        FieldSpec("tags", "json", nullable=False, default="[]"),
-        FieldSpec("plan", "string", nullable=False, default=""),
-        FieldSpec("completion", "string", nullable=False, default=""),
-        FieldSpec("due_date", "datetime", nullable=True),
-        FieldSpec("estimated_pomodoros", "integer", nullable=False, default=1),
-        FieldSpec("actual_pomodoros", "integer", nullable=False, default=0),
-        FieldSpec("archived_at", "datetime", nullable=True),
-    ),
-    pull_key="tasks",
-    route_enabled=True,
-    route_prefix="/tasks",
-    service_path="app.services.task.TaskService",
-    schema_module="app.schemas.task",
-    schema_prefix="TaskResponse",
-    description="Todo/plan item with pomodoro estimates",
-))
-
-REGISTRY.register(EntitySpec(
-    name="session",
-    model_path="app.models.session.Session",
-    table_name="sessions",
-    storage_type=StorageType.DB_ONLY,
-    category=EntityCategory.BUSINESS,
-    sync_enabled=True,
-    soft_delete=False,
-    fields=_sync_fields() + (
-        FieldSpec("task_id", "string", nullable=True),
-        FieldSpec(
-            "type", "string", nullable=False,
-            description="work|short_break|long_break|free|countdown",
-        ),
-        FieldSpec("duration", "integer", nullable=False),
-        FieldSpec("completed", "boolean", nullable=False, default=False),
-        FieldSpec("plan", "string", nullable=False, default=""),
-        FieldSpec("completion", "string", nullable=False, default=""),
-        FieldSpec("started_at", "datetime", nullable=False),
-        FieldSpec("ended_at", "datetime", nullable=True),
-        FieldSpec("mood", "string", nullable=True),
-        FieldSpec("note", "string", nullable=False, default=""),
-        FieldSpec("attention_score", "integer", nullable=True),
-        FieldSpec("flow_state_detected", "boolean", nullable=True),
-        FieldSpec("flow_state_confidence", "float", nullable=True),
-        FieldSpec("interruption_count", "integer", nullable=True, default=0),
-        FieldSpec(
-            "total_interruption_duration", "integer", nullable=True, default=0,
-        ),
-        FieldSpec("avg_recovery_time", "integer", nullable=True),
-        FieldSpec("pause_count", "integer", nullable=True, default=0),
-        FieldSpec("total_pause_duration", "integer", nullable=True, default=0),
-        FieldSpec("cognitive_mark_summary", "string", nullable=True, default=""),
-    ),
-    pull_key="sessions",
-    route_enabled=True,
-    route_prefix="/sessions",
-    service_path="app.services.session.SessionService",
-    schema_module="app.schemas.session",
-    schema_prefix="SessionResponse",
-    description="Pomodoro work/break interval with enhanced metrics",
-))
 
 REGISTRY.register(EntitySpec(
     name="note",
@@ -386,24 +307,7 @@ REGISTRY.register(EntitySpec(
     description="Comment on a quick note (小记评论)",
 ))
 
-# --- Junction tables (3, sync_enabled=True) --- #
-
-REGISTRY.register(EntitySpec(
-    name="session_quick_note",
-    model_path="app.models.session_quick_note.SessionQuickNote",
-    table_name="session_quick_notes",
-    storage_type=StorageType.DB_ONLY,
-    category=EntityCategory.BUSINESS,
-    sync_enabled=True,
-    soft_delete=False,
-    fields=_sync_fields() + (
-        FieldSpec("session_id", "string", nullable=False, indexed=True),
-        FieldSpec("quick_note_id", "string", nullable=False, indexed=True),
-    ),
-    sync_entity_type="sessionQuickNote",
-    pull_key="sessionQuickNotes",
-    description="Junction: pomodoro session <-> quick note",
-))
+# --- Junction tables (1, sync_enabled=True) --- #
 
 REGISTRY.register(EntitySpec(
     name="schedule_quick_note",
@@ -423,21 +327,382 @@ REGISTRY.register(EntitySpec(
     junction_endpoints=(("schedule_id", "schedule"), ("quick_note_id", "quick_note")),
 ))
 
+# --------------------------------------------------------------------------- #
+# Task Space and FocusSession entities (15, strict_cas)
+# --------------------------------------------------------------------------- #
+# 12 business entities (sync_enabled=True), 2 sync_infra entities
+# (sync_enabled=False), and 1 meta entity (sync_enabled=False).
+# All use sync_conflict_policy="strict_cas".
+
 REGISTRY.register(EntitySpec(
-    name="task_quick_note",
-    model_path="app.models.task_quick_note.TaskQuickNote",
-    table_name="task_quick_notes",
+    name="project",
+    model_path="app.models.project.Project",
+    table_name="projects",
     storage_type=StorageType.DB_ONLY,
     category=EntityCategory.BUSINESS,
     sync_enabled=True,
     soft_delete=False,
+    sync_conflict_policy="strict_cas",
     fields=_sync_fields() + (
-        FieldSpec("task_id", "string", nullable=False, indexed=True),
-        FieldSpec("quick_note_id", "string", nullable=False, indexed=True),
+        FieldSpec("key", "string", nullable=False, unique=True),
+        FieldSpec("next_work_item_number", "integer", nullable=False, default=1),
+        FieldSpec("name", "string", nullable=False),
+        FieldSpec("description", "text", nullable=True),
+        FieldSpec("rank", "integer", nullable=False, default=0),
+        FieldSpec("default_status_definition_id", "string", nullable=False),
+        FieldSpec("default_type_definition_id", "string", nullable=False),
+        FieldSpec("archived_at", "datetime", nullable=True),
     ),
-    sync_entity_type="taskQuickNote",
-    pull_key="taskQuickNotes",
-    description="Junction: task <-> quick note",
+    sync_entity_type="project",
+    pull_key="projects",
+    description="Task Space project with human-readable key and work item numbering",
+))
+
+REGISTRY.register(EntitySpec(
+    name="status_definition",
+    model_path="app.models.work_item_definition.StatusDefinition",
+    table_name="status_definitions",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("name", "string", nullable=False),
+        FieldSpec("category", "string", nullable=False),
+        FieldSpec("icon", "string", nullable=True),
+        FieldSpec("color", "string", nullable=True),
+        FieldSpec("rank", "integer", nullable=False, default=0),
+        FieldSpec("system", "boolean", nullable=False, default=False),
+        FieldSpec("archived_at", "datetime", nullable=True),
+    ),
+    sync_entity_type="statusDefinition",
+    pull_key="statusDefinitions",
+    description="Work item status definition with category and visual properties",
+))
+
+REGISTRY.register(EntitySpec(
+    name="type_definition",
+    model_path="app.models.work_item_definition.TypeDefinition",
+    table_name="type_definitions",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("name", "string", nullable=False),
+        FieldSpec("icon", "string", nullable=True),
+        FieldSpec("color", "string", nullable=True),
+        FieldSpec("rank", "integer", nullable=False, default=0),
+        FieldSpec("system", "boolean", nullable=False, default=False),
+        FieldSpec("archived_at", "datetime", nullable=True),
+    ),
+    sync_entity_type="typeDefinition",
+    pull_key="typeDefinitions",
+    description="Work item type definition with visual properties",
+))
+
+REGISTRY.register(EntitySpec(
+    name="label",
+    model_path="app.models.work_item_definition.Label",
+    table_name="labels",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("name", "string", nullable=False, unique=True),
+        FieldSpec("color", "string", nullable=True),
+        FieldSpec("archived_at", "datetime", nullable=True),
+    ),
+    sync_entity_type="label",
+    pull_key="labels",
+    description="Work item label with color",
+))
+
+REGISTRY.register(EntitySpec(
+    name="work_item_label",
+    model_path="app.models.work_item_definition.WorkItemLabel",
+    table_name="work_item_labels",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    primary_key="work_item_id",
+    fields=(
+        FieldSpec("work_item_id", "string", nullable=False, indexed=True),
+        FieldSpec("label_id", "string", nullable=False, indexed=True),
+    ),
+    sync_entity_type="workItemLabel",
+    pull_key="workItemLabels",
+    description="Junction: work item <-> label",
+))
+
+REGISTRY.register(EntitySpec(
+    name="work_item",
+    model_path="app.models.work_item.WorkItem",
+    table_name="work_items",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("project_id", "string", nullable=False, indexed=True),
+        FieldSpec("display_key", "string", nullable=False, unique=True),
+        FieldSpec("title", "string", nullable=False),
+        FieldSpec("description", "text", nullable=True),
+        FieldSpec("type_definition_id", "string", nullable=False),
+        FieldSpec("status_definition_id", "string", nullable=False),
+        FieldSpec("priority", "string", nullable=True),
+        FieldSpec("parent_id", "string", nullable=True, indexed=True),
+        FieldSpec("child_rank", "integer", nullable=False, default=0),
+        FieldSpec("completion_window_start", "datetime", nullable=True),
+        FieldSpec("completion_window_end", "datetime", nullable=True),
+        FieldSpec("review_point", "datetime", nullable=True),
+        FieldSpec("hard_deadline", "datetime", nullable=True),
+        FieldSpec("effort_estimate_lower_seconds", "integer", nullable=True),
+        FieldSpec("effort_estimate_upper_seconds", "integer", nullable=True),
+        FieldSpec("effort_actual_seconds", "integer", nullable=False, default=0),
+        FieldSpec("confidence", "string", nullable=True),
+        FieldSpec("completed_at", "datetime", nullable=True),
+        FieldSpec("cancelled_at", "datetime", nullable=True),
+        FieldSpec("archived_at", "datetime", nullable=True),
+        FieldSpec("marked_as_attention", "boolean", nullable=False, default=False),
+    ),
+    sync_entity_type="workItem",
+    pull_key="workItems",
+    description="Task Space work item with display key and hierarchy support",
+))
+
+REGISTRY.register(EntitySpec(
+    name="work_item_note",
+    model_path="app.models.work_item_note.WorkItemNote",
+    table_name="work_item_notes",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("work_item_id", "string", nullable=False, unique=True),
+        FieldSpec("document_json", "text", nullable=False),
+    ),
+    sync_entity_type="workItemNote",
+    pull_key="workItemNotes",
+    description="Work item note document; sync payload is full document_json post-image",
+))
+
+REGISTRY.register(EntitySpec(
+    name="focus_session",
+    model_path="app.models.focus_session.FocusSession",
+    table_name="focus_sessions",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("session_revision", "integer", nullable=False, default=1),
+        FieldSpec("started_at", "datetime", nullable=False),
+        FieldSpec("ended_at", "datetime", nullable=True),
+        FieldSpec("pause_started_at", "datetime", nullable=True),
+        FieldSpec("planned_seconds", "integer", nullable=False, default=0),
+        FieldSpec("gross_seconds", "integer", nullable=False, default=0),
+        FieldSpec("paused_seconds", "integer", nullable=False, default=0),
+        FieldSpec("break_seconds", "integer", nullable=False, default=0),
+        FieldSpec("focused_seconds", "integer", nullable=False, default=0),
+        FieldSpec("timer_completion", "datetime", nullable=True),
+        FieldSpec("validity", "string", nullable=False, default="pending"),
+        FieldSpec("validity_reason", "string", nullable=True),
+        FieldSpec("overall_progress", "string", nullable=True),
+        FieldSpec("mood", "string", nullable=True),
+        FieldSpec("session_note", "text", nullable=False, default=""),
+        FieldSpec("review_state", "string", nullable=False, default="not_required"),
+        FieldSpec("ownership_state", "string", nullable=False, default="authoritative"),
+    ),
+    sync_entity_type="focusSession",
+    pull_key="focusSessions",
+    description="Focus session with timer metrics, validity, and ownership state",
+))
+
+REGISTRY.register(EntitySpec(
+    name="session_task_context",
+    model_path="app.models.focus_session.SessionTaskContext",
+    table_name="session_task_contexts",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("session_id", "string", nullable=False, unique=True),
+        FieldSpec("project_id", "string", nullable=False),
+        FieldSpec("level2_work_item_id", "string", nullable=False),
+        FieldSpec("title_snapshot", "string", nullable=False),
+        FieldSpec("parent_snapshot", "string", nullable=True),
+        FieldSpec("estimate_snapshot", "string", nullable=True),
+        FieldSpec("status_snapshot", "string", nullable=True),
+        FieldSpec("structure_snapshot", "text", nullable=False, default="{}"),
+        FieldSpec("linked_at", "datetime", nullable=False),
+        FieldSpec("link_method", "string", nullable=False),
+    ),
+    sync_entity_type="sessionTaskContext",
+    pull_key="sessionTaskContexts",
+    description="Immutable task context snapshot linked to a focus session",
+))
+
+REGISTRY.register(EntitySpec(
+    name="session_attribution_revision",
+    model_path="app.models.session_revision.SessionAttributionRevision",
+    table_name="session_attribution_revisions",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("session_id", "string", nullable=False, indexed=True),
+        FieldSpec("revision", "integer", nullable=False),
+        FieldSpec("project_id", "string", nullable=False),
+        FieldSpec("level2_work_item_id", "string", nullable=False),
+        FieldSpec("reason", "string", nullable=True),
+        FieldSpec("corrected_from_revision", "integer", nullable=True),
+        FieldSpec("effective", "boolean", nullable=False, default=True),
+    ),
+    sync_entity_type="sessionAttributionRevision",
+    pull_key="sessionAttributionRevisions",
+    description="Append-only attribution revision for a focus session",
+))
+
+REGISTRY.register(EntitySpec(
+    name="session_work_item_plan",
+    model_path="app.models.session_revision.SessionWorkItemPlan",
+    table_name="session_work_item_plans",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("session_id", "string", nullable=False, indexed=True),
+        FieldSpec("work_item_id", "string", nullable=False),
+        FieldSpec("title_snapshot", "string", nullable=False),
+        FieldSpec("level2_snapshot", "string", nullable=True),
+        FieldSpec("plan_rank", "integer", nullable=False, default=0),
+        FieldSpec("source", "string", nullable=False),
+        FieldSpec("added_at", "datetime", nullable=False),
+        FieldSpec("removed_at", "datetime", nullable=True),
+        FieldSpec("removal_reason", "string", nullable=True),
+        FieldSpec("current_during_session", "boolean", nullable=False, default=False),
+        FieldSpec("completion_draft", "boolean", nullable=False, default=False),
+    ),
+    sync_entity_type="sessionWorkItemPlan",
+    pull_key="sessionWorkItemPlans",
+    description="Planned work item within a focus session with lifecycle tracking",
+))
+
+REGISTRY.register(EntitySpec(
+    name="session_work_item_outcome",
+    model_path="app.models.session_revision.SessionWorkItemOutcome",
+    table_name="session_work_item_outcomes",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    sync_enabled=True,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("session_id", "string", nullable=False, indexed=True),
+        FieldSpec("session_revision", "integer", nullable=False),
+        FieldSpec("revision", "integer", nullable=False),
+        FieldSpec("corrected_from_revision", "integer", nullable=True),
+        FieldSpec("effective", "boolean", nullable=False, default=True),
+        FieldSpec("work_item_id", "string", nullable=False),
+        FieldSpec("touched", "boolean", nullable=False, default=False),
+        FieldSpec("result", "string", nullable=False),
+        FieldSpec("persona", "string", nullable=True),
+        FieldSpec("state_command", "string", nullable=False, default="none"),
+        FieldSpec("command_id", "string", nullable=True),
+        FieldSpec("reviewed_at", "datetime", nullable=True),
+    ),
+    sync_entity_type="sessionWorkItemOutcome",
+    pull_key="sessionWorkItemOutcomes",
+    description="Append-only outcome record for a work item in a focus session",
+))
+
+REGISTRY.register(EntitySpec(
+    name="session_command_envelope",
+    model_path="app.models.session_command.SessionCommandEnvelope",
+    table_name="session_command_envelopes",
+    storage_type=StorageType.SYSTEM,
+    category=EntityCategory.SYNC_INFRA,
+    sync_enabled=False,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    primary_key="command_id",
+    fields=(
+        FieldSpec("command_id", "string", nullable=False),
+        FieldSpec("space_id", "string", nullable=False),
+        FieldSpec("session_id", "string", nullable=False, indexed=True),
+        FieldSpec("session_revision", "integer", nullable=False),
+        FieldSpec("work_item_id", "string", nullable=False),
+        FieldSpec("expected_version", "integer", nullable=False),
+        FieldSpec("target_transition", "string", nullable=False),
+        FieldSpec("replay_safe", "boolean", nullable=False),
+        FieldSpec("payload_hash", "string", nullable=False),
+        FieldSpec("created_at", "datetime", nullable=False),
+    ),
+    description="Immutable command envelope for session state transitions",
+))
+
+REGISTRY.register(EntitySpec(
+    name="session_command_receipt",
+    model_path="app.models.session_command.SessionCommandReceipt",
+    table_name="session_command_receipts",
+    storage_type=StorageType.SYSTEM,
+    category=EntityCategory.SYNC_INFRA,
+    sync_enabled=False,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    primary_key="command_id",
+    fields=(
+        FieldSpec("command_id", "string", nullable=False),
+        FieldSpec("state", "string", nullable=False),
+        FieldSpec("error_code", "string", nullable=True),
+        FieldSpec("retryable", "boolean", nullable=False, default=False),
+        FieldSpec("details_json", "text", nullable=True),
+        FieldSpec("result_json", "text", nullable=True),
+        FieldSpec("updated_at", "datetime", nullable=False),
+    ),
+    description="Command receipt tracking state machine outcome",
+))
+
+REGISTRY.register(EntitySpec(
+    name="active_session_locator",
+    model_path="app.db.models.meta.ActiveSessionLocator",
+    table_name="active_session_locator",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.META,
+    sync_enabled=False,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    primary_key="singleton_key",
+    fields=(
+        FieldSpec("singleton_key", "string", nullable=False),
+        FieldSpec("space_id", "string", nullable=False),
+        FieldSpec("session_id", "string", nullable=False),
+        FieldSpec("operation_id", "string", nullable=False),
+        FieldSpec("state", "string", nullable=False),
+        FieldSpec("owner_device_id", "string", nullable=False),
+        FieldSpec("owner_tab_id", "string", nullable=False),
+        FieldSpec("ownership_epoch", "integer", nullable=False),
+        FieldSpec("lease_expires_at", "datetime", nullable=False),
+        FieldSpec("updated_at", "datetime", nullable=False),
+    ),
+    description="Application-wide singleton owning the currently active focus session",
 ))
 
 
