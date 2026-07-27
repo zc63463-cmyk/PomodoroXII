@@ -20,6 +20,7 @@ from app.registry.entities import (
     EntitySpec,
     FieldSpec,
     StorageType,
+    SyncConflictPolicy,
 )
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "FieldSpec",
     "StorageType",
     "EntityCategory",
+    "SyncConflictPolicy",
     "CatalogCompilationError",
     "CompiledEntityCatalog",
 ]

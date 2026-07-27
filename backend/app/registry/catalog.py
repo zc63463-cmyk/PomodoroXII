@@ -35,7 +35,9 @@ def _canonical_spec(spec: EntitySpec) -> dict[str, Any]:
         "delete_strategy": spec.delete_strategy,
         "route_enabled": spec.route_enabled,
         "mcp_schema_enabled": spec.mcp_schema_enabled,
-        "sync_conflict_policy": spec.sync_conflict_policy,
+        "sync_conflict_policy": require_sync_conflict_policy(
+            spec.sync_conflict_policy
+        ).value,
         "junction_endpoints": spec.junction_endpoints,
     }
 
