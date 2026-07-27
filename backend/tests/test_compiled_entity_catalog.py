@@ -48,6 +48,11 @@ def test_catalog_hash_is_order_independent_and_models_are_resolved() -> None:
 
 
 def test_catalog_validates_and_hashes_sync_conflict_policy() -> None:
+    from app.registry.entities import SyncConflictPolicy
+
+    assert {policy.value for policy in SyncConflictPolicy} == {
+        "timestamp_lww", "strict_cas"
+    }
     base = REGISTRY.get("note")
     strict = replace(base, sync_conflict_policy="strict_cas")
     strict_catalog = CompiledEntityCatalog.compile((strict,), version="2")

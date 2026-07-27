@@ -17,16 +17,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Literal, cast
-
-SyncConflictPolicy = Literal["timestamp_lww", "strict_cas"]
-SYNC_CONFLICT_POLICIES = frozenset({"timestamp_lww", "strict_cas"})
+from typing import Any
 
 
-def require_sync_conflict_policy(value: str) -> SyncConflictPolicy:
-    if value not in SYNC_CONFLICT_POLICIES:
-        raise ValueError(f"unsupported sync_conflict_policy: {value}")
-    return cast(SyncConflictPolicy, value)
+class SyncConflictPolicy(str, Enum):
+    """Closed conflict-resolution vocabulary for catalog entities."""
+
+    TIMESTAMP_LWW = "timestamp_lww"
+    STRICT_CAS = "strict_cas"
+
+
+SYNC_CONFLICT_POLICIES = frozenset(policy.value for policy in SyncConflictPolicy)
+
+
+def require_sync_conflict_policy(value: str | SyncConflictPolicy) -> SyncConflictPolicy:
+    try:
+        return SyncConflictPolicy(value)
+    except ValueError as exc:
+        raise ValueError(f"unsupported sync_conflict_policy: {value}") from exc
 
 
 class StorageType(str, Enum):
@@ -95,7 +103,7 @@ class EntitySpec:
     # P2.1: feature flags for scaffold / introspection.
     route_enabled: bool = False
     mcp_schema_enabled: bool = True
-    sync_conflict_policy: SyncConflictPolicy = "timestamp_lww"
+    sync_conflict_policy: SyncConflictPolicy = SyncConflictPolicy.TIMESTAMP_LWW
     # S3 Task 6: junction endpoint metadata for relation domain policy.
     # Each tuple is (field_name, endpoint_entity_type).
     junction_endpoints: tuple[tuple[str, str], ...] | None = None
