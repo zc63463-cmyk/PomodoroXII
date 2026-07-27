@@ -841,7 +841,12 @@ async def test_nonterminal_checkpoint_keeps_process_owner_fail_closed(
 
 import app.db.migrations as migrations_module
 
-META_TABLES = {"spaces", "meta_settings"}
+META_TABLES = {
+    "spaces",
+    "meta_settings",
+    "active_session_locator",
+    "active_session_operations",
+}
 SPACE_TABLES = {
     "mutation_batches",
     "mutation_operations",
@@ -884,10 +889,10 @@ def _sqlite_url(path: Path) -> str:
 
 
 def _create_legacy_schema(path: Path, database_kind: str) -> None:
-    from app.db.metadata import get_legacy_space_metadata, get_meta_metadata
+    from app.db.metadata import get_legacy_meta_metadata, get_legacy_space_metadata
 
     metadata = (
-        get_meta_metadata()
+        get_legacy_meta_metadata()
         if database_kind == "meta"
         else get_legacy_space_metadata()
     )

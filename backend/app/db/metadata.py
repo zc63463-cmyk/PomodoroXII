@@ -92,6 +92,17 @@ def get_meta_metadata() -> MetaData:
     return MetaBase.metadata
 
 
+def get_legacy_meta_metadata() -> MetaData:
+    """Return the exact pre-Task3 Meta schema for adoption fingerprints."""
+    from app.db.models import meta  # noqa: F401
+
+    source = MetaBase.metadata
+    legacy = MetaData(naming_convention=source.naming_convention)
+    for table_name in ("spaces", "meta_settings"):
+        source.tables[table_name].to_metadata(legacy)
+    return legacy
+
+
 def get_space_metadata() -> MetaData:
     import app.models  # noqa: F401
 

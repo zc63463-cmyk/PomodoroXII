@@ -779,13 +779,14 @@ def _config(kind: DatabaseKind) -> Config:
 
 def _metadata(kind: DatabaseKind, *, legacy: bool = False) -> MetaData:
     from app.db.metadata import (
+        get_legacy_meta_metadata,
         get_legacy_space_metadata,
         get_meta_metadata,
         get_space_metadata,
     )
 
     if kind == "meta":
-        return get_meta_metadata()
+        return get_legacy_meta_metadata() if legacy else get_meta_metadata()
     return get_legacy_space_metadata() if legacy else get_space_metadata()
 
 
