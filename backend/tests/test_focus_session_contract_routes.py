@@ -9,12 +9,18 @@ Verifies that thin contract routers:
 """
 from __future__ import annotations
 
+from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
+from app.auth.authority import Principal
+from app.deps import get_space_runtime_handle, require_master_token
+from app.errors import register_exception_handlers
 from app.focus_session.contracts import (
     ActiveSessionCommand,
     ActiveSessionView,
@@ -24,15 +30,44 @@ from app.focus_session.contracts import (
 from app.routes.v1.active_session import router as active_session_router
 from app.routes.v1.contract_dependencies import (
     get_active_session_coordinator,
-    get_contract_master_principal,
-    get_contract_space_runtime,
     get_focus_session_module,
 )
 from app.routes.v1.focus_sessions import router as focus_sessions_router
+from app.schemas.focus_session import ActivateProvisionalRequest, HeartbeatRequest
 
 # --------------------------------------------------------------------------- #
 # Fakes
 # --------------------------------------------------------------------------- #
+
+
+def _focus_value(session_id: str) -> dict[str, Any]:
+    return {
+        "session": {"id": session_id},
+        "context": None,
+        "attribution": [],
+        "plan": [],
+        "outcomes": [],
+        "commandEnvelopes": [],
+        "commandReceipts": [],
+    }
+
+
+def _locator_value(session_id: str) -> dict[str, Any]:
+    return {
+        "spaceId": "space-a",
+        "sessionId": session_id,
+        "operationId": "operation-a",
+        "state": "active",
+        "ownerDeviceId": "device-a",
+        "ownerTabId": "tab-a",
+        "ownershipEpoch": 3,
+        "leaseExpiresAt": "2026-07-15T09:00:00Z",
+        "updatedAt": "2026-07-15T08:00:00Z",
+    }
+
+
+def _active_value(session_id: str) -> dict[str, Any]:
+    return {**_locator_value(session_id), "session": _focus_value(session_id)}
 
 
 class FakeFocusSessionModule:
@@ -43,51 +78,51 @@ class FakeFocusSessionModule:
 
     async def get(self, scope: Any, session_id: str) -> FocusSessionView:
         self.calls.append(("get", scope, session_id))
-        return FocusSessionView(value={"sessionId": session_id})
+        return FocusSessionView(value=_focus_value(session_id))
 
     async def start(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("start", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def pause(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("pause", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def resume(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("resume", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def end(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("end", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def update_note(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("update_note", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def set_current_plan_item(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("set_current_plan_item", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def set_completion_draft(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("set_completion_draft", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def add_plan_item(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("add_plan_item", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def remove_plan_item(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("remove_plan_item", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def submit_review(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("submit_review", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
     async def reconcile_commands(self, scope: Any, command: FocusSessionCommand) -> FocusSessionView:
         self.calls.append(("reconcile_commands", scope, command))
-        return FocusSessionView(value={"sessionId": command.session_id})
+        return FocusSessionView(value=_focus_value(str(command.session_id)))
 
 
 class FakeActiveSessionCoordinator:
@@ -98,67 +133,66 @@ class FakeActiveSessionCoordinator:
 
     async def locate(self, principal: Any) -> ActiveSessionView | None:
         self.calls.append(("locate", principal))
-        return ActiveSessionView(value={"sessionId": "session-a", "state": "active"})
+        return ActiveSessionView(value=_active_value("session-a"))
 
     async def start(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("start", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def activate_provisional(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("activate_provisional", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def heartbeat(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("heartbeat", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_locator_value(command.session_id))
 
     async def pause(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("pause", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def resume(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("resume", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def takeover(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("takeover", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def end(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("end", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(
+            value={"session": _focus_value(command.session_id), "locator": None}
+        )
 
     async def update_note(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("update_note", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def set_current_plan_item(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("set_current_plan_item", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def set_completion_draft(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("set_completion_draft", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def add_plan_item(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("add_plan_item", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def remove_plan_item(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("remove_plan_item", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def resolve_activation_conflict(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("resolve_activation_conflict", principal, command))
-        return ActiveSessionView(value={"sessionId": command.session_id})
+        return ActiveSessionView(value=_active_value(command.session_id))
 
 
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
-
-
-_MASTER_PRINCIPAL = "master-principal"
 
 
 @pytest.fixture()
@@ -172,29 +206,35 @@ def fake_active_session_coordinator() -> FakeActiveSessionCoordinator:
 
 
 @pytest.fixture()
-def master_principal() -> str:
-    return _MASTER_PRINCIPAL
+def master_principal() -> Principal:
+    return Principal(
+        subject="admin",
+        token_type="master",
+        epoch=1,
+        expires_at=None,
+    )
 
 
 @pytest.fixture()
 def space_runtime_handle() -> object:
-    return object()
+    return SimpleNamespace(scope=SimpleNamespace(space_id="space-a"))
 
 
 @pytest.fixture()
 def contract_app(
     fake_focus_session_module: FakeFocusSessionModule,
     fake_active_session_coordinator: FakeActiveSessionCoordinator,
-    master_principal: str,
+    master_principal: Principal,
     space_runtime_handle: object,
 ) -> FastAPI:
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(focus_sessions_router, prefix="/api/v1/focus-sessions")
     app.include_router(active_session_router, prefix="/api/v1/active-session")
     app.dependency_overrides[get_focus_session_module] = lambda: fake_focus_session_module
     app.dependency_overrides[get_active_session_coordinator] = lambda: fake_active_session_coordinator
-    app.dependency_overrides[get_contract_master_principal] = lambda: master_principal
-    app.dependency_overrides[get_contract_space_runtime] = lambda: space_runtime_handle
+    app.dependency_overrides[require_master_token] = lambda: master_principal
+    app.dependency_overrides[get_space_runtime_handle] = lambda: space_runtime_handle
     return app
 
 
@@ -226,10 +266,10 @@ _PROVISIONAL_PAYLOAD: dict[str, Any] = {
             "startedAt": "2026-07-15T08:00:00Z",
             "pauseStartedAt": None,
             "plannedSeconds": 1500,
-            "grossSeconds": 0,
+            "grossSeconds": 300,
             "pausedSeconds": 0,
             "breakSeconds": 0,
-            "focusedSeconds": 0,
+            "focusedSeconds": 300,
             "validity": "pending",
             "validityReason": None,
             "reviewState": "not_required",
@@ -309,7 +349,7 @@ def valid_active_request(
             "sessionId": session_id,
             "ownershipEpoch": None,
             "payloadHash": _HEX64,
-            "payload": _PROVISIONAL_PAYLOAD,
+            "payload": deepcopy(_PROVISIONAL_PAYLOAD),
         }
     if path == "heartbeat":
         return {
@@ -452,6 +492,7 @@ def valid_active_request(
 def test_active_session_locate_delegates_to_coordinator(
     master_client: TestClient,
     fake_active_session_coordinator: FakeActiveSessionCoordinator,
+    master_principal: Principal,
 ) -> None:
     """GET /api/v1/active-session calls coordinator.locate with master principal."""
     resp = master_client.get("/api/v1/active-session")
@@ -459,7 +500,7 @@ def test_active_session_locate_delegates_to_coordinator(
     assert len(fake_active_session_coordinator.calls) == 1
     method, principal = fake_active_session_coordinator.calls[0]
     assert method == "locate"
-    assert principal == "master-principal"
+    assert principal == master_principal
 
 
 # --------------------------------------------------------------------------- #
@@ -494,6 +535,7 @@ def test_active_session_mutations_delegate_one_generic_command(
     space_id: str | None,
     ownership_epoch: int | None,
     status_code: int,
+    master_principal: Principal,
 ) -> None:
     body = valid_active_request(
         path,
@@ -506,7 +548,7 @@ def test_active_session_mutations_delegate_one_generic_command(
     assert resp.status_code == status_code
     called_method, principal, command = fake_active_session_coordinator.calls[-1]
     assert called_method == coordinator_method
-    assert principal == "master-principal"
+    assert principal == master_principal
     assert isinstance(command, ActiveSessionCommand)
     assert command.space_id == space_id
     assert command.ownership_epoch == ownership_epoch
@@ -599,6 +641,184 @@ def test_focus_session_reconcile_delegates_to_module(
     assert scope is space_runtime_handle
     assert isinstance(command, FocusSessionCommand)
     assert command.space_id == "space-a"
+
+
+def test_focus_session_path_body_mismatch_rejects_before_module(
+    space_client: TestClient,
+    fake_focus_session_module: FakeFocusSessionModule,
+) -> None:
+    body = {
+        "commandId": "review-1",
+        "spaceId": "space-a",
+        "sessionId": "session-b",
+        "ownershipEpoch": None,
+        "payloadHash": _HEX64,
+        "payload": {
+            "expectedVersion": 1,
+            "validity": "valid",
+            "reviewState": "skipped",
+            "reviewedAt": "2026-07-15T08:30:00Z",
+            "outcomes": [],
+        },
+    }
+
+    response = space_client.post(
+        "/api/v1/focus-sessions/session-a/review",
+        headers={"Accept": "application/vnd.pomodoroxii.error+json;version=2"},
+        json=body,
+    )
+
+    assert response.status_code == 422
+    assert fake_focus_session_module.calls == []
+
+
+def test_focus_session_space_mismatch_rejects_before_module(
+    space_client: TestClient,
+    fake_focus_session_module: FakeFocusSessionModule,
+) -> None:
+    body = {
+        "commandId": "review-1",
+        "spaceId": "space-b",
+        "sessionId": "session-a",
+        "ownershipEpoch": None,
+        "payloadHash": _HEX64,
+        "payload": {
+            "expectedVersion": 1,
+            "validity": "valid",
+            "reviewState": "skipped",
+            "reviewedAt": "2026-07-15T08:30:00Z",
+            "outcomes": [],
+        },
+    }
+
+    response = space_client.post(
+        "/api/v1/focus-sessions/session-a/review",
+        headers={"Accept": "application/vnd.pomodoroxii.error+json;version=2"},
+        json=body,
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "space_scope_mismatch"
+    assert fake_focus_session_module.calls == []
+
+
+def test_active_idempotency_mismatch_rejects_before_coordinator(
+    master_client: TestClient,
+    fake_active_session_coordinator: FakeActiveSessionCoordinator,
+) -> None:
+    response = master_client.post(
+        "/api/v1/active-session/start",
+        headers={
+            "Idempotency-Key": "different-command",
+            "Accept": "application/vnd.pomodoroxii.error+json;version=2",
+        },
+        json=valid_active_request("start", "start-command"),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "idempotency_conflict"
+    assert fake_active_session_coordinator.calls == []
+
+
+def test_active_mapper_emits_snake_case_payload(
+    master_client: TestClient,
+    fake_active_session_coordinator: FakeActiveSessionCoordinator,
+) -> None:
+    response = master_client.post(
+        "/api/v1/active-session/start",
+        json=valid_active_request("start", "start-command"),
+    )
+
+    assert response.status_code == 201
+    command = fake_active_session_coordinator.calls[0][2]
+    assert command.payload == {
+        "level2_work_item_id": "l2-a",
+        "level3_work_item_ids": ["l3-a"],
+        "planned_seconds": 1500,
+        "started_at": "2026-07-15T08:00:00Z",
+        "owner_device_id": "device-a",
+        "owner_tab_id": "tab-a",
+        "expected_work_item_versions": {"l2-a": 1, "l3-a": 1},
+    }
+
+
+def test_openapi_uses_operation_specific_active_session_models(
+    contract_app: FastAPI,
+) -> None:
+    schema = contract_app.openapi()
+    paths = schema["paths"]
+
+    resume_request = paths["/api/v1/active-session/resume"]["post"]["requestBody"]
+    heartbeat_response = paths["/api/v1/active-session/heartbeat"]["post"]["responses"]["200"]
+    end_response = paths["/api/v1/active-session/end"]["post"]["responses"]["200"]
+    pause_response = paths["/api/v1/active-session/pause"]["post"]["responses"]["200"]
+
+    assert "ResumeActiveSessionRequest" in str(resume_request)
+    assert "ActiveSessionLocatorResponse" in str(heartbeat_response)
+    assert "EndActiveSessionResponse" in str(end_response)
+    assert "ActiveSessionResponse" in str(pause_response)
+
+
+def test_active_locate_serializes_activation_conflict_union(
+    master_client: TestClient,
+    fake_active_session_coordinator: FakeActiveSessionCoordinator,
+) -> None:
+    async def locate_conflict(principal: Any) -> ActiveSessionView:
+        fake_active_session_coordinator.calls.append(("locate", principal))
+        return ActiveSessionView(
+            value={
+                "kind": "activation_conflict",
+                "active": _active_value("active-session"),
+                "candidate": {
+                    "spaceId": "space-b",
+                    "sessionId": "candidate-session",
+                    "session": _focus_value("candidate-session"),
+                },
+            }
+        )
+
+    fake_active_session_coordinator.locate = locate_conflict  # type: ignore[method-assign]
+
+    response = master_client.get("/api/v1/active-session")
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "activation_conflict"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda body: body["payload"].update(cachedAt="2026-07-15T07:59:00Z"),
+        lambda body: body["payload"]["snapshot"]["context"].update(
+            level2EffortLowerSecondsSnapshot=2500,
+            level2EffortUpperSecondsSnapshot=2000,
+        ),
+        lambda body: body["payload"]["snapshot"]["plan"].append(
+            deepcopy(body["payload"]["snapshot"]["plan"][0])
+        ),
+        lambda body: body["payload"].update(expectedWorkItemVersions={"l2-a": 4}),
+        lambda body: body["payload"]["snapshot"]["session"].update(
+            grossSeconds=299,
+            focusedSeconds=299,
+        ),
+    ),
+)
+def test_activate_provisional_rejects_cross_object_invariant_violations(
+    mutate: Any,
+) -> None:
+    body = valid_active_request("activate-provisional", "activate-command")
+    mutate(body)
+
+    with pytest.raises(ValidationError):
+        ActivateProvisionalRequest.model_validate(body)
+
+
+def test_canonical_utc_rejects_impossible_calendar_timestamp() -> None:
+    body = valid_active_request("heartbeat", "heartbeat-command")
+    body["payload"]["heartbeatAt"] = "2026-99-99T08:05:00Z"
+
+    with pytest.raises(ValidationError):
+        HeartbeatRequest.model_validate(body)
 
 
 # --------------------------------------------------------------------------- #

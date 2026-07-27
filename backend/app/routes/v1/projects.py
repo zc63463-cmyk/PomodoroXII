@@ -7,14 +7,15 @@ the provider dependencies.
 """
 from __future__ import annotations
 
-from typing import Any
+from fastapi import APIRouter, Depends, Header, Query
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-
+from app.deps import get_space_runtime_handle
 from app.routes.v1.contract_dependencies import (
-    get_contract_space_runtime,
     get_task_space_command_module,
     get_task_space_query_module,
+    map_task_space_outcome,
+    require_idempotency_key,
+    require_space_identity,
 )
 from app.schemas.task_space import (
     CreateProjectRequest,
@@ -25,34 +26,10 @@ from app.schemas.task_space import (
 )
 from app.task_space.contracts import (
     CreateProject,
-    TaskSpaceAccepted,
     TaskSpacePageQuery,
-    TaskSpaceRejected,
 )
 
 router = APIRouter()
-
-
-def _map_accepted(outcome: Any) -> TaskSpaceAcceptedResponse:
-    if isinstance(outcome, TaskSpaceAccepted):
-        return TaskSpaceAcceptedResponse(
-            command_id=outcome.command_id,
-            entity_type=outcome.entity_type,
-            entity_id=outcome.entity_id,
-            version=outcome.version,
-            value=dict(outcome.value),
-        )
-    # TaskSpaceRejected — surface as 409 conflict
-    rejected: TaskSpaceRejected = outcome
-
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "code": rejected.code,
-            "retryable": rejected.retryable,
-            "details": dict(rejected.details),
-        },
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -65,7 +42,7 @@ async def list_projects(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     query_module=Depends(get_task_space_query_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpacePageResponse:
     """List projects with optional pagination."""
     page = await query_module.list_projects(
@@ -81,10 +58,13 @@ async def list_projects(
 @router.post("", response_model=TaskSpaceAcceptedResponse, status_code=201)
 async def create_project(
     body: CreateProjectRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     command_module=Depends(get_task_space_command_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceAcceptedResponse:
     """Create a project via the TaskSpace command module."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
     command = CreateProject(
         command_id=body.command_id,
         space_id=body.space_id,
@@ -92,7 +72,7 @@ async def create_project(
         payload={"key": body.key, "name": body.name},
     )
     outcome = await command_module.execute(scope, command)
-    return _map_accepted(outcome)
+    return map_task_space_outcome(outcome)
 
 
 # --------------------------------------------------------------------------- #
@@ -103,7 +83,7 @@ async def create_project(
 @router.get("/definitions", response_model=TaskSpaceDefinitionsResponse)
 async def list_definitions(
     query_module=Depends(get_task_space_query_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceDefinitionsResponse:
     """List system status, type, and label definitions."""
     view = await query_module.list_definitions(scope)
@@ -123,7 +103,7 @@ async def list_definitions(
 async def get_project(
     project_id: str,
     query_module=Depends(get_task_space_query_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceViewResponse:
     """Get a single project by ID."""
     view = await query_module.get_project(scope, project_id)

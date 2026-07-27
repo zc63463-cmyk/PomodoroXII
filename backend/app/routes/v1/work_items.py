@@ -8,12 +8,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, Query
 
+from app.deps import get_space_runtime_handle
 from app.routes.v1.contract_dependencies import (
-    get_contract_space_runtime,
     get_task_space_command_module,
     get_task_space_query_module,
+    map_task_space_outcome,
+    require_idempotency_key,
+    require_space_identity,
 )
 from app.schemas.task_space import (
     CreateWorkItemRequest,
@@ -27,32 +30,10 @@ from app.schemas.task_space import (
 from app.task_space.contracts import (
     CreateWorkItem,
     MutateWorkItem,
-    TaskSpaceAccepted,
     TaskSpacePageQuery,
-    TaskSpaceRejected,
 )
 
 router = APIRouter()
-
-
-def _map_accepted(outcome: Any) -> TaskSpaceAcceptedResponse:
-    if isinstance(outcome, TaskSpaceAccepted):
-        return TaskSpaceAcceptedResponse(
-            command_id=outcome.command_id,
-            entity_type=outcome.entity_type,
-            entity_id=outcome.entity_id,
-            version=outcome.version,
-            value=dict(outcome.value),
-        )
-    rejected: TaskSpaceRejected = outcome
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "code": rejected.code,
-            "retryable": rejected.retryable,
-            "details": dict(rejected.details),
-        },
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -66,7 +47,7 @@ async def list_work_items(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     query_module=Depends(get_task_space_query_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpacePageResponse:
     """List work items with optional project filter and pagination."""
     filters: dict[str, Any] = {}
@@ -85,10 +66,13 @@ async def list_work_items(
 @router.post("", response_model=TaskSpaceAcceptedResponse, status_code=201)
 async def create_work_item(
     body: CreateWorkItemRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     command_module=Depends(get_task_space_command_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceAcceptedResponse:
     """Create a work item via the TaskSpace command module."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
     command = CreateWorkItem(
         command_id=body.command_id,
         space_id=body.space_id,
@@ -102,7 +86,7 @@ async def create_work_item(
         payload_hash=body.payload_hash,
     )
     outcome = await command_module.execute(scope, command)
-    return _map_accepted(outcome)
+    return map_task_space_outcome(outcome)
 
 
 # --------------------------------------------------------------------------- #
@@ -114,10 +98,13 @@ async def create_work_item(
 async def move_work_item(
     work_item_id: str,
     body: MoveWorkItemRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     command_module=Depends(get_task_space_command_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceAcceptedResponse:
     """Move a work item to a new parent."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
     command = MutateWorkItem(
         command_id=body.command_id,
         space_id=body.space_id,
@@ -127,7 +114,7 @@ async def move_work_item(
         payload={"parent_id": body.parent_id},
     )
     outcome = await command_module.execute(scope, command)
-    return _map_accepted(outcome)
+    return map_task_space_outcome(outcome)
 
 
 @router.post(
@@ -136,10 +123,13 @@ async def move_work_item(
 async def transition_work_item(
     work_item_id: str,
     body: TransitionWorkItemRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     command_module=Depends(get_task_space_command_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceAcceptedResponse:
     """Transition a work item to a new status."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
     command = MutateWorkItem(
         command_id=body.command_id,
         space_id=body.space_id,
@@ -149,7 +139,7 @@ async def transition_work_item(
         payload={"status_definition_id": body.status_definition_id},
     )
     outcome = await command_module.execute(scope, command)
-    return _map_accepted(outcome)
+    return map_task_space_outcome(outcome)
 
 
 # --------------------------------------------------------------------------- #
@@ -161,10 +151,13 @@ async def transition_work_item(
 async def update_work_item(
     work_item_id: str,
     body: UpdateWorkItemRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     command_module=Depends(get_task_space_command_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceAcceptedResponse:
     """Update mutable fields of a work item."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
     payload: dict[str, Any] = {}
     if body.title is not None:
         payload["title"] = body.title
@@ -183,14 +176,14 @@ async def update_work_item(
         payload=payload,
     )
     outcome = await command_module.execute(scope, command)
-    return _map_accepted(outcome)
+    return map_task_space_outcome(outcome)
 
 
 @router.get("/{work_item_id}", response_model=TaskSpaceViewResponse)
 async def get_work_item(
     work_item_id: str,
     query_module=Depends(get_task_space_query_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceViewResponse:
     """Get a single work item by ID."""
     view = await query_module.get_work_item(scope, work_item_id)

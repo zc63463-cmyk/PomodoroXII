@@ -9,14 +9,15 @@ No generic note promotion, tree, or legacy alias routes exist.
 """
 from __future__ import annotations
 
-from typing import Any
+from fastapi import APIRouter, Depends, Header, HTTPException
 
-from fastapi import APIRouter, Depends, HTTPException
-
+from app.deps import get_space_runtime_handle
 from app.routes.v1.contract_dependencies import (
-    get_contract_space_runtime,
     get_task_space_command_module,
     get_task_space_query_module,
+    map_task_space_outcome,
+    require_idempotency_key,
+    require_space_identity,
 )
 from app.schemas.task_space import (
     TaskSpaceAcceptedResponse,
@@ -24,37 +25,45 @@ from app.schemas.task_space import (
 )
 from app.schemas.work_item_note import (
     AppendBlocksRequest,
+    ChecklistBlock,
+    ChecklistItem,
+    NoteBlock,
     ReplaceDocumentRequest,
     ToggleChecklistItemRequest,
+    WorkItemNoteDocumentV1,
 )
 from app.task_space.contracts import (
     NoteCommandKind,
-    TaskSpaceAccepted,
-    TaskSpaceRejected,
     WorkItemNoteCommand,
 )
 
 router = APIRouter()
 
 
-def _map_accepted(outcome: Any) -> TaskSpaceAcceptedResponse:
-    if isinstance(outcome, TaskSpaceAccepted):
-        return TaskSpaceAcceptedResponse(
-            command_id=outcome.command_id,
-            entity_type=outcome.entity_type,
-            entity_id=outcome.entity_id,
-            version=outcome.version,
-            value=dict(outcome.value),
-        )
-    rejected: TaskSpaceRejected = outcome
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "code": rejected.code,
-            "retryable": rejected.retryable,
-            "details": dict(rejected.details),
-        },
-    )
+def _map_checklist_item(item: ChecklistItem) -> dict[str, object]:
+    return {
+        "itemId": item.item_id,
+        "text": item.text,
+        "checked": item.checked,
+        "children": [_map_checklist_item(child) for child in item.children],
+    }
+
+
+def _map_note_block(block: NoteBlock) -> dict[str, object]:
+    if isinstance(block, ChecklistBlock):
+        return {
+            "type": block.type,
+            "blockId": block.block_id,
+            "items": [_map_checklist_item(item) for item in block.items],
+        }
+    return {"type": block.type, "blockId": block.block_id, "text": block.text}
+
+
+def _map_note_document(document: WorkItemNoteDocumentV1) -> dict[str, object]:
+    return {
+        "contentVersion": document.content_version,
+        "blocks": [_map_note_block(block) for block in document.blocks],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -66,7 +75,7 @@ def _map_accepted(outcome: Any) -> TaskSpaceAcceptedResponse:
 async def read_note(
     work_item_id: str,
     query_module=Depends(get_task_space_query_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceViewResponse:
     """Read the note document for a work item."""
     view = await query_module.read_note(scope, work_item_id)
@@ -84,10 +93,13 @@ async def read_note(
 async def replace_document(
     work_item_id: str,
     body: ReplaceDocumentRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     command_module=Depends(get_task_space_command_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceAcceptedResponse:
     """Replace the entire note document."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
     command = WorkItemNoteCommand(
         kind=NoteCommandKind.REPLACE_DOCUMENT,
         command_id=body.command_id,
@@ -95,10 +107,10 @@ async def replace_document(
         work_item_id=work_item_id,
         expected_version=body.expected_version,
         payload_hash=body.payload_hash,
-        payload={"document": body.document.model_dump(mode="json")},
+        payload={"document": _map_note_document(body.document)},
     )
     outcome = await command_module.execute(scope, command)
-    return _map_accepted(outcome)
+    return map_task_space_outcome(outcome)
 
 
 # --------------------------------------------------------------------------- #
@@ -113,10 +125,13 @@ async def replace_document(
 async def append_blocks(
     work_item_id: str,
     body: AppendBlocksRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     command_module=Depends(get_task_space_command_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceAcceptedResponse:
     """Append blocks to the note document."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
     command = WorkItemNoteCommand(
         kind=NoteCommandKind.APPEND_BLOCKS,
         command_id=body.command_id,
@@ -125,11 +140,11 @@ async def append_blocks(
         expected_version=body.expected_version,
         payload_hash=body.payload_hash,
         payload={
-            "blocks": [block.model_dump(mode="json") for block in body.blocks],
+            "blocks": [_map_note_block(block) for block in body.blocks],
         },
     )
     outcome = await command_module.execute(scope, command)
-    return _map_accepted(outcome)
+    return map_task_space_outcome(outcome)
 
 
 # --------------------------------------------------------------------------- #
@@ -144,10 +159,13 @@ async def append_blocks(
 async def toggle_checklist_item(
     work_item_id: str,
     body: ToggleChecklistItemRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     command_module=Depends(get_task_space_command_module),
-    scope=Depends(get_contract_space_runtime),
+    scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceAcceptedResponse:
     """Toggle a checklist item in the note document."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
     command = WorkItemNoteCommand(
         kind=NoteCommandKind.TOGGLE_CHECKLIST_ITEM,
         command_id=body.command_id,
@@ -162,4 +180,4 @@ async def toggle_checklist_item(
         },
     )
     outcome = await command_module.execute(scope, command)
-    return _map_accepted(outcome)
+    return map_task_space_outcome(outcome)
