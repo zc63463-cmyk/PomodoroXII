@@ -137,37 +137,3 @@ async def test_soft_delete_folder_raises_not_found(space_session):
     svc = CascadeService(space_session)
     with pytest.raises(NotFoundError):
         await svc.soft_delete_folder("nonexistent-folder-id")
-
-
-@pytest.mark.asyncio
-async def test_cascade_delete_task_removes_junction_links(space_session):
-    """delete_task_cascade() should remove task_quick_notes rows for the task."""
-    from sqlalchemy import select
-
-    from app.models.task import Task
-    from app.models.task_quick_note import TaskQuickNote
-    from app.services.cascade import CascadeService
-
-    svc = CascadeService(space_session)
-
-    # Create a task and a junction row.
-    task_id = uuid.uuid4().hex
-    qn_id = uuid.uuid4().hex
-
-    space_session.add(Task(
-        id=task_id, title="Test", status="todo", priority="medium", tags="[]",
-    ))
-    space_session.add(TaskQuickNote(
-        id=uuid.uuid4().hex, task_id=task_id, quick_note_id=qn_id,
-    ))
-    await space_session.flush()
-
-    await svc.delete_task_cascade(task_id)
-
-    # Junction row should be gone.
-    result = await space_session.execute(
-        select(TaskQuickNote).where(TaskQuickNote.task_id == task_id)
-    )
-    assert result.scalar_one_or_none() is None
-    # Task itself should be gone.
-    assert await space_session.get(Task, task_id) is None

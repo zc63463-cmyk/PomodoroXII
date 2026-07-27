@@ -22,9 +22,9 @@ import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.models.habit import Habit
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
-from app.models.task import Task
 from app.services.base import BaseService
 from app.services.sync_outbox import get_current_cursor, record_sync_event
 
@@ -67,8 +67,7 @@ def test_every_record_sync_event_call_chooses_visibility_explicitly():
     )
     assert len(certification) == 2
     assert all(
-        next(keyword.value.value for keyword in call.keywords if keyword.arg == "visible")
-        is True
+        next(keyword.value.value for keyword in call.keywords if keyword.arg == "visible") is True
         for _source_path, call in certification
     )
 
@@ -78,20 +77,20 @@ async def test_record_sync_event_appends_one_row(space_session):
     """A single call must produce exactly one ledger row."""
     await record_sync_event(
         space_session,
-        entity_type="task",
-        entity_id="tsk_test_001",
+        entity_type="habit",
+        entity_id="hab_test_001",
         action="create",
-        payload={"title": "Test Task"},
+        payload={"title": "Test Habit"},
         visible=True,
     )
     rows = (await space_session.execute(select(SyncOutbox))).scalars().all()
     assert len(rows) == 1
-    assert rows[0].entity_type == "task"
-    assert rows[0].entity_id == "tsk_test_001"
+    assert rows[0].entity_type == "habit"
+    assert rows[0].entity_id == "hab_test_001"
     assert rows[0].action == "create"
     assert rows[0].version is None
     assert rows[0].visible is True
-    assert json.loads(rows[0].payload)["title"] == "Test Task"
+    assert json.loads(rows[0].payload)["title"] == "Test Habit"
 
 
 @pytest.mark.asyncio
@@ -99,22 +98,22 @@ async def test_record_sync_event_keeps_repeated_mutations_as_distinct_events(spa
     """Two mutations on the same entity must produce two separate rows."""
     await record_sync_event(
         space_session,
-        entity_type="task",
-        entity_id="tsk_dup",
+        entity_type="habit",
+        entity_id="hab_dup",
         action="create",
         payload={"title": "First"},
         visible=True,
     )
     await record_sync_event(
         space_session,
-        entity_type="task",
-        entity_id="tsk_dup",
+        entity_type="habit",
+        entity_id="hab_dup",
         action="update",
         payload={"title": "Second"},
         visible=True,
     )
     rows = (
-        (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_dup")))
+        (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "hab_dup")))
         .scalars()
         .all()
     )
@@ -129,8 +128,8 @@ async def test_record_sync_event_rejects_nan_in_payload(space_session):
     with pytest.raises(ValueError, match="Out of range float"):
         await record_sync_event(
             space_session,
-            entity_type="task",
-            entity_id="tsk_nan",
+            entity_type="habit",
+            entity_id="hab_nan",
             action="create",
             payload={"score": nan},
             visible=True,
@@ -144,8 +143,8 @@ async def test_record_sync_event_flush_false_does_not_assign_id_until_caller_flu
     """flush=False must defer ID assignment to the caller's flush."""
     event = await record_sync_event(
         space_session,
-        entity_type="task",
-        entity_id="tsk_noflush",
+        entity_type="habit",
+        entity_id="hab_noflush",
         action="create",
         visible=True,
         flush=False,
@@ -159,7 +158,7 @@ async def test_record_sync_event_flush_false_does_not_assign_id_until_caller_flu
     rows = (
         (
             await space_session.execute(
-                select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_noflush")
+                select(SyncOutbox).where(SyncOutbox.entity_id == "hab_noflush")
             )
         )
         .scalars()
@@ -174,22 +173,22 @@ async def test_record_sync_event_flush_false_does_not_assign_id_until_caller_flu
 async def test_base_service_mutations_append_create_update_delete_events(space_session):
     """BaseService CRUD must append create/update/delete events."""
 
-    class _TaskService(BaseService):
-        model = Task
-        entity_type = "task"
+    class _HabitService(BaseService):
+        model = Habit
+        entity_type = "habit"
 
-    svc = _TaskService(space_session)
-    obj = await svc.create({"id": "tsk_crud", "title": "CRUD Test"})
-    assert obj.id == "tsk_crud"
+    svc = _HabitService(space_session)
+    obj = await svc.create({"id": "hab_crud", "title": "CRUD Test"})
+    assert obj.id == "hab_crud"
 
-    await svc.update("tsk_crud", {"title": "Updated"})
-    await svc.delete("tsk_crud")
+    await svc.update("hab_crud", {"title": "Updated"})
+    await svc.delete("hab_crud")
 
     rows = (
         (
             await space_session.execute(
                 select(SyncOutbox)
-                .where(SyncOutbox.entity_id == "tsk_crud")
+                .where(SyncOutbox.entity_id == "hab_crud")
                 .order_by(SyncOutbox.id.asc())
             )
         )
@@ -206,17 +205,17 @@ async def test_base_service_mutations_append_create_update_delete_events(space_s
 async def test_base_service_skips_events_when_record_sync_events_false(space_session):
     """sync_mode (record_sync_events=False) must not write ledger events."""
 
-    class _TaskService(BaseService):
-        model = Task
-        entity_type = "task"
+    class _HabitService(BaseService):
+        model = Habit
+        entity_type = "habit"
 
-    svc = _TaskService(space_session, record_sync_events=False)
-    await svc.create({"id": "tsk_silent", "title": "Silent"})
+    svc = _HabitService(space_session, record_sync_events=False)
+    await svc.create({"id": "hab_silent", "title": "Silent"})
 
     rows = (
         (
             await space_session.execute(
-                select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_silent")
+                select(SyncOutbox).where(SyncOutbox.entity_id == "hab_silent")
             )
         )
         .scalars()
@@ -231,8 +230,8 @@ async def test_rollback_rolls_back_ledger_rows(space_session):
     async with space_session.begin_nested() as savepoint:
         await record_sync_event(
             space_session,
-            entity_type="task",
-            entity_id="tsk_rb",
+            entity_type="habit",
+            entity_id="hab_rb",
             action="create",
             payload={"title": "Rollback Me"},
             visible=False,
@@ -240,7 +239,7 @@ async def test_rollback_rolls_back_ledger_rows(space_session):
         await savepoint.rollback()
 
     rows = (
-        (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_rb")))
+        (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "hab_rb")))
         .scalars()
         .all()
     )
@@ -256,15 +255,15 @@ async def test_record_sync_event_advances_current_cursor_for_invisible_rows(spac
     """The allocated ledger cursor includes rows omitted from pull responses."""
     visible_event = await record_sync_event(
         space_session,
-        entity_type="task",
-        entity_id="tsk_visible",
+        entity_type="habit",
+        entity_id="hab_visible",
         action="create",
         visible=True,
     )
     invisible_event = await record_sync_event(
         space_session,
-        entity_type="task",
-        entity_id="tsk_invisible",
+        entity_type="habit",
+        entity_id="hab_invisible",
         action="update",
         visible=False,
     )
@@ -280,14 +279,14 @@ async def test_record_sync_event_advances_current_cursor_for_invisible_rows(spac
 async def test_missing_sync_state_fallback_preserves_allocated_cursor(space_session):
     visible_event = await record_sync_event(
         space_session,
-        entity_type="task",
+        entity_type="habit",
         entity_id="fallback-visible",
         action="create",
         visible=True,
     )
     invisible_event = await record_sync_event(
         space_session,
-        entity_type="task",
+        entity_type="habit",
         entity_id="fallback-invisible",
         action="update",
         visible=False,
@@ -312,7 +311,7 @@ async def test_concurrent_sqlite_writers_commit_in_ledger_id_order(space_session
 
     async def writer_one():
         event_row = await record_sync_event(
-            first, entity_type="task", entity_id="writer-1", action="create", visible=True
+            first, entity_type="habit", entity_id="writer-1", action="create", visible=True
         )
         first_ready.set()
         await release_first.wait()
@@ -323,7 +322,7 @@ async def test_concurrent_sqlite_writers_commit_in_ledger_id_order(space_session
     async def writer_two():
         await first_ready.wait()
         event_row = await record_sync_event(
-            second, entity_type="task", entity_id="writer-2", action="create", visible=True
+            second, entity_type="habit", entity_id="writer-2", action="create", visible=True
         )
         await second.commit()
         commit_order.append("writer-2")
@@ -347,14 +346,14 @@ async def test_record_sync_event_payload_is_sorted_and_utf8_safe(space_session):
     """payload JSON must use sort_keys and ensure_ascii=False."""
     await record_sync_event(
         space_session,
-        entity_type="task",
-        entity_id="tsk_utf8",
+        entity_type="habit",
+        entity_id="hab_utf8",
         action="create",
         payload={"z": "last", "a": "first", "unicode": "你好世界"},
         visible=True,
     )
     row = (
-        (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "tsk_utf8")))
+        (await space_session.execute(select(SyncOutbox).where(SyncOutbox.entity_id == "hab_utf8")))
         .scalars()
         .first()
     )
@@ -393,20 +392,22 @@ def _make_minimal_app(app_root: Path) -> None:
     routes_dir = app_root / "routes" / "v1"
     routes_dir.mkdir(parents=True, exist_ok=True)
     for route_file in (
-        "notes.py", "folders.py", "quick_notes.py", "trash.py",
-        "schedules.py", "habits.py", "reflections.py", "time_blocks.py",
+        "notes.py",
+        "folders.py",
+        "quick_notes.py",
+        "trash.py",
+        "schedules.py",
+        "habits.py",
+        "reflections.py",
+        "time_blocks.py",
     ):
         (routes_dir / route_file).write_text("", encoding="utf-8")
     runtime_dir = app_root / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    (runtime_dir / "space.py").write_text(
-        "class SpaceRuntimeHandle:\n    pass\n", encoding="utf-8"
-    )
+    (runtime_dir / "space.py").write_text("class SpaceRuntimeHandle:\n    pass\n", encoding="utf-8")
     commands_dir = app_root / "commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
-    (commands_dir / "entity.py").write_text(
-        "class EntityCommand:\n    pass\n", encoding="utf-8"
-    )
+    (commands_dir / "entity.py").write_text("class EntityCommand:\n    pass\n", encoding="utf-8")
     services_dir = app_root / "services"
     services_dir.mkdir(parents=True, exist_ok=True)
     (services_dir / "ledger.py").write_text(
@@ -464,9 +465,7 @@ def test_s3_exit_ast_gate_rejects_orm_alias_and_raw_route_writes(tmp_path):
     )
 
     # --- GREEN: replace with a clean route ---
-    bad_route.write_text(
-        'async def handler():\n    pass\n', encoding="utf-8"
-    )
+    bad_route.write_text("async def handler():\n    pass\n", encoding="utf-8")
     result = _run_authority_gate(app_root)
     assert result.returncode == 0, f"clean app must pass: {result.stderr}"
     assert "AUTHORITY_GATE_OK" in result.stdout

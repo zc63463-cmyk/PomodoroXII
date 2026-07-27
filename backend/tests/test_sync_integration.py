@@ -45,7 +45,7 @@ async def _setup_login_and_space_token(client) -> str:
 
 
 def _make_event(
-    entity_type: str = "task",
+    entity_type: str = "habit",
     action: str = "create",
     entity_id: str | None = None,
     payload: dict | None = None,
@@ -75,7 +75,7 @@ async def _push(client, headers, events):
 
 @pytest.mark.asyncio
 async def test_full_sync_roundtrip_create_pull(client):
-    """push 1 task → pull returns it → next_since advances."""
+    """push 1 habit -> pull returns it -> next_since advances."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
@@ -84,33 +84,32 @@ async def test_full_sync_roundtrip_create_pull(client):
         _make_event(
             entity_id=eid, action="create",
             payload={
-                "id": eid, "title": "Roundtrip Task", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": eid, "title": "Roundtrip Habit",
             },
             client_updated_at="2026-07-04T10:00:00.000Z",
         )
     ])
 
-    # Initial pull returns the task.
+    # Initial pull returns the habit.
     resp = await client.get(
         "/api/v1/sync/pull?since=&limit=100", headers=headers
     )
     assert resp.status_code == 200
     data = resp.json()
-    task_ids = [t["id"] for t in data["tasks"]]
-    assert eid in task_ids
+    habit_ids = [t["id"] for t in data["habits"]]
+    assert eid in habit_ids
     first_next_since = data["next_since"]
     assert first_next_since >= "2026-07-04T10:00:00.000Z"
 
-    # Pull with since=first_next_since should not return the task again.
+    # Pull with since=first_next_since should not return the habit again.
     resp = await client.get(
         f"/api/v1/sync/pull?since={first_next_since}&limit=100",
         headers=headers,
     )
     assert resp.status_code == 200
     data = resp.json()
-    task_ids = [t["id"] for t in data["tasks"]]
-    assert eid not in task_ids
+    habit_ids = [t["id"] for t in data["habits"]]
+    assert eid not in habit_ids
 
 
 @pytest.mark.asyncio
@@ -160,7 +159,7 @@ async def test_quick_note_sync_roundtrip_preserves_array_tags(client):
 
 @pytest.mark.asyncio
 async def test_full_sync_roundtrip_update_lww(client):
-    """push create → push update (newer ts) → pull reflects new title."""
+    """push create -> push update (newer ts) -> pull reflects new title."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
@@ -169,8 +168,7 @@ async def test_full_sync_roundtrip_update_lww(client):
         _make_event(
             entity_id=eid, action="create",
             payload={
-                "id": eid, "title": "Original", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": eid, "title": "Original",
             },
             client_updated_at="2026-07-04T10:00:00.000Z",
         )
@@ -186,13 +184,13 @@ async def test_full_sync_roundtrip_update_lww(client):
 
     resp = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
     data = resp.json()
-    tasks = {t["id"]: t for t in data["tasks"]}
-    assert tasks[eid]["title"] == "Updated Title"
+    habits = {t["id"]: t for t in data["habits"]}
+    assert habits[eid]["title"] == "Updated Title"
 
 
 @pytest.mark.asyncio
-async def test_sync_roundtrip_delete_via_task_route_creates_tombstone(client):
-    """Create task via push → delete via task route → pull returns tombstone."""
+async def test_sync_roundtrip_delete_via_habit_route_creates_tombstone(client):
+    """Create habit via push -> delete via habit route -> pull returns tombstone."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
@@ -201,27 +199,26 @@ async def test_sync_roundtrip_delete_via_task_route_creates_tombstone(client):
         _make_event(
             entity_id=eid, action="create",
             payload={
-                "id": eid, "title": "Will be deleted", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": eid, "title": "Will be deleted",
             },
         )
     ])
-    # Delete via task route (writes tombstone).
-    resp = await client.delete(f"/api/v1/tasks/{eid}", headers=headers)
+    # Delete via habit route (writes tombstone).
+    resp = await client.delete(f"/api/v1/habits/{eid}", headers=headers)
     assert resp.status_code in (200, 204)
 
     resp = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
     data = resp.json()
     tomb_ids = [t["entity_id"] for t in data["tombstones"]]
     assert eid in tomb_ids
-    # Task row should be gone from pull results.
-    task_ids = [t["id"] for t in data["tasks"]]
-    assert eid not in task_ids
+    # Habit row should be gone from pull results.
+    habit_ids = [t["id"] for t in data["habits"]]
+    assert eid not in habit_ids
 
 
 @pytest.mark.asyncio
 async def test_sync_roundtrip_delete_via_push_writes_tombstone(client):
-    """Create task via push → delete via push → pull returns tombstone."""
+    """Create habit via push -> delete via push -> pull returns tombstone."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
@@ -230,8 +227,7 @@ async def test_sync_roundtrip_delete_via_push_writes_tombstone(client):
         _make_event(
             entity_id=eid, action="create",
             payload={
-                "id": eid, "title": "Will be deleted", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": eid, "title": "Will be deleted",
             },
         )
     ])
@@ -243,22 +239,21 @@ async def test_sync_roundtrip_delete_via_push_writes_tombstone(client):
     data = resp.json()
     tomb_ids = [t["entity_id"] for t in data["tombstones"]]
     assert eid in tomb_ids
-    task_ids = [t["id"] for t in data["tasks"]]
-    assert eid not in task_ids
+    habit_ids = [t["id"] for t in data["habits"]]
+    assert eid not in habit_ids
 
 
 @pytest.mark.asyncio
 async def test_sync_status_reflects_pushed_events(client):
-    """push 3 tasks → status returns tasks=3."""
+    """push 3 habits -> status returns habits=3."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
     events = [
         _make_event(
-            entity_id=f"status-task-{i}", action="create",
+            entity_id=f"status-habit-{i}", action="create",
             payload={
-                "id": f"status-task-{i}", "title": f"S{i}", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": f"status-habit-{i}", "title": f"S{i}",
             },
         )
         for i in range(3)
@@ -268,26 +263,26 @@ async def test_sync_status_reflects_pushed_events(client):
     resp = await client.get("/api/v1/sync/status", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["entity_counts"]["tasks"] == 3
+    assert data["entity_counts"]["habits"] == 3
     assert data["tombstone_count"] == 0
 
 
 @pytest.mark.asyncio
 async def test_sync_full_returns_all_tombstones_ignoring_since(client):
-    """2 tombstones created → full(since=future) returns both."""
+    """2 tombstones created -> full(since=future) returns both."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
     tomb_ids = []
     for i in range(2):
         resp = await client.post(
-            "/api/v1/tasks",
+            "/api/v1/habits",
             json={"title": f"To tombstone {i}"},
             headers=headers,
         )
         assert resp.status_code == 201
         tid = resp.json()["id"]
-        resp = await client.delete(f"/api/v1/tasks/{tid}", headers=headers)
+        resp = await client.delete(f"/api/v1/habits/{tid}", headers=headers)
         assert resp.status_code in (200, 204)
         tomb_ids.append(tid)
 
@@ -308,7 +303,7 @@ async def test_sync_handles_mixed_batch(client):
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
-    # Seed two tasks first.
+    # Seed two habits first.
     keep_id = uuid.uuid4().hex
     update_id = uuid.uuid4().hex
     delete_id = uuid.uuid4().hex
@@ -316,22 +311,19 @@ async def test_sync_handles_mixed_batch(client):
         _make_event(
             entity_id=keep_id, action="create",
             payload={
-                "id": keep_id, "title": "Keep", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": keep_id, "title": "Keep",
             },
         ),
         _make_event(
             entity_id=update_id, action="create",
             payload={
-                "id": update_id, "title": "Update Me", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": update_id, "title": "Update Me",
             },
         ),
         _make_event(
             entity_id=delete_id, action="create",
             payload={
-                "id": delete_id, "title": "Delete Me", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": delete_id, "title": "Delete Me",
             },
         ),
     ])
@@ -348,8 +340,7 @@ async def test_sync_handles_mixed_batch(client):
         _make_event(
             entity_id=new_id, action="create",
             payload={
-                "id": new_id, "title": "New in mixed batch", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": new_id, "title": "New in mixed batch",
             },
             client_updated_at="2026-07-04T15:00:00.000Z",
         ),
@@ -360,15 +351,15 @@ async def test_sync_handles_mixed_batch(client):
     # Verify final state via pull.
     resp = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
     data = resp.json()
-    tasks = {t["id"]: t for t in data["tasks"]}
-    assert tasks[update_id]["title"] == "Updated in mixed batch"
-    assert delete_id not in tasks
-    assert new_id in tasks
+    habits = {t["id"]: t for t in data["habits"]}
+    assert habits[update_id]["title"] == "Updated in mixed batch"
+    assert delete_id not in habits
+    assert new_id in habits
 
 
 @pytest.mark.asyncio
 async def test_sync_push_unknown_entity_returns_error(client):
-    """push entity_type='invalid' → errors contains the event."""
+    """push entity_type='invalid' -> errors contains the event."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
@@ -393,8 +384,7 @@ async def test_sync_pagination_has_more(client):
         _make_event(
             entity_id=f"page-{i}", action="create",
             payload={
-                "id": f"page-{i}", "title": f"Page {i}", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": f"page-{i}", "title": f"Page {i}",
             },
             client_updated_at=f"2026-07-04T1{i}:00:00.000Z",
         )
@@ -416,7 +406,9 @@ async def test_sync_pagination_has_more(client):
         "message": "Legacy sync cursor cannot safely advance",
         "retryable": False,
         "request_id": "req-sync-pagination-upgrade",
-        "details": {"truncated_groups": ["tasks"]},
+        # Seeded status_definitions (6 system rows from migration 010) also
+        # exceed the limit=2 threshold, so they appear in truncated_groups.
+        "details": {"truncated_groups": ["habits", "statusDefinitions"]},
     }
 
     cursor_v2 = await client.get(
@@ -426,7 +418,7 @@ async def test_sync_pagination_has_more(client):
     data = cursor_v2.json()
     assert data["cursor_version"] == 2
     assert data["has_more"] is True
-    assert len(data["tasks"]) == 2
+    assert len(data["habits"]) == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -445,8 +437,7 @@ async def test_sync_push_rejects_stale_update_with_lww_conflict(client):
         _make_event(
             entity_id=eid, action="create",
             payload={
-                "id": eid, "title": "Original", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": eid, "title": "Original",
             },
             client_updated_at="2026-07-04T12:00:00.000Z",
         )
@@ -470,8 +461,8 @@ async def test_sync_push_rejects_stale_update_with_lww_conflict(client):
     resp = await client.get(
         "/api/v1/sync/pull?since=&limit=100", headers=headers
     )
-    tasks = {t["id"]: t for t in resp.json()["tasks"]}
-    assert tasks[eid]["title"] == "Original"
+    habits = {t["id"]: t for t in resp.json()["habits"]}
+    assert habits[eid]["title"] == "Original"
 
 
 @pytest.mark.asyncio
@@ -480,33 +471,35 @@ async def test_sync_pull_since_id_advances_past_tied_timestamps(client):
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
-    tied_ts = "2026-07-04T10:00:00.000Z"
+    # Use a timestamp later than SEED_TIME ("2026-07-15T00:00:00.000Z") so
+    # the test habits hold the global max updated_at, unaffected by the
+    # seeded status_definitions / type_definitions rows from migration 010.
+    tied_ts = "2026-07-16T10:00:00.000Z"
     eids = [uuid.uuid4().hex for _ in range(3)]
     await _push(client, headers, [
         _make_event(
             entity_id=eid, action="create",
             payload={
-                "id": eid, "title": f"Tie-{i}", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": eid, "title": f"Tie-{i}",
             },
             client_updated_at=tied_ts,
         )
         for i, eid in enumerate(eids)
     ])
 
-    # First pull: get all 3 tasks.
+    # First pull: get all 3 habits.
     resp = await client.get(
         "/api/v1/sync/pull?since=&limit=100", headers=headers
     )
     assert resp.status_code == 200
     data = resp.json()
-    task_ids = {t["id"] for t in data["tasks"]}
+    habit_ids = {t["id"] for t in data["habits"]}
     for eid in eids:
-        assert eid in task_ids
+        assert eid in habit_ids
     assert data["next_since"] == tied_ts
     assert data["next_since_id"], "next_since_id must be non-empty for tied timestamps"
 
-    # Second pull with since + since_id: should return 0 tasks.
+    # Second pull with since + since_id: should return 0 habits.
     resp = await client.get(
         f"/api/v1/sync/pull?since={data['next_since']}"
         f"&since_id={data['next_since_id']}&limit=100",
@@ -514,6 +507,6 @@ async def test_sync_pull_since_id_advances_past_tied_timestamps(client):
     )
     assert resp.status_code == 200
     data2 = resp.json()
-    assert len(data2["tasks"]) == 0, (
+    assert len(data2["habits"]) == 0, (
         "since_id should advance past all rows sharing the same updated_at"
     )

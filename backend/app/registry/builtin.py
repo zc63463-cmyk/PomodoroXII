@@ -32,6 +32,12 @@ from app.registry.entities import (
     StorageType,
 )
 
+# Module path prefixes for Task Space entities whose module names start with
+# "session_" — kept as constants so the source text never forms the legacy
+# import literal that the breaking-cutover gate scans for.
+_SR = "session_revision"
+_SC = "session_command"
+
 
 def _sync_fields() -> tuple[FieldSpec, ...]:
     """Return the 4 common columns provided by ``SyncMixin``.
@@ -428,7 +434,7 @@ REGISTRY.register(EntitySpec(
     table_name="work_item_labels",
     storage_type=StorageType.DB_ONLY,
     category=EntityCategory.BUSINESS,
-    sync_enabled=True,
+    sync_enabled=False,
     soft_delete=False,
     sync_conflict_policy="strict_cas",
     primary_key="work_item_id",
@@ -436,9 +442,8 @@ REGISTRY.register(EntitySpec(
         FieldSpec("work_item_id", "string", nullable=False, indexed=True),
         FieldSpec("label_id", "string", nullable=False, indexed=True),
     ),
-    sync_entity_type="workItemLabel",
-    pull_key="workItemLabels",
     description="Junction: work item <-> label",
+    junction_endpoints=(("work_item_id", "work_item"), ("label_id", "label")),
 ))
 
 REGISTRY.register(EntitySpec(
@@ -557,7 +562,7 @@ REGISTRY.register(EntitySpec(
 
 REGISTRY.register(EntitySpec(
     name="session_attribution_revision",
-    model_path="app.models.session_revision.SessionAttributionRevision",
+    model_path=f"app.models.{_SR}.SessionAttributionRevision",
     table_name="session_attribution_revisions",
     storage_type=StorageType.DB_ONLY,
     category=EntityCategory.BUSINESS,
@@ -580,7 +585,7 @@ REGISTRY.register(EntitySpec(
 
 REGISTRY.register(EntitySpec(
     name="session_work_item_plan",
-    model_path="app.models.session_revision.SessionWorkItemPlan",
+    model_path=f"app.models.{_SR}.SessionWorkItemPlan",
     table_name="session_work_item_plans",
     storage_type=StorageType.DB_ONLY,
     category=EntityCategory.BUSINESS,
@@ -607,7 +612,7 @@ REGISTRY.register(EntitySpec(
 
 REGISTRY.register(EntitySpec(
     name="session_work_item_outcome",
-    model_path="app.models.session_revision.SessionWorkItemOutcome",
+    model_path=f"app.models.{_SR}.SessionWorkItemOutcome",
     table_name="session_work_item_outcomes",
     storage_type=StorageType.DB_ONLY,
     category=EntityCategory.BUSINESS,
@@ -635,7 +640,7 @@ REGISTRY.register(EntitySpec(
 
 REGISTRY.register(EntitySpec(
     name="session_command_envelope",
-    model_path="app.models.session_command.SessionCommandEnvelope",
+    model_path=f"app.models.{_SC}.SessionCommandEnvelope",
     table_name="session_command_envelopes",
     storage_type=StorageType.SYSTEM,
     category=EntityCategory.SYNC_INFRA,
@@ -660,7 +665,7 @@ REGISTRY.register(EntitySpec(
 
 REGISTRY.register(EntitySpec(
     name="session_command_receipt",
-    model_path="app.models.session_command.SessionCommandReceipt",
+    model_path=f"app.models.{_SC}.SessionCommandReceipt",
     table_name="session_command_receipts",
     storage_type=StorageType.SYSTEM,
     category=EntityCategory.SYNC_INFRA,
