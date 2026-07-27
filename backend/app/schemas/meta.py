@@ -50,6 +50,7 @@ class EntitySpecOut(BaseModel):
     fields: list[FieldSpecOut]
     sync_entity_type: str | None = None
     pull_key: str | None = None
+    sync_conflict_policy: str = "timestamp_lww"
 
     model_config = {"from_attributes": True}
 

@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 
-def test_build_sync_registry_returns_14_entries():
-    """build_sync_registry 必须返回 14 个实体。"""
+def test_build_sync_registry_returns_22_entries():
+    """build_sync_registry 必须返回 22 个实体。"""
     from app.registry.sync_registry import build_sync_registry
 
     registry = build_sync_registry()
-    assert len(registry) == 14
+    assert len(registry) == 22
 
 
 def test_build_sync_registry_uses_camelcase_keys():
@@ -23,6 +23,10 @@ def test_build_sync_registry_uses_camelcase_keys():
     assert "habitCheckIn" in registry
     assert "timeBlock" in registry
     assert "memoComment" in registry
+    assert "workItem" in registry
+    assert "focusSession" in registry
+    assert "project" in registry
+    assert "workItemNote" in registry
 
 
 def test_build_sync_registry_includes_model_and_pull_key():
