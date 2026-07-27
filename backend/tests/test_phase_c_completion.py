@@ -1,8 +1,8 @@
 """Phase C completion tests — closing the test-coverage gaps identified by audit.
 
 Audit found these gaps (P1/P2):
-- P1: 6 entities (session/habit/reflection/schedule/timeBlock/quickNote)
-       REST DELETE → pull tombstone — only task had integration coverage
+- P1: 5 entities (habit/reflection/schedule/timeBlock/quickNote)
+      REST DELETE → pull tombstone — only task had integration coverage
 - P1: push note delete → tombstone + pull — only create was tested
 - P2: BaseService.delete + entity_type → tombstone — no unit test
 - P2: HTTP-level tombstone conflict (create/update after delete)
@@ -54,7 +54,6 @@ def _headers(token: str) -> dict:
 
 # Minimal create payloads for each entity type (matching schema requirements).
 _CREATE_PAYLOADS: dict[str, dict] = {
-    "sessions": {"type": "work", "duration": 25, "completed": True, "started_at": "2026-07-04T10:00:00Z"},
     "habits": {"title": "Test Habit"},
     "reflections": {"date": "2026-07-04", "content": "Test reflection"},
     "schedules": {"title": "Test Schedule", "due_at": "2099-01-01T10:00:00Z"},
@@ -64,7 +63,6 @@ _CREATE_PAYLOADS: dict[str, dict] = {
 
 # Maps URL path segment → (sync entity_type, sync pull_key).
 _ENTITY_INFO: dict[str, tuple[str, str]] = {
-    "sessions": ("session", "sessions"),
     "habits": ("habit", "habits"),
     "reflections": ("reflection", "reflections"),
     "schedules": ("schedule", "schedules"),
@@ -214,30 +212,35 @@ async def test_base_service_delete_writes_tombstone_when_entity_type_set(space_s
     Closes P2 gap: existing test_base_service.py uses a TaskService without
     entity_type, so the _ensure_tombstone mechanism was never unit-tested.
     """
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.base import BaseService
     from app.services.tombstone import TombstoneService
 
-    class SyncedTaskService(BaseService):
-        model = Task
-        entity_type = "task"
+    class SyncedHabitService(BaseService):
+        model = Habit
+        entity_type = "habit"
 
-    svc = SyncedTaskService(space_session)
+    svc = SyncedHabitService(space_session)
     task_id = uuid.uuid4().hex
     await svc.create({
         "id": task_id,
         "title": "Will be tombstoned",
-        "status": "todo",
-        "priority": "medium",
-        "tags": "[]",
+        "description": "",
+        "color": "#7F77DD",
+        "icon": "✅",
+        "target_count": 1,
+        "rest_day_protection": False,
+        "rest_days": "[]",
+        "sort_order": 0,
+        "archived": False,
     })
 
     # Delete — should write tombstone because entity_type is set.
     await svc.delete(task_id)
 
-    tomb = await TombstoneService(space_session).exists("task", task_id)
+    tomb = await TombstoneService(space_session).exists("habit", task_id)
     assert tomb is not None, "Tombstone not created by BaseService.delete"
-    assert tomb.entity_type == "task"
+    assert tomb.entity_type == "habit"
     assert tomb.entity_id == task_id
 
 
@@ -248,26 +251,31 @@ async def test_base_service_delete_skips_tombstone_when_entity_type_unset(space_
     Ensures the entity_type guard works both ways — only sync-participating
     entities get tombstones.
     """
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.base import BaseService
     from app.services.tombstone import TombstoneService
 
-    class PlainTaskService(BaseService):
-        model = Task
+    class PlainHabitService(BaseService):
+        model = Habit
         # entity_type intentionally unset (None)
 
-    svc = PlainTaskService(space_session)
+    svc = PlainHabitService(space_session)
     task_id = uuid.uuid4().hex
     await svc.create({
         "id": task_id,
         "title": "No tombstone",
-        "status": "todo",
-        "priority": "medium",
-        "tags": "[]",
+        "description": "",
+        "color": "#7F77DD",
+        "icon": "✅",
+        "target_count": 1,
+        "rest_day_protection": False,
+        "rest_days": "[]",
+        "sort_order": 0,
+        "archived": False,
     })
     await svc.delete(task_id)
 
-    tomb = await TombstoneService(space_session).exists("task", task_id)
+    tomb = await TombstoneService(space_session).exists("habit", task_id)
     assert tomb is None, "Tombstone should not be created when entity_type is None"
 
 
@@ -277,7 +285,7 @@ async def test_base_service_delete_skips_tombstone_when_entity_type_unset(space_
 
 @pytest.mark.asyncio
 async def test_http_push_after_rest_delete_returns_tombstone_conflict(client):
-    """REST delete a task → push create with same id → conflict resolution=tombstone.
+    """REST delete a habit → push create with same id → conflict resolution=tombstone.
 
     Closes P2 gap: service-layer tombstone conflict was tested but not the
     HTTP-level roundtrip through /api/v1/sync/push.
@@ -285,9 +293,9 @@ async def test_http_push_after_rest_delete_returns_tombstone_conflict(client):
     token = await _setup_login_and_space_token(client)
     h = _headers(token)
 
-    # 1. Create task via REST.
+    # 1. Create habit via REST.
     resp = await client.post(
-        "/api/v1/tasks",
+        "/api/v1/habits",
         json={"title": "To be deleted"},
         headers=h,
     )
@@ -295,22 +303,27 @@ async def test_http_push_after_rest_delete_returns_tombstone_conflict(client):
     task_id = resp.json()["id"]
 
     # 2. Delete via REST (writes tombstone).
-    resp = await client.delete(f"/api/v1/tasks/{task_id}", headers=h)
+    resp = await client.delete(f"/api/v1/habits/{task_id}", headers=h)
     assert resp.status_code in (200, 204)
 
     # 3. push create with same id → should get conflict_tombstone.
     resp = await client.post(
         "/api/v1/sync/push",
         json={"events": [{
-            "entity_type": "task",
+            "entity_type": "habit",
             "entity_id": task_id,
             "action": "create",
             "payload": {
                 "id": task_id,
                 "title": "Resurrected",
-                "status": "todo",
-                "priority": "medium",
-                "tags": "[]",
+                "description": "",
+                "color": "#7F77DD",
+                "icon": "✅",
+                "target_count": 1,
+                "rest_day_protection": False,
+                "rest_days": "[]",
+                "sort_order": 0,
+                "archived": False,
             },
             "client_updated_at": "2026-07-04T15:00:00.000Z",
         }]},
@@ -329,7 +342,7 @@ async def test_http_push_after_rest_delete_returns_tombstone_conflict(client):
 
 @pytest.mark.asyncio
 async def test_http_push_update_after_rest_delete_returns_tombstone_conflict(client):
-    """REST delete a task → push update (upsert) with same id → conflict_tombstone.
+    """REST delete a habit → push update (upsert) with same id → conflict_tombstone.
 
     Tests the upsert path: when row is missing but tombstone exists, update
     must not recreate the row.
@@ -339,18 +352,18 @@ async def test_http_push_update_after_rest_delete_returns_tombstone_conflict(cli
 
     # 1. Create + delete via REST.
     resp = await client.post(
-        "/api/v1/tasks",
+        "/api/v1/habits",
         json={"title": "Gone"},
         headers=h,
     )
     task_id = resp.json()["id"]
-    await client.delete(f"/api/v1/tasks/{task_id}", headers=h)
+    await client.delete(f"/api/v1/habits/{task_id}", headers=h)
 
     # 2. push update with same id.
     resp = await client.post(
         "/api/v1/sync/push",
         json={"events": [{
-            "entity_type": "task",
+            "entity_type": "habit",
             "entity_id": task_id,
             "action": "update",
             "payload": {"title": "Resurrected via update"},
@@ -365,9 +378,9 @@ async def test_http_push_update_after_rest_delete_returns_tombstone_conflict(cli
     ]
     assert len(tombstone_conflicts) == 1
 
-    # 3. Verify task was NOT recreated.
-    resp = await client.get(f"/api/v1/tasks/{task_id}", headers=h)
-    assert resp.status_code == 404, "Task should not be resurrected"
+    # 3. Verify habit was NOT recreated.
+    resp = await client.get(f"/api/v1/habits/{task_id}", headers=h)
+    assert resp.status_code == 404, "Habit should not be resurrected"
 
 
 # --------------------------------------------------------------------------- #
@@ -381,7 +394,7 @@ async def test_push_update_does_not_overwrite_version_from_client(space_session)
     The client may send version in the payload; strip_client_fields must
     remove it so the server-side version counter is authoritative.
     """
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
@@ -389,27 +402,29 @@ async def test_push_update_does_not_overwrite_version_from_client(space_session)
 
     # Create with version=1.
     await svc.push([{
-        "entity_type": "task",
+        "entity_type": "habit",
         "entity_id": eid,
         "action": "create",
         "payload": {
-            "id": eid, "title": "V1", "status": "todo",
-            "priority": "medium", "tags": "[]",
+            "id": eid, "title": "V1", "description": "",
+            "color": "#7F77DD", "icon": "✅", "target_count": 1,
+            "rest_day_protection": False, "rest_days": "[]",
+            "sort_order": 0, "archived": False,
         },
         "client_updated_at": "2026-07-04T10:00:00.000Z",
     }])
-    row = await space_session.get(Task, eid)
+    row = await space_session.get(Habit, eid)
     assert row.version == 1
 
     # Update with version=999 in payload — must be stripped.
     await svc.push([{
-        "entity_type": "task",
+        "entity_type": "habit",
         "entity_id": eid,
         "action": "update",
         "payload": {"title": "V2", "version": 999},
         "client_updated_at": "2026-07-04T12:00:00.000Z",
     }])
-    row = await space_session.get(Task, eid)
+    row = await space_session.get(Habit, eid)
     assert row.title == "V2"
     assert row.version == 2, (
         f"version should be 2 (server-incremented), not {row.version}"

@@ -27,8 +27,8 @@ def _extract_v1_prefix(route) -> str | None:
     ``build_v1_router()`` mounts sub-routers via ``include_router``; the
     resulting routes are ``_IncludedRouter`` instances whose
     ``include_context.prefix`` holds the full mounted path
-    (e.g. ``/api/v1/tasks``). This helper strips the leading ``/api/v1``
-    and returns ``/tasks``.
+    (e.g. ``/api/v1/habits``). This helper strips the leading ``/api/v1``
+    and returns ``/habits``.
     """
     include_context = getattr(route, "include_context", None)
     if include_context is None:

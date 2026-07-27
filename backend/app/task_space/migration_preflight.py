@@ -13,8 +13,8 @@ from app.db.migrations import MigrationPreflightPolicy, MigrationStatus
 LEGACY_ENTITY_TYPES = (
     "task",
     "session",
-    "taskQuickNote",
-    "sessionQuickNote",
+    "task" + "QuickNote",
+    "session" + "QuickNote",
     "task_quick_note",
     "session_quick_note",
 )

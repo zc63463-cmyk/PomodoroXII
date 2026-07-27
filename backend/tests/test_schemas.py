@@ -6,64 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 
-class TestTaskSchemas:
-    def test_create_validates_status_literal(self):
-        """TaskCreate should reject invalid status values."""
-        from app.schemas.task import TaskCreate
-
-        with pytest.raises(ValidationError):
-            TaskCreate(title="Test", status="invalid_status")
-
-    def test_response_from_attributes(self):
-        """TaskResponse should accept ORM objects via from_attributes."""
-        from app.schemas.task import TaskResponse
-
-        class FakeTask:
-            id = "test-id"
-            title = "Test"
-            status = "todo"
-            priority = "medium"
-            tags = '["tag1", "tag2"]'
-            description = ""
-            plan = ""
-            completion = ""
-            due_date = None
-            estimated_pomodoros = 1
-            actual_pomodoros = 0
-            archived_at = None
-            created_at = "2026-07-02T10:00:00Z"
-            updated_at = "2026-07-02T10:00:00Z"
-            version = 1
-
-        resp = TaskResponse.model_validate(FakeTask())
-        assert resp.id == "test-id"
-        assert resp.title == "Test"
-
-    def test_tags_json_string_to_list(self):
-        """TaskResponse should parse tags from JSON string to list."""
-        from app.schemas.task import TaskResponse
-
-        class FakeTask:
-            id = "t1"
-            title = "T"
-            status = "todo"
-            priority = "low"
-            tags = '["python", "urgent"]'
-            description = ""
-            plan = ""
-            completion = ""
-            due_date = None
-            estimated_pomodoros = 1
-            actual_pomodoros = 0
-            archived_at = None
-            created_at = "2026-07-02T10:00:00Z"
-            updated_at = "2026-07-02T10:00:00Z"
-            version = 1
-
-        resp = TaskResponse.model_validate(FakeTask())
-        assert resp.tags == ["python", "urgent"]
-
-
 class TestNoteSchemas:
     def test_create_has_content_field(self):
         """NoteCreate must have a 'content' field (for .md writing)."""
@@ -109,10 +51,10 @@ class TestCommonSchemas:
     def test_paginated_response_generic(self):
         """PaginatedResponse should work as a generic container."""
         from app.schemas.common import PaginatedResponse
-        from app.schemas.task import TaskResponse
+        from app.schemas.note import NoteResponse
 
-        PaginatedTasks = PaginatedResponse[TaskResponse]
-        page = PaginatedTasks(
+        PaginatedNotes = PaginatedResponse[NoteResponse]
+        page = PaginatedNotes(
             items=[],
             total=0,
             limit=50,
@@ -127,10 +69,8 @@ class TestAllEntitiesHaveSchemas:
     def test_all_entities_have_create_update_response(self):
         """Every entity should have Create, Update, and Response schemas."""
         entities = [
-            ("task", "Task"),
             ("note", "Note"),
             ("folder", "Folder"),
-            ("session", "Session"),
             ("quick_note", "QuickNote"),
             ("reflection", "Reflection"),
             ("habit", "Habit"),
