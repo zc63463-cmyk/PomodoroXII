@@ -15,7 +15,13 @@ from tests.migrations import alembic_config, migration_engine, run_bound_command
 @pytest.mark.parametrize(
     ("schema", "expected_tables"),
     [
-        ("meta", {"spaces", "meta_settings"}),
+        (
+            "meta",
+            {
+                "spaces", "meta_settings", "active_session_locator",
+                "active_session_operations",
+            },
+        ),
         (
             "space",
             {

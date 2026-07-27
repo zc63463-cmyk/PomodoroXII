@@ -10,7 +10,12 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import MetaData, create_engine, inspect, text
 
-META_TABLES = {"spaces", "meta_settings"}
+META_TABLES = {
+    "spaces",
+    "meta_settings",
+    "active_session_locator",
+    "active_session_operations",
+}
 SPACE_TABLES = {
     "mutation_batches",
     "mutation_operations",
