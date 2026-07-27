@@ -1,24 +1,20 @@
-"""Typed provider dependencies for contract routers.
-
-Each dependency fails closed with ``RuntimeError`` when no provider is
-installed.  TS1/TS2 replace these dependencies before mounting the
-contract routers in the production v1 app.
-
-Because these routers are not production-mounted in TS0, the exceptions
-cannot become runtime 500s.  Contract tests always override all
-providers.
-"""
+"""Typed module providers and shared Task Space adapter guards."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from fastapi import HTTPException
+
+from app.errors import AppError, IdempotencyConflictError, ValidationError
+from app.mutation.types import validate_operation_id
+from app.schemas.task_space import TaskSpaceAcceptedResponse
+from app.task_space.contracts import TaskSpaceAccepted, TaskSpaceRejected
 
 if TYPE_CHECKING:
-    from app.auth.authority import Principal
     from app.focus_session.contracts import (
         ActiveSessionCoordinator,
         FocusSessionModule,
     )
-    from app.runtime.space import SpaceRuntimeHandle
     from app.task_space.contracts import (
         TaskSpaceCommandModule,
         TaskSpaceQueryModule,
@@ -45,11 +41,56 @@ def get_active_session_coordinator() -> "ActiveSessionCoordinator":
     raise RuntimeError("ActiveSessionCoordinator provider is not installed")
 
 
-def get_contract_space_runtime() -> "SpaceRuntimeHandle":
-    """Return the request-scoped Space runtime handle or fail closed."""
-    raise RuntimeError("SpaceRuntime provider is not installed")
+def require_idempotency_key(command_id: str, header_value: str | None) -> None:
+    """Validate an optional wire idempotency key and bind it to the body ID."""
+    if header_value is None:
+        return
+    try:
+        validate_operation_id(header_value)
+    except ValueError as exc:
+        raise ValidationError("Idempotency-Key is not a valid operation ID") from exc
+    if header_value != command_id:
+        raise IdempotencyConflictError(operation_id=command_id)
 
 
-def get_contract_master_principal() -> "Principal":
-    """Return the master Principal for active-session routes or fail closed."""
-    raise RuntimeError("Principal provider is not installed")
+def require_space_identity(scope: Any, body_space_id: str) -> None:
+    """Reject a body Space that differs from the authorized runtime handle."""
+    scope_space_id = getattr(getattr(scope, "scope", None), "space_id", None)
+    if not isinstance(scope_space_id, str):
+        raise RuntimeError("authorized Space runtime handle is required")
+    if body_space_id != scope_space_id:
+        raise AppError(
+            code="space_scope_mismatch",
+            details={
+                "scopeSpaceId": scope_space_id,
+                "payloadSpaceId": body_space_id,
+            },
+        )
+
+
+def require_path_identity(path_id: str, body_id: str, entity: str) -> None:
+    """Reject conflicting path/body identities before a module is called."""
+    if path_id != body_id:
+        raise ValidationError(f"{entity} identity does not match the route")
+
+
+def map_task_space_outcome(
+    outcome: TaskSpaceAccepted | TaskSpaceRejected,
+) -> TaskSpaceAcceptedResponse:
+    """Map the closed Task Space outcome union at the REST boundary."""
+    if isinstance(outcome, TaskSpaceAccepted):
+        return TaskSpaceAcceptedResponse(
+            command_id=outcome.command_id,
+            entity_type=outcome.entity_type,
+            entity_id=outcome.entity_id,
+            version=outcome.version,
+            value=dict(outcome.value),
+        )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": outcome.code,
+            "retryable": outcome.retryable,
+            "details": dict(outcome.details),
+        },
+    )

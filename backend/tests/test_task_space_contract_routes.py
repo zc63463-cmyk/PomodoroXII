@@ -9,6 +9,7 @@ Verifies that thin contract routers:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,8 +17,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from app.deps import get_space_runtime_handle
+from app.errors import register_exception_handlers
 from app.routes.v1.contract_dependencies import (
-    get_contract_space_runtime,
     get_task_space_command_module,
     get_task_space_query_module,
 )
@@ -30,6 +32,7 @@ from app.schemas.task_space import (
     WorkItemCreate,
     WorkItemResponse,
 )
+from app.schemas.work_item_note import WorkItemNoteDocumentV1
 from app.task_space.contracts import (
     CreateProject,
     CreateWorkItem,
@@ -91,8 +94,10 @@ class FakeTaskSpaceCommandModule:
 
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
+        self.last_command: Any = None
 
     async def execute(self, scope: Any, command: Any) -> TaskSpaceAccepted:
+        self.last_command = command
         if isinstance(command, WorkItemNoteCommand):
             self.calls.append((
                 command.kind.value,
@@ -148,7 +153,7 @@ def fake_task_commands() -> FakeTaskSpaceCommandModule:
 
 @pytest.fixture()
 def sentinel_scope() -> object:
-    return object()
+    return SimpleNamespace(scope=SimpleNamespace(space_id="s1"))
 
 
 @pytest.fixture()
@@ -158,12 +163,13 @@ def task_space_app(
     sentinel_scope: object,
 ) -> FastAPI:
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(projects_router, prefix="/api/v1/projects")
     app.include_router(notes_router, prefix="/api/v1/work-items")
     app.include_router(work_items_router, prefix="/api/v1/work-items")
     app.dependency_overrides[get_task_space_query_module] = lambda: fake_task_query
     app.dependency_overrides[get_task_space_command_module] = lambda: fake_task_commands
-    app.dependency_overrides[get_contract_space_runtime] = lambda: sentinel_scope
+    app.dependency_overrides[get_space_runtime_handle] = lambda: sentinel_scope
     return app
 
 
@@ -379,15 +385,150 @@ def test_toggle_checklist_item_delegates_to_commands(
     resp = task_space_client.post(
         "/api/v1/work-items/w1/note/toggle-checklist-item",
         json={
-            "commandId": "cmd-1", "spaceId": "space-a",
+            "commandId": "cmd-1", "spaceId": "s1",
             "expectedVersion": 2, "payloadHash": "a" * 64,
             "blockId": "b1", "itemId": "i1", "checked": True,
         },
     )
     assert resp.status_code == 200
     assert fake_task_commands.calls == [
-        ("toggle_checklist_item", "cmd-1", "space-a", "w1", 2),
+        ("toggle_checklist_item", "cmd-1", "s1", "w1", 2),
     ]
+
+
+def test_idempotency_key_mismatch_rejects_before_module(
+    task_space_client: TestClient,
+    fake_task_commands: FakeTaskSpaceCommandModule,
+) -> None:
+    response = task_space_client.post(
+        "/api/v1/projects",
+        headers={
+            "Idempotency-Key": "different-command",
+            "Accept": "application/vnd.pomodoroxii.error+json;version=2",
+        },
+        json={
+            "commandId": "create-project",
+            "spaceId": "s1",
+            "payloadHash": "a" * 64,
+            "key": "PROJ",
+            "name": "Project One",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "idempotency_conflict"
+    assert fake_task_commands.calls == []
+
+
+def test_space_id_mismatch_rejects_before_module(
+    task_space_client: TestClient,
+    fake_task_commands: FakeTaskSpaceCommandModule,
+) -> None:
+    response = task_space_client.post(
+        "/api/v1/projects",
+        headers={"Accept": "application/vnd.pomodoroxii.error+json;version=2"},
+        json={
+            "commandId": "create-project",
+            "spaceId": "other-space",
+            "payloadHash": "a" * 64,
+            "key": "PROJ",
+            "name": "Project One",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "space_scope_mismatch"
+    assert fake_task_commands.calls == []
+
+
+def test_note_mapper_preserves_frozen_content_v1_aliases(
+    task_space_client: TestClient,
+    fake_task_commands: FakeTaskSpaceCommandModule,
+) -> None:
+    response = task_space_client.put(
+        "/api/v1/work-items/w1/note",
+        json={
+            "commandId": "replace-note",
+            "spaceId": "s1",
+            "expectedVersion": 1,
+            "payloadHash": "a" * 64,
+            "document": {
+                "contentVersion": 1,
+                "blocks": [{"type": "paragraph", "blockId": "b1", "text": "Hello"}],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    command = fake_task_commands.last_command
+    assert command.payload == {
+        "document": {
+            "contentVersion": 1,
+            "blocks": [{"type": "paragraph", "blockId": "b1", "text": "Hello"}],
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "document",
+    (
+        {
+            "contentVersion": 1,
+            "blocks": [
+                {"type": "paragraph", "blockId": "duplicate", "text": "one"},
+                {"type": "paragraph", "blockId": "duplicate", "text": "two"},
+            ],
+        },
+        {
+            "contentVersion": 1,
+            "blocks": [
+                {
+                    "type": "checklist",
+                    "blockId": "b1",
+                    "items": [
+                        {
+                            "itemId": "i1",
+                            "text": "one",
+                            "checked": False,
+                            "children": [
+                                {
+                                    "itemId": "i2",
+                                    "text": "two",
+                                    "checked": False,
+                                    "children": [
+                                        {
+                                            "itemId": "i3",
+                                            "text": "three",
+                                            "checked": False,
+                                            "children": [],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "contentVersion": 1,
+            "blocks": [
+                {
+                    "type": "checklist",
+                    "blockId": "b1",
+                    "items": [
+                        {"itemId": "i1", "text": "   ", "checked": False, "children": []}
+                    ],
+                }
+            ],
+        },
+    ),
+)
+def test_note_document_rejects_cross_object_invariant_violations(
+    document: dict[str, Any],
+) -> None:
+    with pytest.raises(ValidationError):
+        WorkItemNoteDocumentV1.model_validate(document)
 
 
 # --------------------------------------------------------------------------- #

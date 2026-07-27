@@ -6,11 +6,12 @@ active-session request schemas, and the FocusSession review/reconcile schemas.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal, Self
+from datetime import datetime
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import AfterValidator, Field, model_validator
 
-from app.schemas.task_space import CommandId, WireModel
+from app.schemas.task_space import CommandId, WireModel, WireResponseModel
 
 # --------------------------------------------------------------------------- #
 # CanonicalUtc
@@ -24,7 +25,15 @@ _CANONICAL_UTC_PATTERN = re.compile(
 def _validate_canonical_utc(value: str) -> str:
     if not isinstance(value, str) or _CANONICAL_UTC_PATTERN.fullmatch(value) is None:
         raise ValueError("canonical_utc")
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("canonical_utc") from exc
     return value
+
+
+def _utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 CanonicalUtc = Annotated[str, AfterValidator(_validate_canonical_utc)]
@@ -64,6 +73,14 @@ class ProvisionalTaskContextSnapshot(WireModel):
     linked_at: CanonicalUtc
     link_method: Literal["explicit", "contextual_confirmed"]
 
+    @model_validator(mode="after")
+    def validate_effort_bounds(self) -> Self:
+        lower = self.level2_effort_lower_seconds_snapshot
+        upper = self.level2_effort_upper_seconds_snapshot
+        if lower is not None and upper is not None and lower > upper:
+            raise ValueError("effort lower bound exceeds upper bound")
+        return self
+
 
 class ProvisionalPlanItemSnapshot(WireModel):
     id: str = Field(min_length=1, max_length=64)
@@ -79,6 +96,16 @@ class ProvisionalPlanItemSnapshot(WireModel):
     current_during_session: bool
     completion_draft: bool
 
+    @model_validator(mode="after")
+    def validate_removal(self) -> Self:
+        reason = self.removal_reason
+        if self.removed_at is None:
+            if reason is not None:
+                raise ValueError("active plan item cannot have a removal reason")
+        elif reason is None or not reason.strip():
+            raise ValueError("removed plan item requires a nonblank reason")
+        return self
+
 
 class ProvisionalFocusSessionSnapshot(WireModel):
     session: ProvisionalSessionSnapshot
@@ -93,6 +120,56 @@ class ActivateProvisionalPayload(WireModel):
     owner_tab_id: str = Field(min_length=1, max_length=64)
     snapshot: ProvisionalFocusSessionSnapshot
     expected_work_item_versions: dict[str, int]
+
+    @model_validator(mode="after")
+    def validate_snapshot(self) -> Self:
+        session = self.snapshot.session
+        context = self.snapshot.context
+        plan = self.snapshot.plan
+        started = _utc(session.started_at)
+        cached = _utc(self.cached_at)
+        if started > cached:
+            raise ValueError("Session startedAt must not exceed cachedAt")
+        if session.gross_seconds != int((cached - started).total_seconds()):
+            raise ValueError("gross seconds do not match the cached interval")
+        if session.pause_started_at is not None:
+            paused_at = _utc(session.pause_started_at)
+            if paused_at < started or paused_at > cached:
+                raise ValueError("pauseStartedAt must be within the cached interval")
+        if session.paused_seconds + session.break_seconds > session.gross_seconds:
+            raise ValueError("paused and break seconds exceed gross seconds")
+        if session.focused_seconds != max(
+            0,
+            session.gross_seconds - session.paused_seconds - session.break_seconds,
+        ):
+            raise ValueError("focused seconds do not match duration facts")
+
+        plan_ids = [item.id for item in plan]
+        work_item_ids = [item.work_item_id for item in plan]
+        ranks = [item.plan_rank for item in plan]
+        if len(set(plan_ids)) != len(plan_ids):
+            raise ValueError("plan IDs must be unique")
+        if len(set(work_item_ids)) != len(work_item_ids):
+            raise ValueError("plan WorkItem IDs must be unique")
+        if len(set(ranks)) != len(ranks):
+            raise ValueError("plan ranks must be unique")
+        if sum(item.current_during_session and item.removed_at is None for item in plan) > 1:
+            raise ValueError("at most one active plan item may be current")
+        if any(
+            item.level2_work_item_id_snapshot != context.level2_work_item_id
+            for item in plan
+        ):
+            raise ValueError("plan context does not match the level-2 WorkItem")
+
+        expected_versions = {context.level2_work_item_id: context.level2_version_snapshot}
+        expected_versions.update(
+            {item.work_item_id: item.work_item_version_snapshot for item in plan}
+        )
+        if any(not key.strip() for key in self.expected_work_item_versions):
+            raise ValueError("expected WorkItem version keys must be nonblank")
+        if self.expected_work_item_versions != expected_versions:
+            raise ValueError("expected WorkItem versions do not match the snapshot")
+        return self
 
 
 class ActivationConflictValidityCorrection(WireModel):
@@ -136,6 +213,17 @@ class StartActiveSessionPayload(WireModel):
     owner_device_id: str = Field(min_length=1, max_length=64)
     owner_tab_id: str = Field(min_length=1, max_length=64)
     expected_work_item_versions: dict[str, int]
+
+    @model_validator(mode="after")
+    def validate_version_map(self) -> Self:
+        if any(not item_id.strip() for item_id in self.level3_work_item_ids):
+            raise ValueError("level-3 WorkItem IDs must be nonblank")
+        if len(set(self.level3_work_item_ids)) != len(self.level3_work_item_ids):
+            raise ValueError("level-3 WorkItem IDs must be unique")
+        expected_ids = {self.level2_work_item_id, *self.level3_work_item_ids}
+        if set(self.expected_work_item_versions) != expected_ids:
+            raise ValueError("expected WorkItem versions must exactly match the request")
+        return self
 
 
 class StartActiveSessionRequest(WireModel):
@@ -297,6 +385,16 @@ class ReviewOutcomePayload(WireModel):
     state_command: Literal["complete", "cancel", "none"]
     expected_work_item_version: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def validate_persona(self) -> Self:
+        if self.execution_persona is None and (
+            self.persona_switched is not None or self.persona_note is not None
+        ):
+            raise ValueError("persona metadata requires an execution persona")
+        if self.persona_note is not None and not self.persona_note.strip():
+            raise ValueError("persona note must be nonblank")
+        return self
+
 
 class SubmitFocusSessionReviewPayload(WireModel):
     expected_version: int = Field(ge=0)
@@ -304,6 +402,15 @@ class SubmitFocusSessionReviewPayload(WireModel):
     review_state: Literal["completed", "skipped"]
     reviewed_at: CanonicalUtc
     outcomes: list[ReviewOutcomePayload]
+
+    @model_validator(mode="after")
+    def validate_outcomes(self) -> Self:
+        outcome_ids = [outcome.work_item_id for outcome in self.outcomes]
+        if len(set(outcome_ids)) != len(outcome_ids):
+            raise ValueError("review Outcome WorkItem IDs must be unique")
+        if self.review_state == "skipped" and self.outcomes:
+            raise ValueError("a skipped review cannot contain outcomes")
+        return self
 
 
 class SubmitFocusSessionReviewRequest(WireModel):
@@ -347,3 +454,55 @@ class ReconcileFocusSessionCommandsRequest(WireModel):
         if self.command_id in self.payload.command_ids:
             raise ValueError("root commandId must differ from every envelope commandId")
         return self
+
+
+# --------------------------------------------------------------------------- #
+# Operation-specific response schemas
+# --------------------------------------------------------------------------- #
+
+
+class FocusSessionAggregateResponse(WireResponseModel):
+    session: dict[str, Any]
+    context: dict[str, Any] | None
+    attribution: list[dict[str, Any]]
+    plan: list[dict[str, Any]]
+    outcomes: list[dict[str, Any]]
+    command_envelopes: list[dict[str, Any]]
+    command_receipts: list[dict[str, Any]]
+
+
+class ActiveSessionLocatorResponse(WireResponseModel):
+    space_id: str
+    session_id: str
+    operation_id: str
+    state: Literal["claiming", "active", "releasing"]
+    owner_device_id: str
+    owner_tab_id: str
+    ownership_epoch: int = Field(gt=0)
+    lease_expires_at: CanonicalUtc
+    updated_at: CanonicalUtc
+
+
+class ActiveSessionResponse(ActiveSessionLocatorResponse):
+    kind: Literal["authoritative", "resumed"] | None = None
+    session: FocusSessionAggregateResponse
+
+
+class ActivationCandidateResponse(WireResponseModel):
+    space_id: str
+    session_id: str
+    session: FocusSessionAggregateResponse
+
+
+class ActivationConflictResponse(WireResponseModel):
+    kind: Literal["activation_conflict"]
+    active: ActiveSessionResponse
+    candidate: ActivationCandidateResponse
+
+
+class EndActiveSessionResponse(WireResponseModel):
+    session: FocusSessionAggregateResponse
+    locator: None
+
+
+ActiveSessionOperationResponse = ActiveSessionResponse | ActivationConflictResponse
