@@ -45,14 +45,16 @@ FORBIDDEN_REGISTRY_NAMES = (
     "task_quick_note",
     "session_quick_note",
 )
-# Patterns that must not appear in production app/**/*.py source.
-PRODUCTION_SCAN_PATTERN = (
-    r"app\.models\.(task|session)"
-    r"|app\.services\.(task|session)"
-    r"|/api/v1/(tasks|sessions)"
-    r"|taskQuickNote"
-    r"|sessionQuickNote"
+# Exact removed modules and routes must not appear in production source.  The
+# negative lookahead deliberately permits final modules such as
+# ``session_revision`` and ``session_command``.
+PRODUCTION_SCAN_PATTERN = re.compile(
+    r"(?P<module>app\.models\.(?:task(?:_quick_note)?|session(?:_quick_note)?)"
+    r"(?![A-Za-z0-9_])|app\.services\.(?:task|session)(?![A-Za-z0-9_]))"
+    r"|(?P<route>/api/v1/(?:tasks|sessions)(?![A-Za-z0-9_-]))"
+    r"|(?P<wire>taskQuickNote|sessionQuickNote)"
 )
+WIRE_AUDIT_EVIDENCE = {ROOT / "task_space" / "migration_preflight.py"}
 
 
 # --------------------------------------------------------------------------- #
@@ -138,7 +140,6 @@ def test_production_code_has_no_legacy_references():
       - /api/v1/tasks / /api/v1/sessions route literals
       - taskQuickNote / sessionQuickNote wire keys
     """
-    pattern = re.compile(PRODUCTION_SCAN_PATTERN)
     app_dir = Path(__file__).resolve().parents[1] / "app"
     violations: list[str] = []
     for py_file in app_dir.rglob("*.py"):
@@ -147,7 +148,12 @@ def test_production_code_has_no_legacy_references():
         except (OSError, UnicodeDecodeError):
             continue
         for line_no, line in enumerate(text.splitlines(), start=1):
-            if pattern.search(line):
+            matches = [
+                match
+                for match in PRODUCTION_SCAN_PATTERN.finditer(line)
+                if not (match.lastgroup == "wire" and py_file in WIRE_AUDIT_EVIDENCE)
+            ]
+            if matches:
                 rel = py_file.relative_to(app_dir.parent)
                 violations.append(f"{rel}:{line_no}: {line.strip()}")
     if violations:

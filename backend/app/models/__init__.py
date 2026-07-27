@@ -1,6 +1,5 @@
 """ORM model package for PomodoroXII Space metadata registration."""
 
-from app.models import session_command, session_revision
 from app.models.focus_session import FocusSession, SessionTaskContext
 from app.models.folder import Folder
 from app.models.habit import Habit
@@ -14,6 +13,12 @@ from app.models.quick_note import QuickNote
 from app.models.reflection import Reflection
 from app.models.schedule import Schedule
 from app.models.schedule_quick_note import ScheduleQuickNote
+from app.models.session_command import SessionCommandEnvelope, SessionCommandReceipt
+from app.models.session_revision import (
+    SessionAttributionRevision,
+    SessionWorkItemOutcome,
+    SessionWorkItemPlan,
+)
 from app.models.setting import Setting
 from app.models.sync_audit_log import SyncAuditLog
 from app.models.sync_outbox import SyncOutbox
@@ -23,12 +28,6 @@ from app.models.tombstone import Tombstone
 from app.models.work_item import WorkItem
 from app.models.work_item_definition import Label, StatusDefinition, TypeDefinition, WorkItemLabel
 from app.models.work_item_note import WorkItemNote
-
-SessionCommandEnvelope = session_command.SessionCommandEnvelope
-SessionCommandReceipt = session_command.SessionCommandReceipt
-SessionAttributionRevision = session_revision.SessionAttributionRevision
-SessionWorkItemOutcome = session_revision.SessionWorkItemOutcome
-SessionWorkItemPlan = session_revision.SessionWorkItemPlan
 
 __all__ = [
     "SyncMixin",

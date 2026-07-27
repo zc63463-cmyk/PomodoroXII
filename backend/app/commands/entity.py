@@ -440,6 +440,100 @@ class FolderDomainPolicy:
             if folder_id == request.entity_id:
                 root_after = after_frozen
 
+        subtree_ids = set(all_ids)
+
+        # Detach Notes through the same durable command. Their filesystem,
+        # index, and FTS projections must move with the DB row; a plain
+        # folder_id UPDATE would leave the authorities inconsistent.
+        from app.knowledge.projections import KnowledgeProjectionBuilder
+
+        note_spec = context.catalog.get("note")
+        note_builder = KnowledgeProjectionBuilder()
+        for row in context.authority.rows("note"):
+            if row.get("folder_id") not in subtree_ids:
+                continue
+            note_id = str(row[note_spec.primary_key])
+            after = dict(row)
+            after["folder_id"] = None
+            after["version"] = (row.get("version") or 0) + 1
+            after["updated_at"] = now
+            after_frozen = require_frozen_object(after)
+            db_plans.append(
+                DbMutationPlan(
+                    note_spec.table_name,
+                    {note_spec.primary_key: note_id},
+                    "update",
+                    row.get("version"),
+                    row,
+                    after_frozen,
+                )
+            )
+            if note_spec.sync_enabled:
+                sync_events.append(
+                    SyncEventPlan(
+                        note_spec.name,
+                        note_id,
+                        "update",
+                        after_frozen,
+                        after["version"],
+                        now,
+                    )
+                )
+            before_path = context.authority.note_path(note_id)
+            before_markdown = (
+                None if before_path is None else context.authority.markdown(before_path)
+            )
+            note_projections = note_builder.build_note(
+                before_row=row,
+                after_row=after_frozen,
+                before_path=before_path,
+                before_markdown=before_markdown,
+                body=None,
+            )
+            for projection in note_projections:
+                projections.append(
+                    ProjectionPlan(
+                        projection.tag,
+                        projection.source,
+                        projection.target,
+                        len(projections),
+                        projection.before,
+                        projection.after,
+                    )
+                )
+
+        quick_note_spec = context.catalog.get("quick_note")
+        for row in context.authority.rows("quick_note"):
+            if row.get("folder_id") not in subtree_ids:
+                continue
+            quick_note_id = str(row[quick_note_spec.primary_key])
+            after = dict(row)
+            after["folder_id"] = None
+            after["version"] = (row.get("version") or 0) + 1
+            after["updated_at"] = now
+            after_frozen = require_frozen_object(after)
+            db_plans.append(
+                DbMutationPlan(
+                    quick_note_spec.table_name,
+                    {quick_note_spec.primary_key: quick_note_id},
+                    "update",
+                    row.get("version"),
+                    row,
+                    after_frozen,
+                )
+            )
+            if quick_note_spec.sync_enabled:
+                sync_events.append(
+                    SyncEventPlan(
+                        quick_note_spec.name,
+                        quick_note_id,
+                        "update",
+                        after_frozen,
+                        after["version"],
+                        now,
+                    )
+                )
+
         return context.command(
             request=request,
             db_plans=tuple(db_plans),

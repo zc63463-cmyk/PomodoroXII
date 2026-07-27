@@ -209,20 +209,11 @@ def _isolate_env(
 
     # Phase B: reload business models (registers all tables on new Base.metadata)
     # Must purge submodules from sys.modules so they re-import with the new Base.
-    # Also clear submodule attributes from the package object — otherwise
-    # ``from app.models import session_command`` in __init__.py finds the stale
-    # attribute and skips re-import, leaving tables on the OLD SpaceBase.metadata.
     import sys
     for key in list(sys.modules.keys()):
         if key.startswith("app.models."):
             del sys.modules[key]
     import app.models as business_models
-    for attr_name in list(vars(business_models)):
-        if not attr_name.startswith("__"):
-            try:
-                delattr(business_models, attr_name)
-            except (AttributeError, TypeError):
-                pass
     importlib.reload(business_models)
 
     # Phase B: purge service submodules (except time, already reloaded above)
