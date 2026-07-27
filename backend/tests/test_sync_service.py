@@ -608,8 +608,8 @@ async def test_status_returns_tombstone_count(space_session):
 
 
 @pytest.mark.asyncio
-async def test_status_returns_all_21_pull_keys_in_one_query(space_session):
-    """D-2: status() should return counts for all 21 pull_keys + tombstone.
+async def test_status_returns_all_22_pull_keys_in_one_query(space_session):
+    """D-2: status() should return counts for all 22 pull_keys + tombstone.
 
     The optimization collapses 22 sequential COUNT queries into a single
     UNION ALL. This test guards against regressions where a new entity is
@@ -642,18 +642,18 @@ async def test_status_returns_all_21_pull_keys_in_one_query(space_session):
 # C8: ENTITY_REGISTRY validation
 # --------------------------------------------------------------------------- #
 
-def test_entity_registry_has_21_entities():
-    """ENTITY_REGISTRY should contain exactly 21 entity types."""
+def test_entity_registry_has_22_entities():
+    """ENTITY_REGISTRY should contain exactly 22 final entity types."""
     from app.services.sync import ENTITY_REGISTRY
 
-    assert len(ENTITY_REGISTRY) == 21
+    assert len(ENTITY_REGISTRY) == 22
     expected_keys = {
         "focusSession", "folder", "habit", "habitCheckIn", "label",
         "memoComment", "note", "project", "quickNote", "reflection",
         "schedule", "scheduleQuickNote", "sessionAttributionRevision",
         "sessionTaskContext", "sessionWorkItemOutcome", "sessionWorkItemPlan",
         "statusDefinition", "timeBlock", "typeDefinition", "workItem",
-        "workItemNote",
+        "workItemLabel", "workItemNote",
     }
     assert set(ENTITY_REGISTRY.keys()) == expected_keys
 
@@ -667,6 +667,26 @@ def test_entity_registry_entries_have_model_and_pull_key():
         assert "pull_key" in entry, f"{etype} missing 'pull_key'"
         assert entry["model"] is not None, f"{etype} model is None"
         assert isinstance(entry["pull_key"], str), f"{etype} pull_key not str"
+
+
+@pytest.mark.asyncio
+async def test_legacy_push_rejects_composite_key_work_item_label(space_session):
+    """Sync v1 rejects the final composite junction instead of crashing."""
+    from app.services.sync import SyncService
+
+    result = await SyncService(space_session).push([
+        _make_event(
+            entity_type="workItemLabel",
+            entity_id="work-item-1:label-1",
+            action="create",
+            payload={"work_item_id": "work-item-1", "label_id": "label-1"},
+        )
+    ])
+
+    assert result["applied"] == []
+    assert result["conflicts"] == []
+    assert len(result["errors"]) == 1
+    assert "Unsupported entity_type on legacy sync endpoint" in result["errors"][0]["error"]
 
 
 def test_entity_registry_pull_keys_are_unique():
@@ -952,6 +972,7 @@ async def test_pull_tombstones_has_more_false_when_under_limit(space_session):
     svc = SyncService(space_session)
     result = await svc.pull(since="", limit=100)
 
+    assert result["workItemLabels"] == []
     assert len(result["tombstones"]) == 3
     assert result["tombstones_has_more"] is False, (
         "tombstones_has_more should be False when under limit"

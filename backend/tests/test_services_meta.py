@@ -128,13 +128,13 @@ def test_meta_service_list_sync_enabled_and_soft_delete():
     """list_sync_enabled / list_soft_delete return the expected subsets."""
     svc = MetaService()
     sync_enabled = svc.list_sync_enabled()
-    assert len(sync_enabled) == 21
+    assert len(sync_enabled) == 22
     assert {s.name for s in sync_enabled} == {
         "note", "folder", "quick_note", "reflection",
         "habit", "habit_check_in", "schedule", "time_block",
         "memo_comment", "schedule_quick_note",
         "project", "status_definition", "type_definition", "label",
-        "work_item", "work_item_note",
+        "work_item_label", "work_item", "work_item_note",
         "focus_session", "session_task_context",
         "session_attribution_revision", "session_work_item_plan",
         "session_work_item_outcome",

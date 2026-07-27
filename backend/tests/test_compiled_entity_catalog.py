@@ -73,7 +73,7 @@ def test_registry_compile_seals_registration() -> None:
     registry.register(
         EntitySpec(
             name="example",
-            model_path="app.models.task.Task",
+            model_path="app.models.project.Project",
             table_name="examples",
             storage_type=StorageType.DB_ONLY,
             category=EntityCategory.BUSINESS,

@@ -251,6 +251,14 @@ async def test_cascade_folder_delete_integration(client):
     assert resp.status_code == 200
     assert resp.json().get("folder_id") == grandchild_id
 
+    resp = await client.post(
+        "/api/v1/quick-notes",
+        json={"content": "Nested quick note", "folder_id": grandchild_id},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    quick_note_id = resp.json()["id"]
+
     # 4. Delete root -> cascade soft-delete
     resp = await client.delete(f"/api/v1/folders/{root_id}", headers=headers)
     assert resp.status_code == 200
@@ -265,6 +273,10 @@ async def test_cascade_folder_delete_integration(client):
 
     # 6. Note is unfiled (folder_id cleared to None by cascade)
     resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json().get("folder_id") is None
+
+    resp = await client.get(f"/api/v1/quick-notes/{quick_note_id}", headers=headers)
     assert resp.status_code == 200
     assert resp.json().get("folder_id") is None
 
