@@ -200,6 +200,8 @@ async def update_note_content(
         current = await db.get(Note, id)
         if current is None:
             raise NotFoundError(f"Note {id} not found")
+        if current.trashed_at is not None:
+            raise NotFoundError(f"Note {id} not found")
         result = await store.update_note_content(
             scope,
             id,

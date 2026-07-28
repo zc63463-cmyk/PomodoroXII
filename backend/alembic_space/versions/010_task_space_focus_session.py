@@ -413,6 +413,8 @@ def upgrade() -> None:
             table_name,
             ["updated_at"],
         )
+    op.create_index("ix_work_items_project_id", "work_items", ["project_id"])
+    op.create_index("ix_work_items_parent_id", "work_items", ["parent_id"])
     op.create_index(
         "uq_session_attribution_effective",
         "session_attribution_revisions",

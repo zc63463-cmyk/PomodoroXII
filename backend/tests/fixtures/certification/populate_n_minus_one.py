@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from alembic import command
+from sqlalchemy import func, select, text
 
 SUBJECT_SHA = "1e4f0fc6d82ce6203f4bada0e84b518b16fcd97f"
 NOTE_BODIES = {
@@ -108,6 +109,34 @@ def _reload_settings_graph() -> None:
     importlib.reload(deps_module)
 
 
+def _create_n_minus_one_space_database(path: Path) -> None:
+    """Create the historical space_009 authority without legacy runtime ORM."""
+    from app.db.migrations import _config
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    target = _bind_existing_target(path, create_authority=True)
+    try:
+        with target.open_maintenance(
+            MaintenanceOptions(read_only=False, create_if_missing=False)
+        ) as maintenance:
+            with _alembic_maintenance_adapter(
+                maintenance,
+                expected_identity=target.identity,
+                require_write=True,
+            ) as adapter:
+                config = _config("space")
+                config.attributes["maintenance_adapter"] = adapter
+                command.upgrade(config, "space_009_mutation_journal")
+    finally:
+        asyncio.run(target.aclose())
+
+
 async def _close_fixture_resources(
     *,
     file_system: Any,
@@ -182,7 +211,6 @@ async def populate_fixture(
             from app.file_system.interfaces import FileSystem
             from app.models.note import Note
             from app.models.quick_note import QuickNote
-            from app.models.task import Task
             from app.services.note import NoteService
             from app.services.sync_outbox import get_current_cursor, record_sync_event
             from app.space_manager import (
@@ -211,30 +239,38 @@ async def populate_fixture(
                     await meta_session.commit()
 
                 space_db.parent.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(run_migrations, "space", space_db)
+                await asyncio.to_thread(_create_n_minus_one_space_database, space_db)
                 space_engine = create_engine(
                     f"sqlite+aiosqlite:///{space_db.as_posix()}", echo=False
                 )
                 space_session = create_session_factory(space_engine)()
                 file_system = await get_file_system(notes_dir, index_db)
 
-                task = Task(
-                    id="task_cert",
-                    title="N-1 task",
-                    created_at=fixed_timestamp,
-                    updated_at=fixed_timestamp,
+                await space_session.execute(
+                    text(
+                        "INSERT INTO tasks "
+                        "(id, title, description, status, priority, tags, plan, "
+                        "completion, due_date, estimated_pomodoros, actual_pomodoros, "
+                        "archived_at, created_at, updated_at, version) VALUES "
+                        "(:id, :title, '', 'todo', 'medium', '[]', '', '', NULL, "
+                        "1, 0, NULL, :timestamp, :timestamp, 1)"
+                    ),
+                    {
+                        "id": "task_cert",
+                        "title": "N-1 task",
+                        "timestamp": fixed_timestamp,
+                    },
                 )
-                space_session.add(task)
                 await space_session.flush()
                 await record_sync_event(
                     space_session,
                     entity_type="task",
-                    entity_id=task.id,
+                    entity_id="task_cert",
                     action="create",
                     payload={
-                        "id": task.id,
-                        "title": task.title,
-                        "updated_at": task.updated_at,
+                        "id": "task_cert",
+                        "title": "N-1 task",
+                        "updated_at": fixed_timestamp,
                     },
                     visible=True,
                 )
@@ -279,8 +315,7 @@ async def populate_fixture(
 
                 entity_counts = {
                     "tasks": int(
-                        await space_session.scalar(select(func.count()).select_from(Task))
-                        or 0
+                        await space_session.scalar(text("SELECT count(*) FROM tasks")) or 0
                     ),
                     "quick_notes": int(
                         await space_session.scalar(

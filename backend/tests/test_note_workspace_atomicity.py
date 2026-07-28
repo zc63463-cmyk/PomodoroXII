@@ -5,7 +5,7 @@ import inspect
 import json
 import sqlite3
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -20,10 +20,12 @@ from app.file_system.engine.base import FileSystemProjectionExecutor, StorageBas
 from app.file_system.interfaces import ProjectionAuthoritySnapshot
 from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.note import Note
+from app.models.project import Project
 from app.models.quick_note import QuickNote
 from app.models.schedule import Schedule
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
+from app.models.work_item import WorkItem
 from app.mutation.journal import MutationJournal
 from app.mutation.recovery import MutationRecovery
 from app.mutation.staging import StageStore
@@ -380,8 +382,17 @@ async def test_note_content_update_rewrites_body_index_fts_and_sync(uow_fixture)
     assert [projection.tag.value for projection in command.projections] == [
         "markdown_write",
         "index_replace",
+        "markdown_write",
+        "index_replace",
         "fts_replace",
     ]
+    version_id = f"v_{requests[1].request_hash[:12]}"
+    assert [str(projection.target) for projection in command.projections[:2]] == [
+        f".meta/version_backups/{version_id}.md",
+        f"index/note_versions/version_id/{version_id}",
+    ]
+    assert command.projections[0].after is not None
+    assert b"Old body" in command.projections[0].after
     assert command.result_value["version"] == 2
     assert command.result_value["content_hash"] == hashlib.sha256(
         b"New body term"
@@ -2041,7 +2052,7 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
     async with uow_fixture.sessions.begin() as session:
         session.add(
             Schedule(
-                id="overlay-task",
+                id="overlay-schedule",
                 title="before",
                 due_at="2026-07-21T00:00:00Z",
                 created_at="2026-07-20T00:00:00Z",
@@ -2053,7 +2064,7 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
     request = MutationRequest.from_payload(
         name="entity.update",
         entity_type="schedule",
-        entity_id="overlay-task",
+        entity_id="overlay-schedule",
         payload={"title": "after"},
         expected_version=1,
     )
@@ -2061,7 +2072,7 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
         overlay = await AuthorityOverlay.from_locked_authorities(
             uow_fixture.scope, session, CATALOG
         )
-    before = overlay.row("schedule", "overlay-task")
+    before = overlay.row("schedule", "overlay-schedule")
     assert before is not None and before["title"] == "before"
 
     after = dict(before)
@@ -2071,7 +2082,7 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
         db_plans=(
             DbMutationPlan(
                 table="schedules",
-                primary_key={"id": "overlay-task"},
+                primary_key={"id": "overlay-schedule"},
                 operation="update",
                 expected_version=1,
                 before_row=before,
@@ -2084,7 +2095,7 @@ async def test_authority_overlay_reads_locked_rows_and_applies_after_images(uow_
     )
     overlay.apply(command)
 
-    assert overlay.row("schedule", "overlay-task") == after
+    assert overlay.row("schedule", "overlay-schedule") == after
 
 
 def test_authority_overlay_rejects_inconsistent_commands_before_state_change() -> None:
@@ -2616,7 +2627,7 @@ async def test_catalog_compiler_and_interpreter_execute_unregistered_entity_poli
     async with uow_fixture.sessions.begin() as session:
         session.add(
             Schedule(
-                id="generic-task",
+                id="generic-schedule",
                 title="before",
                 due_at="2026-07-21T00:00:00Z",
                 created_at="2026-07-20T00:00:00Z",
@@ -2627,7 +2638,7 @@ async def test_catalog_compiler_and_interpreter_execute_unregistered_entity_poli
     request = MutationRequest.from_payload(
         name="entity.update",
         entity_type="schedule",
-        entity_id="generic-task",
+        entity_id="generic-schedule",
         payload={"title": "after"},
         expected_version=1,
     )
@@ -2654,7 +2665,7 @@ async def test_catalog_compiler_and_interpreter_execute_unregistered_entity_poli
     )
     result = await uow.execute(uow_fixture.scope, request, "generic-execution")
     async with uow_fixture.sessions() as session:
-        stored = await session.get(Schedule, "generic-task")
+        stored = await session.get(Schedule, "generic-schedule")
 
     assert result.state is MutationState.FINALIZED
     assert stored is not None and stored.title == "after" and stored.version == 2
@@ -2667,7 +2678,7 @@ async def test_timestamp_lww_remote_win_executes_against_authoritative_version(
     async with uow_fixture.sessions.begin() as session:
         session.add(
             Schedule(
-                id="remote-win-task",
+                id="remote-win-schedule",
                 title="local",
                 due_at="2026-07-21T00:00:00Z",
                 created_at="2026-07-20T00:00:00Z",
@@ -2678,7 +2689,7 @@ async def test_timestamp_lww_remote_win_executes_against_authoritative_version(
     request = MutationRequest.from_payload(
         name="entity.update",
         entity_type="schedule",
-        entity_id="remote-win-task",
+        entity_id="remote-win-schedule",
         payload={"title": "remote"},
         expected_version=2,
         client_updated_at="2026-07-20T00:00:03.1Z",
@@ -2694,7 +2705,7 @@ async def test_timestamp_lww_remote_win_executes_against_authoritative_version(
 
     result = await uow.execute(uow_fixture.scope, request, "remote-win-operation")
     async with uow_fixture.sessions() as session:
-        stored = await session.get(Schedule, "remote-win-task")
+        stored = await session.get(Schedule, "remote-win-schedule")
 
     assert result.resolution == "remote"
     assert stored is not None and stored.title == "remote" and stored.version == 4
@@ -2707,7 +2718,7 @@ async def test_timestamp_lww_remote_delete_executes_against_authoritative_versio
     async with uow_fixture.sessions.begin() as session:
         session.add(
             Schedule(
-                id="remote-delete-task",
+                id="remote-delete-schedule",
                 title="local",
                 due_at="2026-07-21T00:00:00Z",
                 created_at="2026-07-20T00:00:00Z",
@@ -2718,7 +2729,7 @@ async def test_timestamp_lww_remote_delete_executes_against_authoritative_versio
     request = MutationRequest.from_payload(
         name="entity.delete",
         entity_type="schedule",
-        entity_id="remote-delete-task",
+        entity_id="remote-delete-schedule",
         payload={},
         expected_version=2,
         client_updated_at="2026-07-20T00:00:03Z",
@@ -2734,7 +2745,7 @@ async def test_timestamp_lww_remote_delete_executes_against_authoritative_versio
 
     result = await uow.execute(uow_fixture.scope, request, "remote-delete-operation")
     async with uow_fixture.sessions() as session:
-        stored = await session.get(Schedule, "remote-delete-task")
+        stored = await session.get(Schedule, "remote-delete-schedule")
 
     assert result.resolution == "remote"
     assert stored is None
@@ -2743,29 +2754,35 @@ async def test_timestamp_lww_remote_delete_executes_against_authoritative_versio
 @pytest.mark.asyncio
 async def test_strict_cas_rejects_update_without_expected_version(uow_fixture) -> None:
     async with uow_fixture.sessions.begin() as session:
-        session.add(
-            Schedule(
-                id="strict-cas-task",
-                title="before",
-                due_at="2026-07-21T00:00:00Z",
-                created_at="2026-07-20T00:00:00Z",
-                updated_at="2026-07-20T00:00:00Z",
-                version=1,
+        session.add_all(
+            (
+                Project(
+                    id="strict-cas-project",
+                    key="SC",
+                    name="Strict CAS",
+                    default_status_definition_id="sys-status-not-started",
+                    default_type_definition_id="sys-type-work-item",
+                    created_at="2026-07-20T00:00:00Z",
+                    updated_at="2026-07-20T00:00:00Z",
+                    version=1,
+                ),
+                WorkItem(
+                    id="strict-cas-work-item",
+                    project_id="strict-cas-project",
+                    display_key="SC-1",
+                    title="before",
+                    type_definition_id="sys-type-work-item",
+                    status_definition_id="sys-status-not-started",
+                    created_at="2026-07-20T00:00:00Z",
+                    updated_at="2026-07-20T00:00:00Z",
+                    version=1,
+                ),
             )
         )
-    strict_catalog = replace(
-        CATALOG,
-        _by_name={
-            **CATALOG._by_name,
-            "schedule": replace(
-                CATALOG.get("schedule"), sync_conflict_policy="strict_cas"
-            ),
-        },
-    )
     request = MutationRequest.from_payload(
         name="entity.update",
-        entity_type="schedule",
-        entity_id="strict-cas-task",
+        entity_type="work_item",
+        entity_id="strict-cas-work-item",
         payload={"title": "after"},
         expected_version=None,
     )
@@ -2774,7 +2791,7 @@ async def test_strict_cas_rejects_update_without_expected_version(uow_fixture) -
     )
 
     async with uow_fixture.sessions() as session:
-        compilation = await MutationCompiler(strict_catalog).compile_batch(
+        compilation = await MutationCompiler(CATALOG).compile_batch(
             uow_fixture.scope, (item,), session
         )
 
@@ -2818,7 +2835,7 @@ async def test_production_compiler_injects_closed_plan_factories(uow_fixture) ->
                 version=2,
             )
             moved = schedule_model(
-                id="factory-task-moved",
+                id="factory-schedule-moved",
                 title="after",
                 due_at="2026-07-21T00:00:00Z",
                 completed_at=None,
@@ -2857,7 +2874,7 @@ async def test_production_compiler_injects_closed_plan_factories(uow_fixture) ->
     request = MutationRequest.from_payload(
         name="factory.probe",
         entity_type="schedule",
-        entity_id="factory-task",
+        entity_id="factory-schedule",
         payload={},
         expected_version=None,
     )
@@ -2930,22 +2947,22 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
         entity_types = frozenset({"note"})
 
         async def compile(self, context, request):
-            task_request = MutationRequest.from_payload(
+            schedule_request = MutationRequest.from_payload(
                 name="entity.create",
                 entity_type="schedule",
-                entity_id="cross-entity-task",
+                entity_id="cross-entity-schedule",
                 payload={
                     "title": "cross",
                     "due_at": "2026-07-21T00:00:00Z",
                 },
                 expected_version=None,
             )
-            task_command = await compile_catalog_entity_command(
-                context, task_request
+            schedule_command = await compile_catalog_entity_command(
+                context, schedule_request
             )
             return context.command(
                 request=request,
-                db_plans=task_command.db_plans,
+                db_plans=schedule_command.db_plans,
                 projections=(
                     _projection_plan(
                         "markdown_write",
@@ -2955,7 +2972,7 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
                         b"cross",
                     ),
                 ),
-                sync_events=task_command.sync_events,
+                sync_events=schedule_command.sync_events,
                 value={"id": request.entity_id},
             )
 
@@ -3013,7 +3030,7 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
             MutationRequest.from_payload(
                 name="entity.create",
                 entity_type="schedule",
-                entity_id="missing-sync-task",
+                entity_id="missing-sync-schedule",
                 payload={
                     "title": "Missing sync",
                     "due_at": "2026-07-21T00:00:00Z",
@@ -3038,7 +3055,7 @@ async def test_production_compiler_rejects_incomplete_registered_policy(
             MutationRequest.from_payload(
                 name="entity.create",
                 entity_type="schedule",
-                entity_id="divergent-sync-task",
+                entity_id="divergent-sync-schedule",
                 payload={
                     "title": "Database title",
                     "due_at": "2026-07-21T00:00:00Z",
@@ -3296,7 +3313,7 @@ async def test_business_receipt_preserves_null_insert_before_and_delete_after(
     created = MutationRequest.from_payload(
         name="entity.create",
         entity_type="schedule",
-        entity_id="receipt-image-task",
+        entity_id="receipt-image-schedule",
         payload={
             "title": "created",
             "due_at": "2026-07-21T00:00:00Z",
@@ -3306,7 +3323,7 @@ async def test_business_receipt_preserves_null_insert_before_and_delete_after(
     deleted = MutationRequest.from_payload(
         name="entity.delete",
         entity_type="schedule",
-        entity_id="receipt-image-task",
+        entity_id="receipt-image-schedule",
         payload={},
         expected_version=1,
     )
@@ -3328,8 +3345,8 @@ async def test_business_receipt_preserves_null_insert_before_and_delete_after(
     assert create_operation is not None
     assert delete_operation is not None
     assert json.loads(create_operation.db_before_json) == [None]
-    assert json.loads(create_operation.db_after_json)[0]["id"] == "receipt-image-task"
-    assert json.loads(delete_operation.db_before_json)[0]["id"] == "receipt-image-task"
+    assert json.loads(create_operation.db_after_json)[0]["id"] == "receipt-image-schedule"
+    assert json.loads(delete_operation.db_before_json)[0]["id"] == "receipt-image-schedule"
     assert json.loads(delete_operation.db_after_json) == [None]
 
 
@@ -3337,12 +3354,12 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
     request = MutationRequest.from_payload(
         name="decode.probe",
         entity_type="schedule",
-        entity_id="decode-task",
+        entity_id="decode-schedule",
         payload={},
         expected_version=None,
     )
-    complete_task = {
-        "id": "decode-task",
+    complete_schedule = {
+        "id": "decode-schedule",
         "title": "decode",
         "due_at": "2026-07-21T00:00:00Z",
         "completed_at": None,
@@ -3368,36 +3385,36 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             db_plans=(
                 DbMutationPlan(
                     "unknown_table",
-                    {"id": "decode-task"},
+                    {"id": "decode-schedule"},
                     "insert",
                     None,
                     None,
-                    {"id": "decode-task"},
+                    {"id": "decode-schedule"},
                 ),
             ),
             projections=(),
             sync_events=(),
-            result_value={"id": "decode-task"},
+            result_value={"id": "decode-schedule"},
         ),
         MutationCommand.from_effects(
             request=note_request,
             db_plans=(
                 DbMutationPlan(
                     "schedules",
-                    {"id": "decode-task"},
+                    {"id": "decode-schedule"},
                     "insert",
                     None,
                     None,
-                    complete_task,
+                    complete_schedule,
                 ),
             ),
             projections=(),
             sync_events=(
                 SyncEventPlan(
                     "schedule",
-                    "decode-task",
+                    "decode-schedule",
                     "create",
-                    complete_task,
+                    complete_schedule,
                     1,
                     "2026-07-20T00:00:00Z",
                 ),
@@ -3409,25 +3426,25 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             db_plans=(
                 DbMutationPlan(
                     "schedules",
-                    {"id": "decode-task"},
+                    {"id": "decode-schedule"},
                     "insert",
                     None,
                     None,
-                    complete_task,
+                    complete_schedule,
                 ),
             ),
             projections=(),
             sync_events=(
                 SyncEventPlan(
                     "schedule",
-                    "decode-task",
+                    "decode-schedule",
                     "create",
-                    {**complete_task, "title": "different ledger title"},
+                    {**complete_schedule, "title": "different ledger title"},
                     1,
                     "2026-07-20T00:00:00Z",
                 ),
             ),
-            result_value={"id": "decode-task"},
+            result_value={"id": "decode-schedule"},
         ),
         MutationCommand.from_effects(
             request=request,
@@ -3436,30 +3453,30 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             sync_events=(
                 SyncEventPlan(
                     "unknown_entity",
-                    "decode-task",
+                    "decode-schedule",
                     "create",
-                    {"id": "decode-task"},
+                    {"id": "decode-schedule"},
                     1,
                     "2026-07-20T00:00:00Z",
                 ),
             ),
-            result_value={"id": "decode-task"},
+            result_value={"id": "decode-schedule"},
         ),
         MutationCommand.from_effects(
             request=request,
             db_plans=(
                 DbMutationPlan(
                     "schedules",
-                    {"id": "decode-task"},
+                    {"id": "decode-schedule"},
                     "insert",
                     None,
-                    complete_task,
-                    complete_task,
+                    complete_schedule,
+                    complete_schedule,
                 ),
             ),
             projections=(),
             sync_events=(),
-            result_value={"id": "decode-task"},
+            result_value={"id": "decode-schedule"},
         ),
         MutationCommand.from_effects(
             request=request,
@@ -3468,14 +3485,14 @@ def test_interpreter_decode_rejects_effects_outside_compiled_catalog() -> None:
             sync_events=(
                 SyncEventPlan(
                     "schedule",
-                    "decode-task",
+                    "decode-schedule",
                     "create",
-                    {"id": "decode-task"},
+                    {"id": "decode-schedule"},
                     1,
                     "2026-07-20T00:00:00Z",
                 ),
             ),
-            result_value={"id": "decode-task"},
+            result_value={"id": "decode-schedule"},
         ),
     )
     interpreter = DbMutationInterpreter(CATALOG)

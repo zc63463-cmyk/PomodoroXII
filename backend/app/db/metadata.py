@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Column, Index, MetaData, String
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    Float,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    text,
+)
 
 from app.db.base import MetaBase, SpaceBase
 
@@ -73,6 +84,93 @@ def _restore_legacy_columns(table, metadata: MetaData) -> None:
             Index(index_name, table.c[name])
 
 
+def _legacy_sync_columns() -> tuple[Column, ...]:
+    return (
+        Column("id", String(36), primary_key=True),
+        Column("created_at", String(32), nullable=False),
+        Column("updated_at", String(32), nullable=False, index=True),
+        Column("version", Integer, nullable=False),
+    )
+
+
+def _restore_removed_legacy_tables(metadata: MetaData) -> None:
+    """Rebuild the exact pre-TS0 tables without reviving their runtime ORM."""
+    Table(
+        "tasks",
+        metadata,
+        Column("title", String(500), nullable=False),
+        Column("description", String(10000), nullable=False),
+        Column("status", String(20), nullable=False, index=True),
+        Column("priority", String(20), nullable=False, index=True),
+        Column("tags", String(4000), nullable=False),
+        Column("plan", String(10000), nullable=False),
+        Column("completion", String(10000), nullable=False),
+        Column("due_date", String(32), nullable=True, index=True),
+        Column("estimated_pomodoros", Integer, nullable=False),
+        Column("actual_pomodoros", Integer, nullable=False),
+        Column("archived_at", String(32), nullable=True),
+        *_legacy_sync_columns(),
+        CheckConstraint(
+            "status IN ('todo','in_progress','done','archived')",
+            name="check_task_status",
+        ),
+        CheckConstraint(
+            "priority IN ('low','medium','high','urgent')",
+            name="check_task_priority",
+        ),
+    )
+    Table(
+        "sessions",
+        metadata,
+        Column("task_id", String(36), nullable=True),
+        Column("type", String(20), nullable=False),
+        Column("duration", Integer, nullable=False),
+        Column("completed", Boolean, nullable=False),
+        Column("plan", String(10000), nullable=False),
+        Column("completion", String(10000), nullable=False),
+        Column("started_at", String(32), nullable=False),
+        Column("ended_at", String(32), nullable=True),
+        Column("mood", String(20), nullable=True),
+        Column("note", String(10000), nullable=False),
+        Column("attention_score", Integer, nullable=True),
+        Column("flow_state_detected", Boolean, nullable=True),
+        Column("flow_state_confidence", Float, nullable=True),
+        Column("interruption_count", Integer, nullable=True, server_default=text("0")),
+        Column(
+            "total_interruption_duration",
+            Integer,
+            nullable=True,
+            server_default=text("0"),
+        ),
+        Column("avg_recovery_time", Integer, nullable=True),
+        Column("pause_count", Integer, nullable=True, server_default=text("0")),
+        Column(
+            "total_pause_duration", Integer, nullable=True, server_default=text("0")
+        ),
+        Column("cognitive_mark_summary", String(4000), nullable=True),
+        *_legacy_sync_columns(),
+        CheckConstraint(
+            "type IN ('work','short_break','long_break','free','countdown')",
+            name="check_session_type",
+        ),
+        CheckConstraint(
+            "mood IN ('great','good','normal','bad','terrible') OR mood IS NULL",
+            name="check_session_mood",
+        ),
+    )
+    for table_name, owner_column in (
+        ("task_quick_notes", "task_id"),
+        ("session_quick_notes", "session_id"),
+    ):
+        Table(
+            table_name,
+            metadata,
+            Column(owner_column, String(36), nullable=False, index=True),
+            Column("quick_note_id", String(36), nullable=False, index=True),
+            *_legacy_sync_columns(),
+        )
+
+
 def _space_metadata_without_removed_legacy() -> MetaData:
     source = SpaceBase.metadata
     filtered = MetaData(naming_convention=source.naming_convention)
@@ -119,4 +217,5 @@ def get_legacy_space_metadata() -> MetaData:
         if table.name not in FINAL_TASK_SPACE_TABLES:
             copied = table.to_metadata(legacy)
             _restore_legacy_columns(copied, legacy)
+    _restore_removed_legacy_tables(legacy)
     return legacy

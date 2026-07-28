@@ -282,6 +282,21 @@ class KnowledgeDomainPolicy:
         if content is not None:
             payload["content_hash"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
             payload["word_count"] = len(content.split())
+        current = context.authority.row("note", request.entity_id)
+        restoring = (
+            request.name == "knowledge.note.update"
+            and payload == {"trashed_at": None}
+        )
+        if (
+            not creating
+            and current is not None
+            and current.get("trashed_at") is not None
+            and not restoring
+        ):
+            raise MutationRuleViolation(
+                "invalid_note_document",
+                {"entityId": request.entity_id, "reason": "note_in_trash"},
+            )
         folder_id = payload.get("folder_id")
         if folder_id is not None:
             folder = context.authority.row("folder", folder_id)
@@ -302,12 +317,63 @@ class KnowledgeDomainPolicy:
         plan = base.db_plans[0]
         before_path = context.authority.note_path(request.entity_id)
         before_markdown = None if before_path is None else context.authority.markdown(before_path)
-        projections = self.builder.build_note(
+        note_projections = self.builder.build_note(
             before_row=plan.before_row,
             after_row=plan.after_row,
             before_path=before_path,
             before_markdown=before_markdown,
             body=content,
+        )
+        version_projections: tuple[ProjectionPlan, ...] = ()
+        if (
+            request.name == "knowledge.note.update_content"
+            and plan.before_row is not None
+            and plan.after_row is not None
+            and before_markdown is not None
+            and plan.before_row.get("content_hash")
+            != plan.after_row.get("content_hash")
+        ):
+            version_id = f"v_{request.request_hash[:12]}"
+            version_projections = (
+                ProjectionPlan(
+                    ProjectionActionTag.MARKDOWN_WRITE,
+                    None,
+                    ContainedProjectionActionField(
+                        f".meta/version_backups/{version_id}.md"
+                    ),
+                    0,
+                    None,
+                    before_markdown,
+                ),
+                ProjectionPlan(
+                    ProjectionActionTag.INDEX_REPLACE,
+                    None,
+                    ContainedProjectionActionField(
+                        f"index/note_versions/version_id/{version_id}"
+                    ),
+                    1,
+                    None,
+                    _json_blob(
+                        {
+                            "row": {
+                                "version_id": version_id,
+                                "note_id": request.entity_id,
+                                "content_hash": str(
+                                    plan.before_row.get("content_hash", "")
+                                ),
+                                "change_summary": "edit",
+                                "created_at": str(plan.after_row["updated_at"]),
+                            }
+                        }
+                    ),
+                ),
+            )
+        projections = version_projections + tuple(
+            replace(
+                projection,
+                ordinal=projection.ordinal + len(version_projections),
+            )
+            for projection in note_projections
         )
         return context.command(
             request=request,

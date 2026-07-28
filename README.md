@@ -126,7 +126,7 @@ curl -fsS http://localhost:8000/api/health
 | `GET /api/health` | 健康检查 |
 | `POST /api/v1/auth/login` | 主账号登录 → JWT |
 | `GET/POST /api/v1/spaces` | Space 管理 |
-| `GET/POST/PUT/DELETE /api/v1/{entities}` | 14 类实体 CRUD（含 sessions/habits 等 PUT） |
+| `/api/v1/{notes,folders,quick-notes,reflections,habits,schedules,time-blocks}` | 当前已挂载的 Space 实体接口；具体方法见 OpenAPI |
 | `PATCH /api/v1/notes/{id}` | 笔记元数据更新（仅 title/tags/summary 等，不写 .md） |
 | `PUT /api/v1/notes/{id}/content` | 笔记正文重写（更新 .md + content_hash + word_count） |
 | `GET /api/v1/notes/{id}/versions` | 笔记版本历史列表 |
@@ -137,6 +137,9 @@ curl -fsS http://localhost:8000/api/health
 | `GET /api/v1/sync/pull` | 增量拉取 |
 | `GET /api/v1/sync/full` | 全量拉取（含全部 tombstones） |
 | `GET /api/v1/sync/status` | 各实体计数 |
+
+旧版 `/api/v1/tasks` 与 `/api/v1/sessions` 已移除。TS0 已定义
+`projects`、`work-items`、`focus-sessions` 与 `active-session` 合同路由，按阶段门禁暂未挂载到生产 v1。
 
 ### Sync 增量拉取（三游标）
 

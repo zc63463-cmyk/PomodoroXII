@@ -650,11 +650,8 @@ class StorageBase:
         with self._connect() as connection:
             if action.blob is None:
                 receipt.assert_current()
-                connection.execute(
-                    f"DELETE FROM {quoted_table} WHERE {quoted_primary_key} = ?",
-                    (identity,),
-                )
-                # Cascade delete child tables when purging a note.
+                # The index schema does not declare ON DELETE CASCADE. Remove
+                # note-owned rows before the parent so foreign keys remain valid.
                 if table.name == "notes":
                     for child_sql, child_params in (
                         ("DELETE FROM note_versions WHERE note_id = ?", (identity,)),
@@ -671,6 +668,10 @@ class StorageBase:
                         )
                     except Exception:
                         pass
+                connection.execute(
+                    f"DELETE FROM {quoted_table} WHERE {quoted_primary_key} = ?",
+                    (identity,),
+                )
                 receipt.assert_current()
                 connection.commit()
                 return

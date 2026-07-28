@@ -193,85 +193,6 @@ async def list_all_spaces() -> list[dict[str, Any]]:
 
 @mcp.tool
 @canonical_mcp_errors
-async def get_stats_overview(
-    space_id: str,
-    periods: list[str] | None = None,
-) -> dict:
-    """Get pomodoro session counts and durations by time period.
-
-    Args:
-        space_id: The space to query (from list_all_spaces).
-        periods: Optional list of periods: today, week, month, total.
-                 Defaults to all four.
-
-    Returns:
-        Dict mapping period names to {count, duration}.
-    """
-    from app.services.stats import StatsService
-
-    scope = await _authorize_space(space_id, "read")
-    async with get_space_session(scope) as db:
-        return await StatsService(db).overview(periods=periods)
-
-
-@mcp.tool
-@canonical_mcp_errors
-async def get_focus_trend(space_id: str, days: int = 7) -> dict:
-    """Get daily focus trend (pomodoro count + duration) for last N days.
-
-    Args:
-        space_id: The space to query.
-        days: Number of days to trend (1-365, default 7).
-
-    Returns:
-        Dict with "data" list of {date, count, duration} entries.
-    """
-    from app.services.stats import StatsService
-
-    scope = await _authorize_space(space_id, "read")
-    async with get_space_session(scope) as db:
-        return await StatsService(db).focus_trend(days=days)
-
-
-@mcp.tool
-@canonical_mcp_errors
-async def get_task_distribution(space_id: str) -> dict:
-    """Get task distribution grouped by status and priority.
-
-    Args:
-        space_id: The space to query.
-
-    Returns:
-        Dict with "by_status" and "by_priority" mappings.
-    """
-    from app.services.stats import StatsService
-
-    scope = await _authorize_space(space_id, "read")
-    async with get_space_session(scope) as db:
-        return await StatsService(db).task_distribution()
-
-
-@mcp.tool
-@canonical_mcp_errors
-async def get_daily_detail(space_id: str, date: str) -> dict:
-    """Get session count and total duration for a specific date.
-
-    Args:
-        space_id: The space to query.
-        date: Date in YYYY-MM-DD format.
-
-    Returns:
-        Dict with date, count, and duration for completed work sessions.
-    """
-    from app.services.stats import StatsService
-
-    scope = await _authorize_space(space_id, "read")
-    async with get_space_session(scope) as db:
-        return await StatsService(db).daily_detail(date=date)
-
-
-@mcp.tool
-@canonical_mcp_errors
 async def get_habit_summary(space_id: str, days: int = 30) -> dict:
     """Get habit check-in statistics: streaks, completion rates.
 
@@ -373,7 +294,7 @@ async def get_entity_schema(entity_type: str) -> dict:
     """Get the field schema for a specific entity type.
 
     Args:
-        entity_type: Entity name (e.g. "task", "session", "note", "habit").
+        entity_type: Entity name (e.g. "work_item", "focus_session", "note").
 
     Returns:
         Dict with entity_type, table_name, primary_key, and fields list.
@@ -456,7 +377,7 @@ async def entity_schema_resource(entity_type: str) -> dict:
     """Single entity schema as an MCP resource.
 
     Args:
-        entity_type: Entity name (e.g. "task", "session", "note").
+        entity_type: Entity name (e.g. "work_item", "focus_session", "note").
     """
     return await get_entity_schema(entity_type)
 
@@ -481,11 +402,10 @@ def analyze_productivity(space_id: str) -> str:
     """
     return (
         f"Please analyze my productivity data from space '{space_id}'. "
-        f"Start by calling get_stats_overview to see today/week/month totals, "
-        f"then get_focus_trend for the last 14 days, and get_habit_summary "
-        f"for habit streaks. Identify patterns, suggest improvements, and "
-        f"highlight any concerning trends (e.g. declining focus time, "
-        f"broken habit streaks)."
+        f"Call get_habit_summary for the last 14 days, "
+        f"get_schedule_summary for the last 14 days, and get_note_summary. "
+        f"Identify patterns, suggest improvements, and highlight concerning "
+        f"changes such as broken habit streaks or overdue schedules."
     )
 
 
@@ -498,12 +418,9 @@ def weekly_review(space_id: str) -> str:
     """
     return (
         f"Create a weekly review for space '{space_id}'. "
-        f"Call get_stats_overview with periods=['week'] for the summary, "
-        f"get_focus_trend with days=7 for the daily breakdown, "
-        f"get_task_distribution for task progress, and "
-        f"get_schedule_summary with days=7 for schedule completion. "
-        f"Summarize achievements, identify unfinished work, and "
-        f"suggest priorities for next week."
+        f"Call get_habit_summary with days=7, get_schedule_summary with days=7, "
+        f"and get_note_summary. Summarize achievements, identify overdue "
+        f"schedules and broken streaks, and suggest priorities for next week."
     )
 
 

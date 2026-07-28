@@ -20,10 +20,10 @@ class StatSpec:
     """单个统计维度的元数据。
 
     Attributes:
-        name: 维度名,如 "daily_detail" (与 StatsService 方法名同源)
-        service_method: StatsService 上的方法名,如 "daily_detail"
-        route_path: REST /stats 下的子路径,如 "/daily-detail"
-        mcp_tool: MCP 工具名,如 "get_daily_detail"
+        name: 维度名,如 "habit_summary" (与 StatsService 方法名同源)
+        service_method: StatsService 上的方法名,如 "habit_summary"
+        route_path: REST /stats 下的子路径,如 "/habit-summary"
+        mcp_tool: MCP 工具名,如 "get_habit_summary"
         mcp_enabled: 是否暴露为 MCP 工具(False = 仅 REST,需在例外表登记)
         params: 参数约束,如 {"days": {"default": 30, "ge": 1, "le": 365}}
     """
@@ -36,33 +36,6 @@ class StatSpec:
 
 
 STAT_SPECS: tuple[StatSpec, ...] = (
-    StatSpec(
-        name="overview",
-        service_method="overview",
-        route_path="/overview",
-        mcp_tool="get_stats_overview",
-        params={"periods": {"default": None}},
-    ),
-    StatSpec(
-        name="focus_trend",
-        service_method="focus_trend",
-        route_path="/focus-trend",
-        mcp_tool="get_focus_trend",
-        params={"days": {"default": 7, "ge": 1, "le": 365}},
-    ),
-    StatSpec(
-        name="task_distribution",
-        service_method="task_distribution",
-        route_path="/task-distribution",
-        mcp_tool="get_task_distribution",
-    ),
-    StatSpec(
-        name="daily_detail",
-        service_method="daily_detail",
-        route_path="/daily-detail",
-        mcp_tool="get_daily_detail",
-        params={"date": {"required": True, "max_length": 10}},
-    ),
     StatSpec(
         name="habit_summary",
         service_method="habit_summary",

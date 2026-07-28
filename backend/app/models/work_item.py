@@ -28,7 +28,9 @@ class WorkItem(Base, SyncMixin):
         ),
     )
 
-    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id"), nullable=False, index=True
+    )
     display_key: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
@@ -39,7 +41,9 @@ class WorkItem(Base, SyncMixin):
         String(36), ForeignKey("status_definitions.id"), nullable=False
     )
     priority: Mapped[str | None] = mapped_column(String(20))
-    parent_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("work_items.id"))
+    parent_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("work_items.id"), index=True
+    )
     child_rank: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     completion_window_start: Mapped[str | None] = mapped_column(String(32))
     completion_window_end: Mapped[str | None] = mapped_column(String(32))

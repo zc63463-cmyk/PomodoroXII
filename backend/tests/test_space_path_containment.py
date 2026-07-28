@@ -116,7 +116,7 @@ async def test_linux_platform_guard_rejects_real_v1_route_before_contained_stora
     }
     try:
         response = await client.get(
-            "/api/v1/tasks",
+            "/api/v1/notes",
             headers={"X-Request-ID": "req-linux-route"},
         )
     finally:
