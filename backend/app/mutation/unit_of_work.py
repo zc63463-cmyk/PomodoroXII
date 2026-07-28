@@ -1239,12 +1239,16 @@ def _validate_compiled_command(
     *,
     authority: AuthorityOverlay | None = None,
 ) -> None:
+    request_spec: EntitySpec | None
     try:
         request_spec = catalog.get(command.request.entity_type)
     except KeyError as exc:
-        raise SpaceRecoveryRequiredError(
-            "compiled request entity is outside the compiled catalog"
-        ) from exc
+        namespace, separator, _operation = command.request.name.partition(".")
+        if not separator or namespace != command.request.entity_type:
+            raise SpaceRecoveryRequiredError(
+                "compiled request entity is outside the compiled catalog"
+            ) from exc
+        request_spec = None
     plan_specs = tuple(
         _validate_persisted_plan_against_catalog(plan, catalog)
         for plan in command.db_plans
@@ -1252,7 +1256,11 @@ def _validate_compiled_command(
     if command.request.name == "knowledge.projection.rebuild":
         _validate_knowledge_rebuild_command(command, authority)
         return
-    if plan_specs and request_spec.name not in {spec.name for spec in plan_specs}:
+    if (
+        request_spec is not None
+        and plan_specs
+        and request_spec.name not in {spec.name for spec in plan_specs}
+    ):
         raise SpaceRecoveryRequiredError(
             "compiled database effects do not include the request entity"
         )
