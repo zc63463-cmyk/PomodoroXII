@@ -1,0 +1,85 @@
+"""Read-only Task Space definition and project queries."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+from sqlalchemy import select
+
+from app.errors import NotFoundError
+from app.models.project import Project
+from app.models.work_item_definition import Label, StatusDefinition, TypeDefinition
+from app.runtime.space import SpaceRuntimeHandle
+from app.task_space.contracts import (
+    TaskSpaceDefinitionsView,
+    TaskSpacePage,
+    TaskSpacePageQuery,
+    TaskSpaceView,
+)
+
+
+def _row(model) -> dict[str, object]:
+    return {column.name: getattr(model, column.name) for column in model.__table__.columns}
+
+
+def _page(rows: tuple[Mapping[str, object], ...], query: TaskSpacePageQuery) -> TaskSpacePage:
+    start = 0
+    if query.cursor is not None:
+        ids = [str(row["id"]) for row in rows]
+        if query.cursor not in ids:
+            raise ValueError("invalid_task_space_cursor")
+        start = ids.index(query.cursor) + 1
+    selected = rows[start : start + query.limit]
+    has_more = start + len(selected) < len(rows)
+    return TaskSpacePage(
+        items=selected,
+        next_cursor=str(selected[-1]["id"]) if selected and has_more else None,
+    )
+
+
+class DefaultTaskSpaceQueryModule:
+    async def list_definitions(
+        self, scope: SpaceRuntimeHandle
+    ) -> TaskSpaceDefinitionsView:
+        async with scope.session_factory() as session:
+            statuses = tuple(
+                _row(row) for row in (
+                    await session.execute(
+                        select(StatusDefinition).order_by(StatusDefinition.rank, StatusDefinition.id)
+                    )
+                ).scalars()
+            )
+            types = tuple(
+                _row(row) for row in (
+                    await session.execute(
+                        select(TypeDefinition).order_by(TypeDefinition.rank, TypeDefinition.id)
+                    )
+                ).scalars()
+            )
+            labels = tuple(
+                _row(row) for row in (
+                    await session.execute(
+                        select(Label).order_by(Label.name, Label.id)
+                    )
+                ).scalars()
+            )
+        return TaskSpaceDefinitionsView(statuses, types, labels)
+
+    async def list_projects(
+        self, scope: SpaceRuntimeHandle, query: TaskSpacePageQuery
+    ) -> TaskSpacePage:
+        async with scope.session_factory() as session:
+            statement = select(Project).order_by(Project.rank, Project.id)
+            if not bool(query.filters.get("include_archived", False)):
+                statement = statement.where(Project.archived_at.is_(None))
+            rows = tuple(_row(row) for row in (await session.execute(statement)).scalars())
+        return _page(rows, query)
+
+    async def get_project(
+        self, scope: SpaceRuntimeHandle, project_id: str
+    ) -> TaskSpaceView:
+        async with scope.session_factory() as session:
+            row = await session.get(Project, project_id)
+        if row is None:
+            raise NotFoundError("Project not found")
+        return TaskSpaceView(_row(row))
