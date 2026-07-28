@@ -422,173 +422,15 @@ async def client(
 
 # -- S3 mutation fixture factory for TS1 Task Space tests ---------------------
 
-import json
-from contextlib import asynccontextmanager
-
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.commands.entity import EntityCommand
-from app.mutation.journal import MutationJournal
-from app.mutation.recovery import MutationRecovery
-from app.mutation.staging import StageStore
-from app.mutation.unit_of_work import (
-    DbMutationInterpreter,
-    MutationCompiler,
-    MutationUnitOfWork,
-)
 from app.registry import CATALOG
-from app.runtime.leases import LeaseMode
 from app.task_space.compiler import TaskSpaceCompiler
 from app.task_space.module import DefaultTaskSpaceCommandModule
 from app.task_space.queries import DefaultTaskSpaceQueryModule
+from tests.mutation_fixture import MutationFixture, build_mutation_fixture
 from tests.task_space_fixture import FrozenClock, TaskSpaceFixture
-from tests.test_mutation_recovery import (
-    _DiskProjection,
-    _Lease,
-    _ProjectionExecutor,
-    _stage_authority,
-)
-
-
-class _MutationFixture:
-    """End-to-end mutation fixture with constructor-injected domain policies."""
-
-    def __init__(
-        self,
-        *,
-        sessions: async_sessionmaker,
-        scope,
-        uow: MutationUnitOfWork,
-        catalog,
-        policies: tuple,
-        stage_root,
-        projection_root,
-        file_system: _DiskProjection,
-        stage_store: StageStore,
-    ) -> None:
-        self._sessions = sessions
-        self.scope = scope
-        self.uow = uow
-        self.catalog = catalog
-        self._policies = policies
-        self._stage_root = stage_root
-        self._projection_root = projection_root
-        self._file_system = file_system
-        self._stage_store = stage_store
-
-    def overlay_snapshot(self):
-        state = self._file_system._load()
-        return (
-            tuple(sorted(state["markdown"].items())),
-            tuple(sorted(state["index"].items())),
-            tuple(sorted(state["fts"].items())),
-        )
-
-    async def visible_events(self, **filters):
-        from sqlalchemy import select
-
-        from app.models.sync_outbox import SyncOutbox
-
-        async with self._sessions() as session:
-            statement = select(SyncOutbox).where(SyncOutbox.visible.is_(True))
-            for key, value in filters.items():
-                if key == "operation_id":
-                    statement = statement.where(SyncOutbox.operation_id == value)
-                elif key == "entity_type":
-                    statement = statement.where(SyncOutbox.entity_type == value)
-                elif key == "batch_id":
-                    statement = statement.where(SyncOutbox.batch_id == value)
-            result = await session.execute(statement.order_by(SyncOutbox.id))
-            return tuple(
-                SimpleNamespace(
-                    entity_type=row.entity_type,
-                    entity_id=row.entity_id,
-                    action=row.action,
-                    payload=json.loads(row.payload) if row.payload else {},
-                    operation_id=row.operation_id,
-                    batch_id=row.batch_id,
-                    version=row.version,
-                    created_at=row.created_at,
-                )
-                for row in result.scalars()
-            )
-
-    def inject_fault(self, name: str) -> None:
-        pass
-
-    async def restart(self):
-        if self._stage_store is not None:
-            self._stage_store.close()
-        return _build_mutation_fixture(
-            sessions=self._sessions,
-            catalog=self.catalog,
-            policies=self._policies,
-            stage_root=self._stage_root,
-            projection_root=self._projection_root,
-        )
-
-    async def recover(self):
-        recovery = MutationRecovery(
-            catalog=self.catalog,
-            interpreter=DbMutationInterpreter(self.catalog),
-            projection_executor=_ProjectionExecutor(),
-        )
-        return await recovery.recover_under_lease(self.scope, self.scope.space_lease)
-
-
-def _build_mutation_fixture(
-    *,
-    sessions: async_sessionmaker,
-    catalog,
-    policies: tuple,
-    stage_root,
-    projection_root,
-) -> _MutationFixture:
-    stage_store = StageStore(_stage_authority(stage_root))
-    file_system = _DiskProjection(projection_root)
-    global_lease = _Lease(LeaseMode.SHARED, "global")
-    space_lease = _Lease(LeaseMode.EXCLUSIVE, "space-test")
-
-    @asynccontextmanager
-    async def exclusive_space_resources(purpose: str, timeout_seconds: float):
-        yield space_lease
-
-    scope = SimpleNamespace(
-        scope=SimpleNamespace(space_id="space-test"),
-        file_system=file_system,
-        mutation_stages=stage_store,
-        session_factory=sessions,
-        global_lease=global_lease,
-        space_lease=space_lease,
-        _runtime=None,
-        exclusive_space_resources=exclusive_space_resources,
-    )
-
-    compiler = MutationCompiler(catalog, policies=list(policies))
-    uow = MutationUnitOfWork(
-        catalog=catalog,
-        compiler=compiler,
-        interpreter=DbMutationInterpreter(catalog),
-        projection_executor=_ProjectionExecutor(),
-        recovery_gate=MutationRecovery(
-            catalog=catalog,
-            interpreter=DbMutationInterpreter(catalog),
-            projection_executor=_ProjectionExecutor(),
-        ),
-        journal_factory=MutationJournal,
-    )
-
-    return _MutationFixture(
-        sessions=sessions,
-        scope=scope,
-        uow=uow,
-        catalog=catalog,
-        policies=policies,
-        stage_root=stage_root,
-        projection_root=projection_root,
-        file_system=file_system,
-        stage_store=stage_store,
-    )
 
 
 @pytest.fixture
@@ -598,17 +440,25 @@ def mutation_fixture_factory(space_session, tmp_path):
     sessions = async_sessionmaker(space_session.bind, expire_on_commit=False)
     stage_root = tmp_path / "stages"
     projection_root = tmp_path / "projection"
+    database_path = Path(str(space_session.bind.url.database))
+    fixtures: list[MutationFixture] = []
 
-    def factory(*, policies: tuple = ()) -> _MutationFixture:
-        return _build_mutation_fixture(
+    def factory(*, policies: tuple = ()) -> MutationFixture:
+        fixture = build_mutation_fixture(
             sessions=sessions,
             catalog=CATALOG,
             policies=policies,
             stage_root=stage_root,
             projection_root=projection_root,
+            database_path=database_path,
         )
+        fixtures.append(fixture)
+        return fixture
 
-    return factory
+    yield factory
+
+    for fixture in reversed(fixtures):
+        fixture.close()
 
 
 @pytest.fixture
@@ -616,10 +466,14 @@ async def task_space_fixture(mutation_fixture_factory):
     clock = FrozenClock()
     policy = TaskSpaceCompiler(clock.now_iso_ms)
     mutation = mutation_fixture_factory(policies=(policy,))
-    return TaskSpaceFixture(
+    fixture = TaskSpaceFixture(
         mutation=mutation,
         clock=clock,
         module=DefaultTaskSpaceCommandModule(mutation.uow),
         queries=DefaultTaskSpaceQueryModule(),
         entity_commands=EntityCommand(mutation.catalog),
     )
+    try:
+        yield fixture
+    finally:
+        fixture.mutation.close()

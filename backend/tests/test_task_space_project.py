@@ -210,6 +210,32 @@ def test_business_hash_excludes_envelope_but_request_hash_covers_it() -> None:
     assert build_task_space_request(first).request_hash != build_task_space_request(second).request_hash
 
 
+def test_typed_requests_keep_the_virtual_task_space_envelope() -> None:
+    payload = {"key": "PX", "name": "Project", "description": None}
+    command = CreateProject(
+        command_id="virtual-project-command",
+        space_id="space-a",
+        payload_hash=canonical_payload_hash(payload),
+        payload=payload,
+    )
+
+    request = build_task_space_request(command)
+
+    assert request.entity_type == "task_space"
+    assert request.name == "task_space.CreateProject"
+
+
+def test_project_adapter_normalizes_before_payload_hash(task_space_fixture) -> None:
+    command = task_space_fixture.create_project_command(
+        command_id="normalized-project",
+        key=" px1 ",
+        name="Normalized",
+    )
+
+    assert command.payload["key"] == "PX1"
+    assert command.payload_hash == canonical_payload_hash(command.payload)
+
+
 def test_move_hash_excludes_project_guard_but_request_hash_covers_it() -> None:
     business_payload = {"new_parent_id": "parent-a", "child_rank": 3}
     payload_hash = canonical_payload_hash(business_payload)
@@ -272,3 +298,54 @@ def test_task_space_fixture_uses_constructor_policy_injection(
     assert "mutation_fixture.clock" not in fixture_sources
     assert ".register_domain_policy(" not in fixture_sources
     assert ".with_domain(" not in fixture_sources
+    assert "MutationCompiler(" not in fixture_sources
+    assert "MutationUnitOfWork(" not in fixture_sources
+    assert "tests.test_mutation_recovery" not in fixture_sources
+
+    mutation = mutation_fixture_factory(policies=())
+    assert type(mutation).__module__ == "tests.mutation_fixture"
+    with pytest.raises(ValueError, match="unknown mutation fixture fault"):
+        mutation.inject_fault("unknown")
+
+
+@pytest.mark.asyncio
+async def test_mutation_fixture_snapshot_includes_database_authority(task_space_fixture) -> None:
+    before = task_space_fixture.overlay_snapshot()
+
+    await task_space_fixture.create_project(
+        command_id="snapshot-project",
+        key="SP",
+    )
+
+    assert task_space_fixture.overlay_snapshot() != before
+
+
+@pytest.mark.asyncio
+async def test_concrete_modules_are_used_through_ts0_protocols(task_space_fixture) -> None:
+    commands: TaskSpaceCommandModule = task_space_fixture.module
+    queries: TaskSpaceQueryModule = task_space_fixture.queries
+    command = task_space_fixture.create_project_command(
+        command_id="protocol-project",
+        key="PP",
+    )
+
+    created = await commands.execute(task_space_fixture.scope, command)
+    fetched = await queries.get_project(task_space_fixture.scope, created.value["id"])
+    definitions = await queries.list_definitions(task_space_fixture.scope)
+    page = await queries.list_projects(
+        task_space_fixture.scope,
+        TaskSpacePageQuery(cursor=None, limit=10, filters={}),
+    )
+
+    public_writes = {
+        name
+        for name, member in inspect.getmembers(
+            DefaultTaskSpaceCommandModule,
+            predicate=inspect.isfunction,
+        )
+        if not name.startswith("_")
+    }
+    assert fetched.value == created.value
+    assert definitions.statuses
+    assert page.items == (created.value,)
+    assert public_writes == {"execute"}

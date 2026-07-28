@@ -84,19 +84,36 @@ class TaskSpaceFixture:
         name: str | None = None,
         description: str | None = None,
     ):
-        payload = {
-            "key": key,
-            "name": name or f"Project {key.strip()}",
-            "description": description,
-        }
+        command = self.create_project_command(
+            command_id=command_id,
+            key=key,
+            name=name,
+            description=description,
+        )
         return await self.module.execute(
             self.scope,
-            CreateProject(
-                command_id=command_id,
-                space_id=self.space_id,
-                payload_hash=canonical_payload_hash(payload),
-                payload=payload,
-            ),
+            command,
+        )
+
+    def create_project_command(
+        self,
+        *,
+        command_id: str,
+        key: str,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> CreateProject:
+        normalized_key = key.strip().upper()
+        payload = {
+            "key": normalized_key,
+            "name": name or f"Project {normalized_key}",
+            "description": description,
+        }
+        return CreateProject(
+            command_id=command_id,
+            space_id=self.space_id,
+            payload_hash=canonical_payload_hash(payload),
+            payload=payload,
         )
 
     def create_work_item_command(

@@ -5,8 +5,6 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 
-from app.focus_session.contracts import CommandReceiptState  # noqa: F401
-from app.focus_session.receipts import decode_reconcile_coordination  # noqa: F401
 from app.mutation.types import (
     DbMutationPlan,
     MutationCommand,

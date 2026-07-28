@@ -76,13 +76,11 @@ def build_task_space_request(command: TaskSpaceCommand) -> MutationRequest:
     require_payload_hash(command.payload_hash, business_payload)
     if isinstance(command, CreateProject):
         request_name = "CreateProject"
-        entity_type = "project"
         entity_id = command.command_id
         expected_version = None
         payload: Mapping[str, object] = dict(command.payload)
     elif isinstance(command, CreateWorkItem):
         request_name = "CreateWorkItem"
-        entity_type = "work_item"
         entity_id = command.command_id
         expected_version = None
         payload = {
@@ -97,13 +95,11 @@ def build_task_space_request(command: TaskSpaceCommand) -> MutationRequest:
     elif isinstance(command, MutateWorkItem):
         operation = str(command.payload["operation"])
         request_name = WORK_ITEM_REQUEST_NAMES[operation]
-        entity_type = "work_item"
         entity_id = command.work_item_id or command.command_id
         expected_version = command.expected_version
         payload = {key: value for key, value in command.payload.items() if key != "operation"}
     elif isinstance(command, WorkItemNoteCommand):
         request_name = NOTE_REQUEST_NAMES[command.kind]
-        entity_type = "work_item_note"
         entity_id = command.work_item_id
         expected_version = command.expected_version
         payload = {"work_item_id": command.work_item_id, **command.payload}
@@ -112,7 +108,7 @@ def build_task_space_request(command: TaskSpaceCommand) -> MutationRequest:
 
     return MutationRequest.from_payload(
         name=f"task_space.{request_name}",
-        entity_type=entity_type,
+        entity_type="task_space",
         entity_id=entity_id,
         payload={
             "command_id": command.command_id,
