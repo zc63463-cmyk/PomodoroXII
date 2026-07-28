@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta
 
 from app.focus_session.contracts import CommandReceiptState
 from app.focus_session.receipts import decode_reconcile_coordination
@@ -12,6 +13,7 @@ from app.mutation.types import (
     MutationCommand,
     MutationRequest,
     SyncEventPlan,
+    canonical_payload_hash,
 )
 from app.mutation.unit_of_work import MutationCompileContext
 from app.services.time import utc_now_iso_ms
@@ -186,6 +188,53 @@ WORK_ITEM_IMMUTABLE_FIELDS = frozenset({
 })
 
 
+def _monotonic_updated_at(previous: str, candidate: str) -> str:
+    if candidate > previous:
+        return candidate
+    timestamp = datetime.fromisoformat(previous.removesuffix("Z") + "+00:00")
+    return (timestamp + timedelta(milliseconds=1)).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+
+
+def _require_expected_version(
+    item: Mapping[str, object], expected_version: int | None
+) -> None:
+    if int(item["version"]) != expected_version:
+        from app.mutation.types import MutationRuleViolation
+
+        raise MutationRuleViolation(
+            "version_conflict",
+            {"current_version": item["version"]},
+            retryable=False,
+        )
+
+
+def _work_item_update_command(context, request, before, after, timestamp):
+    plan = DbMutationPlan(
+        "work_items",
+        {"id": before["id"]},
+        "update",
+        request.expected_version,
+        before,
+        after,
+    )
+    event = SyncEventPlan(
+        "work_item",
+        str(before["id"]),
+        "update",
+        after,
+        int(after["version"]),
+        timestamp,
+    )
+    return context.command(
+        request=request,
+        db_plans=(plan,),
+        sync_events=(event,),
+        value=after,
+    )
+
+
 # -- Tree helpers -------------------------------------------------------------
 
 
@@ -274,7 +323,7 @@ async def _compile_CreateWorkItem(self, context, request):
         )
     number = int(project["next_work_item_number"])
     work_item_id = _stable_id("work_item", str(request.payload["command_id"]))
-    now = self.now_iso_ms()
+    now = _monotonic_updated_at(str(project["updated_at"]), self.now_iso_ms())
     type_definition_id = (
         request.payload.get("type_definition_id")
         or project["default_type_definition_id"]
@@ -359,42 +408,21 @@ TaskSpaceCompiler.compile_CreateWorkItem = _compile_CreateWorkItem
 async def _compile_UpdateWorkItem(self, context, request):
     overlay = context.authority
     item = _require_row(overlay, "work_item", request.entity_id)
-    if int(item["version"]) != request.expected_version:
-        from app.mutation.types import MutationRuleViolation
-
-        raise MutationRuleViolation(
-            "version_conflict", {"current_version": item["version"]}, retryable=False
-        )
+    _require_expected_version(item, request.expected_version)
     patch = dict(request.payload["patch"])
-    allowed = {
-        "title", "description", "type_definition_id", "priority",
-        "completion_window_start", "completion_window_end", "review_point",
-        "hard_deadline", "effort_estimate_lower_seconds",
-        "effort_estimate_upper_seconds", "confidence", "archived_at",
-        "marked_as_attention",
-    }
-    unexpected = set(patch) - allowed
+    unexpected = set(patch) - WORK_ITEM_SCALAR_FIELDS
     if unexpected:
         raise RuntimeError(f"unregistered WorkItem patch fields: {sorted(unexpected)}")
     if patch.get("type_definition_id") is not None:
         _require_row(overlay, "type_definition", str(patch["type_definition_id"]))
-    now = self.now_iso_ms()
+    now = _monotonic_updated_at(str(item["updated_at"]), self.now_iso_ms())
     after = {
         **item,
         **patch,
         "updated_at": now,
         "version": int(item["version"]) + 1,
     }
-    plan = DbMutationPlan(
-        "work_items", {"id": item["id"]}, "update",
-        request.expected_version, item, after,
-    )
-    event = SyncEventPlan(
-        "work_item", str(item["id"]), "update", after, int(after["version"]), now
-    )
-    return context.command(
-        request=request, db_plans=(plan,), sync_events=(event,), value=after
-    )
+    return _work_item_update_command(context, request, item, after, now)
 
 
 TaskSpaceCompiler.compile_UpdateWorkItem = _compile_UpdateWorkItem
@@ -406,12 +434,7 @@ TaskSpaceCompiler.compile_UpdateWorkItem = _compile_UpdateWorkItem
 async def _compile_MoveWorkItem(self, context, request):
     overlay = context.authority
     item = _require_row(overlay, "work_item", request.entity_id)
-    if int(item["version"]) != request.expected_version:
-        from app.mutation.types import MutationRuleViolation
-
-        raise MutationRuleViolation(
-            "version_conflict", {"current_version": item["version"]}, retryable=False
-        )
+    _require_expected_version(item, request.expected_version)
     requested_project_id = str(request.payload["project_id"])
     _require_row(overlay, "project", requested_project_id)
     if requested_project_id != str(item["project_id"]):
@@ -448,7 +471,7 @@ async def _compile_MoveWorkItem(self, context, request):
         raise MutationRuleViolation(
             "invalid_work_item_tree", {"reason": "subtree_depth"}, retryable=False
         )
-    now = self.now_iso_ms()
+    now = _monotonic_updated_at(str(item["updated_at"]), self.now_iso_ms())
     after = {
         **item,
         "parent_id": parent_id,
@@ -456,19 +479,7 @@ async def _compile_MoveWorkItem(self, context, request):
         "updated_at": now,
         "version": int(item["version"]) + 1,
     }
-    plan = DbMutationPlan(
-        "work_items", {"id": item["id"]}, "update",
-        request.expected_version, item, after,
-    )
-    event = SyncEventPlan(
-        "work_item", str(item["id"]), "update", after, int(after["version"]), now
-    )
-    return context.command(
-        request=request,
-        db_plans=(plan,),
-        sync_events=(event,),
-        value=after,
-    )
+    return _work_item_update_command(context, request, item, after, now)
 
 
 TaskSpaceCompiler.compile_MoveWorkItem = _compile_MoveWorkItem
@@ -477,11 +488,18 @@ TaskSpaceCompiler.compile_MoveWorkItem = _compile_MoveWorkItem
 # -- TransitionWorkItem with Session envelope fence ---------------------------
 
 
-def _require_session_envelope_dispatch_claim(overlay, request) -> None:
-    command_id = request.payload.get("command_id")
-    if command_id is None:
-        return
-    command_id = str(command_id)
+def _require_session_envelope_dispatch_claim(context, request) -> None:
+    command_id = context.operation_id
+    declared_command_id = request.payload.get("command_id")
+    if declared_command_id is not None and str(declared_command_id) != command_id:
+        from app.mutation.types import MutationRuleViolation
+
+        raise MutationRuleViolation(
+            "idempotency_conflict",
+            {"reason": "operation_identity_mismatch"},
+            retryable=False,
+        )
+    overlay = context.authority
     envelope = overlay.row("session_command_envelope", command_id)
     if envelope is None:
         return
@@ -526,17 +544,12 @@ def _require_session_envelope_dispatch_claim(overlay, request) -> None:
 
 async def _compile_TransitionWorkItem(self, context, request):
     overlay = context.authority
-    _require_session_envelope_dispatch_claim(overlay, request)
+    _require_session_envelope_dispatch_claim(context, request)
     item = _require_row(overlay, "work_item", request.entity_id)
     status = _require_row(
         overlay, "status_definition", str(request.payload["status_definition_id"])
     )
-    if int(item["version"]) != request.expected_version:
-        from app.mutation.types import MutationRuleViolation
-
-        raise MutationRuleViolation(
-            "version_conflict", {"current_version": item["version"]}, retryable=False
-        )
+    _require_expected_version(item, request.expected_version)
     item_depth = _parent_depth(
         overlay, item["parent_id"], str(item["project_id"])
     ) + 1
@@ -558,7 +571,7 @@ async def _compile_TransitionWorkItem(self, context, request):
                 {"work_item_ids": active_children},
                 retryable=False,
             )
-    now = self.now_iso_ms()
+    now = _monotonic_updated_at(str(item["updated_at"]), self.now_iso_ms())
     category = str(status["category"])
     after = {
         **item,
@@ -568,19 +581,7 @@ async def _compile_TransitionWorkItem(self, context, request):
         "updated_at": now,
         "version": int(item["version"]) + 1,
     }
-    plan = DbMutationPlan(
-        "work_items", {"id": item["id"]}, "update",
-        request.expected_version, item, after,
-    )
-    event = SyncEventPlan(
-        "work_item", str(item["id"]), "update", after, int(after["version"]), now
-    )
-    return context.command(
-        request=request,
-        db_plans=(plan,),
-        sync_events=(event,),
-        value=after,
-    )
+    return _work_item_update_command(context, request, item, after, now)
 
 
 TaskSpaceCompiler.compile_TransitionWorkItem = _compile_TransitionWorkItem
@@ -600,6 +601,7 @@ def _reject_work_item_sync(reason: str, **details) -> None:
 
 
 def _typed_sync_request(
+    context,
     original: MutationRequest,
     handler_name: str,
     payload: Mapping[str, object],
@@ -608,7 +610,12 @@ def _typed_sync_request(
         name=f"task_space.{handler_name}",
         entity_type="task_space",
         entity_id=original.entity_id,
-        payload=payload,
+        payload={
+            "command_id": context.operation_id,
+            "space_id": context.scope.scope.space_id,
+            "payload_hash": canonical_payload_hash(payload),
+            **payload,
+        },
         expected_version=original.expected_version,
         client_updated_at=None,
     )
@@ -702,6 +709,7 @@ async def _compile_sync_work_item(self, context, request):
     family = families[0]
     if family == "scalar":
         typed = _typed_sync_request(
+            context,
             request,
             "UpdateWorkItem",
             {"patch": {field: candidate[field] for field in scalar_changes}},
@@ -711,6 +719,7 @@ async def _compile_sync_work_item(self, context, request):
         if type(candidate["child_rank"]) is not int or candidate["child_rank"] < 0:
             _reject_work_item_sync("invalid_child_rank")
         typed = _typed_sync_request(
+            context,
             request,
             "MoveWorkItem",
             {
@@ -722,6 +731,7 @@ async def _compile_sync_work_item(self, context, request):
         planned = await _compile_MoveWorkItem(self, context, typed)
     else:
         typed = _typed_sync_request(
+            context,
             request,
             "TransitionWorkItem",
             {"status_definition_id": candidate["status_definition_id"]},

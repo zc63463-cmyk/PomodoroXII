@@ -8,7 +8,8 @@ import pytest
 
 import app.mutation.unit_of_work as mutation_uow
 from app.errors import MutationRejectedError
-from app.mutation.types import canonical_payload_hash
+from app.mutation.journal import MutationJournal
+from app.mutation.types import MutationState, canonical_payload_hash
 from app.task_space.compiler import WORK_ITEM_SYNC_FIELDS, _stable_id
 from app.task_space.contracts import TaskSpacePageQuery, TaskSpaceRejected
 
@@ -232,12 +233,7 @@ async def test_update_and_detail_query_share_the_same_post_image(task_space_fixt
         operation_id="update-detail-command"
     )
 
-    # Detail (query) updated_at is server-managed via DB onupdate trigger on
-    # UPDATE; compare all semantic fields and verify DB timestamp >= event.
-    assert {
-        k: v for k, v in fetched.value.items() if k != "updated_at"
-    } == {k: v for k, v in updated.value.items() if k != "updated_at"}
-    assert fetched.value["updated_at"] >= updated.value["updated_at"]
+    assert fetched.value == updated.value
     assert len(events) == 1
     assert events[0].entity_type == "workItem"
     assert events[0].payload == updated.value
@@ -681,6 +677,19 @@ async def _seed_receipt(
         await session.commit()
 
 
+async def _assert_durable_rejection(
+    fixture, *, operation_id: str, code: str
+) -> None:
+    batch = await MutationJournal(fixture.scope.session_factory).find_batch(operation_id)
+    assert batch is not None
+    assert batch.state is MutationState.ABORTED
+    assert len(batch.result.rejected) == 1
+    rejection = batch.result.rejected[0]
+    assert rejection.operation_id == operation_id
+    assert rejection.code == code
+    assert await fixture.visible_events(operation_id=operation_id) == ()
+
+
 def _transition_payload_hash(fixture, status_category: str) -> str:
     return canonical_payload_hash(
         {"status_definition_id": fixture.status_id(status_category)}
@@ -723,7 +732,7 @@ async def test_transition_with_exact_replay_claimed_succeeds(task_space_fixture)
             {
                 "_reconcileCoordination": {
                     "kind": "replay_claimed",
-                    "rootCommandId": command_id,
+                    "rootCommandId": "session-reconcile-root",
                 }
             }
         ),
@@ -735,6 +744,61 @@ async def test_transition_with_exact_replay_claimed_succeeds(task_space_fixture)
 
     assert not isinstance(outcome, TaskSpaceRejected)
     assert outcome.value["status_definition_id"] == completed
+
+
+@pytest.mark.asyncio
+async def test_sync_transition_cannot_bypass_abandoned_session_envelope(
+    task_space_fixture,
+) -> None:
+    item = await task_space_fixture.seed_level2("fence-sync-abandoned")
+    completed = task_space_fixture.status_id("completed")
+    operation_id = "fence-sync-abandoned-cmd"
+    payload_hash = _transition_payload_hash(task_space_fixture, "completed")
+    await _seed_envelope(
+        task_space_fixture,
+        command_id=operation_id,
+        work_item_id=item["id"],
+        expected_version=item["version"],
+        target_transition="complete",
+        payload_hash=payload_hash,
+    )
+    await _seed_receipt(
+        task_space_fixture,
+        command_id=operation_id,
+        state="abandoned",
+    )
+    client_updated_at = task_space_fixture.clock.tick()
+    candidate = {
+        **item,
+        "status_definition_id": completed,
+        "completed_at": client_updated_at,
+        "cancelled_at": None,
+        "updated_at": client_updated_at,
+        "version": int(item["version"]) + 1,
+    }
+    request = task_space_fixture.entity_commands.from_sync_event(
+        task_space_fixture.scope,
+        task_space_fixture.sync_event(
+            entity_type="workItem",
+            entity_id=str(item["id"]),
+            action="update",
+            payload=candidate,
+            expected_version=int(item["version"]),
+            client_updated_at=client_updated_at,
+        ),
+    )
+    before = task_space_fixture.overlay_snapshot()
+
+    with pytest.raises(MutationRejectedError) as caught:
+        await task_space_fixture.uow.execute(
+            task_space_fixture.scope, request, operation_id
+        )
+
+    assert caught.value.rejection.code == "idempotency_conflict"
+    assert task_space_fixture.overlay_snapshot() == before
+    await _assert_durable_rejection(
+        task_space_fixture, operation_id=operation_id, code="idempotency_conflict"
+    )
 
 
 @pytest.mark.asyncio
@@ -767,6 +831,9 @@ async def test_transition_with_pending_unclaimed_receipt_rejects(task_space_fixt
     assert isinstance(outcome, TaskSpaceRejected)
     assert outcome.code == "idempotency_conflict"
     assert task_space_fixture.overlay_snapshot() == before
+    await _assert_durable_rejection(
+        task_space_fixture, operation_id=command_id, code="idempotency_conflict"
+    )
 
 
 @pytest.mark.asyncio
@@ -806,6 +873,9 @@ async def test_transition_with_replay_finished_unknown_rejects(task_space_fixtur
     assert isinstance(outcome, TaskSpaceRejected)
     assert outcome.code == "idempotency_conflict"
     assert task_space_fixture.overlay_snapshot() == before
+    await _assert_durable_rejection(
+        task_space_fixture, operation_id=command_id, code="idempotency_conflict"
+    )
 
 
 @pytest.mark.asyncio
@@ -838,6 +908,9 @@ async def test_transition_with_abandoned_receipt_rejects(task_space_fixture) -> 
     assert isinstance(outcome, TaskSpaceRejected)
     assert outcome.code == "idempotency_conflict"
     assert task_space_fixture.overlay_snapshot() == before
+    await _assert_durable_rejection(
+        task_space_fixture, operation_id=command_id, code="idempotency_conflict"
+    )
 
 
 @pytest.mark.asyncio
@@ -877,6 +950,9 @@ async def test_transition_with_malformed_coordination_rejects(task_space_fixture
     assert isinstance(outcome, TaskSpaceRejected)
     assert outcome.code == "idempotency_conflict"
     assert task_space_fixture.overlay_snapshot() == before
+    await _assert_durable_rejection(
+        task_space_fixture, operation_id=command_id, code="idempotency_conflict"
+    )
 
 
 @pytest.mark.asyncio
@@ -916,3 +992,6 @@ async def test_transition_with_identity_mismatch_rejects(task_space_fixture) -> 
     assert isinstance(outcome, TaskSpaceRejected)
     assert outcome.code == "idempotency_conflict"
     assert task_space_fixture.overlay_snapshot() == before
+    await _assert_durable_rejection(
+        task_space_fixture, operation_id=command_id, code="idempotency_conflict"
+    )
