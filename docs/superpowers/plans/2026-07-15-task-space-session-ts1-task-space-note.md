@@ -10,8 +10,8 @@
 
 ## Global Constraints
 
-- Execute this plan only after S3 and TS0 are merged and their gates are green; TS1 does not edit S3, S4, Alembic schema, ORM models, registry declarations, or TS0 seed data.
-- The revised S3 contract exposes `MutationCompileContext.command(request=..., db_plans=..., projections=(), sync_events=..., value=...)`, `MutationCompileContext.require_space(payload_space_id)`, `MutationCompileContext.authority`, the `MutationDomainPolicy.compile(context, request)` registration seam, and `MutationUnitOfWork.execute(scope, request, operation_id)`. TS1 never constructs `MutationCommand` or hashes command bytes itself.
+- Execute this plan only after S3 and TS0 are merged and their gates are green; TS1 does not edit S3, S4, Alembic schema, ORM models, registry declarations, or TS0 seed data except for Task 3's narrow S3 contract bridge below. That bridge only exposes the already-authoritative child `operation_id` to domain compilation and partitions the global literal rejection-code ownership test; it does not change S3 admission, hashing, journaling, recovery, or publication semantics.
+- The revised S3 contract exposes `MutationCompileContext.command(request=..., db_plans=..., projections=(), sync_events=..., value=...)`, `MutationCompileContext.require_space(payload_space_id)`, `MutationCompileContext.authority`, read-only `MutationCompileContext.operation_id`, the `MutationDomainPolicy.compile(context, request)` registration seam, and `MutationUnitOfWork.execute(scope, request, operation_id)`. TS1 never constructs `MutationCommand` or hashes command bytes itself.
 - The revised S3 test support exposes `mutation_fixture_factory(*, policies: tuple[MutationDomainPolicy, ...]) -> MutationFixture`. The returned fixture owns `.scope`, `.uow`, `.catalog`, `.overlay_snapshot()`, `.inject_fault(name)`, `.restart()`, `.recover()`, and `.visible_events()`; `restart()` reconstructs process objects with the same constructor policy tuple. TS1 passes its policy at construction time and wraps the result in its own `TaskSpaceFixture`; it never assumes `.clock`, `.register_domain_policy(...)`, or `.with_domain(...)` exist on the S3 fixture.
 - TS0 owns Space revision `space_010_task_space_focus_session` and the `Project`, `StatusDefinition`, `TypeDefinition`, `Label`, `WorkItemLabel`, `WorkItem`, and `WorkItemNote` ORM/Pydantic/catalog definitions. `StatusDefinition`, `TypeDefinition`, `Label`, and `WorkItemLabel` all come from the sole definition-model module `app.models.work_item_definition`; TS1 must not invent or import per-definition shadow model files. The final Project row includes `key` and `next_work_item_number`; WorkItem has no Note-promotion source columns.
 - `Project.key` is user-provided; the server strips surrounding whitespace, uppercases it, then requires the full pattern `[A-Z][A-Z0-9]{1,9}`.
@@ -1034,7 +1034,7 @@ from collections.abc import Callable, Mapping
 
 from app.focus_session.contracts import CommandReceiptState
 from app.focus_session.receipts import decode_reconcile_coordination
-from app.mutation.types import MutationCommand, MutationRequest
+from app.mutation.types import MutationCommand, MutationRequest, canonical_payload_hash
 from app.mutation.unit_of_work import MutationCompileContext
 from app.services.time import utc_now_iso_ms
 from app.task_space.document import InvalidNoteDocument, UnsupportedContentVersion
@@ -1661,13 +1661,15 @@ git commit -m "feat(task-space): add project command interface"
 ### Task 3: Implement WorkItem Allocation, Tree Moves, And Formal Status
 
 **Files:**
+- Modify: `backend/app/mutation/unit_of_work.py` (narrow contract bridge: expose the prepared child `operation_id` on `MutationCompileContext`)
 - Modify: `backend/app/task_space/compiler.py`
 - Modify: `backend/app/task_space/queries.py`
+- Modify: `backend/tests/test_mutation_journal.py` (partition literal rejection codes by S3 versus Task Space ownership)
 - Create: `backend/tests/test_task_space_tree.py`
 - Modify: `backend/tests/test_task_space_project.py`
 
 **Interfaces:**
-- Consumes: Task 2 concrete Modules/compiler, TS0 WorkItem/Project/StatusDefinition/TypeDefinition rows, Session envelope/receipt rows plus `app.focus_session.receipts`, `TaskSpacePageQuery`, S3 overlay and multi-event command support.
+- Consumes: Task 2 concrete Modules/compiler, TS0 WorkItem/Project/StatusDefinition/TypeDefinition rows, Session envelope/receipt rows plus `app.focus_session.receipts`, `TaskSpacePageQuery`, S3 overlay and multi-event command support, and the prepared child `MutationCompileContext.operation_id` required to fence REST and Sync under the same Session envelope identity.
 - Produces: `compile_CreateWorkItem`, `compile_UpdateWorkItem`, `compile_MoveWorkItem`, `compile_TransitionWorkItem`, its same-UoW Session-envelope dispatch fence, `DefaultTaskSpaceQueryModule.list_work_items/get_work_item`, and stable `invalid_work_item_tree`, `version_conflict`, and `active_child_conflict` outcomes.
 
 - [ ] **Step 1: Write failing allocation, depth, cycle, move, and status tests**
@@ -2315,8 +2317,18 @@ async def _compile_MoveWorkItem(self, context, request):
     )
 
 
-def _require_session_envelope_dispatch_claim(overlay, request) -> None:
-    command_id = str(request.payload["command_id"])
+def _require_session_envelope_dispatch_claim(context, request) -> None:
+    command_id = context.operation_id
+    declared_command_id = request.payload.get("command_id")
+    if declared_command_id is not None and str(declared_command_id) != command_id:
+        from app.mutation.types import MutationRuleViolation
+
+        raise MutationRuleViolation(
+            "idempotency_conflict",
+            {"reason": "operation_identity_mismatch"},
+            retryable=False,
+        )
+    overlay = context.authority
     envelope = overlay.get("session_command_envelope", command_id)
     if envelope is None:
         return
@@ -2354,7 +2366,7 @@ def _require_session_envelope_dispatch_claim(overlay, request) -> None:
 
 async def _compile_TransitionWorkItem(self, context, request):
     overlay = context.authority
-    _require_session_envelope_dispatch_claim(overlay, request)
+    _require_session_envelope_dispatch_claim(context, request)
     item = _require_row(overlay, "work_item", request.entity_id)
     status = _require_row(overlay, "status_definition", str(request.payload["status_definition_id"]))
     if int(item["version"]) != request.expected_version:
@@ -2420,12 +2432,13 @@ Space Module and its original operation ID.
 
 The transition authority loader must include the optional
 `session_command_envelope` and `session_command_receipt` rows keyed by
-`request.payload["command_id"]` in the same immutable overlay snapshot; an
-unloaded row is never treated as absent. Focused tests cover no envelope, exact
-claimed envelope, unclaimed/pending, finished-unknown, abandoned, malformed
-coordination, and envelope/request identity mismatch through the real UoW. Every
-rejected branch asserts a durable rejection receipt plus zero WorkItem and Sync
-effects.
+`context.operation_id` in the same immutable overlay snapshot; an unloaded row
+is never treated as absent. If a typed request declares `command_id`, it must
+equal that UoW-owned identity. Focused tests cover no envelope, exact claimed
+envelope, unclaimed/pending, finished-unknown, abandoned, malformed
+coordination, envelope/request identity mismatch, and declared/UoW operation
+identity mismatch through the real UoW. Every rejected branch asserts a durable
+rejection receipt plus zero WorkItem and Sync effects.
 
 Implement the real-entity WorkItem branch in this same step. The synthetic
 typed request is used only to reuse the closed TS1 planner; `_retain_sync_request`
@@ -2470,6 +2483,7 @@ def _reject_work_item_sync(reason: str, **details) -> None:
 
 
 def _typed_sync_request(
+    context,
     original: MutationRequest,
     handler_name: str,
     payload: Mapping[str, object],
@@ -2478,7 +2492,12 @@ def _typed_sync_request(
         name=f"task_space.{handler_name}",
         entity_type="task_space",
         entity_id=original.entity_id,
-        payload=payload,
+        payload={
+            "command_id": context.operation_id,
+            "space_id": context.scope.scope.space_id,
+            "payload_hash": canonical_payload_hash(payload),
+            **payload,
+        },
         expected_version=original.expected_version,
         client_updated_at=None,
     )
@@ -2566,6 +2585,7 @@ async def _compile_sync_work_item(self, context, request):
     family = families[0]
     if family == "scalar":
         typed = _typed_sync_request(
+            context,
             request,
             "UpdateWorkItem",
             {"patch": {field: candidate[field] for field in scalar_changes}},
@@ -2575,6 +2595,7 @@ async def _compile_sync_work_item(self, context, request):
         if type(candidate["child_rank"]) is not int or candidate["child_rank"] < 0:
             _reject_work_item_sync("invalid_child_rank")
         typed = _typed_sync_request(
+            context,
             request,
             "MoveWorkItem",
             {
@@ -2586,6 +2607,7 @@ async def _compile_sync_work_item(self, context, request):
         planned = await _compile_MoveWorkItem(self, context, typed)
     else:
         typed = _typed_sync_request(
+            context,
             request,
             "TransitionWorkItem",
             {"status_definition_id": candidate["status_definition_id"]},
@@ -2672,12 +2694,12 @@ is zero-effect, and S3 generic CAS/journal tests remain green.
 
 - [ ] **Step 8: Run Ruff and commit WorkItem tree support**
 
-Run: `.\.venv\Scripts\ruff.exe check --no-cache app/task_space/compiler.py app/task_space/queries.py tests/test_task_space_project.py tests/test_task_space_tree.py`
+Run: `.\.venv\Scripts\ruff.exe check --no-cache app/mutation/unit_of_work.py app/task_space/compiler.py app/task_space/queries.py tests/test_mutation_journal.py tests/test_task_space_project.py tests/test_task_space_tree.py`
 
 Expected: `All checks passed!`
 
 ```powershell
-git add -- app/task_space/compiler.py app/task_space/queries.py tests/test_task_space_project.py tests/test_task_space_tree.py
+git add -- app/mutation/unit_of_work.py app/task_space/compiler.py app/task_space/queries.py tests/test_mutation_journal.py tests/test_task_space_project.py tests/test_task_space_tree.py
 git commit -m "feat(task-space): enforce work item tree and status"
 ```
 

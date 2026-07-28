@@ -2734,10 +2734,12 @@ function verify(sources) {
   requireText('ts1', 'payload.pop("project_id", None)', 'Move business hash excludes project guard');
   requireText('ts1', 'Move hash shape is exactly `{"new_parent_id": ..., "child_rank": ...}`', 'closed Move hash shape');
   requireText('ts1', 'separate S3 request hash still changes when `project_id` changes', 'Move request guard remains hashed by S3');
-  requireText('ts1', 'def _require_session_envelope_dispatch_claim(overlay, request) -> None:', 'Session envelope dispatch guard');
+  requireText('ts1', 'def _require_session_envelope_dispatch_claim(context, request) -> None:', 'Session envelope dispatch guard');
+  requireText('ts1', 'command_id = context.operation_id', 'UoW-owned Session envelope identity');
+  requireText('ts1', '{"reason": "operation_identity_mismatch"}', 'declared/UoW operation identity fence');
   requireText('ts1', 'session_command_not_replay_claimed', 'abandoned/unclaimed envelope fence');
-  requireText('ts1', 'an\nunloaded row is never treated as absent', 'Session envelope authority loading');
-  const dispatchGuardCall = sources.ts1.indexOf('    _require_session_envelope_dispatch_claim(overlay, request)');
+  requireText('ts1', 'envelope = overlay.get("session_command_envelope", command_id)', 'Session envelope authority loading');
+  const dispatchGuardCall = sources.ts1.indexOf('    _require_session_envelope_dispatch_claim(context, request)');
   const guardedItemRead = sources.ts1.indexOf('    item = _require_row(overlay, "work_item", request.entity_id)', dispatchGuardCall);
   check(dispatchGuardCall >= 0 && guardedItemRead > dispatchGuardCall, 'ts1: Session envelope guard must precede WorkItem authority read');
   requireText('ts1', '/api/v1/work-items?projectId=', 'canonical WorkItem list route');
@@ -4650,7 +4652,7 @@ function main(withSelfTest) {
       ['child ID backend owner', (copy) => { copy.s3 = copy.s3.replaceAll('from app.mutation.types import bounded_child_operation_id', 'from app.mutation.unit_of_work import bounded_child_operation_id'); }],
       ['child ID backend fixture path', (copy) => { copy.s3 = copy.s3.replaceAll('task_space_session_child_operation_id_vectors.json', 'local_child_operation_id_vectors.json'); }],
       ['child ID first overflow oracle', (copy) => { copy.s3 = copy.s3.replace('childh:693301fc7e44c9a0dd041ba5cfd40b79ed955227252d05216e80359feb28df15', 'childh:' + '0'.repeat(64)); }],
-      ['child ID fixture commit staging', (copy) => { copy.s3 = copy.s3.replace(' tests/fixtures/task_space_session_child_operation_id_vectors.json tests/test_mutation_journal.py', ' tests/test_mutation_journal.py'); }],
+      ['child ID fixture commit staging', (copy) => { copy.s3 = copy.s3.replace(' tests/fixtures/task_space_session_child_operation_id_vectors.json', ''); }],
       ['child ID delimiter injectivity', (copy) => { copy.s3 = copy.s3.replace('candidate = f"childp:{len(parent_bytes)}:{parent_id}:{suffix}"', 'candidate = f"{parent_id}:{suffix}"'); }],
       ['child ID hash namespace', (copy) => { copy.s3 = copy.s3.replace('bounded = f"childh:{digest}"', 'bounded = f"childp:{digest}"'); }],
       ['double replay permission', (copy) => { copy.ts2 = copy.ts2.replace('if not root_command.payload["replay_safe"] or not envelope.replay_safe:', 'if not envelope.replay_safe:'); }],
@@ -4768,8 +4770,10 @@ function main(withSelfTest) {
       ['active recovery error', (copy) => { copy.ts0 = copy.ts0.replaceAll('active_session_recovery_required', 'active_session_missing'); }],
       ['Move hash project guard', (copy) => { copy.ts1 = copy.ts1.replace('payload.pop("project_id", None)', '# project_id remains in business hash'); }],
       ['Session envelope dispatch fence', (copy) => { copy.ts1 = copy.ts1.replace('session_command_not_replay_claimed', 'session_command_replay_unchecked'); }],
-      ['Session envelope authority load', (copy) => { copy.ts1 = copy.ts1.replace('an\nunloaded row is never treated as absent', 'an unloaded row is treated as absent'); }],
-      ['Session envelope guard ordering', (copy) => { copy.ts1 = copy.ts1.replace('    _require_session_envelope_dispatch_claim(overlay, request)\n    item = _require_row(overlay, "work_item", request.entity_id)', '    item = _require_row(overlay, "work_item", request.entity_id)\n    _require_session_envelope_dispatch_claim(overlay, request)'); }],
+      ['Session envelope UoW identity', (copy) => { copy.ts1 = copy.ts1.replace('command_id = context.operation_id', 'command_id = str(request.payload["command_id"])'); }],
+      ['Session envelope declared identity fence', (copy) => { copy.ts1 = copy.ts1.replace('{"reason": "operation_identity_mismatch"}', '{"reason": "operation_identity_unchecked"}'); }],
+      ['Session envelope authority load', (copy) => { copy.ts1 = copy.ts1.replace('envelope = overlay.get("session_command_envelope", command_id)', 'envelope = None'); }],
+      ['Session envelope guard ordering', (copy) => { copy.ts1 = copy.ts1.replace('    _require_session_envelope_dispatch_claim(context, request)\n    item = _require_row(overlay, "work_item", request.entity_id)', '    item = _require_row(overlay, "work_item", request.entity_id)\n    _require_session_envelope_dispatch_claim(context, request)'); }],
       ['winner identity selector', (copy) => { copy.ts2 += '\nwinnerSessionId: str\n'; }],
       ['exact reconcile CommandId validator', (copy) => { copy.ts2 = copy.ts2.replace('    validate_operation_id(command.command_id)\n', '    # root command ID left unchecked\n'); }],
       ['root-scoped receipt namespace reservation', (copy) => { copy.ts2 = copy.ts2.replace('    root_scoped_receipt_ids = tuple(', '    root_receipt_namespace = tuple('); }],

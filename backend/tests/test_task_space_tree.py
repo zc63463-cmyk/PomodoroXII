@@ -9,7 +9,7 @@ import pytest
 import app.mutation.unit_of_work as mutation_uow
 from app.errors import MutationRejectedError
 from app.mutation.journal import MutationJournal
-from app.mutation.types import MutationState, canonical_payload_hash
+from app.mutation.types import MutationRequest, MutationState, canonical_payload_hash
 from app.task_space.compiler import WORK_ITEM_SYNC_FIELDS, _stable_id
 from app.task_space.contracts import TaskSpacePageQuery, TaskSpaceRejected
 
@@ -795,6 +795,45 @@ async def test_sync_transition_cannot_bypass_abandoned_session_envelope(
         )
 
     assert caught.value.rejection.code == "idempotency_conflict"
+    assert task_space_fixture.overlay_snapshot() == before
+    await _assert_durable_rejection(
+        task_space_fixture, operation_id=operation_id, code="idempotency_conflict"
+    )
+
+
+@pytest.mark.asyncio
+async def test_transition_rejects_declared_command_id_mismatch_durably(
+    task_space_fixture,
+) -> None:
+    item = await task_space_fixture.seed_level2("fence-operation-identity")
+    completed = task_space_fixture.status_id("completed")
+    operation_id = "fence-operation-identity-actual"
+    request = MutationRequest.from_payload(
+        name="task_space.TransitionWorkItem",
+        entity_type="task_space",
+        entity_id=str(item["id"]),
+        payload={
+            "command_id": "fence-operation-identity-declared",
+            "space_id": task_space_fixture.space_id,
+            "payload_hash": _transition_payload_hash(
+                task_space_fixture, "completed"
+            ),
+            "status_definition_id": completed,
+        },
+        expected_version=int(item["version"]),
+        client_updated_at=None,
+    )
+    before = task_space_fixture.overlay_snapshot()
+
+    with pytest.raises(MutationRejectedError) as caught:
+        await task_space_fixture.uow.execute(
+            task_space_fixture.scope, request, operation_id
+        )
+
+    assert caught.value.rejection.code == "idempotency_conflict"
+    assert caught.value.rejection.details == {
+        "reason": "operation_identity_mismatch"
+    }
     assert task_space_fixture.overlay_snapshot() == before
     await _assert_durable_rejection(
         task_space_fixture, operation_id=operation_id, code="idempotency_conflict"
