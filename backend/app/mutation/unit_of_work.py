@@ -199,6 +199,7 @@ class MutationCompileContext:
     catalog: CompiledEntityCatalog
     db: DbMutationPlanFactory
     sync: SyncEventPlanFactory
+    operation_id: str
 
     def require_space(self, payload_space_id: str) -> None:
         if payload_space_id != self.scope.scope.space_id:
@@ -668,7 +669,11 @@ class MutationCompiler:
                 self._policies[entity_type] = policy
 
     async def compile_against_overlay(
-        self, scope: SpaceRuntimeHandle, request: MutationRequest, overlay: AuthorityOverlay
+        self,
+        scope: SpaceRuntimeHandle,
+        request: MutationRequest,
+        overlay: AuthorityOverlay,
+        operation_id: str,
     ) -> MutationCommand:
         policy = self._policies.get(request.entity_type)
         context = MutationCompileContext(
@@ -677,6 +682,7 @@ class MutationCompiler:
             self.catalog,
             DbMutationPlanFactoryImpl(self.catalog),
             SyncEventPlanFactoryImpl(self.catalog),
+            operation_id,
         )
         if policy is not None:
             return await policy.compile(context, request)
@@ -704,7 +710,9 @@ class MutationCompiler:
             if item.request is None:
                 continue
             try:
-                command = await self.compile_against_overlay(scope, item.request, overlay)
+                command = await self.compile_against_overlay(
+                    scope, item.request, overlay, item.operation_id
+                )
             except MutationRuleViolation as exc:
                 rejected.append(
                     MutationRejection(

@@ -402,12 +402,18 @@ def test_closed_error_map_and_direct_app_error_resolution() -> None:
         MutationRejectedError(ForgedRejection())
 
 
-def test_literal_mutation_rule_codes_are_a_closed_s3_subset() -> None:
+def test_literal_mutation_rule_codes_stay_within_their_owner_sets() -> None:
     app_root = Path(__file__).parents[1] / "app"
-    found: set[str] = set()
+    s3_found: set[str] = set()
+    task_space_found: set[str] = set()
     for path in app_root.rglob("*.py"):
-        found |= literal_exception_codes(path, "MutationRuleViolation")
-    assert found <= (S3_MUTATION_REJECTION_CODES | RESERVED_TS_CODES)
+        found = literal_exception_codes(path, "MutationRuleViolation")
+        if path.parent == app_root / "task_space":
+            task_space_found |= found
+        else:
+            s3_found |= found
+    assert s3_found <= S3_MUTATION_REJECTION_CODES
+    assert task_space_found <= (S3_MUTATION_REJECTION_CODES | RESERVED_TS_CODES)
 
 
 @pytest.mark.asyncio
