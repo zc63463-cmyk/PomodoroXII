@@ -27,6 +27,7 @@ from typing import Sequence, Union
 
 from alembic import op
 
+
 # revision identifiers, used by Alembic.
 revision: str = "006_sync_timestamp_normalize"
 down_revision: Union[str, None] = "005_sync_updated_at_indexes"

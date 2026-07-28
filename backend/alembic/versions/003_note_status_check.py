@@ -6,6 +6,7 @@ Create Date: 2026-07-04
 """
 from alembic import op
 
+
 revision = "003_note_status_check"
 down_revision = "002"
 branch_labels = None

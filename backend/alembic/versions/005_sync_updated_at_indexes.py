@@ -17,6 +17,7 @@ from typing import Sequence, Union
 
 from alembic import op
 
+
 # revision identifiers, used by Alembic.
 revision: str = "005_sync_updated_at_indexes"
 down_revision: Union[str, None] = "004_task_indexes"

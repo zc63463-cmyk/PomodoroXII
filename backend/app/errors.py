@@ -40,6 +40,7 @@ S3_MUTATION_REJECTION_CODES = frozenset(
         "relation_endpoint_missing",
         "entity_id_mismatch",
         "delete_payload_not_empty",
+        "invalid_note_document",
         "not_found",
     }
 )

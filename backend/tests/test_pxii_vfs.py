@@ -240,10 +240,19 @@ def test_contained_opens_cleanup_collects_all_resource_errors() -> None:
         def _close(self):
             raise OSError("notes close")
 
-    opens = ContainedSpaceOpens._create(FailingTarget(), FailingTarget(), FailingHandle())
+    class FailingStageAuthority:
+        def close(self):
+            raise OSError("stage close")
+
+    opens = ContainedSpaceOpens._create(
+        FailingTarget(),
+        FailingTarget(),
+        FailingHandle(),
+        FailingStageAuthority(),
+    )
     with pytest.raises(BaseExceptionGroup) as error:
         asyncio.run(opens.close_all())
-    assert len(error.value.exceptions) == 3
+    assert len(error.value.exceptions) == 4
 
 
 def test_build_receipt_binds_runtime_extension_to_wheel_member(tmp_path: Path) -> None:
