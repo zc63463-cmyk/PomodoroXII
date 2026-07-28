@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.errors import NotFoundError
 from app.models.project import Project
+from app.models.work_item import WorkItem
 from app.models.work_item_definition import Label, StatusDefinition, TypeDefinition
 from app.runtime.space import SpaceRuntimeHandle
 from app.task_space.contracts import (
@@ -82,4 +83,34 @@ class DefaultTaskSpaceQueryModule:
             row = await session.get(Project, project_id)
         if row is None:
             raise NotFoundError("Project not found")
+        return TaskSpaceView(_row(row))
+
+    async def list_work_items(
+        self, scope: SpaceRuntimeHandle, query: TaskSpacePageQuery
+    ) -> TaskSpacePage:
+        project_id = str(query.filters["project_id"])
+        async with scope.session_factory() as session:
+            rows = tuple(
+                _row(row) for row in (
+                    await session.execute(
+                        select(WorkItem)
+                        .where(WorkItem.project_id == project_id)
+                        .order_by(
+                            WorkItem.parent_id.isnot(None),
+                            WorkItem.parent_id.asc(),
+                            WorkItem.child_rank.asc(),
+                            WorkItem.id.asc(),
+                        )
+                    )
+                ).scalars()
+            )
+        return _page(rows, query)
+
+    async def get_work_item(
+        self, scope: SpaceRuntimeHandle, work_item_id: str
+    ) -> TaskSpaceView:
+        async with scope.session_factory() as session:
+            row = await session.get(WorkItem, work_item_id)
+        if row is None:
+            raise NotFoundError("WorkItem not found")
         return TaskSpaceView(_row(row))

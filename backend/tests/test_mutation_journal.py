@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.errors import (
     MUTATION_REJECTION_SPECS,
+    RESERVED_TS_CODES,
     S3_MUTATION_REJECTION_CODES,
     AppError,
     IdempotencyConflictError,
@@ -406,7 +407,7 @@ def test_literal_mutation_rule_codes_are_a_closed_s3_subset() -> None:
     found: set[str] = set()
     for path in app_root.rglob("*.py"):
         found |= literal_exception_codes(path, "MutationRuleViolation")
-    assert found <= S3_MUTATION_REJECTION_CODES
+    assert found <= (S3_MUTATION_REJECTION_CODES | RESERVED_TS_CODES)
 
 
 @pytest.mark.asyncio

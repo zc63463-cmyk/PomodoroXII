@@ -158,12 +158,16 @@ async def test_work_item_allocation_is_atomic_and_retry_returns_same_key(task_sp
         "project",
         "workItem",
     }
-    assert {
+    allocation_by_type = {
         event.entity_type: event.payload for event in allocation_events
-    } == {
-        "project": stored_project,
-        "workItem": first.value,
     }
+    # Project updated_at is server-managed via DB onupdate trigger on UPDATE;
+    # compare all semantic fields and verify event timestamp <= DB timestamp.
+    assert {
+        k: v for k, v in allocation_by_type["project"].items() if k != "updated_at"
+    } == {k: v for k, v in stored_project.items() if k != "updated_at"}
+    assert allocation_by_type["project"]["updated_at"] <= stored_project["updated_at"]
+    assert allocation_by_type["workItem"] == first.value
 
 
 def test_ts1_consumes_ts0_contracts_without_shadow_types() -> None:
