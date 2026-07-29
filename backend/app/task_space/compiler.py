@@ -6,6 +6,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 
+from app.errors import thaw_json
 from app.focus_session.contracts import CommandReceiptState
 from app.focus_session.receipts import decode_reconcile_coordination
 from app.mutation.types import (
@@ -741,3 +742,225 @@ async def _compile_sync_work_item(self, context, request):
 
 
 TaskSpaceCompiler.compile_sync_work_item = _compile_sync_work_item
+
+
+# -- WorkItemNote canonical row loading and post-image compilation -------------
+
+import json as _json
+
+from app.task_space.document import (
+    append_blocks as _append_blocks,
+)
+from app.task_space.document import (
+    canonical_document_json as _canonical_document_json,
+)
+from app.task_space.document import (
+    parse_document_v1 as _parse_document_v1,
+)
+from app.task_space.document import (
+    set_checklist_item_checked as _set_checklist_item_checked,
+)
+
+
+def _note_for_work_item(overlay, work_item_id: str) -> dict[str, object] | None:
+    matches = [
+        dict(row) for row in overlay.rows("work_item_note")
+        if str(row["work_item_id"]) == work_item_id
+    ]
+    if len(matches) > 1:
+        from app.mutation.types import MutationRuleViolation
+
+        raise MutationRuleViolation(
+            "invalid_note_document",
+            {"reason": "duplicate_note_rows"},
+            retryable=False,
+        )
+    return matches[0] if matches else None
+
+
+def _note_command(self, context, request, transform):
+    overlay = context.authority
+    _require_row(overlay, "work_item", str(request.payload["work_item_id"]))
+    before = _note_for_work_item(overlay, str(request.payload["work_item_id"]))
+    if before is None:
+        if request.expected_version is not None:
+            from app.mutation.types import MutationRuleViolation
+
+            raise MutationRuleViolation(
+                "version_conflict", {"current_version": None}, retryable=False
+            )
+        note_id = _stable_id("work_item_note", str(request.payload["work_item_id"]))
+        current = None
+        next_version = 1
+        operation = "insert"
+    else:
+        if int(before["version"]) != request.expected_version:
+            from app.mutation.types import MutationRuleViolation
+
+            raise MutationRuleViolation(
+                "version_conflict",
+                {"current_version": before["version"]},
+                retryable=False,
+            )
+        note_id = str(before["id"])
+        current = _parse_document_v1(_json.loads(str(before["document_json"])))
+        next_version = int(before["version"]) + 1
+        operation = "update"
+    document = transform(current)
+    now = self.now_iso_ms()
+    after = {
+        "id": note_id,
+        "work_item_id": request.payload["work_item_id"],
+        "document_json": _canonical_document_json(document),
+        "created_at": before["created_at"] if before else now,
+        "updated_at": now,
+        "version": next_version,
+    }
+    plan = DbMutationPlan(
+        "work_item_notes", {"id": note_id}, operation,
+        request.expected_version, before, after,
+    )
+    event = SyncEventPlan(
+        "work_item_note", note_id, "create" if before is None else "update",
+        after, next_version, now,
+    )
+    return context.command(
+        request=request,
+        db_plans=(plan,),
+        sync_events=(event,),
+        value=after,
+    )
+
+
+async def _compile_ReplaceDocument(self, context, request):
+    raw = thaw_json(request.payload["document"])
+    document = _parse_document_v1(raw)
+    return _note_command(self, context, request, lambda current: document)
+
+
+async def _compile_AppendBlocks(self, context, request):
+    def transform(current):
+        if current is None:
+            from app.mutation.types import MutationRuleViolation
+
+            raise MutationRuleViolation(
+                "not_found", {"entity_type": "work_item_note"}, retryable=False
+            )
+        blocks = tuple(thaw_json(block) for block in request.payload["blocks"])
+        return _append_blocks(current, blocks)
+
+    return _note_command(self, context, request, transform)
+
+
+async def _compile_ToggleChecklistItem(self, context, request):
+    def transform(current):
+        if current is None:
+            from app.mutation.types import MutationRuleViolation
+
+            raise MutationRuleViolation(
+                "not_found", {"entity_type": "work_item_note"}, retryable=False
+            )
+        return _set_checklist_item_checked(
+            current,
+            str(request.payload["item_id"]),
+            bool(request.payload["checked"]),
+        )
+
+    return _note_command(self, context, request, transform)
+
+
+TaskSpaceCompiler.compile_ReplaceDocument = _compile_ReplaceDocument
+TaskSpaceCompiler.compile_AppendBlocks = _compile_AppendBlocks
+TaskSpaceCompiler.compile_ToggleChecklistItem = _compile_ToggleChecklistItem
+
+
+# -- WorkItemNote Sync entity compilation -------------------------------------
+
+NOTE_SYNC_FIELDS = frozenset({
+    "id", "work_item_id", "document_json", "created_at", "updated_at", "version",
+})
+
+
+def _invalid_sync_note(reason: str, **details) -> None:
+    raise InvalidNoteDocument(_json.dumps(
+        {"reason": reason, **details}, sort_keys=True, separators=(",", ":")
+    ))
+
+
+def _sync_note_document(request, before):
+    expected_fields = (
+        NOTE_SYNC_FIELDS
+        if request.name == "entity.create"
+        else NOTE_SYNC_FIELDS - {"id"}
+    )
+    actual_fields = set(request.payload)
+    if actual_fields != expected_fields:
+        _invalid_sync_note(
+            "full_post_image_required",
+            missing=sorted(expected_fields - actual_fields),
+            extra=sorted(actual_fields - expected_fields),
+        )
+    candidate = {"id": request.entity_id, **dict(request.payload)}
+    version = candidate["version"]
+    if type(version) is not int:
+        _invalid_sync_note("version_must_be_integer")
+    if candidate["updated_at"] != request.client_updated_at:
+        _invalid_sync_note("updated_at_not_client_timestamp")
+    if not isinstance(candidate["document_json"], str):
+        _invalid_sync_note("document_json_must_be_string")
+    try:
+        document = _parse_document_v1(_json.loads(candidate["document_json"]))
+    except (TypeError, _json.JSONDecodeError) as exc:
+        raise InvalidNoteDocument(
+            "document_json must be canonical JSON"
+        ) from exc
+    if _canonical_document_json(document) != candidate["document_json"]:
+        _invalid_sync_note("document_json_not_canonical")
+
+    if request.name == "entity.create":
+        expected_id = _stable_id("work_item_note", str(candidate["work_item_id"]))
+        if request.expected_version is not None or version != 1:
+            _invalid_sync_note("invalid_create_version")
+        if candidate["id"] != expected_id:
+            _invalid_sync_note("noncanonical_note_identity")
+        if candidate["created_at"] != request.client_updated_at:
+            _invalid_sync_note("created_at_not_client_timestamp")
+    else:
+        if before is None:
+            from app.mutation.types import MutationRuleViolation
+
+            raise MutationRuleViolation(
+                "not_found", {"entity_type": "work_item_note"}, retryable=False
+            )
+        if str(before["id"]) != request.entity_id:
+            _invalid_sync_note("note_identity_changed")
+        if str(before["work_item_id"]) != str(candidate["work_item_id"]):
+            _invalid_sync_note("note_owner_changed")
+        if candidate["created_at"] != before["created_at"]:
+            _invalid_sync_note("created_at_changed")
+        if int(before["version"]) != request.expected_version:
+            from app.mutation.types import MutationRuleViolation
+
+            raise MutationRuleViolation(
+                "version_conflict",
+                {"current_version": before["version"]},
+                retryable=False,
+            )
+        if version != int(before["version"]) + 1:
+            _invalid_sync_note("invalid_candidate_version")
+    return candidate, document
+
+
+async def _compile_sync_work_item_note(self, context, request):
+    if request.name == "entity.delete":
+        _reject_formal_sync(request, "note_delete_requires_future_typed_command")
+    if request.name not in {"entity.create", "entity.update"}:
+        raise RuntimeError(f"unregistered WorkItemNote action: {request.name}")
+
+    owner_id = str(request.payload.get("work_item_id", ""))
+    before = _note_for_work_item(context.authority, owner_id) if owner_id else None
+    candidate, document = _sync_note_document(request, before)
+    return _note_command(self, context, request, lambda current: document)
+
+
+TaskSpaceCompiler.compile_sync_work_item_note = _compile_sync_work_item_note

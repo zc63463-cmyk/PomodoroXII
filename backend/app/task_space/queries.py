@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 
 from sqlalchemy import select
@@ -10,6 +11,7 @@ from app.errors import NotFoundError
 from app.models.project import Project
 from app.models.work_item import WorkItem
 from app.models.work_item_definition import Label, StatusDefinition, TypeDefinition
+from app.models.work_item_note import WorkItemNote
 from app.runtime.space import SpaceRuntimeHandle
 from app.task_space.contracts import (
     TaskSpaceDefinitionsView,
@@ -114,3 +116,24 @@ class DefaultTaskSpaceQueryModule:
         if row is None:
             raise NotFoundError("WorkItem not found")
         return TaskSpaceView(_row(row))
+
+    async def read_note(
+        self: "DefaultTaskSpaceQueryModule",
+        scope: SpaceRuntimeHandle,
+        work_item_id: str,
+    ) -> TaskSpaceView | None:
+        async with scope.session_factory() as session:
+            row = (
+                await session.execute(
+                    select(WorkItemNote).where(
+                        WorkItemNote.work_item_id == work_item_id
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        value = _row(row)
+        raw = json.loads(str(value["document_json"]))
+        value["content_version"] = raw.get("contentVersion")
+        value["write_supported"] = raw.get("contentVersion") == 1
+        return TaskSpaceView(value)
