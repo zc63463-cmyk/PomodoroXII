@@ -8,9 +8,28 @@ import pytest
 
 import app.mutation.unit_of_work as mutation_uow
 from app.errors import MutationRejectedError
+from app.models.work_item_note import WorkItemNote
 from app.task_space.compiler import NOTE_SYNC_FIELDS, _stable_id
 from app.task_space.contracts import TaskSpaceRejected
 from app.task_space.document import canonical_document_json, parse_document_v1
+
+
+def _post_image(value) -> dict[str, object]:
+    return {field: value[field] for field in NOTE_SYNC_FIELDS}
+
+
+async def _assert_exact_note_post_image(
+    fixture, *, operation_id: str, result
+) -> dict[str, object]:
+    stored = await fixture.queries.read_note(
+        fixture.scope, str(result.value["work_item_id"])
+    )
+    assert stored is not None
+    assert _post_image(stored.value) == result.value
+    events = await fixture.visible_events(operation_id=operation_id)
+    assert len(events) == 1
+    assert events[0].payload == result.value
+    return dict(stored.value)
 
 
 @pytest.mark.asyncio
@@ -49,6 +68,61 @@ async def test_replace_append_and_toggle_emit_full_canonical_post_images(
     )
     assert stored_item.value["status_definition_id"] == item["status_definition_id"]
     assert stored_item.value["version"] == item["version"]
+
+
+@pytest.mark.asyncio
+async def test_note_mutations_are_monotonic_and_match_db_result_and_event(
+    task_space_fixture,
+) -> None:
+    item = await task_space_fixture.seed_level3("note-post-image")
+    initial = parse_document_v1({
+        "contentVersion": 1,
+        "blocks": [{
+            "blockId": "c1",
+            "type": "checklist",
+            "items": [{
+                "itemId": "check-1",
+                "text": "Check",
+                "checked": False,
+                "children": [],
+            }],
+        }],
+    })
+
+    created = await task_space_fixture.replace_document(
+        "note-post-image-create", item["id"], None, initial
+    )
+    await _assert_exact_note_post_image(
+        task_space_fixture,
+        operation_id="note-post-image-create",
+        result=created,
+    )
+    appended = await task_space_fixture.append_blocks(
+        "note-post-image-append",
+        item["id"],
+        created.value["version"],
+        ({"blockId": "p2", "type": "paragraph", "text": "Next"},),
+    )
+    await _assert_exact_note_post_image(
+        task_space_fixture,
+        operation_id="note-post-image-append",
+        result=appended,
+    )
+    toggled = await task_space_fixture.toggle_checklist_item(
+        "note-post-image-toggle",
+        item["id"],
+        appended.value["version"],
+        "check-1",
+        True,
+    )
+    await _assert_exact_note_post_image(
+        task_space_fixture,
+        operation_id="note-post-image-toggle",
+        result=toggled,
+    )
+
+    assert created.value["updated_at"] < appended.value["updated_at"]
+    assert appended.value["updated_at"] < toggled.value["updated_at"]
 
 
 @pytest.mark.asyncio
@@ -279,6 +353,118 @@ async def test_sync_note_cas_mismatch_is_version_conflict(
     assert await task_space_fixture.visible_events(operation_id="sync-cas") == ()
 
 
+def _invalid_sync_documents() -> tuple[tuple[str, dict[str, object]], ...]:
+    depth_three = {
+        "contentVersion": 1,
+        "blocks": [{
+            "blockId": "deep",
+            "type": "checklist",
+            "items": [{
+                "itemId": "level-1",
+                "text": "One",
+                "checked": False,
+                "children": [{
+                    "itemId": "level-2",
+                    "text": "Two",
+                    "checked": False,
+                    "children": [{
+                        "itemId": "level-3",
+                        "text": "Three",
+                        "checked": False,
+                        "children": [],
+                    }],
+                }],
+            }],
+        }],
+    }
+    reference_item = {
+        "contentVersion": 1,
+        "blocks": [{
+            "blockId": "reference",
+            "type": "checklist",
+            "items": [{
+                "itemId": "reference-item",
+                "text": "Reference",
+                "checked": False,
+                "children": [],
+                "workItemId": "work-item-1",
+                "titleSnapshot": "Not supported",
+            }],
+        }],
+    }
+    oversized = {
+        "contentVersion": 1,
+        "blocks": [
+            {
+                "blockId": f"oversized-{index}",
+                "type": "paragraph",
+                "text": "x" * 10_000,
+            }
+            for index in range(14)
+        ],
+    }
+    return (
+        ("richer-block", {
+            "contentVersion": 1,
+            "blocks": [{"blockId": "code", "type": "code", "text": "no"}],
+        }),
+        ("oversized", oversized),
+        ("depth-three", depth_three),
+        ("work-item-reference", reference_item),
+    )
+
+
+@pytest.mark.parametrize(("case", "document"), _invalid_sync_documents())
+@pytest.mark.asyncio
+async def test_sync_note_invalid_documents_are_policy_owned_zero_effect_rejections(
+    task_space_fixture,
+    monkeypatch,
+    case: str,
+    document: dict[str, object],
+) -> None:
+    note = await task_space_fixture.seed_note(f"sync-invalid-{case}")
+    client_updated_at = task_space_fixture.clock.tick()
+    payload = {
+        **note,
+        "document_json": json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "updated_at": client_updated_at,
+        "version": int(note["version"]) + 1,
+    }
+    request = task_space_fixture.entity_commands.from_sync_event(
+        task_space_fixture.scope,
+        task_space_fixture.sync_event(
+            entity_type="workItemNote",
+            entity_id=str(note["id"]),
+            action="update",
+            payload=payload,
+            expected_version=int(note["version"]),
+            client_updated_at=client_updated_at,
+        ),
+    )
+    operation_id = f"sync-invalid-{case}"
+    before = task_space_fixture.overlay_snapshot()
+
+    async def poison_generic_fallback(*args, **kwargs):
+        raise AssertionError("workItemNote reached generic fallback")
+
+    monkeypatch.setattr(
+        mutation_uow, "compile_catalog_entity_command", poison_generic_fallback
+    )
+    with pytest.raises(MutationRejectedError) as caught:
+        await task_space_fixture.uow.execute(
+            task_space_fixture.scope, request, operation_id
+        )
+
+    assert caught.value.rejection.code == "invalid_note_document"
+    assert task_space_fixture.overlay_snapshot() == before
+    assert await task_space_fixture.visible_events(operation_id=operation_id) == ()
+
+
 @pytest.mark.asyncio
 async def test_sync_note_accepted_post_image_matches_typed_replace(
     task_space_fixture, monkeypatch,
@@ -316,6 +502,10 @@ async def test_sync_note_accepted_post_image_matches_typed_replace(
     sync_result = await task_space_fixture.uow.execute(
         task_space_fixture.scope, request, "sync-match"
     )
+    assert sync_result.value == payload
+    await _assert_exact_note_post_image(
+        task_space_fixture, operation_id="sync-match", result=sync_result
+    )
 
     note2 = await task_space_fixture.seed_note("sync-match-typed")
     typed_result = await task_space_fixture.replace_document(
@@ -328,6 +518,8 @@ async def test_sync_note_accepted_post_image_matches_typed_replace(
     sync_doc = json.loads(sync_result.value["document_json"])
     typed_doc = json.loads(typed_result.value["document_json"])
     assert sync_doc == typed_doc
+    assert set(sync_result.value) == set(typed_result.value) == NOTE_SYNC_FIELDS
+    assert sync_result.value["version"] == typed_result.value["version"]
 
 
 def test_note_sync_fields_shape() -> None:
@@ -360,3 +552,28 @@ async def test_read_note_returns_content_version_and_write_supported(
     assert result is not None
     assert result.value["content_version"] == 1
     assert result.value["write_supported"] is True
+
+
+@pytest.mark.asyncio
+async def test_read_note_preserves_unsupported_content_version(
+    task_space_fixture,
+) -> None:
+    note = await task_space_fixture.seed_note("read-unsupported-note")
+    unsupported_json = (
+        '{"blocks":[{"blockId":"future","payload":{"kind":"future"},'
+        '"type":"future"}],"contentVersion":2}'
+    )
+    async with task_space_fixture.scope.session_factory() as session:
+        row = await session.get(WorkItemNote, str(note["id"]))
+        assert row is not None
+        row.document_json = unsupported_json
+        await session.commit()
+
+    result = await task_space_fixture.queries.read_note(
+        task_space_fixture.scope, str(note["work_item_id"])
+    )
+
+    assert result is not None
+    assert result.value["document_json"] == unsupported_json
+    assert result.value["content_version"] == 2
+    assert result.value["write_supported"] is False
