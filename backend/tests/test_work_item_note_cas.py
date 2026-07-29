@@ -577,3 +577,187 @@ async def test_read_note_preserves_unsupported_content_version(
     assert result.value["document_json"] == unsupported_json
     assert result.value["content_version"] == 2
     assert result.value["write_supported"] is False
+
+
+# -- Non-canonical document_json and invalid sync envelope rejections ----------
+
+
+def _valid_note_document_json(text: str = "Valid") -> str:
+    return canonical_document_json(parse_document_v1({
+        "contentVersion": 1,
+        "blocks": [{"blockId": "b1", "type": "paragraph", "text": text}],
+    }))
+
+
+async def _assert_sync_note_rejection_zero_effect(
+    fixture,
+    monkeypatch,
+    *,
+    entity_id: str,
+    action: str,
+    payload: dict[str, object],
+    expected_version: int | None,
+    client_updated_at: str,
+    operation_id: str,
+    expected_code: str,
+    read_work_item_id: str,
+    expected_document_json: str | None,
+) -> None:
+    """Execute a sync request through the real UoW and assert zero-effect rejection."""
+    event = fixture.sync_event(
+        entity_type="workItemNote",
+        entity_id=entity_id,
+        action=action,
+        payload=payload,
+        expected_version=expected_version,
+        client_updated_at=client_updated_at,
+    )
+    request = fixture.entity_commands.from_sync_event(fixture.scope, event)
+    before = fixture.overlay_snapshot()
+
+    async def poison_generic_fallback(*args, **kwargs):
+        raise AssertionError("workItemNote reached generic fallback")
+
+    monkeypatch.setattr(
+        mutation_uow, "compile_catalog_entity_command", poison_generic_fallback
+    )
+    with pytest.raises(MutationRejectedError) as caught:
+        await fixture.uow.execute(fixture.scope, request, operation_id)
+    assert caught.value.rejection.code == expected_code
+    assert fixture.overlay_snapshot() == before
+    assert await fixture.visible_events(operation_id=operation_id) == ()
+    stored = await fixture.queries.read_note(fixture.scope, read_work_item_id)
+    if expected_document_json is None:
+        assert stored is None
+    else:
+        assert stored is not None
+        assert stored.value["document_json"] == expected_document_json
+
+
+@pytest.mark.asyncio
+async def test_sync_note_noncanonical_json_is_policy_owned_zero_effect_rejection(
+    task_space_fixture, monkeypatch,
+) -> None:
+    note = await task_space_fixture.seed_note("sync-noncanonical")
+    client_updated_at = task_space_fixture.clock.tick()
+    noncanonical_json = '{ "contentVersion": 1, "blocks": [] }'
+    payload = {
+        **note,
+        "document_json": noncanonical_json,
+        "updated_at": client_updated_at,
+        "version": int(note["version"]) + 1,
+    }
+    await _assert_sync_note_rejection_zero_effect(
+        task_space_fixture,
+        monkeypatch,
+        entity_id=str(note["id"]),
+        action="update",
+        payload=payload,
+        expected_version=int(note["version"]),
+        client_updated_at=client_updated_at,
+        operation_id="sync-noncanonical",
+        expected_code="invalid_note_document",
+        read_work_item_id=str(note["work_item_id"]),
+        expected_document_json=note["document_json"],
+    )
+
+
+_ENVELOPE_VECTORS = [
+    ("create-identity", "create", "invalid_note_document"),
+    ("update-identity", "update", "invalid_note_document"),
+    ("update-owner", "update", "not_found"),
+    ("update-created-at", "update", "invalid_note_document"),
+    ("create-version-not-one", "create", "invalid_note_document"),
+    ("update-version-skip", "update", "invalid_note_document"),
+    ("version-non-integer", "update", "invalid_note_document"),
+    ("updated-at-mismatch", "update", "invalid_note_document"),
+    ("create-created-at-mismatch", "create", "invalid_note_document"),
+    ("document-json-non-string", "update", "invalid_note_document"),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "action", "expected_code"),
+    _ENVELOPE_VECTORS,
+    ids=[v[0] for v in _ENVELOPE_VECTORS],
+)
+@pytest.mark.asyncio
+async def test_sync_note_invalid_envelopes_are_policy_owned_zero_effect_rejections(
+    task_space_fixture,
+    monkeypatch,
+    case: str,
+    action: str,
+    expected_code: str,
+) -> None:
+    document_json = _valid_note_document_json(case)
+
+    if action == "create":
+        owner = await task_space_fixture.seed_level3(f"env-{case}")
+        note_id = _stable_id("work_item_note", str(owner["id"]))
+        client_updated_at = task_space_fixture.clock.tick()
+        payload: dict[str, object] = {
+            "id": note_id,
+            "work_item_id": owner["id"],
+            "document_json": document_json,
+            "created_at": client_updated_at,
+            "updated_at": client_updated_at,
+            "version": 1,
+        }
+        entity_id = note_id
+        expected_version: int | None = None
+        read_work_item_id = str(owner["id"])
+        expected_doc_json: str | None = None
+    else:
+        note = await task_space_fixture.seed_note(f"env-{case}")
+        client_updated_at = task_space_fixture.clock.tick()
+        payload = {
+            **note,
+            "document_json": document_json,
+            "updated_at": client_updated_at,
+            "version": int(note["version"]) + 1,
+        }
+        entity_id = str(note["id"])
+        expected_version = int(note["version"])
+        read_work_item_id = str(note["work_item_id"])
+        expected_doc_json = note["document_json"]
+
+    if case in ("create-identity", "update-identity"):
+        payload["id"] = "0" * 32
+        entity_id = "0" * 32
+    elif case == "update-owner":
+        owner2 = await task_space_fixture.seed_level3(f"env-{case}-owner2")
+        payload["work_item_id"] = str(owner2["id"])
+    elif case == "update-created-at":
+        payload["created_at"] = task_space_fixture.clock.tick()
+    elif case == "create-version-not-one":
+        payload["version"] = 2
+    elif case == "update-version-skip":
+        payload["version"] = int(note["version"]) + 2
+    elif case == "version-non-integer":
+        payload["version"] = "2"
+    elif case == "updated-at-mismatch":
+        payload["updated_at"] = task_space_fixture.clock.tick()
+    elif case == "create-created-at-mismatch":
+        payload["created_at"] = task_space_fixture.clock.tick()
+    elif case == "document-json-non-string":
+        payload["document_json"] = {"contentVersion": 1, "blocks": []}
+
+    await _assert_sync_note_rejection_zero_effect(
+        task_space_fixture,
+        monkeypatch,
+        entity_id=entity_id,
+        action=action,
+        payload=payload,
+        expected_version=expected_version,
+        client_updated_at=client_updated_at,
+        operation_id=f"env-{case}",
+        expected_code=expected_code,
+        read_work_item_id=read_work_item_id,
+        expected_document_json=expected_doc_json,
+    )
+
+    if case == "update-owner":
+        stored2 = await task_space_fixture.queries.read_note(
+            task_space_fixture.scope, str(owner2["id"])
+        )
+        assert stored2 is None
