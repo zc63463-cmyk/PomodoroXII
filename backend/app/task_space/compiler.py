@@ -807,7 +807,12 @@ def _note_command(self, context, request, transform):
         next_version = int(before["version"]) + 1
         operation = "update"
     document = transform(current)
-    now = self.now_iso_ms()
+    candidate_now = request.client_updated_at or self.now_iso_ms()
+    now = (
+        candidate_now
+        if before is None
+        else _monotonic_updated_at(str(before["updated_at"]), candidate_now)
+    )
     after = {
         "id": note_id,
         "work_item_id": request.payload["work_item_id"],
