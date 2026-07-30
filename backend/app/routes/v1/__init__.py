@@ -19,12 +19,13 @@ def build_v1_router() -> APIRouter:
         responses=V1_VALIDATION_ERROR_RESPONSES,
     )
 
-    # --- Existing meta-layer routers (master token) ---
+    # Sub-routers (alphabetically sorted; mounted in groups below).
     from app.routes.v1.auth import router as auth_router
     from app.routes.v1.folders import router as folders_router
     from app.routes.v1.habits import router as habits_router
     from app.routes.v1.meta import router as meta_router
     from app.routes.v1.notes import router as notes_router
+    from app.routes.v1.projects import router as projects_router
     from app.routes.v1.quick_notes import router as quick_notes_router
     from app.routes.v1.reflections import router as reflections_router
     from app.routes.v1.schedules import router as schedules_router
@@ -32,10 +33,10 @@ def build_v1_router() -> APIRouter:
     from app.routes.v1.spaces import router as spaces_router
     from app.routes.v1.stats import router as stats_router
     from app.routes.v1.sync import router as sync_router
-
-    # --- Space-scoped entity routers (space token) ---
     from app.routes.v1.time_blocks import router as time_blocks_router
     from app.routes.v1.trash import router as trash_router
+    from app.routes.v1.work_item_notes import router as work_item_notes_router
+    from app.routes.v1.work_items import router as work_items_router
 
     # Meta-layer (master token required).
     router.include_router(auth_router, prefix="/auth", tags=["auth"])
@@ -60,5 +61,12 @@ def build_v1_router() -> APIRouter:
     router.include_router(stats_router, prefix="/stats", tags=["stats"])
     router.include_router(settings_router, prefix="/settings", tags=["settings"])
     router.include_router(sync_router, prefix="/sync", tags=["sync"])
+
+    # Task Space contract routers (space token required).
+    router.include_router(projects_router, prefix="/projects", tags=["projects"])
+    router.include_router(work_items_router, prefix="/work-items", tags=["work-items"])
+    router.include_router(
+        work_item_notes_router, prefix="/work-items", tags=["work-item-notes"]
+    )
 
     return router

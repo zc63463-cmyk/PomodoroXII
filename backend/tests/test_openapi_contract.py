@@ -427,3 +427,64 @@ def test_v1_openapi_and_orm_have_no_richer_note_or_promotion_surface() -> None:
         "source_block_id",
         "source_item_id",
     }.isdisjoint(WorkItem.__table__.columns.keys())
+
+
+# ─── Task 6: Task Space route presence and legacy absence gate ─────
+
+
+class TestTaskSpaceOpenAPIGate:
+    """Task Space routes must be present and legacy routes absent."""
+
+    def test_openapi_contains_task_space_project_routes(self) -> None:
+        schema = app.openapi()
+        paths = schema["paths"]
+        assert "/api/v1/projects" in paths
+        assert "get" in paths["/api/v1/projects"]
+        assert "post" in paths["/api/v1/projects"]
+        assert "/api/v1/projects/definitions" in paths
+        assert "/api/v1/projects/{project_id}" in paths
+
+    def test_openapi_contains_task_space_work_item_routes(self) -> None:
+        schema = app.openapi()
+        paths = schema["paths"]
+        assert "/api/v1/work-items" in paths
+        assert "get" in paths["/api/v1/work-items"]
+        assert "post" in paths["/api/v1/work-items"]
+        assert "/api/v1/work-items/{work_item_id}" in paths
+
+    def test_openapi_contains_task_space_note_routes(self) -> None:
+        schema = app.openapi()
+        paths = schema["paths"]
+        note_paths = {
+            path
+            for path in paths
+            if path.startswith("/api/v1/work-items/{work_item_id}/note")
+        }
+        assert (
+            "/api/v1/work-items/{work_item_id}/note" in note_paths
+        )
+        assert (
+            "/api/v1/work-items/{work_item_id}/note/append-blocks"
+            in note_paths
+        )
+        assert (
+            "/api/v1/work-items/{work_item_id}/note/toggle-checklist-item"
+            in note_paths
+        )
+
+    def test_openapi_excludes_legacy_tasks_route(self) -> None:
+        schema = app.openapi()
+        assert "/api/v1/tasks" not in schema["paths"]
+
+    def test_openapi_excludes_work_items_tree_route(self) -> None:
+        schema = app.openapi()
+        assert "/api/v1/work-items/tree" not in schema["paths"]
+        assert not any(
+            path.endswith("/work-items/tree")
+            for path in schema["paths"]
+        )
+
+    def test_openapi_excludes_generic_note_command_routes(self) -> None:
+        schema = app.openapi()
+        for path in schema["paths"]:
+            assert "/note/commands" not in path
