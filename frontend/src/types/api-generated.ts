@@ -13,13 +13,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Setup Password
-         * @description First-time admin password setup.
-         *
-         *     Stores ``hash_password(password)`` in a ``MetaSetting`` row with
-         *     ``key="admin_password"``.  Returns 409 if a password is already set.
-         */
+        /** Setup Password */
         post: operations["setup_password_api_v1_auth_setup_post"];
         delete?: never;
         options?: never;
@@ -36,12 +30,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Login
-         * @description Verify the admin password and issue a master JWT.
-         *
-         *     Returns 401 if the password is wrong or no password has been set.
-         */
+        /** Login */
         post: operations["login_api_v1_auth_login_post"];
         delete?: never;
         options?: never;
@@ -56,13 +45,27 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Verify Token
-         * @description Verify the current Bearer token and return its claims.
-         */
+        /** Verify Token */
         get: operations["verify_token_api_v1_auth_verify_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke Tokens */
+        post: operations["revoke_tokens_api_v1_auth_revoke_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -84,7 +87,7 @@ export interface paths {
         put?: never;
         /**
          * Create Space
-         * @description Create a new space: insert a row, create directories, commit.
+         * @description Provision a Space before publishing its Meta registration.
          */
         post: operations["create_space_api_v1_spaces_post"];
         delete?: never;
@@ -215,110 +218,6 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/tasks": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Tasks
-         * @description List tasks with optional status / priority / search filters.
-         */
-        get: operations["list_tasks_api_v1_tasks_get"];
-        put?: never;
-        /**
-         * Create Task
-         * @description Create a new task.
-         */
-        post: operations["create_task_api_v1_tasks_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/tasks/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Task
-         * @description Return a single task by id.
-         */
-        get: operations["get_task_api_v1_tasks__id__get"];
-        /**
-         * Update Task
-         * @description Update an existing task (partial update).
-         */
-        put: operations["update_task_api_v1_tasks__id__put"];
-        post?: never;
-        /**
-         * Delete Task
-         * @description Delete a task (idempotent, records a tombstone for sync).
-         */
-        delete: operations["delete_task_api_v1_tasks__id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Sessions
-         * @description List sessions, optionally filtered by type (newest first).
-         */
-        get: operations["list_sessions_api_v1_sessions_get"];
-        put?: never;
-        /**
-         * Create Session
-         * @description Create a new pomodoro session.
-         */
-        post: operations["create_session_api_v1_sessions_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Session
-         * @description Return a single session by id.
-         */
-        get: operations["get_session_api_v1_sessions__id__get"];
-        /**
-         * Update Session
-         * @description Update an existing session (partial update).
-         */
-        put: operations["update_session_api_v1_sessions__id__put"];
-        post?: never;
-        /**
-         * Delete Session
-         * @description Delete a session.
-         */
-        delete: operations["delete_session_api_v1_sessions__id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -569,9 +468,9 @@ export interface paths {
          * Convert Quick Note
          * @description Convert a quick note into a full Note (transactional).
          *
-         *     - Creates a Note with the quick note's content/tags/folder_id.
-         *     - Marks the quick note as archived (``archived_at`` + ``migrated_to_note_id``).
-         *     - Copies ``memo_comments`` rows to the new Note.
+         *     Delegates to ``KnowledgeStore.convert_quick_note`` via the durable
+         *     mutation pipeline, which creates the Note, archives the QuickNote,
+         *     and copies memo_comments atomically.
          *
          *     The original quick note row is kept (GET /{id} still 200) but excluded
          *     from GET /quick-notes listings. Repeated convert returns 409.
@@ -874,7 +773,7 @@ export interface paths {
         put?: never;
         /**
          * Cleanup Expired
-         * @description Remove sync tombstones older than the TTL and return the count purged.
+         * @description Retain the compatibility route while S1 rejects unsafe cleanup.
          */
         post: operations["cleanup_expired_api_v1_trash_cleanup_post"];
         delete?: never;
@@ -894,11 +793,12 @@ export interface paths {
         put?: never;
         /**
          * Restore Item
-         * @description Restore a trashed item by clearing its ``trashed_at`` timestamp.
+         * @description Restore a trashed item via the durable mutation pipeline.
          *
-         *     For notes, also coordinates with the filesystem to move the ``.md``
-         *     file back from ``.trash/`` via ``NoteService.restore``. Other entity
-         *     types only clear the ORM ``trashed_at`` column.
+         *     Notes, folders, and quick notes all clear ``trashed_at`` through
+         *     the KnowledgeStore, which handles DB update, sync events, and
+         *     projections atomically.  For notes, the filesystem ``.trash/``
+         *     file is moved back best-effort after the durable commit.
          */
         post: operations["restore_item_api_v1_trash__entity_type___entity_id__restore_post"];
         delete?: never;
@@ -919,94 +819,14 @@ export interface paths {
         post?: never;
         /**
          * Purge Item
-         * @description Permanently delete a trashed item (hard delete + sync tombstone).
+         * @description Permanently delete a trashed item via the durable mutation pipeline.
          *
-         *     For notes, also purges the filesystem ``.trash/`` entry via
-         *     ``fs.purge`` (deletes the ``.md`` file + fs SQLite index rows).
-         *     For folders, descendant folders discovered via ``CascadeService`` are
-         *     also hard-deleted and tombstoned.
+         *     Notes and folders are purged through the KnowledgeStore, which
+         *     handles DB deletion, tombstone creation, sync events, and
+         *     projections atomically.  Filesystem cleanup for notes is
+         *     best-effort after the durable commit.
          */
         delete: operations["purge_item_api_v1_trash__entity_type___entity_id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/overview": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Overview
-         * @description Return session counts and total durations by time period.
-         */
-        get: operations["stats_overview_api_v1_stats_overview_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/focus-trend": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Focus Trend
-         * @description Return daily focus trend (count + duration) for the last *days* days.
-         */
-        get: operations["stats_focus_trend_api_v1_stats_focus_trend_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/task-distribution": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Task Distribution
-         * @description Return task distribution grouped by status and by priority.
-         */
-        get: operations["stats_task_distribution_api_v1_stats_task_distribution_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/daily-detail": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Daily Detail
-         * @description Return session count and total duration for a specific date.
-         */
-        get: operations["stats_daily_detail_api_v1_stats_daily_detail_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1200,6 +1020,222 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Projects
+         * @description List projects with optional pagination.
+         */
+        get: operations["list_projects_api_v1_projects_get"];
+        put?: never;
+        /**
+         * Create Project
+         * @description Create a project via the TaskSpace command module.
+         */
+        post: operations["create_project_api_v1_projects_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/definitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Definitions
+         * @description List system status, type, and label definitions.
+         */
+        get: operations["list_definitions_api_v1_projects_definitions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Project
+         * @description Get a single project by ID.
+         */
+        get: operations["get_project_api_v1_projects__project_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Work Items
+         * @description List work items with optional project filter and pagination.
+         */
+        get: operations["list_work_items_api_v1_work_items_get"];
+        put?: never;
+        /**
+         * Create Work Item
+         * @description Create a work item via the TaskSpace command module.
+         */
+        post: operations["create_work_item_api_v1_work_items_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}/move": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Move Work Item
+         * @description Move a work item to a new parent.
+         */
+        post: operations["move_work_item_api_v1_work_items__work_item_id__move_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}/transition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Transition Work Item
+         * @description Transition a work item to a new status.
+         */
+        post: operations["transition_work_item_api_v1_work_items__work_item_id__transition_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Work Item
+         * @description Get a single work item by ID.
+         */
+        get: operations["get_work_item_api_v1_work_items__work_item_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Work Item
+         * @description Update mutable fields of a work item.
+         */
+        patch: operations["update_work_item_api_v1_work_items__work_item_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}/note": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Note
+         * @description Read the note document for a work item.
+         */
+        get: operations["read_note_api_v1_work_items__work_item_id__note_get"];
+        /**
+         * Replace Document
+         * @description Replace the entire note document.
+         */
+        put: operations["replace_document_api_v1_work_items__work_item_id__note_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}/note/append-blocks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Append Blocks
+         * @description Append blocks to the note document.
+         */
+        post: operations["append_blocks_api_v1_work_items__work_item_id__note_append_blocks_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}/note/toggle-checklist-item": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Toggle Checklist Item
+         * @description Toggle a checklist item in the note document.
+         */
+        post: operations["toggle_checklist_item_api_v1_work_items__work_item_id__note_toggle_checklist_item_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -1220,10 +1256,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readiness Check
+         * @description Verify meta database connectivity without exposing failures.
+         */
+        get: operations["readiness_check_api_ready_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Metrics
+         * @description Expose minimal Prometheus metrics to authenticated operators.
+         */
+        get: operations["metrics_api_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AppendBlocksRequest */
+        AppendBlocksRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Blocks */
+            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock"])[];
+        };
         /**
          * AuthLoginResponse
          * @description Master-token response returned after login.
@@ -1233,6 +1322,14 @@ export interface components {
             access_token: string;
             /** Token Type */
             token_type: string;
+        };
+        /**
+         * AuthRevokeResponse
+         * @description Stable response after advancing the credential epoch.
+         */
+        AuthRevokeResponse: {
+            /** Message */
+            message: string;
         };
         /**
          * AuthSetupResponse
@@ -1254,27 +1351,64 @@ export interface components {
             /** Type */
             type: string;
         };
-        /**
-         * CountDuration
-         * @description Count and aggregate duration shared by focus statistics.
-         */
-        CountDuration: {
-            /** Count */
-            count: number;
-            /** Duration */
-            duration: number;
+        /** ChecklistBlock */
+        ChecklistBlock: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "checklist";
+            /** Blockid */
+            blockId: string;
+            /** Items */
+            items: components["schemas"]["ChecklistItem"][];
         };
-        /**
-         * DailyDetailResponse
-         * @description Focus aggregates for one requested date.
-         */
-        DailyDetailResponse: {
-            /** Date */
-            date: string;
-            /** Count */
-            count: number;
-            /** Duration */
-            duration: number;
+        /** ChecklistItem */
+        ChecklistItem: {
+            /** Itemid */
+            itemId: string;
+            /** Text */
+            text: string;
+            /** Checked */
+            checked: boolean;
+            /** Children */
+            children?: components["schemas"]["ChecklistItem"][];
+        };
+        /** CreateProjectRequest */
+        CreateProjectRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Key */
+            key: string;
+            /** Name */
+            name: string;
+        };
+        /** CreateWorkItemRequest */
+        CreateWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Projectid */
+            projectId: string;
+            /** Title */
+            title: string;
+            /** Description */
+            description?: string | null;
+            /** Parentid */
+            parentId?: string | null;
+            /** Typedefinitionid */
+            typeDefinitionId?: string | null;
+            /** Statusdefinitionid */
+            statusDefinitionId?: string | null;
+            /** Priority */
+            priority?: string | null;
         };
         /**
          * EntityCategory
@@ -1347,6 +1481,8 @@ export interface components {
             sync_entity_type?: string | null;
             /** Pull Key */
             pull_key?: string | null;
+            /** @default timestamp_lww */
+            sync_conflict_policy: components["schemas"]["SyncConflictPolicy"];
         };
         /**
          * ErrorResponse
@@ -1386,26 +1522,6 @@ export interface components {
              * @default
              */
             description: string;
-        };
-        /**
-         * FocusTrendPoint
-         * @description One date in a focus trend.
-         */
-        FocusTrendPoint: {
-            /** Date */
-            date: string;
-            /** Count */
-            count: number;
-            /** Duration */
-            duration: number;
-        };
-        /**
-         * FocusTrendResponse
-         * @description Daily focus aggregates for a requested date range.
-         */
-        FocusTrendResponse: {
-            /** Data */
-            data: components["schemas"]["FocusTrendPoint"][];
         };
         /**
          * FolderCreate
@@ -1683,6 +1799,19 @@ export interface components {
             status: string;
             /** Version */
             version: string;
+        };
+        /** MoveWorkItemRequest */
+        MoveWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Parentid */
+            parentId?: string | null;
         };
         /**
          * NoteCreate
@@ -2016,50 +2145,6 @@ export interface components {
              */
             has_more: boolean;
         };
-        /** PaginatedResponse[SessionResponse] */
-        PaginatedResponse_SessionResponse_: {
-            /** Items */
-            items: components["schemas"]["SessionResponse"][];
-            /** Total */
-            total: number;
-            /**
-             * Limit
-             * @default 50
-             */
-            limit: number;
-            /**
-             * Offset
-             * @default 0
-             */
-            offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
-        };
-        /** PaginatedResponse[TaskResponse] */
-        PaginatedResponse_TaskResponse_: {
-            /** Items */
-            items: components["schemas"]["TaskResponse"][];
-            /** Total */
-            total: number;
-            /**
-             * Limit
-             * @default 50
-             */
-            limit: number;
-            /**
-             * Offset
-             * @default 0
-             */
-            offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
-        };
         /** PaginatedResponse[TimeBlockResponse] */
         PaginatedResponse_TimeBlockResponse_: {
             /** Items */
@@ -2104,10 +2189,19 @@ export interface components {
              */
             has_more: boolean;
         };
-        /**
-         * PasswordRequest
-         * @description Request body for password setup / login.
-         */
+        /** ParagraphBlock */
+        ParagraphBlock: {
+            /** Blockid */
+            blockId: string;
+            /** Text */
+            text: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "paragraph";
+        };
+        /** PasswordRequest */
         PasswordRequest: {
             /** Password */
             password: string;
@@ -2163,8 +2257,6 @@ export interface components {
             trashed_at?: string | null;
             /** Migrated To Note Id */
             migrated_to_note_id?: string | null;
-            /** Session Id */
-            session_id?: string | null;
             /** Id */
             id?: string | null;
         };
@@ -2200,8 +2292,6 @@ export interface components {
             trashed_at?: string | null;
             /** Migrated To Note Id */
             migrated_to_note_id?: string | null;
-            /** Session Id */
-            session_id?: string | null;
             /** Id */
             id: string;
             /** Created At */
@@ -2235,8 +2325,6 @@ export interface components {
             trashed_at?: string | null;
             /** Migrated To Note Id */
             migrated_to_note_id?: string | null;
-            /** Session Id */
-            session_id?: string | null;
         };
         /**
          * ReflectionCreate
@@ -2252,11 +2340,6 @@ export interface components {
             content: string;
             /** Mood */
             mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /**
-             * Related Task Ids
-             * @default []
-             */
-            related_task_ids: string[];
             /**
              * Tags
              * @default []
@@ -2274,11 +2357,6 @@ export interface components {
              * @default false
              */
             is_structured: boolean;
-            /**
-             * Auto Linked Session Ids
-             * @default []
-             */
-            auto_linked_session_ids: string[];
             /** Id */
             id?: string | null;
         };
@@ -2297,11 +2375,6 @@ export interface components {
             /** Mood */
             mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
             /**
-             * Related Task Ids
-             * @default []
-             */
-            related_task_ids: string[];
-            /**
              * Tags
              * @default []
              */
@@ -2318,11 +2391,6 @@ export interface components {
              * @default false
              */
             is_structured: boolean;
-            /**
-             * Auto Linked Session Ids
-             * @default []
-             */
-            auto_linked_session_ids: string[];
             /** Id */
             id: string;
             /** Created At */
@@ -2346,8 +2414,6 @@ export interface components {
             content?: string | null;
             /** Mood */
             mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /** Related Task Ids */
-            related_task_ids?: string[] | null;
             /** Tags */
             tags?: string[] | null;
             /** Sections */
@@ -2356,8 +2422,6 @@ export interface components {
             }[] | null;
             /** Is Structured */
             is_structured?: boolean | null;
-            /** Auto Linked Session Ids */
-            auto_linked_session_ids?: string[] | null;
         };
         /**
          * RegistryHealthOut
@@ -2372,6 +2436,22 @@ export interface components {
             categories: {
                 [key: string]: number;
             };
+            /** Catalog Version */
+            catalog_version?: string | null;
+            /** Catalog Hash */
+            catalog_hash?: string | null;
+        };
+        /** ReplaceDocumentRequest */
+        ReplaceDocumentRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Expectedversion */
+            expectedVersion?: number | null;
+            /** Payloadhash */
+            payloadHash: string;
+            document: components["schemas"]["WorkItemNoteDocumentV1"];
         };
         /**
          * RequestValidationErrorResponse
@@ -2521,211 +2601,6 @@ export interface components {
             end_time?: string | null;
         };
         /**
-         * SessionCreate
-         * @description Schema for creating a new session.
-         */
-        SessionCreate: {
-            /** Task Id */
-            task_id?: string | null;
-            /**
-             * Type
-             * @enum {string}
-             */
-            type: "work" | "short_break" | "long_break" | "free" | "countdown";
-            /** Duration */
-            duration: number;
-            /**
-             * Completed
-             * @default false
-             */
-            completed: boolean;
-            /**
-             * Plan
-             * @default
-             */
-            plan: string;
-            /**
-             * Completion
-             * @default
-             */
-            completion: string;
-            /** Started At */
-            started_at: string;
-            /** Ended At */
-            ended_at?: string | null;
-            /** Mood */
-            mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /**
-             * Note
-             * @default
-             */
-            note: string;
-            /** Attention Score */
-            attention_score?: number | null;
-            /** Flow State Detected */
-            flow_state_detected?: boolean | null;
-            /** Flow State Confidence */
-            flow_state_confidence?: number | null;
-            /**
-             * Interruption Count
-             * @default 0
-             */
-            interruption_count: number | null;
-            /**
-             * Total Interruption Duration
-             * @default 0
-             */
-            total_interruption_duration: number | null;
-            /** Avg Recovery Time */
-            avg_recovery_time?: number | null;
-            /**
-             * Pause Count
-             * @default 0
-             */
-            pause_count: number | null;
-            /**
-             * Total Pause Duration
-             * @default 0
-             */
-            total_pause_duration: number | null;
-            /**
-             * Cognitive Mark Summary
-             * @default
-             */
-            cognitive_mark_summary: string | null;
-            /** Id */
-            id?: string | null;
-        };
-        /**
-         * SessionResponse
-         * @description Schema for session API responses.
-         */
-        SessionResponse: {
-            /** Task Id */
-            task_id?: string | null;
-            /**
-             * Type
-             * @enum {string}
-             */
-            type: "work" | "short_break" | "long_break" | "free" | "countdown";
-            /** Duration */
-            duration: number;
-            /**
-             * Completed
-             * @default false
-             */
-            completed: boolean;
-            /**
-             * Plan
-             * @default
-             */
-            plan: string;
-            /**
-             * Completion
-             * @default
-             */
-            completion: string;
-            /** Started At */
-            started_at: string;
-            /** Ended At */
-            ended_at?: string | null;
-            /** Mood */
-            mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /**
-             * Note
-             * @default
-             */
-            note: string;
-            /** Attention Score */
-            attention_score?: number | null;
-            /** Flow State Detected */
-            flow_state_detected?: boolean | null;
-            /** Flow State Confidence */
-            flow_state_confidence?: number | null;
-            /**
-             * Interruption Count
-             * @default 0
-             */
-            interruption_count: number | null;
-            /**
-             * Total Interruption Duration
-             * @default 0
-             */
-            total_interruption_duration: number | null;
-            /** Avg Recovery Time */
-            avg_recovery_time?: number | null;
-            /**
-             * Pause Count
-             * @default 0
-             */
-            pause_count: number | null;
-            /**
-             * Total Pause Duration
-             * @default 0
-             */
-            total_pause_duration: number | null;
-            /**
-             * Cognitive Mark Summary
-             * @default
-             */
-            cognitive_mark_summary: string | null;
-            /** Id */
-            id: string;
-            /** Created At */
-            created_at: string;
-            /** Updated At */
-            updated_at: string;
-            /**
-             * Version
-             * @default 1
-             */
-            version: number;
-        };
-        /**
-         * SessionUpdate
-         * @description Schema for updating an existing session.
-         */
-        SessionUpdate: {
-            /** Task Id */
-            task_id?: string | null;
-            /** Type */
-            type?: ("work" | "short_break" | "long_break" | "free" | "countdown") | null;
-            /** Duration */
-            duration?: number | null;
-            /** Completed */
-            completed?: boolean | null;
-            /** Plan */
-            plan?: string | null;
-            /** Completion */
-            completion?: string | null;
-            /** Started At */
-            started_at?: string | null;
-            /** Ended At */
-            ended_at?: string | null;
-            /** Mood */
-            mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /** Note */
-            note?: string | null;
-            /** Attention Score */
-            attention_score?: number | null;
-            /** Flow State Detected */
-            flow_state_detected?: boolean | null;
-            /** Flow State Confidence */
-            flow_state_confidence?: number | null;
-            /** Interruption Count */
-            interruption_count?: number | null;
-            /** Total Interruption Duration */
-            total_interruption_duration?: number | null;
-            /** Avg Recovery Time */
-            avg_recovery_time?: number | null;
-            /** Pause Count */
-            pause_count?: number | null;
-            /** Total Pause Duration */
-            total_pause_duration?: number | null;
-            /** Cognitive Mark Summary */
-            cognitive_mark_summary?: string | null;
-        };
-        /**
          * SettingsResponse
          * @description Bare dynamic key/value settings object.
          */
@@ -2783,13 +2658,6 @@ export interface components {
             token_type: string;
         };
         /**
-         * StatsOverviewResponse
-         * @description Bare dynamic mapping from requested period names to aggregates.
-         */
-        StatsOverviewResponse: {
-            [key: string]: components["schemas"]["CountDuration"];
-        };
-        /**
          * StorageType
          * @description How an entity's data is physically stored.
          * @enum {string}
@@ -2821,6 +2689,12 @@ export interface components {
             /** Resolution */
             resolution: string;
         };
+        /**
+         * SyncConflictPolicy
+         * @description Closed conflict-resolution vocabulary for catalog entities.
+         * @enum {string}
+         */
+        SyncConflictPolicy: "timestamp_lww" | "strict_cas";
         /**
          * SyncErrorItem
          * @description An event that failed to apply.
@@ -3004,165 +2878,57 @@ export interface components {
             /** Tombstone Count */
             tombstone_count: number;
         };
-        /**
-         * TaskCreate
-         * @description Schema for creating a new task.
-         */
-        TaskCreate: {
-            /** Title */
-            title: string;
-            /**
-             * Status
-             * @default todo
-             * @enum {string}
-             */
-            status: "todo" | "in_progress" | "done" | "archived";
-            /**
-             * Priority
-             * @default medium
-             * @enum {string}
-             */
-            priority: "low" | "medium" | "high" | "urgent";
-            /**
-             * Tags
-             * @default []
-             */
-            tags: string[];
-            /**
-             * Description
-             * @default
-             */
-            description: string;
-            /**
-             * Plan
-             * @default
-             */
-            plan: string;
-            /**
-             * Completion
-             * @default
-             */
-            completion: string;
-            /** Due Date */
-            due_date?: string | null;
-            /**
-             * Estimated Pomodoros
-             * @default 1
-             */
-            estimated_pomodoros: number;
-            /** Id */
-            id?: string | null;
-        };
-        /**
-         * TaskDistributionResponse
-         * @description Task counts grouped by status and priority.
-         */
-        TaskDistributionResponse: {
-            /** By Status */
-            by_status: {
-                [key: string]: number;
-            };
-            /** By Priority */
-            by_priority: {
-                [key: string]: number;
-            };
-        };
-        /**
-         * TaskResponse
-         * @description Schema for task API responses.
-         */
-        TaskResponse: {
-            /** Title */
-            title: string;
-            /**
-             * Status
-             * @default todo
-             * @enum {string}
-             */
-            status: "todo" | "in_progress" | "done" | "archived";
-            /**
-             * Priority
-             * @default medium
-             * @enum {string}
-             */
-            priority: "low" | "medium" | "high" | "urgent";
-            /**
-             * Tags
-             * @default []
-             */
-            tags: string[];
-            /**
-             * Description
-             * @default
-             */
-            description: string;
-            /**
-             * Plan
-             * @default
-             */
-            plan: string;
-            /**
-             * Completion
-             * @default
-             */
-            completion: string;
-            /** Due Date */
-            due_date?: string | null;
-            /**
-             * Estimated Pomodoros
-             * @default 1
-             */
-            estimated_pomodoros: number;
-            /** Id */
-            id: string;
-            /** Created At */
-            created_at: string;
-            /** Updated At */
-            updated_at: string;
-            /**
-             * Version
-             * @default 1
-             */
+        /** TaskSpaceAcceptedResponse */
+        TaskSpaceAcceptedResponse: {
+            /** Commandid */
+            commandId: string;
+            /** Entitytype */
+            entityType: string;
+            /** Entityid */
+            entityId: string;
+            /** Version */
             version: number;
-            /**
-             * Actual Pomodoros
-             * @default 0
-             */
-            actual_pomodoros: number;
-            /** Archived At */
-            archived_at?: string | null;
+            /** Value */
+            value: {
+                [key: string]: unknown;
+            };
         };
-        /**
-         * TaskUpdate
-         * @description Schema for updating an existing task — all fields optional.
-         */
-        TaskUpdate: {
-            /** Title */
-            title?: string | null;
-            /** Status */
-            status?: ("todo" | "in_progress" | "done" | "archived") | null;
-            /** Priority */
-            priority?: ("low" | "medium" | "high" | "urgent") | null;
-            /** Tags */
-            tags?: string[] | null;
-            /** Description */
-            description?: string | null;
-            /** Plan */
-            plan?: string | null;
-            /** Completion */
-            completion?: string | null;
-            /** Due Date */
-            due_date?: string | null;
-            /** Estimated Pomodoros */
-            estimated_pomodoros?: number | null;
+        /** TaskSpaceDefinitionsResponse */
+        TaskSpaceDefinitionsResponse: {
+            /** Statuses */
+            statuses: {
+                [key: string]: unknown;
+            }[];
+            /** Types */
+            types: {
+                [key: string]: unknown;
+            }[];
+            /** Labels */
+            labels: {
+                [key: string]: unknown;
+            }[];
+        };
+        /** TaskSpacePageResponse */
+        TaskSpacePageResponse: {
+            /** Items */
+            items: {
+                [key: string]: unknown;
+            }[];
+            /** Nextcursor */
+            nextCursor?: string | null;
+        };
+        /** TaskSpaceViewResponse */
+        TaskSpaceViewResponse: {
+            /** Value */
+            value: {
+                [key: string]: unknown;
+            };
         };
         /**
          * TimeBlockCreate
          * @description Schema for creating a new time block.
          */
         TimeBlockCreate: {
-            /** Task Id */
-            task_id?: string | null;
             /**
              * Title
              * @default
@@ -3209,8 +2975,6 @@ export interface components {
          * @description Schema for time block API responses.
          */
         TimeBlockResponse: {
-            /** Task Id */
-            task_id?: string | null;
             /**
              * Title
              * @default
@@ -3266,8 +3030,6 @@ export interface components {
          * @description Schema for updating an existing time block.
          */
         TimeBlockUpdate: {
-            /** Task Id */
-            task_id?: string | null;
             /** Title */
             title?: string | null;
             /** Date */
@@ -3286,6 +3048,36 @@ export interface components {
             status?: ("planned" | "in_progress" | "completed" | "skipped") | null;
             /** Sort Order */
             sort_order?: number | null;
+        };
+        /** ToggleChecklistItemRequest */
+        ToggleChecklistItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Blockid */
+            blockId: string;
+            /** Itemid */
+            itemId: string;
+            /** Checked */
+            checked: boolean;
+        };
+        /** TransitionWorkItemRequest */
+        TransitionWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Statusdefinitionid */
+            statusDefinitionId: string;
         };
         /**
          * TrashItemResponse
@@ -3306,6 +3098,25 @@ export interface components {
             /** Deleted At */
             deleted_at: string;
         };
+        /** UpdateWorkItemRequest */
+        UpdateWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Title */
+            title?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Priority */
+            priority?: string | null;
+            /** Typedefinitionid */
+            typeDefinitionId?: string | null;
+        };
         /**
          * VersionRecordResponse
          * @description Schema for note version history entries.
@@ -3323,6 +3134,34 @@ export interface components {
             changed_at: string;
             /** Change Summary */
             change_summary: string;
+        };
+        /** WorkItemNoteDocumentV1 */
+        WorkItemNoteDocumentV1: {
+            /**
+             * Contentversion
+             * @constant
+             */
+            contentVersion: 1;
+            /** Blocks */
+            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock"])[];
+        };
+        /**
+         * CanonicalErrorResponse
+         * @description Opt-in canonical error envelope shared by REST and MCP adapters.
+         */
+        CanonicalErrorResponse: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
+            /** Retryable */
+            retryable: boolean;
+            /** Request Id */
+            request_id: string;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
         };
     };
     responses: never;
@@ -3358,10 +3197,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3391,10 +3234,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3420,10 +3267,47 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    revoke_tokens_api_v1_auth_revoke_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthRevokeResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3449,10 +3333,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3482,10 +3370,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3513,10 +3405,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3544,10 +3440,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3573,10 +3473,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3605,10 +3509,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3636,10 +3544,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3667,342 +3579,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_tasks_api_v1_tasks_get: {
-        parameters: {
-            query?: {
-                /** @description Filter by status: todo|in_progress|done|archived */
-                status?: string | null;
-                /** @description Filter by priority: low|medium|high|urgent */
-                priority?: string | null;
-                /** @description Case-insensitive search on title */
-                search?: string | null;
-                page?: number;
-                per_page?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PaginatedResponse_TaskResponse_"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    create_task_api_v1_tasks_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TaskCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_task_api_v1_tasks__id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_task_api_v1_tasks__id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TaskUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    delete_task_api_v1_tasks__id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_sessions_api_v1_sessions_get: {
-        parameters: {
-            query?: {
-                /** @description Filter by type: work|short_break|long_break|free|countdown */
-                type?: string | null;
-                page?: number;
-                per_page?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PaginatedResponse_SessionResponse_"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    create_session_api_v1_sessions_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SessionCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_session_api_v1_sessions__id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_session_api_v1_sessions__id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SessionUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    delete_session_api_v1_sessions__id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4031,10 +3615,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4064,10 +3652,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4098,10 +3690,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4129,10 +3725,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4160,10 +3760,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4191,10 +3795,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4223,10 +3831,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4254,10 +3866,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4289,10 +3905,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4320,10 +3940,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4355,10 +3979,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4389,10 +4017,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4422,10 +4054,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4453,10 +4089,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4488,10 +4128,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4519,10 +4163,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4551,10 +4199,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4584,10 +4236,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4615,10 +4271,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4646,10 +4306,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4681,10 +4345,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4712,10 +4380,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4746,10 +4418,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4779,10 +4455,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4810,10 +4490,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4845,10 +4529,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4876,10 +4564,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4908,10 +4600,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4941,10 +4637,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4972,10 +4672,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5007,10 +4711,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5038,10 +4746,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5072,10 +4784,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5107,10 +4823,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5139,10 +4859,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5172,10 +4896,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5203,10 +4931,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5238,10 +4970,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5269,10 +5005,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5303,10 +5043,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5336,10 +5080,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5367,10 +5115,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5402,10 +5154,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5433,10 +5189,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5465,10 +5225,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5494,10 +5258,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5526,10 +5294,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5558,135 +5330,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_overview_api_v1_stats_overview_get: {
-        parameters: {
-            query?: {
-                /** @description Periods to aggregate: today|week|month|total */
-                periods?: string[] | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["StatsOverviewResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_focus_trend_api_v1_stats_focus_trend_get: {
-        parameters: {
-            query?: {
-                /** @description Number of days to trend */
-                days?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FocusTrendResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_task_distribution_api_v1_stats_task_distribution_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskDistributionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_daily_detail_api_v1_stats_daily_detail_get: {
-        parameters: {
-            query: {
-                /** @description Date in YYYY-MM-DD format */
-                date: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DailyDetailResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5715,10 +5366,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5747,10 +5402,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5776,10 +5435,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5805,10 +5468,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5840,10 +5507,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5873,10 +5544,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5912,10 +5587,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5952,10 +5631,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5981,10 +5664,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -6010,10 +5697,549 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_projects_api_v1_projects_get: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpacePageResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_project_api_v1_projects_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_definitions_api_v1_projects_definitions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceDefinitionsResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_project_api_v1_projects__project_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceViewResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_work_items_api_v1_work_items_get: {
+        parameters: {
+            query?: {
+                projectId?: string | null;
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpacePageResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_work_item_api_v1_work_items_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    move_work_item_api_v1_work_items__work_item_id__move_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    transition_work_item_api_v1_work_items__work_item_id__transition_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TransitionWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_work_item_api_v1_work_items__work_item_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceViewResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_work_item_api_v1_work_items__work_item_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    read_note_api_v1_work_items__work_item_id__note_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceViewResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    replace_document_api_v1_work_items__work_item_id__note_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplaceDocumentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    append_blocks_api_v1_work_items__work_item_id__note_append_blocks_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppendBlocksRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    toggle_checklist_item_api_v1_work_items__work_item_id__note_toggle_checklist_item_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToggleChecklistItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -6034,6 +6260,85 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    readiness_check_api_ready_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Database unavailable */
+            503: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    metrics_api_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Prometheus metrics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+            /** @description Master token required */
+            403: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
