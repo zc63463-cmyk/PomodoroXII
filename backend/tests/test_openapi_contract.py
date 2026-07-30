@@ -10,7 +10,12 @@ Uses conftest.py's async `client` fixture (httpx.AsyncClient).
 
 from __future__ import annotations
 
+import json
+
 import pytest
+
+from app.main import app
+from app.models.work_item import WorkItem
 
 pytestmark = pytest.mark.provisioned_space_storage
 
@@ -393,3 +398,32 @@ class TestOpenAPIContractGate:
             assert set(_schema_refs(content[CANONICAL_ERROR_MEDIA_TYPE]["schema"])) == {
                 CANONICAL_ERROR_RESPONSE_REF
             }
+
+
+# ─── Task 5: WorkItemNote v1 boundary absence gate ───────────────
+
+
+def test_v1_openapi_and_orm_have_no_richer_note_or_promotion_surface() -> None:
+    """WorkItemNote v1 must not expose richer blocks or promotion surfaces."""
+    schema = app.openapi()
+    serialized = json.dumps(schema, sort_keys=True)
+
+    assert not any(
+        path.endswith("/note/promote-list-item")
+        for path in schema["paths"]
+    )
+
+    for forbidden in (
+        '"heading"',
+        '"ordered_list"',
+        '"unordered_list"',
+        '"work_item_ref"',
+        '"PromoteListItem"',
+    ):
+        assert forbidden not in serialized
+
+    assert {
+        "source_note_id",
+        "source_block_id",
+        "source_item_id",
+    }.isdisjoint(WorkItem.__table__.columns.keys())
