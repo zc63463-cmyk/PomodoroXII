@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.deps import get_space_runtime_handle
+from app.deps import get_compiled_entity_catalog, get_mutation_compiler, get_space_runtime_handle
 from app.errors import register_exception_handlers
 from app.routes.v1.contract_dependencies import (
     get_task_space_command_module,
@@ -44,6 +44,8 @@ from app.task_space.contracts import (
     TaskSpaceView,
     WorkItemNoteCommand,
 )
+from app.task_space.module import DefaultTaskSpaceCommandModule
+from app.task_space.queries import DefaultTaskSpaceQueryModule
 
 # --------------------------------------------------------------------------- #
 # Fakes
@@ -591,17 +593,28 @@ def test_work_item_action_routes_before_mutation(
 
 
 # --------------------------------------------------------------------------- #
-# Fail-closed tests
+# Provider composition tests
 # --------------------------------------------------------------------------- #
 
 
-def test_task_space_provider_not_installed_raises() -> None:
-    """Without provider override, the dependency must raise RuntimeError."""
-    app = FastAPI()
-    app.include_router(projects_router, prefix="/api/v1/projects")
-    client = TestClient(app, raise_server_exceptions=True)
-    with pytest.raises(RuntimeError, match="provider is not installed"):
-        client.get("/api/v1/projects")
+def test_task_space_providers_are_installed() -> None:
+    query = get_task_space_query_module()
+    command = get_task_space_command_module(object())
+
+    assert isinstance(query, DefaultTaskSpaceQueryModule)
+    assert isinstance(command, DefaultTaskSpaceCommandModule)
+
+
+def test_shared_compiler_registers_task_space_without_dropping_s3_policies() -> None:
+    compiler = get_mutation_compiler(get_compiled_entity_catalog())
+
+    assert {
+        "task_space",
+        "project",
+        "work_item",
+        "work_item_note",
+    } <= set(compiler._policies)
+    assert {"folder", "schedule_quick_note", "note"} <= set(compiler._policies)
 
 
 # --------------------------------------------------------------------------- #
