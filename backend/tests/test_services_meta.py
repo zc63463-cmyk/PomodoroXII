@@ -142,3 +142,47 @@ def test_meta_service_list_sync_enabled_and_soft_delete():
 
     soft_delete = svc.list_soft_delete()
     assert {s.name for s in soft_delete} == {"note", "folder", "quick_note"}
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — Task Space entity metadata parity
+# --------------------------------------------------------------------------- #
+
+TASK_SPACE_ENTITY_NAMES = frozenset({
+    "project",
+    "status_definition",
+    "type_definition",
+    "label",
+    "work_item_label",
+    "work_item",
+    "work_item_note",
+    "focus_session",
+    "session_task_context",
+    "session_attribution_revision",
+    "session_work_item_plan",
+    "session_work_item_outcome",
+})
+
+
+def test_meta_service_task_space_entities_resolvable():
+    """Every Task Space entity must be resolvable via MetaService.get_entity."""
+    svc = MetaService()
+    for name in TASK_SPACE_ENTITY_NAMES:
+        spec = svc.get_entity(name)
+        assert spec.name == name
+        assert spec.category == EntityCategory.BUSINESS
+        assert spec.sync_enabled is True
+
+
+def test_meta_service_task_space_entities_have_sync_enabled():
+    """All Task Space entities must appear in list_sync_enabled()."""
+    svc = MetaService()
+    sync_names = {s.name for s in svc.list_sync_enabled()}
+    assert TASK_SPACE_ENTITY_NAMES <= sync_names
+
+
+def test_meta_service_legacy_task_entity_not_resolvable():
+    """The legacy 'task' entity must not be resolvable via MetaService."""
+    svc = MetaService()
+    with pytest.raises(NotFoundError):
+        svc.get_entity("task")

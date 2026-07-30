@@ -258,3 +258,77 @@ async def test_openapi_documents_canonical_error_media_and_headers(client) -> No
                     }
                     checked += 1
     assert checked > 0
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — Compiler rejection producer and registration parity
+# --------------------------------------------------------------------------- #
+
+EXPECTED_TS1_COMPILER_REJECTION_CODES = frozenset({
+    "not_found",
+    "space_scope_mismatch",
+    "invalid_project_key",
+    "project_key_conflict",
+    "invalid_work_item_tree",
+    "active_child_conflict",
+    "version_conflict",
+    "unsupported_content_version",
+    "invalid_note_document",
+    "work_item_structure_changed",
+    "offline_formal_creation_forbidden",
+})
+
+
+def test_ts1_compiler_rejection_producer_set_is_exact() -> None:
+    """The Task Space compiler execution chain must produce exactly the 11
+    expected rejection codes.
+
+    The compiler delegates space-scope validation to the mutation context
+    (``context.require_space`` in unit_of_work.py), so the producer set is
+    gathered from both compiler.py and unit_of_work.py.  The extra codes
+    in unit_of_work.py (``not_found``, ``version_conflict``) are also
+    produced by the compiler itself, so the union is still the exact 11.
+    ``idempotency_conflict`` is produced by the compiler but is a
+    coordination-layer code that is not part of the TS1 domain rejection
+    contract; it is excluded from the expected set.
+    """
+    from pathlib import Path
+
+    from tests.ast_helpers import literal_exception_codes
+
+    backend_root = Path(__file__).resolve().parents[1]
+    compiler_path = backend_root / "app" / "task_space" / "compiler.py"
+    uow_path = backend_root / "app" / "mutation" / "unit_of_work.py"
+
+    compiler_codes = literal_exception_codes(compiler_path, "MutationRuleViolation")
+    uow_codes = literal_exception_codes(uow_path, "MutationRuleViolation")
+
+    # The Task Space compiler namespace is "task_space::*".  The UoW context
+    # raises space_scope_mismatch during compiler execution.  All other UoW
+    # codes (not_found, version_conflict, entity_id_mismatch,
+    # delete_payload_not_empty) are also raised by the compiler itself or
+    # belong to S3 policies.  The compiler-only idempotency_conflict is a
+    # session-coordination code, not a TS1 domain rejection.
+    ts1_producer = (compiler_codes | uow_codes) - {"idempotency_conflict"}
+    # Remove S3-only codes that the UoW raises for non-Task-Space policies.
+    s3_only = {"entity_id_mismatch", "delete_payload_not_empty", "cycle_detected",
+               "relation_endpoint_missing"}
+    ts1_producer -= s3_only
+
+    assert ts1_producer == EXPECTED_TS1_COMPILER_REJECTION_CODES, (
+        f"TS1 rejection producer codes mismatch.\n"
+        f"  Missing: {EXPECTED_TS1_COMPILER_REJECTION_CODES - ts1_producer}\n"
+        f"  Unexpected: {ts1_producer - EXPECTED_TS1_COMPILER_REJECTION_CODES}"
+    )
+
+
+def test_all_ts1_rejection_codes_are_registered() -> None:
+    """Every TS1 rejection code must be in MUTATION_REJECTION_SPECS."""
+    from app.errors import MUTATION_REJECTION_SPECS
+
+    registered = set(MUTATION_REJECTION_SPECS.keys())
+    unregistered = EXPECTED_TS1_COMPILER_REJECTION_CODES - registered
+    assert not unregistered, (
+        f"TS1 rejection codes not registered in MUTATION_REJECTION_SPECS: "
+        f"{unregistered}"
+    )

@@ -116,3 +116,29 @@ def test_alembic_head_matches_metadata(tmp_path: Path, schema: str) -> None:
         engine.dispose()
 
     assert actual == _metadata_signature(metadata, tmp_path, schema)
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — Space Alembic unique head gate
+# --------------------------------------------------------------------------- #
+
+
+def test_space_alembic_unique_head_is_task_space_focus_session() -> None:
+    """The Space Alembic chain must have exactly one head: space_010."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    backend_root = Path(__file__).resolve().parents[1]
+    cfg = Config(str(backend_root / "alembic_space.ini"))
+    cfg.set_main_option(
+        "script_location", str(backend_root / "alembic_space")
+    )
+    script_dir = ScriptDirectory.from_config(cfg)
+    heads = script_dir.get_heads()
+    assert len(heads) == 1, (
+        f"Space Alembic must have exactly one head, got {len(heads)}: {heads}"
+    )
+    assert heads[0] == "space_010_task_space_focus_session", (
+        f"Space Alembic head must be 'space_010_task_space_focus_session', "
+        f"got {heads[0]!r}"
+    )
