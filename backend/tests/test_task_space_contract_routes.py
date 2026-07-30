@@ -57,9 +57,11 @@ class FakeTaskSpaceQueryModule:
 
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
+        self.raw_queries: list[Any] = []
 
     async def list_projects(self, scope: Any, query: Any) -> TaskSpacePage:
         self.calls.append(("list_projects", scope, query))
+        self.raw_queries.append(query)
         return TaskSpacePage(
             items=({"id": "p1", "key": "TEST", "name": "Test"},),
             next_cursor=None,
@@ -67,6 +69,7 @@ class FakeTaskSpaceQueryModule:
 
     async def get_project(self, scope: Any, project_id: str) -> TaskSpaceView:
         self.calls.append(("get_project", scope, project_id))
+        self.raw_queries.append(project_id)
         return TaskSpaceView(
             value={"id": project_id, "key": "TEST", "name": "Test",
                    "nextWorkItemNumber": 1}
@@ -74,20 +77,24 @@ class FakeTaskSpaceQueryModule:
 
     async def list_definitions(self, scope: Any) -> TaskSpaceDefinitionsView:
         self.calls.append(("list_definitions", scope))
+        self.raw_queries.append(scope)
         return TaskSpaceDefinitionsView(statuses=(), types=(), labels=())
 
     async def list_work_items(self, scope: Any, query: Any) -> TaskSpacePage:
         self.calls.append(("list_work_items", scope, query))
+        self.raw_queries.append(query)
         return TaskSpacePage(items=(), next_cursor=None)
 
     async def get_work_item(self, scope: Any, work_item_id: str) -> TaskSpaceView:
         self.calls.append(("get_work_item", scope, work_item_id))
+        self.raw_queries.append(work_item_id)
         return TaskSpaceView(
             value={"id": work_item_id, "displayKey": "TEST-1"}
         )
 
     async def read_note(self, scope: Any, work_item_id: str) -> TaskSpaceView | None:
         self.calls.append(("read_note", scope, work_item_id))
+        self.raw_queries.append(work_item_id)
         return TaskSpaceView(value={"workItemId": work_item_id})
 
 
@@ -97,9 +104,11 @@ class FakeTaskSpaceCommandModule:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self.last_command: Any = None
+        self.raw_commands: list[Any] = []
 
     async def execute(self, scope: Any, command: Any) -> TaskSpaceAccepted:
         self.last_command = command
+        self.raw_commands.append(command)
         if isinstance(command, WorkItemNoteCommand):
             self.calls.append((
                 command.kind.value,
@@ -272,6 +281,50 @@ def test_list_work_items_with_project_filter(
     assert resp.status_code == 200
     _, _, query = fake_task_query.calls[0]
     assert query.filters.get("project_id") == "p1"
+
+
+def test_work_item_adapter_passes_raw_command_and_project_filter(
+    task_space_client: TestClient,
+    fake_task_commands: FakeTaskSpaceCommandModule,
+    fake_task_query: FakeTaskSpaceQueryModule,
+) -> None:
+    """Adapter must pass raw CreateWorkItem and translate projectId filter."""
+    from app.mutation.types import canonical_payload_hash
+
+    business_payload = {
+        "title": "Adapter work item",
+        "description": None,
+        "parent_id": None,
+        "type_definition_id": None,
+        "status_definition_id": None,
+        "priority": None,
+    }
+    created = task_space_client.post(
+        "/api/v1/work-items",
+        json={
+            "commandId": "adapter-create-work-item",
+            "spaceId": "s1",
+            "projectId": "project-a",
+            "payloadHash": canonical_payload_hash(business_payload),
+            "title": business_payload["title"],
+            "description": None,
+            "parentId": None,
+            "typeDefinitionId": None,
+            "statusDefinitionId": None,
+            "priority": None,
+        },
+        headers={"Idempotency-Key": "adapter-create-work-item"},
+    )
+    listed = task_space_client.get(
+        "/api/v1/work-items", params={"projectId": "project-a"}
+    )
+
+    assert created.status_code == 201
+    assert listed.status_code == 200
+    assert isinstance(fake_task_commands.raw_commands[-1], CreateWorkItem)
+    assert fake_task_commands.raw_commands[-1].project_id == "project-a"
+    assert fake_task_query.raw_queries[-1].filters == {"project_id": "project-a"}
+    assert "projectId" not in fake_task_query.raw_queries[-1].filters
 
 
 def test_create_work_item_delegates_to_commands(
@@ -622,13 +675,14 @@ def test_shared_compiler_registers_task_space_without_dropping_s3_policies() -> 
 # --------------------------------------------------------------------------- #
 
 
-def test_contract_routers_not_mounted_in_production_v1() -> None:
-    """The production v1 router must NOT include contract routers."""
+def test_contract_routers_are_mounted_in_production_v1() -> None:
+    """The production v1 router must include Task Space contract routers."""
     from app.routes.v1 import build_v1_router
 
     router = build_v1_router()
     paths = set(_flatten_route_paths(router))
-    assert "/api/v1/projects" not in paths
-    assert "/api/v1/work-items" not in paths
+    assert "/api/v1/projects" in paths
+    assert "/api/v1/work-items" in paths
+    assert "/api/v1/work-items/{work_item_id}/note" in paths
     assert "/api/v1/active-session" not in paths
     assert "/api/v1/focus-sessions" not in paths

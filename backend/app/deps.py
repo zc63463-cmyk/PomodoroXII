@@ -42,8 +42,13 @@ def get_compiled_entity_catalog():
     return CATALOG
 
 
-def get_mutation_compiler(catalog=Depends(get_compiled_entity_catalog)):
-    """Build the shared compiler composition for request-scoped UoW wiring."""
+def build_mutation_compiler(catalog):
+    """Build the shared compiler composition with all domain policies.
+
+    This factory is the single construction site for MutationCompiler.
+    Both the request-scoped FastAPI dependency and the runtime bootstrap
+    use it to guarantee identical policy composition.
+    """
     from app.commands import FolderDomainPolicy, RelationDomainPolicy
     from app.knowledge.projections import KnowledgeDomainPolicy
     from app.mutation.unit_of_work import MutationCompiler
@@ -59,6 +64,11 @@ def get_mutation_compiler(catalog=Depends(get_compiled_entity_catalog)):
             TaskSpaceCompiler(utc_now_iso_ms),
         ),
     )
+
+
+def get_mutation_compiler(catalog=Depends(get_compiled_entity_catalog)):
+    """Build the shared compiler composition for request-scoped UoW wiring."""
+    return build_mutation_compiler(catalog)
 
 
 def get_mutation_uow(request: Request):
