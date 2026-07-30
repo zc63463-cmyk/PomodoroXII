@@ -799,7 +799,12 @@ def _note_command(self, context, request, transform):
 
             raise MutationRuleViolation(
                 "version_conflict",
-                {"current_version": before["version"]},
+                {
+                    "current_version": before["version"],
+                    "current_document": _json.loads(
+                        str(before["document_json"])
+                    ),
+                },
                 retryable=False,
             )
         note_id = str(before["id"])
@@ -948,7 +953,12 @@ def _sync_note_document(request, before):
 
             raise MutationRuleViolation(
                 "version_conflict",
-                {"current_version": before["version"]},
+                {
+                    "current_version": before["version"],
+                    "current_document": _json.loads(
+                        str(before["document_json"])
+                    ),
+                },
                 retryable=False,
             )
         if version != int(before["version"]) + 1:

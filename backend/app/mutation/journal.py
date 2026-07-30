@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import to_wire_json
 from app.models.mutation import MutationBatch, MutationOperation, MutationStep
 from app.models.sync_outbox import SyncOutbox
 from app.mutation.types import (
@@ -82,7 +83,7 @@ def _encode_result(result: BatchMutationResult) -> str:
                     "version": item.version,
                     "resolution": item.resolution,
                     "state": item.state.value,
-                    "value": dict(item.value),
+                    "value": to_wire_json(item.value),
                 }
                 for item in result.applied
             ],
@@ -94,7 +95,7 @@ def _encode_result(result: BatchMutationResult) -> str:
                     "entity_id": item.entity_id,
                     "code": item.code,
                     "retryable": item.retryable,
-                    "details": dict(item.details),
+                    "details": to_wire_json(item.details),
                 }
                 for item in result.rejected
             ],
