@@ -314,3 +314,120 @@ class TestTaskSpaceIntegration:
         )
         assert listed.status_code == 200
         assert "items" in listed.json()
+
+    async def test_note_toggle_checklist_rejects_stale_version(self, client) -> None:
+        """Toggle with a stale expectedVersion must 409 without mutating state."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+
+        # --- Create project and work item ---
+        project_body = {
+            "commandId": "cas-proj",
+            "spaceId": space_id,
+            "payloadHash": canonical_payload_hash({"key": "CAS", "name": "CasProj"}),
+            "key": "cas",
+            "name": "CasProj",
+        }
+        project = await client.post(
+            "/api/v1/projects",
+            json=project_body,
+            headers={**headers, "Idempotency-Key": "cas-proj"},
+        )
+        assert project.status_code == 201
+
+        wi_payload = {
+            "title": "Cas WI",
+            "description": None,
+            "parent_id": None,
+            "type_definition_id": None,
+            "status_definition_id": None,
+            "priority": None,
+        }
+        wi_body = {
+            "commandId": "cas-wi",
+            "spaceId": space_id,
+            "projectId": project.json()["entityId"],
+            "payloadHash": canonical_payload_hash(wi_payload),
+            "title": "Cas WI",
+        }
+        work_item = await client.post(
+            "/api/v1/work-items",
+            json=wi_body,
+            headers={**headers, "Idempotency-Key": "cas-wi"},
+        )
+        assert work_item.status_code == 201
+        wi_id = work_item.json()["entityId"]
+
+        # --- Create a v1 note with a checklist block ---
+        note_document = {
+            "contentVersion": 1,
+            "blocks": [
+                {
+                    "type": "checklist",
+                    "blockId": "cb1",
+                    "items": [
+                        {
+                            "itemId": "ci1",
+                            "text": "Review PR",
+                            "checked": False,
+                            "children": [],
+                        }
+                    ],
+                }
+            ],
+        }
+        note_payload = {"document": note_document}
+        note_body = {
+            "commandId": "cas-note",
+            "spaceId": space_id,
+            "expectedVersion": None,
+            "payloadHash": canonical_payload_hash(note_payload),
+            "document": note_document,
+        }
+        note_resp = await client.put(
+            f"/api/v1/work-items/{wi_id}/note",
+            json=note_body,
+            headers={**headers, "Idempotency-Key": "cas-note"},
+        )
+        assert note_resp.status_code == 200
+        note_version = note_resp.json()["version"]
+        assert note_version == 1
+
+        # --- Snapshot the note before the conflict attempt ---
+        before = await client.get(
+            f"/api/v1/work-items/{wi_id}/note",
+            headers=headers,
+        )
+        assert before.status_code == 200
+        before_value = before.json()["value"]
+
+        # --- Toggle with a stale expectedVersion (current - 1 = 0) ---
+        toggle_payload = {"block_id": "cb1", "item_id": "ci1", "checked": True}
+        toggle_body = {
+            "commandId": "cas-toggle",
+            "spaceId": space_id,
+            "expectedVersion": note_version - 1,
+            "payloadHash": canonical_payload_hash(toggle_payload),
+            "blockId": "cb1",
+            "itemId": "ci1",
+            "checked": True,
+        }
+        conflict = await client.post(
+            f"/api/v1/work-items/{wi_id}/note/toggle-checklist-item",
+            json=toggle_body,
+            headers={**headers, "Idempotency-Key": "cas-toggle"},
+        )
+        assert conflict.status_code == 409
+        conflict_json = conflict.json()
+        assert conflict_json["detail"]["code"] == "version_conflict"
+
+        # --- Verify version and document are unchanged ---
+        after = await client.get(
+            f"/api/v1/work-items/{wi_id}/note",
+            headers=headers,
+        )
+        assert after.status_code == 200
+        after_value = after.json()["value"]
+        assert after_value["version"] == before_value["version"]
+        assert after_value["document_json"] == before_value["document_json"]
