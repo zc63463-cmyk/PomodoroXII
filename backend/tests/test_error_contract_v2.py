@@ -280,17 +280,21 @@ EXPECTED_TS1_COMPILER_REJECTION_CODES = frozenset({
 
 
 def test_ts1_compiler_rejection_producer_set_is_exact() -> None:
-    """The Task Space compiler execution chain must produce exactly the 11
-    expected rejection codes.
+    """The Task Space compiler file must produce exactly the 11 expected
+    rejection codes — no filtering, no exclusions, no additions.
 
-    The compiler delegates space-scope validation to the mutation context
-    (``context.require_space`` in unit_of_work.py), so the producer set is
-    gathered from both compiler.py and unit_of_work.py.  The extra codes
-    in unit_of_work.py (``not_found``, ``version_conflict``) are also
-    produced by the compiler itself, so the union is still the exact 11.
-    ``idempotency_conflict`` is produced by the compiler but is a
-    coordination-layer code that is not part of the TS1 domain rejection
-    contract; it is excluded from the expected set.
+    The raw set from ``literal_exception_codes`` on ``compiler.py`` is
+    asserted directly against the expected contract.  If the compiler
+    produces extra codes (e.g. ``idempotency_conflict``) or is missing
+    expected codes (e.g. ``space_scope_mismatch``), the test fails and the
+    production boundary must be fixed — not the test.
+
+    BLOCKER: At commit 7728be5, ``compiler.py`` produces
+    ``idempotency_conflict`` (not in the expected set) and delegates
+    ``space_scope_mismatch`` to ``unit_of_work.py`` instead of raising it
+    directly.  Fixing this requires modifying ``compiler.py``, which is
+    outside the allowed TS1 Task 7 file scope.  This test is intentionally
+    RED to surface the production boundary issue.
     """
     from pathlib import Path
 
@@ -298,27 +302,15 @@ def test_ts1_compiler_rejection_producer_set_is_exact() -> None:
 
     backend_root = Path(__file__).resolve().parents[1]
     compiler_path = backend_root / "app" / "task_space" / "compiler.py"
-    uow_path = backend_root / "app" / "mutation" / "unit_of_work.py"
 
-    compiler_codes = literal_exception_codes(compiler_path, "MutationRuleViolation")
-    uow_codes = literal_exception_codes(uow_path, "MutationRuleViolation")
+    raw_producer = literal_exception_codes(compiler_path, "MutationRuleViolation")
 
-    # The Task Space compiler namespace is "task_space::*".  The UoW context
-    # raises space_scope_mismatch during compiler execution.  All other UoW
-    # codes (not_found, version_conflict, entity_id_mismatch,
-    # delete_payload_not_empty) are also raised by the compiler itself or
-    # belong to S3 policies.  The compiler-only idempotency_conflict is a
-    # session-coordination code, not a TS1 domain rejection.
-    ts1_producer = (compiler_codes | uow_codes) - {"idempotency_conflict"}
-    # Remove S3-only codes that the UoW raises for non-Task-Space policies.
-    s3_only = {"entity_id_mismatch", "delete_payload_not_empty", "cycle_detected",
-               "relation_endpoint_missing"}
-    ts1_producer -= s3_only
-
-    assert ts1_producer == EXPECTED_TS1_COMPILER_REJECTION_CODES, (
-        f"TS1 rejection producer codes mismatch.\n"
-        f"  Missing: {EXPECTED_TS1_COMPILER_REJECTION_CODES - ts1_producer}\n"
-        f"  Unexpected: {ts1_producer - EXPECTED_TS1_COMPILER_REJECTION_CODES}"
+    assert raw_producer == EXPECTED_TS1_COMPILER_REJECTION_CODES, (
+        f"TS1 compiler rejection producer codes mismatch.\n"
+        f"  Raw set:   {sorted(raw_producer)}\n"
+        f"  Expected:  {sorted(EXPECTED_TS1_COMPILER_REJECTION_CODES)}\n"
+        f"  Missing:   {sorted(EXPECTED_TS1_COMPILER_REJECTION_CODES - raw_producer)}\n"
+        f"  Unexpected:{sorted(raw_producer - EXPECTED_TS1_COMPILER_REJECTION_CODES)}"
     )
 
 
