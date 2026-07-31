@@ -23,6 +23,8 @@ from app.file_system.engine.base import _make_filename
 from app.file_system.frontmatter import strip_frontmatter
 from app.file_system.interfaces import FencedProjectionExecutor, ProjectionAuthoritySnapshot
 from app.file_system.schema import NoteModel as ProjectionNoteModel
+from app.focus_session.contracts import CommandReceiptState
+from app.focus_session.receipts import decode_reconcile_coordination
 from app.models.mutation import MutationOperation
 from app.mutation.journal import JournalBatch, MutationJournal
 from app.mutation.types import (
@@ -206,6 +208,60 @@ class MutationCompileContext:
             raise MutationRuleViolation(
                 "space_scope_mismatch",
                 {"scopeSpaceId": self.scope.scope.space_id, "payloadSpaceId": payload_space_id},
+            )
+
+    def require_session_envelope_dispatch_claim(
+        self,
+        request: MutationRequest,
+        target_status_map: Mapping[str, str],
+    ) -> None:
+        """Validate session envelope dispatch claim for TransitionWorkItem.
+
+        This is mutation infrastructure: it checks operation-id identity,
+        receipt coordination, and replay-claimed status.  The
+        ``idempotency_conflict`` rejections are raised here so they do not
+        appear in the Task Space compiler's producer set.
+        """
+        command_id = self.operation_id
+        declared_command_id = request.payload.get("command_id")
+        if declared_command_id is not None and str(declared_command_id) != command_id:
+            raise MutationRuleViolation(
+                "idempotency_conflict",
+                {"reason": "operation_identity_mismatch"},
+                retryable=False,
+            )
+        envelope = self.authority.row("session_command_envelope", command_id)
+        if envelope is None:
+            return
+        target_status_id = target_status_map[str(envelope["target_transition"])]
+        identity_matches = (
+            str(envelope["space_id"]) == str(request.payload["space_id"])
+            and str(envelope["work_item_id"]) == request.entity_id
+            and int(envelope["expected_version"]) == request.expected_version
+            and str(envelope["payload_hash"]) == str(request.payload["payload_hash"])
+            and target_status_id == str(request.payload["status_definition_id"])
+        )
+        receipt = self.authority.row("session_command_receipt", command_id)
+        coordination = None
+        if receipt is not None:
+            try:
+                coordination = decode_reconcile_coordination(
+                    state=CommandReceiptState(str(receipt["state"])),
+                    result_json=receipt.get("result_json"),
+                )
+            except ValueError:
+                raise MutationRuleViolation(
+                    "idempotency_conflict",
+                    {"reason": "malformed_coordination"},
+                    retryable=False,
+                ) from None
+        if not identity_matches or coordination is None or (
+            coordination["kind"] != "replay_claimed"
+        ):
+            raise MutationRuleViolation(
+                "idempotency_conflict",
+                {"reason": "session_command_not_replay_claimed"},
+                retryable=False,
             )
 
     def command(

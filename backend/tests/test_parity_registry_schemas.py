@@ -113,17 +113,14 @@ def test_openapi_exposes_independent_task_space_response_types() -> None:
     ``TaskSpaceViewResponse``, ``TaskSpacePageResponse``, or
     ``TaskSpaceAcceptedResponse`` with untyped ``value`` fields.
 
-    BLOCKER: At commit 7728be5, the backend Task Space routes use
-    ``TaskSpaceViewResponse`` (a generic ``value: dict`` wrapper) instead of
-    referencing the response models directly.  ``WorkItemNoteResponse`` does
-    not yet exist as a backend Pydantic model.  Fixing the backend routes is
-    outside the allowed TS1 Task 7 file scope.  This test is intentionally
-    RED to surface the production boundary issue.
+    The backend Task Space routes now reference these models directly:
+    ``GET /{project_id}`` returns ``ProjectResponse``, ``GET /{work_item_id}``
+    returns ``WorkItemResponse``, and ``GET /{work_item_id}/note`` returns
+    ``WorkItemNoteResponse``.  Page responses use typed ``items`` lists
+    (``ProjectPageResponse``, ``WorkItemPageResponse``).
 
-    The frontend ``api-generated.ts`` was generated via
-    ``npx openapi-typescript`` against the real backend OpenAPI schema and
-    does NOT contain these types.  Hand-editing the generated file is
-    prohibited.
+    The frontend ``api-generated.ts`` is generated via
+    ``openapi-typescript`` against the real backend OpenAPI schema.
     """
     from app.main import create_app
 

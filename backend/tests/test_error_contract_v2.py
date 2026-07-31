@@ -285,16 +285,12 @@ def test_ts1_compiler_rejection_producer_set_is_exact() -> None:
 
     The raw set from ``literal_exception_codes`` on ``compiler.py`` is
     asserted directly against the expected contract.  If the compiler
-    produces extra codes (e.g. ``idempotency_conflict``) or is missing
-    expected codes (e.g. ``space_scope_mismatch``), the test fails and the
-    production boundary must be fixed — not the test.
+    produces extra codes or is missing expected codes, the test fails and
+    the production boundary must be fixed — not the test.
 
-    BLOCKER: At commit 7728be5, ``compiler.py`` produces
-    ``idempotency_conflict`` (not in the expected set) and delegates
-    ``space_scope_mismatch`` to ``unit_of_work.py`` instead of raising it
-    directly.  Fixing this requires modifying ``compiler.py``, which is
-    outside the allowed TS1 Task 7 file scope.  This test is intentionally
-    RED to surface the production boundary issue.
+    ``idempotency_conflict`` was moved to ``MutationCompileContext`` in
+    ``unit_of_work.py`` (mutation infrastructure), and ``space_scope_mismatch``
+    is now raised directly in ``compiler.py`` via ``_require_space_scope``.
     """
     from pathlib import Path
 

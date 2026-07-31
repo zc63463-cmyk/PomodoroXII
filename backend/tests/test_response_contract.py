@@ -353,12 +353,12 @@ class TestTaskSpaceResponseSchemas:
         ("method", "path", "status", "component_name"),
         [
             ("post", "/api/v1/projects", "201", "TaskSpaceAcceptedResponse"),
-            ("get", "/api/v1/projects", "200", "TaskSpacePageResponse"),
+            ("get", "/api/v1/projects", "200", "ProjectPageResponse"),
             (
                 "get",
                 "/api/v1/projects/{project_id}",
                 "200",
-                "TaskSpaceViewResponse",
+                "ProjectResponse",
             ),
             (
                 "get",
@@ -367,12 +367,12 @@ class TestTaskSpaceResponseSchemas:
                 "TaskSpaceDefinitionsResponse",
             ),
             ("post", "/api/v1/work-items", "201", "TaskSpaceAcceptedResponse"),
-            ("get", "/api/v1/work-items", "200", "TaskSpacePageResponse"),
+            ("get", "/api/v1/work-items", "200", "WorkItemPageResponse"),
             (
                 "get",
                 "/api/v1/work-items/{work_item_id}",
                 "200",
-                "TaskSpaceViewResponse",
+                "WorkItemResponse",
             ),
             (
                 "patch",
@@ -390,7 +390,7 @@ class TestTaskSpaceResponseSchemas:
                 "get",
                 "/api/v1/work-items/{work_item_id}/note",
                 "200",
-                "TaskSpaceViewResponse",
+                "WorkItemNoteResponse",
             ),
         ],
     )
