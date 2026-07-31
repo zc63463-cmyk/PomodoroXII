@@ -22,10 +22,10 @@ from app.schemas.task_space import (
     CreateWorkItemRequest,
     MoveWorkItemRequest,
     TaskSpaceAcceptedResponse,
-    TaskSpacePageResponse,
-    TaskSpaceViewResponse,
     TransitionWorkItemRequest,
     UpdateWorkItemRequest,
+    WorkItemPageResponse,
+    WorkItemResponse,
 )
 from app.task_space.contracts import (
     CreateWorkItem,
@@ -41,14 +41,14 @@ router = APIRouter()
 # --------------------------------------------------------------------------- #
 
 
-@router.get("", response_model=TaskSpacePageResponse)
+@router.get("", response_model=WorkItemPageResponse)
 async def list_work_items(
     project_id: str | None = Query(default=None, alias="projectId"),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     query_module=Depends(get_task_space_query_module),
     scope=Depends(get_space_runtime_handle),
-) -> TaskSpacePageResponse:
+) -> WorkItemPageResponse:
     """List work items with optional project filter and pagination."""
     filters: dict[str, Any] = {}
     if project_id is not None:
@@ -57,8 +57,20 @@ async def list_work_items(
         scope,
         TaskSpacePageQuery(cursor=cursor, limit=limit, filters=filters),
     )
-    return TaskSpacePageResponse(
-        items=[dict(item) for item in page.items],
+    return WorkItemPageResponse(
+        items=[
+            WorkItemResponse(
+                id=str(item.get("id", "")),
+                display_key=str(
+                    item.get("display_key") or item.get("displayKey", "")
+                ),
+                project_id=str(
+                    item.get("project_id") or item.get("projectId", "")
+                ),
+                title=str(item.get("title", "")),
+            )
+            for item in page.items
+        ],
         next_cursor=page.next_cursor,
     )
 
@@ -179,12 +191,18 @@ async def update_work_item(
     return map_task_space_outcome(outcome)
 
 
-@router.get("/{work_item_id}", response_model=TaskSpaceViewResponse)
+@router.get("/{work_item_id}", response_model=WorkItemResponse)
 async def get_work_item(
     work_item_id: str,
     query_module=Depends(get_task_space_query_module),
     scope=Depends(get_space_runtime_handle),
-) -> TaskSpaceViewResponse:
+) -> WorkItemResponse:
     """Get a single work item by ID."""
     view = await query_module.get_work_item(scope, work_item_id)
-    return TaskSpaceViewResponse(value=dict(view.value))
+    v = view.value
+    return WorkItemResponse(
+        id=str(v.get("id", "")),
+        display_key=str(v.get("display_key") or v.get("displayKey", "")),
+        project_id=str(v.get("project_id") or v.get("projectId", "")),
+        title=str(v.get("title", "")),
+    )

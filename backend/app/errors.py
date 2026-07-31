@@ -36,6 +36,7 @@ S3_MUTATION_REJECTION_CODES = frozenset(
     {
         "space_scope_mismatch",
         "version_conflict",
+        "idempotency_conflict",
         "cycle_detected",
         "relation_endpoint_missing",
         "entity_id_mismatch",

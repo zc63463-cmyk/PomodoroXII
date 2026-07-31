@@ -488,3 +488,180 @@ class TestTaskSpaceOpenAPIGate:
         schema = app.openapi()
         for path in schema["paths"]:
             assert "/note/commands" not in path
+
+
+# ─── TS1 Task 7: Typed response schemas and camelCase serialization ─
+
+
+class TestTypedResponseSchemas:
+    """TS1 Task 7: Task Space routes must expose typed, independent response schemas."""
+
+    def test_project_response_is_independent_schema(self) -> None:
+        """ProjectResponse must be a named component with camelCase fields."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ProjectResponse"]
+        props = set(component["properties"])
+        assert props == {"id", "key", "name", "nextWorkItemNumber"}
+        assert "next_work_item_number" not in props
+
+    def test_work_item_response_is_independent_schema(self) -> None:
+        """WorkItemResponse must be a named component with camelCase fields."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["WorkItemResponse"]
+        props = set(component["properties"])
+        assert props == {"id", "displayKey", "projectId", "title"}
+        assert "display_key" not in props
+        assert "project_id" not in props
+
+    def test_work_item_note_response_is_independent_schema(self) -> None:
+        """WorkItemNoteResponse must be a named component with camelCase fields."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["WorkItemNoteResponse"]
+        props = set(component["properties"])
+        assert props == {
+            "id", "workItemId", "contentVersion", "writeSupported", "version",
+        }
+        assert "work_item_id" not in props
+        assert "content_version" not in props
+        assert "write_supported" not in props
+
+    def test_project_get_route_references_project_response(self) -> None:
+        """GET /api/v1/projects/{project_id} must return ProjectResponse."""
+        schema = app.openapi()
+        response_schema = (
+            schema["paths"]["/api/v1/projects/{project_id}"]["get"]
+            ["responses"]["200"]["content"]["application/json"]["schema"]
+        )
+        assert response_schema == {"$ref": "#/components/schemas/ProjectResponse"}
+
+    def test_work_item_get_route_references_work_item_response(self) -> None:
+        """GET /api/v1/work-items/{work_item_id} must return WorkItemResponse."""
+        schema = app.openapi()
+        response_schema = (
+            schema["paths"]["/api/v1/work-items/{work_item_id}"]["get"]
+            ["responses"]["200"]["content"]["application/json"]["schema"]
+        )
+        assert response_schema == {"$ref": "#/components/schemas/WorkItemResponse"}
+
+    def test_note_get_route_references_work_item_note_response(self) -> None:
+        """GET /api/v1/work-items/{work_item_id}/note must return WorkItemNoteResponse."""
+        schema = app.openapi()
+        response_schema = (
+            schema["paths"]["/api/v1/work-items/{work_item_id}/note"]["get"]
+            ["responses"]["200"]["content"]["application/json"]["schema"]
+        )
+        assert response_schema == {"$ref": "#/components/schemas/WorkItemNoteResponse"}
+
+    def test_project_page_response_uses_typed_items(self) -> None:
+        """ProjectPageResponse.items must reference ProjectResponse, not generic dict."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ProjectPageResponse"]
+        items = component["properties"]["items"]
+        assert items["type"] == "array"
+        assert items["items"] == {"$ref": "#/components/schemas/ProjectResponse"}
+
+    def test_work_item_page_response_uses_typed_items(self) -> None:
+        """WorkItemPageResponse.items must reference WorkItemResponse, not generic dict."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["WorkItemPageResponse"]
+        items = component["properties"]["items"]
+        assert items["type"] == "array"
+        assert items["items"] == {"$ref": "#/components/schemas/WorkItemResponse"}
+
+    def test_paragraph_block_is_independent_schema(self) -> None:
+        """ParagraphBlock must be a named component with camelCase blockId."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ParagraphBlock"]
+        props = set(component["properties"])
+        assert props == {"type", "blockId", "text"}
+        assert "block_id" not in props
+
+    def test_checklist_block_is_independent_schema(self) -> None:
+        """ChecklistBlock must be a named component with camelCase blockId."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ChecklistBlock"]
+        props = set(component["properties"])
+        assert props == {"type", "blockId", "items"}
+        assert "block_id" not in props
+
+    def test_checklist_item_uses_camel_case_fields(self) -> None:
+        """ChecklistItem must use camelCase itemId, not snake_case."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ChecklistItem"]
+        props = set(component["properties"])
+        assert "itemId" in props
+        assert "item_id" not in props
+
+    def test_note_document_uses_camel_case_content_version(self) -> None:
+        """WorkItemNoteDocumentV1 must use camelCase contentVersion in properties."""
+        schema = app.openapi()
+        for name, component in schema["components"]["schemas"].items():
+            props = component.get("properties", {})
+            if "contentVersion" in props:
+                assert "content_version" not in props, (
+                    f"{name} must use camelCase contentVersion, not content_version"
+                )
+
+    def test_three_canonical_note_command_routes_exist(self) -> None:
+        """The three canonical Note command routes must be present."""
+        schema = app.openapi()
+        paths = schema["paths"]
+        assert "put" in paths["/api/v1/work-items/{work_item_id}/note"]
+        assert "post" in paths[
+            "/api/v1/work-items/{work_item_id}/note/append-blocks"
+        ]
+        assert "post" in paths[
+            "/api/v1/work-items/{work_item_id}/note/toggle-checklist-item"
+        ]
+
+
+# ─── TS1 Task 7: Idempotency and session behavior non-regression ──
+
+
+class TestIdempotencyNonRegression:
+    """TS1 Task 7: idempotency_conflict and session behavior must not regress."""
+
+    def test_idempotency_conflict_remains_registered(self) -> None:
+        """idempotency_conflict must still be in MUTATION_REJECTION_SPECS."""
+        from app.errors import MUTATION_REJECTION_SPECS
+
+        assert "idempotency_conflict" in MUTATION_REJECTION_SPECS
+
+    def test_space_scope_mismatch_remains_registered(self) -> None:
+        """space_scope_mismatch must still be in MUTATION_REJECTION_SPECS."""
+        from app.errors import MUTATION_REJECTION_SPECS
+
+        assert "space_scope_mismatch" in MUTATION_REJECTION_SPECS
+
+    def test_idempotency_conflict_not_in_compiler_producer_set(self) -> None:
+        """idempotency_conflict must NOT appear in compiler.py's producer set."""
+        from pathlib import Path
+
+        from tests.ast_helpers import literal_exception_codes
+
+        backend_root = Path(__file__).resolve().parents[1]
+        compiler_path = backend_root / "app" / "task_space" / "compiler.py"
+        raw_producer = literal_exception_codes(compiler_path, "MutationRuleViolation")
+        assert "idempotency_conflict" not in raw_producer
+
+    def test_space_scope_mismatch_in_compiler_producer_set(self) -> None:
+        """space_scope_mismatch MUST appear in compiler.py's producer set."""
+        from pathlib import Path
+
+        from tests.ast_helpers import literal_exception_codes
+
+        backend_root = Path(__file__).resolve().parents[1]
+        compiler_path = backend_root / "app" / "task_space" / "compiler.py"
+        raw_producer = literal_exception_codes(compiler_path, "MutationRuleViolation")
+        assert "space_scope_mismatch" in raw_producer
+
+    def test_idempotency_conflict_in_unit_of_work_producer_set(self) -> None:
+        """idempotency_conflict must appear in unit_of_work.py's producer set."""
+        from pathlib import Path
+
+        from tests.ast_helpers import literal_exception_codes
+
+        backend_root = Path(__file__).resolve().parents[1]
+        uow_path = backend_root / "app" / "mutation" / "unit_of_work.py"
+        raw_producer = literal_exception_codes(uow_path, "MutationRuleViolation")
+        assert "idempotency_conflict" in raw_producer
