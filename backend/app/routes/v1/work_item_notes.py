@@ -82,20 +82,14 @@ async def read_note(
     if view is None:
         raise HTTPException(status_code=404, detail="note_not_found")
     v = view.value
+    document_json = str(v["document_json"])
     return WorkItemNoteResponse(
-        id=str(v.get("id", "")),
-        work_item_id=str(
-            v.get("work_item_id") or v.get("workItemId", "")
-        ),
-        content_version=v.get("content_version")
-        if v.get("content_version") is not None
-        else v.get("contentVersion"),
-        write_supported=bool(
-            v.get("write_supported")
-            if v.get("write_supported") is not None
-            else v.get("writeSupported", False)
-        ),
-        version=int(v.get("version", 0) or 0),
+        id=str(v["id"]),
+        work_item_id=str(v["work_item_id"]),
+        document_json=document_json,
+        content_version=v["content_version"],
+        write_supported=bool(v["write_supported"]),
+        version=int(v["version"]),
     )
 
 

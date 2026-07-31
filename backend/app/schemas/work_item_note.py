@@ -106,6 +106,7 @@ class WorkItemNoteResponse(WireResponseModel):
 
     id: str
     work_item_id: str
+    document_json: str
     content_version: int | None
     write_supported: bool
     version: int

@@ -7,6 +7,7 @@ provider-backed integration works end-to-end through the real app.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -401,6 +402,8 @@ class TestTaskSpaceIntegration:
         )
         assert before.status_code == 200
         before_value = before.json()
+        assert before_value["documentJson"]
+        assert json.loads(before_value["documentJson"]) == note_document
 
         # --- Toggle with a stale expectedVersion (current - 1 = 0) ---
         toggle_payload = {"block_id": "cb1", "item_id": "ci1", "checked": True}
@@ -431,3 +434,4 @@ class TestTaskSpaceIntegration:
         after_value = after.json()
         assert after_value["version"] == before_value["version"]
         assert after_value["contentVersion"] == before_value["contentVersion"]
+        assert after_value["documentJson"] == before_value["documentJson"]
