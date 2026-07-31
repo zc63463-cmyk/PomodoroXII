@@ -60,14 +60,10 @@ async def list_work_items(
     return WorkItemPageResponse(
         items=[
             WorkItemResponse(
-                id=str(item.get("id", "")),
-                display_key=str(
-                    item.get("display_key") or item.get("displayKey", "")
-                ),
-                project_id=str(
-                    item.get("project_id") or item.get("projectId", "")
-                ),
-                title=str(item.get("title", "")),
+                id=str(item["id"]),
+                display_key=str(item["display_key"]),
+                project_id=str(item["project_id"]),
+                title=str(item["title"]),
             )
             for item in page.items
         ],
@@ -201,8 +197,8 @@ async def get_work_item(
     view = await query_module.get_work_item(scope, work_item_id)
     v = view.value
     return WorkItemResponse(
-        id=str(v.get("id", "")),
-        display_key=str(v.get("display_key") or v.get("displayKey", "")),
-        project_id=str(v.get("project_id") or v.get("projectId", "")),
-        title=str(v.get("title", "")),
+        id=str(v["id"]),
+        display_key=str(v["display_key"]),
+        project_id=str(v["project_id"]),
+        title=str(v["title"]),
     )

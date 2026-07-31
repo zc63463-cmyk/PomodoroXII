@@ -519,7 +519,8 @@ class TestTypedResponseSchemas:
         component = schema["components"]["schemas"]["WorkItemNoteResponse"]
         props = set(component["properties"])
         assert props == {
-            "id", "workItemId", "contentVersion", "writeSupported", "version",
+            "id", "workItemId", "documentJson", "contentVersion",
+            "writeSupported", "version",
         }
         assert "work_item_id" not in props
         assert "content_version" not in props

@@ -52,14 +52,10 @@ async def list_projects(
     return ProjectPageResponse(
         items=[
             ProjectResponse(
-                id=str(item.get("id", "")),
-                key=str(item.get("key", "")),
-                name=str(item.get("name", "")),
-                next_work_item_number=int(
-                    item.get("next_work_item_number")
-                    or item.get("nextWorkItemNumber")
-                    or 1
-                ),
+                id=str(item["id"]),
+                key=str(item["key"]),
+                name=str(item["name"]),
+                next_work_item_number=int(item["next_work_item_number"]),
             )
             for item in page.items
         ],
@@ -121,12 +117,8 @@ async def get_project(
     view = await query_module.get_project(scope, project_id)
     v = view.value
     return ProjectResponse(
-        id=str(v.get("id", "")),
-        key=str(v.get("key", "")),
-        name=str(v.get("name", "")),
-        next_work_item_number=int(
-            v.get("next_work_item_number")
-            or v.get("nextWorkItemNumber")
-            or 1
-        ),
+        id=str(v["id"]),
+        key=str(v["key"]),
+        name=str(v["name"]),
+        next_work_item_number=int(v["next_work_item_number"]),
     )

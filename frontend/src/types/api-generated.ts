@@ -3163,6 +3163,8 @@ export interface components {
             id: string;
             /** Workitemid */
             workItemId: string;
+            /** Documentjson */
+            documentJson: string;
             /** Contentversion */
             contentVersion: number | null;
             /** Writesupported */
