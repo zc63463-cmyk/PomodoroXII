@@ -129,11 +129,14 @@ class TestASTImportBoundary:
             f"{filename} must not redefine: {overlaps}"
         )
 
-    def test_commands_imports_contracts_only_from_contracts_module(self) -> None:
-        """commands.py must import FocusSessionCommand only from contracts."""
-        path = _module_path("commands.py")
+    @pytest.mark.parametrize("filename", FILES_TO_CHECK)
+    def test_focus_modules_import_contract_types_only_from_contracts_module(
+        self, filename: str,
+    ) -> None:
+        """All present focus modules must source shared types from contracts."""
+        path = _module_path(filename)
         if not path.exists():
-            pytest.skip("commands.py does not exist yet")
+            pytest.skip(f"{filename} does not exist yet (later TS2 task)")
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
@@ -229,15 +232,15 @@ class TestBusinessPayloadHash:
             session_id="fs-1",
             ownership_epoch=1,
             payload_hash=canonical_payload_hash(business),
-            payload=raw.payload,
+            payload={**raw.payload, "expected_version": 1},
         )
         cmd_b = FocusSessionCommand(
-            command_id="cmd-b",  # different command_id
+            command_id="cmd-a",
             space_id="space-a",
             session_id="fs-1",
             ownership_epoch=1,
             payload_hash=canonical_payload_hash(business),
-            payload=raw.payload,
+            payload={**raw.payload, "expected_version": 2},
         )
         req_a = build_focus_request("start", cmd_a)
         req_b = build_focus_request("start", cmd_b)
@@ -254,15 +257,57 @@ class TestInvalidHashPrecedence:
         with pytest.raises(InvalidPayloadHashError):
             build_focus_request("start", command)
 
-    def test_invalid_hash_has_no_side_effects(self) -> None:
-        """build_focus_request must call require_payload_hash before anything."""
-        from app.focus_session.commands import build_focus_request
+    def test_invalid_hash_precedes_version_and_request_construction(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Invalid hashes must precede CAS validation and request construction."""
+        import app.focus_session.commands as focus_commands
 
-        command = start_command(declared="0" * 64)
-        # If require_payload_hash is not first, MutationRequest.from_payload
-        # or validate_expected_version might execute. The InvalidPayloadHashError
-        # must be raised before any of those.
+        base = start_command(declared="0" * 64)
+        command = FocusSessionCommand(
+            command_id=base.command_id,
+            space_id=base.space_id,
+            session_id=base.session_id,
+            ownership_epoch=base.ownership_epoch,
+            payload_hash=base.payload_hash,
+            payload={**base.payload, "expected_version": "malformed"},
+        )
+        calls: list[str] = []
+
+        def forbidden(*args: object, **kwargs: object) -> None:
+            calls.append("collaborator")
+
+        monkeypatch.setattr(
+            focus_commands,
+            "validate_expected_version",
+            forbidden,
+        )
+        monkeypatch.setattr(
+            focus_commands.MutationRequest,
+            "from_payload",
+            classmethod(forbidden),
+        )
+
         with pytest.raises(InvalidPayloadHashError):
+            focus_commands.build_focus_request("start", command)
+        assert calls == []
+
+    def test_conflicting_operation_is_rejected(self) -> None:
+        from app.focus_session.commands import build_focus_request, focus_business_payload
+
+        base = start_command(declared="0" * 64)
+        payload = {**base.payload, "operation": "pause"}
+        command = FocusSessionCommand(
+            command_id=base.command_id,
+            space_id=base.space_id,
+            session_id=base.session_id,
+            ownership_epoch=base.ownership_epoch,
+            payload_hash=canonical_payload_hash(
+                focus_business_payload("start", payload)
+            ),
+            payload=payload,
+        )
+        with pytest.raises(ValueError, match="operation"):
             build_focus_request("start", command)
 
     def test_valid_hash_does_not_raise(self) -> None:
@@ -373,6 +418,146 @@ class TestRfc8785CanonicalVectors:
         h = canonical_payload_hash(business)
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
+
+    @pytest.mark.parametrize(
+        ("action", "payload", "expected"),
+        (
+            ("start", {
+                "level2_work_item_id": "l2-a",
+                "level3_work_item_ids": ["l3-a"],
+                "planned_seconds": 1500,
+                "started_at": "2026-07-15T08:00:00Z",
+                "owner_device_id": "device-a",
+                "owner_tab_id": "tab-a",
+                "expected_work_item_versions": {"l2-a": 4},
+            }, "959b3a935a0b2cce0a3d51890baab71ee72bc1474d787699ef82690634180d92"),
+            ("pause", {
+                "occurred_at": "2026-07-15T09:00:00Z",
+                "owner_device_id": "device-a",
+                "owner_tab_id": "tab-a",
+                "expected_version": 1,
+            }, "780dee7ec8bd36aa6f523d1e712d351b660de1a893585d0799e5188f0c21bfc3"),
+            ("resume", {
+                "resumed_at": "2026-07-15T09:15:00Z",
+                "owner_device_id": "device-a",
+                "owner_tab_id": "tab-a",
+                "expected_version": 1,
+            }, "3b4b819dd6a329d127dadf852ad0fcf0faa4df1e2c26346725d4ba6aa442f7bf"),
+            ("end", {
+                "ended_at": "2026-07-15T10:00:00Z",
+                "completion": "completed",
+                "owner_device_id": "device-a",
+                "owner_tab_id": "tab-a",
+                "expected_version": 1,
+            }, "873b3d823b50534becc3d55e016ae70cf7b55b4ff5e6f4ac2da55fb3f18cb0bc"),
+            ("update_note", {
+                "note": "focus",
+                "updated_at": "2026-07-15T10:01:00Z",
+                "expected_version": 1,
+            }, "6b3d9dc7ed710d4886fb6d0941716a698bb5d9397acc2cd065c230329ef0c8d1"),
+            ("set_current_plan_item", {
+                "plan_item_id": "plan-1",
+                "selected_at": "2026-07-15T10:02:00Z",
+                "expected_plan_version": 3,
+            }, "08b122c875ac02984136adcc4e0abdbc053674119e0aab480efb2a6ca5324446"),
+            ("set_completion_draft", {
+                "plan_item_id": "plan-1",
+                "completion_draft": {
+                    "result": "completed",
+                    "state_command": "complete",
+                },
+                "expected_plan_version": 3,
+            }, "77be832e22bb03470720828c0d1992e89423545e8da6b439593eaed26516f533"),
+            ("add_plan_item", {
+                "work_item_id": "l3-b",
+                "title_snapshot": "Second",
+                "added_at": "2026-07-15T10:03:00Z",
+                "expected_plan_version": 3,
+            }, "e9aa191b8717920aa1e5c954164ea5bf91599d190e728d896073129a8dc3e5fd"),
+            ("remove_plan_item", {
+                "plan_item_id": "plan-1",
+                "removed_at": "2026-07-15T10:04:00Z",
+                "removal_reason": "done",
+                "expected_plan_version": 3,
+            }, "9811fc11d2e53d5455ef57974a8b557e4ee3f2bc7284ace13455ecada89d7150"),
+            ("submit_review", {
+                "validity": "valid",
+                "review_state": "completed",
+                "reviewed_at": "2026-07-15T10:05:00Z",
+                "outcomes": [{
+                    "work_item_id": "l3-a",
+                    "touched": True,
+                    "result": "completed",
+                    "state_command": "complete",
+                    "expected_work_item_version": 5,
+                }],
+                "expected_version": 2,
+            }, "d7cb5d4b219bd54f325b40b8b863b580f08a98a1cbc7239af242a49334f95d37"),
+            ("reconcile_commands", {
+                "command_ids": ["cmd-1", "cmd-2"],
+                "replay_safe": True,
+                "abandon_command_ids": ["cmd-2"],
+                "decision_at": "2026-07-15T10:06:00Z",
+            }, "f265b59fd14fa9c7c8e2e8eb1be8a8d4eb453396754b5f19b1e775be31fdd23b"),
+            ("correct_attribution", {
+                "work_item_id": "l3-a",
+                "attribution": "manual",
+                "corrected_at": "2026-07-15T10:07:00Z",
+                "expected_source_work_item_version": 4,
+            }, "eea3a40d066f063892880ce4e94dd03336f0b755099b3ce1f9e9a5cd440438af"),
+            ("activate_provisional", {
+                "cached_at": "2026-07-15T10:08:00Z",
+                "cached_ownership_epoch": 2,
+                "owner_device_id": "device-a",
+                "owner_tab_id": "tab-a",
+                "snapshot": {
+                    "session": {"session_revision": 1, "validity": "pending"},
+                    "context": {"level2_work_item_id": "l2-a"},
+                    "plan": [{"id": "plan-1", "work_item_id": "l3-a"}],
+                },
+                "expected_work_item_versions": {"l2-a": 4},
+            }, "a8ec2e0d5e21a6fa1a3fe25a9bf6cfea2b740fda9b4978f4522d6ada379080e5"),
+            ("mark_activation_conflict", {
+                "conflict_pair": {
+                    "active_session_id": "fs-1",
+                    "candidate_session_id": "fs-2",
+                },
+                "detected_at": "2026-07-15T10:09:00Z",
+                "expected_ownership_epoch": 7,
+            }, "84a4eff54825fc3f7bb963dc49a5371b3d1efd44bb26382e06ce34cb51fd4b76"),
+            ("resolve_activation_conflict", {
+                "winner_role": "active",
+                "decision_at": "2026-07-15T10:10:00Z",
+                "validity_correction": {
+                    "loser_validity": "invalid",
+                    "loser_validity_reason": "activation_conflict_loser",
+                },
+            }, "6dcaa8b4555bbf791e3f1bd6ad7b10961ab2f0bdbf0aa8473aaafc2d24d31b51"),
+            ("claim_owner", {
+                "owner_device_id": "device-a",
+                "owner_tab_id": "tab-a",
+                "claimed_at": "2026-07-15T10:11:00Z",
+                "expected_ownership_epoch": 7,
+            }, "103ed869ca027574ea589b7018da2ab812f4be305fc2aeb33e8444d184f00cfb"),
+            ("record_receipt", {
+                "receipt_id": "receipt-1",
+                "state": "succeeded",
+                "recorded_at": "2026-07-15T10:12:00Z",
+                "expected_version": 1,
+            }, "b98ab30caa32fa3a5d923732c965181c1055c4f11063037e59ca0fd8d972fcc6"),
+            ("rebuild_effort_projection", {
+                "projection_revision": 2,
+                "rebuilt_at": "2026-07-15T10:13:00Z",
+                "expected_version": 1,
+            }, "59a3654548ce021dc554bb3b5cd0dfc7c031a4c6ee8b070a3769f00624d928a9"),
+        ),
+    )
+    def test_action_hash_matches_fixed_golden_vector(
+        self, action: str, payload: dict[str, object], expected: str,
+    ) -> None:
+        from app.focus_session.commands import focus_business_payload
+
+        assert canonical_payload_hash(focus_business_payload(action, payload)) == expected
 
     def test_pause_business_payload_excludes_expected_version(self) -> None:
         from app.focus_session.commands import focus_business_payload
