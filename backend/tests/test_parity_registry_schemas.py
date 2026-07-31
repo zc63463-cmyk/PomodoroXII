@@ -89,3 +89,53 @@ def test_task_space_entity_schema_in_correct_module(
         assert hasattr(module, expected_class), (
             f"{expected_module} missing {expected_class} for entity '{entity_name}'"
         )
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — OpenAPI independent response type parity gate
+# --------------------------------------------------------------------------- #
+
+#: Response schema names that MUST appear as independent, named schemas in the
+#: OpenAPI ``components.schemas`` — not hidden inside generic wrappers like
+#: ``TaskSpaceViewResponse.value`` (which is ``additionalProperties: true``).
+REQUIRED_OPENAPI_RESPONSE_TYPES = frozenset({
+    "ProjectResponse",
+    "WorkItemResponse",
+    "WorkItemNoteResponse",
+})
+
+
+def test_openapi_exposes_independent_task_space_response_types() -> None:
+    """The OpenAPI schema must expose ``ProjectResponse``, ``WorkItemResponse``,
+    and ``WorkItemNoteResponse`` as independent, named component schemas.
+
+    These types must NOT be replaced by generic wrappers such as
+    ``TaskSpaceViewResponse``, ``TaskSpacePageResponse``, or
+    ``TaskSpaceAcceptedResponse`` with untyped ``value`` fields.
+
+    BLOCKER: At commit 7728be5, the backend Task Space routes use
+    ``TaskSpaceViewResponse`` (a generic ``value: dict`` wrapper) instead of
+    referencing the response models directly.  ``WorkItemNoteResponse`` does
+    not yet exist as a backend Pydantic model.  Fixing the backend routes is
+    outside the allowed TS1 Task 7 file scope.  This test is intentionally
+    RED to surface the production boundary issue.
+
+    The frontend ``api-generated.ts`` was generated via
+    ``npx openapi-typescript`` against the real backend OpenAPI schema and
+    does NOT contain these types.  Hand-editing the generated file is
+    prohibited.
+    """
+    from app.main import create_app
+
+    app = create_app()
+    schema = app.openapi()
+    component_schemas = set(schema.get("components", {}).get("schemas", {}).keys())
+
+    missing = REQUIRED_OPENAPI_RESPONSE_TYPES - component_schemas
+    assert not missing, (
+        f"OpenAPI is missing independent response type schemas: {sorted(missing)}. "
+        f"The backend routes must reference these models directly instead of "
+        f"using generic TaskSpace wrappers with untyped value fields. "
+        f"This is a production boundary blocker — cannot be fixed within "
+        f"the allowed TS1 Task 7 test-only file scope."
+    )
