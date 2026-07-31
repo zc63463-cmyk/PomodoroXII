@@ -15,6 +15,7 @@ from app.mutation.types import (
     bounded_child_operation_id,
     canonical_payload_hash,
     require_payload_hash,
+    validate_canonical_timestamp,
     validate_expected_version,
     validate_operation_id,
 )
@@ -91,6 +92,9 @@ def build_focus_request(
 ) -> MutationRequest:
     business = focus_business_payload(action, command.payload)
     require_payload_hash(command.payload_hash, business)
+    declared_operation = command.payload.get("operation")
+    if declared_operation is not None and declared_operation != action:
+        raise ValueError("payload operation must match action")
     expected_version = command.payload.get("expected_version")
     validate_expected_version(expected_version)
     return MutationRequest.from_payload(
@@ -115,7 +119,7 @@ def validate_reconcile_shape(command: FocusSessionCommand) -> None:
     if command.ownership_epoch is not None:
         raise ValueError("post-terminal reconciliation requires no owner epoch")
     command_ids = command.payload.get("command_ids", ())
-    if not isinstance(command_ids, (tuple, list)) or any(
+    if not isinstance(command_ids, (tuple, list)) or not command_ids or any(
         not isinstance(item, str) or not item for item in command_ids
     ):
         raise ValueError("command_ids must be an ordered string collection")
@@ -131,8 +135,13 @@ def validate_reconcile_shape(command: FocusSessionCommand) -> None:
     if not set(abandon_ids) <= set(command_ids):
         raise ValueError("abandon_command_ids must be a command_ids subset")
     decision_at = command.payload.get("decision_at")
-    if bool(abandon_ids) != isinstance(decision_at, str):
+    if bool(abandon_ids) != (decision_at is not None):
         raise ValueError("decision_at is required exactly for abandonment")
+    if decision_at is not None:
+        try:
+            validate_canonical_timestamp(decision_at)
+        except ValueError as exc:
+            raise ValueError("decision_at must be a canonical UTC timestamp") from exc
     validate_operation_id(command.command_id)
     for operation_id in (*command_ids, *abandon_ids):
         validate_operation_id(operation_id)

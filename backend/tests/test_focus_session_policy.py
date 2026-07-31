@@ -252,6 +252,11 @@ class TestReconcileShapeValidation:
         with pytest.raises(ValueError, match="command_ids"):
             validate_reconcile_shape(command)
 
+    def test_command_ids_must_not_be_empty(self) -> None:
+        command = _reconcile_command(command_ids=())
+        with pytest.raises(ValueError, match="command_ids"):
+            validate_reconcile_shape(command)
+
     def test_replay_safe_must_be_boolean(self) -> None:
         command = _reconcile_command(replay_safe="yes")  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="replay_safe"):
@@ -274,6 +279,18 @@ class TestReconcileShapeValidation:
         command = _reconcile_command(
             abandon_command_ids=(),
             decision_at="2026-07-15T14:00:00Z",
+        )
+        with pytest.raises(ValueError, match="decision_at"):
+            validate_reconcile_shape(command)
+
+    def test_decision_at_must_be_canonical_when_present(self) -> None:
+        command = _reconcile_command(decision_at="not-a-timestamp")
+        with pytest.raises(ValueError, match="decision_at"):
+            validate_reconcile_shape(command)
+
+    def test_non_string_decision_at_is_rejected_without_abandonment(self) -> None:
+        command = _reconcile_command(  # type: ignore[arg-type]
+            abandon_command_ids=(), decision_at=123,
         )
         with pytest.raises(ValueError, match="decision_at"):
             validate_reconcile_shape(command)
