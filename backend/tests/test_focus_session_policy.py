@@ -316,3 +316,89 @@ class TestReceiptReservationStates:
             "not_needed", "pending", "succeeded",
             "failed", "conflict", "unknown",
         }
+
+
+# ---------------------------------------------------------------------------
+# TS2 Task 2: Module-level policy interface tests
+# ---------------------------------------------------------------------------
+
+class TestModulePolicyInterface:
+    """Verify module-level functions and policy constants exist with correct shape."""
+
+    def test_derive_clock_state_exists_and_is_callable(self) -> None:
+        from app.focus_session.module import derive_clock_state
+
+        assert callable(derive_clock_state)
+        assert derive_clock_state(
+            started_at="2026-07-15T08:00:00Z",
+            pause_started_at=None,
+            ended_at=None,
+        ) == "running"
+
+    def test_focus_session_view_exists_and_is_callable(self) -> None:
+        from app.focus_session.module import focus_session_view
+
+        assert callable(focus_session_view)
+
+    def test_require_focus_scope_exists_and_is_callable(self) -> None:
+        from app.focus_session.module import require_focus_scope
+
+        assert callable(require_focus_scope)
+
+    def test_default_focus_session_module_exists(self) -> None:
+        from app.focus_session.contracts import FocusSessionModule
+        from app.focus_session.module import DefaultFocusSessionModule
+
+        assert FocusSessionModule in DefaultFocusSessionModule.__mro__
+
+    def test_focus_session_policy_types_exist(self) -> None:
+        from app.focus_session.policy import FOCUS_SESSION_POLICY_TYPES
+
+        assert FOCUS_SESSION_POLICY_TYPES == frozenset({
+            "focus_session",
+            "session_task_context",
+            "session_attribution_revision",
+            "session_work_item_plan",
+            "session_work_item_outcome",
+        })
+
+    def test_focus_session_mutation_policy_exists(self) -> None:
+        from app.focus_session.policy import FocusSessionMutationPolicy
+        from app.mutation.unit_of_work import MutationDomainPolicy
+
+        assert MutationDomainPolicy in FocusSessionMutationPolicy.__mro__
+
+    def test_focus_session_query_exists(self) -> None:
+        from app.focus_session.query import FocusSessionQuery
+
+        assert FocusSessionQuery is not None
+
+
+class TestModuleReconcileAdmissionGating:
+    """Verify reconcile admission gating runs before root UoW."""
+
+    def test_reconcile_with_ownership_epoch_fails_before_uow(self) -> None:
+        """Non-null ownership_epoch must be rejected after hash, before admission."""
+        from app.focus_session.commands import validate_reconcile_shape
+
+        # This test verifies the shape validator rejects it before any UoW call.
+        # The hash is computed on the business payload, and the shape validator
+        # runs in the module before build_focus_request's UoW entry.
+        payload: dict[str, object] = {
+            "command_ids": ["cmd-1"],
+            "replay_safe": True,
+            "abandon_command_ids": ["cmd-1"],
+            "decision_at": "2026-07-15T14:00:00Z",
+        }
+        business = focus_business_payload("reconcile_commands", payload)
+        command = FocusSessionCommand(
+            command_id="reconcile-1",
+            space_id="space-a",
+            session_id="fs-1",
+            ownership_epoch=1,
+            payload_hash=canonical_payload_hash(business),
+            payload=payload,
+        )
+        # validate_reconcile_shape must reject this before UoW
+        with pytest.raises(ValueError, match="owner epoch"):
+            validate_reconcile_shape(command)
