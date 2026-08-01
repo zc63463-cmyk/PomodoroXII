@@ -561,7 +561,7 @@ class TestSyncPolicyMatrix:
         assert captured.value.code == "version_conflict"
 
     @pytest.mark.asyncio
-    async def test_terminal_activation_snapshot_does_not_require_locator_claim(
+    async def test_terminal_activation_snapshot_is_rejected_before_locator_claim(
         self, sync_policy_fixture,
     ) -> None:
         from app.mutation.unit_of_work import AuthorityOverlay
@@ -571,11 +571,12 @@ class TestSyncPolicyMatrix:
             "timer_completion": "interrupted",
         })
         overlay = AuthorityOverlay(sync_policy_fixture.catalog, _activation_rows())
-        command = await sync_policy_fixture.mutation.uow.compiler.compile_against_overlay(
-            sync_policy_fixture.scope, request, overlay, request.entity_id,
-        )
-        assert command.db_plans[0].operation == "insert"
-        assert command.db_plans[0].after_row["ended_at"] == "2026-07-15T08:10:00Z"
+        with pytest.raises(MutationRuleViolation) as captured:
+            await sync_policy_fixture.mutation.uow.compiler.compile_against_overlay(
+                sync_policy_fixture.scope, request, overlay, request.entity_id,
+            )
+        assert captured.value.code == "work_item_structure_changed"
+        assert captured.value.details["reason"] == "terminal_snapshot"
 
     @pytest.mark.asyncio
     async def test_activation_conflict_sync_update_has_no_db_or_outbox_effects(
