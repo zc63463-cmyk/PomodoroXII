@@ -63,6 +63,14 @@ _SYNC_MATRIX: dict[tuple[str, str], bool] = {
     ("session_work_item_outcome", "delete"): False,
 }
 
+_FOCUS_CLOCK_FIELDS = frozenset({
+    "ended_at", "pause_started_at", "gross_seconds", "paused_seconds",
+    "break_seconds", "focused_seconds", "timer_completion",
+})
+_FOCUS_SYNC_MUTABLE_FIELDS = frozenset({
+    "session_note", "overall_progress", "mood",
+})
+
 
 def entity_action(request: MutationRequest) -> str | None:
     """Derive create/update/delete from an S3 EntityCommand request name."""
@@ -75,27 +83,33 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
 
     entity_types = FOCUS_SESSION_POLICY_TYPES
 
-    def __init__(self, locator_reader: Callable[..., object] | object | None = None) -> None:
+    def __init__(self, locator_reader: Callable[..., object] | object) -> None:
         """Create the policy with the TS0 locator reader.
 
         The reader is deliberately injected instead of opening the Meta
-        database from S3.  Test-only callers from the first Task 2 draft may
-        omit it; in that compatibility mode owner fencing is unavailable, but
-        every production/coordinator path must provide the reader.
+        database from S3.  Omitting it would silently disable owner fencing,
+        so construction fails closed instead.
         """
+        if locator_reader is None:
+            raise TypeError("locator_reader is required for owner fencing")
         self._locator = locator_reader
 
     async def _read_locator(
         self, context: MutationCompileContext, request: MutationRequest,
     ) -> Mapping[str, object] | None:
         reader = self._locator
-        if reader is None:
-            return None
         if callable(reader):
             try:
-                value = reader(context.scope, request)
-            except TypeError:
+                parameters = inspect.signature(reader).parameters
+            except (TypeError, ValueError):
+                parameters = None
+            if parameters is not None and not any(
+                parameter.kind is inspect.Parameter.VAR_POSITIONAL
+                for parameter in parameters.values()
+            ) and len(parameters) == 0:
                 value = reader()
+            else:
+                value = reader(context.scope, request)
         elif hasattr(reader, "read"):
             value = reader.read(context.scope, request)
         elif hasattr(reader, "get"):
@@ -121,6 +135,14 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
     def _locator_value(row: Mapping[str, object], name: str) -> object:
         return row.get(name, row.get(_snake_to_camel(name)))
 
+    @staticmethod
+    def _reject_activation_conflict(session: Mapping[str, object]) -> None:
+        if session.get("ownership_state") == "activation_conflict":
+            raise _MutationRuleViolation(
+                "session_activation_conflict",
+                {"sessionId": session.get("id"), "reason": "conflict_read_only"},
+            )
+
     async def _require_locator_claim(
         self,
         context: MutationCompileContext,
@@ -128,8 +150,6 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         *,
         require_owner: bool = True,
     ) -> Mapping[str, object] | None:
-        if self._locator is None:
-            return None
         row = await self._read_locator(context, request)
         payload = request.payload
         expected_epoch = payload.get("ownership_epoch")
@@ -432,71 +452,8 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             )
         action = request.name.rsplit(".", 1)[-1]
         occurred_at = str(request.payload.get("occurred_at", ""))
-        _require_canonical_timestamp(occurred_at)
-        _require_non_regressing_timestamp(current, occurred_at)
-        _validate_duration_row(current)
-        after = dict(current)
-        after["updated_at"] = occurred_at
-        if "break_seconds" in request.payload:
-            break_seconds = request.payload["break_seconds"]
-            if type(break_seconds) is not int or break_seconds < 0:
-                raise _MutationRuleViolation(
-                    "version_conflict", {"sessionId": session_id, "reason": "invalid_duration"}
-                )
-            after["break_seconds"] = break_seconds
-        started_at = str(current.get("started_at", ""))
-        _require_canonical_timestamp(started_at)
-        if action == "pause":
-            if current.get("pause_started_at") is not None or current.get("ended_at") is not None:
-                raise _MutationRuleViolation(
-                    "version_conflict",
-                    {"sessionId": session_id, "reason": "not_running"},
-                )
-            after["pause_started_at"] = occurred_at
-            after["gross_seconds"] = _integer_seconds_between(started_at, occurred_at)
-            after["focused_seconds"] = _focused_seconds(after)
-        elif action == "resume":
-            if current.get("pause_started_at") is None or current.get("ended_at") is not None:
-                raise _MutationRuleViolation(
-                    "version_conflict",
-                    {"sessionId": session_id, "reason": "not_paused"},
-                )
-            pause_started = str(current.get("pause_started_at", ""))
-            elapsed_pause = _integer_seconds_between(pause_started, occurred_at)
-            after["paused_seconds"] = int(current.get("paused_seconds", 0)) + elapsed_pause
-            after["pause_started_at"] = None
-            after["gross_seconds"] = _integer_seconds_between(started_at, occurred_at)
-            after["focused_seconds"] = _focused_seconds(after)
-        elif action == "end":
-            if current.get("ended_at") is not None:
-                raise _MutationRuleViolation(
-                    "version_conflict",
-                    {"sessionId": session_id, "reason": "already_ended"},
-                )
-            if current.get("pause_started_at") is not None:
-                pause_started = str(current.get("pause_started_at", ""))
-                elapsed_pause = _integer_seconds_between(pause_started, occurred_at)
-                after["paused_seconds"] = int(current.get("paused_seconds", 0)) + elapsed_pause
-                after["pause_started_at"] = None
-            after["ended_at"] = occurred_at
-            after["gross_seconds"] = _integer_seconds_between(started_at, occurred_at)
-            after["focused_seconds"] = _focused_seconds(after)
-            after["timer_completion"] = str(request.payload.get("timer_completion", "completed"))
-            after["validity"] = str(request.payload.get("validity", "valid"))
-            after["validity_reason"] = request.payload.get("validity_reason")
-            if after["timer_completion"] not in {"completed", "ended_early", "interrupted"}:
-                raise _MutationRuleViolation(
-                    "version_conflict", {"sessionId": session_id, "reason": "invalid_timer_completion"}
-                )
-            if after["validity"] not in {"pending", "valid", "invalid"}:
-                raise _MutationRuleViolation(
-                    "version_conflict", {"sessionId": session_id, "reason": "invalid_validity"}
-                )
-        else:
-            raise _MutationRuleViolation(
-                "version_conflict", {"sessionId": session_id, "reason": "unsupported_clock_action"},
-            )
-        _validate_duration_row(after)
+        self._reject_activation_conflict(current)
+        after = dict(_clock_transition_after(current, action, occurred_at, request.payload))
         version = int(current.get("version", 1))
         after["version"] = version + 1
         frozen_after = require_frozen_object(after)
@@ -529,6 +486,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         current = context.authority.row("focus_session", session_id)
         if current is None:
             raise _MutationRuleViolation("not_found", {"entityId": session_id})
+        self._reject_activation_conflict(current)
         if current.get("ended_at") is None:
             raise _MutationRuleViolation(
                 "version_conflict", {"sessionId": session_id, "reason": "session_not_ended"}
@@ -619,6 +577,14 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
     ) -> MutationCommand:
         winner = request.payload.get("winner_role")
         state = "authoritative" if winner in {"active", "candidate"} else "activation_conflict"
+        session_id = str(request.payload.get("session_id", request.entity_id))
+        current = context.authority.row("focus_session", session_id)
+        if current is None:
+            raise _MutationRuleViolation("not_found", {"entityId": session_id})
+        if current.get("ownership_state") != "activation_conflict":
+            raise _MutationRuleViolation(
+                "version_conflict", {"sessionId": session_id, "reason": "not_activation_conflict"}
+            )
         return await self._compile_field_update(
             context, request, {"ownership_state": state},
         )
@@ -632,6 +598,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         session = context.authority.row("focus_session", session_id)
         if session is None:
             raise _MutationRuleViolation("not_found", {"entityId": session_id})
+        self._reject_activation_conflict(session)
         if session.get("ended_at") is not None:
             raise _MutationRuleViolation(
                 "version_conflict", {"sessionId": session_id, "reason": "terminal_session"}
@@ -661,6 +628,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         session = context.authority.row("focus_session", session_id)
         if session is None:
             raise _MutationRuleViolation("not_found", {"entityId": session_id})
+        self._reject_activation_conflict(session)
         rows = tuple(
             context.authority.rows("session_attribution_revision")
         )
@@ -737,6 +705,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         session = context.authority.row("focus_session", session_id)
         if session is None:
             raise _MutationRuleViolation("not_found", {"entityId": session_id})
+        self._reject_activation_conflict(session)
         if session.get("ended_at") is not None:
             raise _MutationRuleViolation(
                 "version_conflict", {"sessionId": session_id, "reason": "terminal_session"},
@@ -745,6 +714,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             dict(row) for row in context.authority.rows("session_work_item_plan")
             if row.get("session_id") == session_id
         ]
+        response_rows = [dict(row) for row in rows]
         plans: list[DbMutationPlan] = []
         events: list[SyncEventPlan] = []
         now = str(request.payload.get("occurred_at") or request.payload.get("added_at") or session.get("updated_at", ""))
@@ -769,7 +739,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 row.get("work_item_id") == target and row.get("removed_at") is None for row in rows
             ):
                 raise _MutationRuleViolation("not_found", {"entityId": target})
-            for row in rows:
+            for index, row in enumerate(rows):
                 if row["id"] not in expected or row["version"] != expected[row["id"]]:
                     raise _MutationRuleViolation("version_conflict", {"entityId": row["id"]})
                 after = dict(row)
@@ -781,6 +751,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 frozen_after = require_frozen_object(after)
                 plans.append(_update_plan(context.catalog, "session_work_item_plan", row, frozen_after))
                 events.append(_update_sync("session_work_item_plan", frozen_after, now))
+                response_rows[index] = dict(frozen_after)
         elif action == "completion_draft":
             row = _find_plan(rows, request.payload.get("plan_item_id"))
             _require_plan_version(row, request.payload.get("expected_plan_version"))
@@ -793,6 +764,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             frozen_after = require_frozen_object(after)
             plans.append(_update_plan(context.catalog, "session_work_item_plan", row, frozen_after))
             events.append(_update_sync("session_work_item_plan", frozen_after, now))
+            response_rows[response_rows.index(dict(row))] = dict(frozen_after)
         elif action == "add":
             work_item_id = str(request.payload.get("work_item_id", ""))
             if any(row.get("work_item_id") == work_item_id for row in rows):
@@ -827,6 +799,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             )
             plans.append(_insert_plan(context.catalog, "session_work_item_plan", plan))
             events.append(_create_sync("session_work_item_plan", plan, now))
+            response_rows.append(dict(plan))
         elif action == "remove":
             row = _find_plan(rows, request.payload.get("plan_item_id"))
             _require_plan_version(row, request.payload.get("expected_plan_version"))
@@ -847,6 +820,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             frozen_after = require_frozen_object(after)
             plans.append(_update_plan(context.catalog, "session_work_item_plan", row, frozen_after))
             events.append(_update_sync("session_work_item_plan", frozen_after, now))
+            response_rows[response_rows.index(dict(row))] = dict(frozen_after)
         else:
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "unknown_plan_action"})
         return context.command(
@@ -855,7 +829,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             sync_events=tuple(events),
             value=require_frozen_object({
                 "session": _to_camel_session(session),
-                "plan": [_to_camel_plan(row) for row in rows],
+                "plan": [_to_camel_plan(row) for row in response_rows],
             }),
         )
 
@@ -863,7 +837,6 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         self, context: MutationCompileContext, request: MutationRequest,
     ) -> MutationCommand:
         context.require_space(str(request.payload.get("space_id", "")))
-        await self._require_locator_claim(context, request, require_owner=True)
         snapshot = request.payload.get("snapshot")
         if not isinstance(snapshot, Mapping):
             raise _MutationRuleViolation(
@@ -886,14 +859,64 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             raise _MutationRuleViolation(
                 "work_item_structure_changed", {"reason": "snapshot_time_range"}
             )
+        ownership_state = get("ownership_state", "ownershipState")
+        if ownership_state != "local_provisional":
+            raise _MutationRuleViolation(
+                "work_item_structure_changed", {"reason": "snapshot_ownership_state"}
+            )
+        validity = get("validity")
+        if validity != "pending":
+            raise _MutationRuleViolation(
+                "work_item_structure_changed", {"reason": "snapshot_validity"}
+            )
+        ended_at = get("ended_at", "endedAt")
+        pause_started_at = get("pause_started_at", "pauseStartedAt")
+        if ended_at is not None:
+            ended_at = _require_canonical_timestamp(ended_at)
+            if _parse_timestamp(ended_at) < _parse_timestamp(started_at) or (
+                _parse_timestamp(ended_at) > _parse_timestamp(cached_at)
+            ):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "snapshot_time_range", "field": "ended_at"}
+                )
+            if pause_started_at is not None:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "terminal_pause_state"}
+                )
+            timer_completion = get("timer_completion", "timerCompletion")
+            if timer_completion not in {"completed", "ended_early", "interrupted"}:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "terminal_timer_completion"}
+                )
+            review_state = "pending"
+        else:
+            if get("timer_completion", "timerCompletion") is not None:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "nonterminal_timer_completion"}
+                )
+            review_state = "not_required"
+            await self._require_locator_claim(context, request, require_owner=True)
+        if pause_started_at is not None:
+            pause_started_at = _require_canonical_timestamp(pause_started_at)
+            if _parse_timestamp(pause_started_at) < _parse_timestamp(started_at) or (
+                _parse_timestamp(pause_started_at) > _parse_timestamp(cached_at)
+            ):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "snapshot_time_range", "field": "pause_started_at"}
+                )
+        gross_seconds = get("gross_seconds", "grossSeconds")
+        if type(gross_seconds) is not int or gross_seconds != _integer_seconds_between(started_at, cached_at):
+            raise _MutationRuleViolation(
+                "work_item_structure_changed", {"reason": "snapshot_gross_seconds"}
+            )
         row = _focus_session_row(
             id=request.entity_id,
             session_revision=int(get("session_revision", "sessionRevision") or 1),
             started_at=started_at,
-            ended_at=get("ended_at", "endedAt"),
-            pause_started_at=get("pause_started_at", "pauseStartedAt"),
+            ended_at=ended_at,
+            pause_started_at=pause_started_at,
             planned_seconds=get("planned_seconds", "plannedSeconds"),
-            gross_seconds=get("gross_seconds", "grossSeconds"),
+            gross_seconds=gross_seconds,
             paused_seconds=get("paused_seconds", "pausedSeconds"),
             break_seconds=get("break_seconds", "breakSeconds"),
             focused_seconds=get("focused_seconds", "focusedSeconds"),
@@ -903,55 +926,130 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             overall_progress=get("overall_progress", "overallProgress"),
             mood=get("mood"),
             session_note=str(get("session_note", "sessionNote") or ""),
-            review_state="not_required",
+            review_state=review_state,
             ownership_state="local_provisional",
             version=1,
             created_at=started_at,
             updated_at=cached_at,
         )
         _validate_duration_row(row)
-        for field in ("ended_at", "pause_started_at"):
-            value = row.get(field)
-            if value is not None:
-                _require_canonical_timestamp(value)
-                if _parse_timestamp(str(value)) > _parse_timestamp(cached_at):
-                    raise _MutationRuleViolation(
-                        "work_item_structure_changed", {"reason": "snapshot_time_range", "field": field}
-                    )
         context_row = _snapshot_context_row(request, snapshot)
         if not context_row.get("project_id") or not context_row.get("level2_work_item_id"):
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_context"})
+        raw_context = snapshot.get("context")
+        if not isinstance(raw_context, Mapping):
+            raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_context"})
+        l2_id = str(context_row["level2_work_item_id"])
+        l2 = context.authority.row("work_item", l2_id)
+        if l2 is None:
+            raise _MutationRuleViolation("not_found", {"entityId": l2_id})
+        project_id = str(context_row["project_id"])
+        if str(l2.get("project_id")) != project_id:
+            raise _MutationRuleViolation(
+                "invalid_work_item_tree", {"reason": "context_project_mismatch", "entityId": l2_id}
+            )
+        project = context.authority.row("project", project_id)
+        if project is None:
+            raise _MutationRuleViolation("not_found", {"entityId": project_id})
+        def context_get(name: str, camel: str | None = None) -> object:
+            return raw_context.get(name, raw_context.get(camel or _snake_to_camel(name)))
+        if context_get("project_title_snapshot", "projectTitleSnapshot") != project.get("title"):
+            raise _MutationRuleViolation("work_item_structure_changed", {"reason": "context_project_snapshot"})
+        if context_row["title_snapshot"] != l2.get("title") or context_row["parent_snapshot"] != l2.get("parent_id"):
+            raise _MutationRuleViolation("work_item_structure_changed", {"reason": "context_work_item_snapshot"})
+        if context_row["status_snapshot"] != l2.get("status_definition_id"):
+            raise _MutationRuleViolation("work_item_structure_changed", {"reason": "context_status_snapshot"})
+        expected_versions = request.payload.get("expected_work_item_versions")
+        if not isinstance(expected_versions, Mapping):
+            raise _MutationRuleViolation("work_item_structure_changed", {"reason": "expected_versions"})
         plan_rows = snapshot.get("plan", ())
         if not isinstance(plan_rows, (tuple, list)):
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan"})
+        plan_work_item_ids: list[str] = []
+        for item in plan_rows:
+            if not isinstance(item, Mapping):
+                raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_item"})
+            item_id = str(item.get("work_item_id", item.get("workItemId", "")) or "")
+            item_version = item.get("work_item_version_snapshot", item.get("workItemVersionSnapshot"))
+            if not item_id or type(item_version) is not int or item_version < 0:
+                raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_identity"})
+            plan_work_item_ids.append(item_id)
+            if expected_versions.get(item_id) != item_version:
+                raise _MutationRuleViolation("version_conflict", {"entityId": item_id})
+        expected_ids = {l2_id, *plan_work_item_ids}
+        if set(expected_versions) != expected_ids or any(
+            type(value) is not int or value < 0 for value in expected_versions.values()
+        ):
+            raise _MutationRuleViolation("work_item_structure_changed", {"reason": "expected_versions"})
+        self._validate_start_work_items(
+            context, l2_id, tuple(plan_work_item_ids), expected_versions,
+        )
+        if expected_versions[l2_id] != context_get("level2_version_snapshot", "level2VersionSnapshot"):
+            raise _MutationRuleViolation("version_conflict", {"entityId": l2_id})
         converted_plans: list[Mapping[str, object]] = []
+        plan_ids: set[str] = set()
+        plan_ranks: set[int] = set()
+        current_count = 0
         for item in plan_rows:
             if not isinstance(item, Mapping):
                 raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_item"})
             def item_get(name: str, camel: str | None = None) -> object:
                 return item.get(name, item.get(camel or _snake_to_camel(name)))
-            added_at = _require_canonical_timestamp(item_get("added_at", "addedAt"))
+            item_id = str(item_get("id") or "")
+            work_item_id = str(item_get("work_item_id", "workItemId") or "")
+            source = item_get("source")
+            plan_rank = item_get("plan_rank", "planRank")
+            current_during_session = item_get("current_during_session", "currentDuringSession")
+            completion_draft = item_get("completion_draft", "completionDraft")
+            if not item_id or item_id in plan_ids or source not in {"before_start", "during_session"}:
+                raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_identity"})
+            if type(plan_rank) is not int or plan_rank < 0 or plan_rank in plan_ranks:
+                raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_rank"})
+            if type(current_during_session) is not bool or type(completion_draft) is not bool:
+                raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_flags"})
             removed_at = item_get("removed_at", "removedAt")
+            removal_reason = item_get("removal_reason", "removalReason")
+            if removed_at is None and removal_reason is not None:
+                raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_removal"})
+            if removed_at is not None and (not isinstance(removal_reason, str) or not removal_reason.strip()):
+                raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_removal"})
+            added_at = _require_canonical_timestamp(item_get("added_at", "addedAt"))
             if removed_at is not None:
                 _require_canonical_timestamp(removed_at)
+                if _parse_timestamp(str(removed_at)) > _parse_timestamp(cached_at):
+                    raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_time_range"})
+            if current_during_session and removed_at is not None:
+                raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_flags"})
+            current_count += int(bool(current_during_session and removed_at is None))
+            plan_ids.add(item_id)
+            plan_ranks.add(plan_rank)
+            work_item = context.authority.row("work_item", work_item_id)
+            if work_item is None:
+                raise _MutationRuleViolation("not_found", {"entityId": work_item_id})
+            if item_get("title_snapshot", "titleSnapshot") != work_item.get("title"):
+                raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_title"})
+            if item_get("level2_work_item_id_snapshot", "level2WorkItemIdSnapshot") != l2_id:
+                raise _MutationRuleViolation("invalid_work_item_tree", {"reason": "plan_parent"})
             converted = _plan_row(
-                id=str(item_get("id") or ""),
+                id=item_id,
                 session_id=request.entity_id,
-                work_item_id=str(item_get("work_item_id", "workItemId") or ""),
+                work_item_id=work_item_id,
                 title_snapshot=str(item_get("title_snapshot", "titleSnapshot") or ""),
-                level2_snapshot=str(item_get("level2_work_item_id_snapshot", "level2WorkItemIdSnapshot") or ""),
-                plan_rank=item_get("plan_rank", "planRank"),
-                source=str(item_get("source") or "before_start"),
+                level2_snapshot=l2_id,
+                plan_rank=plan_rank,
+                source=str(source),
                 added_at=added_at,
                 removed_at=removed_at,
-                removal_reason=item_get("removal_reason", "removalReason"),
-                current_during_session=bool(item_get("current_during_session", "currentDuringSession")),
-                completion_draft=bool(item_get("completion_draft", "completionDraft")),
+                removal_reason=removal_reason,
+                current_during_session=current_during_session,
+                completion_draft=completion_draft,
                 version=1,
                 created_at=added_at,
                 updated_at=cached_at,
             )
             converted_plans.append(converted)
+        if current_count > 1:
+            raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_current"})
         attribution = _attribution_row(
             id=f"attr-{request.entity_id}-1",
             session_id=request.entity_id,
@@ -1042,6 +1140,8 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         current = context.authority.row("focus_session", session_id)
         if current is None:
             raise _MutationRuleViolation("not_found", {"entityId": session_id})
+        if require_owner:
+            self._reject_activation_conflict(current)
         if require_cas:
             if request.expected_version is None or current.get("version") != request.expected_version:
                 raise _MutationRuleViolation(
@@ -1170,6 +1270,10 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 "work_item_structure_changed", {"reason": "unknown_fields", "fields": tuple(sorted(unknown))}
             )
         _validate_sync_update_parent(context, entity_type, current)
+        if entity_type == "focus_session":
+            return await self._compile_sync_focus_session_update(
+                context, request, current,
+            )
         after = dict(current)
         for key, value in request.payload.items():
             if key not in {"id", "created_at", "version"}:
@@ -1195,6 +1299,151 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             db_plans=(db_plan,),
             sync_events=(sync_event,),
             value=value,
+        )
+
+    async def _compile_sync_focus_session_update(
+        self,
+        context: MutationCompileContext,
+        request: MutationRequest,
+        current: Mapping[str, object],
+    ) -> MutationCommand:
+        """Compile a provisional Session post-image without opening a second clock API.
+
+        Sync may carry a complete row, but it cannot invent timer facts.  A
+        changed clock marker must describe exactly one legal transition and
+        the shared transition helper computes all counters and timestamps.
+        Non-clock Sync updates are limited to the three provisional content
+        fields below.
+        """
+        payload = request.payload
+        immutable = (
+            "id", "created_at", "session_revision", "started_at",
+            "planned_seconds", "ownership_state", "review_state",
+        )
+        for field in immutable:
+            if field in payload and payload[field] != current.get(field):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {"reason": "session_immutable_field", "field": field},
+                )
+        if "version" in payload and payload["version"] != current.get("version"):
+            raise _MutationRuleViolation(
+                "version_conflict", {"reason": "session_version_post_image"},
+            )
+
+        changed_clock_fields = {
+            field for field in _FOCUS_CLOCK_FIELDS
+            if field in payload and payload[field] != current.get(field)
+        }
+        clock_action: str | None = None
+        if changed_clock_fields:
+            if "ended_at" in changed_clock_fields:
+                if current.get("ended_at") is not None or payload.get("ended_at") is None:
+                    raise _MutationRuleViolation(
+                        "work_item_structure_changed", {"reason": "invalid_clock_transition"},
+                    )
+                clock_action = "end"
+            elif "pause_started_at" in changed_clock_fields:
+                if (
+                    current.get("ended_at") is None
+                    and current.get("pause_started_at") is None
+                    and payload.get("pause_started_at") is not None
+                ):
+                    clock_action = "pause"
+                elif (
+                    current.get("ended_at") is None
+                    and current.get("pause_started_at") is not None
+                    and payload.get("pause_started_at") is None
+                ):
+                    clock_action = "resume"
+                else:
+                    raise _MutationRuleViolation(
+                        "work_item_structure_changed", {"reason": "invalid_clock_transition"},
+                    )
+            else:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "clock_counter_direct_update"},
+                )
+
+            transition_at = request.client_updated_at or payload.get("updated_at")
+            marker = payload.get(
+                "ended_at" if clock_action == "end" else "pause_started_at",
+            )
+            if not isinstance(transition_at, str) or marker != transition_at:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "clock_timestamp_mismatch"},
+                )
+            if request.client_updated_at is not None and payload.get("updated_at") not in {
+                None, transition_at,
+            }:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "updated_at_mismatch"},
+                )
+            generated = dict(
+                _clock_transition_after(current, clock_action, transition_at, {
+                    key: value for key, value in payload.items()
+                    if key != "break_seconds"
+                }),
+            )
+            for field in _FOCUS_CLOCK_FIELDS | {"validity", "validity_reason", "updated_at"}:
+                if field in payload and payload[field] != generated.get(field):
+                    raise _MutationRuleViolation(
+                        "work_item_structure_changed",
+                        {"reason": "clock_post_image_mismatch", "field": field},
+                    )
+            after = generated
+        else:
+            if any(
+                field in payload and payload[field] != current.get(field)
+                for field in ("validity", "validity_reason")
+            ):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "session_state_direct_update"},
+                )
+            after = dict(current)
+            client_ts = request.client_updated_at or payload.get("updated_at") or current.get("updated_at")
+            if not isinstance(client_ts, str):
+                raise _MutationRuleViolation(
+                    "version_conflict", {"reason": "invalid_timestamp"},
+                )
+            _require_canonical_timestamp(client_ts)
+            _require_non_regressing_timestamp(current, client_ts)
+            if request.client_updated_at is not None and payload.get("updated_at") not in {
+                None, client_ts,
+            }:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "updated_at_mismatch"},
+                )
+            after["updated_at"] = client_ts
+
+        for field, value in payload.items():
+            if field in _FOCUS_SYNC_MUTABLE_FIELDS:
+                after[field] = value
+            elif field not in {
+                "id", "created_at", "version", "updated_at", "session_revision",
+                "started_at", "planned_seconds", "validity", "validity_reason",
+                "ownership_state", "review_state", *_FOCUS_CLOCK_FIELDS,
+            }:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "session_field_not_sync_mutable", "field": field},
+                )
+
+        _validate_sync_update_row(
+            context, request, "focus_session", current, after,
+            allow_terminal_validity=clock_action == "end",
+        )
+        after["version"] = int(current.get("version", 1)) + 1
+        frozen_before = require_frozen_object(current)
+        frozen_after = require_frozen_object(after)
+        db_plan = _update_plan(context.catalog, "focus_session", frozen_before, frozen_after)
+        sync_event = _update_sync(
+            "focus_session", frozen_after, str(frozen_after["updated_at"]),
+        )
+        return context.command(
+            request=request,
+            db_plans=(db_plan,),
+            sync_events=(sync_event,),
+            value=require_frozen_object({"updated": True, "entityType": "focus_session"}),
         )
 
 
@@ -1294,6 +1543,77 @@ def _validate_duration_row(row: Mapping[str, object]) -> None:
         raise _MutationRuleViolation(
             "version_conflict", {"reason": "invalid_duration", "field": "focused_seconds"}
         )
+
+
+def _clock_transition_after(
+    current: Mapping[str, object],
+    action: str,
+    occurred_at: str,
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Build and validate one legal running/paused/ended post-image.
+
+    Both typed lifecycle commands and the restricted provisional Sync update
+    path use this helper.  Keeping the transition arithmetic here prevents a
+    wire post-image from inventing timer counters or state transitions.
+    """
+    _require_canonical_timestamp(occurred_at)
+    _require_non_regressing_timestamp(current, occurred_at)
+    _validate_duration_row(current)
+    after = dict(current)
+    after["updated_at"] = occurred_at
+    if "break_seconds" in payload:
+        break_seconds = payload["break_seconds"]
+        if type(break_seconds) is not int or break_seconds < 0:
+            raise _MutationRuleViolation(
+                "version_conflict", {"reason": "invalid_duration", "field": "break_seconds"}
+            )
+        after["break_seconds"] = break_seconds
+    started_at = str(current.get("started_at", ""))
+    _require_canonical_timestamp(started_at)
+    if action == "pause":
+        if current.get("pause_started_at") is not None or current.get("ended_at") is not None:
+            raise _MutationRuleViolation("version_conflict", {"reason": "not_running"})
+        after["pause_started_at"] = occurred_at
+        after["gross_seconds"] = _integer_seconds_between(started_at, occurred_at)
+        after["focused_seconds"] = _focused_seconds(after)
+    elif action == "resume":
+        if current.get("pause_started_at") is None or current.get("ended_at") is not None:
+            raise _MutationRuleViolation("version_conflict", {"reason": "not_paused"})
+        pause_started = str(current.get("pause_started_at", ""))
+        elapsed_pause = _integer_seconds_between(pause_started, occurred_at)
+        after["paused_seconds"] = int(current.get("paused_seconds", 0)) + elapsed_pause
+        after["pause_started_at"] = None
+        after["gross_seconds"] = _integer_seconds_between(started_at, occurred_at)
+        after["focused_seconds"] = _focused_seconds(after)
+    elif action == "end":
+        if current.get("ended_at") is not None:
+            raise _MutationRuleViolation("version_conflict", {"reason": "already_ended"})
+        if current.get("pause_started_at") is not None:
+            pause_started = str(current.get("pause_started_at", ""))
+            elapsed_pause = _integer_seconds_between(pause_started, occurred_at)
+            after["paused_seconds"] = int(current.get("paused_seconds", 0)) + elapsed_pause
+            after["pause_started_at"] = None
+        after["ended_at"] = occurred_at
+        after["gross_seconds"] = _integer_seconds_between(started_at, occurred_at)
+        after["focused_seconds"] = _focused_seconds(after)
+        after["timer_completion"] = str(
+            payload.get("timer_completion", current.get("timer_completion") or "completed")
+        )
+        after["validity"] = str(payload.get("validity", current.get("validity", "pending")))
+        after["validity_reason"] = payload.get(
+            "validity_reason", current.get("validity_reason")
+        )
+        if after["timer_completion"] not in {"completed", "ended_early", "interrupted"}:
+            raise _MutationRuleViolation("version_conflict", {"reason": "invalid_timer_completion"})
+        if after["validity"] not in {"pending", "valid", "invalid"}:
+            raise _MutationRuleViolation("version_conflict", {"reason": "invalid_validity"})
+    else:
+        raise _MutationRuleViolation(
+            "version_conflict", {"reason": "unsupported_clock_action"}
+        )
+    _validate_duration_row(after)
+    return require_frozen_object(after)
 
 
 def _work_item_depth(authority: object, row: Mapping[str, object]) -> int:
@@ -1397,7 +1717,12 @@ def _require_provisional_session(
     session = context.authority.row("focus_session", session_id)
     if session is None:
         raise _MutationRuleViolation("not_found", {"entityId": session_id})
-    if session.get("ownership_state") not in {"local_provisional", "activation_conflict"}:
+    if session.get("ownership_state") == "activation_conflict":
+        raise _MutationRuleViolation(
+            "session_activation_conflict",
+            {"sessionId": session_id, "reason": "conflict_read_only"},
+        )
+    if session.get("ownership_state") != "local_provisional":
         raise _MutationRuleViolation(
             "stale_session_owner", {"sessionId": session_id, "reason": "authoritative_session"}
         )
@@ -1478,9 +1803,13 @@ def _validate_sync_update_row(
     entity_type: str,
     before: Mapping[str, object],
     after: Mapping[str, object],
+    *,
+    allow_terminal_validity: bool = False,
 ) -> None:
     if entity_type == "focus_session":
-        immutable = ("id", "created_at", "ownership_state", "validity", "review_state")
+        immutable = ("id", "created_at", "ownership_state", "review_state")
+        if not allow_terminal_validity:
+            immutable += ("validity",)
         if any(before.get(key) != after.get(key) for key in immutable):
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "session_immutable_field"})
         _require_canonical_timestamp(after.get("started_at"))
