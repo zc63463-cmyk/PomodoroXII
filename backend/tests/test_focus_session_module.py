@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select, text
 
+from app.errors import MutationRejectedError
 from app.focus_session.commands import build_focus_request, focus_business_payload
 from app.focus_session.contracts import (
     FocusSessionCommand,
@@ -28,7 +29,7 @@ from app.focus_session.module import (
     require_focus_scope,
 )
 from app.models.focus_session import FocusSession
-from app.mutation.types import canonical_payload_hash
+from app.mutation.types import InvalidPayloadHashError, canonical_payload_hash
 
 # ---------------------------------------------------------------------------
 # Pure-logic tests (no DB fixture needed)
@@ -242,6 +243,7 @@ class TestFocusSessionModuleIntegration:
 
         pause_payload: dict[str, object] = {
             "occurred_at": "2026-07-15T08:30:00Z",
+            "expected_version": 1,
             "owner_device_id": "device-a",
             "owner_tab_id": "tab-a",
         }
@@ -259,6 +261,7 @@ class TestFocusSessionModuleIntegration:
 
         resume_payload: dict[str, object] = {
             "occurred_at": "2026-07-15T08:45:00Z",
+            "expected_version": 2,
             "owner_device_id": "device-a",
             "owner_tab_id": "tab-a",
         }
@@ -276,6 +279,7 @@ class TestFocusSessionModuleIntegration:
 
         end_payload: dict[str, object] = {
             "occurred_at": "2026-07-15T09:00:00Z",
+            "expected_version": 3,
             "timer_completion": "completed",
             "validity": "valid",
             "validity_reason": "natural_completion",
@@ -293,6 +297,93 @@ class TestFocusSessionModuleIntegration:
         )
         ended = await focus_fixture.module.end(focus_fixture.scope, end_cmd)
         assert ended.value["session"]["clockState"] == "ended"
+
+    @pytest.mark.asyncio
+    async def test_clock_transition_requires_expected_version_cas(
+        self, focus_fixture,
+    ) -> None:
+        await focus_fixture.module.start(
+            focus_fixture.scope, self._start_command()
+        )
+        payload = {
+            "occurred_at": "2026-07-15T08:30:00Z",
+            "expected_version": 99,
+            "owner_device_id": "device-a",
+            "owner_tab_id": "tab-a",
+        }
+        command = FocusSessionCommand(
+            command_id="pause-stale-cas",
+            space_id="space-test",
+            session_id="fs-1",
+            ownership_epoch=1,
+            payload_hash=canonical_payload_hash(
+                focus_business_payload("pause", payload)
+            ),
+            payload=payload,
+        )
+        with pytest.raises(MutationRejectedError) as captured:
+            await focus_fixture.module.pause(focus_fixture.scope, command)
+        assert captured.value.rejection.code == "version_conflict"
+
+    @pytest.mark.asyncio
+    async def test_clock_transition_rejects_time_regression(
+        self, focus_fixture,
+    ) -> None:
+        await focus_fixture.module.start(
+            focus_fixture.scope, self._start_command()
+        )
+        payload = {
+            "occurred_at": "2026-07-15T07:59:59Z",
+            "expected_version": 1,
+            "owner_device_id": "device-a",
+            "owner_tab_id": "tab-a",
+        }
+        command = FocusSessionCommand(
+            command_id="pause-time-regression",
+            space_id="space-test",
+            session_id="fs-1",
+            ownership_epoch=1,
+            payload_hash=canonical_payload_hash(
+                focus_business_payload("pause", payload)
+            ),
+            payload=payload,
+        )
+        with pytest.raises(MutationRejectedError) as captured:
+            await focus_fixture.module.pause(focus_fixture.scope, command)
+        assert captured.value.rejection.code == "version_conflict"
+        assert captured.value.rejection.details["reason"] == "time_regression"
+
+    @pytest.mark.asyncio
+    async def test_set_current_plan_item_mutates_plan_row_not_session_only(
+        self, focus_fixture,
+    ) -> None:
+        await focus_fixture.module.start(
+            focus_fixture.scope, self._start_command()
+        )
+        payload = {
+            "owner_device_id": "device-a",
+            "owner_tab_id": "tab-a",
+            "work_item_id": None,
+            "expected_plan_versions": {"plan-fs-1-l3-a": 1},
+        }
+        command = FocusSessionCommand(
+            command_id="current-plan-clear",
+            space_id="space-test",
+            session_id="fs-1",
+            ownership_epoch=1,
+            payload_hash=canonical_payload_hash(
+                focus_business_payload("set_current_plan_item", payload)
+            ),
+            payload=payload,
+        )
+        await focus_fixture.module.set_current_plan_item(
+            focus_fixture.scope, command
+        )
+        aggregate = await focus_fixture.module._query.load(
+            focus_fixture.scope, "fs-1"
+        )
+        assert aggregate["plan"][0]["currentDuringSession"] is False
+        assert aggregate["session"]["version"] == 1
 
     @pytest.mark.asyncio
     async def test_reconcile_non_null_ownership_epoch_rejected_before_admission(
@@ -313,7 +404,7 @@ class TestFocusSessionModuleIntegration:
             payload_hash=canonical_payload_hash(business),
             payload=reconcile_payload,
         )
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValueError, match="owner epoch"):
             await focus_fixture.module.reconcile_commands(
                 focus_fixture.scope, command,
             )
@@ -336,7 +427,48 @@ class TestFocusSessionModuleIntegration:
             payload_hash=canonical_payload_hash(business),
             payload=reconcile_payload,
         )
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValueError, match="space_scope_mismatch"):
+            await focus_fixture.module.reconcile_commands(
+                focus_fixture.scope, command,
+            )
+
+    @pytest.mark.asyncio
+    async def test_payload_hash_is_verified_before_scope_mismatch(
+        self, focus_fixture,
+    ) -> None:
+        """A malformed business hash cannot be masked by an invalid Scope."""
+        command = FocusSessionCommand(
+            command_id="start-hash-order",
+            space_id="space-wrong",
+            session_id="fs-hash-order",
+            ownership_epoch=1,
+            payload_hash="0" * 64,
+            payload={"started_at": "2026-07-15T08:00:00Z"},
+        )
+        with pytest.raises(InvalidPayloadHashError):
+            await focus_fixture.module.start(focus_fixture.scope, command)
+
+    @pytest.mark.asyncio
+    async def test_reconcile_epoch_rejection_is_exact_and_pre_uow(
+        self, focus_fixture,
+    ) -> None:
+        payload = {
+            "command_ids": ["cmd-1"],
+            "replay_safe": True,
+            "abandon_command_ids": ["cmd-1"],
+            "decision_at": "2026-07-15T14:00:00Z",
+        }
+        command = FocusSessionCommand(
+            command_id="reconcile-exact",
+            space_id="space-test",
+            session_id="fs-1",
+            ownership_epoch=1,
+            payload_hash=canonical_payload_hash(
+                focus_business_payload("reconcile_commands", payload)
+            ),
+            payload=payload,
+        )
+        with pytest.raises(ValueError, match="owner epoch"):
             await focus_fixture.module.reconcile_commands(
                 focus_fixture.scope, command,
             )
