@@ -872,30 +872,15 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         ended_at = get("ended_at", "endedAt")
         pause_started_at = get("pause_started_at", "pauseStartedAt")
         if ended_at is not None:
-            ended_at = _require_canonical_timestamp(ended_at)
-            if _parse_timestamp(ended_at) < _parse_timestamp(started_at) or (
-                _parse_timestamp(ended_at) > _parse_timestamp(cached_at)
-            ):
-                raise _MutationRuleViolation(
-                    "work_item_structure_changed", {"reason": "snapshot_time_range", "field": "ended_at"}
-                )
-            if pause_started_at is not None:
-                raise _MutationRuleViolation(
-                    "work_item_structure_changed", {"reason": "terminal_pause_state"}
-                )
-            timer_completion = get("timer_completion", "timerCompletion")
-            if timer_completion not in {"completed", "ended_early", "interrupted"}:
-                raise _MutationRuleViolation(
-                    "work_item_structure_changed", {"reason": "terminal_timer_completion"}
-                )
-            review_state = "pending"
-        else:
-            if get("timer_completion", "timerCompletion") is not None:
-                raise _MutationRuleViolation(
-                    "work_item_structure_changed", {"reason": "nonterminal_timer_completion"}
-                )
-            review_state = "not_required"
-            await self._require_locator_claim(context, request, require_owner=True)
+            raise _MutationRuleViolation(
+                "work_item_structure_changed", {"reason": "terminal_snapshot"}
+            )
+        if get("timer_completion", "timerCompletion") is not None:
+            raise _MutationRuleViolation(
+                "work_item_structure_changed", {"reason": "nonterminal_timer_completion"}
+            )
+        review_state = "not_required"
+        await self._require_locator_claim(context, request, require_owner=True)
         if pause_started_at is not None:
             pause_started_at = _require_canonical_timestamp(pause_started_at)
             if _parse_timestamp(pause_started_at) < _parse_timestamp(started_at) or (
