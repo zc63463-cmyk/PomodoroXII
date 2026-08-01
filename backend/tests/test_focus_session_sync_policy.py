@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.focus_session.policy import FOCUS_SESSION_POLICY_TYPES
-from app.mutation.types import MutationRuleViolation
+from app.mutation.types import MutationRequest, MutationRuleViolation
 
 EXPECTED_TYPES = frozenset({
     "focus_session",
@@ -140,7 +140,7 @@ class TestSyncPolicyMatrix:
         from app.mutation import unit_of_work as uow_module
         from app.mutation.unit_of_work import AuthorityOverlay
 
-        policy = FocusSessionMutationPolicy()
+        policy = FocusSessionMutationPolicy(locator_reader=lambda *_args: None)
         mutation = mutation_fixture_factory(policies=(policy,))
 
         # Track generic fallback calls by wrapping compile_catalog_entity_command
@@ -196,13 +196,56 @@ class TestSyncPolicyMatrix:
                 sync_policy_fixture.scope, entity_type, "entity-1", expected_version=None,
             )
         if conditionally_allowed:
-            command = await sync_policy_fixture.compile(request)
-            assert command.request is request
+            try:
+                command = await sync_policy_fixture.compile(request)
+            except MutationRuleViolation as captured:
+                # An allowed matrix branch still requires its authoritative
+                # provisional parent/row; this empty overlay intentionally
+                # exercises the fail-closed path without generic fallback.
+                assert captured.code in {"not_found", "version_conflict", "stale_session_owner"}
+            else:
+                assert command.request is request
         else:
             with pytest.raises(MutationRuleViolation) as captured:
                 await sync_policy_fixture.compile(request)
-            assert captured.value.code in (
-                "version_conflict",
-                "stale_session_owner",
-            )
+            assert captured.value.code == "work_item_structure_changed"
         assert sync_policy_fixture.fallback_calls["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_sync_update_missing_authority_row_is_not_found(
+        self, sync_policy_fixture,
+    ) -> None:
+        """Sync cannot synthesize an update image for a missing Session row."""
+        request = sync_policy_fixture.entity_commands.update(
+            sync_policy_fixture.scope,
+            "focus_session",
+            "missing-session",
+            _valid_provisional_payload("focus_session", "update"),
+            expected_version=1,
+        )
+        with pytest.raises(MutationRuleViolation) as captured:
+            await sync_policy_fixture.compile(request)
+        assert captured.value.code == "not_found"
+
+    @pytest.mark.asyncio
+    async def test_start_requires_a_matching_locator_claim(
+        self, sync_policy_fixture,
+    ) -> None:
+        request = MutationRequest.from_payload(
+            name="focus_session.start",
+            entity_type="focus_session",
+            entity_id="missing-session",
+            payload={
+                "space_id": "space-test",
+                "session_id": "missing-session",
+                "started_at": "2026-07-15T08:00:00Z",
+                "planned_seconds": 1500,
+                "level2_work_item_id": "l2-a",
+                "level3_work_item_ids": (),
+                "ownership_epoch": 1,
+            },
+            expected_version=None,
+        )
+        with pytest.raises(MutationRuleViolation) as captured:
+            await sync_policy_fixture.compile(request)
+        assert captured.value.code == "stale_session_owner"

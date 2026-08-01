@@ -60,12 +60,18 @@ def focus_session_view(
     if not isinstance(session, dict):
         session = dict(session)
     started_at = session.get("startedAt")
-    if not started_at:
+    if not isinstance(started_at, str) or not started_at:
         raise TypeError("startedAt is required in session projection")
+    pause_started_at = session.get("pauseStartedAt")
+    ended_at = session.get("endedAt")
+    if pause_started_at is not None and not isinstance(pause_started_at, str):
+        raise TypeError("pauseStartedAt must be a string or null")
+    if ended_at is not None and not isinstance(ended_at, str):
+        raise TypeError("endedAt must be a string or null")
     clock_state = derive_clock_state(
-        started_at=started_at if isinstance(started_at, str) else None,
-        pause_started_at=session.get("pauseStartedAt"),
-        ended_at=session.get("endedAt"),
+        started_at=started_at,
+        pause_started_at=pause_started_at,
+        ended_at=ended_at,
     )
     result = dict(aggregate)
     result["session"] = {**session, "clockState": clock_state}
@@ -112,8 +118,8 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def start(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("start", command)
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)
@@ -121,8 +127,8 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def pause(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("pause", command)
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)
@@ -130,8 +136,8 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def resume(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("resume", command)
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)
@@ -139,8 +145,8 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def end(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("end", command)
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)
@@ -148,8 +154,8 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def update_note(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("update_note", command)
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)
@@ -157,8 +163,8 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def set_current_plan_item(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("set_current_plan_item", command)
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)
@@ -166,8 +172,8 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def set_completion_draft(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("set_completion_draft", command)
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)
@@ -175,8 +181,8 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def add_plan_item(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("add_plan_item", command)
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)
@@ -184,8 +190,8 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def remove_plan_item(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("remove_plan_item", command)
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)
@@ -193,8 +199,10 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def submit_review(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        require_focus_scope(scope, command.space_id, command.session_id)
         request = build_focus_request("submit_review", command)
+        if command.ownership_epoch is not None:
+            raise ValueError("post-terminal review requires no owner epoch")
+        require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         view = focus_session_view(dict(result.value))
         return FocusSessionView(value=view)

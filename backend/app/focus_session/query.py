@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
+from app.focus_session.receipts import receipt_view
 from app.models.focus_session import FocusSession, SessionTaskContext
 from app.models.session_command import SessionCommandEnvelope, SessionCommandReceipt
 from app.models.session_revision import (
@@ -49,7 +50,8 @@ class FocusSessionQuery:
                 await session.execute(
                     select(SessionAttributionRevision)
                     .where(SessionAttributionRevision.session_id == session_id)
-                    .order_by(SessionAttributionRevision.revision)
+                    .where(SessionAttributionRevision.effective.is_(True))
+                    .order_by(SessionAttributionRevision.revision.desc())
                 )
             ).scalars().all()
             plan_rows = (
@@ -63,14 +65,15 @@ class FocusSessionQuery:
                 await session.execute(
                     select(SessionWorkItemOutcome)
                     .where(SessionWorkItemOutcome.session_id == session_id)
-                    .order_by(SessionWorkItemOutcome.revision)
+                    .where(SessionWorkItemOutcome.effective.is_(True))
+                    .order_by(SessionWorkItemOutcome.work_item_id, SessionWorkItemOutcome.revision.desc())
                 )
             ).scalars().all()
             envelope_rows = (
                 await session.execute(
                     select(SessionCommandEnvelope)
                     .where(SessionCommandEnvelope.session_id == session_id)
-                    .order_by(SessionCommandEnvelope.command_id)
+                    .order_by(SessionCommandEnvelope.created_at, SessionCommandEnvelope.command_id)
                 )
             ).scalars().all()
             receipt_rows = (
@@ -81,17 +84,17 @@ class FocusSessionQuery:
                             [e.command_id for e in envelope_rows]
                         )
                     )
-                    .order_by(SessionCommandReceipt.command_id)
+                    .order_by(SessionCommandReceipt.updated_at, SessionCommandReceipt.command_id)
                 )
             ).scalars().all()
         return {
             "session": _project_session(session_row),
             "context": _project_context(context_row) if context_row else None,
-            "attributions": [_project_attribution(a) for a in attribution_rows],
-            "plans": [_project_plan(p) for p in plan_rows],
+            "attribution": [_project_attribution(a) for a in attribution_rows],
+            "plan": [_project_plan(p) for p in plan_rows],
             "outcomes": [_project_outcome(o) for o in outcome_rows],
-            "envelopes": [_project_envelope(e) for e in envelope_rows],
-            "receipts": [_project_receipt(r) for r in receipt_rows],
+            "command_envelopes": [_project_envelope(e) for e in envelope_rows],
+            "command_receipts": [dict(receipt_view(r)) for r in receipt_rows],
         }
 
 
@@ -151,6 +154,8 @@ def _project_attribution(row: SessionAttributionRevision) -> dict[str, object]:
         "correctedFromRevision": row.corrected_from_revision,
         "effective": row.effective,
         "version": row.version,
+        "createdAt": row.created_at,
+        "updatedAt": row.updated_at,
     }
 
 
@@ -169,6 +174,8 @@ def _project_plan(row: SessionWorkItemPlan) -> dict[str, object]:
         "currentDuringSession": row.current_during_session,
         "completionDraft": row.completion_draft,
         "version": row.version,
+        "createdAt": row.created_at,
+        "updatedAt": row.updated_at,
     }
 
 
@@ -188,25 +195,25 @@ def _project_outcome(row: SessionWorkItemOutcome) -> dict[str, object]:
         "commandId": row.command_id,
         "reviewedAt": row.reviewed_at,
         "version": row.version,
+        "createdAt": row.created_at,
+        "updatedAt": row.updated_at,
     }
 
 
 def _project_envelope(row: SessionCommandEnvelope) -> dict[str, object]:
     return {
         "commandId": row.command_id,
-        "sessionId": getattr(row, "session_id", None),
-        "workItemId": getattr(row, "work_item_id", None),
-        "action": getattr(row, "action", None),
-        "payloadHash": getattr(row, "payload_hash", None),
-        "version": getattr(row, "version", None),
+        "spaceId": row.space_id,
+        "sessionId": row.session_id,
+        "sessionRevision": row.session_revision,
+        "workItemId": row.work_item_id,
+        "expectedVersion": row.expected_version,
+        "targetTransition": row.target_transition,
+        "replaySafe": row.replay_safe,
+        "payloadHash": row.payload_hash,
+        "createdAt": row.created_at,
     }
 
 
 def _project_receipt(row: SessionCommandReceipt) -> dict[str, object]:
-    return {
-        "commandId": row.command_id,
-        "state": getattr(row, "state", None),
-        "errorCode": getattr(row, "error_code", None),
-        "retryable": getattr(row, "retryable", None),
-        "updatedAt": getattr(row, "updated_at", None),
-    }
+    return dict(receipt_view(row))
