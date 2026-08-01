@@ -183,7 +183,19 @@ class TestFocusSessionModuleIntegration:
         from app.focus_session.policy import FocusSessionMutationPolicy
         from app.focus_session.query import FocusSessionQuery
 
-        policy = FocusSessionMutationPolicy()
+        def locator_reader(_scope, request):
+            payload = request.payload
+            return {
+                "state": "claiming",
+                "space_id": payload.get("space_id", "space-test"),
+                "session_id": payload.get("session_id", request.entity_id),
+                "operation_id": payload.get("command_id"),
+                "owner_device_id": payload.get("owner_device_id"),
+                "owner_tab_id": payload.get("owner_tab_id"),
+                "ownership_epoch": payload.get("ownership_epoch"),
+            }
+
+        policy = FocusSessionMutationPolicy(locator_reader=locator_reader)
         mutation = mutation_fixture_factory(policies=(policy,))
         module = DefaultFocusSessionModule(
             uow=mutation.uow,
