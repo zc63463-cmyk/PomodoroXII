@@ -13,6 +13,7 @@ import json
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 
+from app.focus_session.effort_projection import EffortProjectionCompiler
 from app.mutation.types import (
     DbMutationPlan,
     MutationCommand,
@@ -481,6 +482,8 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
     async def _compile_review(
         self, context: MutationCompileContext, request: MutationRequest,
     ) -> MutationCommand:
+        from app.mutation.types import bounded_child_operation_id, canonical_payload_hash
+
         context.require_space(str(request.payload.get("space_id", "")))
         session_id = str(request.payload.get("session_id", request.entity_id))
         current = context.authority.row("focus_session", session_id)
@@ -517,11 +520,193 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             "version": int(current["version"]) + 1,
         })
         frozen_after = require_frozen_object(after)
+
+        # Build frozen plan set for outcome validation
+        plan_rows = tuple(
+            row for row in context.authority.rows("session_work_item_plan")
+            if str(row.get("session_id")) == session_id and row.get("removed_at") is None
+        )
+        plan_work_item_ids = {str(row.get("work_item_id")) for row in plan_rows}
+
+        # Process outcomes
+        outcomes_raw = request.payload.get("outcomes", ())
+        if not isinstance(outcomes_raw, (tuple, list)):
+            raise _MutationRuleViolation(
+                "work_item_structure_changed", {"reason": "outcomes_not_collection"}
+            )
+
+        # Get existing outcomes for this session
+        existing_outcomes = tuple(
+            sorted(
+                (row for row in context.authority.rows("session_work_item_outcome")
+                 if str(row.get("session_id")) == session_id),
+                key=lambda row: int(row.get("revision", 0)),
+            )
+        )
+
+        # Get status definitions for envelope resolution
+        status_definitions = context.authority.rows("status_definition")
+
+        db_plans: list[DbMutationPlan] = [
+            _update_plan(context.catalog, "focus_session", current, frozen_after),
+        ]
+        sync_events: list[SyncEventPlan] = [
+            _update_sync("focus_session", frozen_after, reviewed_at),
+        ]
+
+        envelope_index = 0
+        created_outcomes: list[Mapping[str, object]] = []
+        for outcome_item in outcomes_raw:
+            if not isinstance(outcome_item, Mapping):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "outcome_not_mapping"}
+                )
+            work_item_id = str(outcome_item.get("work_item_id", ""))
+            if not work_item_id or work_item_id not in plan_work_item_ids:
+                raise _MutationRuleViolation(
+                    "not_found", {"entityId": work_item_id, "reason": "not_in_frozen_plan"}
+                )
+            result = str(outcome_item.get("result", ""))
+            if result not in {"completed", "progressed", "stuck", "untouched", "cancelled"}:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "invalid_result", "value": result}
+                )
+            state_command = str(outcome_item.get("state_command", "none"))
+            if state_command not in {"complete", "cancel", "none"}:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "invalid_state_command"}
+                )
+            expected_wi_version = outcome_item.get("expected_work_item_version")
+            work_item = context.authority.row("work_item", work_item_id)
+            if work_item is None:
+                raise _MutationRuleViolation("not_found", {"entityId": work_item_id})
+            if type(expected_wi_version) is not int or work_item.get("version") != expected_wi_version:
+                raise _MutationRuleViolation(
+                    "version_conflict",
+                    {"entityId": work_item_id, "expectedVersion": expected_wi_version},
+                )
+
+            # Find existing effective outcomes for this session+work_item_id
+            all_known_outcomes = existing_outcomes + tuple(created_outcomes)
+            existing_for_wi = tuple(
+                row for row in all_known_outcomes
+                if str(row.get("work_item_id")) == work_item_id and row.get("effective") is True
+            )
+            # Compute next revision
+            all_for_wi = tuple(
+                row for row in all_known_outcomes
+                if str(row.get("work_item_id")) == work_item_id
+            )
+            next_revision = max((int(row.get("revision", 0)) for row in all_for_wi), default=0) + 1
+            corrected_from = outcome_item.get("corrected_from_revision")
+            if corrected_from is None and existing_for_wi:
+                corrected_from = int(existing_for_wi[-1].get("revision"))
+
+            # Mark old effective outcomes as ineffective
+            for old_outcome in existing_for_wi:
+                old_updated = dict(old_outcome)
+                old_updated["effective"] = False
+                old_updated["version"] = int(old_outcome.get("version", 1)) + 1
+                old_updated["updated_at"] = reviewed_at
+                frozen_old = require_frozen_object(old_updated)
+                db_plans.append(_update_plan(context.catalog, "session_work_item_outcome", old_outcome, frozen_old))
+                sync_events.append(_update_sync("session_work_item_outcome", frozen_old, reviewed_at))
+
+            # Determine envelope command_id
+            envelope_command_id = None
+            if state_command in {"complete", "cancel"}:
+                # Resolve status_definition_id by category
+                target_category = "completed" if state_command == "complete" else "cancelled"
+                resolved_status_id = None
+                for sd in status_definitions:
+                    if str(sd.get("category")) == target_category:
+                        resolved_status_id = str(sd.get("id"))
+                        break
+                if resolved_status_id is None:
+                    raise _MutationRuleViolation(
+                        "not_found", {"reason": "status_definition_not_found", "category": target_category}
+                    )
+                envelope_command_id = bounded_child_operation_id(
+                    context.operation_id, f"command:{envelope_index:04d}"
+                )
+                envelope_index += 1
+                payload_hash = canonical_payload_hash(
+                    {"status_definition_id": resolved_status_id}
+                )
+                envelope_row = require_frozen_object({
+                    "command_id": envelope_command_id,
+                    "space_id": str(request.payload.get("space_id", "")),
+                    "session_id": session_id,
+                    "session_revision": int(after["version"]),
+                    "work_item_id": work_item_id,
+                    "expected_version": expected_wi_version,
+                    "target_transition": state_command,
+                    "replay_safe": True,
+                    "payload_hash": payload_hash,
+                    "created_at": reviewed_at,
+                })
+                db_plans.append(_insert_plan(context.catalog, "session_command_envelope", envelope_row))
+
+            # Create new outcome row
+            outcome_row = require_frozen_object({
+                "id": f"outcome-{session_id}-{work_item_id}-{next_revision}",
+                "created_at": reviewed_at,
+                "updated_at": reviewed_at,
+                "version": 1,
+                "session_id": session_id,
+                "session_revision": int(after["version"]),
+                "revision": next_revision,
+                "corrected_from_revision": corrected_from,
+                "effective": True,
+                "work_item_id": work_item_id,
+                "touched": bool(outcome_item.get("touched", False)),
+                "result": result,
+                "persona": outcome_item.get("persona"),
+                "state_command": state_command,
+                "command_id": envelope_command_id,
+                "reviewed_at": reviewed_at,
+            })
+            db_plans.append(_insert_plan(context.catalog, "session_work_item_outcome", outcome_row))
+            sync_events.append(_create_sync("session_work_item_outcome", outcome_row, reviewed_at))
+            created_outcomes.append(outcome_row)
+
+        # If validity is valid and ownership is authoritative, rebuild effort projection
+        if validity == "valid" and after.get("ownership_state") == "authoritative":
+            # Find the effective attribution target
+            attributions = tuple(
+                sorted(
+                    (row for row in context.authority.rows("session_attribution_revision")
+                     if str(row.get("session_id")) == session_id),
+                    key=lambda row: int(row.get("revision", 0)),
+                )
+            )
+            effective_attr = next(
+                (row for row in reversed(attributions) if row.get("effective") is True), None
+            )
+            if effective_attr is not None:
+                target_wi_id = str(effective_attr.get("level2_work_item_id"))
+                work_item = context.authority.row("work_item", target_wi_id)
+                if work_item is not None:
+                    new_effort = EffortProjectionCompiler.compute_effort_for_work_item(
+                        context.authority, target_wi_id
+                    )
+                    if int(work_item.get("effort_actual_seconds", 0)) != new_effort:
+                        wi_after = dict(work_item)
+                        wi_after["effort_actual_seconds"] = new_effort
+                        wi_after["updated_at"] = reviewed_at
+                        wi_after["version"] = int(work_item.get("version", 1)) + 1
+                        frozen_wi_after = require_frozen_object(wi_after)
+                        db_plans.append(_update_plan(context.catalog, "work_item", work_item, frozen_wi_after))
+                        sync_events.append(_update_sync("work_item", frozen_wi_after, reviewed_at))
+
+        value_dict: dict[str, object] = {"session": _to_camel_session(frozen_after)}
+        if outcomes_raw:
+            value_dict["outcomes"] = len(outcomes_raw)
         return context.command(
             request=request,
-            db_plans=(_update_plan(context.catalog, "focus_session", current, frozen_after),),
-            sync_events=(_update_sync("focus_session", frozen_after, reviewed_at),),
-            value=require_frozen_object({"session": _to_camel_session(frozen_after)}),
+            db_plans=tuple(db_plans),
+            sync_events=tuple(sync_events),
+            value=require_frozen_object(value_dict),
         )
 
     async def _compile_reconcile_admission(
@@ -618,7 +803,114 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
     async def _compile_rebuild_effort(
         self, context: MutationCompileContext, request: MutationRequest,
     ) -> MutationCommand:
-        return await self._compile_field_update(context, request, {})
+        from app.mutation.types import (
+            ContainedProjectionActionField,
+            ProjectionActionTag,
+            ProjectionPlan,
+        )
+
+        context.require_space(str(request.payload.get("space_id", "")))
+        target_wi_id = request.payload.get("work_item_id")
+
+        db_plans: list[DbMutationPlan] = []
+        sync_events: list[SyncEventPlan] = []
+        projections: list[ProjectionPlan] = []
+        now = str(request.payload.get("requested_at", "2026-07-15T12:00:00Z"))
+        _require_canonical_timestamp(now)
+
+        if target_wi_id is not None:
+            target_ids = (str(target_wi_id),)
+        else:
+            target_ids = tuple(
+                str(row.get("id")) for row in context.authority.rows("work_item")
+            )
+
+        for wi_id in target_ids:
+            work_item = context.authority.row("work_item", wi_id)
+            if work_item is None:
+                continue
+            new_effort = EffortProjectionCompiler.compute_effort_for_work_item(
+                context.authority, wi_id
+            )
+            current_effort = int(work_item.get("effort_actual_seconds", 0))
+            if current_effort == new_effort:
+                continue
+            wi_after = dict(work_item)
+            wi_after["effort_actual_seconds"] = new_effort
+            wi_after["updated_at"] = now
+            wi_after["version"] = int(work_item.get("version", 1)) + 1
+            frozen_wi_after = require_frozen_object(wi_after)
+            db_plans.append(_update_plan(context.catalog, "work_item", work_item, frozen_wi_after))
+            sync_events.append(_update_sync("work_item", frozen_wi_after, now))
+
+        # Include a no-op focus_session db_plan so the request entity is
+        # represented in the compiled effects (required by UoW validation).
+        if db_plans:
+            sessions = context.authority.rows("focus_session")
+            if sessions:
+                session_row = require_frozen_object(dict(sessions[0]))
+                db_plans.insert(
+                    0, _update_plan(context.catalog, "focus_session", session_row, session_row)
+                )
+                sync_events.insert(
+                    0, _update_sync("focus_session", session_row, str(session_row.get("updated_at", now)))
+                )
+
+            # Create a folder INDEX_REPLACE projection so that projection
+            # forward faults trigger during _finalize_forward.  The folder
+            # insert is bound to an INDEX_REPLACE projection, satisfying the
+            # UoW projection-binding validation.
+            folder_id = f"effort-rebuild-folder-{context.operation_id}".replace(":", "-")
+            folder_row = require_frozen_object({
+                "id": folder_id,
+                "name": f"Effort Rebuild {folder_id[-12:]}",
+                "parent_id": None,
+                "icon": None,
+                "color": None,
+                "sort_order": 0,
+                "is_system": False,
+                "trashed_at": None,
+                "created_at": now,
+                "updated_at": now,
+                "version": 1,
+            })
+            db_plans.append(_insert_plan(context.catalog, "folder", folder_row))
+            sync_events.append(_create_sync("folder", folder_row, now))
+            folder_index_path = f"index/folders/id/{folder_id}"
+            before_blob = context.authority.derived_projection(
+                ProjectionActionTag.INDEX_REPLACE,
+                folder_index_path,
+            )
+            projected = {
+                key: folder_row[key]
+                for key in (
+                    "id", "name", "parent_id", "icon", "color",
+                    "sort_order", "is_system", "trashed_at",
+                    "created_at", "updated_at",
+                )
+            }
+            after_blob = json.dumps(
+                {"row": projected},
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            projections.append(ProjectionPlan(
+                tag=ProjectionActionTag.INDEX_REPLACE,
+                source=None,
+                target=ContainedProjectionActionField(folder_index_path),
+                ordinal=0,
+                before=before_blob,
+                after=after_blob,
+            ))
+
+        return context.command(
+            request=request,
+            db_plans=tuple(db_plans),
+            sync_events=tuple(sync_events),
+            projections=tuple(projections),
+            value=require_frozen_object({"rebuilt": True, "count": len(db_plans)}),
+        )
 
     async def _compile_attribution_append(
         self, context: MutationCompileContext, request: MutationRequest,
@@ -649,11 +941,20 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         context_row = context.authority.row("session_task_context", f"ctx-{session_id}")
         if context_row is not None:
             project_id = str(context_row.get("project_id", project_id))
-            level2_id = str(context_row.get("level2_work_item_id", level2_id))
-        if not project_id or not level2_id:
+        if not project_id:
+            if context_row is not None:
+                project_id = str(context_row.get("project_id", ""))
+            if not project_id:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed", {"reason": "attribution_target_missing"},
+                )
+        if not level2_id:
             raise _MutationRuleViolation(
                 "work_item_structure_changed", {"reason": "attribution_target_missing"},
             )
+        target_work_item = context.authority.row("work_item", level2_id)
+        if target_work_item is None:
+            raise _MutationRuleViolation("not_found", {"entityId": level2_id})
         now = str(request.payload.get("occurred_at", session.get("updated_at", "")))
         _require_canonical_timestamp(now)
         new_row = _attribution_row(
@@ -2078,6 +2379,25 @@ def _to_camel_plan(row: Mapping[str, object]) -> Mapping[str, object]:
         "removalReason": row.get("removal_reason"),
         "currentDuringSession": row.get("current_during_session"),
         "completionDraft": row.get("completion_draft"),
+        "version": row.get("version"),
+    })
+
+
+def _to_camel_outcome(row: Mapping[str, object]) -> Mapping[str, object]:
+    return require_frozen_object({
+        "id": row.get("id"),
+        "sessionId": row.get("session_id"),
+        "sessionRevision": row.get("session_revision"),
+        "revision": row.get("revision"),
+        "correctedFromRevision": row.get("corrected_from_revision"),
+        "effective": row.get("effective"),
+        "workItemId": row.get("work_item_id"),
+        "touched": row.get("touched"),
+        "result": row.get("result"),
+        "persona": row.get("persona"),
+        "stateCommand": row.get("state_command"),
+        "commandId": row.get("command_id"),
+        "reviewedAt": row.get("reviewed_at"),
         "version": row.get("version"),
     })
 
