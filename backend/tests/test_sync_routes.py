@@ -43,7 +43,7 @@ async def _setup_login_and_space_token(client) -> tuple[str, str]:
 
 
 def _make_event(
-    entity_type: str = "task",
+    entity_type: str = "habit",
     action: str = "create",
     entity_id: str | None = None,
     payload: dict | None = None,
@@ -88,9 +88,6 @@ async def test_push_endpoint_applies_events(client):
                     payload={
                         "id": eid,
                         "title": "Synced via HTTP",
-                        "status": "todo",
-                        "priority": "medium",
-                        "tags": "[]",
                     },
                 )
             ]
@@ -105,12 +102,12 @@ async def test_push_endpoint_applies_events(client):
 
 
 @pytest.mark.asyncio
-async def test_pull_endpoint_returns_tasks(client):
-    """GET /sync/pull returns tasks list."""
+async def test_pull_endpoint_returns_habits(client):
+    """GET /sync/pull returns habits list."""
     _, space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
-    # Seed a task via push.
+    # Seed a habit via push.
     eid = uuid.uuid4().hex
     await client.post(
         "/api/v1/sync/push",
@@ -120,8 +117,7 @@ async def test_pull_endpoint_returns_tasks(client):
                     entity_id=eid,
                     action="create",
                     payload={
-                        "id": eid, "title": "Pull me", "status": "todo",
-                        "priority": "medium", "tags": "[]",
+                        "id": eid, "title": "Pull me",
                     },
                 )
             ]
@@ -132,8 +128,8 @@ async def test_pull_endpoint_returns_tasks(client):
     resp = await client.get("/api/v1/sync/pull", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    task_ids = [t["id"] for t in data["tasks"]]
-    assert eid in task_ids
+    habit_ids = [t["id"] for t in data["habits"]]
+    assert eid in habit_ids
 
 
 @pytest.mark.asyncio
@@ -151,8 +147,7 @@ async def test_pull_endpoint_filters_by_since(client):
                     entity_id=old_id,
                     action="create",
                     payload={
-                        "id": old_id, "title": "Old", "status": "todo",
-                        "priority": "medium", "tags": "[]",
+                        "id": old_id, "title": "Old",
                     },
                     client_updated_at="2026-07-04T08:00:00.000Z",
                 )
@@ -170,8 +165,7 @@ async def test_pull_endpoint_filters_by_since(client):
                     entity_id=new_id,
                     action="create",
                     payload={
-                        "id": new_id, "title": "New", "status": "todo",
-                        "priority": "medium", "tags": "[]",
+                        "id": new_id, "title": "New",
                     },
                     client_updated_at="2026-07-04T12:00:00.000Z",
                 )
@@ -185,9 +179,9 @@ async def test_pull_endpoint_filters_by_since(client):
         headers=headers,
     )
     assert resp.status_code == 200
-    task_ids = [t["id"] for t in resp.json()["tasks"]]
-    assert old_id not in task_ids
-    assert new_id in task_ids
+    habit_ids = [t["id"] for t in resp.json()["habits"]]
+    assert old_id not in habit_ids
+    assert new_id in habit_ids
 
 
 @pytest.mark.asyncio
@@ -196,17 +190,17 @@ async def test_full_endpoint_returns_all_tombstones_ignoring_since(client):
     _, space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
-    # Create a task via task route, then DELETE via task route (which
+    # Create a habit via habit route, then DELETE via habit route (which
     # writes a tombstone). Sync push delete also writes a tombstone.
     resp = await client.post(
-        "/api/v1/tasks",
-        json={"title": "To delete via task route"},
+        "/api/v1/habits",
+        json={"title": "To delete via habit route"},
         headers=headers,
     )
     assert resp.status_code == 201
-    task_id = resp.json()["id"]
+    habit_id = resp.json()["id"]
 
-    resp = await client.delete(f"/api/v1/tasks/{task_id}", headers=headers)
+    resp = await client.delete(f"/api/v1/habits/{habit_id}", headers=headers)
     assert resp.status_code in (200, 204)
 
     resp = await client.get(
@@ -216,7 +210,7 @@ async def test_full_endpoint_returns_all_tombstones_ignoring_since(client):
     assert resp.status_code == 200
     data = resp.json()
     tomb_ids = [t["entity_id"] for t in data["tombstones"]]
-    assert task_id in tomb_ids
+    assert habit_id in tomb_ids
     assert data["is_full"] is True
 
 
@@ -226,7 +220,7 @@ async def test_status_endpoint_returns_counts(client):
     _, space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
 
-    # Push 3 tasks.
+    # Push 3 habits.
     for i in range(3):
         eid = uuid.uuid4().hex
         await client.post(
@@ -237,8 +231,7 @@ async def test_status_endpoint_returns_counts(client):
                         entity_id=eid,
                         action="create",
                         payload={
-                            "id": eid, "title": f"T{i}", "status": "todo",
-                            "priority": "medium", "tags": "[]",
+                            "id": eid, "title": f"T{i}",
                         },
                     )
                 ]
@@ -249,10 +242,9 @@ async def test_status_endpoint_returns_counts(client):
     resp = await client.get("/api/v1/sync/status", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["entity_counts"]["tasks"] == 3
+    assert data["entity_counts"]["habits"] == 3
     assert "tombstone_count" in data
     assert "server_time" in data
-
 
 @pytest.mark.asyncio
 async def test_space_token_cannot_prune_sync_ledger(client):
@@ -279,7 +271,7 @@ async def test_cursor_expired_http_error_has_stable_recovery_fields(space_sessio
 
     event_row = await record_sync_event(
         space_session,
-        entity_type="task",
+        entity_type="habit",
         entity_id="expired-http",
         action="create",
         visible=True,
@@ -350,8 +342,7 @@ async def test_push_endpoint_returns_conflict_for_lww(client):
                     entity_id=eid,
                     action="create",
                     payload={
-                        "id": eid, "title": "Original", "status": "todo",
-                        "priority": "medium", "tags": "[]",
+                        "id": eid, "title": "Original",
                     },
                     client_updated_at="2026-07-04T12:00:00.000Z",
                 )

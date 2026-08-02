@@ -138,10 +138,6 @@ def get_actual_stats_mcp_tools() -> set[str]:
 EXPECTED_MCP_TOOLS = frozenset(
     {
         "list_all_spaces",
-        "get_stats_overview",
-        "get_focus_trend",
-        "get_task_distribution",
-        "get_daily_detail",
         "get_habit_summary",
         "get_schedule_summary",
         "get_note_summary",

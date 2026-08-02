@@ -777,16 +777,21 @@ def _config(kind: DatabaseKind) -> Config:
     return config
 
 
-def _metadata(kind: DatabaseKind) -> MetaData:
-    from app.db.metadata import get_meta_metadata, get_space_metadata
+def _metadata(kind: DatabaseKind, *, legacy: bool = False) -> MetaData:
+    from app.db.metadata import (
+        get_legacy_meta_metadata,
+        get_legacy_space_metadata,
+        get_meta_metadata,
+        get_space_metadata,
+    )
 
     if kind == "meta":
-        return get_meta_metadata()
-    return get_space_metadata()
+        return get_legacy_meta_metadata() if legacy else get_meta_metadata()
+    return get_legacy_space_metadata() if legacy else get_space_metadata()
 
 
-def _table_names(kind: DatabaseKind) -> frozenset[str]:
-    return frozenset(_metadata(kind).tables)
+def _table_names(kind: DatabaseKind, *, legacy: bool = False) -> frozenset[str]:
+    return frozenset(_metadata(kind, legacy=legacy).tables)
 
 
 def _single_head(config: Config) -> str:
@@ -848,8 +853,8 @@ def _inspector_fingerprint(connection: Connection, table_names: frozenset[str]) 
 
 
 def _expected_legacy_fingerprint(kind: DatabaseKind) -> dict[str, Any]:
-    metadata = _metadata(kind)
-    table_names = _table_names(kind)
+    metadata = _metadata(kind, legacy=True)
+    table_names = _table_names(kind, legacy=True)
     engine = create_engine("sqlite://")
     try:
         metadata.create_all(engine)
@@ -904,7 +909,7 @@ def _classify_schema(
     kind: DatabaseKind,
     known_revisions: set[str],
 ) -> Literal["fresh", "legacy", "managed"]:
-    expected_tables = _table_names(kind)
+    expected_tables = _table_names(kind, legacy=True)
     version_table = _VERSION_TABLES[kind]
     tables = set(inspect(connection).get_table_names())
     present_version_tables = tables & _ALL_VERSION_TABLES

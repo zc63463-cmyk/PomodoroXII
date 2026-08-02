@@ -291,7 +291,7 @@ def verify_baseline(audit_root: Path) -> VerificationSummary:
         if score != Decimal(str(worksheet["composite"])):
             raise ValueError(f"stored composite drift: {module_id}")
         module_scores[module_id] = score
-    finding_ids = _validate_finding_ids(baseline["findings"])
+    _validate_finding_ids(baseline["findings"])
     _validate_retained_artifact_debt(baseline["retained_artifact_debt"])
     records = validate_evidence_envelope(
         {

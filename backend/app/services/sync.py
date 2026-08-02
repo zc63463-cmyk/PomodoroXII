@@ -62,6 +62,17 @@ SYNC_SNAPSHOT_TTL = timedelta(hours=1)
 
 ENTITY_REGISTRY: dict[str, dict[str, Any]] = build_sync_registry()
 
+# The legacy timestamp-based pull/full implementation requires a single ``id``
+# cursor plus ``updated_at``.  The final catalog also contains the composite-key
+# ``workItemLabel`` junction, which is delivered by the S4 ledger protocol rather
+# than this compatibility path.  Keep it in ENTITY_REGISTRY so the final wire
+# identity remains authoritative, but never run timestamp queries against it.
+TIMESTAMP_PULL_REGISTRY: dict[str, dict[str, Any]] = {
+    entity_type: entry
+    for entity_type, entry in ENTITY_REGISTRY.items()
+    if hasattr(entry["model"], "id") and hasattr(entry["model"], "updated_at")
+}
+
 
 class SyncService:
     """Push/pull/full/status service bound to a single space DB.
@@ -108,6 +119,14 @@ class SyncService:
                     "entity_type": etype_raw,
                     "entity_id": eid,
                     "error": f"Unknown entity_type: {etype_raw}",
+                })
+                continue
+
+            if etype not in TIMESTAMP_PULL_REGISTRY:
+                errors.append({
+                    "entity_type": etype,
+                    "entity_id": eid,
+                    "error": f"Unsupported entity_type on legacy sync endpoint: {etype}",
                 })
                 continue
 
@@ -535,6 +554,8 @@ class SyncService:
         truncated_groups: list[str] = []
 
         for entry in ENTITY_REGISTRY.values():
+            result[entry["pull_key"]] = []
+        for entry in TIMESTAMP_PULL_REGISTRY.values():
             model = entry["model"]
             pull_key = entry["pull_key"]
             q = select(model)
@@ -862,7 +883,7 @@ class SyncService:
         # are therefore delivered by the following incremental pull.
         snapshot_cursor = await get_current_cursor(self.db)
         items: list[dict[str, Any]] = []
-        for entry in ENTITY_REGISTRY.values():
+        for entry in TIMESTAMP_PULL_REGISTRY.values():
             rows = (
                 await self.db.execute(
                     select(entry["model"]).order_by(entry["model"].id.asc())

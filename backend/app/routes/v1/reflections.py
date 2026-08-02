@@ -2,8 +2,7 @@
 
 CRUD endpoints for the Reflection entity.  Uses an inline
 ``ReflectionService(BaseService)`` subclass that serialises JSON-array
-fields (``related_task_ids``, ``tags``, ``sections``,
-``auto_linked_session_ids``) and the boolean ``is_structured`` (stored as
+fields (``tags`` and ``sections``) and the boolean ``is_structured`` (stored as
 the string ``"true"``/``"false"``) before persisting.  Listings are
 ordered by date descending and may be filtered by date.
 Writes use the durable mutation UoW; read-only endpoints use the query service.
@@ -48,7 +47,7 @@ async def create_reflection(
     """Create a new daily reflection."""
     payload = data.model_dump()
     payload["id"] = payload.get("id") or entity_id_for_operation(operation_id, "reflection")
-    for field in ("related_task_ids", "tags", "sections", "auto_linked_session_ids"):
+    for field in ("tags", "sections"):
         payload[field] = json.dumps(payload.get(field, []))
     result = await store.uow.execute(
         scope, store.entity_commands.create(scope, "reflection", payload, None), operation_id
@@ -107,7 +106,7 @@ async def update_reflection(
     if current is None:
         raise NotFoundError(f"Reflection '{id}' not found")
     patch = data.model_dump(exclude_unset=True)
-    for field in ("related_task_ids", "tags", "sections", "auto_linked_session_ids"):
+    for field in ("tags", "sections"):
         if field in patch:
             patch[field] = json.dumps(patch[field])
     result = await store.uow.execute(

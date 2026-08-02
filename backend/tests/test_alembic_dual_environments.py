@@ -10,7 +10,12 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import MetaData, create_engine, inspect, text
 
-META_TABLES = {"spaces", "meta_settings"}
+META_TABLES = {
+    "spaces",
+    "meta_settings",
+    "active_session_locator",
+    "active_session_operations",
+}
 SPACE_TABLES = {
     "mutation_batches",
     "mutation_operations",
@@ -24,17 +29,27 @@ SPACE_TABLES = {
     "reflections",
     "schedule_quick_notes",
     "schedules",
-    "session_quick_notes",
-    "sessions",
     "settings",
     "sync_audit_log",
     "sync_outbox",
     "sync_snapshots",
     "sync_state",
-    "task_quick_notes",
-    "tasks",
     "time_blocks",
     "tombstones",
+    "projects",
+    "status_definitions",
+    "type_definitions",
+    "labels",
+    "work_item_labels",
+    "work_items",
+    "work_item_notes",
+    "focus_sessions",
+    "session_task_contexts",
+    "session_attribution_revisions",
+    "session_work_item_plans",
+    "session_work_item_outcomes",
+    "session_command_envelopes",
+    "session_command_receipts",
 }
 VERSION_TABLES = {
     "meta": "alembic_version_meta",
@@ -95,22 +110,38 @@ def _selected_metadata(environment: str) -> MetaData:
 
 
 def _column_signature(inspector, table_name: str) -> dict[str, tuple[str, bool, str | None]]:
+    def normalize_default(value) -> str | None:
+        if value is None:
+            return None
+        text_value = str(value)
+        if len(text_value) >= 2 and text_value[0] == "'" and text_value[-1] == "'":
+            return text_value[1:-1]
+        return text_value
+
     return {
         column["name"]: (
             str(column["type"]),
             bool(column["nullable"]),
-            None if column["default"] is None else str(column["default"]),
+            normalize_default(column["default"]),
         )
         for column in inspector.get_columns(table_name)
     }
 
 
 def _metadata_column_signature(metadata: MetaData, table_name: str, engine) -> dict:
+    def normalize_default(value) -> str | None:
+        if value is None:
+            return None
+        text_value = str(value)
+        if len(text_value) >= 2 and text_value[0] == "'" and text_value[-1] == "'":
+            return text_value[1:-1]
+        return text_value
+
     expected = {}
     for column in metadata.tables[table_name].columns:
         default = None
         if column.server_default is not None:
-            default = str(column.server_default.arg)
+            default = normalize_default(column.server_default.arg)
         expected[column.name] = (
             str(column.type.compile(dialect=engine.dialect)),
             bool(column.nullable),

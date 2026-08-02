@@ -13,8 +13,8 @@ def _make_spec(**overrides) -> EntitySpec:
     """构造一个最小合法的 EntitySpec 用于测试。"""
     defaults = dict(
         name="test",
-        model_path="app.models.task.Task",
-        table_name="tests",
+        model_path="app.models.habit.Habit",
+        table_name="habits",
         storage_type=StorageType.DB_ONLY,
         category=EntityCategory.BUSINESS,
         sync_enabled=True,
@@ -45,11 +45,11 @@ def test_entity_spec_has_delete_strategy_field():
 
 def test_entity_spec_effective_sync_entity_type_fallback():
     """sync_entity_type 不填时，effective_sync_entity_type fallback 到 name。"""
-    spec = _make_spec(name="task")
-    assert spec.effective_sync_entity_type == "task"
+    spec = _make_spec(name="habit")
+    assert spec.effective_sync_entity_type == "habit"
 
 
 def test_entity_spec_effective_pull_key_fallback():
     """pull_key 不填时，effective_pull_key fallback 到 name + 's'。"""
-    spec = _make_spec(name="task")
-    assert spec.effective_pull_key == "tasks"
+    spec = _make_spec(name="habit")
+    assert spec.effective_pull_key == "habits"

@@ -293,7 +293,7 @@ async def test_space_token_cannot_authorize_another_space_before_storage(
     )
     runtime = _install_forbidden_runtime(server)
     with pytest.raises(ToolError) as raised:
-        await server.get_stats_overview("spc_b")
+        await server.get_habit_summary("spc_b")
     assert json.loads(str(raised.value)) == {
         "code": "forbidden",
         "message": "Token is not valid for this Space",
@@ -323,7 +323,7 @@ async def test_unregistered_space_returns_canonical_error_before_storage(
     )
     runtime = _install_forbidden_runtime(server)
     with pytest.raises(ToolError) as raised:
-        await server.get_stats_overview("spc_missing")
+        await server.get_habit_summary("spc_missing")
     assert json.loads(str(raised.value)) == {
         "code": "space_not_found",
         "message": "Space is not registered",
@@ -357,7 +357,7 @@ async def test_outside_root_space_returns_canonical_error_before_storage(
     )
     runtime = _install_forbidden_runtime(server)
     with pytest.raises(ToolError) as raised:
-        await server.get_stats_overview("spc_outside")
+        await server.get_habit_summary("spc_outside")
     payload = json.loads(str(raised.value))
     assert payload["code"] == "path_outside_space"
     assert payload["retryable"] is False

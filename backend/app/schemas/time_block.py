@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 class TimeBlockBase(BaseModel):
     """Base fields shared by time block schemas."""
 
-    task_id: Optional[str] = None
     title: str = Field(default="", max_length=500)
     date: str
     start_time: str
@@ -29,7 +28,6 @@ class TimeBlockCreate(TimeBlockBase):
 class TimeBlockUpdate(BaseModel):
     """Schema for updating an existing time block."""
 
-    task_id: Optional[str] = None
     title: Optional[str] = Field(default=None, max_length=500)
     date: Optional[str] = None
     start_time: Optional[str] = None

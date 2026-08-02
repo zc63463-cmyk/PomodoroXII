@@ -40,7 +40,7 @@ async def test_init_meta_db_creates_engine_and_factory():
 
 @pytest.mark.asyncio
 async def test_init_meta_db_creates_tables():
-    """After init, the spaces + meta_settings tables must exist."""
+    """After init, all meta tables must exist."""
     await meta_session_module.init_meta_db()
     engine = meta_session_module.get_meta_engine()
 
@@ -50,6 +50,8 @@ async def test_init_meta_db_creates_tables():
         )
     assert "spaces" in tables
     assert "meta_settings" in tables
+    assert "active_session_locator" in tables
+    assert "active_session_operations" in tables
     await meta_session_module.close_meta_db()
 
 

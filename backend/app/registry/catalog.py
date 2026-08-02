@@ -35,7 +35,9 @@ def _canonical_spec(spec: EntitySpec) -> dict[str, Any]:
         "delete_strategy": spec.delete_strategy,
         "route_enabled": spec.route_enabled,
         "mcp_schema_enabled": spec.mcp_schema_enabled,
-        "sync_conflict_policy": spec.sync_conflict_policy,
+        "sync_conflict_policy": require_sync_conflict_policy(
+            spec.sync_conflict_policy
+        ).value,
         "junction_endpoints": spec.junction_endpoints,
     }
 
@@ -129,10 +131,6 @@ class CompiledEntityCatalog:
             if spec.sync_enabled:
                 try:
                     mapper = sa_inspect(models[spec.name])
-                    if len(mapper.primary_key) != 1:
-                        raise CatalogCompilationError(
-                            f"composite primary key is not sync-safe: {spec.name}"
-                        )
                     column = mapper.columns[spec.primary_key]
                 except (KeyError, AttributeError) as exc:
                     raise CatalogCompilationError(

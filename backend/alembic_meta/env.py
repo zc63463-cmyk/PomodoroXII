@@ -14,6 +14,7 @@ if config.config_file_name is not None:
 
 target_metadata = get_meta_metadata()
 META_TABLES = frozenset(target_metadata.tables)
+LEGACY_META_TABLES = frozenset({"spaces", "meta_settings"})
 SPACE_MARKER_TABLES = {"tasks", "notes", "sessions", "folders"}
 
 
@@ -31,7 +32,7 @@ def _assert_safe_schema(connection: Connection) -> None:
         raise RuntimeError(
             "legacy or mixed database detected; explicit dual-chain adoption is required"
         )
-    if tables == META_TABLES and config.attributes.get("allow_legacy_adoption"):
+    if tables == LEGACY_META_TABLES and config.attributes.get("allow_legacy_adoption"):
         return
     if tables & META_TABLES:
         raise RuntimeError(

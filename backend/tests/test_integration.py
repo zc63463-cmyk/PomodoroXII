@@ -4,7 +4,7 @@ End-to-end flows that chain multiple API calls together, plus
 architectural gate tests (no FastAPI in services, route count).
 
 Tests:
-  1. test_full_lifecycle_space_token_task_session_stats
+  1. test_full_lifecycle_space_token_habit_schedule_stats
   2. test_note_saga_end_to_end_consistency
   3. test_cascade_folder_delete_integration
   4. test_gate_services_do_not_import_fastapi
@@ -62,9 +62,9 @@ def _items(resp_json):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_full_lifecycle_space_token_task_session_stats(client):
+async def test_full_lifecycle_space_token_habit_schedule_stats(client):
     """Full lifecycle: setup -> login -> create_space -> issue_token ->
-    create_task -> create_session -> stats_overview -> delete_task ->
+    create_habit -> create_schedule -> stats_schedule_summary -> delete_habit ->
     trash_list_shows_tombstone.
     """
     # 1. Setup + login -> master token
@@ -90,35 +90,33 @@ async def test_full_lifecycle_space_token_task_session_stats(client):
     space_token = resp.json()["space_token"]
     headers = {"Authorization": f"Bearer {space_token}"}
 
-    # 3. Create task
+    # 3. Create habit
     resp = await client.post(
-        "/api/v1/tasks",
-        json={"title": "Lifecycle task", "status": "todo"},
+        "/api/v1/habits",
+        json={"title": "Lifecycle habit"},
         headers=headers,
     )
     assert resp.status_code == 201
-    task_id = resp.json()["id"]
+    habit_id = resp.json()["id"]
 
-    # 4. Create session
+    # 4. Create schedule
     resp = await client.post(
-        "/api/v1/sessions",
+        "/api/v1/schedules",
         json={
-            "type": "work",
-            "duration": 25,
-            "completed": True,
-            "started_at": "2026-01-01T10:00:00Z",
+            "title": "Lifecycle schedule",
+            "due_at": "2099-01-01T10:00:00Z",
         },
         headers=headers,
     )
     assert resp.status_code == 201
 
-    # 5. Stats overview (should reflect the session)
-    resp = await client.get("/api/v1/stats/overview", headers=headers)
+    # 5. Stats schedule-summary (should reflect the schedule)
+    resp = await client.get("/api/v1/stats/schedule-summary", headers=headers)
     assert resp.status_code == 200
     assert isinstance(resp.json(), dict)
 
-    # 6. Delete task
-    resp = await client.delete(f"/api/v1/tasks/{task_id}", headers=headers)
+    # 6. Delete habit
+    resp = await client.delete(f"/api/v1/habits/{habit_id}", headers=headers)
     assert resp.status_code == 200
 
     # 7. Trash list shows the tombstone
@@ -126,8 +124,8 @@ async def test_full_lifecycle_space_token_task_session_stats(client):
     assert resp.status_code == 200
     items = _items(resp.json())
     assert len(items) >= 1
-    task_entries = [i for i in items if i.get("entity_type") == "task"]
-    assert len(task_entries) >= 1
+    habit_entries = [i for i in items if i.get("entity_type") == "habit"]
+    assert len(habit_entries) >= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -253,6 +251,14 @@ async def test_cascade_folder_delete_integration(client):
     assert resp.status_code == 200
     assert resp.json().get("folder_id") == grandchild_id
 
+    resp = await client.post(
+        "/api/v1/quick-notes",
+        json={"content": "Nested quick note", "folder_id": grandchild_id},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    quick_note_id = resp.json()["id"]
+
     # 4. Delete root -> cascade soft-delete
     resp = await client.delete(f"/api/v1/folders/{root_id}", headers=headers)
     assert resp.status_code == 200
@@ -267,6 +273,10 @@ async def test_cascade_folder_delete_integration(client):
 
     # 6. Note is unfiled (folder_id cleared to None by cascade)
     resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json().get("folder_id") is None
+
+    resp = await client.get(f"/api/v1/quick-notes/{quick_note_id}", headers=headers)
     assert resp.status_code == 200
     assert resp.json().get("folder_id") is None
 

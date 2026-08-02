@@ -444,17 +444,19 @@ class FolderDomainPolicy:
                 root_after = after_frozen
 
         # Detach projection-backed notes and DB-only quick notes in the same
-        # durable command as the folder cascade.  This keeps the folder trash,
-        # child row updates, sync events, and filesystem projections under one
-        # journal/lease boundary.
+        # durable command as the folder cascade. This keeps all authorities
+        # under one journal and lease boundary.
         from app.knowledge.projections import KnowledgeProjectionBuilder
 
-        note_builder = KnowledgeProjectionBuilder()
         note_spec = context.catalog.get("note")
-        for row in sorted(context.authority.rows("note"), key=lambda item: str(item["id"])):
+        note_builder = KnowledgeProjectionBuilder()
+        for row in sorted(
+            context.authority.rows("note"),
+            key=lambda item: str(item[note_spec.primary_key]),
+        ):
             if row.get("folder_id") not in folder_ids or row.get("trashed_at") is not None:
                 continue
-            note_id = str(row["id"])
+            note_id = str(row[note_spec.primary_key])
             before_path = context.authority.note_path(note_id)
             before_markdown = (
                 None if before_path is None else context.authority.markdown(before_path)
@@ -478,18 +480,19 @@ class FolderDomainPolicy:
                     after_frozen,
                 )
             )
-            sync_payload = dict(after)
-            sync_payload["content"] = note_builder._body(before_markdown)
-            sync_events.append(
-                SyncEventPlan(
-                    note_spec.name,
-                    note_id,
-                    "update",
-                    require_frozen_object(sync_payload),
-                    after["version"],
-                    now,
+            if note_spec.sync_enabled:
+                sync_payload = dict(after)
+                sync_payload["content"] = note_builder._body(before_markdown)
+                sync_events.append(
+                    SyncEventPlan(
+                        note_spec.name,
+                        note_id,
+                        "update",
+                        require_frozen_object(sync_payload),
+                        after["version"],
+                        now,
+                    )
                 )
-            )
             note_projections = note_builder.build_note(
                 before_row=row,
                 after_row=after_frozen,
@@ -513,11 +516,12 @@ class FolderDomainPolicy:
 
         quick_note_spec = context.catalog.get("quick_note")
         for row in sorted(
-            context.authority.rows("quick_note"), key=lambda item: str(item["id"])
+            context.authority.rows("quick_note"),
+            key=lambda item: str(item[quick_note_spec.primary_key]),
         ):
             if row.get("folder_id") not in folder_ids:
                 continue
-            quick_note_id = str(row["id"])
+            quick_note_id = str(row[quick_note_spec.primary_key])
             after = dict(row)
             after["folder_id"] = None
             after["version"] = (row.get("version") or 0) + 1
@@ -533,16 +537,17 @@ class FolderDomainPolicy:
                     after_frozen,
                 )
             )
-            sync_events.append(
-                SyncEventPlan(
-                    quick_note_spec.name,
-                    quick_note_id,
-                    "update",
-                    after_frozen,
-                    after["version"],
-                    now,
+            if quick_note_spec.sync_enabled:
+                sync_events.append(
+                    SyncEventPlan(
+                        quick_note_spec.name,
+                        quick_note_id,
+                        "update",
+                        after_frozen,
+                        after["version"],
+                        now,
+                    )
                 )
-            )
 
         return context.command(
             request=request,

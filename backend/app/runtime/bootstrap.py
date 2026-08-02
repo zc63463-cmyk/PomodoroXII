@@ -461,13 +461,17 @@ async def _startup_owned(
     )
     from app.db.meta_session import init_meta_db
     from app.settings import settings
+    from app.task_space.migration_preflight import TaskSpaceCutoverPreflight
 
     global_lease = await runtime.leases.acquire_global(
         LeaseMode.EXCLUSIVE, "startup-migration", 60
     )
     async with global_lease:
         fleet = await runtime.preflight_registered_fleet(
-            migrations, settings.meta_db_path, global_lease
+            migrations,
+            settings.meta_db_path,
+            global_lease,
+            policies=(TaskSpaceCutoverPreflight(),),
         )
         await migrations.upgrade_under_lease(
             "meta", settings.meta_db_path, global_lease

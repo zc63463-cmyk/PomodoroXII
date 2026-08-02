@@ -15,7 +15,7 @@ def resolve_model(spec_or_path: Union[EntitySpec, str]) -> type:
     """从 EntitySpec.model_path 或字符串路径 import ORM 类。
 
     Args:
-        spec_or_path: EntitySpec 实例或 "app.models.task.Task" 形式字符串
+        spec_or_path: EntitySpec 实例或 "app.models.note.Note" 形式字符串
 
     Returns:
         ORM 类（如 Task）
