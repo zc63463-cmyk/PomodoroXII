@@ -12,10 +12,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.errors import (
     MUTATION_REJECTION_SPECS,
+    RESERVED_TS_CODES,
     S3_MUTATION_REJECTION_CODES,
     AppError,
     IdempotencyConflictError,
     MutationRejectedError,
+    thaw_json,
     to_wire_json,
 )
 from app.models.mutation import MutationBatch, MutationOperation, MutationStep
@@ -401,12 +403,18 @@ def test_closed_error_map_and_direct_app_error_resolution() -> None:
         MutationRejectedError(ForgedRejection())
 
 
-def test_literal_mutation_rule_codes_are_a_closed_s3_subset() -> None:
+def test_literal_mutation_rule_codes_stay_within_their_owner_sets() -> None:
     app_root = Path(__file__).parents[1] / "app"
-    found: set[str] = set()
+    s3_found: set[str] = set()
+    task_space_found: set[str] = set()
     for path in app_root.rglob("*.py"):
-        found |= literal_exception_codes(path, "MutationRuleViolation")
-    assert found <= S3_MUTATION_REJECTION_CODES
+        found = literal_exception_codes(path, "MutationRuleViolation")
+        if path.parent == app_root / "task_space":
+            task_space_found |= found
+        else:
+            s3_found |= found
+    assert s3_found <= S3_MUTATION_REJECTION_CODES
+    assert task_space_found <= (S3_MUTATION_REJECTION_CODES | RESERVED_TS_CODES)
 
 
 @pytest.mark.asyncio
@@ -500,6 +508,40 @@ async def test_rejected_batch_uses_intent_to_aborted_batch_transition(space_sess
     ]
     with pytest.raises(IllegalMutationTransition):
         await journal.transition("op-1", MutationState.ABORTED)
+
+
+@pytest.mark.asyncio
+async def test_rejected_batch_persists_nested_frozen_details(space_session) -> None:
+    assert space_session.bind is not None
+    sessions = async_sessionmaker(space_session.bind, expire_on_commit=False)
+    journal = MutationJournal(sessions)
+    document = {
+        "contentVersion": 1,
+        "blocks": [{"blockId": "p1", "type": "paragraph", "text": "Remote"}],
+    }
+    rejection = MutationRejection(
+        request_index=0,
+        operation_id="nested-rejected-op",
+        entity_type="work_item_note",
+        entity_id="note-1",
+        code="version_conflict",
+        retryable=False,
+        details={"current_version": 2, "current_document": document},
+    )
+
+    result = await journal.record_rejected_batch(
+        "nested-rejected-batch", "h" * 64, (rejection,)
+    )
+
+    assert thaw_json(result.rejected[0].details["current_document"]) == document
+    async with sessions() as session:
+        row = await session.get(MutationBatch, "nested-rejected-batch")
+    assert row is not None
+    persisted = json.loads(str(row.result_json))
+    assert persisted["rejected"][0]["details"] == {
+        "current_version": 2,
+        "current_document": document,
+    }
 
 
 @pytest.mark.asyncio

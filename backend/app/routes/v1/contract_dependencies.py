@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 
-from app.errors import AppError, IdempotencyConflictError, ValidationError
+from app.deps import get_mutation_uow
+from app.errors import AppError, IdempotencyConflictError, ValidationError, to_wire_json
 from app.mutation.types import validate_operation_id
 from app.schemas.task_space import TaskSpaceAcceptedResponse
 from app.task_space.contracts import TaskSpaceAccepted, TaskSpaceRejected
+from app.task_space.module import DefaultTaskSpaceCommandModule
+from app.task_space.queries import DefaultTaskSpaceQueryModule
 
 if TYPE_CHECKING:
     from app.focus_session.contracts import (
@@ -22,13 +25,15 @@ if TYPE_CHECKING:
 
 
 def get_task_space_query_module() -> "TaskSpaceQueryModule":
-    """Return the installed TaskSpaceQueryModule or fail closed."""
-    raise RuntimeError("TaskSpaceQueryModule provider is not installed")
+    """Return the concrete read-only Task Space provider."""
+    return DefaultTaskSpaceQueryModule()
 
 
-def get_task_space_command_module() -> "TaskSpaceCommandModule":
-    """Return the installed TaskSpaceCommandModule or fail closed."""
-    raise RuntimeError("TaskSpaceCommandModule provider is not installed")
+def get_task_space_command_module(
+    uow=Depends(get_mutation_uow),
+) -> "TaskSpaceCommandModule":
+    """Bind the concrete Task Space command provider to the shared UoW."""
+    return DefaultTaskSpaceCommandModule(uow)
 
 
 def get_focus_session_module() -> "FocusSessionModule":
@@ -84,13 +89,13 @@ def map_task_space_outcome(
             entity_type=outcome.entity_type,
             entity_id=outcome.entity_id,
             version=outcome.version,
-            value=dict(outcome.value),
+            value=to_wire_json(outcome.value),
         )
     raise HTTPException(
         status_code=409,
         detail={
             "code": outcome.code,
             "retryable": outcome.retryable,
-            "details": dict(outcome.details),
+            "details": to_wire_json(outcome.details),
         },
     )

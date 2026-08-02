@@ -344,3 +344,65 @@ class TestPopulatedSpaceStatsResponses:
         )
         assert note_summary.status_code == 200
         assert note_summary.json()["notes"] >= 1
+
+
+class TestTaskSpaceResponseSchemas:
+    """Task Space routes must document precise response component schemas."""
+
+    @pytest.mark.parametrize(
+        ("method", "path", "status", "component_name"),
+        [
+            ("post", "/api/v1/projects", "201", "TaskSpaceAcceptedResponse"),
+            ("get", "/api/v1/projects", "200", "TaskSpacePageResponse"),
+            (
+                "get",
+                "/api/v1/projects/{project_id}",
+                "200",
+                "TaskSpaceViewResponse",
+            ),
+            (
+                "get",
+                "/api/v1/projects/definitions",
+                "200",
+                "TaskSpaceDefinitionsResponse",
+            ),
+            ("post", "/api/v1/work-items", "201", "TaskSpaceAcceptedResponse"),
+            ("get", "/api/v1/work-items", "200", "TaskSpacePageResponse"),
+            (
+                "get",
+                "/api/v1/work-items/{work_item_id}",
+                "200",
+                "TaskSpaceViewResponse",
+            ),
+            (
+                "patch",
+                "/api/v1/work-items/{work_item_id}",
+                "200",
+                "TaskSpaceAcceptedResponse",
+            ),
+            (
+                "put",
+                "/api/v1/work-items/{work_item_id}/note",
+                "200",
+                "TaskSpaceAcceptedResponse",
+            ),
+            (
+                "get",
+                "/api/v1/work-items/{work_item_id}/note",
+                "200",
+                "TaskSpaceViewResponse",
+            ),
+        ],
+    )
+    async def test_task_space_responses_reference_components(
+        self,
+        client,
+        method: str,
+        path: str,
+        status: str,
+        component_name: str,
+    ):
+        openapi = await _openapi(client)
+        _assert_component_ref(
+            _response_schema(openapi, method, path, status), component_name
+        )

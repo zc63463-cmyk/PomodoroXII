@@ -199,6 +199,7 @@ class MutationCompileContext:
     catalog: CompiledEntityCatalog
     db: DbMutationPlanFactory
     sync: SyncEventPlanFactory
+    operation_id: str
 
     def require_space(self, payload_space_id: str) -> None:
         if payload_space_id != self.scope.scope.space_id:
@@ -668,7 +669,11 @@ class MutationCompiler:
                 self._policies[entity_type] = policy
 
     async def compile_against_overlay(
-        self, scope: SpaceRuntimeHandle, request: MutationRequest, overlay: AuthorityOverlay
+        self,
+        scope: SpaceRuntimeHandle,
+        request: MutationRequest,
+        overlay: AuthorityOverlay,
+        operation_id: str,
     ) -> MutationCommand:
         policy = self._policies.get(request.entity_type)
         context = MutationCompileContext(
@@ -677,6 +682,7 @@ class MutationCompiler:
             self.catalog,
             DbMutationPlanFactoryImpl(self.catalog),
             SyncEventPlanFactoryImpl(self.catalog),
+            operation_id,
         )
         if policy is not None:
             return await policy.compile(context, request)
@@ -704,7 +710,9 @@ class MutationCompiler:
             if item.request is None:
                 continue
             try:
-                command = await self.compile_against_overlay(scope, item.request, overlay)
+                command = await self.compile_against_overlay(
+                    scope, item.request, overlay, item.operation_id
+                )
             except MutationRuleViolation as exc:
                 rejected.append(
                     MutationRejection(
@@ -1239,12 +1247,16 @@ def _validate_compiled_command(
     *,
     authority: AuthorityOverlay | None = None,
 ) -> None:
+    request_spec: EntitySpec | None
     try:
         request_spec = catalog.get(command.request.entity_type)
     except KeyError as exc:
-        raise SpaceRecoveryRequiredError(
-            "compiled request entity is outside the compiled catalog"
-        ) from exc
+        namespace, separator, _operation = command.request.name.partition(".")
+        if not separator or namespace != command.request.entity_type:
+            raise SpaceRecoveryRequiredError(
+                "compiled request entity is outside the compiled catalog"
+            ) from exc
+        request_spec = None
     plan_specs = tuple(
         _validate_persisted_plan_against_catalog(plan, catalog)
         for plan in command.db_plans
@@ -1252,7 +1264,11 @@ def _validate_compiled_command(
     if command.request.name == "knowledge.projection.rebuild":
         _validate_knowledge_rebuild_command(command, authority)
         return
-    if plan_specs and request_spec.name not in {spec.name for spec in plan_specs}:
+    if (
+        request_spec is not None
+        and plan_specs
+        and request_spec.name not in {spec.name for spec in plan_specs}
+    ):
         raise SpaceRecoveryRequiredError(
             "compiled database effects do not include the request entity"
         )
