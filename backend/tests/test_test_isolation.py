@@ -297,8 +297,8 @@ async def test_opt_in_storage_fixture_provisions_registered_space(client) -> Non
     token, space_id = await _registered_space_token(client)
 
     response = await client.post(
-        "/api/v1/tasks",
-        json={"title": "Provisioned task", "status": "todo"},
+        "/api/v1/notes",
+        json={"title": "Provisioned note", "content": "fixture probe"},
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -316,8 +316,8 @@ async def test_unmarked_client_keeps_registered_space_missing(client) -> None:
     token, space_id = await _missing_registered_space_token(client)
 
     response = await client.post(
-        "/api/v1/tasks",
-        json={"title": "Missing store", "status": "todo"},
+        "/api/v1/notes",
+        json={"title": "Missing store", "content": "fixture probe"},
         headers={"Authorization": f"Bearer {token}"},
     )
 

@@ -18,7 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.registry.entities import EntityCategory, StorageType
+from app.registry.entities import EntityCategory, StorageType, SyncConflictPolicy
 
 
 class FieldSpecOut(BaseModel):
@@ -50,6 +50,7 @@ class EntitySpecOut(BaseModel):
     fields: list[FieldSpecOut]
     sync_entity_type: str | None = None
     pull_key: str | None = None
+    sync_conflict_policy: SyncConflictPolicy = SyncConflictPolicy.TIMESTAMP_LWW
 
     model_config = {"from_attributes": True}
 

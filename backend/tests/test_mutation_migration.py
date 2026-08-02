@@ -16,7 +16,7 @@ def _upgrade(path: Path, revision: str, *, after: Callable[[Any], None] | None =
     run_bound_command("space", path, command.upgrade, revision, after=after)
 
 
-def test_space_008_upgrades_to_mutation_journal_and_preserves_legacy_visibility(
+def test_space_008_upgrades_through_task_space_and_preserves_legacy_visibility(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "space.db"
@@ -51,10 +51,16 @@ def test_space_008_upgrades_to_mutation_journal_and_preserves_legacy_visibility(
 
     _upgrade(path, "head", after=verify_009)
 
-    assert {"mutation_batches", "mutation_operations", "mutation_steps"} <= observed["tables"]
+    assert {
+        "mutation_batches",
+        "mutation_operations",
+        "mutation_steps",
+        "work_items",
+        "focus_sessions",
+    } <= observed["tables"]
     assert {"operation_id", "batch_id", "version", "visible"} <= observed["columns"]
     assert observed["legacy"] == (None, None, None, 1)
-    assert observed["head"] == "space_009_mutation_journal"
+    assert observed["head"] == "space_010_task_space_focus_session"
 
 
 def test_bound_after_callback_commits_or_rolls_back_and_closes(tmp_path: Path) -> None:

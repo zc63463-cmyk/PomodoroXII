@@ -207,7 +207,7 @@ def _isolate_env(
     import app.services.time as services_time_module
     importlib.reload(services_time_module)
 
-    # Phase B: reload business models (registers 18 tables on new Base.metadata)
+    # Phase B: reload business models (registers all tables on new Base.metadata)
     # Must purge submodules from sys.modules so they re-import with the new Base.
     import sys
     for key in list(sys.modules.keys()):

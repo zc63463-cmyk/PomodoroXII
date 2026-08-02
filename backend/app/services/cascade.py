@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import NotFoundError, ValidationError
@@ -161,20 +161,3 @@ class CascadeService:
                 visible=True,
             )
         return {"trashed_folder_ids": all_ids}
-
-    async def delete_task_cascade(self, task_id: str) -> None:
-        """Hard-delete a task and its junction rows in task_quick_notes.
-
-        This is a hard delete (not soft) because tasks do not have
-        ``trashed_at``.  Tombstone creation is the caller's responsibility.
-        """
-        from app.models.task import Task
-        from app.models.task_quick_note import TaskQuickNote
-
-        task = await self.db.get(Task, task_id)
-        if task is not None:
-            await self.db.execute(
-                delete(TaskQuickNote).where(TaskQuickNote.task_id == task_id)
-            )
-            await self.db.delete(task)
-            await self.db.flush()

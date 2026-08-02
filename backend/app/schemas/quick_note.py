@@ -20,7 +20,6 @@ class QuickNoteBase(BaseModel):
     folder_id: Optional[str] = Field(default=None, max_length=36)
     trashed_at: Optional[str] = None
     migrated_to_note_id: Optional[str] = Field(default=None, max_length=36)
-    session_id: Optional[str] = None
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -50,7 +49,6 @@ class QuickNoteUpdate(BaseModel):
     folder_id: Optional[str] = Field(default=None, max_length=36)
     trashed_at: Optional[str] = None
     migrated_to_note_id: Optional[str] = Field(default=None, max_length=36)
-    session_id: Optional[str] = None
 
     @field_validator("tags", mode="before")
     @classmethod

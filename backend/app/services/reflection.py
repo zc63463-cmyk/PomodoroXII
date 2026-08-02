@@ -14,10 +14,8 @@ from app.services.base import BaseService
 
 # Fields stored as JSON-serialised strings in SQLite.
 _JSON_LIST_FIELDS = (
-    "related_task_ids",
     "tags",
     "sections",
-    "auto_linked_session_ids",
 )
 
 

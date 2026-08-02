@@ -10,10 +10,6 @@ from app.models.mixins import SyncMixin
 class QuickNote(Base, SyncMixin):
     """QuickNote model for rapid text capture during work sessions.
 
-    Supports optional association with a pomodoro session via session_id.
-    A session can have multiple quick notes; a quick note can exist
-    independently without a session link.
-
     Two distinct "removed" states:
       - ``trashed_at``: Soft-delete via trash route (same as Note/Folder).
         Item appears in recycle bin, can be restored or purged.
@@ -44,10 +40,6 @@ class QuickNote(Base, SyncMixin):
     migrated_to_note_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, index=True
     )
-    session_id: Mapped[str | None] = mapped_column(
-        String(36), nullable=True, index=True
-    )
-
     __table_args__ = (
         CheckConstraint(
             "mood IN ('normal','happy','sad','tired','excited','calm') OR mood IS NULL",

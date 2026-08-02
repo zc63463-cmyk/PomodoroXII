@@ -1073,6 +1073,108 @@ def _projection_belongs_to_plan(
     return False
 
 
+def _projection_belongs_to_note_version(
+    projection,
+    command: MutationCommand | PersistedMutationCommand,
+    plan: DbMutationPlan,
+    identity: str,
+) -> bool:
+    if (
+        command.request.name != "knowledge.note.update_content"
+        or plan.before_row is None
+        or plan.after_row is None
+        or plan.before_row.get("content_hash") == plan.after_row.get("content_hash")
+    ):
+        return False
+    version_id = f"v_{command.request.request_hash[:12]}"
+    target = str(projection.target)
+    return (
+        projection.tag is ProjectionActionTag.MARKDOWN_WRITE
+        and target == f".meta/version_backups/{version_id}.md"
+    ) or (
+        projection.tag is ProjectionActionTag.INDEX_REPLACE
+        and target == f"index/note_versions/version_id/{version_id}"
+    )
+
+
+def _validate_note_version_projections(
+    command: MutationCommand | PersistedMutationCommand,
+    plan: DbMutationPlan,
+    identity: str,
+    authority: AuthorityOverlay | None,
+) -> None:
+    changed = (
+        command.request.name == "knowledge.note.update_content"
+        and plan.before_row is not None
+        and plan.after_row is not None
+        and plan.before_row.get("content_hash") != plan.after_row.get("content_hash")
+    )
+    projections = tuple(
+        projection
+        for projection in command.projections
+        if _projection_belongs_to_note_version(
+            projection, command, plan, identity
+        )
+    )
+    if not changed:
+        if projections:
+            raise SpaceRecoveryRequiredError(
+                "Note version projection exists without a content change"
+            )
+        return
+    if len(projections) != 2 or {
+        projection.tag for projection in projections
+    } != {
+        ProjectionActionTag.MARKDOWN_WRITE,
+        ProjectionActionTag.INDEX_REPLACE,
+    }:
+        raise SpaceRecoveryRequiredError(
+            "Note content update requires complete version projections"
+        )
+    if not isinstance(command, MutationCommand):
+        if any(
+            projection.before_sha256 is not None
+            or projection.after_sha256 is None
+            for projection in projections
+        ):
+            raise SpaceRecoveryRequiredError(
+                "persisted Note version projection images are invalid"
+            )
+        return
+    version_id = f"v_{command.request.request_hash[:12]}"
+    backup = next(
+        projection
+        for projection in projections
+        if projection.tag is ProjectionActionTag.MARKDOWN_WRITE
+    )
+    index = next(
+        projection
+        for projection in projections
+        if projection.tag is ProjectionActionTag.INDEX_REPLACE
+    )
+    authoritative = None
+    if authority is not None:
+        path = authority.note_path(identity)
+        authoritative = None if path is None else authority.markdown(path)
+    if backup.before is not None or backup.after != authoritative:
+        raise SpaceRecoveryRequiredError(
+            "Note version backup differs from authoritative Markdown"
+        )
+    try:
+        index_payload = json.loads(index.after) if index.after is not None else None
+    except (TypeError, ValueError) as exc:
+        raise SpaceRecoveryRequiredError("Note version index is invalid") from exc
+    expected_row = {
+        "version_id": version_id,
+        "note_id": identity,
+        "content_hash": str(plan.before_row.get("content_hash", "")),
+        "change_summary": "edit",
+        "created_at": str(plan.after_row["updated_at"]),
+    }
+    if index.before is not None or index_payload != {"row": expected_row}:
+        raise SpaceRecoveryRequiredError("Note version index is invalid")
+
+
 def _required_projection_tags(
     plan: DbMutationPlan, spec: EntitySpec
 ) -> frozenset[ProjectionActionTag]:
@@ -1224,10 +1326,17 @@ def _validate_compiled_command(
                         "compiled delete event version differs from the database before image"
                     )
         identity = str(plan.primary_key[spec.primary_key])
+        if spec.name == "note":
+            _validate_note_version_projections(
+                command, plan, identity, authority
+            )
         owned = tuple(
             projection
             for projection in command.projections
-            if _projection_belongs_to_plan(
+            if not _projection_belongs_to_note_version(
+                projection, command, plan, identity
+            )
+            and _projection_belongs_to_plan(
                 projection,
                 spec,
                 identity,
@@ -1309,6 +1418,11 @@ def _validate_compiled_command(
                 persisted_path_owner=(
                     persisted_path_owners.get(projection.tag) == plan_index
                 ),
+            ):
+                bound = True
+                break
+            if spec.name == "note" and _projection_belongs_to_note_version(
+                projection, command, plan, identity
             ):
                 bound = True
                 break

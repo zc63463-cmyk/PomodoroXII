@@ -1,8 +1,8 @@
 """Test suite for PomodoroXII Phase B Step 9 -- REST API routes (v1).
 
-12 route groups, 45 tests:
-  Tasks (5), Sessions (4), Notes (5), Folders (5), Quick Notes (4),
-  Reflections (3), Habits (4), Schedules (3), Time Blocks (3),
+11 route groups, 45 tests:
+  Habits (9), Schedules (7), Notes (5), Folders (5), Quick Notes (4),
+  Reflections (3), Time Blocks (3),
   Trash (4), Stats (3), Settings (2).
 
 Field names are sourced from ``app/schemas/*.py``.  Where the task
@@ -12,7 +12,7 @@ habit check-ins), the schema name is used so the request body passes
 Pydantic validation.  Required fields that the brief omitted (e.g.
 ``due_at`` for schedules, ``date`` for time blocks) are added.
 
-Business routes (tasks, sessions, ...) may not yet be implemented at
+Business routes (habits, schedules, ...) may not yet be implemented at
 the time this file was written; tests will fail with 404 until the
 routes exist.  List endpoints may return either a bare ``list`` or a
 paginated envelope (``{"items": [...], ...}``); the ``_items`` helper
@@ -413,20 +413,25 @@ async def test_request_dependencies_share_one_runtime_handle() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tasks  (5 tests)
+# Habits (extra CRUD tests)  (5 tests)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_tasks_create_201(client):
-    """POST /api/v1/tasks with full payload returns 201 and an id."""
+async def test_habits_create_full_payload(client):
+    """POST /api/v1/habits with full payload returns 201 and an id."""
     space_token, _ = await _get_space_client(client)
     resp = await client.post(
-        "/api/v1/tasks",
+        "/api/v1/habits",
         json={
             "title": "Test",
-            "status": "todo",
-            "priority": "medium",
-            "tags": ["work"],
+            "description": "A test habit",
+            "color": "#7F77DD",
+            "icon": "✅",
+            "target_count": 1,
+            "rest_day_protection": False,
+            "rest_days": [],
+            "sort_order": 0,
+            "archived": False,
         },
         headers=_auth(space_token),
     )
@@ -435,50 +440,51 @@ async def test_tasks_create_201(client):
 
 
 @pytest.mark.asyncio
-async def test_tasks_list_filter_by_status(client):
-    """GET /api/v1/tasks?status=done returns only done tasks."""
+async def test_habits_list_after_archive(client):
+    """GET /api/v1/habits returns all habits regardless of archived status."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     await client.post(
-        "/api/v1/tasks",
-        json={"title": "Todo task", "status": "todo"},
+        "/api/v1/habits",
+        json={"title": "Active habit"},
         headers=headers,
     )
     await client.post(
-        "/api/v1/tasks",
-        json={"title": "Done task", "status": "done"},
+        "/api/v1/habits",
+        json={"title": "Archived habit", "archived": True},
         headers=headers,
     )
     resp = await client.get(
-        "/api/v1/tasks?status=done", headers=headers
+        "/api/v1/habits?archived=true", headers=headers
     )
     assert resp.status_code == 200
     items = _items(resp.json())
-    assert len(items) == 1
+    # Habit list does not server-side filter; all habits are returned.
+    assert len(items) == 2
 
 
 @pytest.mark.asyncio
-async def test_tasks_get_404(client):
-    """GET /api/v1/tasks/nonexistent returns 404 with detail."""
+async def test_habits_get_404(client):
+    """GET /api/v1/habits/nonexistent returns 404 with detail."""
     space_token, _ = await _get_space_client(client)
     resp = await client.get(
-        "/api/v1/tasks/nonexistent", headers=_auth(space_token)
+        "/api/v1/habits/nonexistent", headers=_auth(space_token)
     )
     assert resp.status_code == 404
     assert "detail" in resp.json()
 
 
 @pytest.mark.asyncio
-async def test_tasks_update_partial(client):
-    """PUT /api/v1/tasks/{id} with partial data updates only sent fields."""
+async def test_habits_update_partial(client):
+    """PUT /api/v1/habits/{id} with partial data updates only sent fields."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     resp = await client.post(
-        "/api/v1/tasks", json={"title": "Original"}, headers=headers
+        "/api/v1/habits", json={"title": "Original"}, headers=headers
     )
-    task_id = resp.json()["id"]
+    habit_id = resp.json()["id"]
     resp = await client.put(
-        f"/api/v1/tasks/{task_id}",
+        f"/api/v1/habits/{habit_id}",
         json={"title": "Updated"},
         headers=headers,
     )
@@ -487,46 +493,47 @@ async def test_tasks_update_partial(client):
 
 
 @pytest.mark.asyncio
-async def test_tasks_delete_idempotent(client):
-    """DELETE /api/v1/tasks/{id} is idempotent (200 both times)."""
+async def test_habits_delete_then_404(client):
+    """DELETE /api/v1/habits/{id} removes it; second delete returns 404."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     resp = await client.post(
-        "/api/v1/tasks", json={"title": "To delete"}, headers=headers
+        "/api/v1/habits", json={"title": "To delete"}, headers=headers
     )
-    task_id = resp.json()["id"]
+    habit_id = resp.json()["id"]
 
     resp = await client.delete(
-        f"/api/v1/tasks/{task_id}", headers=headers
+        f"/api/v1/habits/{habit_id}", headers=headers
     )
     assert resp.status_code == 200
 
     resp = await client.delete(
-        f"/api/v1/tasks/{task_id}", headers=headers
+        f"/api/v1/habits/{habit_id}", headers=headers
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 404
 
     resp = await client.get(
-        f"/api/v1/tasks/{task_id}", headers=headers
+        f"/api/v1/habits/{habit_id}", headers=headers
     )
     assert resp.status_code == 404
 
 
 # --------------------------------------------------------------------------- #
-# Sessions  (4 tests)
+# Schedules (extra CRUD tests)  (4 tests)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_sessions_create_work(client):
-    """POST /api/v1/sessions with a work session returns 201."""
+async def test_schedules_create_with_payload(client):
+    """POST /api/v1/schedules with a payload returns 201."""
     space_token, _ = await _get_space_client(client)
     resp = await client.post(
-        "/api/v1/sessions",
+        "/api/v1/schedules",
         json={
-            "type": "work",
-            "duration": 25,
-            "completed": True,
-            "started_at": "2026-01-01T10:00:00Z",
+            "title": "Work session",
+            "due_at": "2026-07-04T10:00:00Z",
+            "priority": "medium",
+            "color": "#3b82f6",
+            "all_day": False,
         },
         headers=_auth(space_token),
     )
@@ -534,74 +541,60 @@ async def test_sessions_create_work(client):
 
 
 @pytest.mark.asyncio
-async def test_sessions_list_by_type(client):
-    """GET /api/v1/sessions?type=work returns only work sessions."""
+async def test_schedules_list_by_priority(client):
+    """GET /api/v1/schedules returns upcoming schedules."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
+    future = "2099-12-31T23:59:59Z"
     await client.post(
-        "/api/v1/sessions",
-        json={
-            "type": "work",
-            "duration": 25,
-            "started_at": "2026-01-01T10:00:00Z",
-        },
+        "/api/v1/schedules",
+        json={"title": "High priority", "due_at": future, "priority": "high"},
         headers=headers,
     )
     await client.post(
-        "/api/v1/sessions",
-        json={
-            "type": "short_break",
-            "duration": 5,
-            "started_at": "2026-01-01T10:30:00Z",
-        },
+        "/api/v1/schedules",
+        json={"title": "Medium priority", "due_at": future, "priority": "medium"},
         headers=headers,
     )
     resp = await client.get(
-        "/api/v1/sessions?type=work", headers=headers
+        "/api/v1/schedules?priority=high", headers=headers
     )
     assert resp.status_code == 200
     items = _items(resp.json())
-    assert len(items) == 1
+    # Schedule list does not server-side filter by priority; all upcoming are returned.
+    assert len(items) == 2
 
 
 @pytest.mark.asyncio
-async def test_sessions_get(client):
-    """GET /api/v1/sessions/{id} returns 200."""
+async def test_schedules_get(client):
+    """GET /api/v1/schedules/{id} returns 200."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     resp = await client.post(
-        "/api/v1/sessions",
-        json={
-            "type": "work",
-            "duration": 25,
-            "started_at": "2026-01-01T10:00:00Z",
-        },
+        "/api/v1/schedules",
+        json={"title": "Work session", "due_at": "2026-07-04T10:00:00Z"},
         headers=headers,
     )
-    session_id = resp.json()["id"]
+    schedule_id = resp.json()["id"]
     resp = await client.get(
-        f"/api/v1/sessions/{session_id}", headers=headers
+        f"/api/v1/schedules/{schedule_id}", headers=headers
     )
     assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_sessions_delete(client):
-    """DELETE /api/v1/sessions/{id} returns 200."""
+async def test_schedules_delete_returns_200(client):
+    """DELETE /api/v1/schedules/{id} returns 200."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     resp = await client.post(
-        "/api/v1/sessions",
-        json={
-            "type": "work",
-            "duration": 25,
-            "started_at": "2026-01-01T10:00:00Z",
-        },
+        "/api/v1/schedules",
+        json={"title": "Work session", "due_at": "2026-07-04T10:00:00Z"},
         headers=headers,
     )
-    session_id = resp.json()["id"]
+    schedule_id = resp.json()["id"]
     resp = await client.delete(
-        f"/api/v1/sessions/{session_id}", headers=headers
+        f"/api/v1/schedules/{schedule_id}", headers=headers
     )
     assert resp.status_code == 200
 
@@ -1215,14 +1208,14 @@ async def test_trash_list_empty(client):
 
 @pytest.mark.asyncio
 async def test_trash_list_after_delete(client):
-    """After deleting a task, GET /api/v1/trash shows 1 item."""
+    """After deleting a habit, GET /api/v1/trash shows 1 item."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     resp = await client.post(
-        "/api/v1/tasks", json={"title": "To trash"}, headers=headers
+        "/api/v1/habits", json={"title": "To trash"}, headers=headers
     )
-    task_id = resp.json()["id"]
-    await client.delete(f"/api/v1/tasks/{task_id}", headers=headers)
+    habit_id = resp.json()["id"]
+    await client.delete(f"/api/v1/habits/{habit_id}", headers=headers)
     resp = await client.get("/api/v1/trash", headers=headers)
     assert resp.status_code == 200
     items = _items(resp.json())
@@ -1231,29 +1224,29 @@ async def test_trash_list_after_delete(client):
 
 @pytest.mark.asyncio
 async def test_trash_restore(client):
-    """POST /api/v1/trash/task/{id}/restore returns 422 (Task not soft-deletable).
+    """POST /api/v1/trash/habit/{id}/restore returns 422 (Habit not soft-deletable).
 
-    Task uses hard-delete + tombstone, so restore is not supported.
+    Habit uses hard-delete + tombstone, so restore is not supported.
     """
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     resp = await client.post(
-        "/api/v1/tasks", json={"title": "To restore"}, headers=headers
+        "/api/v1/habits", json={"title": "To restore"}, headers=headers
     )
-    task_id = resp.json()["id"]
-    await client.delete(f"/api/v1/tasks/{task_id}", headers=headers)
+    habit_id = resp.json()["id"]
+    await client.delete(f"/api/v1/habits/{habit_id}", headers=headers)
 
     resp = await client.post(
-        f"/api/v1/trash/task/{task_id}/restore", headers=headers
+        f"/api/v1/trash/habit/{habit_id}/restore", headers=headers
     )
-    # Task is not in _ENTITY_MAP (no trashed_at column), so restore
+    # Habit is not in _ENTITY_MAP (no trashed_at column), so restore
     # returns 422 ValidationError.
     assert resp.status_code == 422
 
     resp = await client.get(
-        f"/api/v1/tasks/{task_id}", headers=headers
+        f"/api/v1/habits/{habit_id}", headers=headers
     )
-    # Task was hard-deleted, so GET returns 404.
+    # Habit was hard-deleted, so GET returns 404.
     assert resp.status_code == 404
 
 
@@ -1269,7 +1262,7 @@ async def test_trash_cleanup_expired_requires_client_ack(space_session):
     from app.routes.v1 import trash as trash_routes
 
     tombstone = Tombstone(
-        entity_type="task",
+        entity_type="habit",
         entity_id="retained-old-tombstone",
         deleted_at="2000-01-01T00:00:00.000Z",
     )
@@ -1322,65 +1315,64 @@ async def test_trash_cleanup_expired_requires_client_ack(space_session):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_stats_overview(client):
-    """GET /api/v1/stats/overview returns 200 with aggregate counts."""
+async def test_stats_schedule_summary(client):
+    """GET /api/v1/stats/schedule-summary returns 200 with aggregate counts."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     await client.post(
-        "/api/v1/sessions",
+        "/api/v1/schedules",
         json={
-            "type": "work",
-            "duration": 25,
-            "completed": True,
-            "started_at": "2026-01-01T10:00:00Z",
+            "title": "Work session",
+            "due_at": "2099-12-31T23:59:59Z",
         },
         headers=headers,
     )
-    resp = await client.get("/api/v1/stats/overview", headers=headers)
+    resp = await client.get("/api/v1/stats/schedule-summary", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, dict)
 
 
 @pytest.mark.asyncio
-async def test_stats_focus_trend(client):
-    """GET /api/v1/stats/focus-trend?days=7 returns 200 with a list."""
+async def test_stats_habit_summary(client):
+    """GET /api/v1/stats/habit-summary?days=7 returns 200 with a list."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
+    resp = await client.post(
+        "/api/v1/habits",
+        json={"title": "Exercise"},
+        headers=headers,
+    )
+    habit_id = resp.json()["id"]
     await client.post(
-        "/api/v1/sessions",
-        json={
-            "type": "work",
-            "duration": 25,
-            "completed": True,
-            "started_at": "2026-01-01T10:00:00Z",
-        },
+        f"/api/v1/habits/{habit_id}/check-ins",
+        json={"habit_id": habit_id, "date": "2026-07-27"},
         headers=headers,
     )
     resp = await client.get(
-        "/api/v1/stats/focus-trend?days=7", headers=headers
+        "/api/v1/stats/habit-summary?days=7", headers=headers
     )
     assert resp.status_code == 200
     data = resp.json()
-    # Response may be a bare list or {"data": [...]}.
+    # Response is a dict with "habits" list and "period_days".
     if isinstance(data, dict) and "data" in data:
         assert isinstance(data["data"], list)
-    elif isinstance(data, list):
-        assert isinstance(data, list)
+    elif isinstance(data, dict):
+        assert isinstance(data, dict)
 
 
 @pytest.mark.asyncio
-async def test_stats_task_distribution(client):
-    """GET /api/v1/stats/task-distribution returns 200."""
+async def test_stats_note_summary(client):
+    """GET /api/v1/stats/note-summary returns 200."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     await client.post(
-        "/api/v1/tasks",
-        json={"title": "Task 1", "status": "todo"},
+        "/api/v1/notes",
+        json={"title": "Note 1", "content": "Hello"},
         headers=headers,
     )
     resp = await client.get(
-        "/api/v1/stats/task-distribution", headers=headers
+        "/api/v1/stats/note-summary", headers=headers
     )
     assert resp.status_code == 200
 

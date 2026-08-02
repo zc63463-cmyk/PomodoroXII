@@ -4,8 +4,8 @@ Each test creates a few rows then asserts the response JSON has the
 shape ``{"items": [...], "total": N, "limit": ..., "offset": ..., "has_more": ...}``
 as defined by ``app.schemas.common.PaginatedResponse``.
 
-11 tests covering 11 list endpoints across 10 route files:
-  tasks, notes, folders, sessions, schedules, time_blocks,
+9 tests covering 9 list endpoints across 8 route files:
+  notes, folders, schedules, time_blocks,
   reflections, quick_notes, habits (list_habits + list_check_ins), trash.
 """
 
@@ -56,21 +56,21 @@ def _assert_paginated_envelope(data: dict, expected_total: int) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tasks
+# Habits (extra pagination test)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_list_tasks_returns_paginated_envelope(client):
-    """GET /api/v1/tasks returns PaginatedResponse envelope."""
+async def test_list_habits_extra_returns_paginated_envelope(client):
+    """GET /api/v1/habits returns PaginatedResponse envelope."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     for i in range(3):
         await client.post(
-            "/api/v1/tasks",
-            json={"title": f"Task-{i}", "status": "todo"},
+            "/api/v1/habits",
+            json={"title": f"Habit-{i}"},
             headers=headers,
         )
-    resp = await client.get("/api/v1/tasks", headers=headers)
+    resp = await client.get("/api/v1/habits", headers=headers)
     assert resp.status_code == 200
     _assert_paginated_envelope(resp.json(), expected_total=3)
 
@@ -116,25 +116,23 @@ async def test_list_folders_returns_paginated_envelope(client):
 
 
 # --------------------------------------------------------------------------- #
-# Sessions
+# Schedules (extra pagination test)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_list_sessions_returns_paginated_envelope(client):
-    """GET /api/v1/sessions returns PaginatedResponse envelope."""
+async def test_list_schedules_extra_returns_paginated_envelope(client):
+    """GET /api/v1/schedules returns PaginatedResponse envelope."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
+    # Note: schedules only returns upcoming (incomplete, due >= now).
+    future = "2099-12-31T23:59:59Z"
     for i in range(3):
         await client.post(
-            "/api/v1/sessions",
-            json={
-                "type": "work",
-                "started_at": f"2026-07-04T0{i}:00:00Z",
-                "duration": 1500,
-            },
+            "/api/v1/schedules",
+            json={"title": f"Sch-{i}", "due_at": future},
             headers=headers,
         )
-    resp = await client.get("/api/v1/sessions", headers=headers)
+    resp = await client.get("/api/v1/schedules", headers=headers)
     assert resp.status_code == 200
     _assert_paginated_envelope(resp.json(), expected_total=3)
 

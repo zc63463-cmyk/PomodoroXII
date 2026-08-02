@@ -1,4 +1,4 @@
-"""Tests for app.models — 18 table ORM models + SyncMixin."""
+"""Tests for app.models — ORM models + SyncMixin."""
 
 from __future__ import annotations
 
@@ -11,19 +11,32 @@ class TestModelRegistration:
         meta_tables = set(get_meta_metadata().tables)
         space_tables = set(get_space_metadata().tables)
         expected_space_tables = {
-            "tasks", "sessions", "notes", "folders",
-            "quick_notes", "reflections", "habits", "habit_check_ins",
-            "schedules", "time_blocks", "memo_comments",
-            "session_quick_notes", "schedule_quick_notes", "task_quick_notes",
+            # Legacy business entities (10)
+            "notes", "folders", "quick_notes", "reflections",
+            "habits", "habit_check_ins", "schedules", "time_blocks",
+            "memo_comments", "schedule_quick_notes",
+            # Task Space business entities (12)
+            "projects", "status_definitions", "type_definitions", "labels",
+            "work_item_labels", "work_items", "work_item_notes",
+            "focus_sessions", "session_task_contexts",
+            "session_attribution_revisions", "session_work_item_plans",
+            "session_work_item_outcomes",
+            # Session command infra (2)
+            "session_command_envelopes", "session_command_receipts",
+            # Sync infrastructure (5)
             "tombstones", "settings", "sync_outbox", "sync_audit_log",
             "sync_state", "sync_snapshots",
+            # Mutation journal (3)
             "mutation_batches", "mutation_operations", "mutation_steps",
         }
 
-        assert meta_tables == {"spaces", "meta_settings"}
+        assert meta_tables == {
+            "spaces", "meta_settings", "active_session_locator",
+            "active_session_operations",
+        }
         assert space_tables == expected_space_tables
         assert meta_tables.isdisjoint(space_tables)
-        assert len(meta_tables | space_tables) == 25
+        assert len(meta_tables | space_tables) == 37
 
     def test_all_models_import_from_db_base(self):
         """No model should import from app.database — only app.db.base."""
@@ -55,12 +68,12 @@ class TestNoteModel:
         assert "word_count" in columns, f"Note missing word_count, got: {columns}"
 
 
-class TestTaskModel:
+class TestScheduleModel:
     def test_has_check_constraints(self):
-        """Task should have CHECK constraints for status and priority."""
-        from app.models import Task
+        """Schedule should have CHECK constraints for priority."""
+        from app.models import Schedule
         constraints = [
-            str(c) for c in Task.__table__.constraints
+            str(c) for c in Schedule.__table__.constraints
             if c.__class__.__name__ == "CheckConstraint"
         ]
         # At least one constraint should mention status or priority
@@ -82,9 +95,9 @@ class TestFolderModel:
 
 class TestSyncMixin:
     def test_fields_present_on_standard_entities(self):
-        """Task, Session, Note should have id/created_at/updated_at/version from SyncMixin."""
-        from app.models import Note, Session, Task
-        for model_cls in [Task, Session, Note]:
+        """Habit, Schedule, Note should have id/created_at/updated_at/version from SyncMixin."""
+        from app.models import Habit, Note, Schedule
+        for model_cls in [Habit, Schedule, Note]:
             columns = {c.name for c in model_cls.__table__.columns}
             assert "id" in columns, f"{model_cls.__name__} missing id"
             assert "created_at" in columns, f"{model_cls.__name__} missing created_at"

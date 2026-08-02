@@ -116,6 +116,7 @@ class MetaService:
             "fields": [MetaService._field_dict(f) for f in spec.fields],
             "sync_entity_type": spec.sync_entity_type,
             "pull_key": spec.pull_key,
+            "sync_conflict_policy": spec.sync_conflict_policy,
         }
 
     @staticmethod

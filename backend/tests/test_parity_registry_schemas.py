@@ -14,10 +14,22 @@ from app.registry.entities import EntityCategory
 
 # 例外表：实体 -> 例外原因
 # Junction tables 没有独立 schema（通过父实体管理）
+# Task Space / FocusSession 实体在 TS0 阶段仅注册 catalog，
+# schema 模块将在后续 Task 中创建。
 SCHEMA_EXCEPTIONS: dict[str, str] = {
-    "session_quick_note": "Junction table, no independent schema",
     "schedule_quick_note": "Junction table, no independent schema",
-    "task_quick_note": "Junction table, no independent schema",
+    "work_item_label": "Junction table, no independent schema",
+    "project": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "status_definition": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "type_definition": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "label": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "work_item": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "work_item_note": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "focus_session": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "session_task_context": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "session_attribution_revision": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "session_work_item_plan": "Task Space entity, schema not yet created (TS0 catalog-only)",
+    "session_work_item_outcome": "Task Space entity, schema not yet created (TS0 catalog-only)",
 }
 
 

@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import shutil
 import uuid
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,7 @@ from app.auth.authority import Principal
 from app.db.migrations import (
     FleetPreflightTarget,
     FrozenFleetPreflight,
+    MigrationPreflightPolicy,
     MigrationSafetyError,
 )
 from app.db.models.meta import Space
@@ -650,6 +652,7 @@ class SpaceRuntime:
         migrations,
         meta_target: Path,
         global_lease: Lease,
+        policies: Iterable[MigrationPreflightPolicy] = (),
     ) -> FrozenFleetPreflight:
         """Freeze Meta registrations and preflight every store read-only."""
         global_lease.assert_active_owner(
@@ -701,7 +704,9 @@ class SpaceRuntime:
                     FleetPreflightTarget(space_id, "space", target.identity, target)
                 )
             handed_to_coordinator = True
-            fleet = await migrations.preflight_fleet_under_lease(fleet_targets, global_lease)
+            fleet = await migrations.preflight_fleet_under_lease(
+                fleet_targets, global_lease, policies
+            )
             self._frozen_registrations = registrations
             return fleet
         finally:

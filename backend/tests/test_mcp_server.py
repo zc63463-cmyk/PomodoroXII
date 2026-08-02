@@ -116,27 +116,6 @@ async def test_list_all_spaces_returns_list():
 
 
 @pytest.mark.asyncio
-async def test_get_stats_overview_returns_dict(mcp_space_session):
-    """get_stats_overview should return a dict with period keys."""
-    from app.mcp.server import get_stats_overview
-
-    result = await get_stats_overview("spc_test")
-    assert isinstance(result, dict)
-    # Default periods should be today/week/month/total
-    assert "today" in result or "total" in result
-
-
-@pytest.mark.asyncio
-async def test_get_task_distribution_returns_dict(mcp_space_session):
-    """get_task_distribution should return by_status and by_priority."""
-    from app.mcp.server import get_task_distribution
-
-    result = await get_task_distribution("spc_test")
-    assert "by_status" in result
-    assert "by_priority" in result
-
-
-@pytest.mark.asyncio
 async def test_get_habit_summary_returns_dict(mcp_space_session):
     """get_habit_summary should return habits list and period_days."""
     from app.mcp.server import get_habit_summary
@@ -181,8 +160,8 @@ async def test_list_entities_returns_all():
     assert result["total"] > 0
     # Should include core business entities.
     names = [e["name"] for e in result["entities"]]
-    assert "task" in names
-    assert "session" in names
+    assert "work_item" in names
+    assert "focus_session" in names
     assert "note" in names
 
 
@@ -191,13 +170,13 @@ async def test_get_entity_schema_returns_fields():
     """get_entity_schema should return field list for an entity."""
     from app.mcp.server import get_entity_schema
 
-    result = await get_entity_schema("task")
-    assert result["entity_type"] == "task"
+    result = await get_entity_schema("work_item")
+    assert result["entity_type"] == "work_item"
     assert "fields" in result
     assert len(result["fields"]) > 0
     field_names = [f["name"] for f in result["fields"]]
     assert "title" in field_names
-    assert "status" in field_names
+    assert "status_definition_id" in field_names
 
 
 @pytest.mark.asyncio
@@ -233,8 +212,8 @@ def test_analyze_productivity_prompt_generates_text():
     result = analyze_productivity("spc_test")
     assert isinstance(result, str)
     assert "spc_test" in result
-    assert "get_stats_overview" in result
-    assert "get_focus_trend" in result
+    assert "get_habit_summary" in result
+    assert "get_schedule_summary" in result
 
 
 def test_weekly_review_prompt_generates_text():
@@ -244,7 +223,7 @@ def test_weekly_review_prompt_generates_text():
     result = weekly_review("spc_test")
     assert isinstance(result, str)
     assert "spc_test" in result
-    assert "get_task_distribution" in result
+    assert "get_habit_summary" in result
     assert "get_schedule_summary" in result
 
 
@@ -316,29 +295,6 @@ def test_all_tools_registered_via_fastmcp():
 # --------------------------------------------------------------------------- #
 # Tools without prior test coverage
 # --------------------------------------------------------------------------- #
-
-@pytest.mark.asyncio
-async def test_get_focus_trend_returns_data(mcp_space_session):
-    """get_focus_trend should return trend data with 'data' key."""
-    from app.mcp.server import get_focus_trend
-
-    result = await get_focus_trend("spc_test", days=7)
-    assert isinstance(result, dict)
-    assert "data" in result
-    assert isinstance(result["data"], list)
-
-
-@pytest.mark.asyncio
-async def test_get_daily_detail_returns_data(mcp_space_session):
-    """get_daily_detail should return count and duration for a date."""
-    from app.mcp.server import get_daily_detail
-
-    result = await get_daily_detail("spc_test", date="2026-01-01")
-    assert isinstance(result, dict)
-    assert "date" in result
-    assert "count" in result
-    assert "duration" in result
-
 
 @pytest.mark.asyncio
 async def test_get_schedule_summary_returns_data(mcp_space_session):

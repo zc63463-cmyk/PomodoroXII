@@ -157,11 +157,11 @@ class TestBearerSecurityScheme:
             f"{create_security}"
         )
 
-        # /api/v1/tasks (POST) requires space token
-        create_task = paths.get("/api/v1/tasks", {}).get("post", {})
-        create_security = create_task.get("security", [])
+        # /api/v1/habits (POST) requires space token
+        create_habit = paths.get("/api/v1/habits", {}).get("post", {})
+        create_security = create_habit.get("security", [])
         assert create_security == PROTECTED_SECURITY, (
-            "POST /api/v1/tasks must have exact HTTPBearer security: "
+            "POST /api/v1/habits must have exact HTTPBearer security: "
             f"{create_security}"
         )
 
@@ -255,19 +255,19 @@ class TestOpenAPIContractGate:
     """B4: Structural OpenAPI assertions to prevent contract regressions."""
 
     async def test_paths_count_is_stable(self, client):
-        """OpenAPI must keep at least the existing 51 paths."""
+        """OpenAPI must keep the 47 paths remaining after the TS0 cutover."""
         resp = await client.get("/openapi.json")
         schema = resp.json()
         paths = schema.get("paths", {})
-        assert len(paths) >= 51, f"Got {len(paths)} paths, expected at least 51"
+        assert len(paths) >= 47, f"Got {len(paths)} paths, expected at least 47"
 
     async def test_operations_count_is_stable(self, client):
-        """OpenAPI must keep at least the existing 83 operations."""
+        """OpenAPI must keep the 73 operations remaining after the cutover."""
         resp = await client.get("/openapi.json")
         schema = resp.json()
         operations = list(_iter_operations(schema))
-        assert len(operations) >= 83, (
-            f"Got {len(operations)} operations, expected at least 83"
+        assert len(operations) >= 73, (
+            f"Got {len(operations)} operations, expected at least 73"
         )
 
     def test_error_status_detection_covers_numeric_and_range_keys(self):

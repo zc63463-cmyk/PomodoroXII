@@ -54,6 +54,22 @@ async def _setup_login_and_space_token(client) -> tuple[str, str]:
     return master_token, space_token
 
 
+async def _clear_seeded_definitions(session):
+    """Delete seeded status_definitions and type_definitions from migration 010.
+
+    Migration 010 seeds system status/type definitions with updated_at
+    '2026-07-15T00:00:00.000Z', which interferes with tests that expect
+    empty or controlled entity groups.
+    """
+    from sqlalchemy import delete
+
+    from app.models.work_item_definition import StatusDefinition, TypeDefinition
+
+    await session.execute(delete(StatusDefinition))
+    await session.execute(delete(TypeDefinition))
+    await session.flush()
+
+
 # --------------------------------------------------------------------------- #
 # Seconds-precision DB rows vs millisecond cursor
 # --------------------------------------------------------------------------- #
@@ -64,7 +80,7 @@ async def test_pull_with_milliseconds_precision_db_does_not_repeat(space_session
     the cursor equals their timestamp.
 
     Flow:
-    1. Insert a Task row with updated_at="2026-07-04T10:00:00.000Z" (ms).
+    1. Insert a Habit row with updated_at="2026-07-04T10:00:00.000Z" (ms).
     2. pull(since="") returns the row; next_since = "2026-07-04T10:00:00.000Z".
     3. pull(since=next_since) should NOT return the row again.
 
@@ -72,24 +88,22 @@ async def test_pull_with_milliseconds_precision_db_does_not_repeat(space_session
     alembic 006 (tested separately). After migration, all DB rows are ms
     precision, so the cursor comparison is lexicographically consistent.
     """
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
-    task = Task(
+    await _clear_seeded_definitions(space_session)
+    habit = Habit(
         id="ms-precision-1",
         title="Milliseconds",
-        status="todo",
-        priority="medium",
-        tags="[]",
         updated_at="2026-07-04T10:00:00.000Z",
     )
-    space_session.add(task)
+    space_session.add(habit)
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
     first = await svc.pull(since="", limit=100)
-    task_ids = [t["id"] for t in first["tasks"]]
-    assert "ms-precision-1" in task_ids
+    habit_ids = [t["id"] for t in first["habits"]]
+    assert "ms-precision-1" in habit_ids
     next_since = first["next_since"]
     assert next_since == "2026-07-04T10:00:00.000Z", (
         f"expected normalized cursor, got {next_since}"
@@ -97,7 +111,7 @@ async def test_pull_with_milliseconds_precision_db_does_not_repeat(space_session
 
     # Second pull with the same cursor: row must NOT repeat.
     second = await svc.pull(since=next_since, limit=100)
-    second_ids = [t["id"] for t in second["tasks"]]
+    second_ids = [t["id"] for t in second["habits"]]
     assert "ms-precision-1" not in second_ids, (
         "row was re-emitted after cursor advanced past its timestamp"
     )
@@ -111,22 +125,21 @@ async def test_pull_with_milliseconds_precision_db_does_not_repeat(space_session
 async def test_pull_orders_by_updated_at_then_id(space_session):
     """Rows sharing the same updated_at should be ordered by id ascending
     so clients receive a deterministic sequence."""
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
-    # Insert 3 tasks with the SAME updated_at but out-of-order ids.
+    # Insert 3 habits with the SAME updated_at but out-of-order ids.
     ts = "2026-07-04T10:00:00.000Z"
-    for tid in ["charlie", "alpha", "bravo"]:
-        t = Task(
-            id=tid, title=tid, status="todo", priority="medium",
-            tags="[]", updated_at=ts,
+    for hid in ["charlie", "alpha", "bravo"]:
+        h = Habit(
+            id=hid, title=hid, updated_at=ts,
         )
-        space_session.add(t)
+        space_session.add(h)
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
     result = await svc.pull(since="", limit=100)
-    returned_ids = [t["id"] for t in result["tasks"]]
+    returned_ids = [t["id"] for t in result["habits"]]
     # Expect alphabetical (id-asc) ordering.
     assert returned_ids == ["alpha", "bravo", "charlie"], (
         f"expected id-asc order, got {returned_ids}"
@@ -137,22 +150,22 @@ async def test_pull_orders_by_updated_at_then_id(space_session):
 async def test_pull_same_timestamp_3_rows_requires_cursor_upgrade(space_session):
     """A same-timestamp legacy overflow must not return an advancing cursor."""
     from app.errors import CursorUpgradeRequiredError
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
+    await _clear_seeded_definitions(space_session)
     ts = "2026-07-04T10:00:00.000Z"
-    for tid in ["same-ts-3", "same-ts-1", "same-ts-2"]:
-        t = Task(
-            id=tid, title=tid, status="todo", priority="medium",
-            tags="[]", updated_at=ts,
+    for hid in ["same-ts-3", "same-ts-1", "same-ts-2"]:
+        h = Habit(
+            id=hid, title=hid, updated_at=ts,
         )
-        space_session.add(t)
+        space_session.add(h)
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
     with pytest.raises(CursorUpgradeRequiredError) as raised:
         await svc.pull(since="", limit=2)
-    assert raised.value.details == {"truncated_groups": ("tasks",)}
+    assert raised.value.details == {"truncated_groups": ("habits",)}
 
 
 # --------------------------------------------------------------------------- #
@@ -163,23 +176,21 @@ async def test_pull_same_timestamp_3_rows_requires_cursor_upgrade(space_session)
 async def test_legacy_pull_global_cursor_skips_truncated_older_entity_rows(space_session):
     """A newer entity cannot make an unsafe legacy cursor advance.
 
-    With ``limit=2`` the task group has one remaining 10:00 row, while a
+    With ``limit=2`` the habit group has one remaining 10:00 row, while a
     quick note at 12:00 exists. The legacy global cursor must fail closed.
     """
     from app.errors import CursorUpgradeRequiredError
+    from app.models.habit import Habit
     from app.models.quick_note import QuickNote
-    from app.models.task import Task
     from app.services.sync import SyncService
 
+    await _clear_seeded_definitions(space_session)
     old_ts = "2026-07-04T10:00:00.000Z"
-    for task_id in ["task-3", "task-1", "task-2"]:
+    for habit_id in ["habit-3", "habit-1", "habit-2"]:
         space_session.add(
-            Task(
-                id=task_id,
-                title=task_id,
-                status="todo",
-                priority="medium",
-                tags="[]",
+            Habit(
+                id=habit_id,
+                title=habit_id,
                 updated_at=old_ts,
             )
         )
@@ -196,7 +207,7 @@ async def test_legacy_pull_global_cursor_skips_truncated_older_entity_rows(space
     service = SyncService(space_session, fs=None)
     with pytest.raises(CursorUpgradeRequiredError) as raised:
         await service.pull(since="", limit=2)
-    assert raised.value.details == {"truncated_groups": ("tasks",)}
+    assert raised.value.details == {"truncated_groups": ("habits",)}
 
 
 @pytest.mark.asyncio
@@ -205,8 +216,8 @@ async def test_cursor_pull_pages_cross_entity_events_without_skipping(space_sess
     from app.services.sync_outbox import record_sync_event
 
     await record_sync_event(
-        space_session, entity_type="task", entity_id="task-1", action="create",
-        payload={"id": "task-1", "title": "one"},
+        space_session, entity_type="habit", entity_id="habit-1", action="create",
+        payload={"id": "habit-1", "title": "one"},
         visible=True,
     )
     await record_sync_event(
@@ -215,8 +226,8 @@ async def test_cursor_pull_pages_cross_entity_events_without_skipping(space_sess
         visible=True,
     )
     await record_sync_event(
-        space_session, entity_type="task", entity_id="task-2", action="create",
-        payload={"id": "task-2", "title": "two"},
+        space_session, entity_type="habit", entity_id="habit-2", action="create",
+        payload={"id": "habit-2", "title": "two"},
         visible=True,
     )
 
@@ -227,8 +238,8 @@ async def test_cursor_pull_pages_cross_entity_events_without_skipping(space_sess
     assert first["cursor_version"] == 2
     assert first["has_more"] is True
     assert first["next_cursor"] < second["next_cursor"]
-    assert {item["id"] for page in (first, second) for item in page["tasks"]} == {
-        "task-1", "task-2",
+    assert {item["id"] for page in (first, second) for item in page["habits"]} == {
+        "habit-1", "habit-2",
     }
     assert [item["id"] for item in first["quickNotes"]] == ["quick-1"]
 
@@ -239,8 +250,8 @@ async def test_cursor_pull_limit_one_reaches_delete_and_interleaved_update(space
     from app.services.sync_outbox import record_sync_event
 
     await record_sync_event(
-        space_session, entity_type="task", entity_id="task-1", action="create",
-        payload={"id": "task-1", "title": "created"},
+        space_session, entity_type="habit", entity_id="habit-1", action="create",
+        payload={"id": "habit-1", "title": "created"},
         visible=True,
     )
     await record_sync_event(
@@ -248,8 +259,8 @@ async def test_cursor_pull_limit_one_reaches_delete_and_interleaved_update(space
         visible=True,
     )
     await record_sync_event(
-        space_session, entity_type="task", entity_id="task-1", action="update",
-        payload={"id": "task-1", "title": "updated"},
+        space_session, entity_type="habit", entity_id="habit-1", action="update",
+        payload={"id": "habit-1", "title": "updated"},
         visible=True,
     )
 
@@ -268,7 +279,7 @@ async def test_cursor_pull_limit_one_reaches_delete_and_interleaved_update(space
     assert len(pages[1]["tombstones"]) == 1
     assert pages[1]["tombstones"][0]["entity_type"] == "quickNote"
     assert pages[1]["tombstones"][0]["entity_id"] == "quick-1"
-    assert pages[2]["tasks"][0]["title"] == "updated"
+    assert pages[2]["habits"][0]["title"] == "updated"
 
 
 @pytest.mark.asyncio
@@ -277,18 +288,18 @@ async def test_cursor_pull_folds_repeated_entity_events_to_last_scanned_state(sp
     from app.services.sync_outbox import record_sync_event
 
     first = await record_sync_event(
-        space_session, entity_type="task", entity_id="same", action="create",
+        space_session, entity_type="habit", entity_id="same", action="create",
         payload={"id": "same", "title": "first"},
         visible=True,
     )
     last = await record_sync_event(
-        space_session, entity_type="task", entity_id="same", action="update",
+        space_session, entity_type="habit", entity_id="same", action="update",
         payload={"id": "same", "title": "last"},
         visible=True,
     )
 
     page = await SyncService(space_session).pull(cursor=0, limit=10)
-    assert page["tasks"] == [{"id": "same", "title": "last"}]
+    assert page["habits"] == [{"id": "same", "title": "last"}]
     assert page["next_cursor"] == last.id
     assert page["next_cursor"] != first.id
 
@@ -301,18 +312,18 @@ async def test_cursor_pull_excludes_invisible_events_but_keeps_allocated_cursor(
 
     visible_event = await record_sync_event(
         space_session,
-        entity_type="task",
-        entity_id="visible-task",
+        entity_type="habit",
+        entity_id="visible-habit",
         action="create",
-        payload={"id": "visible-task", "title": "visible"},
+        payload={"id": "visible-habit", "title": "visible"},
         visible=True,
     )
     invisible_event = await record_sync_event(
         space_session,
-        entity_type="task",
-        entity_id="hidden-task",
+        entity_type="habit",
+        entity_id="hidden-habit",
         action="create",
-        payload={"id": "hidden-task", "title": "hidden"},
+        payload={"id": "hidden-habit", "title": "hidden"},
         visible=False,
     )
 
@@ -321,7 +332,7 @@ async def test_cursor_pull_excludes_invisible_events_but_keeps_allocated_cursor(
 
     assert state is not None
     assert state.current_cursor == invisible_event.id
-    assert page["tasks"] == [{"id": "visible-task", "title": "visible"}]
+    assert page["habits"] == [{"id": "visible-habit", "title": "visible"}]
     assert page["next_cursor"] == visible_event.id
     assert page["has_more"] is False
 
@@ -353,10 +364,10 @@ async def test_cursor_pull_via_http_after_push_returns_events(client):
     resp = await client.post(
         "/api/v1/sync/push",
         json={"events": [{
-            "entity_type": "task",
+            "entity_type": "habit",
             "entity_id": eid,
             "action": "create",
-            "payload": {"id": eid, "title": "Cursor HTTP", "status": "todo", "priority": "medium", "tags": "[]"},
+            "payload": {"id": eid, "title": "Cursor HTTP"},
             "client_updated_at": "2026-07-04T10:00:00.000Z",
         }]},
         headers=headers,
@@ -369,8 +380,8 @@ async def test_cursor_pull_via_http_after_push_returns_events(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["cursor_version"] == 2
-    task_ids = [t["id"] for t in body.get("tasks", [])]
-    assert eid in task_ids
+    habit_ids = [t["id"] for t in body.get("habits", [])]
+    assert eid in habit_ids
     assert body["next_cursor"] is not None
     assert body["has_more"] is False
 
@@ -388,7 +399,7 @@ async def test_tombstones_same_timestamp_ordered_by_id(space_session):
     ts = "2026-07-04T10:00:00.000Z"
     for tid in ["tomb-c", "tomb-a", "tomb-b"]:
         tb = Tombstone(
-            entity_type="task",
+            entity_type="habit",
             entity_id=tid,
             deleted_at=ts,
         )
@@ -411,38 +422,37 @@ async def test_tombstones_same_timestamp_ordered_by_id(space_session):
 async def test_pull_same_timestamp_since_id_still_rejects_overflow(space_session):
     """A supplied legacy secondary cursor does not make group overflow safe."""
     from app.errors import CursorUpgradeRequiredError
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
+    await _clear_seeded_definitions(space_session)
     ts = "2026-07-04T10:00:00.000Z"
-    for tid in ["s3", "s1", "s2"]:
-        t = Task(
-            id=tid, title=tid, status="todo", priority="medium",
-            tags="[]", updated_at=ts,
+    for hid in ["s3", "s1", "s2"]:
+        h = Habit(
+            id=hid, title=hid, updated_at=ts,
         )
-        space_session.add(t)
+        space_session.add(h)
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
     with pytest.raises(CursorUpgradeRequiredError) as raised:
         await svc.pull(since="", since_id="", limit=2)
-    assert raised.value.details == {"truncated_groups": ("tasks",)}
+    assert raised.value.details == {"truncated_groups": ("habits",)}
 
 
 @pytest.mark.asyncio
 async def test_pull_five_same_timestamp_rows_requires_cursor_upgrade(space_session):
     """Legacy pages cannot represent a five-row same-timestamp overflow."""
     from app.errors import CursorUpgradeRequiredError
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
     ts = "2026-07-04T10:00:00.000Z"
-    for tid in ["s5", "s3", "s1", "s4", "s2"]:
-        t = Task(
-            id=tid, title=tid, status="todo", priority="medium",
-            tags="[]", updated_at=ts,
+    for hid in ["s5", "s3", "s1", "s4", "s2"]:
+        h = Habit(
+            id=hid, title=hid, updated_at=ts,
         )
-        space_session.add(t)
+        space_session.add(h)
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
@@ -458,22 +468,22 @@ async def test_pull_since_id_backward_compatible(space_session):
     pull(since="") with no since_id returns all rows — the (updated_at, id)
     filter is skipped when since is empty, just like before.
     """
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
+    await _clear_seeded_definitions(space_session)
     ts = "2026-07-04T10:00:00.000Z"
-    for tid in ["bc-1", "bc-2"]:
-        t = Task(
-            id=tid, title=tid, status="todo", priority="medium",
-            tags="[]", updated_at=ts,
+    for hid in ["bc-1", "bc-2"]:
+        h = Habit(
+            id=hid, title=hid, updated_at=ts,
         )
-        space_session.add(t)
+        space_session.add(h)
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
     # No since_id kwarg — should default to "" and behave as before.
     result = await svc.pull(since="", limit=10)
-    ids = [t["id"] for t in result["tasks"]]
+    ids = [t["id"] for t in result["habits"]]
     assert set(ids) == {"bc-1", "bc-2"}, (
         f"both rows should be returned without since_id, got {ids}"
     )
@@ -488,18 +498,16 @@ async def test_pull_since_id_backward_compatible(space_session):
 async def test_pull_distinct_timestamp_overflow_requires_cursor_upgrade(space_session):
     """Distinct timestamps still cannot make a truncated legacy group safe."""
     from app.errors import CursorUpgradeRequiredError
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
-    t1 = Task(
-        id="dt-1", title="t1", status="todo", priority="medium",
-        tags="[]", updated_at="2026-07-04T10:00:00.000Z",
+    h1 = Habit(
+        id="dt-1", title="t1", updated_at="2026-07-04T10:00:00.000Z",
     )
-    t2 = Task(
-        id="dt-2", title="t2", status="todo", priority="medium",
-        tags="[]", updated_at="2026-07-04T11:00:00.000Z",
+    h2 = Habit(
+        id="dt-2", title="t2", updated_at="2026-07-04T11:00:00.000Z",
     )
-    space_session.add_all([t1, t2])
+    space_session.add_all([h1, h2])
     await space_session.flush()
 
     svc = SyncService(space_session, fs=None)
@@ -518,9 +526,10 @@ async def test_tombstone_overflow_requires_cursor_upgrade(space_session):
     from app.models.tombstone import Tombstone
     from app.services.sync import SyncService
 
+    await _clear_seeded_definitions(space_session)
     ts = "2026-07-04T10:00:00.000Z"
     for tid in ["t5", "t3", "t1", "t4", "t2"]:
-        tb = Tombstone(entity_type="task", entity_id=tid, deleted_at=ts)
+        tb = Tombstone(entity_type="habit", entity_id=tid, deleted_at=ts)
         space_session.add(tb)
     await space_session.flush()
 
@@ -534,12 +543,12 @@ async def test_tombstone_overflow_requires_cursor_upgrade(space_session):
 @pytest.mark.asyncio
 async def test_full_cursor_zero_is_current_state_snapshot_not_ledger_replay(space_session):
     """历史实体即使从未写入账本，也必须出现在 cursor v2 full snapshot。"""
+    from app.models.habit import Habit
     from app.models.quick_note import QuickNote
-    from app.models.task import Task
     from app.services.sync import SyncService
     from app.services.sync_outbox import record_sync_event
 
-    space_session.add(Task(id="historical", title="before-h2"))
+    space_session.add(Habit(id="historical", title="before-h2"))
     space_session.add(QuickNote(id="ledger-only", content="current", tags="[]"))
     await space_session.flush()
     await record_sync_event(
@@ -553,7 +562,7 @@ async def test_full_cursor_zero_is_current_state_snapshot_not_ledger_replay(spac
 
     page = await SyncService(space_session).full(cursor=0, limit=100)
 
-    assert {item["id"] for item in page["tasks"]} == {"historical"}
+    assert {item["id"] for item in page["habits"]} == {"historical"}
     assert {item["id"] for item in page["quickNotes"]} == {"ledger-only"}
     assert page["cursor_version"] == 2
     assert page["snapshot_token"]
@@ -562,14 +571,15 @@ async def test_full_cursor_zero_is_current_state_snapshot_not_ledger_replay(spac
 
 @pytest.mark.asyncio
 async def test_full_snapshot_pages_all_entity_groups_and_tombstones_with_one_offset(space_session):
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.models.tombstone import Tombstone
     from app.services.sync import SyncService
 
+    await _clear_seeded_definitions(space_session)
     space_session.add_all([
-        Task(id="snap-task-1", title="one"),
-        Task(id="snap-task-2", title="two"),
-        Tombstone(entity_type="task", entity_id="deleted-task"),
+        Habit(id="snap-habit-1", title="one"),
+        Habit(id="snap-habit-2", title="two"),
+        Tombstone(entity_type="habit", entity_id="deleted-habit"),
     ])
     await space_session.flush()
 
@@ -588,16 +598,16 @@ async def test_full_snapshot_pages_all_entity_groups_and_tombstones_with_one_off
         snapshot_offset=second["snapshot_offset"],
     )
 
-    all_task_ids = {
-        item["id"] for page in (first, second, third) for item in page["tasks"]
+    all_habit_ids = {
+        item["id"] for page in (first, second, third) for item in page["habits"]
     }
     all_tombstone_ids = {
         item["entity_id"]
         for page in (first, second, third)
         for item in page["tombstones"]
     }
-    assert all_task_ids == {"snap-task-1", "snap-task-2"}
-    assert all_tombstone_ids == {"deleted-task"}
+    assert all_habit_ids == {"snap-habit-1", "snap-habit-2"}
+    assert all_tombstone_ids == {"deleted-habit"}
     assert [first["has_more"], second["has_more"], third["has_more"]] == [True, True, False]
     assert first["next_cursor"] == second["next_cursor"] == third["next_cursor"]
 
@@ -605,14 +615,14 @@ async def test_full_snapshot_pages_all_entity_groups_and_tombstones_with_one_off
 @pytest.mark.asyncio
 async def test_full_snapshot_rejects_offset_without_token_and_offset_past_end(space_session):
     from app.errors import ValidationError
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
     service = SyncService(space_session)
     with pytest.raises(ValidationError, match="snapshot_offset requires"):
         await service.full(cursor=0, snapshot_offset=1, limit=10)
 
-    space_session.add(Task(id="snapshot-bounds", title="bounds"))
+    space_session.add(Habit(id="snapshot-bounds", title="bounds"))
     await space_session.flush()
     first = await service.full(cursor=0, limit=10)
     with pytest.raises(ValidationError, match="non-negative"):
@@ -723,17 +733,17 @@ async def test_new_snapshot_prunes_expired_materialized_snapshots(space_session)
 async def test_full_after_prune_recovers_new_device_from_current_state(space_session):
     from sqlalchemy import delete
 
+    from app.models.habit import Habit
     from app.models.sync_outbox import SyncOutbox
     from app.models.sync_state import SyncState
-    from app.models.task import Task
     from app.services.sync import SyncService
     from app.services.sync_outbox import record_sync_event
 
-    space_session.add(Task(id="survives-prune", title="current"))
+    space_session.add(Habit(id="survives-prune", title="current"))
     await space_session.flush()
     event = await record_sync_event(
         space_session,
-        entity_type="task",
+        entity_type="habit",
         entity_id="survives-prune",
         action="create",
         payload={"id": "survives-prune", "title": "current"},
@@ -748,7 +758,7 @@ async def test_full_after_prune_recovers_new_device_from_current_state(space_ses
     await space_session.flush()
 
     page = await SyncService(space_session).full(cursor=0, limit=100)
-    assert {item["id"] for item in page["tasks"]} == {"survives-prune"}
+    assert {item["id"] for item in page["habits"]} == {"survives-prune"}
     assert page["next_cursor"] == event.id
 
 
@@ -764,9 +774,10 @@ async def test_tombstone_since_id_backward_compatible(space_session):
     from app.models.tombstone import Tombstone
     from app.services.sync import SyncService
 
+    await _clear_seeded_definitions(space_session)
     ts = "2026-07-04T10:00:00.000Z"
     for tid in ["bc-b", "bc-a"]:
-        tb = Tombstone(entity_type="task", entity_id=tid, deleted_at=ts)
+        tb = Tombstone(entity_type="habit", entity_id=tid, deleted_at=ts)
         space_session.add(tb)
     await space_session.flush()
 
