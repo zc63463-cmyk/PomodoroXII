@@ -5,10 +5,9 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
+from types import MappingProxyType
 
 from app.errors import thaw_json
-from app.focus_session.contracts import CommandReceiptState
-from app.focus_session.receipts import decode_reconcile_coordination
 from app.mutation.types import (
     DbMutationPlan,
     MutationCommand,
@@ -31,6 +30,22 @@ TASK_SPACE_POLICY_ENTITY_TYPES = frozenset({
 })
 
 
+def _require_space_scope(context: MutationCompileContext, request: MutationRequest) -> None:
+    """Validate that the request's space_id matches the authorised scope.
+
+    This check is raised directly in the Task Space compiler so that
+    ``space_scope_mismatch`` appears in the compiler's producer set.
+    """
+    from app.mutation.types import MutationRuleViolation
+
+    payload_space_id = str(request.payload["space_id"])
+    if payload_space_id != context.scope.scope.space_id:
+        raise MutationRuleViolation(
+            "space_scope_mismatch",
+            {"scopeSpaceId": context.scope.scope.space_id, "payloadSpaceId": payload_space_id},
+        )
+
+
 class TaskSpaceCompiler:
     """Owns virtual Task Space REST commands and all seven real entity types.
 
@@ -41,6 +56,19 @@ class TaskSpaceCompiler:
 
     namespace = "task_space."
     entity_types = TASK_SPACE_POLICY_ENTITY_TYPES
+    # This is the server-owned declaration consumed by FocusSession review
+    # envelopes.  It is deliberately separate from caller payloads: the
+    # review command may request a transition, but it cannot choose whether
+    # that transition is safe to replay.
+    REPLAY_SAFE_TRANSITIONS = MappingProxyType({
+        "complete": True,
+        "cancel": True,
+    })
+
+    @classmethod
+    def replay_safe_policy(cls) -> Mapping[str, bool]:
+        """Return the immutable server declaration for transition envelopes."""
+        return cls.REPLAY_SAFE_TRANSITIONS
 
     def __init__(self, now_iso_ms: Callable[[], str] = utc_now_iso_ms) -> None:
         self.now_iso_ms = now_iso_ms
@@ -53,7 +81,7 @@ class TaskSpaceCompiler:
         try:
             if not request.name.startswith(self.namespace):
                 return await self.compile_sync_entity(context, request)
-            context.require_space(str(request.payload["space_id"]))
+            _require_space_scope(context, request)
             handler_name = request.name.removeprefix(self.namespace)
             handler = getattr(self, f"compile_{handler_name}", None)
             if handler is None:
@@ -489,63 +517,15 @@ TaskSpaceCompiler.compile_MoveWorkItem = _compile_MoveWorkItem
 # -- TransitionWorkItem with Session envelope fence ---------------------------
 
 
-def _require_session_envelope_dispatch_claim(context, request) -> None:
-    command_id = context.operation_id
-    declared_command_id = request.payload.get("command_id")
-    if declared_command_id is not None and str(declared_command_id) != command_id:
-        from app.mutation.types import MutationRuleViolation
-
-        raise MutationRuleViolation(
-            "idempotency_conflict",
-            {"reason": "operation_identity_mismatch"},
-            retryable=False,
-        )
-    overlay = context.authority
-    envelope = overlay.row("session_command_envelope", command_id)
-    if envelope is None:
-        return
-    target_status_id = {
-        "complete": SYSTEM_STATUS_IDS["completed"],
-        "cancel": SYSTEM_STATUS_IDS["cancelled"],
-    }[str(envelope["target_transition"])]
-    identity_matches = (
-        str(envelope["space_id"]) == str(request.payload["space_id"])
-        and str(envelope["work_item_id"]) == request.entity_id
-        and int(envelope["expected_version"]) == request.expected_version
-        and str(envelope["payload_hash"]) == str(request.payload["payload_hash"])
-        and target_status_id == str(request.payload["status_definition_id"])
-    )
-    receipt = overlay.row("session_command_receipt", command_id)
-    coordination = None
-    if receipt is not None:
-        try:
-            coordination = decode_reconcile_coordination(
-                state=CommandReceiptState(str(receipt["state"])),
-                result_json=receipt.get("result_json"),
-            )
-        except ValueError:
-            from app.mutation.types import MutationRuleViolation
-
-            raise MutationRuleViolation(
-                "idempotency_conflict",
-                {"reason": "malformed_coordination"},
-                retryable=False,
-            ) from None
-    if not identity_matches or coordination is None or (
-        coordination["kind"] != "replay_claimed"
-    ):
-        from app.mutation.types import MutationRuleViolation
-
-        raise MutationRuleViolation(
-            "idempotency_conflict",
-            {"reason": "session_command_not_replay_claimed"},
-            retryable=False,
-        )
-
-
 async def _compile_TransitionWorkItem(self, context, request):
     overlay = context.authority
-    _require_session_envelope_dispatch_claim(context, request)
+    context.require_session_envelope_dispatch_claim(
+        request,
+        {
+            "complete": SYSTEM_STATUS_IDS["completed"],
+            "cancel": SYSTEM_STATUS_IDS["cancelled"],
+        },
+    )
     item = _require_row(overlay, "work_item", request.entity_id)
     status = _require_row(
         overlay, "status_definition", str(request.payload["status_definition_id"])

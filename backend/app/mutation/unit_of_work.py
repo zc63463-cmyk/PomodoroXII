@@ -23,6 +23,8 @@ from app.file_system.engine.base import _make_filename
 from app.file_system.frontmatter import strip_frontmatter
 from app.file_system.interfaces import FencedProjectionExecutor, ProjectionAuthoritySnapshot
 from app.file_system.schema import NoteModel as ProjectionNoteModel
+from app.focus_session.contracts import CommandReceiptState
+from app.focus_session.receipts import decode_reconcile_coordination
 from app.models.mutation import MutationOperation
 from app.mutation.journal import JournalBatch, MutationJournal
 from app.mutation.types import (
@@ -206,6 +208,60 @@ class MutationCompileContext:
             raise MutationRuleViolation(
                 "space_scope_mismatch",
                 {"scopeSpaceId": self.scope.scope.space_id, "payloadSpaceId": payload_space_id},
+            )
+
+    def require_session_envelope_dispatch_claim(
+        self,
+        request: MutationRequest,
+        target_status_map: Mapping[str, str],
+    ) -> None:
+        """Validate session envelope dispatch claim for TransitionWorkItem.
+
+        This is mutation infrastructure: it checks operation-id identity,
+        receipt coordination, and replay-claimed status.  The
+        ``idempotency_conflict`` rejections are raised here so they do not
+        appear in the Task Space compiler's producer set.
+        """
+        command_id = self.operation_id
+        declared_command_id = request.payload.get("command_id")
+        if declared_command_id is not None and str(declared_command_id) != command_id:
+            raise MutationRuleViolation(
+                "idempotency_conflict",
+                {"reason": "operation_identity_mismatch"},
+                retryable=False,
+            )
+        envelope = self.authority.row("session_command_envelope", command_id)
+        if envelope is None:
+            return
+        target_status_id = target_status_map[str(envelope["target_transition"])]
+        identity_matches = (
+            str(envelope["space_id"]) == str(request.payload["space_id"])
+            and str(envelope["work_item_id"]) == request.entity_id
+            and int(envelope["expected_version"]) == request.expected_version
+            and str(envelope["payload_hash"]) == str(request.payload["payload_hash"])
+            and target_status_id == str(request.payload["status_definition_id"])
+        )
+        receipt = self.authority.row("session_command_receipt", command_id)
+        coordination = None
+        if receipt is not None:
+            try:
+                coordination = decode_reconcile_coordination(
+                    state=CommandReceiptState(str(receipt["state"])),
+                    result_json=receipt.get("result_json"),
+                )
+            except ValueError:
+                raise MutationRuleViolation(
+                    "idempotency_conflict",
+                    {"reason": "malformed_coordination"},
+                    retryable=False,
+                ) from None
+        if not identity_matches or coordination is None or (
+            coordination["kind"] != "replay_claimed"
+        ):
+            raise MutationRuleViolation(
+                "idempotency_conflict",
+                {"reason": "session_command_not_replay_claimed"},
+                retryable=False,
             )
 
     def command(
@@ -1264,10 +1320,14 @@ def _validate_compiled_command(
     if command.request.name == "knowledge.projection.rebuild":
         _validate_knowledge_rebuild_command(command, authority)
         return
+    focus_rebuild = command.request.name == "focus_session.rebuild_effort_projection"
+    if focus_rebuild:
+        _validate_focus_session_rebuild_command(command, catalog)
     if (
         request_spec is not None
         and plan_specs
         and request_spec.name not in {spec.name for spec in plan_specs}
+        and not focus_rebuild
     ):
         raise SpaceRecoveryRequiredError(
             "compiled database effects do not include the request entity"
@@ -1445,6 +1505,60 @@ def _validate_compiled_command(
         if not bound:
             raise SpaceRecoveryRequiredError(
                 "compiled projection target is not bound to a database mutation"
+            )
+
+
+def _validate_focus_session_rebuild_command(
+    command: MutationCommand | PersistedMutationCommand,
+    catalog: CompiledEntityCatalog,
+) -> None:
+    """Validate the one cross-entity FocusSession maintenance command."""
+    request = command.request
+    allowed = {
+        "space_id", "operation", "requested_at", "work_item_id", "payload_hash",
+    }
+    if (
+        request.entity_type != "focus_session"
+        or request.expected_version is not None
+        or request.client_updated_at is not None
+        or set(request.payload) - allowed
+        or (
+            "operation" in request.payload
+            and request.payload["operation"] != "rebuild_effort_projection"
+        )
+        or not isinstance(request.payload.get("space_id"), str)
+        or not isinstance(request.payload.get("requested_at"), str)
+        or not command.result_value.keys() >= {"rebuilt", "count", "mismatches_repaired"}
+    ):
+        raise SpaceRecoveryRequiredError(
+            "invalid focus_session effort rebuild command"
+        )
+    payload_hash = request.payload.get("payload_hash")
+    if payload_hash is not None:
+        from app.mutation.types import require_payload_hash
+
+        business_payload = {
+            key: value
+            for key, value in request.payload.items()
+            if key not in {"space_id", "payload_hash"}
+        }
+        try:
+            require_payload_hash(str(payload_hash), business_payload)
+        except ValueError as exc:
+            raise SpaceRecoveryRequiredError(
+                "invalid focus_session effort rebuild payload hash"
+            ) from exc
+    if "work_item_id" in request.payload and not isinstance(
+        request.payload["work_item_id"], str
+    ):
+        raise SpaceRecoveryRequiredError(
+            "invalid focus_session effort rebuild target"
+        )
+    for plan in command.db_plans:
+        spec = _validate_persisted_plan_against_catalog(plan, catalog)
+        if spec.name != "work_item" or plan.operation != "update":
+            raise SpaceRecoveryRequiredError(
+                "focus_session effort rebuild may update WorkItem projections only"
             )
 
 

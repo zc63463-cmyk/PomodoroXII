@@ -21,7 +21,6 @@ from app.routes.v1.contract_dependencies import (
 )
 from app.schemas.task_space import (
     TaskSpaceAcceptedResponse,
-    TaskSpaceViewResponse,
 )
 from app.schemas.work_item_note import (
     AppendBlocksRequest,
@@ -31,6 +30,7 @@ from app.schemas.work_item_note import (
     ReplaceDocumentRequest,
     ToggleChecklistItemRequest,
     WorkItemNoteDocumentV1,
+    WorkItemNoteResponse,
 )
 from app.task_space.contracts import (
     NoteCommandKind,
@@ -71,17 +71,26 @@ def _map_note_document(document: WorkItemNoteDocumentV1) -> dict[str, object]:
 # --------------------------------------------------------------------------- #
 
 
-@router.get("/{work_item_id}/note", response_model=TaskSpaceViewResponse)
+@router.get("/{work_item_id}/note", response_model=WorkItemNoteResponse)
 async def read_note(
     work_item_id: str,
     query_module=Depends(get_task_space_query_module),
     scope=Depends(get_space_runtime_handle),
-) -> TaskSpaceViewResponse:
+) -> WorkItemNoteResponse:
     """Read the note document for a work item."""
     view = await query_module.read_note(scope, work_item_id)
     if view is None:
         raise HTTPException(status_code=404, detail="note_not_found")
-    return TaskSpaceViewResponse(value=dict(view.value))
+    v = view.value
+    document_json = str(v["document_json"])
+    return WorkItemNoteResponse(
+        id=str(v["id"]),
+        work_item_id=str(v["work_item_id"]),
+        document_json=document_json,
+        content_version=v["content_version"],
+        write_supported=bool(v["write_supported"]),
+        version=int(v["version"]),
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -50,10 +50,20 @@ def build_mutation_compiler(catalog):
     use it to guarantee identical policy composition.
     """
     from app.commands import FolderDomainPolicy, RelationDomainPolicy
+    from app.focus_session.policy import FocusSessionMutationPolicy
     from app.knowledge.projections import KnowledgeDomainPolicy
     from app.mutation.unit_of_work import MutationCompiler
     from app.services.time import utc_now_iso_ms
     from app.task_space.compiler import TaskSpaceCompiler
+
+    async def read_active_session_locator(_scope, _request):
+        """Read the Meta singleton lazily for owner-fenced FocusSession writes."""
+        from app.db.meta_session import get_meta_session_factory
+        from app.db.models.meta import ActiveSessionLocator
+
+        async with get_meta_session_factory()() as session:
+            row = await session.get(ActiveSessionLocator, "active")
+            return row
 
     return MutationCompiler(
         catalog,
@@ -62,6 +72,10 @@ def build_mutation_compiler(catalog):
             RelationDomainPolicy(),
             KnowledgeDomainPolicy(),
             TaskSpaceCompiler(utc_now_iso_ms),
+            FocusSessionMutationPolicy(
+                read_active_session_locator,
+                replay_safe_policy=TaskSpaceCompiler.replay_safe_policy(),
+            ),
         ),
     )
 
