@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Literal, Protocol
 
+from app.errors import SpaceRecoveryRequiredError
 from app.mutation.types import (
     ContainedProjectionActionField,
     DbMutationPlan,
@@ -376,6 +378,7 @@ class FolderDomainPolicy:
 
         all_ids = [request.entity_id]
         all_ids.extend(self._find_descendants(context, request.entity_id))
+        folder_ids = frozenset(all_ids)
 
         now = utc_now_iso_ms()
         db_plans: list[DbMutationPlan] = []
@@ -439,6 +442,107 @@ class FolderDomainPolicy:
 
             if folder_id == request.entity_id:
                 root_after = after_frozen
+
+        # Detach projection-backed notes and DB-only quick notes in the same
+        # durable command as the folder cascade.  This keeps the folder trash,
+        # child row updates, sync events, and filesystem projections under one
+        # journal/lease boundary.
+        from app.knowledge.projections import KnowledgeProjectionBuilder
+
+        note_builder = KnowledgeProjectionBuilder()
+        note_spec = context.catalog.get("note")
+        for row in sorted(context.authority.rows("note"), key=lambda item: str(item["id"])):
+            if row.get("folder_id") not in folder_ids or row.get("trashed_at") is not None:
+                continue
+            note_id = str(row["id"])
+            before_path = context.authority.note_path(note_id)
+            before_markdown = (
+                None if before_path is None else context.authority.markdown(before_path)
+            )
+            if before_path is None or before_markdown is None:
+                raise SpaceRecoveryRequiredError(
+                    f"folder cascade cannot detach note {note_id} without Markdown"
+                )
+            after = dict(row)
+            after["folder_id"] = None
+            after["version"] = (row.get("version") or 0) + 1
+            after["updated_at"] = now
+            after_frozen = require_frozen_object(after)
+            db_plans.append(
+                DbMutationPlan(
+                    note_spec.table_name,
+                    {note_spec.primary_key: note_id},
+                    "update",
+                    row.get("version"),
+                    row,
+                    after_frozen,
+                )
+            )
+            sync_payload = dict(after)
+            sync_payload["content"] = note_builder._body(before_markdown)
+            sync_events.append(
+                SyncEventPlan(
+                    note_spec.name,
+                    note_id,
+                    "update",
+                    require_frozen_object(sync_payload),
+                    after["version"],
+                    now,
+                )
+            )
+            note_projections = note_builder.build_note(
+                before_row=row,
+                after_row=after_frozen,
+                before_path=before_path,
+                before_markdown=before_markdown,
+                body=None,
+                before_index=context.authority.derived_projection(
+                    ProjectionActionTag.INDEX_REPLACE,
+                    f"index/notes/note_id/{note_id}",
+                ),
+                before_fts=context.authority.derived_projection(
+                    ProjectionActionTag.FTS_REPLACE,
+                    f"fts/{note_id}",
+                ),
+            )
+            offset = len(projections)
+            projections.extend(
+                replace(projection, ordinal=offset + projection.ordinal)
+                for projection in note_projections
+            )
+
+        quick_note_spec = context.catalog.get("quick_note")
+        for row in sorted(
+            context.authority.rows("quick_note"), key=lambda item: str(item["id"])
+        ):
+            if row.get("folder_id") not in folder_ids:
+                continue
+            quick_note_id = str(row["id"])
+            after = dict(row)
+            after["folder_id"] = None
+            after["version"] = (row.get("version") or 0) + 1
+            after["updated_at"] = now
+            after_frozen = require_frozen_object(after)
+            db_plans.append(
+                DbMutationPlan(
+                    quick_note_spec.table_name,
+                    {quick_note_spec.primary_key: quick_note_id},
+                    "update",
+                    row.get("version"),
+                    row,
+                    after_frozen,
+                )
+            )
+            sync_events.append(
+                SyncEventPlan(
+                    quick_note_spec.name,
+                    quick_note_id,
+                    "update",
+                    after_frozen,
+                    after["version"],
+                    now,
+                )
+            )
 
         return context.command(
             request=request,

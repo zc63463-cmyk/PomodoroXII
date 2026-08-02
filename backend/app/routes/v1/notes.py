@@ -200,6 +200,8 @@ async def update_note_content(
         current = await db.get(Note, id)
         if current is None:
             raise NotFoundError(f"Note {id} not found")
+        if current.trashed_at is not None:
+            raise NotFoundError(f"Note {id} not found")
         result = await store.update_note_content(
             scope,
             id,
@@ -230,6 +232,8 @@ async def update_note_metadata(
     current = await db.get(Note, id)
     if current is None:
         raise NotFoundError(f"Note {id} not found")
+    if current.trashed_at is not None:
+        raise ValidationError(f"Note {id} is in trash; restore before editing")
     result = await store.update_note_metadata(
         scope,
         id,
@@ -270,10 +274,15 @@ async def update_note(
     current = await db.get(Note, id)
     if current is None:
         raise NotFoundError(f"Note {id} not found")
+    update_data = data.model_dump(exclude_unset=True)
+    if current.trashed_at is not None and "content" in update_data:
+        raise NotFoundError(f"Note {id} not found")
+    if current.trashed_at is not None:
+        raise ValidationError(f"Note {id} is in trash; restore before editing")
     result = await store.update_note(
         scope,
         id,
-        data.model_dump(exclude_unset=True),
+        update_data,
         expected_version_from_request(request, current.version),
         operation_id,
     )
