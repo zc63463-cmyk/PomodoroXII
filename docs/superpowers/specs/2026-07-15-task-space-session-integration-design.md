@@ -637,6 +637,10 @@ Rules:
 - only the root that owns `replay_claimed` may execute the Task Space child; a
   timeout completes that claim as `replay_finished_unknown`, after which a new
   root may replay or abandon;
+- the S3 domain compile context exposes the prepared child `operation_id` as
+  read-only authority so Task Space applies the same envelope fence to typed
+  REST commands and synthetic commands rebuilt from Sync events; Sync payload
+  fields are never treated as a substitute for that UoW-owned identity;
 - abandon also queries the original command first; an already-terminal S3
   result wins, otherwise a new immutable `abandoned` receipt records the user
   decision/timestamp without deleting or rewriting its envelope;

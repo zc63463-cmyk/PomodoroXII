@@ -480,12 +480,12 @@ async def _startup_owned(
         await bootstrap_credential_epoch()
         catalog = CATALOG
         if runtime.recovery_provider is None:
+            from app.deps import build_mutation_compiler
             from app.file_system.engine.base import FileSystemProjectionExecutor
             from app.mutation.journal import MutationJournal
             from app.mutation.recovery import MutationRecovery
             from app.mutation.unit_of_work import (
                 DbMutationInterpreter,
-                MutationCompiler,
                 MutationUnitOfWork,
             )
 
@@ -496,20 +496,11 @@ async def _startup_owned(
                 interpreter=interpreter,
                 projection_executor=projection_executor,
             )
-            from app.commands import FolderDomainPolicy, RelationDomainPolicy
-            from app.knowledge.projections import KnowledgeDomainPolicy
 
             runtime.install_recovery_provider(
                 MutationUnitOfWork(
                     catalog=catalog,
-                    compiler=MutationCompiler(
-                        catalog,
-                        policies=(
-                            FolderDomainPolicy(),
-                            RelationDomainPolicy(),
-                            KnowledgeDomainPolicy(),
-                        ),
-                    ),
+                    compiler=build_mutation_compiler(catalog),
                     interpreter=interpreter,
                     projection_executor=projection_executor,
                     recovery_gate=recovery,

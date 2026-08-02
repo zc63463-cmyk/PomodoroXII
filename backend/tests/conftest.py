@@ -418,3 +418,62 @@ async def client(
             event_hooks={"response": [provision_created_space]},
         ) as ac:
             yield ac
+
+
+# -- S3 mutation fixture factory for TS1 Task Space tests ---------------------
+
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from app.commands.entity import EntityCommand
+from app.registry import CATALOG
+from app.task_space.compiler import TaskSpaceCompiler
+from app.task_space.module import DefaultTaskSpaceCommandModule
+from app.task_space.queries import DefaultTaskSpaceQueryModule
+from tests.mutation_fixture import MutationFixture, build_mutation_fixture
+from tests.task_space_fixture import FrozenClock, TaskSpaceFixture
+
+
+@pytest.fixture
+def mutation_fixture_factory(space_session, tmp_path):
+    """Return a factory that constructs mutation fixtures with given policies."""
+
+    sessions = async_sessionmaker(space_session.bind, expire_on_commit=False)
+    stage_root = tmp_path / "stages"
+    projection_root = tmp_path / "projection"
+    database_path = Path(str(space_session.bind.url.database))
+    fixtures: list[MutationFixture] = []
+
+    def factory(*, policies: tuple = ()) -> MutationFixture:
+        fixture = build_mutation_fixture(
+            sessions=sessions,
+            catalog=CATALOG,
+            policies=policies,
+            stage_root=stage_root,
+            projection_root=projection_root,
+            database_path=database_path,
+        )
+        fixtures.append(fixture)
+        return fixture
+
+    yield factory
+
+    for fixture in reversed(fixtures):
+        fixture.close()
+
+
+@pytest.fixture
+async def task_space_fixture(mutation_fixture_factory):
+    clock = FrozenClock()
+    policy = TaskSpaceCompiler(clock.now_iso_ms)
+    mutation = mutation_fixture_factory(policies=(policy,))
+    fixture = TaskSpaceFixture(
+        mutation=mutation,
+        clock=clock,
+        module=DefaultTaskSpaceCommandModule(mutation.uow),
+        queries=DefaultTaskSpaceQueryModule(),
+        entity_commands=EntityCommand(mutation.catalog),
+    )
+    try:
+        yield fixture
+    finally:
+        fixture.mutation.close()

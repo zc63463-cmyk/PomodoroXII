@@ -149,3 +149,64 @@ def test_registry_register_duplicate_raises_valueerror():
     local.register(spec)
     with pytest.raises(ValueError):
         local.register(spec)
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — Task Space entity and sync-key parity gates
+# --------------------------------------------------------------------------- #
+
+TASK_SPACE_ENTITY_NAMES = frozenset({
+    "project",
+    "status_definition",
+    "type_definition",
+    "label",
+    "work_item_label",
+    "work_item",
+    "work_item_note",
+    "focus_session",
+    "session_task_context",
+    "session_attribution_revision",
+    "session_work_item_plan",
+    "session_work_item_outcome",
+})
+
+EXPECTED_CAMEL_CASE_SYNC_KEYS = {
+    "project": "project",
+    "status_definition": "statusDefinition",
+    "type_definition": "typeDefinition",
+    "label": "label",
+    "work_item_label": "workItemLabel",
+    "work_item": "workItem",
+    "work_item_note": "workItemNote",
+    "focus_session": "focusSession",
+    "session_task_context": "sessionTaskContext",
+    "session_attribution_revision": "sessionAttributionRevision",
+    "session_work_item_plan": "sessionWorkItemPlan",
+    "session_work_item_outcome": "sessionWorkItemOutcome",
+}
+
+
+def test_task_space_entities_are_registered():
+    """All seven core Task Space entities must be present in the registry."""
+    actual_names = {s.name for s in REGISTRY.list()}
+    missing = TASK_SPACE_ENTITY_NAMES - actual_names
+    assert not missing, f"Task Space entities missing from registry: {missing}"
+
+
+def test_task_space_entities_have_camel_case_sync_keys():
+    """Each Task Space entity must expose the correct camelCase sync_entity_type."""
+    for snake_name, expected_camel in EXPECTED_CAMEL_CASE_SYNC_KEYS.items():
+        spec = REGISTRY.get(snake_name)
+        assert spec.effective_sync_entity_type == expected_camel, (
+            f"Entity '{snake_name}' has sync_entity_type="
+            f"{spec.effective_sync_entity_type!r}, expected {expected_camel!r}"
+        )
+
+
+def test_legacy_task_entity_is_absent():
+    """The legacy 'task' entity must NOT exist in the registry."""
+    actual_names = {s.name for s in REGISTRY.list()}
+    assert "task" not in actual_names, (
+        "Legacy 'task' entity must not be registered; "
+        "it has been replaced by 'work_item'."
+    )
