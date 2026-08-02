@@ -12,6 +12,7 @@ import inspect
 import json
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
+from types import MappingProxyType
 
 from app.focus_session.effort_projection import EffortProjectionCompiler
 from app.mutation.types import (
@@ -84,7 +85,12 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
 
     entity_types = FOCUS_SESSION_POLICY_TYPES
 
-    def __init__(self, locator_reader: Callable[..., object] | object) -> None:
+    def __init__(
+        self,
+        locator_reader: Callable[..., object] | object,
+        *,
+        replay_safe_policy: Mapping[str, bool] | None = None,
+    ) -> None:
         """Create the policy with the TS0 locator reader.
 
         The reader is deliberately injected instead of opening the Meta
@@ -94,6 +100,14 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         if locator_reader is None:
             raise TypeError("locator_reader is required for owner fencing")
         self._locator = locator_reader
+        if replay_safe_policy is not None:
+            if not isinstance(replay_safe_policy, Mapping) or any(
+                not isinstance(key, str) or type(value) is not bool
+                for key, value in replay_safe_policy.items()
+            ):
+                raise TypeError("replay_safe_policy must map transition names to booleans")
+            replay_safe_policy = MappingProxyType(dict(replay_safe_policy))
+        self._replay_safe_policy = replay_safe_policy
 
     async def _read_locator(
         self, context: MutationCompileContext, request: MutationRequest,
@@ -144,29 +158,34 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 {"sessionId": session.get("id"), "reason": "conflict_read_only"},
             )
 
-    def _resolve_replay_safe(self, context: MutationCompileContext) -> bool:
-        """Resolve server-declared replay_safe from Task Space policy.
+    def _resolve_replay_safe(
+        self, context: MutationCompileContext, target_transition: str,
+    ) -> bool:
+        """Resolve the immutable server declaration for one transition.
 
-        BLOCKER: No Task Space policy declaration injection path exists in
-        the current architecture.  The spec requires replay_safe to come
-        from the Task Space server-declared policy, never from review input
-        and never hardcoded.  Until a declaration path is added (likely via
-        a new static method on TaskSpaceMutationPolicy or a constructor
-        injection), this method fails closed.
-
-        Required minimal architectural change:
-        1. Add a static declaration to TaskSpaceMutationPolicy in
-           backend/app/task_space/compiler.py that declares replay safety
-           for transition commands (complete/cancel).
-        2. Inject that declaration into FocusSessionMutationPolicy, either
-           via constructor parameter or by referencing the static method.
-        3. This method then reads the injected declaration instead of
-           raising.
+        The declaration is injected by the composition root (or exposed on
+        the runtime scope for older callers).  Review payloads are never
+        consulted.  Missing or malformed declarations fail closed before an
+        envelope can be persisted.
         """
-        raise _MutationRuleViolation(
-            "work_item_structure_changed",
-            {"reason": "missing_task_space_replay_safe_policy"},
-        )
+        policy = self._replay_safe_policy
+        if policy is None:
+            policy = getattr(context.scope, "task_space_replay_safe_policy", None)
+        if not isinstance(policy, Mapping):
+            raise _MutationRuleViolation(
+                "work_item_structure_changed",
+                {"reason": "missing_task_space_replay_safe_policy"},
+            )
+        value = policy.get(target_transition)
+        if type(value) is not bool:
+            raise _MutationRuleViolation(
+                "work_item_structure_changed",
+                {
+                    "reason": "missing_task_space_replay_safe_policy",
+                    "transition": target_transition,
+                },
+            )
+        return value
 
     def _recalc_effort_for_targets(
         self,
@@ -756,7 +775,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                     "work_item_id": work_item_id,
                     "expected_version": expected_wi_version,
                     "target_transition": state_command,
-                    "replay_safe": self._resolve_replay_safe(context),
+                    "replay_safe": self._resolve_replay_safe(context, state_command),
                     "payload_hash": payload_hash,
                     "created_at": reviewed_at,
                 })
