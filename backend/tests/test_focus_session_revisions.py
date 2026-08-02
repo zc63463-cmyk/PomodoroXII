@@ -25,6 +25,7 @@ from app.focus_session.module import DefaultFocusSessionModule
 from app.focus_session.policy import FocusSessionMutationPolicy
 from app.focus_session.query import FocusSessionQuery
 from app.mutation.types import canonical_payload_hash
+from app.task_space.compiler import TaskSpaceCompiler
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -46,7 +47,10 @@ def focus_fixture(mutation_fixture_factory):
             "ownership_epoch": payload.get("ownership_epoch"),
         }
 
-    policy = FocusSessionMutationPolicy(locator_reader=locator_reader)
+    policy = FocusSessionMutationPolicy(
+        locator_reader=locator_reader,
+        replay_safe_policy=TaskSpaceCompiler.replay_safe_policy(),
+    )
     mutation = mutation_fixture_factory(policies=(policy,))
     module = DefaultFocusSessionModule(
         uow=mutation.uow,
@@ -55,6 +59,7 @@ def focus_fixture(mutation_fixture_factory):
     )
     return SimpleNamespace(
         mutation=mutation,
+        policy=policy,
         module=module,
         scope=mutation.scope,
         uow=mutation.uow,
@@ -518,7 +523,12 @@ class TestReviewCommitsBeforeDispatch:
     async def test_review_does_not_dispatch_to_task_space(
         self, focus_fixture,
     ) -> None:
-        """Review must not produce any work_item mutations or task_space sync events."""
+        """Review must not dispatch the recorded Outcome to Task Space.
+
+        The same S3 command may legitimately emit the WorkItem effort
+        projection for the level-2 target; that is not a Task Space state
+        transition and must not touch the reviewed level-3 item.
+        """
         from app.models.work_item import WorkItem
 
         await _seed_catalog(focus_fixture)
@@ -547,11 +557,15 @@ class TestReviewCommitsBeforeDispatch:
         assert l3.version == 1
         assert l3.status_definition_id == "status-todo"
 
-        # No task_space entity sync events should be produced for work_item
+        # The only WorkItem event is the authoritative effort projection for
+        # the level-2 target.  No event may transition the reviewed level-3
+        # item as part of review materialization.
         events = await focus_fixture.mutation.visible_events(
             entity_type="workItem",
         )
-        assert len(events) == 0
+        assert len(events) == 1
+        assert events[0].entity_id == "l2-a"
+        assert events[0].payload["effort_actual_seconds"] == 1500
 
 
 # ---------------------------------------------------------------------------
@@ -941,6 +955,7 @@ class TestCorrectedOutcomeAppendsRevision:
         )
         await _submit_review(
             focus_fixture, expected_version=3, outcomes=second_outcomes,
+            reviewed_at="2026-07-15T08:31:00Z",
             command_id="review-2",
         )
 
@@ -1287,6 +1302,10 @@ class TestReplaySafeBlocksWhenNoPolicy:
     async def test_complete_outcome_blocks_without_replay_safe_policy(
         self, focus_fixture,
     ) -> None:
+        # Exercise the fail-closed path explicitly.  The shared fixture uses
+        # the real Task Space declaration so the normal envelope tests can
+        # succeed; removing it here models a miscomposed server.
+        focus_fixture.policy._replay_safe_policy = None
         await _seed_catalog(focus_fixture)
         await _start_session(focus_fixture)
         await _end_session(focus_fixture, expected_version=1)

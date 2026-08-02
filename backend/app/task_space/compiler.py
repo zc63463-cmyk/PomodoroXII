@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
+from types import MappingProxyType
 
 from app.errors import thaw_json
 from app.mutation.types import (
@@ -55,6 +56,19 @@ class TaskSpaceCompiler:
 
     namespace = "task_space."
     entity_types = TASK_SPACE_POLICY_ENTITY_TYPES
+    # This is the server-owned declaration consumed by FocusSession review
+    # envelopes.  It is deliberately separate from caller payloads: the
+    # review command may request a transition, but it cannot choose whether
+    # that transition is safe to replay.
+    REPLAY_SAFE_TRANSITIONS = MappingProxyType({
+        "complete": True,
+        "cancel": True,
+    })
+
+    @classmethod
+    def replay_safe_policy(cls) -> Mapping[str, bool]:
+        """Return the immutable server declaration for transition envelopes."""
+        return cls.REPLAY_SAFE_TRANSITIONS
 
     def __init__(self, now_iso_ms: Callable[[], str] = utc_now_iso_ms) -> None:
         self.now_iso_ms = now_iso_ms

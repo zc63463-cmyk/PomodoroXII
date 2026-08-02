@@ -30,11 +30,12 @@ from app.focus_session.contracts import FocusSessionCommand
 
 # EffortProjectionCompiler does not exist yet -- this import will fail
 # until the module is implemented.  That is the expected RED signal.
-from app.focus_session.effort_projection import EffortProjectionCompiler
+from app.focus_session.effort_projection import EffortMismatch, EffortProjectionCompiler
 from app.focus_session.module import DefaultFocusSessionModule
 from app.focus_session.policy import EffortProjectionRepairPolicy, FocusSessionMutationPolicy
 from app.focus_session.query import FocusSessionQuery
 from app.mutation.types import MutationRequest, MutationRuleViolation, canonical_payload_hash
+from app.task_space.compiler import TaskSpaceCompiler
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -56,7 +57,10 @@ def focus_fixture(mutation_fixture_factory):
             "ownership_epoch": payload.get("ownership_epoch"),
         }
 
-    policy = FocusSessionMutationPolicy(locator_reader=locator_reader)
+    policy = FocusSessionMutationPolicy(
+        locator_reader=locator_reader,
+        replay_safe_policy=TaskSpaceCompiler.replay_safe_policy(),
+    )
     repair_policy = EffortProjectionRepairPolicy()
     mutation = mutation_fixture_factory(policies=(policy, repair_policy))
     module = DefaultFocusSessionModule(
@@ -857,9 +861,12 @@ class TestEffortProjectionVerification:
             l2.effort_actual_seconds = 999
             await session.commit()
 
-        # verify_all should detect the stale projection (fail-closed)
-        with pytest.raises(MutationRuleViolation):
-            await EffortProjectionCompiler.verify_all(focus_fixture.scope)
+        # verify_all is a read-only report.  It shares the exact computation
+        # path with rebuild and returns typed mismatches instead of throwing
+        # for an ordinary stale materialized value.
+        assert await EffortProjectionCompiler.verify_all(focus_fixture.scope) == (
+            EffortMismatch(work_item_id="l2-a", stored=999, expected=1500),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -889,11 +896,13 @@ class TestFaultInjectionConverges:
         initial_effort = await _get_effort_actual(focus_fixture, "l2-a")
         assert initial_effort == 0
 
-        # Inject a projection forward fault
-        focus_fixture.mutation.inject_fault("projection_forward")
+        # Inject a failure at the real rebuild boundary.  Rebuilds deliberately
+        # have no file projections, so a projection-forward fault would never
+        # execute after the fake projection was removed.
+        focus_fixture.mutation.inject_fault("db_commit")
 
         # Attempt rebuild -- should fail during projection
-        with pytest.raises(MutationRejectedError):
+        with pytest.raises(RuntimeError, match="injected db commit failure"):
             await _rebuild_effort(
                 focus_fixture, work_item_id="l2-a",
                 command_id="rebuild-effort-l2-a-fault",
@@ -928,9 +937,9 @@ class TestFaultInjectionConverges:
             ended_at="2026-07-15T08:25:00Z",
         )
 
-        # Inject fault, attempt rebuild, recover
-        focus_fixture.mutation.inject_fault("projection_forward")
-        with pytest.raises(MutationRejectedError):
+        # Inject a real DB commit failure, then recover the staged journal.
+        focus_fixture.mutation.inject_fault("db_commit")
+        with pytest.raises(RuntimeError, match="injected db commit failure"):
             await _rebuild_effort(
                 focus_fixture, work_item_id="l2-a",
                 command_id="rebuild-effort-l2-a-fault",
