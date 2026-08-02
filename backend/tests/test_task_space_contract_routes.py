@@ -63,7 +63,12 @@ class FakeTaskSpaceQueryModule:
         self.calls.append(("list_projects", scope, query))
         self.raw_queries.append(query)
         return TaskSpacePage(
-            items=({"id": "p1", "key": "TEST", "name": "Test"},),
+            items=({
+                "id": "p1",
+                "key": "TEST",
+                "name": "Test",
+                "next_work_item_number": 1,
+            },),
             next_cursor=None,
         )
 
@@ -72,7 +77,7 @@ class FakeTaskSpaceQueryModule:
         self.raw_queries.append(project_id)
         return TaskSpaceView(
             value={"id": project_id, "key": "TEST", "name": "Test",
-                   "nextWorkItemNumber": 1}
+                   "next_work_item_number": 1}
         )
 
     async def list_definitions(self, scope: Any) -> TaskSpaceDefinitionsView:
@@ -89,13 +94,25 @@ class FakeTaskSpaceQueryModule:
         self.calls.append(("get_work_item", scope, work_item_id))
         self.raw_queries.append(work_item_id)
         return TaskSpaceView(
-            value={"id": work_item_id, "displayKey": "TEST-1"}
+            value={
+                "id": work_item_id,
+                "display_key": "TEST-1",
+                "project_id": "p1",
+                "title": "Test work item",
+            }
         )
 
     async def read_note(self, scope: Any, work_item_id: str) -> TaskSpaceView | None:
         self.calls.append(("read_note", scope, work_item_id))
         self.raw_queries.append(work_item_id)
-        return TaskSpaceView(value={"workItemId": work_item_id})
+        return TaskSpaceView(value={
+            "id": "note-1",
+            "work_item_id": work_item_id,
+            "document_json": '{"blocks":[],"contentVersion":1}',
+            "content_version": 1,
+            "write_supported": True,
+            "version": 1,
+        })
 
 
 class FakeTaskSpaceCommandModule:

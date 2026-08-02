@@ -19,10 +19,10 @@ from app.routes.v1.contract_dependencies import (
 )
 from app.schemas.task_space import (
     CreateProjectRequest,
+    ProjectPageResponse,
+    ProjectResponse,
     TaskSpaceAcceptedResponse,
     TaskSpaceDefinitionsResponse,
-    TaskSpacePageResponse,
-    TaskSpaceViewResponse,
 )
 from app.task_space.contracts import (
     CreateProject,
@@ -37,20 +37,28 @@ router = APIRouter()
 # --------------------------------------------------------------------------- #
 
 
-@router.get("", response_model=TaskSpacePageResponse)
+@router.get("", response_model=ProjectPageResponse)
 async def list_projects(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     query_module=Depends(get_task_space_query_module),
     scope=Depends(get_space_runtime_handle),
-) -> TaskSpacePageResponse:
+) -> ProjectPageResponse:
     """List projects with optional pagination."""
     page = await query_module.list_projects(
         scope,
         TaskSpacePageQuery(cursor=cursor, limit=limit, filters={}),
     )
-    return TaskSpacePageResponse(
-        items=[dict(item) for item in page.items],
+    return ProjectPageResponse(
+        items=[
+            ProjectResponse(
+                id=str(item["id"]),
+                key=str(item["key"]),
+                name=str(item["name"]),
+                next_work_item_number=int(item["next_work_item_number"]),
+            )
+            for item in page.items
+        ],
         next_cursor=page.next_cursor,
     )
 
@@ -99,12 +107,18 @@ async def list_definitions(
 # --------------------------------------------------------------------------- #
 
 
-@router.get("/{project_id}", response_model=TaskSpaceViewResponse)
+@router.get("/{project_id}", response_model=ProjectResponse)
 async def get_project(
     project_id: str,
     query_module=Depends(get_task_space_query_module),
     scope=Depends(get_space_runtime_handle),
-) -> TaskSpaceViewResponse:
+) -> ProjectResponse:
     """Get a single project by ID."""
     view = await query_module.get_project(scope, project_id)
-    return TaskSpaceViewResponse(value=dict(view.value))
+    v = view.value
+    return ProjectResponse(
+        id=str(v["id"]),
+        key=str(v["key"]),
+        name=str(v["name"]),
+        next_work_item_number=int(v["next_work_item_number"]),
+    )

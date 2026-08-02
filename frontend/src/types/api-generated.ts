@@ -2206,6 +2206,27 @@ export interface components {
             /** Password */
             password: string;
         };
+        /** ProjectPageResponse */
+        ProjectPageResponse: {
+            /** Items */
+            items: components["schemas"]["ProjectResponse"][];
+            /** Nextcursor */
+            nextCursor?: string | null;
+        };
+        /**
+         * ProjectResponse
+         * @description Project view returned by query routes.
+         */
+        ProjectResponse: {
+            /** Id */
+            id: string;
+            /** Key */
+            key: string;
+            /** Name */
+            name: string;
+            /** Nextworkitemnumber */
+            nextWorkItemNumber: number;
+        };
         /**
          * QuickNoteConvertResponse
          * @description Response for ``POST /api/v1/quick-notes/{id}/convert``.
@@ -2908,22 +2929,6 @@ export interface components {
                 [key: string]: unknown;
             }[];
         };
-        /** TaskSpacePageResponse */
-        TaskSpacePageResponse: {
-            /** Items */
-            items: {
-                [key: string]: unknown;
-            }[];
-            /** Nextcursor */
-            nextCursor?: string | null;
-        };
-        /** TaskSpaceViewResponse */
-        TaskSpaceViewResponse: {
-            /** Value */
-            value: {
-                [key: string]: unknown;
-            };
-        };
         /**
          * TimeBlockCreate
          * @description Schema for creating a new time block.
@@ -3144,6 +3149,49 @@ export interface components {
             contentVersion: 1;
             /** Blocks */
             blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock"])[];
+        };
+        /**
+         * WorkItemNoteResponse
+         * @description Work item note view returned by the read route.
+         *
+         *     Fields are sourced from the actual query/model data: the ORM row
+         *     (``id``, ``work_item_id``, ``version``) and the parsed document JSON
+         *     (``content_version``, ``write_supported``).
+         */
+        WorkItemNoteResponse: {
+            /** Id */
+            id: string;
+            /** Workitemid */
+            workItemId: string;
+            /** Documentjson */
+            documentJson: string;
+            /** Contentversion */
+            contentVersion: number | null;
+            /** Writesupported */
+            writeSupported: boolean;
+            /** Version */
+            version: number;
+        };
+        /** WorkItemPageResponse */
+        WorkItemPageResponse: {
+            /** Items */
+            items: components["schemas"]["WorkItemResponse"][];
+            /** Nextcursor */
+            nextCursor?: string | null;
+        };
+        /**
+         * WorkItemResponse
+         * @description Work item view returned by query routes.
+         */
+        WorkItemResponse: {
+            /** Id */
+            id: string;
+            /** Displaykey */
+            displayKey: string;
+            /** Projectid */
+            projectId: string;
+            /** Title */
+            title: string;
         };
         /**
          * CanonicalErrorResponse
@@ -5727,7 +5775,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskSpacePageResponse"];
+                    "application/json": components["schemas"]["ProjectPageResponse"];
                 };
             };
             /** @description Domain or request validation error */
@@ -5834,7 +5882,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskSpaceViewResponse"];
+                    "application/json": components["schemas"]["ProjectResponse"];
                 };
             };
             /** @description Domain or request validation error */
@@ -5871,7 +5919,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskSpacePageResponse"];
+                    "application/json": components["schemas"]["WorkItemPageResponse"];
                 };
             };
             /** @description Domain or request validation error */
@@ -6027,7 +6075,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskSpaceViewResponse"];
+                    "application/json": components["schemas"]["WorkItemResponse"];
                 };
             };
             /** @description Domain or request validation error */
@@ -6103,7 +6151,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskSpaceViewResponse"];
+                    "application/json": components["schemas"]["WorkItemNoteResponse"];
                 };
             };
             /** @description Domain or request validation error */

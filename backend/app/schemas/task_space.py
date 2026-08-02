@@ -169,6 +169,16 @@ class TaskSpaceAcceptedResponse(WireResponseModel):
     value: dict[str, Any]
 
 
+class ProjectPageResponse(WireResponseModel):
+    items: list[ProjectResponse]
+    next_cursor: str | None = None
+
+
+class WorkItemPageResponse(WireResponseModel):
+    items: list[WorkItemResponse]
+    next_cursor: str | None = None
+
+
 class TaskSpacePageResponse(WireResponseModel):
     items: list[dict[str, Any]]
     next_cursor: str | None = None

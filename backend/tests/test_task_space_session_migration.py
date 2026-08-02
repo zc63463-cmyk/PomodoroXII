@@ -63,6 +63,15 @@ def test_space_010_creates_exact_final_tables_and_seeds(tmp_path) -> None:
         outcome_indexes = {
             row[1] for row in conn.execute("PRAGMA index_list(session_work_item_outcomes)")
         }
+        outcome_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(session_work_item_outcomes)")
+        }
+        assert {
+            "execution_persona",
+            "persona_switched",
+            "persona_note",
+        } <= outcome_columns
         assert "uq_session_attribution_effective" in attribution_indexes
         assert "uq_session_work_item_outcome_effective" in outcome_indexes
 

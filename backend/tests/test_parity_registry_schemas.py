@@ -89,3 +89,50 @@ def test_task_space_entity_schema_in_correct_module(
         assert hasattr(module, expected_class), (
             f"{expected_module} missing {expected_class} for entity '{entity_name}'"
         )
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — OpenAPI independent response type parity gate
+# --------------------------------------------------------------------------- #
+
+#: Response schema names that MUST appear as independent, named schemas in the
+#: OpenAPI ``components.schemas`` — not hidden inside generic wrappers like
+#: ``TaskSpaceViewResponse.value`` (which is ``additionalProperties: true``).
+REQUIRED_OPENAPI_RESPONSE_TYPES = frozenset({
+    "ProjectResponse",
+    "WorkItemResponse",
+    "WorkItemNoteResponse",
+})
+
+
+def test_openapi_exposes_independent_task_space_response_types() -> None:
+    """The OpenAPI schema must expose ``ProjectResponse``, ``WorkItemResponse``,
+    and ``WorkItemNoteResponse`` as independent, named component schemas.
+
+    These types must NOT be replaced by generic wrappers such as
+    ``TaskSpaceViewResponse``, ``TaskSpacePageResponse``, or
+    ``TaskSpaceAcceptedResponse`` with untyped ``value`` fields.
+
+    The backend Task Space routes now reference these models directly:
+    ``GET /{project_id}`` returns ``ProjectResponse``, ``GET /{work_item_id}``
+    returns ``WorkItemResponse``, and ``GET /{work_item_id}/note`` returns
+    ``WorkItemNoteResponse``.  Page responses use typed ``items`` lists
+    (``ProjectPageResponse``, ``WorkItemPageResponse``).
+
+    The frontend ``api-generated.ts`` is generated via
+    ``openapi-typescript`` against the real backend OpenAPI schema.
+    """
+    from app.main import create_app
+
+    app = create_app()
+    schema = app.openapi()
+    component_schemas = set(schema.get("components", {}).get("schemas", {}).keys())
+
+    missing = REQUIRED_OPENAPI_RESPONSE_TYPES - component_schemas
+    assert not missing, (
+        f"OpenAPI is missing independent response type schemas: {sorted(missing)}. "
+        f"The backend routes must reference these models directly instead of "
+        f"using generic TaskSpace wrappers with untyped value fields. "
+        f"This is a production boundary blocker — cannot be fixed within "
+        f"the allowed TS1 Task 7 test-only file scope."
+    )

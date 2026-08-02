@@ -10,7 +10,7 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, model_validator
 
 from app.mutation.types import canonical_json_bytes
-from app.schemas.task_space import CommandId, WireModel
+from app.schemas.task_space import CommandId, WireModel, WireResponseModel
 
 MAX_NOTE_DOCUMENT_BYTES = 128 * 1024
 MAX_NOTE_BLOCKS = 256
@@ -89,6 +89,27 @@ def _validate_blocks(blocks: list[NoteBlock]) -> None:
         if isinstance(block, ChecklistBlock):
             for item in block.items:
                 visit(item, 1)
+
+
+# --------------------------------------------------------------------------- #
+# Response schema
+# --------------------------------------------------------------------------- #
+
+
+class WorkItemNoteResponse(WireResponseModel):
+    """Work item note view returned by the read route.
+
+    Fields are sourced from the actual query/model data: the ORM row
+    (``id``, ``work_item_id``, ``version``) and the parsed document JSON
+    (``content_version``, ``write_supported``).
+    """
+
+    id: str
+    work_item_id: str
+    document_json: str
+    content_version: int | None
+    write_supported: bool
+    version: int
 
 
 # --------------------------------------------------------------------------- #
