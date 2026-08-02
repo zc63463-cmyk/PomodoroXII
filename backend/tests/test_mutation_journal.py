@@ -407,9 +407,10 @@ def test_literal_mutation_rule_codes_stay_within_their_owner_sets() -> None:
     app_root = Path(__file__).parents[1] / "app"
     s3_found: set[str] = set()
     task_space_found: set[str] = set()
+    domain_roots = {app_root / "task_space", app_root / "focus_session"}
     for path in app_root.rglob("*.py"):
         found = literal_exception_codes(path, "MutationRuleViolation")
-        if path.parent == app_root / "task_space":
+        if any(path == root or root in path.parents for root in domain_roots):
             task_space_found |= found
         else:
             s3_found |= found

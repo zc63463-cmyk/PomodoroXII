@@ -30,7 +30,11 @@ from app.focus_session.contracts import FocusSessionCommand
 
 # EffortProjectionCompiler does not exist yet -- this import will fail
 # until the module is implemented.  That is the expected RED signal.
-from app.focus_session.effort_projection import EffortMismatch, EffortProjectionCompiler
+from app.focus_session.effort_projection import (
+    EffortMismatch,
+    EffortProjectionCompiler,
+    EffortProjectionRepairService,
+)
 from app.focus_session.module import DefaultFocusSessionModule
 from app.focus_session.policy import EffortProjectionRepairPolicy, FocusSessionMutationPolicy
 from app.focus_session.query import FocusSessionQuery
@@ -73,6 +77,7 @@ def focus_fixture(mutation_fixture_factory):
         module=module,
         scope=mutation.scope,
         uow=mutation.uow,
+        repair_service=EffortProjectionRepairService(uow=mutation.uow),
     )
 
 
@@ -658,6 +663,30 @@ class TestRebuildEntersRealPolicy:
         result = await _rebuild_effort(focus_fixture, work_item_id="l2-a")
         assert result is not None
         assert result.state in ("FINALIZED", "DB_COMMITTED", "FORWARD_APPLIED")
+
+    @pytest.mark.asyncio
+    async def test_repair_service_uses_focus_session_policy(self, focus_fixture) -> None:
+        await _seed_catalog(focus_fixture)
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-1",
+            level2_work_item_id="l2-a",
+            focused_seconds=1500,
+            validity="valid",
+            ended_at="2026-07-15T08:25:00Z",
+        )
+
+        report = await focus_fixture.repair_service.rebuild(
+            focus_fixture.scope,
+            operation_id="repair-effort-service-1",
+            requested_at="2026-07-15T12:00:00Z",
+            work_item_id="l2-a",
+        )
+
+        assert report.operation_id == "repair-effort-service-1"
+        assert report.applied is True
+        assert report.mismatches_repaired == 1
+        assert await _get_effort_actual(focus_fixture, "l2-a") == 1500
 
     @pytest.mark.asyncio
     async def test_rebuild_updates_work_item_effort(self, focus_fixture) -> None:

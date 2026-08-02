@@ -1320,10 +1320,14 @@ def _validate_compiled_command(
     if command.request.name == "knowledge.projection.rebuild":
         _validate_knowledge_rebuild_command(command, authority)
         return
+    focus_rebuild = command.request.name == "focus_session.rebuild_effort_projection"
+    if focus_rebuild:
+        _validate_focus_session_rebuild_command(command, catalog)
     if (
         request_spec is not None
         and plan_specs
         and request_spec.name not in {spec.name for spec in plan_specs}
+        and not focus_rebuild
     ):
         raise SpaceRecoveryRequiredError(
             "compiled database effects do not include the request entity"
@@ -1501,6 +1505,60 @@ def _validate_compiled_command(
         if not bound:
             raise SpaceRecoveryRequiredError(
                 "compiled projection target is not bound to a database mutation"
+            )
+
+
+def _validate_focus_session_rebuild_command(
+    command: MutationCommand | PersistedMutationCommand,
+    catalog: CompiledEntityCatalog,
+) -> None:
+    """Validate the one cross-entity FocusSession maintenance command."""
+    request = command.request
+    allowed = {
+        "space_id", "operation", "requested_at", "work_item_id", "payload_hash",
+    }
+    if (
+        request.entity_type != "focus_session"
+        or request.expected_version is not None
+        or request.client_updated_at is not None
+        or set(request.payload) - allowed
+        or (
+            "operation" in request.payload
+            and request.payload["operation"] != "rebuild_effort_projection"
+        )
+        or not isinstance(request.payload.get("space_id"), str)
+        or not isinstance(request.payload.get("requested_at"), str)
+        or not command.result_value.keys() >= {"rebuilt", "count", "mismatches_repaired"}
+    ):
+        raise SpaceRecoveryRequiredError(
+            "invalid focus_session effort rebuild command"
+        )
+    payload_hash = request.payload.get("payload_hash")
+    if payload_hash is not None:
+        from app.mutation.types import require_payload_hash
+
+        business_payload = {
+            key: value
+            for key, value in request.payload.items()
+            if key not in {"space_id", "payload_hash"}
+        }
+        try:
+            require_payload_hash(str(payload_hash), business_payload)
+        except ValueError as exc:
+            raise SpaceRecoveryRequiredError(
+                "invalid focus_session effort rebuild payload hash"
+            ) from exc
+    if "work_item_id" in request.payload and not isinstance(
+        request.payload["work_item_id"], str
+    ):
+        raise SpaceRecoveryRequiredError(
+            "invalid focus_session effort rebuild target"
+        )
+    for plan in command.db_plans:
+        spec = _validate_persisted_plan_against_catalog(plan, catalog)
+        if spec.name != "work_item" or plan.operation != "update":
+            raise SpaceRecoveryRequiredError(
+                "focus_session effort rebuild may update WorkItem projections only"
             )
 
 
