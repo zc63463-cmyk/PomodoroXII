@@ -5328,7 +5328,7 @@ function verifyCrossWave(plans) {
     'S3 Task 11 Step 3: unknown SyncOutbox relation escape must fail closed',
   );
   requireSha256('S3 reusable authority AST gate', s3AstGate, '0deb4f27014061eba180266894a9798cda1f96ee5af9518c9c86cbf82d29c494');
-  requireSha256('S3 Task 11 Step 3', s3Task11Step3, '243407dee807f99c89325aaae829c0a90b56a014bb2ebeb940f4390bcf6e8f5c');
+  requireSha256('S3 Task 11 Step 3', s3Task11Step3, '87972157e6b5aa90f2863c8064312d8d89ce9bdc42b7c2e5d54262ed82c39d03');
   const s3AstExecutable = executableLines(s3AstPowerShell);
   const astInvocation = '& .\\backend\\.venv\\Scripts\\python.exe backend/scripts/check_backend_authority.py --app-root backend/app';
   const astInvocationIndex = s3AstExecutable.indexOf(astInvocation);
@@ -8025,7 +8025,7 @@ function runMutationSelfTests(
         const file = path.join(paths.plans, expectedPlans[3].filename);
         replaceRequired(
           file,
-          '            bindings = await self.journal.find_operation_batch_bindings(operation_ids)\n',
+          '            bindings = await journal.find_operation_batch_bindings(operation_ids)\n',
           '            bindings = {}\n',
           this.name,
         );
@@ -8065,8 +8065,8 @@ function runMutationSelfTests(
         const file = path.join(paths.plans, expectedPlans[3].filename);
         replaceRequired(
           file,
-          ' tests/fixtures/task_space_session_child_operation_id_vectors.json tests/test_mutation_journal.py',
-          ' tests/test_mutation_journal.py',
+          ' tests/fixtures/task_space_session_child_operation_id_vectors.json tests/fixtures/certification/populate_n_minus_one.py tests/test_mutation_journal.py',
+          ' tests/fixtures/certification/populate_n_minus_one.py tests/test_mutation_journal.py',
           this.name,
         );
       },
@@ -9052,7 +9052,7 @@ function runMutationSelfTests(
       expected: /exclusive mutation recovery preflight|caller operation binding preflight is invalid|S3 Task 4 UoW critical body SHA-256 drift/,
       mutate(paths) {
         const file = path.join(paths.plans, expectedPlans[3].filename);
-        replaceRequired(file, '            await self.recover_under_lease(scope, lease)\n', '', this.name);
+        replaceRequired(file, '            await self.recovery_gate.require_clean_under_lease(scope, lease, journal)\n', '', this.name);
       },
     },
     {
