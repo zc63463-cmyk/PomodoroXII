@@ -99,7 +99,7 @@ describe('outbox integration', () => {
     const task1 = makeTask('t1', 'Task1')
     const task2 = makeTask('t1', 'Task2')
     await enqueueOutbox(db, 'task', 't1', 'create', task1)
-    await enqueueOutbox(db, 'task', 't1', 'update', task2)
+    await enqueueOutbox(db, 'task', 't1', 'update', task2, { expectedVersion: 1 })
 
     const rows = await db.outbox.toArray()
     expect(rows).toHaveLength(1)
@@ -113,7 +113,7 @@ describe('outbox integration', () => {
     const task = makeTask('t1', 'Task')
     await db.tasks.put(task)
     await enqueueOutbox(db, 'task', 't1', 'create', task)
-    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' })
+    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }, { expectedVersion: 1 })
 
     const outboxRows = await db.outbox.where('entityId').equals('t1').toArray()
     expect(outboxRows).toHaveLength(0)
@@ -124,7 +124,7 @@ describe('outbox integration', () => {
   it('T12: create→delete 无实体行 — outbox 空，不抛错', async () => {
     db = await openTestDb()
     await enqueueOutbox(db, 'task', 't2', 'create', { id: 't2' })
-    await enqueueOutbox(db, 'task', 't2', 'delete', {})
+    await enqueueOutbox(db, 'task', 't2', 'delete', {}, { expectedVersion: 1 })
 
     const outboxRows = await db.outbox.where('entityId').equals('t2').toArray()
     expect(outboxRows).toHaveLength(0)
@@ -134,7 +134,7 @@ describe('outbox integration', () => {
   it('T13: delete→create — 1 行 action=update (resurrect)', async () => {
     db = await openTestDb()
     const task = makeTask('t1', 'Task')
-    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' })
+    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }, { expectedVersion: 1 })
     await enqueueOutbox(db, 'task', 't1', 'create', task)
 
     const rows = await db.outbox.toArray()
@@ -178,6 +178,9 @@ describe('outbox integration', () => {
       payload: '{}',
       createdAt: Date.now(),
       synced: false,
+      operationId: 'op-test',
+      expectedVersion: null,
+      requiresVersionRebase: false,
     }
     // 3 行未同步
     await db.outbox.bulkAdd([
@@ -204,6 +207,9 @@ describe('outbox integration', () => {
       payload: '{}',
       createdAt: Date.now(),
       synced: false,
+      operationId: 'op-test',
+      expectedVersion: null,
+      requiresVersionRebase: false,
     }
     const ids = await db.outbox.bulkAdd([
       { ...baseEvent, entityId: 'e1' },
@@ -250,13 +256,13 @@ describe('outbox integration', () => {
     const base = Date.now()
     // 3 行未同步（故意乱序写入）
     await db.outbox.bulkAdd([
-      { entityType: 'task', entityId: 'e2', action: 'create', payload: '{}', createdAt: base + 200, synced: false },
-      { entityType: 'task', entityId: 'e1', action: 'create', payload: '{}', createdAt: base + 100, synced: false },
-      { entityType: 'task', entityId: 'e3', action: 'create', payload: '{}', createdAt: base + 300, synced: false },
+      { entityType: 'task', entityId: 'e2', action: 'create', payload: '{}', createdAt: base + 200, synced: false, operationId: 'op-h3-1', expectedVersion: null, requiresVersionRebase: false },
+      { entityType: 'task', entityId: 'e1', action: 'create', payload: '{}', createdAt: base + 100, synced: false, operationId: 'op-h3-2', expectedVersion: null, requiresVersionRebase: false },
+      { entityType: 'task', entityId: 'e3', action: 'create', payload: '{}', createdAt: base + 300, synced: false, operationId: 'op-h3-3', expectedVersion: null, requiresVersionRebase: false },
     ])
     // 1 行已同步（应排除）
     await db.outbox.add({
-      entityType: 'task', entityId: 'e4', action: 'create', payload: '{}', createdAt: base + 50, synced: true,
+      entityType: 'task', entityId: 'e4', action: 'create', payload: '{}', createdAt: base + 50, synced: true, operationId: 'op-h3-4', expectedVersion: null, requiresVersionRebase: false,
     })
 
     const rows = await listUnsyncedOutbox(db)
@@ -270,9 +276,9 @@ describe('outbox integration', () => {
   it('H4: markOutboxEventsFailed — 只标记目标未同步事件并累计 attemptCount', async () => {
     db = await openTestDb()
     const ids = await db.outbox.bulkAdd([
-      { entityType: 'task', entityId: 'failed', action: 'update', payload: '{}', createdAt: 1, synced: false },
-      { entityType: 'task', entityId: 'clean', action: 'update', payload: '{}', createdAt: 2, synced: false },
-      { entityType: 'task', entityId: 'synced', action: 'update', payload: '{}', createdAt: 3, synced: true },
+      { entityType: 'task', entityId: 'failed', action: 'update', payload: '{}', createdAt: 1, synced: false, operationId: 'op-h4-1', expectedVersion: 1, requiresVersionRebase: false },
+      { entityType: 'task', entityId: 'clean', action: 'update', payload: '{}', createdAt: 2, synced: false, operationId: 'op-h4-2', expectedVersion: 1, requiresVersionRebase: false },
+      { entityType: 'task', entityId: 'synced', action: 'update', payload: '{}', createdAt: 3, synced: true, operationId: 'op-h4-3', expectedVersion: 1, requiresVersionRebase: false },
     ], { allKeys: true })
 
     await markOutboxEventsFailed(db, [
@@ -312,7 +318,7 @@ describe('outbox integration', () => {
 
   it('H5: enqueueOutbox replace — clears stale failure metadata on new local mutation', async () => {
     db = await openTestDb()
-    await enqueueOutbox(db, 'quickNote', 'qn-failed', 'update', { id: 'qn-failed', content: 'old' })
+    await enqueueOutbox(db, 'quickNote', 'qn-failed', 'update', { id: 'qn-failed', content: 'old' }, { expectedVersion: 1 })
     const existing = await db.outbox.where('entityId').equals('qn-failed').first()
     await markOutboxEventsFailed(db, [
       {
@@ -322,7 +328,7 @@ describe('outbox integration', () => {
       },
     ])
 
-    await enqueueOutbox(db, 'quickNote', 'qn-failed', 'update', { id: 'qn-failed', content: 'new' })
+    await enqueueOutbox(db, 'quickNote', 'qn-failed', 'update', { id: 'qn-failed', content: 'new' }, { expectedVersion: 1 })
 
     const row = await db.outbox.where('entityId').equals('qn-failed').first()
     expect(row).toMatchObject({
@@ -336,7 +342,7 @@ describe('outbox integration', () => {
 
   it('H6: enqueueOutbox keep_existing — clears stale failure metadata on repeated local mutation', async () => {
     db = await openTestDb()
-    await enqueueOutbox(db, 'quickNote', 'qn-delete-failed', 'delete', { id: 'qn-delete-failed' })
+    await enqueueOutbox(db, 'quickNote', 'qn-delete-failed', 'delete', { id: 'qn-delete-failed' }, { expectedVersion: 1 })
     const existing = await db.outbox.where('entityId').equals('qn-delete-failed').first()
     await markOutboxEventsFailed(db, [
       {
@@ -346,7 +352,7 @@ describe('outbox integration', () => {
       },
     ])
 
-    await enqueueOutbox(db, 'quickNote', 'qn-delete-failed', 'delete', { id: 'qn-delete-failed' })
+    await enqueueOutbox(db, 'quickNote', 'qn-delete-failed', 'delete', { id: 'qn-delete-failed' }, { expectedVersion: 1 })
 
     const row = await db.outbox.where('entityId').equals('qn-delete-failed').first()
     expect(row).toMatchObject({
@@ -364,12 +370,12 @@ describe('outbox integration', () => {
     // 手动插入 3 行同实体未同步 outbox（不同 createdAt）
     const base = Date.now()
     await db.outbox.bulkAdd([
-      { entityType: 'task', entityId: 't1', action: 'create', payload: 'p1', createdAt: base + 100, synced: false },
-      { entityType: 'task', entityId: 't1', action: 'update', payload: 'p2', createdAt: base + 200, synced: false },
-      { entityType: 'task', entityId: 't1', action: 'update', payload: 'p3', createdAt: base + 300, synced: false },
+      { entityType: 'task', entityId: 't1', action: 'create', payload: 'p1', createdAt: base + 100, synced: false, operationId: 'op-t15-1', expectedVersion: null, requiresVersionRebase: false },
+      { entityType: 'task', entityId: 't1', action: 'update', payload: 'p2', createdAt: base + 200, synced: false, operationId: 'op-t15-2', expectedVersion: 1, requiresVersionRebase: false },
+      { entityType: 'task', entityId: 't1', action: 'update', payload: 'p3', createdAt: base + 300, synced: false, operationId: 'op-t15-3', expectedVersion: 1, requiresVersionRebase: false },
     ])
     // 再 enqueue 一行 update → 应合并到 latest (createdAt=base+300)
-    await enqueueOutbox(db, 'task', 't1', 'update', { id: 't1', title: 'final' })
+    await enqueueOutbox(db, 'task', 't1', 'update', { id: 't1', title: 'final' }, { expectedVersion: 1 })
 
     const rows = await db.outbox.where('entityId').equals('t1').toArray()
     expect(rows).toHaveLength(1)
@@ -391,4 +397,155 @@ describe('outbox integration', () => {
       db = undefined as unknown as PomodoroXIDB
     },
   )
+
+  // --- S3-Task10: fail-closed for update/delete without base version ---
+  it('S3T10-FC1: enqueueOutbox update without expectedVersion → throw (fail-closed)', async () => {
+    db = await openTestDb()
+    await expect(
+      enqueueOutbox(db, 'task', 't1', 'update', { id: 't1' }),
+    ).rejects.toThrow('requires a non-negative integer expectedVersion')
+  })
+
+  it('S3T10-FC2: enqueueOutbox delete without expectedVersion → throw (fail-closed)', async () => {
+    db = await openTestDb()
+    await expect(
+      enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }),
+    ).rejects.toThrow('requires a non-negative integer expectedVersion')
+  })
+
+  it('S3T10-FC3: enqueueOutbox update with negative expectedVersion → throw', async () => {
+    db = await openTestDb()
+    await expect(
+      enqueueOutbox(db, 'task', 't1', 'update', { id: 't1' }, { expectedVersion: -1 }),
+    ).rejects.toThrow('requires a non-negative integer expectedVersion')
+  })
+
+  it('S3T10-FC4: enqueueOutbox update with non-integer expectedVersion → throw', async () => {
+    db = await openTestDb()
+    await expect(
+      enqueueOutbox(db, 'task', 't1', 'update', { id: 't1' }, { expectedVersion: 1.5 }),
+    ).rejects.toThrow('requires a non-negative integer expectedVersion')
+  })
+
+  // --- S3-Task10: create always has expectedVersion=null ---
+  it('S3T10-CV1: enqueueOutbox create — expectedVersion=null, requiresVersionRebase=false', async () => {
+    db = await openTestDb()
+    await enqueueOutbox(db, 'task', 't1', 'create', { id: 't1' })
+    const row = await db.outbox.where('entityId').equals('t1').first()
+    expect(row!.expectedVersion).toBeNull()
+    expect(row!.requiresVersionRebase).toBe(false)
+    expect(row!.operationId).toBeTruthy()
+  })
+
+  // --- S3-Task10: merge preserves operationId ---
+  it('S3T10-MG1: create→update merge preserves operationId, expectedVersion stays null', async () => {
+    db = await openTestDb()
+    await enqueueOutbox(db, 'task', 't1', 'create', { id: 't1' })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'update', { id: 't1', title: 'X' }, { expectedVersion: 1 })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBeNull()
+    expect(merged!.requiresVersionRebase).toBe(false)
+  })
+
+  it('S3T10-MG2: update→update merge preserves first known base version', async () => {
+    db = await openTestDb()
+    await enqueueOutbox(db, 'task', 't1', 'update', { id: 't1' }, { expectedVersion: 3 })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'update', { id: 't1', title: 'X' }, { expectedVersion: 5 })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBe(3)
+  })
+
+  it('S3T10-MG3: update→delete merge preserves first known base version', async () => {
+    db = await openTestDb()
+    await enqueueOutbox(db, 'task', 't1', 'update', { id: 't1' }, { expectedVersion: 2 })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }, { expectedVersion: 3 })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.action).toBe('delete')
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBe(2)
+  })
+
+  it('S3T10-MG4: delete→create resurrect — preserves operationId and first known base version', async () => {
+    db = await openTestDb()
+    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }, { expectedVersion: 1 })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'create', { id: 't1' })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.action).toBe('update')
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBe(1)
+    expect(merged!.requiresVersionRebase).toBe(false)
+  })
+
+  it('S3T10-MG4b: delete→create resurrect — preserves rebase state when delete has no version', async () => {
+    db = await openTestDb()
+    // Manually insert a delete row with rebase state (simulating v17 migration)
+    await db.outbox.add({
+      entityType: 'task', entityId: 't1', action: 'delete', payload: JSON.stringify({ id: 't1' }),
+      createdAt: Date.now(), synced: false, operationId: 'op-rebase-delete',
+      expectedVersion: null, requiresVersionRebase: true,
+    })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'create', { id: 't1' })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.action).toBe('update')
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBeNull()
+    expect(merged!.requiresVersionRebase).toBe(true)
+  })
+
+  it('S3T10-MG5: create→delete drops outbox row entirely', async () => {
+    db = await openTestDb()
+    await enqueueOutbox(db, 'task', 't1', 'create', { id: 't1' })
+    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }, { expectedVersion: 1 })
+    const rows = await db.outbox.where('entityId').equals('t1').toArray()
+    expect(rows).toHaveLength(0)
+  })
+
+  it('S3T10-MG6: keep_existing preserves operationId and expectedVersion', async () => {
+    db = await openTestDb()
+    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }, { expectedVersion: 4 })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }, { expectedVersion: 5 })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBe(4)
+  })
+
+  it('S3T10-MG7: legacy rebase delete row + update merge - preserves rebase state', async () => {
+    db = await openTestDb()
+    await db.outbox.add({
+      entityType: 'task', entityId: 't1', action: 'delete', payload: JSON.stringify({ id: 't1' }),
+      createdAt: Date.now(), synced: false, operationId: 'op-rebase-delete',
+      expectedVersion: null, requiresVersionRebase: true,
+    })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'update', { id: 't1', title: 'X' }, { expectedVersion: 5 })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.action).toBe('delete')
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBeNull()
+    expect(merged!.requiresVersionRebase).toBe(true)
+  })
+
+  it('S3T10-MG8: legacy rebase delete row + delete merge - preserves rebase state', async () => {
+    db = await openTestDb()
+    await db.outbox.add({
+      entityType: 'task', entityId: 't1', action: 'delete', payload: JSON.stringify({ id: 't1' }),
+      createdAt: Date.now(), synced: false, operationId: 'op-rebase-delete',
+      expectedVersion: null, requiresVersionRebase: true,
+    })
+    const original = await db.outbox.where('entityId').equals('t1').first()
+    await enqueueOutbox(db, 'task', 't1', 'delete', { id: 't1' }, { expectedVersion: 6 })
+    const merged = await db.outbox.where('entityId').equals('t1').first()
+    expect(merged!.action).toBe('delete')
+    expect(merged!.operationId).toBe(original!.operationId)
+    expect(merged!.expectedVersion).toBeNull()
+    expect(merged!.requiresVersionRebase).toBe(true)
+  })
 })

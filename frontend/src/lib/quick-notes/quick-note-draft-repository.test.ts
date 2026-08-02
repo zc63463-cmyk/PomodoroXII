@@ -228,6 +228,9 @@ describe('quick-note-draft-repository', () => {
         lastErrorCode: null,
         failedAt: null,
         attemptCount: 0,
+        operationId: expect.any(String),
+        expectedVersion: null,
+        requiresVersionRebase: false,
       }])
       expect(await getRawDraft(dbA)).toBeUndefined()
     })
@@ -355,6 +358,9 @@ describe('quick-note-draft-repository', () => {
           lastErrorCode: null,
           failedAt: null,
           attemptCount: 0,
+          operationId: 'op-qn-delayed-hook',
+          expectedVersion: null,
+          requiresVersionRebase: false,
         })
         await new Promise<void>((resolve) => setTimeout(resolve, 0))
         throw new Error('delayed custom hook failed')

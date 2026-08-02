@@ -5,14 +5,25 @@ Uses inline ``HabitService`` and ``HabitCheckInService`` subclasses of
 ``BaseService``.  ``HabitService`` serialises the ``rest_days`` list to a
 JSON string before persisting (the column is a String).  Check-ins are
 scoped under ``/{habit_id}/check-ins``.
-Routes commit; the services only flush.
+Writes use the durable mutation UoW; read-only endpoints use the query services.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_space_context, get_space_db
+from app.deps import (
+    entity_id_for_operation,
+    expected_version_from_request,
+    get_knowledge_store,
+    get_operation_id,
+    get_space_context,
+    get_space_db,
+    get_space_runtime_handle,
+)
+from app.errors import NotFoundError
+from app.models.habit import Habit
+from app.runtime.space import SpaceRuntimeHandle
 from app.schemas.common import PaginatedResponse
 from app.schemas.habit import HabitCreate, HabitResponse, HabitUpdate
 from app.schemas.habit_check_in import (
@@ -30,14 +41,19 @@ router = APIRouter()
 @router.post("", response_model=HabitResponse, status_code=201)
 async def create_habit(
     data: HabitCreate,
-    db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Create a new habit."""
-    obj = await HabitService(db).create(data.model_dump())
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    import json
+    payload = data.model_dump()
+    payload["id"] = payload.get("id") or entity_id_for_operation(operation_id, "habit")
+    payload["rest_days"] = json.dumps(payload.get("rest_days", []))
+    result = await store.uow.execute(
+        scope, store.entity_commands.create(scope, "habit", payload, None), operation_id
+    )
+    return dict(result.value)
 
 
 @router.get("", response_model=PaginatedResponse[HabitResponse])
@@ -75,25 +91,52 @@ async def get_habit(
 async def update_habit(
     id: str,
     data: HabitUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Update an existing habit (partial update)."""
-    obj = await HabitService(db).update(id, data.model_dump(exclude_unset=True))
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    import json
+    current = await db.get(Habit, id)
+    if current is None:
+        raise NotFoundError(f"Habit '{id}' not found")
+    patch = data.model_dump(exclude_unset=True)
+    if "rest_days" in patch:
+        patch["rest_days"] = json.dumps(patch["rest_days"])
+    result = await store.uow.execute(
+        scope,
+        store.entity_commands.update(
+            scope, "habit", id, patch,
+            expected_version_from_request(request, current.version),
+        ),
+        operation_id,
+    )
+    return dict(result.value)
 
 
 @router.delete("/{id}")
 async def delete_habit(
     id: str,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Delete a habit."""
-    await HabitService(db).delete(id)
-    await db.commit()
+    current = await db.get(Habit, id)
+    if current is None:
+        raise NotFoundError(f"Habit '{id}' not found")
+    await store.uow.execute(
+        scope,
+        store.entity_commands.delete(
+            scope, "habit", id,
+            expected_version_from_request(request, current.version),
+        ),
+        operation_id,
+    )
     return {"message": "Deleted"}
 
 
@@ -108,16 +151,22 @@ async def delete_habit(
 async def create_check_in(
     habit_id: str,
     data: HabitCheckInCreate,
-    db: AsyncSession = Depends(get_space_db),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Record a check-in for the given habit (path habit_id is authoritative)."""
     payload = data.model_dump()
     payload["habit_id"] = habit_id
-    obj = await HabitCheckInService(db).create(payload)
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    payload["id"] = payload.get("id") or entity_id_for_operation(
+        operation_id, "habit_check_in"
+    )
+    result = await store.uow.execute(
+        scope,
+        store.entity_commands.create(scope, "habit_check_in", payload, None),
+        operation_id,
+    )
+    return dict(result.value)
 
 
 @router.get(

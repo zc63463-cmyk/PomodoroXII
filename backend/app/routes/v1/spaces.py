@@ -6,7 +6,6 @@ operate on the *meta* database (``get_meta_db``).
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -16,10 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import create_space_token
 from app.db.models.meta import Space
-from app.deps import get_meta_db, require_master_token
+from app.deps import get_meta_db, get_space_runtime, require_master_token
 from app.errors import NotFoundError
+from app.runtime.space import SpaceProvisionSpec, SpaceRuntime
 from app.schemas.space import SpaceResponse, SpaceTokenResponse
-from app.settings import settings
 
 router = APIRouter()
 
@@ -47,26 +46,15 @@ def _space_to_dict(space: Space) -> dict[str, Any]:
 async def create_space(
     body: SpaceCreateRequest,
     user: dict = Depends(require_master_token),
-    db: AsyncSession = Depends(get_meta_db),
+    runtime: SpaceRuntime = Depends(get_space_runtime),
 ) -> dict:
-    """Create a new space: insert a row, create directories, commit."""
-    space_id = uuid.uuid4().hex
-    db_path = str(settings.space_db_path(space_id))
-    notes_dir = str(settings.space_notes_dir(space_id))
-
-    # Ensure the directories exist on disk.
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(notes_dir).mkdir(parents=True, exist_ok=True)
-
-    space = Space(
-        id=space_id,
-        name=body.name,
-        db_path=db_path,
-        notes_dir=notes_dir,
-    )
-    db.add(space)
-    await db.commit()
-    await db.refresh(space)
+    """Provision a Space before publishing its Meta registration."""
+    spec = SpaceProvisionSpec(space_id=uuid.uuid4().hex, name=body.name)
+    handle = await runtime.provision(spec)
+    async with handle:
+        space = await runtime.get_registered(spec.space_id)
+    if space is None:
+        raise NotFoundError("Space is not registered")
     return _space_to_dict(space)
 
 
@@ -113,6 +101,6 @@ async def issue_space_token(
 
     user_id = str(user["sub"])
     return {
-        "space_token": create_space_token(space_id, user_id),
+        "space_token": create_space_token(space_id, user_id, epoch=int(user["epoch"])),
         "token_type": "bearer",
     }

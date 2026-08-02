@@ -16,10 +16,11 @@ import uuid
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
+    CursorUpgradeRequiredError,
     SyncCursorExpiredError,
     SyncSnapshotExpiredError,
     ValidationError,
@@ -257,6 +258,7 @@ class SyncService:
             entity_id=entity_id,
             action=action,  # type: ignore[arg-type]
             payload=event_payload,
+            visible=True,
         )
 
     async def _check_preflight(
@@ -313,6 +315,7 @@ class SyncService:
         )
         if resolution is not None:
             return resolution
+        payload = self._serialize_json_storage_fields(etype, payload)
 
         if action == "create":
             # C3: Folder circular reference detection on create.
@@ -374,6 +377,30 @@ class SyncService:
             return "ok"
 
         raise ValueError(f"Unknown action: {action}")
+
+    @staticmethod
+    def _serialize_json_storage_fields(
+        etype: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Encode registry-declared JSON fields before generic ORM writes.
+
+        Sync payloads carry JSON fields in their API form (lists or objects),
+        while the SQLite models store them in Text columns. Service-specific
+        CRUD methods normally perform this encoding, but generic sync writes
+        bypass those services. The registry is the shared schema source for
+        both shapes, so it determines which payload fields need encoding.
+        """
+        spec = ENTITY_REGISTRY[etype]["spec"]
+        json_fields = {field.name for field in spec.fields if field.type == "json"}
+        if not json_fields:
+            return payload
+
+        normalized = dict(payload)
+        for field in json_fields:
+            value = normalized.get(field)
+            if isinstance(value, (list, dict)):
+                normalized[field] = json.dumps(value, ensure_ascii=False)
+        return normalized
 
     # ----------------------------------------------------------------- #
     # _push_note_event (note-specific event handling via NoteService)
@@ -505,6 +532,7 @@ class SyncService:
         # alive across multiple pages sharing the same deleted_at.
         latest_tomb_ts = ""
         latest_tomb_id = ""
+        truncated_groups: list[str] = []
 
         for entry in ENTITY_REGISTRY.values():
             model = entry["model"]
@@ -523,6 +551,7 @@ class SyncService:
             q = q.order_by(model.updated_at.asc(), model.id.asc()).limit(limit + 1)
             rows = (await self.db.execute(q)).scalars().all()
             if len(rows) > limit:
+                truncated_groups.append(pull_key)
                 result["has_more"] = True
                 rows = rows[:limit]
             serialized = [serialize_entity(r) for r in rows]
@@ -573,6 +602,7 @@ class SyncService:
         # D-5: surface tombstones overflow on the top-level has_more flag too,
         # so clients polling with has_more=True know to keep fetching.
         if tomb_has_more:
+            truncated_groups.append("tombstones")
             result["has_more"] = True
         for t in tombstones:
             ts = normalize_timestamp(t.deleted_at or "")
@@ -584,6 +614,11 @@ class SyncService:
             ):
                 latest_tomb_ts = ts
                 latest_tomb_id = t.entity_id
+
+        if truncated_groups:
+            raise CursorUpgradeRequiredError(
+                truncated_groups=truncated_groups,
+            )
 
         result["next_since"] = max_ts
         # Only expose next_since_id when the latest entity timestamp equals the
@@ -617,7 +652,7 @@ class SyncService:
         rows = (
             await self.db.execute(
                 select(SyncOutbox)
-                .where(SyncOutbox.id > cursor)
+                .where(SyncOutbox.id > cursor, SyncOutbox.visible.is_(True))
                 .order_by(SyncOutbox.id.asc())
                 .limit(limit + 1)
             )
@@ -638,7 +673,7 @@ class SyncService:
         for entry in ENTITY_REGISTRY.values():
             result[entry["pull_key"]] = []
 
-        latest: dict[tuple[str, str], SyncOutbox] = {}
+        latest: dict[tuple[str, str], Any] = {}
         order: list[tuple[str, str]] = []
         for event in scanned:
             key = (event.entity_type, event.entity_id)
@@ -878,40 +913,38 @@ class SyncService:
     async def status(self) -> dict[str, Any]:
         """Return server time + per-entity counts + tombstone count.
 
-        D-2 optimization: collapsed 15 sequential COUNT queries (14 entities
-        + tombstones) into a single UNION ALL query — one round-trip to the
-        DB instead of 15.
-
-        Table names come from ORM ``__tablename__`` (hard-coded in models,
-        not user input), so injecting them into the SQL text is safe.
+        Keep the registry-driven count query as one round trip without
+        interpolated SQL.  The models and pull keys are static registry data.
         """
-        from sqlalchemy import text
-
-        # Build one UNION ALL query covering all 14 entities + tombstones.
-        select_parts: list[str] = []
-        pull_keys: list[str] = []
+        count_selects = []
         for entry in ENTITY_REGISTRY.values():
             pull_key = entry["pull_key"]
-            table_name = entry["model"].__tablename__
-            select_parts.append(
-                f"SELECT '{pull_key}' AS k, COUNT(*) AS c FROM {table_name}"
+            model = entry["model"]
+            count_selects.append(
+                select(
+                    literal(pull_key).label("pull_key"),
+                    func.count().label("row_count"),
+                ).select_from(model)
             )
-            pull_keys.append(pull_key)
-        # Append tombstone count as the last UNION ALL member.
-        select_parts.append(
-            f"SELECT '__tombstones__' AS k, COUNT(*) AS c FROM {Tombstone.__tablename__}"
+        count_selects.append(
+            select(
+                literal("__tombstones__").label("pull_key"),
+                func.count().label("row_count"),
+            ).select_from(Tombstone)
         )
-        sql = text(" UNION ALL ".join(select_parts))
-        result = (await self.db.execute(sql)).all()
-
-        entity_counts: dict[str, int] = {pk: 0 for pk in pull_keys}
+        counts = union_all(*count_selects).subquery()
+        rows = (
+            await self.db.execute(select(counts.c.pull_key, counts.c.row_count))
+        ).all()
+        entity_counts = {
+            entry["pull_key"]: 0 for entry in ENTITY_REGISTRY.values()
+        }
         tombstone_count = 0
-        for row in result:
-            k, c = row[0], int(row[1] or 0)
-            if k == "__tombstones__":
-                tombstone_count = c
-            elif k in entity_counts:
-                entity_counts[k] = c
+        for pull_key, row_count in rows:
+            if pull_key == "__tombstones__":
+                tombstone_count = int(row_count or 0)
+            else:
+                entity_counts[pull_key] = int(row_count or 0)
         return {
             "server_time": utc_now_iso(),
             "entity_counts": entity_counts,

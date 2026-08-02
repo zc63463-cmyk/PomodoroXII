@@ -6,6 +6,7 @@ import {
   convertQuickNoteToNote,
   createQuickNote,
   createQuickNoteInTransaction,
+  commitQuickNoteExistingEdit,
   getQuickNoteRepositoryUserMessage,
   listQuickNoteLifecycleStates,
   listQuickNotes,
@@ -131,6 +132,8 @@ describe('quick-note-repository', () => {
       entityId: note.id,
       action: 'create',
       synced: false,
+      expectedVersion: null,
+      requiresVersionRebase: false,
     })
     expect(JSON.parse(rows[0]!.payload)).toMatchObject({
       id: note.id,
@@ -184,6 +187,8 @@ describe('quick-note-repository', () => {
       entityId: note.id,
       action: 'delete',
       synced: false,
+      expectedVersion: 2,
+      requiresVersionRebase: false,
     })
     expect(JSON.parse(rows[0]!.payload)).toEqual({ id: note.id })
   })
@@ -230,6 +235,12 @@ describe('quick-note-repository', () => {
     expect(contexts[3]?.payload).toMatchObject({ id: note.id, trashed_at: restored.trashed_at })
     expect(contexts[5]?.payload).toEqual({ id: note.id })
     expect(contexts).toHaveLength(6)
+    expect(contexts[0]?.expectedVersion).toBeUndefined()
+    expect(contexts[1]?.expectedVersion).toBe(1)
+    expect(contexts[2]?.expectedVersion).toBe(2)
+    expect(contexts[3]?.expectedVersion).toBe(3)
+    expect(contexts[4]?.expectedVersion).toBe(4)
+    expect(contexts[5]?.expectedVersion).toBe(5)
     expect(await db.outbox.count()).toBe(0)
   })
 
@@ -271,6 +282,12 @@ describe('quick-note-repository', () => {
       'note:create',
       'quickNote:update',
     ])
+    const noteCreateRow = outboxRows.find((r) => r.entityType === 'note' && r.action === 'create')!
+    expect(noteCreateRow.expectedVersion).toBeNull()
+    expect(noteCreateRow.requiresVersionRebase).toBe(false)
+    const quickNoteUpdateRow = outboxRows.find((r) => r.entityType === 'quickNote' && r.action === 'update')!
+    expect(quickNoteUpdateRow.expectedVersion).toBe(1)
+    expect(quickNoteUpdateRow.requiresVersionRebase).toBe(false)
     expect((await listQuickNotes()).map((item) => item.id)).not.toContain(quickNote.id)
     expect((await listQuickNoteLifecycleStates())[quickNote.id]).toBe('converted')
   })
@@ -378,6 +395,73 @@ describe('quick-note-repository', () => {
     expect(row?.updated_at).toBe('2026-01-02T00:00:00.000Z')
     expect(row?.version).toBe(2)
     expect(row?._dirty).toBe(true)
+  })
+
+  it('commits an existing edit and its Outbox update in the supplied database', async () => {
+    const isolated = new PomodoroXIDB(`quick-note-existing-edit-${crypto.randomUUID()}`)
+    await isolated.open()
+    try {
+      const created = await isolated.transaction('rw', isolated.quickNotes, isolated.outbox, () =>
+        createQuickNoteInTransaction(isolated, { id: 'existing-cas', content: 'before #old' }),
+      )
+      await isolated.outbox.clear()
+
+      const result = await commitQuickNoteExistingEdit(isolated, {
+        id: created.id,
+        expectedUpdatedAt: created.updated_at,
+        content: 'after #new',
+      })
+
+      expect(result).toMatchObject({ kind: 'saved', note: { id: created.id, content: 'after #new', tags: ['new'] } })
+      expect(await isolated.quickNotes.get(created.id)).toMatchObject({ content: 'after #new', version: 2, _dirty: true })
+      expect(await isolated.outbox.where('entityId').equals(created.id).count()).toBe(1)
+      expect(await db.quickNotes.get(created.id)).toBeUndefined()
+    } finally { await isolated.delete() }
+  })
+
+  it('returns conflict without writing when the captured revision is stale', async () => {
+    const note = await createQuickNote({ content: 'before' })
+    const remoteUpdatedAt = new Date(Date.parse(note.updated_at) + 1000).toISOString()
+    await updateQuickNote(note.id, { content: 'remote', updated_at: remoteUpdatedAt })
+    await db.outbox.clear()
+
+    await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+      id: note.id, expectedUpdatedAt: note.updated_at, content: 'local',
+    })).resolves.toMatchObject({ kind: 'conflict', note: { content: 'remote' } })
+    expect(await db.quickNotes.get(note.id)).toMatchObject({ content: 'remote' })
+    expect(await db.outbox.count()).toBe(0)
+  })
+
+  it('returns missing-or-inactive for absent and sync-deleted rows without writes', async () => {
+    await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+      id: 'missing-existing-edit', expectedUpdatedAt: '2026-07-15T00:00:00.000Z', content: 'local',
+    })).resolves.toEqual({ kind: 'missing-or-inactive' })
+
+    const note = await createQuickNote({ id: 'sync-deleted-existing-edit', content: 'before' })
+    await db.quickNotes.update(note.id, { deletion_state: 'deleted', _dirty: false })
+    const before = await db.quickNotes.get(note.id)
+    await db.outbox.clear()
+
+    await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+      id: note.id, expectedUpdatedAt: note.updated_at, content: 'must not revive',
+    })).resolves.toEqual({ kind: 'missing-or-inactive' })
+    expect(await db.quickNotes.get(note.id)).toEqual(before)
+    expect(await db.outbox.count()).toBe(0)
+  })
+
+  it('rolls back an existing-edit entity write when its Outbox write fails', async () => {
+    const note = await createQuickNote({ id: 'existing-edit-rollback', content: 'before' })
+    const before = await db.quickNotes.get(note.id)
+    await db.outbox.clear()
+    configureQuickNoteOutboxHook(async () => {
+      throw new Error('existing edit Outbox failed')
+    })
+
+    await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {
+      id: note.id, expectedUpdatedAt: note.updated_at, content: 'after',
+    })).rejects.toThrow('existing edit Outbox failed')
+    expect(await db.quickNotes.get(note.id)).toEqual(before)
+    expect(await db.outbox.count()).toBe(0)
   })
 
   it('rejects blank creates and exposes stable user and developer messages', async () => {

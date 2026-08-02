@@ -11,12 +11,14 @@ as defined by ``app.schemas.common.PaginatedResponse``.
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 async def _get_space_client(client):
     """Set up admin password, log in, create a space, issue a space token."""
-    await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     resp = await client.post(
-        "/api/v1/auth/login", json={"password": "test123"}
+        "/api/v1/auth/login", json={"password": "test-password-123"}
     )
     master_token = resp.json()["access_token"]
     resp = await client.post(
@@ -298,3 +300,65 @@ async def test_list_trash_returns_paginated_envelope(client):
     # Trash may include tombstones + trashed items; total >= 1.
     _assert_paginated_envelope(data, expected_total=len(data["items"]))
     assert data["total"] >= 1, "Expected at least one trashed item"
+
+
+# --------------------------------------------------------------------------- #
+# Stable tie ordering
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_pagination_is_stable_with_tied_sort_keys(client):
+    """Pagination returns items in stable deterministic order when sort keys collide.
+
+    Creates 5 schedules sharing the same due_at, then paginates with
+    per_page=2.  IDs must appear in ascending order across all pages,
+    and the same order must be reproducible across repeated requests.
+    """
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+    future = "2099-12-31T23:59:59Z"
+    created_ids: list[str] = []
+    for i in range(5):
+        resp = await client.post(
+            "/api/v1/schedules",
+            json={"title": f"Tie-{i}", "due_at": future},
+            headers=headers,
+        )
+        assert resp.status_code == 201
+        created_ids.append(resp.json()["id"])
+
+    # First pass: collect all IDs in page order.
+    seen_ids: list[str] = []
+    page = 1
+    while True:
+        resp = await client.get(
+            f"/api/v1/schedules?page={page}&per_page=2",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        _assert_paginated_envelope(data, expected_total=5)
+        seen_ids.extend(item["id"] for item in data["items"])
+        if not data["has_more"]:
+            break
+        page += 1
+        assert page <= 20, "Pagination loop detected"
+
+    # All items present, no duplicates.
+    assert len(seen_ids) == 5
+    assert set(seen_ids) == set(created_ids)
+
+    # IDs must be in ascending order (stable tiebreaker: primary_key ASC).
+    assert seen_ids == sorted(seen_ids), (
+        f"IDs not in ascending order: {seen_ids}"
+    )
+
+    # Second pass: re-request page 1 and verify same order (reproducible).
+    resp = await client.get(
+        "/api/v1/schedules?page=1&per_page=2", headers=headers
+    )
+    assert resp.status_code == 200
+    page1_ids = [item["id"] for item in resp.json()["items"]]
+    assert page1_ids == seen_ids[:2], (
+        f"Page 1 not reproducible: {page1_ids} vs {seen_ids[:2]}"
+    )

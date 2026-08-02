@@ -7,22 +7,56 @@ This service only flushes; the caller owns the surrounding transaction.
 H2-E retention helpers are service-internal. No public client-facing prune
 endpoint is exposed until client ACKs can establish a safe deletion floor.
 """
+
 from __future__ import annotations
 
 import json
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
-from app.models.sync_audit_log import SyncAuditLog
+from app.errors import RetentionAckRequiredError, to_wire_json
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
 
 SyncAction = Literal["create", "update", "delete"]
 _VALID_ACTIONS = frozenset({"create", "update", "delete"})
+_DEFERRED_WATERMARK_EVENTS = "pomodoroxii_deferred_watermark_events"
+
+
+def _advance_deferred_watermarks(session: Session, _flush_context: object) -> None:
+    pending = tuple(session.info.pop(_DEFERRED_WATERMARK_EVENTS, ()))
+    allocated = tuple(
+        item.id for item in pending if getattr(item, "id", None) is not None
+    )
+    if not allocated:
+        return
+    highest = max(allocated)
+    session.connection().execute(
+        sqlite_insert(SyncState)
+        .values(id=1, retention_floor=0, current_cursor=highest)
+        .on_conflict_do_update(
+            index_elements=[SyncState.id],
+            set_={"current_cursor": func.max(SyncState.current_cursor, highest)},
+        )
+    )
+    for state in session.identity_map.values():
+        if getattr(getattr(state, "__table__", None), "name", None) == "sync_state":
+            session.expire(state, ("current_cursor",))
+
+
+def _discard_deferred_watermarks(session: Session) -> None:
+    session.info.pop(_DEFERRED_WATERMARK_EVENTS, None)
+
+
+if not getattr(Session, "_pomodoroxii_watermark_listeners", False):
+    event.listen(Session, "after_flush_postexec", _advance_deferred_watermarks)
+    event.listen(Session, "after_rollback", _discard_deferred_watermarks)
+    Session._pomodoroxii_watermark_listeners = True
 
 
 async def record_sync_event(
@@ -32,6 +66,11 @@ async def record_sync_event(
     entity_id: str,
     action: SyncAction,
     payload: Mapping[str, Any] | None = None,
+    operation_id: str | None = None,
+    batch_id: str | None = None,
+    version: int | None = None,
+    created_at: str | None = None,
+    visible: bool,
     flush: bool = True,
 ) -> SyncOutbox:
     """Append one mutation event and return its allocated global sequence.
@@ -47,18 +86,34 @@ async def record_sync_event(
         raise ValueError("entity_id must not be empty")
     if action not in _VALID_ACTIONS:
         raise ValueError(f"Unsupported sync action: {action}")
+    if type(visible) is not bool:
+        raise ValueError("visible must be an explicit boolean")
+    if version is not None and (type(version) is not int or version < 0):
+        raise ValueError("version must be a nonnegative integer or null")
+    try:
+        wire_payload = to_wire_json(payload or {})
+    except TypeError as exc:
+        if "finite" in str(exc):
+            raise ValueError("Out of range float values are not JSON compliant") from exc
+        raise
 
     event = SyncOutbox(
         entity_type=entity_type,
         entity_id=entity_id,
         action=action,
         payload=json.dumps(
-            payload or {},
+            wire_payload,
             ensure_ascii=False,
             sort_keys=True,
             allow_nan=False,
         ),
+        operation_id=operation_id,
+        batch_id=batch_id,
+        version=version,
+        visible=visible,
     )
+    if created_at is not None:
+        event.created_at = created_at
     db.add(event)
     if flush:
         await db.flush()
@@ -71,76 +126,27 @@ async def record_sync_event(
                 set_={"current_cursor": func.max(SyncState.current_cursor, event.id)},
             )
         )
+    else:
+        db.sync_session.info.setdefault(_DEFERRED_WATERMARK_EVENTS, []).append(event)
     return event
 
 
 async def advance_retention_floor(db: AsyncSession, *, floor: int) -> None:
-    """Internal maintenance boundary; never expose through a client route."""
-    if floor < 0:
-        raise ValueError("retention floor must be >= 0")
-    current_cursor = await get_current_cursor(db)
-    if floor > current_cursor:
-        raise ValueError("retention floor exceeds current cursor")
-    current_floor = await get_retention_floor(db)
-    if floor < current_floor:
-        raise ValueError("retention floor must not move backwards")
-    await db.execute(
-        sqlite_insert(SyncState)
-        .values(id=1, retention_floor=floor, current_cursor=current_cursor)
-        .on_conflict_do_update(
-            index_elements=[SyncState.id],
-            set_={"retention_floor": floor, "current_cursor": current_cursor},
-        )
-    )
-    db.add(
-        SyncAuditLog(
-            event_type="retention_floor_advanced",
-            entity_type="sync_outbox",
-            entity_id=str(floor),
-            details=json.dumps(
-                {"previous_floor": current_floor, "new_floor": floor},
-                sort_keys=True,
-            ),
-        )
-    )
-    await db.flush()
+    """Reject retention until S4 owns registered-client ACK waterlines."""
+    raise RetentionAckRequiredError()
 
 
 async def prune_sync_events(db: AsyncSession, *, before_id: int) -> int:
-    """Prune only beneath the independently persisted internal retention floor."""
-    if before_id < 0:
-        raise ValueError("before_id must be >= 0")
-    state = await db.get(SyncState, 1)
-    if state is None:
-        raise ValueError("persisted retention floor is required")
-    if not before_id <= state.retention_floor <= state.current_cursor:
-        raise ValueError("before_id exceeds persisted retention floor")
-
-    result = await db.execute(delete(SyncOutbox).where(SyncOutbox.id <= before_id))
-    pruned_count = int(result.rowcount or 0)
-    db.add(
-        SyncAuditLog(
-            event_type="retention_pruned",
-            entity_type="sync_outbox",
-            entity_id=str(before_id),
-            details=json.dumps(
-                {
-                    "before_id": before_id,
-                    "persisted_floor": state.retention_floor,
-                    "pruned_count": pruned_count,
-                },
-                sort_keys=True,
-            ),
-        )
-    )
-    await db.flush()
-    return pruned_count
+    """Reject pruning until S4 owns registered-client ACK waterlines."""
+    raise RetentionAckRequiredError()
 
 
 async def get_current_cursor(db: AsyncSession) -> int:
     state = await db.get(SyncState, 1)
     if state is not None:
         return state.current_cursor
+    # The fallback must preserve the allocated high-water mark even when
+    # the singleton state row is missing during legacy recovery.
     return int(await db.scalar(select(func.max(SyncOutbox.id))) or 0)
 
 

@@ -33,6 +33,15 @@ from typing import Any
 
 _FRONTMATTER_DELIMITER = "---"
 _FRONTMATTER_END = "---\n"
+_CANONICAL_KEY_ORDER = (
+    "id",
+    "title",
+    "tags",
+    "folder_id",
+    "content_hash",
+    "created_at",
+    "updated_at",
+)
 
 
 def serialize_frontmatter(meta: dict[str, Any]) -> str:
@@ -54,7 +63,9 @@ def serialize_frontmatter(meta: dict[str, Any]) -> str:
     None values become ``null``.
     """
     lines = [_FRONTMATTER_DELIMITER]
-    for key, value in meta.items():
+    order = {key: index for index, key in enumerate(_CANONICAL_KEY_ORDER)}
+    for key in sorted(meta, key=lambda item: (order.get(item, len(order)), item)):
+        value = meta[key]
         if value is None:
             lines.append(f"{key}: null")
         elif isinstance(value, list):

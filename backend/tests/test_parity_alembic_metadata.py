@@ -10,7 +10,7 @@ import pytest
 from alembic import command
 from sqlalchemy import Inspector, MetaData, inspect
 
-from tests.migrations import alembic_config, migration_engine
+from tests.migrations import migration_engine, run_bound_command
 
 
 def _normalize_sql(value: Any) -> str | None:
@@ -93,11 +93,13 @@ def test_alembic_head_matches_metadata(tmp_path: Path, schema: str) -> None:
 
     metadata = get_meta_metadata() if schema == "meta" else get_space_metadata()
     engine = migration_engine(tmp_path, f"alembic_{schema}")
-    cfg = alembic_config(schema)
     try:
-        with engine.begin() as connection:
-            cfg.attributes["connection"] = connection
-            command.upgrade(cfg, "head")
+        cfg = run_bound_command(
+            schema,
+            tmp_path / f"alembic_{schema}.db",
+            command.upgrade,
+            "head",
+        )
         inspector = inspect(engine)
         version_table = cfg.get_main_option("version_table")
         actual = {

@@ -1,8 +1,8 @@
-"""Tests for FastAPI dependency providers (app.deps)."""
+"""Tests for FastAPI dependency providers."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.security import HTTPAuthorizationCredentials
@@ -13,147 +13,199 @@ from app.deps import get_current_user, get_space_context, require_master_token
 from app.errors import AuthorizationError
 
 
-async def _run(coro):
-    """Tiny helper so synchronous test bodies can await dependencies."""
-    import asyncio
-
-    return await asyncio.get_event_loop().run_until_complete(coro)
-
-
-def _cred(token: str) -> HTTPAuthorizationCredentials:
-    """Build an HTTPAuthorizationCredentials for direct dependency calls."""
-    return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-
-@pytest.mark.asyncio
-async def test_get_current_user_decodes_valid_token():
-    """A valid space token should decode to its payload."""
-    token = create_space_token("spc_1", "user_1")
-    payload = await get_current_user(credentials=_cred(token))
-    assert payload["sub"] == "user_1"
-    assert payload["type"] == "space"
-    assert payload["space_id"] == "spc_1"
-
-
-@pytest.mark.asyncio
-async def test_require_master_token_rejects_space_token():
-    """A space token must not satisfy require_master_token."""
-    token = create_space_token("spc_1", "user_1")
-    user = await get_current_user(credentials=_cred(token))
-    with pytest.raises(AuthorizationError):
-        await require_master_token(user=user)
-
-    # And a master token should pass.
-    master = create_master_token("admin")
-    master_user = await get_current_user(credentials=_cred(master))
-    result = await require_master_token(user=master_user)
-    assert result["type"] == "master"
-
-
-@pytest.mark.asyncio
-async def test_get_space_context_returns_space_id_and_user_id():
-    """get_space_context should extract space_id + user_id from a space token.
-
-    P3.6 added meta-DB existence check, so the test must seed a real Space
-    row in the meta DB before calling get_space_context with a token that
-    references it.
-    """
-    from app.db.meta_session import close_meta_db, init_meta_db
-    from app.db.models.meta import Space
-
-    await init_meta_db()
-    try:
-        from app.db.meta_session import get_meta_session
-
-        # Seed a Space row matching the token's space_id.
-        async for session in get_meta_session():
-            session.add(Space(
-                id="spc_ctx",
-                name="Ctx Test Space",
-                db_path="/tmp/spc_ctx.db",
-                notes_dir="/tmp/spc_ctx_notes",
-                is_default=False,
-            ))
-            await session.commit()
-            break
-
-        token = create_space_token("spc_ctx", "user_ctx")
-        user = await get_current_user(credentials=_cred(token))
-        ctx = await get_space_context(user=user)
-        assert ctx == {"space_id": "spc_ctx", "user_id": "user_ctx"}
-
-        # A master token should be rejected by get_space_context.
-        with pytest.raises(AuthorizationError):
-            master = create_master_token("admin")
-            master_user = await get_current_user(credentials=_cred(master))
-            await get_space_context(user=master_user)
-    finally:
-        await close_meta_db()
-
-
-# --------------------------------------------------------------------------- #
-# DB session dependencies
-# --------------------------------------------------------------------------- #
-@pytest.mark.asyncio
-async def test_get_meta_db_yields_session():
-    """get_meta_db should yield an AsyncSession bound to the meta database."""
-    from app.db.meta_session import close_meta_db, init_meta_db
-
-    await init_meta_db()
-    try:
-        from app.deps import get_meta_db
-
-        gen = get_meta_db()
-        session = await gen.__anext__()
-        assert isinstance(session, AsyncSession)
-        # Close the generator properly
-        with pytest.raises(StopAsyncIteration):
-            await gen.__anext__()
-    finally:
-        await close_meta_db()
-
-
-@pytest.mark.asyncio
-async def test_get_space_db_yields_session():
-    """get_space_db should yield an AsyncSession bound to the space's database."""
+@pytest.fixture(autouse=True)
+async def _meta_database():
     from app.db.meta_session import close_meta_db, init_meta_db
     from app.space_manager import dispose_space_engine_manager
 
     await init_meta_db()
     try:
-        from app.deps import get_space_db
-
-        # Build a fake space context
-        ctx = {"space_id": "spc_test", "user_id": "user_test"}
-
-        gen = get_space_db(ctx)
-        session = await gen.__anext__()
-        assert isinstance(session, AsyncSession)
-        with pytest.raises(StopAsyncIteration):
-            await gen.__anext__()
+        yield
     finally:
         await dispose_space_engine_manager()
         await close_meta_db()
 
 
-# --------------------------------------------------------------------------- #
-# get_file_system dependency (Gate #10)
-# --------------------------------------------------------------------------- #
+def _cred(token: str) -> HTTPAuthorizationCredentials:
+    return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+
+class _FakeLease:
+    fence = 1
+
+    async def release(self) -> None:
+        return None
+
+
+class _FakeLeases:
+    async def acquire_global(self, *_args):
+        return _FakeLease()
+
+    def register_pending_lease_cleanup(self, _lease) -> None:
+        return None
+
+
+class _FakeRuntime:
+    def __init__(self) -> None:
+        self.leases = _FakeLeases()
+        self.open_count = 0
+
+    async def open_resolved(
+        self, scope, _mode, _global_lease, *, owns_global_lease: bool
+    ):
+        assert owns_global_lease is True
+        self.open_count += 1
+        return SimpleNamespace(scope=scope)
+
+
+def _request_with_runtime(runtime):
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime=runtime)))
+
+
+async def _register_space(space_id: str) -> None:
+    from app.db.meta_session import get_meta_session
+    from app.db.models.meta import Space
+    from app.settings import settings
+
+    root = settings.spaces_data_dir / space_id
+    notes = root / "notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    (root / "space.db").touch()
+    (root / "index.db").touch()
+    async for session in get_meta_session():
+        session.add(
+            Space(
+                id=space_id,
+                name=f"Context {space_id}",
+                db_path=str(root / "space.db"),
+                notes_dir=str(notes),
+                is_default=False,
+            )
+        )
+        await session.commit()
+        break
+
+
+async def _registered_space_context(space_id: str, user_id: str = "user_test"):
+    await _register_space(space_id)
+    runtime = _FakeRuntime()
+    return await get_space_context(
+        request=_request_with_runtime(runtime),
+        user={
+            "sub": user_id,
+            "type": "space",
+            "space_id": space_id,
+            "epoch": 1,
+        }
+    )
+
+
 @pytest.mark.asyncio
-async def test_get_file_system_returns_filesystem_instance():
-    """get_file_system should return a FileSystem instance, not a Path.
+async def test_get_current_user_decodes_valid_token() -> None:
+    from app.auth.authority import bootstrap_credential_epoch
 
-    This is Gate #10: the dependency must return an actual FileSystem
-    implementation, not a fallback pathlib.Path.
-    """
+    await _register_space("spc_1")
+    epoch = await bootstrap_credential_epoch()
+    token = create_space_token("spc_1", "user_1", epoch=epoch)
+    payload = await get_current_user(credentials=_cred(token))
+    assert payload["sub"] == "user_1"
+    assert payload["type"] == "space"
+    assert payload["space_id"] == "spc_1"
+    assert payload["epoch"] == epoch
+
+
+@pytest.mark.asyncio
+async def test_require_master_token_rejects_space_token() -> None:
+    from app.auth.authority import bootstrap_credential_epoch
+
+    await _register_space("spc_1")
+    epoch = await bootstrap_credential_epoch()
+    user = await get_current_user(
+        credentials=_cred(create_space_token("spc_1", "user_1", epoch=epoch))
+    )
+    with pytest.raises(AuthorizationError):
+        await require_master_token(user=user)
+
+    master_user = await get_current_user(
+        credentials=_cred(create_master_token("admin", epoch=epoch))
+    )
+    assert (await require_master_token(user=master_user))["type"] == "master"
+
+
+@pytest.mark.asyncio
+async def test_get_space_context_returns_private_scope_result() -> None:
+    ctx = await _registered_space_context("spc_ctx", "user_ctx")
+    assert ctx["space_id"] == "spc_ctx"
+    assert ctx["user_id"] == "user_ctx"
+    assert ctx["scope_result"].space_id == "spc_ctx"
+
+    with pytest.raises(AuthorizationError):
+        await get_space_context(
+            request=_request_with_runtime(_FakeRuntime()),
+            user={"sub": "admin", "type": "master"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_meta_db_yields_session() -> None:
+    from app.deps import get_meta_db
+
+    dependency = get_meta_db()
+    session = await dependency.__anext__()
+    assert isinstance(session, AsyncSession)
+    with pytest.raises(StopAsyncIteration):
+        await dependency.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_get_space_db_yields_identity_bound_session() -> None:
+    from app.deps import get_space_db
+    from app.runtime.space import SpaceRuntimeHandle
+
+    class Session:
+        async def close(self) -> None:
+            return None
+
+    handle = SpaceRuntimeHandle(
+        SimpleNamespace(space_id="spc_session"),
+        SimpleNamespace(session_factory=lambda: Session()),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        None,
+        False,
+        False,
+        1,
+        SimpleNamespace(leases=SimpleNamespace()),
+    )
+
+    dependency = get_space_db(handle)
+    session = await dependency.__anext__()
+    try:
+        assert session is not None
+    finally:
+        with pytest.raises(StopAsyncIteration):
+            await dependency.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_get_file_system_yields_and_closes_contained_instance() -> None:
     from app.deps import get_file_system
-    from app.file_system.interfaces import FileSystem
+    from app.runtime.space import SpaceRuntimeHandle
 
-    ctx = {"space_id": "spc_fs_test", "user_id": "user_test"}
-    result = await get_file_system(ctx)
-    assert isinstance(result, FileSystem), (
-        f"Expected FileSystem instance, got {type(result).__name__}"
+    file_system = SimpleNamespace()
+    handle = SpaceRuntimeHandle(
+        SimpleNamespace(space_id="spc_file_system"),
+        SimpleNamespace(),
+        file_system,
+        SimpleNamespace(),
+        None,
+        False,
+        False,
+        1,
+        SimpleNamespace(leases=SimpleNamespace()),
     )
-    assert not isinstance(result, Path), (
-        "get_file_system returned a Path fallback instead of a FileSystem instance"
-    )
+
+    dependency = get_file_system(handle)
+    yielded = await dependency.__anext__()
+    assert yielded is file_system
+    await dependency.aclose()

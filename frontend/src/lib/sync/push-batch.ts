@@ -13,6 +13,7 @@ import type { AxiosInstance } from 'axios'
 import type { PomodoroXIDB } from '@/services/database'
 import type { OutboxEvent } from '@/types'
 import { listUnsyncedOutbox, deleteOutboxByIds, markOutboxEventsFailed } from './outbox'
+import { buildBatchIdempotencyKey } from '@/services/idempotency'
 import {
   ENTITY_TYPE_TO_TABLE,
   type ApiSyncEvent,
@@ -148,9 +149,23 @@ export async function pushBatch(
       retriableErrorCount: 0,
     }
   }
-  const events = buildPushEvents(rows)
-  const res = await api.post<ApiSyncPushResponse>('/sync/push', { events })
-  return handlePushResponse(db, res.data, rows)
+  // S3-Task10: filter out rows that require version rebase - they must not enter push
+  const pushable = rows.filter((row) => !row.requiresVersionRebase)
+  if (pushable.length === 0) {
+    return {
+      clearedOutboxIds: [],
+      conflicts: [],
+      remoteWinCount: 0,
+      circularRefCount: 0,
+      retriableErrorCount: 0,
+    }
+  }
+  const events = buildPushEvents(pushable)
+  const idempotencyKey = await buildBatchIdempotencyKey(pushable)
+  const res = await api.post<ApiSyncPushResponse>('/sync/push', { events }, {
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
+  return handlePushResponse(db, res.data, pushable)
 }
 
 /** 循环推送直至 outbox 空或遇需用户裁决冲突（F1 §5.4 分批 100） */
@@ -172,7 +187,11 @@ export async function pushAllPending(
     const pending = await listUnsyncedOutbox(db)
     if (pending.length === 0) break
 
-    const batch = pending.slice(0, size)
+    // S3-Task10: filter out rows that require version rebase - they must not enter push
+    const pushable = pending.filter((row) => !row.requiresVersionRebase)
+    if (pushable.length === 0) break
+
+    const batch = pushable.slice(0, size)
     const result = await pushBatch(db, api, batch)
 
     aggregated.clearedOutboxIds.push(...result.clearedOutboxIds)
@@ -183,6 +202,8 @@ export async function pushAllPending(
 
     // 有需用户裁决冲突 → 停止推送（不应继续推送待裁决 outbox）
     if (result.conflicts.length > 0) break
+    // S3-Task10: 本轮无进展（未清除任何 outbox 行，或存在可重试错误）→ 立即停止，避免无限循环
+    if (result.clearedOutboxIds.length === 0 || result.retriableErrorCount > 0) break
     // batch 未满 → outbox 已空，无需再拉
     if (batch.length < size) break
   }

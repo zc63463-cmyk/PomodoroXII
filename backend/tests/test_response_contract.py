@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 def _response_schema(
     openapi: Mapping[str, Any],
@@ -51,9 +53,9 @@ async def _openapi(client) -> dict[str, Any]:
 
 
 async def _empty_space_headers(client) -> dict[str, str]:
-    setup = await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    setup = await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     assert setup.status_code == 201
-    login = await client.post("/api/v1/auth/login", json={"password": "test123"})
+    login = await client.post("/api/v1/auth/login", json={"password": "test-password-123"})
     assert login.status_code == 200
     master_headers = {
         "Authorization": f"Bearer {login.json()['access_token']}"

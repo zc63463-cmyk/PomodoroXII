@@ -86,6 +86,7 @@ class RelationService:
                     entity_id=row.id,
                     action="create",
                     payload=serialize_entity(row),
+                    visible=True,
                 )
             return row
         except IntegrityError:
@@ -131,6 +132,7 @@ class RelationService:
                 entity_type=entity_type,
                 entity_id=entity_id,
                 action="delete",
+                visible=True,
             )
 
     async def list_quick_notes(self, kind: str, parent_id: str) -> list[Any]:

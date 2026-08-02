@@ -7,7 +7,7 @@ using either convention are accepted by /sync/push.
 """
 from __future__ import annotations
 
-from app.registry import REGISTRY
+from app.registry import CATALOG
 
 # Lazily-built alias map: {snake_case_name | camelCase_alias -> camelCase canonical}.
 # Entities without sync_entity_type fall back to their name (identity mapping).
@@ -17,7 +17,7 @@ _ALIAS_MAP: dict[str, str] = {}
 def _build_alias_map() -> dict[str, str]:
     """Build the alias map from REGISTRY (call after registry is populated)."""
     alias: dict[str, str] = {}
-    for spec in REGISTRY.list_sync_enabled():
+    for spec in CATALOG.list_sync_enabled():
         canonical = spec.sync_entity_type or spec.name
         # Always map the registry name -> canonical.
         alias[spec.name] = canonical
