@@ -28,16 +28,12 @@ async def test_meta_db_has_only_2_tables(_isolate_env):
 
 
 @pytest.mark.asyncio
-async def test_space_db_excludes_meta_tables(_isolate_env):
+async def test_space_db_excludes_meta_tables(_isolate_env, space_session):
     """Space DB should not contain spaces or meta_settings tables."""
     from sqlalchemy import inspect
 
-    from app.db.meta_session import init_meta_db
-    from app.space_manager import get_space_engine_manager
-
-    await init_meta_db()
-    manager = get_space_engine_manager()
-    engine = await manager.get_engine("spc_test")
+    engine = space_session.bind
+    assert engine is not None
     async with engine.connect() as conn:
         tables = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_table_names()
@@ -49,16 +45,12 @@ async def test_space_db_excludes_meta_tables(_isolate_env):
 
 
 @pytest.mark.asyncio
-async def test_space_db_has_all_business_tables(_isolate_env):
+async def test_space_db_has_all_business_tables(_isolate_env, space_session):
     """Space DB should contain all 20 business tables."""
     from sqlalchemy import inspect
 
-    from app.db.meta_session import init_meta_db
-    from app.space_manager import get_space_engine_manager
-
-    await init_meta_db()
-    manager = get_space_engine_manager()
-    engine = await manager.get_engine("spc_test")
+    engine = space_session.bind
+    assert engine is not None
     async with engine.connect() as conn:
         tables = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_table_names()

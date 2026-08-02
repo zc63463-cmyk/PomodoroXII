@@ -30,47 +30,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("PomodoroXII API starting up (env=%s)", settings.environment)
 
     # --- Startup ---
-    from app.db.meta_session import close_meta_db, init_meta_db
-    from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
+    from app.file_system.backup import require_legacy_backup_disabled
+
+    require_legacy_backup_disabled(enabled=settings.backup_enabled)
+
+    from app.runtime.bootstrap import bootstrap_runtime
 
     try:
-        await init_meta_db()
-        logger.info("Meta database initialised.")
+        async with bootstrap_runtime("fastapi") as services:
+            app.state.runtime_services = services
+            app.state.runtime = services.runtime
+            app.state.runtime_executor = services.executor
+            services.executor.gate.assert_ready()
+            services.runtime.assert_ready()
+            app.state.ready = True
+            logger.info("PomodoroXII API ready.")
+            yield
     except Exception as exc:
-        logger.critical("Failed to initialise meta database: %s", exc, exc_info=True)
+        logger.critical("Failed to initialise runtime: %s", exc, exc_info=True)
         raise
-
-    # Warm up the space engine manager singleton.
-    get_space_engine_manager()
-
-    # Startup backup: snapshot each space's DB if backup_enabled.
-    if settings.backup_enabled:
-        from sqlalchemy import select
-
-        from app.db.meta_session import get_meta_session
-        from app.db.models.meta import Space
-        from app.file_system.backup import BackupService
-
-        try:
-            async for session in get_meta_session():
-                spaces = (await session.execute(select(Space))).scalars().all()
-                break
-            for space in spaces:
-                db_path = settings.space_db_path(space.id)
-                if not db_path.exists():
-                    continue
-                backup_dir = settings.spaces_data_dir / space.id / ".meta" / "backups"
-                BackupService.create_backup(db_path, backup_dir)
-        except Exception as exc:
-            logger.error("Startup backup failed: %s", exc, exc_info=True)
-
-    logger.info("PomodoroXII API ready.")
-    yield
+    finally:
+        app.state.ready = False
+        if hasattr(app.state, "runtime"):
+            delattr(app.state, "runtime")
+        if hasattr(app.state, "runtime_services"):
+            delattr(app.state, "runtime_services")
+        if hasattr(app.state, "runtime_executor"):
+            delattr(app.state, "runtime_executor")
 
     # --- Shutdown ---
     logger.info("PomodoroXII API shutting down.")
-    await dispose_space_engine_manager()
-    await close_meta_db()
 
 
 def create_app() -> FastAPI:

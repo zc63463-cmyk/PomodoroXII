@@ -12,9 +12,9 @@ import pytest
 
 async def _get_master_token(client) -> str:
     """Set up admin password and return a fresh master token."""
-    await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     resp = await client.post(
-        "/api/v1/auth/login", json={"password": "test123"}
+        "/api/v1/auth/login", json={"password": "test-password-123"}
     )
     return resp.json()["access_token"]
 

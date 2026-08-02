@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "modules": [
+    "runtime_auth",
+    "migration_space_lifecycle",
+    "registry_meta",
+    "entity_commands",
+    "sync_push",
+    "sync_pull_recovery",
+    "notes_fs",
+    "deploy_operations",
+    "mcp"
+  ],
+  "dimensions": {
+    "completeness": {"minimum": 0, "maximum": 20},
+    "integrity": {"minimum": 0, "maximum": 20},
+    "verification": {"minimum": 0, "maximum": 20},
+    "operability": {"minimum": 0, "maximum": 20},
+    "maintainability": {"minimum": 0, "maximum": 20}
+  },
+  "formula": {
+    "maturity": "(completeness+integrity)/40*100",
+    "health": "(verification+operability+maintainability)/60*100",
+    "module_composite": "0.4*((completeness+integrity)/40*100)+0.6*((verification+operability+maintainability)/60*100)",
+    "backend_composite": "arithmetic_mean(module_composite)"
+  },
+  "thresholds": {
+    "backend_composite_minimum": 95.0,
+    "module_composite_minimum": 90.0,
+    "p0_maximum": 0,
+    "release_blocker_maximum": 0,
+    "critical_xfail_maximum": 0
+  },
+  "hard_caps": {
+    "data_loss_authorization_path_escape_or_unrecoverable_p0": 69,
+    "release_blocker_or_missing_rollback": 89,
+    "missing_restore_drill_exact_sha_ci_or_digest_evidence": 94
+  }
+}

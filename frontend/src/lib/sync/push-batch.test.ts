@@ -38,6 +38,9 @@ function makeOutboxRow(
     payload: JSON.stringify(payload),
     createdAt,
     synced: false,
+    operationId: `op-${entityId}-${id}`,
+    expectedVersion: action === 'create' ? null : 1,
+    requiresVersionRebase: false,
   }
 }
 
@@ -275,6 +278,9 @@ describe('push-batch', () => {
       payload: JSON.stringify({ id: `t${i}`, title: 'X' }),
       createdAt: i,
       synced: false,
+      operationId: `op-t${i}`,
+      expectedVersion: null,
+      requiresVersionRebase: false,
     }))
     await db.outbox.bulkAdd(rows)
 
@@ -349,5 +355,227 @@ describe('push-batch', () => {
     expect(postCount).toBe(0)
     expect(result.clearedOutboxIds).toHaveLength(0)
     expect(result.conflicts).toHaveLength(0)
+  })
+
+  it('PB11: exactly batchSize pushable rows - one POST, all cleared', async () => {
+    db = await openTestDb()
+    const rows = Array.from({ length: 3 }, (_, i) => ({
+      entityType: 'task' as const,
+      entityId: `t${i}`,
+      action: 'create' as const,
+      payload: JSON.stringify({ id: `t${i}`, title: 'X' }),
+      createdAt: i,
+      synced: false,
+      operationId: `op-t${i}`,
+      expectedVersion: null,
+      requiresVersionRebase: false,
+    }))
+    await db.outbox.bulkAdd(rows)
+
+    let postCount = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.url?.includes('/sync/push')) {
+        postCount++
+        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
+        return ok({
+          applied: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, action: e.action })),
+          conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z',
+        }, config)
+      }
+      return ok({}, config)
+    }
+
+    await pushAllPending(db, spaceApi, 3)
+
+    expect(postCount).toBe(1)
+    expect(await db.outbox.count()).toBe(0)
+  })
+
+  it('PB12: exceeds batchSize pushable rows - multiple POSTs, all cleared', async () => {
+    db = await openTestDb()
+    const rows = Array.from({ length: 7 }, (_, i) => ({
+      entityType: 'task' as const,
+      entityId: `t${i}`,
+      action: 'create' as const,
+      payload: JSON.stringify({ id: `t${i}`, title: 'X' }),
+      createdAt: i,
+      synced: false,
+      operationId: `op-t${i}`,
+      expectedVersion: null,
+      requiresVersionRebase: false,
+    }))
+    await db.outbox.bulkAdd(rows)
+
+    let postCount = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.url?.includes('/sync/push')) {
+        postCount++
+        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
+        return ok({
+          applied: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, action: e.action })),
+          conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z',
+        }, config)
+      }
+      return ok({}, config)
+    }
+
+    await pushAllPending(db, spaceApi, 3)
+
+    expect(postCount).toBe(3)
+    expect(await db.outbox.count()).toBe(0)
+  })
+
+  it('PB13: mixed pushable and rebase rows - only pushable sent, rebase remain', async () => {
+    db = await openTestDb()
+    // 3 pushable create rows
+    const pushableRows = Array.from({ length: 3 }, (_, i) => ({
+      entityType: 'task' as const,
+      entityId: `p${i}`,
+      action: 'create' as const,
+      payload: JSON.stringify({ id: `p${i}` }),
+      createdAt: i,
+      synced: false,
+      operationId: `op-p${i}`,
+      expectedVersion: null,
+      requiresVersionRebase: false,
+    }))
+    // 2 rebase rows (update without reliable version)
+    const rebaseRows = Array.from({ length: 2 }, (_, i) => ({
+      entityType: 'task' as const,
+      entityId: `r${i}`,
+      action: 'update' as const,
+      payload: JSON.stringify({ id: `r${i}` }),
+      createdAt: 10 + i,
+      synced: false,
+      operationId: `op-r${i}`,
+      expectedVersion: null,
+      requiresVersionRebase: true,
+    }))
+    await db.outbox.bulkAdd([...pushableRows, ...rebaseRows])
+
+    let postCount = 0
+    const pushedIds: string[] = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.url?.includes('/sync/push')) {
+        postCount++
+        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
+        pushedIds.push(...events.map((e) => e.entity_id))
+        return ok({
+          applied: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, action: e.action })),
+          conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z',
+        }, config)
+      }
+      return ok({}, config)
+    }
+
+    await pushAllPending(db, spaceApi, 100)
+
+    expect(postCount).toBe(1)
+    expect(pushedIds).toEqual(['p0', 'p1', 'p2'])
+    // Rebase rows remain in outbox
+    const remaining = await db.outbox.toArray()
+    expect(remaining).toHaveLength(2)
+    expect(remaining.every((r) => r.requiresVersionRebase === true)).toBe(true)
+  })
+
+  it('PB14: full batch all generic errors - pushAllPending stops after one POST, rows preserved', async () => {
+    db = await openTestDb()
+    const rows = Array.from({ length: 3 }, (_, i) => ({
+      entityType: 'task' as const,
+      entityId: `t${i}`,
+      action: 'create' as const,
+      payload: JSON.stringify({ id: `t${i}`, title: 'X' }),
+      createdAt: i,
+      synced: false,
+      operationId: `op-t${i}`,
+      expectedVersion: null,
+      requiresVersionRebase: false,
+    }))
+    await db.outbox.bulkAdd(rows)
+
+    let postCount = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.url?.includes('/sync/push')) {
+        postCount++
+        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
+        return ok({
+          applied: [],
+          conflicts: [],
+          errors: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, error: 'something_failed' })),
+          server_time: '2026-07-06T12:00:00.000Z',
+        }, config)
+      }
+      return ok({}, config)
+    }
+
+    const result = await pushAllPending(db, spaceApi, 3)
+
+    expect(postCount).toBe(1)
+    expect(result.retriableErrorCount).toBe(3)
+    expect(await db.outbox.count()).toBe(3)
+  })
+
+  it('PB15: pushBatch with all rebase rows - no POST, empty result', async () => {
+    db = await openTestDb()
+    await db.outbox.bulkPut([
+      { ...makeOutboxRow(1, 'task', 'r1', 'update'), requiresVersionRebase: true, expectedVersion: null },
+      { ...makeOutboxRow(2, 'task', 'r2', 'delete'), requiresVersionRebase: true, expectedVersion: null },
+    ])
+
+    let postCount = 0
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.url?.includes('/sync/push')) postCount++
+      return ok({ applied: [], conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z' }, config)
+    }
+
+    const rows = await db.outbox.toArray()
+    const result = await pushBatch(db, spaceApi, rows)
+
+    expect(postCount).toBe(0)
+    expect(result.clearedOutboxIds).toHaveLength(0)
+    expect(result.conflicts).toHaveLength(0)
+    expect(result.retriableErrorCount).toBe(0)
+    expect(await db.outbox.count()).toBe(2)
+  })
+
+  it('PB16: pushBatch with mixed pushable/rebase rows - only pushable rows sent', async () => {
+    db = await openTestDb()
+    await db.outbox.bulkPut([
+      makeOutboxRow(1, 'task', 'p1', 'create'),
+      { ...makeOutboxRow(2, 'task', 'r1', 'update'), requiresVersionRebase: true, expectedVersion: null },
+      makeOutboxRow(3, 'task', 'p2', 'create'),
+    ])
+
+    let postCount = 0
+    const pushedIds: string[] = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      if (config.url?.includes('/sync/push')) {
+        postCount++
+        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
+        pushedIds.push(...events.map((e) => e.entity_id))
+        return ok({
+          applied: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, action: e.action })),
+          conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z',
+        }, config)
+      }
+      return ok({}, config)
+    }
+
+    const rows = await db.outbox.toArray()
+    const result = await pushBatch(db, spaceApi, rows)
+
+    expect(postCount).toBe(1)
+    expect(pushedIds).toEqual(['p1', 'p2'])
+    expect(result.clearedOutboxIds).toContain(1)
+    expect(result.clearedOutboxIds).toContain(3)
+    const remaining = await db.outbox.toArray()
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0]!.entityId).toBe('r1')
+    expect(remaining[0]!.requiresVersionRebase).toBe(true)
   })
 })

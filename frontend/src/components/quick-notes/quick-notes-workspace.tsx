@@ -1,6 +1,6 @@
 'use client'
 
-import { createElement, FormEvent, ReactNode, useEffect, useMemo, useState } from 'react'
+import { createElement, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { SearchIcon, XIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -148,6 +148,33 @@ export function QuickNotesWorkspace({
     [allQuickNotes],
   )
   const [quickPreviewNoteId, setQuickPreviewNoteId] = useState<string | null>(null)
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false)
+  const mobileFiltersOpenerRef = useRef<HTMLButtonElement | null>(null)
+  const mobileFiltersDialogRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!mobileFiltersOpen) return
+    const dialog = mobileFiltersDialogRef.current
+    const focusables = () => Array.from(dialog?.querySelectorAll<HTMLElement>('button, input, [tabindex]:not([tabindex="-1"])') ?? []).filter((element) => !element.hasAttribute('disabled'))
+    focusables()[0]?.focus()
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setMobileFiltersOpen(false)
+        mobileFiltersOpenerRef.current?.focus()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const items = focusables()
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [mobileFiltersOpen])
   const selectedLifecycleState = selectedQuickNoteId
     ? lifecycleStateById[selectedQuickNoteId]
     : undefined
@@ -368,20 +395,17 @@ export function QuickNotesWorkspace({
     onToggleDate: onToggleSelectedDate,
     onClearDate: onClearSelectedDate,
   })
-  const timelineSlot = isFocusEditing
-    ? createElement(
-        'div',
-        {
-          className: quickNoteStyles.focusEditTimelineSink,
-          'data-focus-edit-timeline-sink': 'true',
-          'aria-disabled': true,
-        },
-        timeline,
-      )
-    : timeline
   const mainColumn = createElement(
     'div',
     { className: quickNoteStyles.workspaceMain },
+    !isFocusEditing
+      ? createElement(
+          'div',
+          { className: 'flex items-center gap-2 lg:hidden' },
+          createElement('div', { className: 'min-w-0 flex-1' }, createElement(SearchBox, { searchQuery, onSearchChange, onClearSearch, label: '移动端搜索小记', clearLabel: '清空移动端搜索' })),
+          createElement(Button, { ref: mobileFiltersOpenerRef, type: 'button', variant: 'outline', onClick: () => setMobileFiltersOpen(true), 'aria-label': '打开筛选', className: 'min-h-11 shrink-0' }, '筛选'),
+        )
+      : null,
     createElement(QuickNoteComposer, {
       draft,
       editingNote,
@@ -421,7 +445,7 @@ export function QuickNotesWorkspace({
           pendingById: trashPendingById,
         })
       : null,
-    timelineSlot,
+    isFocusEditing ? null : timeline,
   )
 
   return createElement(
@@ -434,8 +458,22 @@ export function QuickNotesWorkspace({
           ? quickNoteStyles.focusEditGrid
           : quickNoteStyles.workspaceGrid,
       },
-      explorer,
+      isFocusEditing
+        ? null
+        : createElement('div', { className: 'hidden lg:block' }, explorer),
       mainColumn,
+      mobileFiltersOpen
+        ? createElement(
+            'div',
+            { ref: mobileFiltersDialogRef, role: 'dialog', 'aria-modal': true, 'aria-label': '筛选小记', className: 'fixed inset-0 z-50 overflow-y-auto bg-black/30 p-4 lg:hidden' },
+            createElement(
+              'div',
+              { className: 'mx-auto max-w-md bg-[color:var(--qn-panel)] p-3' },
+              createElement(Button, { type: 'button', variant: 'ghost', onClick: () => { setMobileFiltersOpen(false); mobileFiltersOpenerRef.current?.focus() }, 'aria-label': '关闭筛选', className: 'min-h-11' }, '关闭'),
+              explorer,
+            ),
+          )
+        : null,
     ),
   )
 }
@@ -471,10 +509,14 @@ function SearchBox({
   searchQuery,
   onSearchChange,
   onClearSearch,
+  label = '搜索小记',
+  clearLabel = '清空搜索',
 }: {
   searchQuery: string
   onSearchChange: (query: string) => void
   onClearSearch: () => void
+  label?: string
+  clearLabel?: string
 }) {
   return createElement(
     'div',
@@ -486,7 +528,7 @@ function SearchBox({
         onSearchChange(event.target.value),
       placeholder: '搜索内容或 #标签',
       className: quickNoteStyles.searchInput,
-      'aria-label': '搜索小记',
+      'aria-label': label,
     }),
     searchQuery
       ? createElement(
@@ -496,7 +538,7 @@ function SearchBox({
             variant: 'ghost',
             size: 'icon-sm',
             onClick: onClearSearch,
-            'aria-label': '清空搜索',
+            'aria-label': clearLabel,
             className: quickNoteStyles.ghostButton,
           },
           createElement(XIcon),

@@ -5,21 +5,112 @@ Token model:
 - ``type == "space"``  → access scoped to a single ``space_id``.
 """
 
+import hashlib
 import logging
 from collections.abc import AsyncIterator
+from functools import lru_cache
 from typing import Any
+from uuid import uuid4
 
-import jwt
-from fastapi import Depends, Request, Security
+from fastapi import Depends, Request, Response, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.security import decode_access_token
-from app.errors import AuthenticationError, AuthorizationError
+from app.auth.authority import Principal, verify_with_fresh_meta_session
+from app.errors import AuthenticationError, AuthorizationError, ValidationError
 from app.logging import request_id_var  # noqa: F401  (re-exported for convenience)
-from app.space_manager import get_space_engine_manager
+from app.mutation.types import validate_operation_id
+from app.runtime.scope import AuthorizedSpaceScope
+from app.runtime.space import SpaceRuntimeHandle
 
 logger = logging.getLogger(__name__)
+
+
+def get_space_runtime(request: Request):
+    """Return the sole runtime instance installed by application bootstrap."""
+    runtime = getattr(request.app.state, "runtime", None)
+    if runtime is None:
+        raise RuntimeError("SpaceRuntime is not installed")
+    return runtime
+
+
+@lru_cache(maxsize=1)
+def get_compiled_entity_catalog():
+    """Return the process-stable catalog used by route mutation dependencies."""
+    from app.registry import CATALOG
+
+    return CATALOG
+
+
+def get_mutation_compiler(catalog=Depends(get_compiled_entity_catalog)):
+    """Build the shared compiler composition for request-scoped UoW wiring."""
+    from app.commands import FolderDomainPolicy, RelationDomainPolicy
+    from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.mutation.unit_of_work import MutationCompiler
+
+    return MutationCompiler(
+        catalog,
+        policies=(
+            FolderDomainPolicy(),
+            RelationDomainPolicy(),
+            KnowledgeDomainPolicy(),
+        ),
+    )
+
+
+def get_mutation_uow(request: Request):
+    """Return the runtime-owned mutation UoW for the current application."""
+    runtime = get_space_runtime(request)
+    uow = getattr(runtime, "recovery_provider", None)
+    if uow is None:
+        raise RuntimeError("MutationUnitOfWork is not installed")
+    return uow
+
+
+def get_entity_command(catalog=Depends(get_compiled_entity_catalog)):
+    """Return the pure EntityCommand factory bound to the shared catalog."""
+    from app.commands import EntityCommand
+
+    return EntityCommand(catalog)
+
+
+def expected_version_from_request(request: Request, current_version: int) -> int:
+    """Resolve an update CAS version from If-Match or the current row."""
+    header = request.headers.get("If-Match")
+    if header is None or not header.strip():
+        return current_version
+    value = header.strip()
+    if value.startswith("W/"):
+        value = value[2:].strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1]
+    try:
+        version = int(value)
+    except ValueError as exc:
+        raise ValidationError("If-Match must contain a nonnegative integer version") from exc
+    if version < 0:
+        raise ValidationError("If-Match must contain a nonnegative integer version")
+    return version
+
+
+def get_operation_id(request: Request, response: Response) -> str:
+    """Resolve the durable operation identity for one mutation request."""
+    supplied = request.headers.get("Idempotency-Key")
+    operation_id = supplied.strip() if supplied else f"req-{uuid4().hex}"
+    try:
+        validate_operation_id(operation_id)
+    except ValueError as exc:
+        raise ValidationError("Idempotency-Key must be 1-128 printable ASCII characters") from exc
+    response.headers["X-Operation-ID"] = operation_id
+    return operation_id
+
+
+def entity_id_for_operation(operation_id: str, entity_type: str) -> str:
+    """Derive a retry-stable entity ID for a create request without one."""
+    validate_operation_id(operation_id)
+    return hashlib.sha256(
+        f"entity-id-v1\\0{entity_type}\\0{operation_id}".encode("ascii")
+    ).hexdigest()[:32]
 
 
 class _LegacyCompatibleHTTPBearer(HTTPBearer):
@@ -58,14 +149,14 @@ async def get_current_user(
     if credentials is None:
         raise AuthenticationError("Missing or invalid Authorization header")
     token = credentials.credentials.strip()
-    try:
-        payload = decode_access_token(token)
-    except jwt.PyJWTError as exc:
-        raise AuthenticationError("Invalid or expired token") from exc
-
-    if "sub" not in payload or "type" not in payload:
-        raise AuthenticationError("Malformed token payload")
-    return payload
+    principal = await verify_with_fresh_meta_session(token, required_scope=None)
+    return {
+        "sub": principal.subject,
+        "type": principal.token_type,
+        "space_id": principal.space_id,
+        "epoch": principal.epoch,
+        "exp": principal.expires_at,
+    }
 
 
 async def require_master_token(
@@ -78,6 +169,7 @@ async def require_master_token(
 
 
 async def get_space_context(
+    request: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Ensure the token is a space token and return its context.
@@ -88,24 +180,55 @@ async def get_space_context(
     meta DB so forged tokens (or tokens pointing at deleted spaces) are
     rejected early instead of failing later with confusing errors.
     """
+    from app.runtime.sqlite_vfs import require_windows_native_runtime
+
+    require_windows_native_runtime()
     if user.get("type") != "space":
         raise AuthorizationError("Space token required")
     space_id = user.get("space_id")
     if not space_id:
         raise AuthenticationError("Space token missing space_id")
 
-    # Verify the space actually exists in the meta DB.
+    principal = Principal(
+        subject=str(user.get("sub")),
+        token_type="space",
+        epoch=int(user.get("epoch", 0)),
+        expires_at=user.get("exp") if isinstance(user.get("exp"), int) else None,
+        space_id=str(space_id),
+    )
     from app.db.meta_session import get_meta_session
-    from app.db.models.meta import Space
+    from app.settings import settings
 
+    runtime = get_space_runtime(request)
     async for session in get_meta_session():
-        exists = await session.get(Space, str(space_id))
+        opened = await AuthorizedSpaceScope(
+            session, settings.spaces_data_dir, runtime
+        ).open(principal, str(space_id), "read")
         break
 
-    if exists is None:
-        raise AuthenticationError(f"Space '{space_id}' does not exist")
+    runtime_handle = opened
+    scope_result = runtime_handle.scope
 
-    return {"space_id": str(space_id), "user_id": str(user.get("sub"))}
+    result = {
+        "space_id": str(space_id),
+        "user_id": principal.subject,
+        "scope_result": scope_result,
+    }
+    result["runtime_handle"] = runtime_handle
+    return result
+
+
+async def get_space_runtime_handle(
+    ctx: dict[str, Any] = Depends(get_space_context),
+) -> AsyncIterator[SpaceRuntimeHandle]:
+    """Yield one request-owned runtime handle for all Space resources."""
+    existing = ctx.get("runtime_handle")
+    if not isinstance(existing, SpaceRuntimeHandle):
+        raise RuntimeError("SpaceRuntimeHandle is required")
+    try:
+        yield existing
+    finally:
+        await existing.aclose()
 
 
 # --------------------------------------------------------------------------- #
@@ -120,11 +243,10 @@ async def get_meta_db() -> AsyncIterator[AsyncSession]:
 
 
 async def get_space_db(
-    ctx: dict[str, Any] = Depends(get_space_context),
+    handle: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
 ) -> AsyncIterator[AsyncSession]:
     """Yield an AsyncSession bound to the space's database."""
-    manager = get_space_engine_manager()
-    session = await manager.get_session(ctx["space_id"])
+    session = handle.session_factory()
     try:
         yield session
     finally:
@@ -134,18 +256,41 @@ async def get_space_db(
 # --------------------------------------------------------------------------- #
 # Filesystem
 # --------------------------------------------------------------------------- #
-async def get_file_system(ctx: dict[str, Any] = Depends(get_space_context)) -> Any:
-    """Return a FileSystem instance for the current space.
+async def get_file_system(
+    handle: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+) -> AsyncIterator[Any]:
+    """Yield a contained FileSystem instance for the current request.
 
     Uses the project's ``FileSystemStorage`` implementation (from
     ``app.file_system.api``) to create and initialise a filesystem
     rooted at the space's notes directory.
     """
-    from app.file_system.api import get_file_system as _create_fs
-    from app.settings import settings
+    if handle.file_system is None:
+        raise RuntimeError("Space runtime has no active filesystem")
+    yield handle.file_system
 
-    space_id = ctx["space_id"]
-    root_dir = settings.space_notes_dir(space_id)
-    index_db = settings.spaces_data_dir / space_id / "index.db"
 
-    return await _create_fs(root_dir=root_dir, index_db=index_db)
+# --------------------------------------------------------------------------- #
+# KnowledgeStore (durable mutation facade)
+# --------------------------------------------------------------------------- #
+def get_knowledge_store(
+    request: Request,
+    handle: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+) -> Any:
+    """Construct a KnowledgeStore from the runtime's MutationUnitOfWork.
+
+    The KnowledgeStore delegates all writes through the durable mutation
+    pipeline (journal + UoW + projections).  Reads stay on the direct
+    DB session.
+    """
+    from app.commands import EntityCommand
+    from app.knowledge.commands import KnowledgeCommands
+    from app.knowledge.store import KnowledgeStore
+    uow = get_mutation_uow(request)
+    if uow is None:
+        raise RuntimeError("MutationUnitOfWork is not installed")
+    return KnowledgeStore(
+        commands=KnowledgeCommands(),
+        entity_commands=EntityCommand(get_compiled_entity_catalog()),
+        uow=uow,
+    )

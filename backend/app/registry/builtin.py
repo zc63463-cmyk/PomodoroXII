@@ -94,6 +94,9 @@ REGISTRY.register(EntitySpec(
     pull_key="tasks",
     route_enabled=True,
     route_prefix="/tasks",
+    service_path="app.services.task.TaskService",
+    schema_module="app.schemas.task",
+    schema_prefix="TaskResponse",
     description="Todo/plan item with pomodoro estimates",
 ))
 
@@ -134,6 +137,9 @@ REGISTRY.register(EntitySpec(
     pull_key="sessions",
     route_enabled=True,
     route_prefix="/sessions",
+    service_path="app.services.session.SessionService",
+    schema_module="app.schemas.session",
+    schema_prefix="SessionResponse",
     description="Pomodoro work/break interval with enhanced metrics",
 ))
 
@@ -163,6 +169,9 @@ REGISTRY.register(EntitySpec(
     delete_strategy="fs_saga",
     route_enabled=True,
     route_prefix="/notes",
+    service_path="app.services.note.NoteService",
+    schema_module="app.schemas.note",
+    schema_prefix="NoteResponse",
     description="Lightweight knowledge-base entry; content lives in FS, meta in DB",
 ))
 
@@ -187,6 +196,9 @@ REGISTRY.register(EntitySpec(
     delete_strategy="cascade_soft_delete",
     route_enabled=True,
     route_prefix="/folders",
+    service_path="app.services.folder.FolderService",
+    schema_module="app.schemas.folder",
+    schema_prefix="FolderResponse",
     description="Self-referencing VFS folder for organising notes/quick_notes",
 ))
 
@@ -215,6 +227,9 @@ REGISTRY.register(EntitySpec(
     delete_strategy="soft_delete",
     route_enabled=True,
     route_prefix="/quick-notes",
+    service_path="app.services.quick_note.QuickNoteService",
+    schema_module="app.schemas.quick_note",
+    schema_prefix="QuickNoteResponse",
     description="Rapid-capture note with optional session link",
 ))
 
@@ -239,6 +254,9 @@ REGISTRY.register(EntitySpec(
     pull_key="reflections",
     route_enabled=True,
     route_prefix="/reflections",
+    service_path="app.services.reflection.ReflectionService",
+    schema_module="app.schemas.reflection",
+    schema_prefix="ReflectionResponse",
     description="Daily retrospective with structured sections",
 ))
 
@@ -264,6 +282,9 @@ REGISTRY.register(EntitySpec(
     pull_key="habits",
     route_enabled=True,
     route_prefix="/habits",
+    service_path="app.services.habit.HabitService",
+    schema_module="app.schemas.habit",
+    schema_prefix="HabitResponse",
     description="Habit streak chain with rest-day protection",
 ))
 
@@ -310,6 +331,9 @@ REGISTRY.register(EntitySpec(
     pull_key="schedules",
     route_enabled=True,
     route_prefix="/schedules",
+    service_path="app.services.schedule.ScheduleService",
+    schema_module="app.schemas.schedule",
+    schema_prefix="ScheduleResponse",
     description="Calendar event with completion status",
 ))
 
@@ -343,6 +367,9 @@ REGISTRY.register(EntitySpec(
     pull_key="timeBlocks",
     route_enabled=True,
     route_prefix="/time-blocks",
+    service_path="app.services.time_block.TimeBlockService",
+    schema_module="app.schemas.time_block",
+    schema_prefix="TimeBlockResponse",
     description="Planned time block on a given date",
 ))
 
@@ -397,6 +424,7 @@ REGISTRY.register(EntitySpec(
     sync_entity_type="scheduleQuickNote",
     pull_key="scheduleQuickNotes",
     description="Junction: schedule <-> quick note",
+    junction_endpoints=(("schedule_id", "schedule"), ("quick_note_id", "quick_note")),
 ))
 
 REGISTRY.register(EntitySpec(
@@ -498,6 +526,9 @@ REGISTRY.register(EntitySpec(
     soft_delete=False,
     route_enabled=True,
     route_prefix="/spaces",
+    service_path="app.routes.v1.spaces.create_space",
+    schema_module="app.schemas.space",
+    schema_prefix="SpaceResponse",
     primary_key="id",
     fields=(
         FieldSpec("id", "string", nullable=False),
@@ -545,6 +576,9 @@ REGISTRY.register(EntitySpec(
     soft_delete=False,
     route_enabled=True,
     route_prefix="/settings",
+    service_path="app.routes.v1.settings.get_settings",
+    schema_module="app.schemas.settings",
+    schema_prefix="SettingsResponse",
     primary_key="key",
     fields=(
         FieldSpec("key", "string", nullable=False, unique=True),

@@ -9,6 +9,8 @@ import uuid
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 async def _setup_login_and_space_token(client) -> tuple[str, str]:
     """Setup admin, login, create a space, issue a space token.
@@ -264,30 +266,48 @@ async def test_space_token_cannot_prune_sync_ledger(client):
 
 
 @pytest.mark.asyncio
-async def test_cursor_expired_http_error_has_stable_recovery_fields(client):
-    from app.services.sync_outbox import advance_retention_floor, prune_sync_events
-    from app.space_manager import get_space_engine_manager
+async def test_cursor_expired_http_error_has_stable_recovery_fields(space_session):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy import delete
 
-    _, space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-    token_payload = __import__("app.auth.security", fromlist=["decode_access_token"]).decode_access_token(
-        space_token
+    from app.errors import register_exception_handlers
+    from app.models.sync_outbox import SyncOutbox
+    from app.models.sync_state import SyncState
+    from app.routes.v1 import sync as sync_routes
+    from app.services.sync_outbox import record_sync_event
+
+    event_row = await record_sync_event(
+        space_session,
+        entity_type="task",
+        entity_id="expired-http",
+        action="create",
+        visible=True,
     )
-    session = await get_space_engine_manager().get_session(token_payload["space_id"])
-    try:
-        from app.services.sync_outbox import record_sync_event
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    state.retention_floor = event_row.id
+    await space_session.execute(
+        delete(SyncOutbox).where(SyncOutbox.id <= event_row.id)
+    )
+    await space_session.flush()
 
-        event_row = await record_sync_event(
-            session, entity_type="task", entity_id="expired-http", action="create"
-        )
-        await advance_retention_floor(session, floor=event_row.id)
+    async def database_override():
+        yield space_session
 
-        await prune_sync_events(session, before_id=event_row.id)
-        await session.commit()
-    finally:
-        await session.close()
-
-    response = await client.get("/api/v1/sync/pull?cursor=0", headers=headers)
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(sync_routes.router, prefix="/api/v1/sync")
+    app.dependency_overrides[sync_routes.get_space_db] = database_override
+    app.dependency_overrides[sync_routes.get_file_system] = lambda: None
+    app.dependency_overrides[sync_routes.get_space_context] = lambda: {
+        "space_id": "spc_test"
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as local:
+        response = await local.get("/api/v1/sync/pull?cursor=0")
     assert response.status_code == 409
     assert response.json() == {
         "detail": "Sync cursor expired; perform a full sync",

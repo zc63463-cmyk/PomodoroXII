@@ -7,8 +7,11 @@ C10 integration tested in test_sync_integration.py.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
+
+pytestmark = pytest.mark.provisioned_space_storage
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -432,7 +435,12 @@ async def test_pull_filters_by_since(space_session):
 
 @pytest.mark.asyncio
 async def test_pull_pagination_has_more(space_session):
-    """pull() with limit < total should set has_more=True."""
+    """Legacy pull rejects entity truncation without recording a pull."""
+    from sqlalchemy import func, select
+
+    from app.errors import CursorUpgradeRequiredError
+    from app.models.sync_audit_log import SyncAuditLog
+    from app.models.task import Task
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
@@ -449,8 +457,20 @@ async def test_pull_pagination_has_more(space_session):
                 "updated_at": f"2026-07-04T1{i}:00:00.000Z",
             },
         )])
-    result = await svc.pull(since="", limit=2)
-    assert result["has_more"] is True
+    audit_count_before = await space_session.scalar(
+        select(func.count(SyncAuditLog.id))
+    )
+    with pytest.raises(CursorUpgradeRequiredError) as raised:
+        await svc.pull(since="", limit=2)
+
+    domain = raised.value.to_domain_record("req-pagination")
+    assert domain.code == "cursor_upgrade_required"
+    assert domain.retryable is False
+    assert raised.value.details == {"truncated_groups": ("tasks",)}
+    assert await space_session.scalar(select(func.count(Task.id))) == 5
+    assert await space_session.scalar(select(func.count(SyncAuditLog.id))) == (
+        audit_count_before
+    )
 
 
 @pytest.mark.asyncio
@@ -614,6 +634,8 @@ async def test_status_returns_all_14_pull_keys_in_one_query(space_session):
     from app.services.sync import ENTITY_REGISTRY, SyncService
 
     svc = SyncService(space_session)
+    execute = AsyncMock(wraps=space_session.execute)
+    space_session.execute = execute
     result = await svc.status()
 
     expected_pull_keys = {entry["pull_key"] for entry in ENTITY_REGISTRY.values()}
@@ -629,6 +651,7 @@ async def test_status_returns_all_14_pull_keys_in_one_query(space_session):
     assert isinstance(result["tombstone_count"], int)
     assert result["tombstone_count"] >= 0
     assert "server_time" in result
+    assert execute.await_count == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -902,11 +925,12 @@ async def test_push_batches_audit_flushes(space_session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_pull_tombstones_respects_limit(space_session):
-    """D-5: pull() should cap tombstones at *limit* and set tombstones_has_more.
+    """Legacy pull rejects tombstone truncation without partial progress."""
+    from sqlalchemy import func, select
 
-    Without this cap, a 90-day TTL accumulation could blow up the response.
-    The test seeds 5 tombstones and pulls with limit=3 to verify truncation.
-    """
+    from app.errors import CursorUpgradeRequiredError
+    from app.models.sync_audit_log import SyncAuditLog
+    from app.models.tombstone import Tombstone
     from app.services.sync import SyncService
     from app.services.tombstone import TombstoneService
 
@@ -914,20 +938,19 @@ async def test_pull_tombstones_respects_limit(space_session):
     for i in range(5):
         await tomb_svc.create("task", f"d5-tomb-{i}")
 
-    svc = SyncService(space_session)
-    result = await svc.pull(since="", limit=3)
+    audit_count_before = await space_session.scalar(
+        select(func.count(SyncAuditLog.id))
+    )
+    with pytest.raises(CursorUpgradeRequiredError) as raised:
+        await SyncService(space_session).pull(since="", limit=3)
 
-    # Tombstones should be capped at limit (3), with tombstones_has_more=True.
-    assert len(result["tombstones"]) == 3, (
-        f"Expected 3 tombstones (capped at limit), "
-        f"got {len(result['tombstones'])}"
-    )
-    assert result["tombstones_has_more"] is True, (
-        "tombstones_has_more should be True when truncated"
-    )
-    # The top-level has_more should also be True (D-5 surfaces tomb overflow).
-    assert result["has_more"] is True, (
-        "has_more should be True when tombstones overflow"
+    domain = raised.value.to_domain_record("req-tombstone-pagination")
+    assert domain.code == "cursor_upgrade_required"
+    assert domain.retryable is False
+    assert raised.value.details == {"truncated_groups": ("tombstones",)}
+    assert await space_session.scalar(select(func.count(Tombstone.id))) == 5
+    assert await space_session.scalar(select(func.count(SyncAuditLog.id))) == (
+        audit_count_before
     )
 
 

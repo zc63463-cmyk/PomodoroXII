@@ -14,6 +14,7 @@ Iron rules (consistent with the project's three-layer discipline):
 """
 from __future__ import annotations
 
+from app.registry.catalog import CatalogCompilationError, CompiledEntityCatalog
 from app.registry.entities import (
     EntityCategory,
     EntitySpec,
@@ -24,10 +25,13 @@ from app.registry.entities import (
 __all__ = [
     "EntityRegistry",
     "REGISTRY",
+    "CATALOG",
     "EntitySpec",
     "FieldSpec",
     "StorageType",
     "EntityCategory",
+    "CatalogCompilationError",
+    "CompiledEntityCatalog",
 ]
 
 
@@ -42,6 +46,7 @@ class EntityRegistry:
 
     def __init__(self) -> None:
         self._specs: dict[str, EntitySpec] = {}
+        self._compiled = False
 
     def register(self, spec: EntitySpec) -> None:
         """Register an ``EntitySpec``.
@@ -50,6 +55,8 @@ class EntityRegistry:
         registered, which usually indicates a duplicate declaration in
         ``builtin.py``.
         """
+        if self._compiled:
+            raise CatalogCompilationError("entity registry is sealed")
         if spec.name in self._specs:
             raise ValueError(f"Entity {spec.name!r} already registered")
         self._specs[spec.name] = spec
@@ -82,6 +89,15 @@ class EntityRegistry:
     def __len__(self) -> int:
         return len(self._specs)
 
+    def compile(self, *, version: str) -> CompiledEntityCatalog:
+        if self._compiled:
+            error = CatalogCompilationError("catalog_already_compiled")
+            error.code = "catalog_already_compiled"
+            raise error
+        catalog = CompiledEntityCatalog.compile(self.list(), version=version)
+        self._compiled = True
+        return catalog
+
 
 # Process-level singleton.
 REGISTRY = EntityRegistry()
@@ -91,3 +107,5 @@ REGISTRY = EntityRegistry()
 # avoid a circular dependency: ``builtin`` imports ``REGISTRY`` from
 # this module, and we import ``builtin`` to trigger registration.
 from app.registry import builtin  # noqa: E402, F401
+
+CATALOG = REGISTRY.compile(version="1")

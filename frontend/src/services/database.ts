@@ -245,5 +245,49 @@ export class PomodoroXIDB extends Dexie {
         })
       }
     })
+    // version(17): S3-Task10 - backfill outbox rows with idempotency fields.
+    // operationId: UUID for each row.
+    // expectedVersion: null for create; payload.version-1 for update/delete with
+    //   reliable version (integer >= 2); null for unreliable update/delete.
+    // requiresVersionRebase: true for update/delete with no reliable version.
+    this.version(17).stores({
+      outbox: '++id, entityType, entityId, synced, createdAt',
+    }).upgrade(async (tx) => {
+      await tx.table('outbox').toCollection().modify((row: Record<string, unknown>) => {
+        if (typeof row.operationId !== 'string' || row.operationId.length === 0) {
+          row.operationId = crypto.randomUUID()
+        }
+
+        const needsExpectedVersion = row.expectedVersion === undefined
+        const needsRebaseState = row.requiresVersionRebase === undefined
+        if (!needsExpectedVersion && !needsRebaseState) return
+
+        const action = row.action as string
+        let expectedVersion: number | null
+        let requiresVersionRebase: boolean
+        if (action === 'create') {
+          expectedVersion = null
+          requiresVersionRebase = false
+        } else {
+          let payloadVersion: unknown = undefined
+          try {
+            const payload = JSON.parse(row.payload as string) as { version?: unknown }
+            payloadVersion = payload.version
+          } catch {
+            // payload is not valid JSON -- treat as no reliable version
+          }
+          if (Number.isInteger(payloadVersion) && (payloadVersion as number) >= 2) {
+            expectedVersion = (payloadVersion as number) - 1
+            requiresVersionRebase = false
+          } else {
+            expectedVersion = null
+            requiresVersionRebase = true
+          }
+        }
+
+        if (needsExpectedVersion) row.expectedVersion = expectedVersion
+        if (needsRebaseState) row.requiresVersionRebase = requiresVersionRebase
+      })
+    })
   }
 }

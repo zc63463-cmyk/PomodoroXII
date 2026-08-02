@@ -12,6 +12,9 @@ from sqlalchemy import MetaData, create_engine, inspect, text
 
 META_TABLES = {"spaces", "meta_settings"}
 SPACE_TABLES = {
+    "mutation_batches",
+    "mutation_operations",
+    "mutation_steps",
     "folders",
     "habit_check_ins",
     "habits",
@@ -52,12 +55,35 @@ def _config(environment: str) -> Config:
 
 
 def _upgrade(environment: str, db_path: Path):
-    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    _bound_command(environment, db_path, command.upgrade, "head")
+    return create_engine(f"sqlite:///{db_path.as_posix()}")
+
+
+def _bound_command(environment: str, db_path: Path, operation, revision: str) -> None:
+    import asyncio
+
+    from app.runtime.sqlite_vfs import (
+        MaintenanceOptions,
+        _alembic_maintenance_adapter,
+        _bind_existing_target,
+    )
+
+    db_path.touch(exist_ok=True)
+    target = _bind_existing_target(db_path, create_authority=True)
     config = _config(environment)
-    with engine.begin() as connection:
-        config.attributes["connection"] = connection
-        command.upgrade(config, "head")
-    return engine
+    try:
+        with target.open_maintenance(
+            MaintenanceOptions(read_only=False, create_if_missing=False)
+        ) as maintenance:
+            with _alembic_maintenance_adapter(
+                maintenance,
+                expected_identity=target.identity,
+                require_write=True,
+            ) as adapter:
+                config.attributes["maintenance_adapter"] = adapter
+                operation(config, revision)
+    finally:
+        asyncio.run(target.aclose())
 
 
 def _selected_metadata(environment: str) -> MetaData:
@@ -100,7 +126,9 @@ def _index_signature(inspector, table_name: str) -> set[tuple[str, tuple[str, ..
     }
 
 
-def _metadata_index_signature(metadata: MetaData, table_name: str) -> set[tuple[str, tuple[str, ...], bool]]:
+def _metadata_index_signature(
+    metadata: MetaData, table_name: str
+) -> set[tuple[str, tuple[str, ...], bool]]:
     return {
         (index.name, tuple(column.name for column in index.columns), bool(index.unique))
         for index in metadata.tables[table_name].indexes
@@ -209,7 +237,7 @@ def test_mixed_legacy_database_fails_closed_without_schema_changes(
 
         config = _config(environment)
         config.attributes["connection"] = connection
-        with pytest.raises(RuntimeError, match="legacy|mixed|adopt"):
+        with pytest.raises(RuntimeError, match="legacy|mixed|adopt|authority-bound"):
             command.upgrade(config, "head")
 
         assert set(inspect(connection).get_table_names()) == before
@@ -230,18 +258,18 @@ def test_downgrade_to_base_then_upgrade_head_roundtrip(tmp_path: Path, environme
 
     try:
         # Downgrade to base (before any revision)
-        with engine.begin() as connection:
-            config.attributes["connection"] = connection
-            command.downgrade(config, "base")
+        engine.dispose()
+        _bound_command(environment, db_path, command.downgrade, "base")
+        engine = create_engine(f"sqlite:///{db_path.as_posix()}")
         after_down = set(inspect(engine).get_table_names())
         # Only the (now-empty) version table may remain; all business tables must be gone
-        business_tables = (META_TABLES if environment == "meta" else SPACE_TABLES)
+        business_tables = META_TABLES if environment == "meta" else SPACE_TABLES
         assert after_down.isdisjoint(business_tables)
 
         # Upgrade back to head
-        with engine.begin() as connection:
-            config.attributes["connection"] = connection
-            command.upgrade(config, head)
+        engine.dispose()
+        _bound_command(environment, db_path, command.upgrade, head)
+        engine = create_engine(f"sqlite:///{db_path.as_posix()}")
         after_up = set(inspect(engine).get_table_names())
         expected = business_tables | {VERSION_TABLES[environment]}
         assert after_up == expected
@@ -254,15 +282,14 @@ def test_downgrade_leaves_no_residual_tables(tmp_path: Path, environment: str) -
     """After full downgrade to base, no business tables should remain as orphans."""
     db_path = tmp_path / f"residual_{environment}.db"
     engine = _upgrade(environment, db_path)
-    config = _config(environment)
 
     try:
-        with engine.begin() as connection:
-            config.attributes["connection"] = connection
-            command.downgrade(config, "base")
+        engine.dispose()
+        _bound_command(environment, db_path, command.downgrade, "base")
+        engine = create_engine(f"sqlite:///{db_path.as_posix()}")
         tables = set(inspect(engine).get_table_names())
         # Only the (now-empty) version table may remain; no business tables
-        business_tables = (META_TABLES if environment == "meta" else SPACE_TABLES)
+        business_tables = META_TABLES if environment == "meta" else SPACE_TABLES
         assert tables.isdisjoint(business_tables)
     finally:
         engine.dispose()
@@ -270,8 +297,12 @@ def test_downgrade_leaves_no_residual_tables(tmp_path: Path, environment: str) -
 
 def test_space_chain_revision_ids_are_disjoint_from_meta() -> None:
     """Meta and space revision IDs must never overlap."""
-    meta_revs = {rev.revision for rev in ScriptDirectory.from_config(_config("meta")).walk_revisions()}
-    space_revs = {rev.revision for rev in ScriptDirectory.from_config(_config("space")).walk_revisions()}
+    meta_revs = {
+        rev.revision for rev in ScriptDirectory.from_config(_config("meta")).walk_revisions()
+    }
+    space_revs = {
+        rev.revision for rev in ScriptDirectory.from_config(_config("space")).walk_revisions()
+    }
     assert meta_revs.isdisjoint(space_revs)
     assert len(meta_revs) >= 1
     assert len(space_revs) >= 1

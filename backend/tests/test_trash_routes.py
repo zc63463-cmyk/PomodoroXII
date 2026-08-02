@@ -1,18 +1,24 @@
-"""Tests for trash routes (P3.2: cascade purge of folder descendants).
+"""Tests for trash routes — durable purge and restore lifecycles.
 
-Verifies that purge_item on a folder with descendants:
-- Hard-deletes the root folder.
-- Hard-deletes all descendant folders (cascade).
-- Creates a tombstone for each deleted folder.
+Verifies that restore and purge operations delegate to the KnowledgeStore
+and route through the durable mutation pipeline (journal + UoW + projections).
 
-The fix in P3.2 changes the implementation from N+1 per-row db.get()
-calls to a single batch SELECT via IN-clause, without changing the
-external behaviour. These tests pin that behaviour so the refactor
-cannot regress.
+Covers:
+- Folder cascade purge (descendants hard-deleted + tombstoned).
+- Folder cascade purge with no descendants.
+- Note soft-delete → trash listing → restore → .md recovery.
+- Note purge (hard delete + tombstone).
+- Note purge on untrashed note → 422.
+- Folder soft-delete → restore via durable pipeline.
+- Note restore succeeds even when FS restore fails (best-effort FS).
+- Note purge creates sync events (proves durable pipeline).
+- Folder purge creates sync events for all descendants.
 """
 from __future__ import annotations
 
 import pytest
+
+pytestmark = pytest.mark.provisioned_space_storage
 
 
 async def _setup_login_and_space_token(client) -> str:
@@ -247,15 +253,21 @@ async def test_note_purge_untrashed_returns_422(client):
     assert resp.status_code == 422
 
 
+# --------------------------------------------------------------------------- #
+# Task 8: Durable pipeline integration tests
+# --------------------------------------------------------------------------- #
+
+
 @pytest.mark.asyncio
-async def test_note_restore_returns_409_when_target_path_occupied(
+async def test_note_restore_succeeds_even_when_fs_target_occupied(
     client, monkeypatch
 ):
-    """POST /trash/note/{id}/restore maps FileExistsError -> 409 ConflictError.
+    """POST /trash/note/{id}/restore succeeds even when FS restore fails.
 
-    Regression guard: trash.py restore_item must catch both FileNotFoundError
-    and FileExistsError from NoteService.restore (the latter occurs when the
-    target .md path is occupied by another note).
+    The durable DB restore via KnowledgeStore is the source of truth.
+    FS restore is best-effort: if the target .md path is occupied,
+    the note is still restored in the DB (trashed_at cleared) and
+    the route returns 200.
     """
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
@@ -265,16 +277,179 @@ async def test_note_restore_returns_409_when_target_path_occupied(
     resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
     assert resp.status_code == 200
 
-    # Mock NoteService.restore to raise FileExistsError (simulates path conflict).
-    from app.services.note import NoteService
+    # Mock FS restore to raise FileExistsError (simulates path conflict).
+    # Patch TrashOpsMixin because it overrides FileSystem.restore in the MRO.
+    from app.file_system.engine.trash_ops import TrashOpsMixin
 
-    async def _raise_file_exists(self, id):
-        raise FileExistsError(f"target path for note {id} already occupied")
+    async def _raise_file_exists(self, note_id):
+        raise FileExistsError(f"target path for note {note_id} already occupied")
 
-    monkeypatch.setattr(NoteService, "restore", _raise_file_exists)
+    monkeypatch.setattr(TrashOpsMixin, "restore", _raise_file_exists)
 
     resp = await client.post(
         f"/api/v1/trash/note/{note_id}/restore", headers=headers
     )
-    assert resp.status_code == 409, resp.text
-    assert resp.json()["error_type"] == "conflict"
+    # DB restore succeeds even when FS restore fails.
+    assert resp.status_code == 200, resp.text
+
+    # trashed_at should be cleared in DB.
+    resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["trashed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_folder_soft_delete_then_restore_via_durable_pipeline(client):
+    """Folder soft-delete → restore via KnowledgeStore clears trashed_at."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    # Create a folder.
+    resp = await client.post(
+        "/api/v1/folders", json={"name": "To Restore"}, headers=headers
+    )
+    assert resp.status_code == 201
+    folder_id = resp.json()["id"]
+
+    # Soft-delete via DELETE /folders/{id} (uses CascadeService → KnowledgeStore).
+    resp = await client.delete(f"/api/v1/folders/{folder_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # Folder should appear in trash listing.
+    resp = await client.get("/api/v1/trash", headers=headers)
+    assert resp.status_code == 200
+    trash_ids = [item["entity_id"] for item in resp.json()["items"]]
+    assert folder_id in trash_ids
+
+    # Restore via trash route.
+    resp = await client.post(
+        f"/api/v1/trash/folder/{folder_id}/restore", headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Folder should no longer be in trash.
+    resp = await client.get("/api/v1/trash", headers=headers)
+    assert resp.status_code == 200
+    trash_ids = [item["entity_id"] for item in resp.json()["items"]]
+    assert folder_id not in trash_ids
+
+    # Folder should be accessible again.
+    resp = await client.get(f"/api/v1/folders/{folder_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["trashed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_note_purge_creates_sync_events(client):
+    """Note purge via KnowledgeStore creates sync events (durable pipeline proof)."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    note_id = await _create_note(client, headers, content="sync event test")
+
+    # Soft-delete first.
+    resp = await client.delete(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+
+    # Purge via trash route (goes through KnowledgeStore → UoW).
+    resp = await client.delete(
+        f"/api/v1/trash/note/{note_id}", headers=headers
+    )
+    assert resp.status_code == 200
+
+    # Verify sync events were created (the durable pipeline records them).
+    resp = await client.get("/api/v1/sync/full", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Tombstone should exist.
+    tomb_ids = [t["entity_id"] for t in data["tombstones"]]
+    assert note_id in tomb_ids
+
+    # The purged note must NOT appear in the notes group (hard-deleted).
+    notes = data.get("notes", [])
+    note_rows = [e for e in notes if e.get("id") == note_id]
+    assert len(note_rows) == 0, "purged note should not appear in sync/full notes"
+
+
+@pytest.mark.asyncio
+async def test_folder_purge_creates_tombstones_for_all_descendants(client):
+    """Folder cascade purge creates tombstones for root + all descendants."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    # Create root + child + grandchild.
+    resp = await client.post(
+        "/api/v1/folders", json={"name": "Root"}, headers=headers
+    )
+    assert resp.status_code == 201
+    root_id = resp.json()["id"]
+
+    resp = await client.post(
+        "/api/v1/folders",
+        json={"name": "Child", "parent_id": root_id},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    child_id = resp.json()["id"]
+
+    resp = await client.post(
+        "/api/v1/folders",
+        json={"name": "Grandchild", "parent_id": child_id},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    grandchild_id = resp.json()["id"]
+
+    # Purge root (cascades to all descendants via KnowledgeStore).
+    resp = await client.delete(
+        f"/api/v1/trash/folder/{root_id}", headers=headers
+    )
+    assert resp.status_code == 200
+
+    # Verify tombstones exist for all three folders.
+    resp = await client.get("/api/v1/sync/full", headers=headers)
+    assert resp.status_code == 200
+    tomb_ids = {t["entity_id"] for t in resp.json()["tombstones"]}
+    assert root_id in tomb_ids
+    assert child_id in tomb_ids
+    assert grandchild_id in tomb_ids
+
+
+@pytest.mark.asyncio
+async def test_restore_untrashed_note_returns_422(client):
+    """Restoring a note that is NOT trashed returns 422 ValidationError."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    note_id = await _create_note(client, headers, content="not trashed")
+
+    # Try to restore without soft-deleting first → 422.
+    resp = await client.post(
+        f"/api/v1/trash/note/{note_id}/restore", headers=headers
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_restore_nonexistent_note_returns_404(client):
+    """Restoring a nonexistent note returns 404."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    resp = await client.post(
+        "/api/v1/trash/note/nonexistent-id/restore", headers=headers
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_purge_nonexistent_note_returns_404(client):
+    """Purging a nonexistent note returns 404."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    resp = await client.delete(
+        "/api/v1/trash/note/nonexistent-id", headers=headers
+    )
+    assert resp.status_code == 404

@@ -207,17 +207,18 @@ async function restoreNoteFromTrash(id: string): Promise<void> {
     if (!existing) throw new Error('Note was not found in the local repository')
     if (existing.trashed_at === null) throw new Error('Only trashed notes can be restored')
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const row: CachedNote = {
       ...existing,
       trashed_at: null,
       updated_at: now,
       deletion_state: 'active',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
     await db.notes.put(row)
-    await enqueueOutbox(db, 'note', id, 'update', stripNoteSyncFields(row))
+    await enqueueOutbox(db, 'note', id, 'update', stripNoteSyncFields(row), { expectedVersion: baseVersion })
   })
 }
 
@@ -227,8 +228,9 @@ async function purgeNoteFromTrash(id: string): Promise<void> {
     if (!existing) throw new Error('Note was not found in the local repository')
     if (existing.trashed_at === null) throw new Error('Only trashed notes can be purged')
 
+    const baseVersion = existing.version ?? 1
     await db.notes.delete(id)
-    await enqueueOutbox(db, 'note', id, 'delete', { id })
+    await enqueueOutbox(db, 'note', id, 'delete', { id }, { expectedVersion: baseVersion })
   })
 }
 
@@ -238,17 +240,18 @@ async function restoreFolderFromTrash(id: string): Promise<void> {
     if (!existing) throw new Error('Folder was not found in the local repository')
     if (existing.trashed_at === null) throw new Error('Only trashed folders can be restored')
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const row: CachedFolder = {
       ...existing,
       trashed_at: null,
       updated_at: now,
       deletion_state: 'active',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
     await db.folders.put(row)
-    await enqueueOutbox(db, 'folder', id, 'update', stripFolderSyncFields(row))
+    await enqueueOutbox(db, 'folder', id, 'update', stripFolderSyncFields(row), { expectedVersion: baseVersion })
   })
 }
 
@@ -258,8 +261,9 @@ async function purgeFolderFromTrash(id: string): Promise<void> {
     if (!existing) throw new Error('Folder was not found in the local repository')
     if (existing.trashed_at === null) throw new Error('Only trashed folders can be purged')
 
+    const baseVersion = existing.version ?? 1
     await db.folders.delete(id)
-    await enqueueOutbox(db, 'folder', id, 'delete', { id })
+    await enqueueOutbox(db, 'folder', id, 'delete', { id }, { expectedVersion: baseVersion })
   })
 }
 

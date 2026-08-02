@@ -210,6 +210,9 @@ describe('RealSyncEngine', () => {
       payload: '{"title":"local"}',
       createdAt: Date.now(),
       synced: false,
+      operationId: 'engine-en5-op',
+      expectedVersion: 1,
+      requiresVersionRebase: false,
     } as never)
 
     // pull 空；push 返回 version_mismatch error
@@ -264,6 +267,9 @@ describe('RealSyncEngine', () => {
       payload: '{"title":"local"}',
       createdAt: Date.now() + i,
       synced: false,
+      operationId: `engine-en6-op-${i}`,
+      expectedVersion: 1,
+      requiresVersionRebase: false,
     }))
     await db.outbox.bulkAdd(outboxRows as never)
 

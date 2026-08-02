@@ -31,7 +31,7 @@ class SessionService(BaseService):
         total = (
             await self.db.execute(select(func.count()).select_from(q.subquery()))
         ).scalar() or 0
-        q = q.order_by(self.model.started_at.desc())
+        q = q.order_by(self.model.started_at.desc(), self.model.id.desc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()

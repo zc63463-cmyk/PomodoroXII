@@ -1,0 +1,19 @@
+{
+  "seeded_preview": "quickNotePreview=1; four notes created through the preview UI",
+  "zoom": {
+    "viewport": "1440x900",
+    "mechanism": "five Control+Equal browser shortcuts (Chrome zoom to 200%)",
+    "document_scroll_width": 1440,
+    "console_errors": 0,
+    "screenshot": "browser-zoom-200-seeded-1440x900.png",
+    "result": "No horizontal overflow observed in the browser capture."
+  },
+  "focus_edit": {
+    "viewport": "1440x900",
+    "entry": "clicked the visible 专注 control",
+    "focus_sequence": ["专注 button", "focus-edit snapshot: only 小记内容, 退出专注, 记录, and non-interactive status content"],
+    "excluded_controls": ["小记探索", "小记时间线"],
+    "escape": "Escape restored normal workspace snapshot containing explorer, timeline, and focused 专注 button",
+    "screenshot": "focus-edit-seeded-1440x900.png"
+  }
+}

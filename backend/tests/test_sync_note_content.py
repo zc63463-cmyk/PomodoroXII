@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 async def _make_fs_for_sync(tmp_path):
     """Helper: create a FileSystem instance for sync tests."""
