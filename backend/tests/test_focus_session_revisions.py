@@ -549,7 +549,7 @@ class TestReviewCommitsBeforeDispatch:
 
         # No task_space entity sync events should be produced for work_item
         events = await focus_fixture.mutation.visible_events(
-            entity_type="work_item",
+            entity_type="workItem",
         )
         assert len(events) == 0
 
@@ -712,8 +712,10 @@ class TestReviewFailClosed:
         command = _review_command(
             expected_version=2, outcomes=outcomes,
         )
-        with pytest.raises((MutationRejectedError, Exception)):
+        with pytest.raises(MutationRejectedError) as captured:
             await focus_fixture.module.submit_review(focus_fixture.scope, command)
+        assert captured.value.rejection.code == "work_item_structure_changed"
+        assert captured.value.rejection.details["reason"] == "invalid_result"
 
 
 # ---------------------------------------------------------------------------
@@ -1053,6 +1055,262 @@ class TestPlanChangesDoNotMutateWorkItem:
         )
 
         events = await focus_fixture.mutation.visible_events(
-            entity_type="work_item",
+            entity_type="workItem",
         )
         assert len(events) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Terminal local_provisional review promotion
+# ---------------------------------------------------------------------------
+
+class TestTerminalProvisionalReviewPromotion:
+    """A terminal local_provisional session is promoted to authoritative on valid review.
+
+    A pending local_provisional session contributes zero effort.  Once a
+    valid review adjudicates it, ownership_state flips to authoritative and
+    the WorkItem effort_actual_seconds is projected from focused_seconds.
+    A subsequent invalid correction zeroes the effort again.
+    """
+
+    @pytest.mark.asyncio
+    async def test_provisional_session_promoted_and_effort_projected(
+        self, focus_fixture,
+    ) -> None:
+        from app.models.focus_session import FocusSession
+        from app.models.work_item import WorkItem
+
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture, level2_id="l2-a")
+        # End with validity="pending".  The normal end command leaves
+        # ownership_state="authoritative", so flip it to
+        # "local_provisional" directly to model a terminal provisional
+        # session awaiting adjudication.
+        await _end_session(focus_fixture, expected_version=1, validity="pending")
+
+        async with focus_fixture.scope.session_factory() as session:
+            fs = (
+                await session.execute(
+                    select(FocusSession).where(FocusSession.id == "fs-1")
+                )
+            ).scalar_one()
+            fs.ownership_state = "local_provisional"
+            await session.commit()
+
+        # A valid review promotes the provisional session to authoritative.
+        await _submit_review(
+            focus_fixture,
+            expected_version=2,
+            validity="valid",
+            reviewed_at="2026-07-15T08:30:00Z",
+            command_id="review-1",
+        )
+
+        async with focus_fixture.scope.session_factory() as session:
+            fs = (
+                await session.execute(
+                    select(FocusSession).where(FocusSession.id == "fs-1")
+                )
+            ).scalar_one()
+            l2 = (
+                await session.execute(
+                    select(WorkItem).where(WorkItem.id == "l2-a")
+                )
+            ).scalar_one()
+
+        assert fs.ownership_state == "authoritative"
+        assert fs.validity == "valid"
+        assert fs.focused_seconds > 0
+        assert l2.effort_actual_seconds == fs.focused_seconds
+
+        # A subsequent invalid correction (new command_id) zeroes the effort.
+        await _submit_review(
+            focus_fixture,
+            expected_version=3,
+            validity="invalid",
+            reviewed_at="2026-07-15T08:35:00Z",
+            command_id="review-2",
+        )
+
+        async with focus_fixture.scope.session_factory() as session:
+            l2 = (
+                await session.execute(
+                    select(WorkItem).where(WorkItem.id == "l2-a")
+                )
+            ).scalar_one()
+
+        assert l2.effort_actual_seconds == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Review timestamp monotonicity
+# ---------------------------------------------------------------------------
+
+class TestReviewTimestampMonotonicity:
+    """Review timestamps must be strictly monotonic and never regress below ended_at."""
+
+    @pytest.mark.asyncio
+    async def test_same_reviewed_at_rejected_as_not_monotonic(
+        self, focus_fixture,
+    ) -> None:
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture)
+        await _end_session(focus_fixture, expected_version=1)
+
+        # First review succeeds at 08:30.
+        await _submit_review(
+            focus_fixture,
+            expected_version=2,
+            reviewed_at="2026-07-15T08:30:00Z",
+            command_id="review-1",
+        )
+
+        # Second review with the same reviewed_at is not strictly later than
+        # the recorded review timestamp.
+        with pytest.raises(MutationRejectedError) as captured:
+            await _submit_review(
+                focus_fixture,
+                expected_version=3,
+                reviewed_at="2026-07-15T08:30:00Z",
+                command_id="review-2",
+            )
+        assert captured.value.rejection.code == "version_conflict"
+        reason = captured.value.rejection.details.get("reason", "")
+        assert reason in ("review_time_not_monotonic", "review_time_regression")
+
+    @pytest.mark.asyncio
+    async def test_reviewed_at_earlier_than_ended_at_rejected(
+        self, focus_fixture,
+    ) -> None:
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture)
+        await _end_session(
+            focus_fixture, expected_version=1, occurred_at="2026-07-15T08:25:00Z",
+        )
+
+        # reviewed_at (08:20) is earlier than ended_at (08:25).
+        with pytest.raises(MutationRejectedError) as captured:
+            await _submit_review(
+                focus_fixture,
+                expected_version=2,
+                reviewed_at="2026-07-15T08:20:00Z",
+                command_id="review-1",
+            )
+        assert captured.value.rejection.code == "version_conflict"
+        assert (
+            captured.value.rejection.details.get("reason") == "review_time_regression"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: Review idempotent replay
+# ---------------------------------------------------------------------------
+
+class TestReviewIdempotentReplay:
+    """Replaying the same review command_id returns the original result without duplicates."""
+
+    @pytest.mark.asyncio
+    async def test_replay_same_command_returns_existing_state(
+        self, focus_fixture,
+    ) -> None:
+        from app.models.session_command import SessionCommandEnvelope
+        from app.models.session_revision import SessionWorkItemOutcome
+
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture)
+        await _end_session(focus_fixture, expected_version=1)
+
+        outcomes = (
+            {
+                "work_item_id": "l3-a",
+                "touched": True,
+                "result": "progressed",
+                "persona": "ox",
+                "state_command": "none",
+                "expected_work_item_version": 1,
+            },
+        )
+        first = await _submit_review(
+            focus_fixture,
+            expected_version=2,
+            outcomes=outcomes,
+            reviewed_at="2026-07-15T08:30:00Z",
+            command_id="review-1",
+        )
+        assert first.value["session"]["reviewState"] == "completed"
+
+        # Replay the exact same command (same command_id + reviewed_at + payload).
+        second = await _submit_review(
+            focus_fixture,
+            expected_version=2,
+            outcomes=outcomes,
+            reviewed_at="2026-07-15T08:30:00Z",
+            command_id="review-1",
+        )
+        assert second.value["session"]["reviewState"] == "completed"
+
+        async with focus_fixture.scope.session_factory() as session:
+            outcome_rows = (
+                await session.execute(
+                    select(SessionWorkItemOutcome).where(
+                        SessionWorkItemOutcome.session_id == "fs-1"
+                    )
+                )
+            ).scalars().all()
+            envelopes = (
+                await session.execute(
+                    select(SessionCommandEnvelope).where(
+                        SessionCommandEnvelope.session_id == "fs-1"
+                    )
+                )
+            ).scalars().all()
+
+        # No duplicate outcomes or envelopes were created by the replay.
+        assert len(outcome_rows) == 1
+        assert len(envelopes) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: replay_safe fails closed without a Task Space policy
+# ---------------------------------------------------------------------------
+
+class TestReplaySafeBlocksWhenNoPolicy:
+    """When replay_safe has no Task Space policy source, state_command reviews fail closed.
+
+    _resolve_replay_safe raises MutationRuleViolation (a RuntimeError subclass)
+    which the UoW surfaces as MutationRejectedError.  Until a Task Space
+    declaration path is added, any outcome carrying state_command=complete or
+    cancel must be rejected with ``missing_task_space_replay_safe_policy``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_complete_outcome_blocks_without_replay_safe_policy(
+        self, focus_fixture,
+    ) -> None:
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture)
+        await _end_session(focus_fixture, expected_version=1)
+
+        outcomes = (
+            {
+                "work_item_id": "l3-a",
+                "touched": True,
+                "result": "completed",
+                "persona": "ox",
+                "state_command": "complete",
+                "expected_work_item_version": 1,
+            },
+        )
+        with pytest.raises(MutationRejectedError) as captured:
+            await _submit_review(
+                focus_fixture,
+                expected_version=2,
+                outcomes=outcomes,
+                reviewed_at="2026-07-15T08:30:00Z",
+                command_id="review-1",
+            )
+        assert captured.value.rejection.code == "work_item_structure_changed"
+        assert (
+            captured.value.rejection.details.get("reason")
+            == "missing_task_space_replay_safe_policy"
+        )

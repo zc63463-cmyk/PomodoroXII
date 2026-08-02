@@ -215,11 +215,3 @@ class DefaultFocusSessionModule(FocusSessionModule):
         require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
         return FocusSessionView(value=dict(result.value))
-
-    async def rebuild_effort_projection(
-        self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
-    ) -> object:
-        """Server-authored effort projection rebuild."""
-        request = build_focus_request("rebuild_effort_projection", command)
-        result = await self._uow.execute(scope, request, command.command_id)
-        return result
