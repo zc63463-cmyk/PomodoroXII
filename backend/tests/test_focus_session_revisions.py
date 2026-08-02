@@ -422,6 +422,41 @@ class TestAttributionCorrectionAppendOnly:
 
         assert ctx.level2_work_item_id == "l2-a"
 
+    @pytest.mark.asyncio
+    async def test_multiple_attribution_corrections_keep_one_effective_revision(
+        self, focus_fixture,
+    ) -> None:
+        from app.models.session_revision import SessionAttributionRevision
+
+        await _seed_catalog(focus_fixture, extra_l2_ids=("l2-b", "l2-c"))
+        await _start_session(focus_fixture, level2_id="l2-a")
+        await _end_session(focus_fixture, expected_version=1)
+
+        await _correct_attribution(
+            focus_fixture,
+            level2_work_item_id="l2-b",
+            occurred_at="2026-07-15T09:00:00Z",
+            command_id="correct-attr-1",
+        )
+        await _correct_attribution(
+            focus_fixture,
+            level2_work_item_id="l2-c",
+            occurred_at="2026-07-15T09:05:00Z",
+            command_id="correct-attr-2",
+        )
+
+        async with focus_fixture.scope.session_factory() as session:
+            revisions = (
+                await session.execute(
+                    select(SessionAttributionRevision)
+                    .where(SessionAttributionRevision.session_id == "fs-1")
+                    .order_by(SessionAttributionRevision.revision)
+                )
+            ).scalars().all()
+
+        assert [row.effective for row in revisions] == [False, False, True]
+        assert revisions[-1].level2_work_item_id == "l2-c"
+
 
 # ---------------------------------------------------------------------------
 # Tests: Review commits before dispatch
@@ -791,6 +826,7 @@ class TestEnvelopePayloadHash:
     async def test_complete_envelope_hash_uses_completed_status_id(
         self, focus_fixture,
     ) -> None:
+        from app.models.focus_session import FocusSession
         from app.models.session_command import SessionCommandEnvelope
 
         await _seed_catalog(focus_fixture)
@@ -817,14 +853,17 @@ class TestEnvelopePayloadHash:
                     )
                 )
             ).scalars().all()
+            focus_session = await session.get(FocusSession, "fs-1")
 
         assert len(envelopes) == 1
         env = envelopes[0]
         assert env.target_transition == "complete"
         expected_hash = canonical_payload_hash(
-            {"status_definition_id": "status-done"}
+            {"status_definition_id": "sys-status-completed"}
         )
         assert env.payload_hash == expected_hash
+        assert focus_session is not None
+        assert env.session_revision == focus_session.session_revision
 
     @pytest.mark.asyncio
     async def test_cancel_envelope_hash_uses_cancelled_status_id(
@@ -861,7 +900,7 @@ class TestEnvelopePayloadHash:
         env = envelopes[0]
         assert env.target_transition == "cancel"
         expected_hash = canonical_payload_hash(
-            {"status_definition_id": "status-cancelled"}
+            {"status_definition_id": "sys-status-cancelled"}
         )
         assert env.payload_hash == expected_hash
 
@@ -919,6 +958,7 @@ class TestCorrectedOutcomeAppendsRevision:
     async def test_corrected_outcome_appends_revision_and_preserves_envelope(
         self, focus_fixture,
     ) -> None:
+        from app.models.focus_session import FocusSession
         from app.models.session_command import SessionCommandEnvelope
         from app.models.session_revision import SessionWorkItemOutcome
 
@@ -975,6 +1015,7 @@ class TestCorrectedOutcomeAppendsRevision:
                     )
                 )
             ).scalars().all()
+            focus_session = await session.get(FocusSession, "fs-1")
 
         assert len(outcome_rows) == 2
         old, new = outcome_rows
@@ -986,6 +1027,9 @@ class TestCorrectedOutcomeAppendsRevision:
         assert new.result == "completed"
         assert new.state_command == "complete"
         assert new.corrected_from_revision == 1
+        assert focus_session is not None
+        assert new.session_revision == focus_session.session_revision
+        assert envelopes[0].session_revision == focus_session.session_revision
 
         # The envelope from the corrected (effective) outcome exists
         assert len(envelopes) == 1

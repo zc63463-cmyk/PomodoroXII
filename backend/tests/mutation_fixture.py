@@ -266,15 +266,17 @@ class MutationFixture:
 
     def inject_fault(self, name: str) -> None:
         if name == "db_commit":
-            original_apply = self.uow.interpreter.apply
+            original_commit = self.uow._commit_business
 
-            async def fail_once(session, plans):
-                # Restore the real interpreter before raising so recovery can
-                # inspect and settle the staged journal with the normal path.
-                self.uow.interpreter.apply = original_apply
+            async def fail_once(*args, **kwargs):
+                # Commit the business transaction first, then fail before the
+                # visibility/finalization barrier.  Recovery can therefore
+                # observe the real DB_COMMITTED journal boundary.
+                self.uow._commit_business = original_commit
+                await original_commit(*args, **kwargs)
                 raise RuntimeError("injected db commit failure")
 
-            self.uow.interpreter.apply = fail_once
+            self.uow._commit_business = fail_once
             return
         if name != "projection_forward":
             raise ValueError(f"unknown mutation fixture fault: {name}")

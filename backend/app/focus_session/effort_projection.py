@@ -22,11 +22,17 @@ than silently producing a wrong number.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.mutation.types import MutationRuleViolation
+from app.mutation.types import (
+    MutationRequest,
+    MutationRuleViolation,
+    canonical_payload_hash,
+    validate_canonical_timestamp,
+    validate_operation_id,
+)
 
 if TYPE_CHECKING:
     from app.mutation.unit_of_work import AuthorityOverlay
@@ -42,6 +48,61 @@ class EffortMismatch:
     work_item_id: str
     stored: int
     expected: int
+
+
+@dataclass(frozen=True, slots=True)
+class EffortProjectionRepairResult:
+    """Result of one journaled effort projection repair command."""
+
+    operation_id: str
+    applied: bool
+    mismatches_repaired: int
+
+
+class EffortProjectionRepairService:
+    """Submit server-authored effort repairs through the shared S3 UoW."""
+
+    def __init__(self, *, uow: object) -> None:
+        self._uow = uow
+
+    async def rebuild(
+        self,
+        scope: SpaceRuntimeHandle,
+        *,
+        operation_id: str,
+        requested_at: str,
+        work_item_id: str | None = None,
+    ) -> EffortProjectionRepairResult:
+        validate_operation_id(operation_id)
+        validate_canonical_timestamp(requested_at)
+        if work_item_id is not None and not work_item_id:
+            raise ValueError("work_item_id must be non-empty when provided")
+
+        business_payload: dict[str, object] = {
+            "operation": "rebuild_effort_projection",
+            "requested_at": requested_at,
+        }
+        if work_item_id is not None:
+            business_payload["work_item_id"] = work_item_id
+        payload = {
+            "space_id": scope.scope.space_id,
+            **business_payload,
+            "payload_hash": canonical_payload_hash(business_payload),
+        }
+        request = MutationRequest.from_payload(
+            name="focus_session.rebuild_effort_projection",
+            entity_type="focus_session",
+            entity_id=work_item_id or "all",
+            payload=payload,
+            expected_version=None,
+            client_updated_at=None,
+        )
+        result = await self._uow.execute(scope, request, operation_id)
+        return EffortProjectionRepairResult(
+            operation_id=operation_id,
+            applied=True,
+            mismatches_repaired=int(result.value["mismatches_repaired"]),
+        )
 
 
 def _work_item_depth(authority: AuthorityOverlay, row: Mapping[str, object]) -> int:
@@ -63,7 +124,9 @@ def _compute_effort_map(
     authority: AuthorityOverlay,
     *,
     session_overrides: Mapping[str, Mapping[str, object]] | None = None,
-    attribution_overrides: Mapping[str, Mapping[str, object]] | None = None,
+    attribution_overrides: Mapping[
+        str, Mapping[str, object] | Sequence[Mapping[str, object]]
+    ] | None = None,
 ) -> dict[str, int]:
     """Pure computation: map every level-2 WorkItem ID to its effort total.
 
@@ -89,13 +152,26 @@ def _compute_effort_map(
         else:
             sessions.append(s)
 
-    attributions: list[Mapping[str, object]] = []
-    for a in raw_attributions:
-        sid = str(a.get("session_id", ""))
-        if attribution_overrides and sid in attribution_overrides:
-            attributions.append(attribution_overrides[sid])
-        else:
-            attributions.append(a)
+    # A correction override is the complete post-mutation attribution set for
+    # one Session.  Replacing only the currently iterated row would make every
+    # historical revision appear effective after a second correction.
+    overridden_sessions = frozenset(attribution_overrides or ())
+    attributions: list[Mapping[str, object]] = [
+        a for a in raw_attributions
+        if str(a.get("session_id", "")) not in overridden_sessions
+    ]
+    for session_id, override in (attribution_overrides or {}).items():
+        if isinstance(override, Mapping):
+            attributions.append(override)
+            continue
+        if not isinstance(override, Sequence) or isinstance(
+            override, (str, bytes, bytearray)
+        ) or any(not isinstance(row, Mapping) for row in override):
+            raise MutationRuleViolation(
+                "work_item_structure_changed",
+                {"reason": "invalid_attribution_override", "sessionId": session_id},
+            )
+        attributions.extend(override)
 
     # Build effective attribution map: session_id -> list of attribution rows
     # Fail closed if a session has zero or multiple effective attributions.
@@ -109,7 +185,8 @@ def _compute_effort_map(
     for session in sessions:
         session_id = str(session.get("id", ""))
 
-        # Skip sessions that don't contribute (but still validate attributions)
+        # Every persisted Session must have exactly one effective attribution;
+        # non-contributing states still need a structurally valid history.
         ended_at = session.get("ended_at")
         validity = session.get("validity")
         ownership_state = session.get("ownership_state")
@@ -125,15 +202,6 @@ def _compute_effort_map(
                 },
             )
 
-        # Only ended, valid, authoritative sessions contribute
-        if ended_at is None:
-            continue
-        if validity != "valid":
-            continue
-        if ownership_state != "authoritative":
-            continue
-
-        # Exactly one effective attribution required for contributing sessions
         if len(effective_list) == 0:
             raise MutationRuleViolation(
                 "work_item_structure_changed",
@@ -142,6 +210,14 @@ def _compute_effort_map(
                     "sessionId": session_id,
                 },
             )
+
+        # Only ended, valid, authoritative sessions contribute
+        if ended_at is None:
+            continue
+        if validity != "valid":
+            continue
+        if ownership_state != "authoritative":
+            continue
 
         target_wi_id = str(effective_list[0].get("level2_work_item_id", ""))
         attr_project_id = str(effective_list[0].get("project_id", ""))
@@ -229,7 +305,9 @@ class EffortProjectionCompiler:
         work_item_id: str,
         *,
         session_overrides: Mapping[str, Mapping[str, object]] | None = None,
-        attribution_overrides: Mapping[str, Mapping[str, object]] | None = None,
+        attribution_overrides: Mapping[
+            str, Mapping[str, object] | Sequence[Mapping[str, object]]
+        ] | None = None,
     ) -> int:
         """Compute effort for a single WorkItem from authority overlay rows.
 
@@ -250,7 +328,9 @@ class EffortProjectionCompiler:
         authority: AuthorityOverlay,
         *,
         session_overrides: Mapping[str, Mapping[str, object]] | None = None,
-        attribution_overrides: Mapping[str, Mapping[str, object]] | None = None,
+        attribution_overrides: Mapping[
+            str, Mapping[str, object] | Sequence[Mapping[str, object]]
+        ] | None = None,
     ) -> dict[str, int]:
         """Compute effort for all WorkItems from authority overlay rows.
 
@@ -277,7 +357,9 @@ class EffortProjectionCompiler:
         ids: set[str] = set()
         for attr in attributions:
             if str(attr.get("session_id")) == session_id:
-                ids.add(str(attr.get("level2_work_item_id")))
+                work_item_id = str(attr.get("level2_work_item_id") or "")
+                if work_item_id and authority.row("work_item", work_item_id) is not None:
+                    ids.add(work_item_id)
         return tuple(sorted(ids))
 
     @staticmethod

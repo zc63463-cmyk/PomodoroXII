@@ -101,13 +101,17 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             raise TypeError("locator_reader is required for owner fencing")
         self._locator = locator_reader
         if replay_safe_policy is not None:
-            if not isinstance(replay_safe_policy, Mapping) or any(
-                not isinstance(key, str) or type(value) is not bool
-                for key, value in replay_safe_policy.items()
-            ):
+            if not self._is_valid_replay_safe_policy(replay_safe_policy):
                 raise TypeError("replay_safe_policy must map transition names to booleans")
             replay_safe_policy = MappingProxyType(dict(replay_safe_policy))
         self._replay_safe_policy = replay_safe_policy
+
+    @staticmethod
+    def _is_valid_replay_safe_policy(policy: object) -> bool:
+        return isinstance(policy, Mapping) and all(
+            isinstance(key, str) and type(value) is bool
+            for key, value in policy.items()
+        )
 
     async def _read_locator(
         self, context: MutationCompileContext, request: MutationRequest,
@@ -171,11 +175,12 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         policy = self._replay_safe_policy
         if policy is None:
             policy = getattr(context.scope, "task_space_replay_safe_policy", None)
-        if not isinstance(policy, Mapping):
+        if not self._is_valid_replay_safe_policy(policy):
             raise _MutationRuleViolation(
                 "work_item_structure_changed",
                 {"reason": "missing_task_space_replay_safe_policy"},
             )
+        policy = MappingProxyType(dict(policy))
         value = policy.get(target_transition)
         if type(value) is not bool:
             raise _MutationRuleViolation(
@@ -194,7 +199,9 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         reviewed_at: str,
         *,
         session_overrides: Mapping[str, Mapping[str, object]] | None = None,
-        attribution_overrides: Mapping[str, Mapping[str, object]] | None = None,
+        attribution_overrides: Mapping[
+            str, Mapping[str, object] | tuple[Mapping[str, object], ...]
+        ] | None = None,
     ) -> tuple[list[DbMutationPlan], list[SyncEventPlan]]:
         """Recompute effort_actual_seconds for the given WorkItem IDs.
 
@@ -227,11 +234,17 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 continue
             wi_after = dict(work_item)
             wi_after["effort_actual_seconds"] = new_effort
-            wi_after["updated_at"] = reviewed_at
+            wi_after["updated_at"] = _non_regressing_timestamp(
+                work_item.get("updated_at"), reviewed_at
+            )
             wi_after["version"] = int(work_item.get("version", 1)) + 1
             frozen_wi_after = require_frozen_object(wi_after)
             db_plans.append(_update_plan(context.catalog, "work_item", work_item, frozen_wi_after))
-            sync_events.append(_update_sync("work_item", frozen_wi_after, reviewed_at))
+            sync_events.append(
+                _update_sync(
+                    "work_item", frozen_wi_after, str(frozen_wi_after["updated_at"])
+                )
+            )
         return db_plans, sync_events
 
     @staticmethod
@@ -308,12 +321,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             "focus_session.resolve_activation_conflict": self._compile_resolution,
             "focus_session.claim_owner": self._compile_owner_claim,
             "focus_session.record_receipt": self._compile_receipt,
-            # NOTE: "focus_session.rebuild_effort_projection" is intentionally
-            # absent.  The S3 framework requires that compiled db_plans include
-            # the request entity (unit_of_work.py line ~1323).  A standalone
-            # rebuild only produces work_item plans, so it must use
-            # entity_type="work_item" and route through
-            # EffortProjectionRepairPolicy (defined at module level) instead.
+            "focus_session.rebuild_effort_projection": self._compile_rebuild_effort,
         }
         handler = handlers.get(request.name)
         if handler is not None:
@@ -322,6 +330,27 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         if action is not None:
             return await self._compile_sync_entity(context, request, action=action)
         raise RuntimeError(f"unregistered FocusSession command: {request.name}")
+
+    async def _compile_rebuild_effort(
+        self, context: MutationCompileContext, request: MutationRequest,
+    ) -> MutationCommand:
+        """Compile the server-authored rebuild through this policy/UoW."""
+        payload_hash = request.payload.get("payload_hash")
+        if payload_hash is not None:
+            from app.mutation.types import require_payload_hash
+
+            business_payload = {
+                key: value
+                for key, value in request.payload.items()
+                if key not in {"space_id", "payload_hash"}
+            }
+            try:
+                require_payload_hash(str(payload_hash), business_payload)
+            except ValueError as exc:
+                raise _MutationRuleViolation(
+                    "invalid_payload_hash", {"reason": "body_hash_mismatch"}
+                ) from exc
+        return await _compile_rebuild_effort_impl(context, request)
 
     # -- TS2 domain command handlers ----------------------------------------
 
@@ -568,11 +597,24 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         frozen_after = require_frozen_object(after)
         db_plan = _update_plan(context.catalog, "focus_session", current, frozen_after)
         sync_event = _update_sync("focus_session", frozen_after, occurred_at)
+        db_plans: list[DbMutationPlan] = [db_plan]
+        sync_events: list[SyncEventPlan] = [sync_event]
+        if action == "end":
+            affected_ids = self._collect_affected_work_item_ids(context, session_id)
+            if affected_ids:
+                effort_plans, effort_events = self._recalc_effort_for_targets(
+                    context,
+                    affected_ids,
+                    occurred_at,
+                    session_overrides={session_id: frozen_after},
+                )
+                db_plans.extend(effort_plans)
+                sync_events.extend(effort_events)
         value = require_frozen_object({"session": _to_camel_session(frozen_after)})
         return context.command(
             request=request,
-            db_plans=(db_plan,),
-            sync_events=(sync_event,),
+            db_plans=tuple(db_plans),
+            sync_events=tuple(sync_events),
             value=value,
         )
 
@@ -587,10 +629,86 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             require_cas=True,
         )
 
+    @staticmethod
+    def _validate_review_snapshots(
+        context: MutationCompileContext,
+        session_id: str,
+        plan_rows: tuple[Mapping[str, object], ...],
+    ) -> None:
+        """Revalidate immutable L2/L3 identity facts before review writes."""
+        context_row = context.authority.row(
+            "session_task_context", f"ctx-{session_id}"
+        )
+        if context_row is None:
+            raise _MutationRuleViolation(
+                "not_found", {"entityId": session_id, "reason": "session_context_missing"}
+            )
+        level2_id = str(context_row.get("level2_work_item_id", ""))
+        level2 = context.authority.row("work_item", level2_id)
+        if level2 is None:
+            raise _MutationRuleViolation("not_found", {"entityId": level2_id})
+        snapshot_fields = (
+            ("project_id", "project_id"),
+            ("title", "title_snapshot"),
+            ("parent_id", "parent_snapshot"),
+            ("status_definition_id", "status_snapshot"),
+        )
+        for current_name, snapshot_name in snapshot_fields:
+            current_value = level2.get(current_name)
+            snapshot_value = context_row.get(snapshot_name)
+            if current_name == "parent_id":
+                current_value = None if current_value is None else str(current_value)
+                snapshot_value = None if snapshot_value is None else str(snapshot_value)
+            elif current_value is not None or snapshot_value is not None:
+                current_value = str(current_value)
+                snapshot_value = str(snapshot_value)
+            if current_value != snapshot_value:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {
+                        "reason": "session_context_snapshot_changed",
+                        "entityId": level2_id,
+                        "field": current_name,
+                    },
+                )
+        current_estimate = level2.get("effort_estimate_upper_seconds")
+        snapshot_estimate = context_row.get("estimate_snapshot")
+        if current_estimate is not None or snapshot_estimate is not None:
+            if str(current_estimate) != str(snapshot_estimate):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {
+                        "reason": "session_context_snapshot_changed",
+                        "entityId": level2_id,
+                        "field": "effort_estimate_upper_seconds",
+                    },
+                )
+        for plan in plan_rows:
+            if plan.get("removed_at") is not None:
+                continue
+            work_item_id = str(plan.get("work_item_id", ""))
+            current = context.authority.row("work_item", work_item_id)
+            if current is None:
+                raise _MutationRuleViolation("not_found", {"entityId": work_item_id})
+            if (
+                str(plan.get("level2_snapshot")) != level2_id
+                or str(current.get("project_id")) != str(context_row.get("project_id"))
+                or current.get("parent_id") != level2_id
+                or str(current.get("title")) != str(plan.get("title_snapshot"))
+            ):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {
+                        "reason": "session_plan_snapshot_changed",
+                        "entityId": work_item_id,
+                    },
+                )
+
     async def _compile_review(
         self, context: MutationCompileContext, request: MutationRequest,
     ) -> MutationCommand:
         from app.mutation.types import bounded_child_operation_id, canonical_payload_hash
+        from app.task_space.contracts import SYSTEM_STATUS_IDS
 
         context.require_space(str(request.payload.get("space_id", "")))
         session_id = str(request.payload.get("session_id", request.entity_id))
@@ -613,14 +731,24 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             raise _MutationRuleViolation(
                 "version_conflict", {"sessionId": session_id, "reason": "review_time_regression"}
             )
-        # P1-7: reviewed_at must be strictly later than any existing
-        # review/correction timestamp (strict monotonicity).
+        # A correction advances the Session updated_at even before the first
+        # review, so compare against the latest attribution timestamp as well
+        # as an already-materialized review timestamp.
+        attribution_times = [
+            str(row.get("updated_at"))
+            for row in context.authority.rows("session_attribution_revision")
+            if str(row.get("session_id")) == session_id and row.get("updated_at")
+        ]
+        latest_revision_at = max(
+            (_parse_timestamp(value) for value in attribution_times),
+            default=_parse_timestamp(str(current.get("ended_at"))),
+        )
         if (
             current.get("review_state") != "not_required"
             and current.get("updated_at") is not None
             and isinstance(current.get("updated_at"), str)
             and _parse_timestamp(reviewed_at) <= _parse_timestamp(str(current["updated_at"]))
-        ):
+        ) or _parse_timestamp(reviewed_at) <= latest_revision_at:
             raise _MutationRuleViolation(
                 "version_conflict",
                 {"sessionId": session_id, "reason": "review_time_not_monotonic"},
@@ -643,6 +771,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             "validity_reason": request.payload.get("validity_reason"),
             "updated_at": reviewed_at,
             "version": int(current["version"]) + 1,
+            "session_revision": int(current.get("session_revision", 1)) + 1,
         })
         # P1-5: Terminal local_provisional adjudication — when a pending
         # local_provisional session is reviewed as valid, promote to
@@ -668,6 +797,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             raise _MutationRuleViolation(
                 "work_item_structure_changed", {"reason": "outcomes_not_collection"}
             )
+        self._validate_review_snapshots(context, session_id, plan_rows)
 
         # Get existing outcomes for this session
         existing_outcomes = tuple(
@@ -677,9 +807,6 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 key=lambda row: int(row.get("revision", 0)),
             )
         )
-
-        # Get status definitions for envelope resolution
-        status_definitions = context.authority.rows("status_definition")
 
         db_plans: list[DbMutationPlan] = [
             _update_plan(context.catalog, "focus_session", current, frozen_after),
@@ -749,14 +876,18 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             # Determine envelope command_id
             envelope_command_id = None
             if state_command in {"complete", "cancel"}:
-                # Resolve status_definition_id by category
+                # Resolve the seeded system status ID, then verify the row's
+                # category.  A first-match category scan could select a
+                # user-created duplicate that Task Space cannot dispatch.
                 target_category = "completed" if state_command == "complete" else "cancelled"
-                resolved_status_id = None
-                for sd in status_definitions:
-                    if str(sd.get("category")) == target_category:
-                        resolved_status_id = str(sd.get("id"))
-                        break
-                if resolved_status_id is None:
+                resolved_status_id = SYSTEM_STATUS_IDS[target_category]
+                resolved_status = context.authority.row(
+                    "status_definition", resolved_status_id
+                )
+                if (
+                    resolved_status is None
+                    or str(resolved_status.get("category")) != target_category
+                ):
                     raise _MutationRuleViolation(
                         "not_found", {"reason": "status_definition_not_found", "category": target_category}
                     )
@@ -771,7 +902,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                     "command_id": envelope_command_id,
                     "space_id": str(request.payload.get("space_id", "")),
                     "session_id": session_id,
-                    "session_revision": int(after["version"]),
+                    "session_revision": int(after["session_revision"]),
                     "work_item_id": work_item_id,
                     "expected_version": expected_wi_version,
                     "target_transition": state_command,
@@ -788,7 +919,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 "updated_at": reviewed_at,
                 "version": 1,
                 "session_id": session_id,
-                "session_revision": int(after["version"]),
+                "session_revision": int(after["session_revision"]),
                 "revision": next_revision,
                 "corrected_from_revision": corrected_from,
                 "effective": True,
@@ -969,6 +1100,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             raise _MutationRuleViolation("not_found", {"entityId": level2_id})
         now = str(request.payload.get("occurred_at", session.get("updated_at", "")))
         _require_canonical_timestamp(now)
+        _require_non_regressing_timestamp(session, now)
         new_row = _attribution_row(
             id=f"attr-{session_id}-{revision}",
             session_id=session_id,
@@ -986,9 +1118,23 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         )
         plans: list[DbMutationPlan] = []
         events: list[SyncEventPlan] = []
-        session_image = require_frozen_object(dict(session))
-        plans.append(_update_plan(context.catalog, "focus_session", session_image, session_image))
-        events.append(_update_sync("focus_session", session_image, str(session_image.get("updated_at", now))))
+        session_image_dict = dict(session)
+        session_image_dict["updated_at"] = _non_regressing_timestamp(
+            session.get("updated_at"), now
+        )
+        session_image_dict["version"] = int(session.get("version", 1)) + 1
+        session_image_dict["session_revision"] = int(
+            session.get("session_revision", 1)
+        ) + 1
+        session_image = require_frozen_object(session_image_dict)
+        # The before image must remain the authoritative Session row; the
+        # previous no-op image bypassed the version guard and made correction
+        # timestamps invisible to later review monotonicity.
+        plans.append(_update_plan(context.catalog, "focus_session", session, session_image))
+        events.append(
+            _update_sync("focus_session", session_image, str(session_image["updated_at"])
+            )
+        )
         if effective is not None:
             old = dict(effective)
             old["effective"] = False
@@ -1000,15 +1146,27 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         plans.append(_insert_plan(context.catalog, "session_attribution_revision", new_row))
         events.append(_create_sync("session_attribution_revision", new_row, now))
 
+        post_attributions: list[Mapping[str, object]] = []
+        for row in current:
+            if effective is not None and row.get("id") == effective.get("id"):
+                post_attributions.append(frozen_old)
+            else:
+                post_attributions.append(row)
+        post_attributions.append(new_row)
+
         # P1-1: Recalculate effort for both old and new targets.
         # The old target loses this session's contribution; the new target
         # gains it.  Use attribution_overrides to provide the post-mutation
         # state (old effective -> ineffective, new -> effective).
-        affected_ids = self._collect_affected_work_item_ids(context, session_id)
+        affected_id_set = set(self._collect_affected_work_item_ids(context, session_id))
+        affected_id_set.add(level2_id)
+        affected_ids = tuple(sorted(affected_id_set))
         if affected_ids:
             effort_plans, effort_events = self._recalc_effort_for_targets(
                 context, affected_ids, now,
-                attribution_overrides={session_id: new_row},
+                attribution_overrides={
+                    session_id: tuple(post_attributions)
+                },
             )
             plans.extend(effort_plans)
             events.extend(effort_events)
@@ -1018,7 +1176,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             db_plans=tuple(plans),
             sync_events=tuple(events),
             value=require_frozen_object({
-                "session": _to_camel_session(session),
+                "session": _to_camel_session(session_image),
                 "attribution": [_to_camel_attribution(new_row)],
             }),
         )
@@ -1796,6 +1954,17 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value[:-1] + "+00:00")
 
 
+def _non_regressing_timestamp(current: object, requested: str) -> str:
+    """Return a canonical projection timestamp that never moves backwards."""
+    if not isinstance(current, str) or not current:
+        return requested
+    try:
+        validate_canonical_timestamp(current)
+    except (TypeError, ValueError):
+        return requested
+    return current if _parse_timestamp(requested) < _parse_timestamp(current) else requested
+
+
 def _require_non_regressing_timestamp(
     current: Mapping[str, object], occurred_at: str,
 ) -> None:
@@ -2445,15 +2614,7 @@ def _integer_seconds_between(start_iso: str, end_iso: str) -> int:
 async def _compile_rebuild_effort_impl(
     context: MutationCompileContext, request: MutationRequest,
 ) -> MutationCommand:
-    """Compile a work_item.rebuild_effort_projection maintenance command.
-
-    This function is shared by ``EffortProjectionRepairPolicy`` (standalone
-    rebuild via ``entity_type="work_item"``).  It is intentionally NOT
-    registered on ``FocusSessionMutationPolicy`` because the S3 framework
-    requires compiled db_plans to include the request entity; a standalone
-    rebuild only produces ``work_item`` plans, so the request must use
-    ``entity_type="work_item"`` to pass validation.
-    """
+    """Compile the server-authored effort rebuild for either policy entry."""
     context.require_space(str(request.payload.get("space_id", "")))
     target_wi_id = request.payload.get("work_item_id")
 
@@ -2487,11 +2648,15 @@ async def _compile_rebuild_effort_impl(
             continue
         wi_after = dict(work_item)
         wi_after["effort_actual_seconds"] = new_effort
-        wi_after["updated_at"] = now
+        wi_after["updated_at"] = _non_regressing_timestamp(
+            work_item.get("updated_at"), now
+        )
         wi_after["version"] = int(work_item.get("version", 1)) + 1
         frozen_wi_after = require_frozen_object(wi_after)
         db_plans.append(_update_plan(context.catalog, "work_item", work_item, frozen_wi_after))
-        sync_events.append(_update_sync("work_item", frozen_wi_after, now))
+        sync_events.append(
+            _update_sync("work_item", frozen_wi_after, str(frozen_wi_after["updated_at"]))
+        )
         repaired += 1
 
     # P1-9: No fake folder, no folder Sync event, no INDEX_REPLACE
