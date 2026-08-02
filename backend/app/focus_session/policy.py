@@ -144,6 +144,90 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 {"sessionId": session.get("id"), "reason": "conflict_read_only"},
             )
 
+    def _resolve_replay_safe(self, context: MutationCompileContext) -> bool:
+        """Resolve server-declared replay_safe from Task Space policy.
+
+        BLOCKER: No Task Space policy declaration injection path exists in
+        the current architecture.  The spec requires replay_safe to come
+        from the Task Space server-declared policy, never from review input
+        and never hardcoded.  Until a declaration path is added (likely via
+        a new static method on TaskSpaceMutationPolicy or a constructor
+        injection), this method fails closed.
+
+        Required minimal architectural change:
+        1. Add a static declaration to TaskSpaceMutationPolicy in
+           backend/app/task_space/compiler.py that declares replay safety
+           for transition commands (complete/cancel).
+        2. Inject that declaration into FocusSessionMutationPolicy, either
+           via constructor parameter or by referencing the static method.
+        3. This method then reads the injected declaration instead of
+           raising.
+        """
+        raise _MutationRuleViolation(
+            "work_item_structure_changed",
+            {"reason": "missing_task_space_replay_safe_policy"},
+        )
+
+    def _recalc_effort_for_targets(
+        self,
+        context: MutationCompileContext,
+        target_wi_ids: tuple[str, ...],
+        reviewed_at: str,
+        *,
+        session_overrides: Mapping[str, Mapping[str, object]] | None = None,
+        attribution_overrides: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> tuple[list[DbMutationPlan], list[SyncEventPlan]]:
+        """Recompute effort_actual_seconds for the given WorkItem IDs.
+
+        For each target, computes the fresh effort total from authoritative
+        session facts.  If the stored value differs, emits an update plan
+        and a complete WorkItem post-image Sync event.  Only
+        effort_actual_seconds, updated_at, and version are modified.
+
+        Optional ``session_overrides`` and ``attribution_overrides`` allow
+        computing effort with the post-mutation state before the mutation
+        is committed.
+
+        Returns (db_plans, sync_events) for the changed WorkItems.
+        """
+        db_plans: list[DbMutationPlan] = []
+        sync_events: list[SyncEventPlan] = []
+        for wi_id in target_wi_ids:
+            work_item = context.authority.row("work_item", wi_id)
+            if work_item is None:
+                raise _MutationRuleViolation(
+                    "not_found", {"entityId": wi_id, "reason": "effort_target_missing"}
+                )
+            new_effort = EffortProjectionCompiler.compute_effort_for_work_item(
+                context.authority, wi_id,
+                session_overrides=session_overrides,
+                attribution_overrides=attribution_overrides,
+            )
+            current_effort = int(work_item.get("effort_actual_seconds", 0))
+            if current_effort == new_effort:
+                continue
+            wi_after = dict(work_item)
+            wi_after["effort_actual_seconds"] = new_effort
+            wi_after["updated_at"] = reviewed_at
+            wi_after["version"] = int(work_item.get("version", 1)) + 1
+            frozen_wi_after = require_frozen_object(wi_after)
+            db_plans.append(_update_plan(context.catalog, "work_item", work_item, frozen_wi_after))
+            sync_events.append(_update_sync("work_item", frozen_wi_after, reviewed_at))
+        return db_plans, sync_events
+
+    @staticmethod
+    def _collect_affected_work_item_ids(
+        context: MutationCompileContext, session_id: str,
+    ) -> tuple[str, ...]:
+        """Collect all WorkItem IDs whose effort may change for a session.
+
+        Includes both the current effective attribution target and any
+        previously effective targets (for correction scenarios).
+        """
+        return EffortProjectionCompiler.collect_affected_work_item_ids(
+            context.authority, session_id
+        )
+
     async def _require_locator_claim(
         self,
         context: MutationCompileContext,
@@ -205,7 +289,12 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             "focus_session.resolve_activation_conflict": self._compile_resolution,
             "focus_session.claim_owner": self._compile_owner_claim,
             "focus_session.record_receipt": self._compile_receipt,
-            "focus_session.rebuild_effort_projection": self._compile_rebuild_effort,
+            # NOTE: "focus_session.rebuild_effort_projection" is intentionally
+            # absent.  The S3 framework requires that compiled db_plans include
+            # the request entity (unit_of_work.py line ~1323).  A standalone
+            # rebuild only produces work_item plans, so it must use
+            # entity_type="work_item" and route through
+            # EffortProjectionRepairPolicy (defined at module level) instead.
         }
         handler = handlers.get(request.name)
         if handler is not None:
@@ -505,6 +594,23 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             raise _MutationRuleViolation(
                 "version_conflict", {"sessionId": session_id, "reason": "review_time_regression"}
             )
+        # P1-7: reviewed_at must be strictly later than any existing
+        # review/correction timestamp (strict monotonicity).
+        if (
+            current.get("review_state") != "not_required"
+            and current.get("updated_at") is not None
+            and isinstance(current.get("updated_at"), str)
+            and _parse_timestamp(reviewed_at) <= _parse_timestamp(str(current["updated_at"]))
+        ):
+            raise _MutationRuleViolation(
+                "version_conflict",
+                {"sessionId": session_id, "reason": "review_time_not_monotonic"},
+            )
+        # P1-12: Idempotent replay is handled by the MutationUnitOfWork
+        # journal layer — if the same operation_id (command_id) is replayed
+        # with the same request_hash, ``_resume_or_return`` returns the
+        # cached result without invoking this policy compiler.  No
+        # policy-level duplicate check is needed here.
         review_state = str(request.payload.get("review_state", "completed"))
         validity = str(request.payload.get("validity", "valid"))
         if review_state not in {"completed", "skipped"} or validity not in {"valid", "invalid"}:
@@ -519,6 +625,15 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             "updated_at": reviewed_at,
             "version": int(current["version"]) + 1,
         })
+        # P1-5: Terminal local_provisional adjudication — when a pending
+        # local_provisional session is reviewed as valid, promote to
+        # authoritative.  Invalid decisions keep the session provisional
+        # (and contribute zero effort).
+        if (
+            current.get("ownership_state") == "local_provisional"
+            and validity == "valid"
+        ):
+            after["ownership_state"] = "authoritative"
         frozen_after = require_frozen_object(after)
 
         # Build frozen plan set for outcome validation
@@ -641,7 +756,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                     "work_item_id": work_item_id,
                     "expected_version": expected_wi_version,
                     "target_transition": state_command,
-                    "replay_safe": True,
+                    "replay_safe": self._resolve_replay_safe(context),
                     "payload_hash": payload_hash,
                     "created_at": reviewed_at,
                 })
@@ -662,6 +777,9 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 "touched": bool(outcome_item.get("touched", False)),
                 "result": result,
                 "persona": outcome_item.get("persona"),
+                "execution_persona": outcome_item.get("execution_persona"),
+                "persona_switched": outcome_item.get("persona_switched"),
+                "persona_note": outcome_item.get("persona_note"),
                 "state_command": state_command,
                 "command_id": envelope_command_id,
                 "reviewed_at": reviewed_at,
@@ -670,34 +788,21 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             sync_events.append(_create_sync("session_work_item_outcome", outcome_row, reviewed_at))
             created_outcomes.append(outcome_row)
 
-        # If validity is valid and ownership is authoritative, rebuild effort projection
-        if validity == "valid" and after.get("ownership_state") == "authoritative":
-            # Find the effective attribution target
-            attributions = tuple(
-                sorted(
-                    (row for row in context.authority.rows("session_attribution_revision")
-                     if str(row.get("session_id")) == session_id),
-                    key=lambda row: int(row.get("revision", 0)),
-                )
+        # P1-1, P1-2: Always recalculate effort for all affected WorkItem
+        # targets.  When validity changes from valid to invalid, the
+        # recalculation naturally produces 0 because the session_overrides
+        # reflect the post-mutation validity.  When attribution has changed
+        # (via correction), both old and new targets are recalculated.
+        # Sessions that are pending/invalid/local_provisional contribute 0
+        # and their targets' effort is updated accordingly.
+        affected_ids = self._collect_affected_work_item_ids(context, session_id)
+        if affected_ids:
+            effort_plans, effort_events = self._recalc_effort_for_targets(
+                context, affected_ids, reviewed_at,
+                session_overrides={session_id: frozen_after},
             )
-            effective_attr = next(
-                (row for row in reversed(attributions) if row.get("effective") is True), None
-            )
-            if effective_attr is not None:
-                target_wi_id = str(effective_attr.get("level2_work_item_id"))
-                work_item = context.authority.row("work_item", target_wi_id)
-                if work_item is not None:
-                    new_effort = EffortProjectionCompiler.compute_effort_for_work_item(
-                        context.authority, target_wi_id
-                    )
-                    if int(work_item.get("effort_actual_seconds", 0)) != new_effort:
-                        wi_after = dict(work_item)
-                        wi_after["effort_actual_seconds"] = new_effort
-                        wi_after["updated_at"] = reviewed_at
-                        wi_after["version"] = int(work_item.get("version", 1)) + 1
-                        frozen_wi_after = require_frozen_object(wi_after)
-                        db_plans.append(_update_plan(context.catalog, "work_item", work_item, frozen_wi_after))
-                        sync_events.append(_update_sync("work_item", frozen_wi_after, reviewed_at))
+            db_plans.extend(effort_plans)
+            sync_events.extend(effort_events)
 
         value_dict: dict[str, object] = {"session": _to_camel_session(frozen_after)}
         if outcomes_raw:
@@ -800,118 +905,6 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
     ) -> MutationCommand:
         return await self._compile_receipt_row(context, request)
 
-    async def _compile_rebuild_effort(
-        self, context: MutationCompileContext, request: MutationRequest,
-    ) -> MutationCommand:
-        from app.mutation.types import (
-            ContainedProjectionActionField,
-            ProjectionActionTag,
-            ProjectionPlan,
-        )
-
-        context.require_space(str(request.payload.get("space_id", "")))
-        target_wi_id = request.payload.get("work_item_id")
-
-        db_plans: list[DbMutationPlan] = []
-        sync_events: list[SyncEventPlan] = []
-        projections: list[ProjectionPlan] = []
-        now = str(request.payload.get("requested_at", "2026-07-15T12:00:00Z"))
-        _require_canonical_timestamp(now)
-
-        if target_wi_id is not None:
-            target_ids = (str(target_wi_id),)
-        else:
-            target_ids = tuple(
-                str(row.get("id")) for row in context.authority.rows("work_item")
-            )
-
-        for wi_id in target_ids:
-            work_item = context.authority.row("work_item", wi_id)
-            if work_item is None:
-                continue
-            new_effort = EffortProjectionCompiler.compute_effort_for_work_item(
-                context.authority, wi_id
-            )
-            current_effort = int(work_item.get("effort_actual_seconds", 0))
-            if current_effort == new_effort:
-                continue
-            wi_after = dict(work_item)
-            wi_after["effort_actual_seconds"] = new_effort
-            wi_after["updated_at"] = now
-            wi_after["version"] = int(work_item.get("version", 1)) + 1
-            frozen_wi_after = require_frozen_object(wi_after)
-            db_plans.append(_update_plan(context.catalog, "work_item", work_item, frozen_wi_after))
-            sync_events.append(_update_sync("work_item", frozen_wi_after, now))
-
-        # Include a no-op focus_session db_plan so the request entity is
-        # represented in the compiled effects (required by UoW validation).
-        if db_plans:
-            sessions = context.authority.rows("focus_session")
-            if sessions:
-                session_row = require_frozen_object(dict(sessions[0]))
-                db_plans.insert(
-                    0, _update_plan(context.catalog, "focus_session", session_row, session_row)
-                )
-                sync_events.insert(
-                    0, _update_sync("focus_session", session_row, str(session_row.get("updated_at", now)))
-                )
-
-            # Create a folder INDEX_REPLACE projection so that projection
-            # forward faults trigger during _finalize_forward.  The folder
-            # insert is bound to an INDEX_REPLACE projection, satisfying the
-            # UoW projection-binding validation.
-            folder_id = f"effort-rebuild-folder-{context.operation_id}".replace(":", "-")
-            folder_row = require_frozen_object({
-                "id": folder_id,
-                "name": f"Effort Rebuild {folder_id[-12:]}",
-                "parent_id": None,
-                "icon": None,
-                "color": None,
-                "sort_order": 0,
-                "is_system": False,
-                "trashed_at": None,
-                "created_at": now,
-                "updated_at": now,
-                "version": 1,
-            })
-            db_plans.append(_insert_plan(context.catalog, "folder", folder_row))
-            sync_events.append(_create_sync("folder", folder_row, now))
-            folder_index_path = f"index/folders/id/{folder_id}"
-            before_blob = context.authority.derived_projection(
-                ProjectionActionTag.INDEX_REPLACE,
-                folder_index_path,
-            )
-            projected = {
-                key: folder_row[key]
-                for key in (
-                    "id", "name", "parent_id", "icon", "color",
-                    "sort_order", "is_system", "trashed_at",
-                    "created_at", "updated_at",
-                )
-            }
-            after_blob = json.dumps(
-                {"row": projected},
-                ensure_ascii=True,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("ascii")
-            projections.append(ProjectionPlan(
-                tag=ProjectionActionTag.INDEX_REPLACE,
-                source=None,
-                target=ContainedProjectionActionField(folder_index_path),
-                ordinal=0,
-                before=before_blob,
-                after=after_blob,
-            ))
-
-        return context.command(
-            request=request,
-            db_plans=tuple(db_plans),
-            sync_events=tuple(sync_events),
-            projections=tuple(projections),
-            value=require_frozen_object({"rebuilt": True, "count": len(db_plans)}),
-        )
-
     async def _compile_attribution_append(
         self, context: MutationCompileContext, request: MutationRequest,
     ) -> MutationCommand:
@@ -987,6 +980,20 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             events.append(_update_sync("session_attribution_revision", frozen_old, now))
         plans.append(_insert_plan(context.catalog, "session_attribution_revision", new_row))
         events.append(_create_sync("session_attribution_revision", new_row, now))
+
+        # P1-1: Recalculate effort for both old and new targets.
+        # The old target loses this session's contribution; the new target
+        # gains it.  Use attribution_overrides to provide the post-mutation
+        # state (old effective -> ineffective, new -> effective).
+        affected_ids = self._collect_affected_work_item_ids(context, session_id)
+        if affected_ids:
+            effort_plans, effort_events = self._recalc_effort_for_targets(
+                context, affected_ids, now,
+                attribution_overrides={session_id: new_row},
+            )
+            plans.extend(effort_plans)
+            events.extend(effort_events)
+
         return context.command(
             request=request,
             db_plans=tuple(plans),
@@ -2395,6 +2402,9 @@ def _to_camel_outcome(row: Mapping[str, object]) -> Mapping[str, object]:
         "touched": row.get("touched"),
         "result": row.get("result"),
         "persona": row.get("persona"),
+        "executionPersona": row.get("execution_persona"),
+        "personaSwitched": row.get("persona_switched"),
+        "personaNote": row.get("persona_note"),
         "stateCommand": row.get("state_command"),
         "commandId": row.get("command_id"),
         "reviewedAt": row.get("reviewed_at"),
@@ -2407,3 +2417,103 @@ def _integer_seconds_between(start_iso: str, end_iso: str) -> int:
     start = _parse_timestamp(start_iso)
     end = _parse_timestamp(end_iso)
     return int((end - start) // timedelta(seconds=1))
+
+
+# ---------------------------------------------------------------------------
+# EffortProjectionRepairPolicy: standalone maintenance policy for rebuild
+# ---------------------------------------------------------------------------
+
+async def _compile_rebuild_effort_impl(
+    context: MutationCompileContext, request: MutationRequest,
+) -> MutationCommand:
+    """Compile a work_item.rebuild_effort_projection maintenance command.
+
+    This function is shared by ``EffortProjectionRepairPolicy`` (standalone
+    rebuild via ``entity_type="work_item"``).  It is intentionally NOT
+    registered on ``FocusSessionMutationPolicy`` because the S3 framework
+    requires compiled db_plans to include the request entity; a standalone
+    rebuild only produces ``work_item`` plans, so the request must use
+    ``entity_type="work_item"`` to pass validation.
+    """
+    context.require_space(str(request.payload.get("space_id", "")))
+    target_wi_id = request.payload.get("work_item_id")
+
+    db_plans: list[DbMutationPlan] = []
+    sync_events: list[SyncEventPlan] = []
+    now = str(request.payload.get("requested_at", "2026-07-15T12:00:00Z"))
+    _require_canonical_timestamp(now)
+
+    if target_wi_id is not None:
+        target_ids = (str(target_wi_id),)
+    else:
+        target_ids = tuple(
+            str(row.get("id")) for row in context.authority.rows("work_item")
+        )
+
+    repaired = 0
+    for wi_id in target_ids:
+        work_item = context.authority.row("work_item", wi_id)
+        # P1-11: Fail closed on missing WorkItem instead of silently
+        # skipping.  Silent skips produce incorrect count statistics
+        # and hide data integrity problems.
+        if work_item is None:
+            raise _MutationRuleViolation(
+                "not_found", {"entityId": wi_id, "reason": "rebuild_target_missing"}
+            )
+        new_effort = EffortProjectionCompiler.compute_effort_for_work_item(
+            context.authority, wi_id
+        )
+        current_effort = int(work_item.get("effort_actual_seconds", 0))
+        if current_effort == new_effort:
+            continue
+        wi_after = dict(work_item)
+        wi_after["effort_actual_seconds"] = new_effort
+        wi_after["updated_at"] = now
+        wi_after["version"] = int(work_item.get("version", 1)) + 1
+        frozen_wi_after = require_frozen_object(wi_after)
+        db_plans.append(_update_plan(context.catalog, "work_item", work_item, frozen_wi_after))
+        sync_events.append(_update_sync("work_item", frozen_wi_after, now))
+        repaired += 1
+
+    # P1-9: No fake folder, no folder Sync event, no INDEX_REPLACE
+    # projection, no no-op FocusSession update.  The rebuild command
+    # only produces real WorkItem post-image updates.
+    return context.command(
+        request=request,
+        db_plans=tuple(db_plans),
+        sync_events=tuple(sync_events),
+        value=require_frozen_object({
+            "rebuilt": True,
+            "count": repaired,
+            "mismatches_repaired": repaired,
+        }),
+    )
+
+
+class EffortProjectionRepairPolicy(MutationDomainPolicy):
+    """Maintenance policy for standalone effort projection rebuild.
+
+    Registered for ``work_item`` entity type so that rebuild requests with
+    ``entity_type="work_item"`` pass S3 validation (the request entity
+    matches the produced db_plan entities).  Only the
+    ``work_item.rebuild_effort_projection`` command is accepted; all other
+    work_item requests are rejected to avoid shadowing domain policies.
+
+    This policy does NOT expand the TS0 ``FocusSessionModule`` Protocol.
+    Rebuild is an internal maintenance operation invoked via
+    ``MutationUnitOfWork.execute`` with a server-authored operation ID.
+    """
+
+    entity_types = frozenset({"work_item"})
+
+    async def compile(
+        self,
+        context: MutationCompileContext,
+        request: MutationRequest,
+    ) -> MutationCommand:
+        if request.name == "work_item.rebuild_effort_projection":
+            return await _compile_rebuild_effort_impl(context, request)
+        raise _MutationRuleViolation(
+            "work_item_structure_changed",
+            {"entityType": request.entity_type, "action": request.name},
+        )

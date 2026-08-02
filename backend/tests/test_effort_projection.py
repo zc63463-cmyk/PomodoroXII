@@ -32,9 +32,9 @@ from app.focus_session.contracts import FocusSessionCommand
 # until the module is implemented.  That is the expected RED signal.
 from app.focus_session.effort_projection import EffortProjectionCompiler
 from app.focus_session.module import DefaultFocusSessionModule
-from app.focus_session.policy import FocusSessionMutationPolicy
+from app.focus_session.policy import EffortProjectionRepairPolicy, FocusSessionMutationPolicy
 from app.focus_session.query import FocusSessionQuery
-from app.mutation.types import canonical_payload_hash
+from app.mutation.types import MutationRequest, MutationRuleViolation, canonical_payload_hash
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -57,7 +57,8 @@ def focus_fixture(mutation_fixture_factory):
         }
 
     policy = FocusSessionMutationPolicy(locator_reader=locator_reader)
-    mutation = mutation_fixture_factory(policies=(policy,))
+    repair_policy = EffortProjectionRepairPolicy()
+    mutation = mutation_fixture_factory(policies=(policy, repair_policy))
     module = DefaultFocusSessionModule(
         uow=mutation.uow,
         query=FocusSessionQuery(),
@@ -271,34 +272,6 @@ async def _insert_session_with_context(
 # Rebuild command builder and executor
 # ---------------------------------------------------------------------------
 
-def _rebuild_command(
-    *,
-    work_item_id: str | None = None,
-    requested_at: str = "2026-07-15T12:00:00Z",
-    command_id: str | None = None,
-) -> FocusSessionCommand:
-    payload: dict[str, object] = {
-        "requested_at": requested_at,
-    }
-    if work_item_id is not None:
-        payload["work_item_id"] = work_item_id
-    if command_id is None:
-        command_id = (
-            f"rebuild-effort-{work_item_id}"
-            if work_item_id is not None
-            else "rebuild-effort-all"
-        )
-    business = focus_business_payload("rebuild_effort_projection", payload)
-    return FocusSessionCommand(
-        command_id=command_id,
-        space_id="space-test",
-        session_id=None,
-        ownership_epoch=None,
-        payload_hash=canonical_payload_hash(business),
-        payload=payload,
-    )
-
-
 async def _rebuild_effort(
     fixture,
     *,
@@ -306,14 +279,33 @@ async def _rebuild_effort(
     requested_at: str = "2026-07-15T12:00:00Z",
     command_id: str | None = None,
 ):
-    """Execute a rebuild_effort_projection command through the UoW."""
-    command = _rebuild_command(
-        work_item_id=work_item_id,
-        requested_at=requested_at,
-        command_id=command_id,
+    """Execute a rebuild_effort_projection command through the UoW.
+
+    The rebuild uses ``entity_type="work_item"`` and routes through
+    ``EffortProjectionRepairPolicy`` so that the S3 framework validation
+    (db_plans must include the request entity) passes naturally.
+    """
+    if command_id is None:
+        command_id = (
+            f"rebuild-effort-{work_item_id}"
+            if work_item_id is not None
+            else "rebuild-effort-all"
+        )
+    payload: dict[str, object] = {
+        "requested_at": requested_at,
+        "space_id": "space-test",
+    }
+    if work_item_id is not None:
+        payload["work_item_id"] = work_item_id
+    request = MutationRequest.from_payload(
+        name="work_item.rebuild_effort_projection",
+        entity_type="work_item",
+        entity_id=work_item_id or "all",
+        payload=payload,
+        expected_version=None,
+        client_updated_at=None,
     )
-    request = build_focus_request("rebuild_effort_projection", command)
-    return await fixture.uow.execute(fixture.scope, request, command.command_id)
+    return await fixture.uow.execute(fixture.scope, request, command_id)
 
 
 async def _get_effort_actual(fixture, work_item_id: str) -> int:
@@ -640,10 +632,10 @@ class TestReceiptsDoNotAffectProjection:
 # ---------------------------------------------------------------------------
 
 class TestRebuildEntersRealPolicy:
-    """Rebuild must route through FocusSessionMutationPolicy, not the generic compiler."""
+    """Rebuild must route through EffortProjectionRepairPolicy, not the generic compiler."""
 
     @pytest.mark.asyncio
-    async def test_rebuild_routes_through_focus_session_policy(
+    async def test_rebuild_routes_through_repair_policy(
         self, focus_fixture,
     ) -> None:
         await _seed_catalog(focus_fixture)
@@ -656,9 +648,9 @@ class TestRebuildEntersRealPolicy:
             ended_at="2026-07-15T08:25:00Z",
         )
 
-        # The rebuild request has entity_type="focus_session", which is owned
-        # by FocusSessionMutationPolicy.  If the policy handler is not invoked,
-        # the generic compiler would reject the unknown request name.
+        # The rebuild request has entity_type="work_item", which is owned
+        # by EffortProjectionRepairPolicy.  If the policy handler is not
+        # invoked, the generic compiler would reject the unknown request name.
         result = await _rebuild_effort(focus_fixture, work_item_id="l2-a")
         assert result is not None
         assert result.state in ("FINALIZED", "DB_COMMITTED", "FORWARD_APPLIED")
@@ -781,10 +773,10 @@ class TestRebuildProducesWorkItemEvent:
         events = await focus_fixture.mutation.visible_events(
             entity_type="workItem",
         )
-        assert len(events) >= 1
-        work_item_events = [e for e in events if e.entity_id == "l2-a"]
-        assert len(work_item_events) >= 1
-        event = work_item_events[-1]
+        assert len(events) == 1
+        event = events[0]
+        assert event.entity_type == "workItem"
+        assert event.entity_id == "l2-a"
         assert event.action == "update"
         # The payload should contain the updated effort_actual_seconds
         assert event.payload.get("effort_actual_seconds") == 1500
@@ -865,8 +857,8 @@ class TestEffortProjectionVerification:
             l2.effort_actual_seconds = 999
             await session.commit()
 
-        # verify_all should detect the stale projection
-        with pytest.raises((AssertionError, ValueError, RuntimeError)):
+        # verify_all should detect the stale projection (fail-closed)
+        with pytest.raises(MutationRuleViolation):
             await EffortProjectionCompiler.verify_all(focus_fixture.scope)
 
 
@@ -901,7 +893,7 @@ class TestFaultInjectionConverges:
         focus_fixture.mutation.inject_fault("projection_forward")
 
         # Attempt rebuild -- should fail during projection
-        with pytest.raises(Exception):
+        with pytest.raises(MutationRejectedError):
             await _rebuild_effort(
                 focus_fixture, work_item_id="l2-a",
                 command_id="rebuild-effort-l2-a-fault",
@@ -938,7 +930,7 @@ class TestFaultInjectionConverges:
 
         # Inject fault, attempt rebuild, recover
         focus_fixture.mutation.inject_fault("projection_forward")
-        with pytest.raises(Exception):
+        with pytest.raises(MutationRejectedError):
             await _rebuild_effort(
                 focus_fixture, work_item_id="l2-a",
                 command_id="rebuild-effort-l2-a-fault",
@@ -951,3 +943,341 @@ class TestFaultInjectionConverges:
             command_id="rebuild-effort-l2-a-retry",
         )
         assert await _get_effort_actual(focus_fixture, "l2-a") == 1500
+
+
+# ---------------------------------------------------------------------------
+# Helper: Build AuthorityOverlay from current DB state
+# ---------------------------------------------------------------------------
+
+async def _build_authority(fixture):
+    """Build an AuthorityOverlay from the current committed DB state.
+
+    The overlay is detached from the session because
+    ``from_locked_authorities`` eagerly loads every row into memory.
+    """
+    from app.mutation.unit_of_work import AuthorityOverlay
+
+    async with fixture.scope.session_factory() as session:
+        return await AuthorityOverlay.from_locked_authorities(
+            fixture.scope, session, fixture.mutation.catalog,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: Multiple effective attribution fails closed
+# ---------------------------------------------------------------------------
+
+class TestMultipleEffectiveAttributionFailClosed:
+    """A session with multiple effective attributions must fail closed."""
+
+    @pytest.mark.asyncio
+    async def test_multiple_effective_attribution_raises_violation(
+        self, focus_fixture,
+    ) -> None:
+        from sqlalchemy import text
+
+        from app.models.session_revision import SessionAttributionRevision
+
+        await _seed_catalog(focus_fixture)
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-1",
+            level2_work_item_id="l2-a",
+            focused_seconds=1500,
+            validity="valid",
+            ended_at="2026-07-15T08:25:00Z",
+        )
+
+        # The DB partial unique index (uq_session_attribution_effective)
+        # normally prevents two effective revisions for one session.  Drop
+        # it temporarily so we can inject the corrupt state that the
+        # computation layer must still detect and reject.
+        async with focus_fixture.scope.session_factory() as session:
+            await session.execute(
+                text("DROP INDEX IF EXISTS uq_session_attribution_effective")
+            )
+            session.add(SessionAttributionRevision(
+                id="attr-fs-1-dup",
+                session_id="fs-1",
+                revision=2,
+                project_id="proj-1",
+                level2_work_item_id="l2-a",
+                reason=None,
+                corrected_from_revision=None,
+                effective=True,
+                version=1,
+                created_at="2026-07-15T08:00:00Z",
+                updated_at="2026-07-15T08:00:00Z",
+            ))
+            await session.commit()
+
+        authority = await _build_authority(focus_fixture)
+
+        with pytest.raises(MutationRuleViolation) as exc_info:
+            EffortProjectionCompiler.compute_effort_for_work_item(
+                authority, "l2-a",
+            )
+        assert exc_info.value.details["reason"] == "multiple_effective_attribution"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Attribution target validation fails closed
+# ---------------------------------------------------------------------------
+
+class TestAttributionTargetValidationFailClosed:
+    """Missing, cross-Project, and non-level-2 attribution targets fail closed."""
+
+    @pytest.mark.asyncio
+    async def test_missing_target_raises_violation(self, focus_fixture) -> None:
+        await _seed_catalog(focus_fixture)
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-1",
+            level2_work_item_id="nonexistent-wi",
+            focused_seconds=1500,
+            validity="valid",
+            ended_at="2026-07-15T08:25:00Z",
+        )
+
+        authority = await _build_authority(focus_fixture)
+
+        with pytest.raises(MutationRuleViolation) as exc_info:
+            EffortProjectionCompiler.compute_effort_for_work_item(
+                authority, "nonexistent-wi",
+            )
+        assert exc_info.value.details["reason"] == "attribution_target_missing"
+
+    @pytest.mark.asyncio
+    async def test_non_level2_target_raises_violation(
+        self, focus_fixture,
+    ) -> None:
+        await _seed_catalog(focus_fixture)
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-1",
+            level2_work_item_id="l3-a",
+            focused_seconds=1500,
+            validity="valid",
+            ended_at="2026-07-15T08:25:00Z",
+        )
+
+        authority = await _build_authority(focus_fixture)
+
+        with pytest.raises(MutationRuleViolation) as exc_info:
+            EffortProjectionCompiler.compute_effort_for_work_item(
+                authority, "l3-a",
+            )
+        assert exc_info.value.details["reason"] == "attribution_target_not_level2"
+
+    @pytest.mark.asyncio
+    async def test_cross_project_target_raises_violation(
+        self, focus_fixture,
+    ) -> None:
+        from app.models.project import Project
+        from app.models.work_item import WorkItem
+
+        await _seed_catalog(focus_fixture)
+
+        # Seed a second project with a level-2 WorkItem.
+        async with focus_fixture.scope.session_factory() as session:
+            session.add(Project(
+                id="proj-2",
+                key="TEST2",
+                name="Test Project 2",
+                default_status_definition_id="status-todo",
+                default_type_definition_id="type-task",
+            ))
+            session.add(WorkItem(
+                id="l2-cross",
+                project_id="proj-2",
+                display_key="TEST2-l2-cross",
+                title="Cross Project L2",
+                type_definition_id="type-task",
+                status_definition_id="status-todo",
+                parent_id=None,
+                version=1,
+            ))
+            await session.commit()
+
+        # Attribution points to l2-cross (proj-2) but carries project_id=proj-1.
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-1",
+            level2_work_item_id="l2-cross",
+            project_id="proj-1",
+            focused_seconds=1500,
+            validity="valid",
+            ended_at="2026-07-15T08:25:00Z",
+        )
+
+        authority = await _build_authority(focus_fixture)
+
+        with pytest.raises(MutationRuleViolation) as exc_info:
+            EffortProjectionCompiler.compute_effort_for_work_item(
+                authority, "l2-cross",
+            )
+        assert exc_info.value.details["reason"] == "attribution_target_cross_project"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Focused seconds validation fails closed
+# ---------------------------------------------------------------------------
+
+class TestFocusedSecondsValidationFailClosed:
+    """Negative, non-integer, and unsafe-integer focused_seconds fail closed."""
+
+    @pytest.mark.asyncio
+    async def test_negative_focused_seconds_raises_violation(
+        self, focus_fixture,
+    ) -> None:
+        await _seed_catalog(focus_fixture)
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-1",
+            level2_work_item_id="l2-a",
+            focused_seconds=1500,
+            validity="valid",
+            ended_at="2026-07-15T08:25:00Z",
+        )
+
+        authority = await _build_authority(focus_fixture)
+
+        # Mutate the in-memory session row to simulate a negative
+        # focused_seconds value that bypassed DB check constraints.
+        original = dict(authority._rows[("focus_session", "fs-1")])
+        original["focused_seconds"] = -100
+        authority._rows[("focus_session", "fs-1")] = original
+
+        with pytest.raises(MutationRuleViolation) as exc_info:
+            EffortProjectionCompiler.compute_effort_for_work_item(
+                authority, "l2-a",
+            )
+        assert exc_info.value.details["reason"] == "invalid_focused_seconds"
+
+    @pytest.mark.asyncio
+    async def test_non_integer_focused_seconds_raises_violation(
+        self, focus_fixture,
+    ) -> None:
+        await _seed_catalog(focus_fixture)
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-1",
+            level2_work_item_id="l2-a",
+            focused_seconds=1500,
+            validity="valid",
+            ended_at="2026-07-15T08:25:00Z",
+        )
+
+        authority = await _build_authority(focus_fixture)
+
+        # Mutate the in-memory session row to simulate a non-integer
+        # focused_seconds value (string instead of int).
+        original = dict(authority._rows[("focus_session", "fs-1")])
+        original["focused_seconds"] = "1500"
+        authority._rows[("focus_session", "fs-1")] = original
+
+        with pytest.raises(MutationRuleViolation) as exc_info:
+            EffortProjectionCompiler.compute_effort_for_work_item(
+                authority, "l2-a",
+            )
+        assert exc_info.value.details["reason"] == "invalid_focused_seconds"
+
+    @pytest.mark.asyncio
+    async def test_unsafe_integer_total_raises_violation(
+        self, focus_fixture,
+    ) -> None:
+        await _seed_catalog(focus_fixture)
+
+        # Two sessions with very large focused_seconds that together
+        # exceed the safe integer max (2^53 - 1 = 9007199254740991).
+        large_value = 5_000_000_000_000_000
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-1",
+            level2_work_item_id="l2-a",
+            focused_seconds=large_value,
+            validity="valid",
+            ended_at="2026-07-15T08:25:00Z",
+        )
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-2",
+            level2_work_item_id="l2-a",
+            started_at="2026-07-15T09:00:00Z",
+            ended_at="2026-07-15T09:25:00Z",
+            focused_seconds=large_value,
+            validity="valid",
+        )
+
+        authority = await _build_authority(focus_fixture)
+
+        with pytest.raises(MutationRuleViolation) as exc_info:
+            EffortProjectionCompiler.compute_effort_for_work_item(
+                authority, "l2-a",
+            )
+        assert exc_info.value.details["reason"] == "effort_total_unsafe_integer"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Rebuild produces no fake folder or no-op FocusSession events
+# ---------------------------------------------------------------------------
+
+class TestRebuildNoFakeFolderOrNoopSession:
+    """Rebuild must only emit WorkItem sync events, never folder or focusSession."""
+
+    @pytest.mark.asyncio
+    async def test_rebuild_emits_no_folder_or_session_events(
+        self, focus_fixture,
+    ) -> None:
+        await _seed_catalog(focus_fixture)
+        await _insert_session(
+            focus_fixture,
+            session_id="fs-1",
+            level2_work_item_id="l2-a",
+            focused_seconds=1500,
+            validity="valid",
+            ended_at="2026-07-15T08:25:00Z",
+        )
+
+        await _rebuild_effort(focus_fixture, work_item_id="l2-a")
+
+        # No folder sync events should be produced.
+        folder_events = await focus_fixture.mutation.visible_events(
+            entity_type="folder",
+        )
+        assert len(folder_events) == 0
+
+        # No focusSession sync events (no no-op session update).
+        session_events = await focus_fixture.mutation.visible_events(
+            entity_type="focusSession",
+        )
+        assert len(session_events) == 0
+
+        # Only workItem sync events should be produced.
+        work_item_events = await focus_fixture.mutation.visible_events(
+            entity_type="workItem",
+        )
+        assert len(work_item_events) == 1
+        assert work_item_events[0].entity_id == "l2-a"
+        assert work_item_events[0].action == "update"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Rebuild for non-existent WorkItem fails closed
+# ---------------------------------------------------------------------------
+
+class TestRebuildMissingWorkItemRejected:
+    """Rebuild for a non-existent WorkItem must fail closed."""
+
+    @pytest.mark.asyncio
+    async def test_rebuild_nonexistent_work_item_rejected(
+        self, focus_fixture,
+    ) -> None:
+        await _seed_catalog(focus_fixture)
+
+        with pytest.raises(MutationRejectedError) as captured:
+            await _rebuild_effort(
+                focus_fixture, work_item_id="nonexistent-wi",
+            )
+        assert captured.value.rejection.code == "not_found"
+        assert captured.value.rejection.details["reason"] == "rebuild_target_missing"
