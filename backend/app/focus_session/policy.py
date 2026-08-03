@@ -400,6 +400,14 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             project_id = str(l2.get("project_id", project_id))
         if not project_id:
             project_id = str(request.payload.get("project_id", ""))
+        level3_rows = tuple(
+            context.authority.row("work_item", str(l3_id))
+            for l3_id in l3_ids
+        )
+        structure_snapshot = _work_item_structure_snapshot(
+            l2,
+            level3_rows,
+        )
         session_row = _focus_session_row(
             id=session_id,
             session_revision=1,
@@ -439,7 +447,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             status_snapshot=(
                 l2.get("status_definition_id") if l2 is not None else None
             ),
-            structure_snapshot="{}",
+            structure_snapshot=structure_snapshot,
             linked_at=started_at,
             link_method="manual",
             version=1,
@@ -465,9 +473,9 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 session_id=session_id,
                 work_item_id=str(l3_id),
                 title_snapshot=str(
-                    (
-                        context.authority.row("work_item", str(l3_id)) or {}
-                    ).get("title", request.payload.get("level3_title_snapshot", ""))
+                    (level3_rows[index] or {}).get(
+                        "title", request.payload.get("level3_title_snapshot", "")
+                    )
                 ),
                 level2_snapshot=context_l2_id,
                 plan_rank=index,
@@ -683,6 +691,39 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                         "field": "effort_estimate_upper_seconds",
                     },
                 )
+        frozen_structure = _parse_work_item_structure_snapshot(
+            context_row.get("structure_snapshot")
+        )
+        if frozen_structure is not None:
+            frozen_level2 = frozen_structure.get("level2")
+            if not isinstance(frozen_level2, Mapping):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {"reason": "invalid_frozen_work_item_snapshot"},
+                )
+            if str(frozen_level2.get("id")) != level2_id:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {
+                        "reason": "session_context_snapshot_changed",
+                        "entityId": level2_id,
+                        "field": "id",
+                    },
+                )
+            _validate_frozen_work_item(
+                level2,
+                frozen_level2,
+                reason="session_context_snapshot_changed",
+                allow_effort_projection=True,
+            )
+            frozen_plan = frozen_structure.get("plan")
+            if not isinstance(frozen_plan, Mapping):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {"reason": "invalid_frozen_work_item_snapshot"},
+                )
+        else:
+            frozen_plan = {}
         for plan in plan_rows:
             if plan.get("removed_at") is not None:
                 continue
@@ -690,6 +731,42 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             current = context.authority.row("work_item", work_item_id)
             if current is None:
                 raise _MutationRuleViolation("not_found", {"entityId": work_item_id})
+            if (
+                str(plan.get("source")) == "before_start"
+                and work_item_id not in frozen_plan
+            ):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {
+                        "reason": "missing_frozen_work_item_snapshot",
+                        "entityId": work_item_id,
+                    },
+                )
+            frozen_item = (
+                frozen_plan.get(work_item_id)
+                if isinstance(frozen_plan, Mapping)
+                else None
+            )
+            if frozen_item is not None:
+                if not isinstance(frozen_item, Mapping):
+                    raise _MutationRuleViolation(
+                        "work_item_structure_changed",
+                        {"reason": "invalid_frozen_work_item_snapshot", "entityId": work_item_id},
+                    )
+                if str(frozen_item.get("id")) != work_item_id:
+                    raise _MutationRuleViolation(
+                        "work_item_structure_changed",
+                        {
+                            "reason": "session_plan_snapshot_changed",
+                            "entityId": work_item_id,
+                            "field": "id",
+                        },
+                    )
+                _validate_frozen_work_item(
+                    current,
+                    frozen_item,
+                    reason="session_plan_snapshot_changed",
+                )
             if (
                 str(plan.get("level2_snapshot")) != level2_id
                 or str(current.get("project_id")) != str(context_row.get("project_id"))
@@ -1098,6 +1175,17 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         target_work_item = context.authority.row("work_item", level2_id)
         if target_work_item is None:
             raise _MutationRuleViolation("not_found", {"entityId": level2_id})
+        if (
+            effective is not None
+            and str(effective.get("level2_work_item_id")) == level2_id
+        ):
+            raise _MutationRuleViolation(
+                "version_conflict",
+                {
+                    "sessionId": session_id,
+                    "reason": "attribution_target_unchanged",
+                },
+            )
         now = str(request.payload.get("occurred_at", session.get("updated_at", "")))
         _require_canonical_timestamp(now)
         _require_non_regressing_timestamp(session, now)
@@ -1520,6 +1608,19 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             converted_plans.append(converted)
         if current_count > 1:
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan_current"})
+        # Offline imports must freeze the same authoritative WorkItem identity
+        # facts as online starts.  Review uses this persisted snapshot to
+        # distinguish an effort-projection version bump from unrelated edits.
+        context_row = require_frozen_object({
+            **dict(context_row),
+            "structure_snapshot": _work_item_structure_snapshot(
+                l2,
+                tuple(
+                    context.authority.row("work_item", str(item["work_item_id"]))
+                    for item in converted_plans
+                ),
+            ),
+        })
         attribution = _attribution_row(
             id=f"attr-{request.entity_id}-1",
             session_id=request.entity_id,
@@ -2377,6 +2478,110 @@ def _context_row(
     })
 
 
+_WORK_ITEM_FROZEN_FIELDS = (
+    "id", "created_at", "project_id", "display_key", "title", "description",
+    "type_definition_id", "status_definition_id", "priority", "parent_id",
+    "child_rank", "completion_window_start", "completion_window_end",
+    "review_point", "hard_deadline", "effort_estimate_lower_seconds",
+    "effort_estimate_upper_seconds", "effort_actual_seconds", "confidence",
+    "completed_at", "cancelled_at", "archived_at", "marked_as_attention",
+    "version",
+)
+
+
+def _work_item_identity_snapshot(row: Mapping[str, object]) -> Mapping[str, object]:
+    return {
+        field: (str(row.get(field)) if field == "id" else row.get(field))
+        for field in _WORK_ITEM_FROZEN_FIELDS
+    }
+
+
+def _work_item_structure_snapshot(
+    level2: Mapping[str, object] | None,
+    level3_rows: tuple[Mapping[str, object] | None, ...],
+) -> str:
+    if level2 is None:
+        return "{}"
+    plan = {
+        str(row["id"]): _work_item_identity_snapshot(row)
+        for row in level3_rows
+        if row is not None and row.get("id")
+    }
+    return json.dumps(
+        {
+            "level2": _work_item_identity_snapshot(level2),
+            "plan": plan,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _parse_work_item_structure_snapshot(
+    raw: object,
+) -> Mapping[str, object] | None:
+    if raw in (None, "", "{}"):
+        return None
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise _MutationRuleViolation(
+            "work_item_structure_changed",
+            {"reason": "invalid_frozen_work_item_snapshot"},
+        ) from exc
+    if not isinstance(parsed, Mapping):
+        raise _MutationRuleViolation(
+            "work_item_structure_changed",
+            {"reason": "invalid_frozen_work_item_snapshot"},
+        )
+    return parsed
+
+
+def _validate_frozen_work_item(
+    current: Mapping[str, object],
+    frozen: Mapping[str, object],
+    *,
+    reason: str,
+    allow_effort_projection: bool = False,
+) -> None:
+    for field in _WORK_ITEM_FROZEN_FIELDS:
+        if field in {"id", "version", "effort_actual_seconds"}:
+            continue
+        if field not in frozen:
+            raise _MutationRuleViolation(
+                "work_item_structure_changed",
+                {
+                    "reason": "invalid_frozen_work_item_snapshot",
+                    "entityId": current.get("id"),
+                    "field": field,
+                },
+            )
+        if current.get(field) != frozen.get(field):
+            raise _MutationRuleViolation(
+                "work_item_structure_changed",
+                {
+                    "reason": reason,
+                    "entityId": current.get("id"),
+                    "field": field,
+                },
+            )
+    if current.get("version") != frozen.get("version"):
+        if not (
+            allow_effort_projection
+            and current.get("effort_actual_seconds")
+            != frozen.get("effort_actual_seconds")
+        ):
+            raise _MutationRuleViolation(
+                "work_item_structure_changed",
+                {
+                    "reason": reason,
+                    "entityId": current.get("id"),
+                    "field": "version",
+                },
+            )
+
+
 def _attribution_row(
     *, id: str, session_id: str, revision: int, project_id: str,
     level2_work_item_id: str, reason: str | None,
@@ -2607,10 +2812,6 @@ def _integer_seconds_between(start_iso: str, end_iso: str) -> int:
     return int((end - start) // timedelta(seconds=1))
 
 
-# ---------------------------------------------------------------------------
-# EffortProjectionRepairPolicy: standalone maintenance policy for rebuild
-# ---------------------------------------------------------------------------
-
 async def _compile_rebuild_effort_impl(
     context: MutationCompileContext, request: MutationRequest,
 ) -> MutationCommand:
@@ -2672,32 +2873,3 @@ async def _compile_rebuild_effort_impl(
             "mismatches_repaired": repaired,
         }),
     )
-
-
-class EffortProjectionRepairPolicy(MutationDomainPolicy):
-    """Maintenance policy for standalone effort projection rebuild.
-
-    Registered for ``work_item`` entity type so that rebuild requests with
-    ``entity_type="work_item"`` pass S3 validation (the request entity
-    matches the produced db_plan entities).  Only the
-    ``work_item.rebuild_effort_projection`` command is accepted; all other
-    work_item requests are rejected to avoid shadowing domain policies.
-
-    This policy does NOT expand the TS0 ``FocusSessionModule`` Protocol.
-    Rebuild is an internal maintenance operation invoked via
-    ``MutationUnitOfWork.execute`` with a server-authored operation ID.
-    """
-
-    entity_types = frozenset({"work_item"})
-
-    async def compile(
-        self,
-        context: MutationCompileContext,
-        request: MutationRequest,
-    ) -> MutationCommand:
-        if request.name == "work_item.rebuild_effort_projection":
-            return await _compile_rebuild_effort_impl(context, request)
-        raise _MutationRuleViolation(
-            "work_item_structure_changed",
-            {"entityType": request.entity_type, "action": request.name},
-        )

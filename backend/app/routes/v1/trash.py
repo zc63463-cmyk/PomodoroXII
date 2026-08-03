@@ -287,6 +287,10 @@ async def purge_item(
         obj = await db.get(Folder, entity_id)
         if obj is None:
             raise NotFoundError(f"folder '{entity_id}' not found")
+        if obj.trashed_at is None:
+            raise ValidationError(
+                f"folder '{entity_id}' is not trashed; refuse to purge"
+            )
         await store.purge_folder(
             scope, entity_id,
             expected_version_from_request(request, obj.version),

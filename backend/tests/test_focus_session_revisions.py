@@ -457,6 +457,145 @@ class TestAttributionCorrectionAppendOnly:
         assert [row.effective for row in revisions] == [False, False, True]
         assert revisions[-1].level2_work_item_id == "l2-c"
 
+    @pytest.mark.asyncio
+    async def test_duplicate_attribution_target_is_rejected_explicitly(
+        self, focus_fixture,
+    ) -> None:
+        """A correction to the already-effective target is a deterministic no-op."""
+        await _seed_catalog(focus_fixture, extra_l2_ids=("l2-b",))
+        await _start_session(focus_fixture, level2_id="l2-a")
+        await _end_session(focus_fixture, expected_version=1)
+        await _correct_attribution(
+            focus_fixture,
+            level2_work_item_id="l2-b",
+            occurred_at="2026-07-15T09:00:00Z",
+            command_id="correct-attr-1",
+        )
+
+        with pytest.raises(MutationRejectedError) as captured:
+            await _correct_attribution(
+                focus_fixture,
+                level2_work_item_id="l2-b",
+                occurred_at="2026-07-15T09:05:00Z",
+                command_id="correct-attr-2",
+            )
+
+        assert captured.value.rejection.code == "version_conflict"
+        assert (
+            captured.value.rejection.details.get("reason")
+            == "attribution_target_unchanged"
+        )
+
+    @pytest.mark.asyncio
+    async def test_direct_valid_end_recomputes_level2_effort(
+        self, focus_fixture,
+    ) -> None:
+        """A valid terminal end updates the materialized L2 effort immediately."""
+        from app.models.work_item import WorkItem
+
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture, level2_id="l2-a")
+        await _end_session(focus_fixture, expected_version=1, validity="valid")
+
+        async with focus_fixture.scope.session_factory() as session:
+            work_item = await session.get(WorkItem, "l2-a")
+
+        assert work_item is not None
+        assert work_item.effort_actual_seconds == 1500
+
+    @pytest.mark.asyncio
+    async def test_review_rejects_frozen_level3_status_or_version_drift(
+        self, focus_fixture,
+    ) -> None:
+        """Review must reject a plan item whose frozen identity changed."""
+        from app.models.work_item import WorkItem
+
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture)
+        await _end_session(focus_fixture, expected_version=1)
+
+        async with focus_fixture.scope.session_factory() as session:
+            work_item = await session.get(WorkItem, "l3-a")
+            assert work_item is not None
+            work_item.status_definition_id = "status-in-progress"
+            work_item.version = 2
+            await session.commit()
+
+        with pytest.raises(MutationRejectedError) as captured:
+            await _submit_review(
+                focus_fixture,
+                expected_version=2,
+                reviewed_at="2026-07-15T08:30:00Z",
+                command_id="review-frozen-drift",
+            )
+
+        assert captured.value.rejection.code == "work_item_structure_changed"
+
+    @pytest.mark.asyncio
+    async def test_review_rejects_non_effort_work_item_change_after_projection(
+        self, focus_fixture,
+    ) -> None:
+        """Effort projection version bumps must not mask other WorkItem edits."""
+        from app.models.work_item import WorkItem
+
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture)
+        await _end_session(focus_fixture, expected_version=1, validity="valid")
+
+        async with focus_fixture.scope.session_factory() as session:
+            work_item = await session.get(WorkItem, "l2-a")
+            assert work_item is not None
+            work_item.priority = "high"
+            work_item.version += 1
+            await session.commit()
+
+        with pytest.raises(MutationRejectedError) as captured:
+            await _submit_review(
+                focus_fixture,
+                expected_version=2,
+                reviewed_at="2026-07-15T08:30:00Z",
+                command_id="review-non-effort-drift",
+            )
+
+        assert captured.value.rejection.code == "work_item_structure_changed"
+
+    @pytest.mark.asyncio
+    async def test_review_rejects_missing_frozen_initial_plan_identity(
+        self, focus_fixture,
+    ) -> None:
+        """Initial plan items must remain present in the persisted structure snapshot."""
+        import json
+
+        from app.models.focus_session import SessionTaskContext
+
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture)
+        await _end_session(focus_fixture, expected_version=1)
+
+        async with focus_fixture.scope.session_factory() as session:
+            context = await session.get(SessionTaskContext, "ctx-fs-1")
+            assert context is not None
+            frozen = json.loads(context.structure_snapshot)
+            frozen["plan"] = {}
+            context.structure_snapshot = json.dumps(
+                frozen, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            )
+            await session.commit()
+
+        with pytest.raises(MutationRejectedError) as captured:
+            await _submit_review(
+                focus_fixture,
+                expected_version=2,
+                reviewed_at="2026-07-15T08:30:00Z",
+                command_id="review-missing-frozen-plan",
+            )
+
+        assert captured.value.rejection.code == "work_item_structure_changed"
+        assert (
+            captured.value.rejection.details.get("reason")
+            == "missing_frozen_work_item_snapshot"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: Review commits before dispatch
