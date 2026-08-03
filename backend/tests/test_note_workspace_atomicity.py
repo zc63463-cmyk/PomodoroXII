@@ -292,6 +292,7 @@ async def test_note_metadata_update_compiles_rename_frontmatter_index_and_fts(
     from app.commands import EntityCommand, FolderDomainPolicy
     from app.knowledge.commands import KnowledgeCommands
     from app.knowledge.projections import KnowledgeDomainPolicy
+    from app.mutation.unit_of_work import _validate_compiled_command
 
     commands = KnowledgeCommands()
     folder = EntityCommand(CATALOG).create(
@@ -350,6 +351,65 @@ async def test_note_metadata_update_compiles_rename_frontmatter_index_and_fts(
     assert b"title: New" in markdown
     assert b"folder_id: f2" in markdown
     assert b"tags: [tag]" in markdown
+    _validate_compiled_command(update_command.persisted(), CATALOG)
+
+
+def test_filesystem_projection_executor_has_no_second_note_version_writer() -> None:
+    """Note version backups must be explicit persisted projections only."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "file_system"
+        / "engine"
+        / "base.py"
+    ).read_text(encoding="utf-8")
+    assert "_record_projection_note_version" not in source
+    assert "record_projection_versions" not in source
+
+
+@pytest.mark.asyncio
+async def test_persisted_folder_cascade_binds_each_note_projection(
+    knowledge_fixture,
+) -> None:
+    """Persisted recovery binds path projections per Note, not by global tag."""
+    from app.mutation.unit_of_work import _validate_compiled_command
+
+    kf = knowledge_fixture
+    await kf.store.create_folder(
+        kf.scope,
+        {"id": "f-multi-note", "name": "Multi Note"},
+        expected_version=None,
+        operation_id="create-multi-note-folder",
+    )
+    for note_id in ("n-multi-a", "n-multi-b"):
+        await kf.store.create_note(
+            kf.scope,
+            {
+                "id": note_id,
+                "title": note_id,
+                "folder_id": "f-multi-note",
+                "content": f"body-{note_id}",
+            },
+            expected_version=None,
+            operation_id=f"create-{note_id}",
+        )
+
+    request = kf.store.entity_commands.delete(
+        kf.scope, "folder", "f-multi-note", expected_version=1
+    )
+    item = mutation_types.PreparedBatchItem(
+        0, "compile-multi-note-cascade", request.request_hash, request, None
+    )
+    async with kf.sessions() as session:
+        compilation = await kf.store.uow.compiler.compile_batch(
+            kf.scope, (item,), session
+        )
+
+    assert compilation.rejected == ()
+    assert len(compilation.commands) == 1
+    _validate_compiled_command(compilation.commands[0].persisted(), CATALOG)
 
 
 @pytest.mark.asyncio

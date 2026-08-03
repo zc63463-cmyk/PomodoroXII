@@ -12,7 +12,6 @@ import json
 import os
 import sqlite3
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from threading import RLock
@@ -25,7 +24,6 @@ from sqlalchemy import Boolean, create_engine
 from sqlalchemy.schema import CreateTable
 
 from app.errors import SpaceRecoveryRequiredError
-from app.file_system.frontmatter import extract_frontmatter
 from app.file_system.interfaces import (
     FencedProjectionExecutor,
     NoteLevel,
@@ -49,10 +47,6 @@ from app.mutation.types import (
 from app.runtime.contained_io import BoundDirectoryHandle
 from app.runtime.sqlite_vfs import BoundSQLiteTarget, MaintenanceOptions
 
-_record_projection_versions: ContextVar[bool] = ContextVar(
-    "record_projection_versions", default=False
-)
-
 
 class FileSystemProjectionExecutor(FencedProjectionExecutor):
     """Execute only verified, contained actions from the active stage authority."""
@@ -74,11 +68,7 @@ class FileSystemProjectionExecutor(FencedProjectionExecutor):
             ),
             receipt=receipt,
         )
-        token = _record_projection_versions.set(True)
-        try:
-            await self._execute_actions(scope, actions, receipt)
-        finally:
-            _record_projection_versions.reset(token)
+        await self._execute_actions(scope, actions, receipt)
 
     async def restore_before(
         self, scope, operation_id, command, receipt, *, ordinals=None
@@ -97,11 +87,7 @@ class FileSystemProjectionExecutor(FencedProjectionExecutor):
             ),
             receipt=receipt,
         )
-        token = _record_projection_versions.set(False)
-        try:
-            await self._execute_actions(scope, actions, receipt)
-        finally:
-            _record_projection_versions.reset(token)
+        await self._execute_actions(scope, actions, receipt)
 
     async def _execute_actions(
         self, scope, actions: Sequence[MaterializedProjectionAction], receipt
@@ -609,64 +595,8 @@ class StorageBase:
             content = action.blob.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("markdown projection must be UTF-8") from exc
-        if _record_projection_versions.get():
-            self._record_projection_note_version(str(action.target), content, receipt)
         receipt.assert_current()
         self._atomic_write(str(action.target), content)
-
-    def _record_projection_note_version(
-        self, target: str, new_markdown: str, receipt
-    ) -> None:
-        """Persist the old Markdown image before a durable projection overwrite.
-
-        The mutation projection already owns the fence and the authoritative
-        before image.  Recording the backup here keeps the filesystem index,
-        backup body, and visible mutation under the same forward projection;
-        restore-before paths disable this hook through the context variable.
-        """
-        if not target.startswith("notes/") or not self._file_exists(target):
-            return
-        old_markdown = self._read_text(target)
-        old_meta, old_body = extract_frontmatter(old_markdown)
-        new_meta, new_body = extract_frontmatter(new_markdown)
-        old_hash = hashlib.sha256(old_body.encode("utf-8")).hexdigest()
-        new_hash = hashlib.sha256(new_body.encode("utf-8")).hexdigest()
-        if old_hash == new_hash:
-            return
-
-        note_id = None if old_meta is None else old_meta.get("id")
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT note_id FROM notes WHERE current_path = ?",
-                (target,),
-            ).fetchone()
-            if row is not None:
-                note_id = row[0]
-            if not isinstance(note_id, str) or not note_id:
-                return
-            updated_at = (
-                new_meta.get("updated_at")
-                if isinstance(new_meta, dict)
-                else None
-            )
-            if not isinstance(updated_at, str) or not updated_at:
-                updated_at = _utc_now_iso()
-            version_id = "v_" + hashlib.sha256(
-                f"{note_id}\0{old_hash}\0{new_hash}\0{updated_at}".encode("utf-8")
-            ).hexdigest()[:12]
-            backup_path = f".meta/version_backups/{version_id}.md"
-            if not self._file_exists(backup_path):
-                receipt.assert_current()
-                self._atomic_write(backup_path, old_markdown)
-            receipt.assert_current()
-            connection.execute(
-                "INSERT OR IGNORE INTO note_versions "
-                "(version_id, note_id, content_hash, change_summary, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (version_id, note_id, old_hash, "edit", updated_at),
-            )
-            receipt.assert_current()
-            connection.commit()
 
     def _apply_projection_path_rename(
         self, action: MaterializedProjectionAction, receipt

@@ -84,7 +84,13 @@ async def test_purge_folder_cascades_to_descendants(client):
     assert resp.status_code == 201
     grandchild1_id = resp.json()["id"]
 
-    # Purge the root — should cascade to all descendants.
+    # Enter Trash first; purge is intentionally blocked for active Folders.
+    resp = await client.delete(
+        f"/api/v1/folders/{root_id}", headers=headers
+    )
+    assert resp.status_code == 200
+
+    # Purge the trashed root — should cascade to all descendants.
     resp = await client.delete(
         f"/api/v1/trash/folder/{root_id}", headers=headers
     )
@@ -118,6 +124,11 @@ async def test_purge_folder_with_no_descendants_succeeds(client):
     leaf_id = resp.json()["id"]
 
     resp = await client.delete(
+        f"/api/v1/folders/{leaf_id}", headers=headers
+    )
+    assert resp.status_code == 200
+
+    resp = await client.delete(
         f"/api/v1/trash/folder/{leaf_id}", headers=headers
     )
     assert resp.status_code == 200
@@ -126,6 +137,24 @@ async def test_purge_folder_with_no_descendants_succeeds(client):
     # Folder should be gone.
     resp = await client.get(f"/api/v1/folders/{leaf_id}", headers=headers)
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_purge_active_folder_is_rejected(client):
+    """A Folder must enter Trash before the route can permanently purge it."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    resp = await client.post(
+        "/api/v1/folders", json={"name": "Still Active"}, headers=headers
+    )
+    assert resp.status_code == 201
+    folder_id = resp.json()["id"]
+
+    resp = await client.delete(
+        f"/api/v1/trash/folder/{folder_id}", headers=headers
+    )
+    assert resp.status_code == 422
 
 
 # --------------------------------------------------------------------------- #
@@ -400,6 +429,12 @@ async def test_folder_purge_creates_tombstones_for_all_descendants(client):
     )
     assert resp.status_code == 201
     grandchild_id = resp.json()["id"]
+
+    # Enter Trash first; the purge route only accepts trashed Folders.
+    resp = await client.delete(
+        f"/api/v1/folders/{root_id}", headers=headers
+    )
+    assert resp.status_code == 200
 
     # Purge root (cascades to all descendants via KnowledgeStore).
     resp = await client.delete(

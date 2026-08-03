@@ -36,7 +36,7 @@ from app.focus_session.effort_projection import (
     EffortProjectionRepairService,
 )
 from app.focus_session.module import DefaultFocusSessionModule
-from app.focus_session.policy import EffortProjectionRepairPolicy, FocusSessionMutationPolicy
+from app.focus_session.policy import FocusSessionMutationPolicy
 from app.focus_session.query import FocusSessionQuery
 from app.mutation.types import MutationRequest, MutationRuleViolation, canonical_payload_hash
 from app.task_space.compiler import TaskSpaceCompiler
@@ -65,8 +65,7 @@ def focus_fixture(mutation_fixture_factory):
         locator_reader=locator_reader,
         replay_safe_policy=TaskSpaceCompiler.replay_safe_policy(),
     )
-    repair_policy = EffortProjectionRepairPolicy()
-    mutation = mutation_fixture_factory(policies=(policy, repair_policy))
+    mutation = mutation_fixture_factory(policies=(policy,))
     module = DefaultFocusSessionModule(
         uow=mutation.uow,
         query=FocusSessionQuery(),
@@ -290,9 +289,8 @@ async def _rebuild_effort(
 ):
     """Execute a rebuild_effort_projection command through the UoW.
 
-    The rebuild uses ``entity_type="work_item"`` and routes through
-    ``EffortProjectionRepairPolicy`` so that the S3 framework validation
-    (db_plans must include the request entity) passes naturally.
+    The rebuild uses the FocusSession policy's cross-entity maintenance
+    command and emits only real WorkItem projection updates.
     """
     if command_id is None:
         command_id = (
@@ -307,10 +305,17 @@ async def _rebuild_effort(
     if work_item_id is not None:
         payload["work_item_id"] = work_item_id
     request = MutationRequest.from_payload(
-        name="work_item.rebuild_effort_projection",
-        entity_type="work_item",
+        name="focus_session.rebuild_effort_projection",
+        entity_type="focus_session",
         entity_id=work_item_id or "all",
-        payload=payload,
+        payload={
+            **payload,
+            "operation": "rebuild_effort_projection",
+            "payload_hash": canonical_payload_hash({
+                "operation": "rebuild_effort_projection",
+                **{key: value for key, value in payload.items() if key != "space_id"},
+            }),
+        },
         expected_version=None,
         client_updated_at=None,
     )
@@ -641,7 +646,7 @@ class TestReceiptsDoNotAffectProjection:
 # ---------------------------------------------------------------------------
 
 class TestRebuildEntersRealPolicy:
-    """Rebuild must route through EffortProjectionRepairPolicy, not the generic compiler."""
+    """Rebuild must route through FocusSession policy, not generic CRUD."""
 
     @pytest.mark.asyncio
     async def test_rebuild_routes_through_repair_policy(
@@ -657,9 +662,8 @@ class TestRebuildEntersRealPolicy:
             ended_at="2026-07-15T08:25:00Z",
         )
 
-        # The rebuild request has entity_type="work_item", which is owned
-        # by EffortProjectionRepairPolicy.  If the policy handler is not
-        # invoked, the generic compiler would reject the unknown request name.
+        # The rebuild request is a FocusSession maintenance command.  If the
+        # domain policy handler is not invoked, generic CRUD rejects its name.
         result = await _rebuild_effort(focus_fixture, work_item_id="l2-a")
         assert result is not None
         assert result.state in ("FINALIZED", "DB_COMMITTED", "FORWARD_APPLIED")

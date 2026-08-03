@@ -561,6 +561,28 @@ class TestSyncPolicyMatrix:
         assert captured.value.code == "version_conflict"
 
     @pytest.mark.asyncio
+    async def test_activation_snapshot_persists_frozen_work_item_structure(
+        self, sync_policy_fixture,
+    ) -> None:
+        """Offline activation must preserve the same L2/L3 identity facts as online start."""
+        from app.mutation.unit_of_work import AuthorityOverlay
+
+        request = _activation_request()
+        overlay = AuthorityOverlay(sync_policy_fixture.catalog, _activation_rows())
+        command = await sync_policy_fixture.mutation.uow.compiler.compile_against_overlay(
+            sync_policy_fixture.scope, request, overlay, request.entity_id,
+        )
+
+        context_plan = next(
+            plan for plan in command.db_plans
+            if plan.table == "session_task_contexts"
+        )
+        structure = context_plan.after_row["structure_snapshot"]
+        assert structure != "{}"
+        assert '"level2"' in structure
+        assert '"l3-a"' in structure
+
+    @pytest.mark.asyncio
     async def test_terminal_activation_snapshot_is_rejected_before_locator_claim(
         self, sync_policy_fixture,
     ) -> None:

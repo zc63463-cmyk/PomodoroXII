@@ -11,13 +11,17 @@ from app.routes.v1 import build_v1_router
 
 # Routers that are not tied to a single EntitySpec route_enabled entry.
 # Spaces are handled by the ``space`` EntitySpec (route_enabled=True), so
-# they are NOT listed here.
+# they are NOT listed here.  Task Space project/work-item routers expose
+# contract-shaped operations rather than generic EntitySpec CRUD, so they
+# belong to this explicit non-entity set as well.
 EXPECTED_NON_ENTITY_PREFIXES = {
     "/auth",
     "/meta",
+    "/projects",
     "/trash",
     "/stats",
     "/sync",
+    "/work-items",
 }
 
 

@@ -135,7 +135,7 @@ class TestCompilerComposition:
         assert "build_mutation_compiler" in source
 
     def test_shared_compiler_factory_includes_all_policies(self) -> None:
-        """The shared factory must include all four domain policies."""
+        """The shared factory must include every domain policy."""
         from app.deps import build_mutation_compiler
         from app.registry import CATALOG
 
@@ -145,6 +145,14 @@ class TestCompilerComposition:
         assert "FolderDomainPolicy" in policy_types
         assert "RelationDomainPolicy" in policy_types
         assert "KnowledgeDomainPolicy" in policy_types
+        assert "FocusSessionMutationPolicy" in policy_types
+
+        from app.focus_session.policy import FOCUS_SESSION_POLICY_TYPES
+
+        for entity_type in FOCUS_SESSION_POLICY_TYPES:
+            assert type(compiler._policies[entity_type]).__name__ == (
+                "FocusSessionMutationPolicy"
+            )
 
     def test_only_one_mutation_compiler_constructor_in_app(self) -> None:
         """Only deps.py may construct MutationCompiler; no shadow compilers."""

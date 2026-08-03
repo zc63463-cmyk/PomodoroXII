@@ -1001,6 +1001,16 @@ def _note_projection_paths(
     return _NoteProjectionPaths(before, after)
 
 
+def _persisted_note_path(identity: str, row: Mapping[str, object]) -> str | None:
+    """Derive a Note's canonical path when only persisted DB images remain."""
+    title = row.get("title")
+    if title is None:
+        return None
+    filename = _make_filename(identity, str(title))
+    folder_id = row.get("folder_id")
+    return f"notes/{filename}" if folder_id is None else f"notes/{folder_id}/{filename}"
+
+
 def _matching_sync_events(
     command: MutationCommand | PersistedMutationCommand,
     plan: DbMutationPlan,
@@ -1102,26 +1112,37 @@ def _projection_belongs_to_plan(
     identity: str,
     *,
     note_paths: _NoteProjectionPaths | None = None,
-    persisted_path_owner: bool = False,
+    persisted_note_identity: str | None = None,
 ) -> bool:
     target = str(projection.target)
     if spec.name == "note":
+        if persisted_note_identity is not None:
+            if projection.tag is ProjectionActionTag.INDEX_REPLACE:
+                return target == f"index/notes/note_id/{identity}"
+            if projection.tag is ProjectionActionTag.FTS_REPLACE:
+                return target == f"fts/{identity}"
+            if projection.tag is ProjectionActionTag.MARKDOWN_WRITE:
+                return persisted_note_identity == identity
+            if projection.tag is ProjectionActionTag.PATH_RENAME:
+                return persisted_note_identity == identity
+            if projection.tag is ProjectionActionTag.PATH_REMOVE:
+                return persisted_note_identity == identity
         if projection.tag is ProjectionActionTag.MARKDOWN_WRITE:
             return (
-                persisted_path_owner
+                False
                 if note_paths is None
                 else target == note_paths.after
             )
         if projection.tag is ProjectionActionTag.PATH_RENAME:
             return (
-                persisted_path_owner
+                False
                 if note_paths is None
                 else str(projection.source) == note_paths.before
                 and target == note_paths.after
             )
         if projection.tag is ProjectionActionTag.PATH_REMOVE:
             return (
-                persisted_path_owner
+                False
                 if note_paths is None
                 else target == note_paths.before
             )
@@ -1338,8 +1359,14 @@ def _validate_compiled_command(
         _required_projection_tags(plan, spec)
         for plan, spec in zip(command.db_plans, plan_specs, strict=True)
     )
-    persisted_path_owners: dict[ProjectionActionTag, int] = {}
+    persisted_note_projection_identity: dict[int, str] = {}
+    legacy_persisted_path_owner: dict[ProjectionActionTag, str] = {}
     if isinstance(command, PersistedMutationCommand):
+        # Persisted descriptors retain hashes, not the index-row bytes that
+        # contain a historical Note path.  A single-Note journal entry can
+        # therefore retain an older, valid path that is no longer derivable
+        # from its title/folder image.  Keep that legacy case bound to its
+        # unique Note owner; multi-Note commands remain canonical-path bound.
         for tag in (
             ProjectionActionTag.MARKDOWN_WRITE,
             ProjectionActionTag.PATH_RENAME,
@@ -1353,7 +1380,62 @@ def _validate_compiled_command(
                 if spec.name == "note" and tag in required
             )
             if len(owners) == 1:
-                persisted_path_owners[tag] = owners[0]
+                plan = command.db_plans[owners[0]]
+                spec = plan_specs[owners[0]]
+                legacy_persisted_path_owner[tag] = str(
+                    plan.primary_key[spec.primary_key]
+                )
+        for projection in command.projections:
+            if projection.tag not in {
+                ProjectionActionTag.MARKDOWN_WRITE,
+                ProjectionActionTag.PATH_RENAME,
+                ProjectionActionTag.PATH_REMOVE,
+            }:
+                continue
+            matches: list[str] = []
+            for plan, spec in zip(command.db_plans, plan_specs, strict=True):
+                if spec.name != "note":
+                    continue
+                identity = str(plan.primary_key[spec.primary_key])
+                before = (
+                    None
+                    if plan.before_row is None
+                    else _persisted_note_path(identity, plan.before_row)
+                )
+                after = (
+                    None
+                    if plan.after_row is None
+                    else _persisted_note_path(identity, plan.after_row)
+                )
+                target = str(projection.target)
+                source = None if projection.source is None else str(projection.source)
+                belongs = (
+                    projection.tag is ProjectionActionTag.MARKDOWN_WRITE
+                    and after is not None
+                    and target == after
+                ) or (
+                    projection.tag is ProjectionActionTag.PATH_RENAME
+                    and before is not None
+                    and after is not None
+                    and source == before
+                    and target == after
+                ) or (
+                    projection.tag is ProjectionActionTag.PATH_REMOVE
+                    and before is not None
+                    and target == before
+                )
+                if belongs:
+                    matches.append(identity)
+            if len(matches) == 1:
+                persisted_note_projection_identity[projection.ordinal] = matches[0]
+            elif len(matches) > 1:
+                raise SpaceRecoveryRequiredError(
+                    "persisted Note projection matches multiple database mutations"
+                )
+            elif projection.tag in legacy_persisted_path_owner:
+                persisted_note_projection_identity[projection.ordinal] = (
+                    legacy_persisted_path_owner[projection.tag]
+                )
     note_paths_by_plan: dict[int, _NoteProjectionPaths] = {}
     if isinstance(command, MutationCommand):
         for plan_index, (plan, spec) in enumerate(
@@ -1417,8 +1499,8 @@ def _validate_compiled_command(
                 spec,
                 identity,
                 note_paths=note_paths_by_plan.get(plan_index),
-                persisted_path_owner=(
-                    persisted_path_owners.get(projection.tag) == plan_index
+                persisted_note_identity=persisted_note_projection_identity.get(
+                    projection.ordinal
                 ),
             )
         )
@@ -1491,8 +1573,8 @@ def _validate_compiled_command(
                 spec,
                 identity,
                 note_paths=note_paths_by_plan.get(plan_index),
-                persisted_path_owner=(
-                    persisted_path_owners.get(projection.tag) == plan_index
+                persisted_note_identity=persisted_note_projection_identity.get(
+                    projection.ordinal
                 ),
             ):
                 bound = True
