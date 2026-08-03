@@ -12,7 +12,7 @@ import {
   purgeQuickNote,
   restoreQuickNote,
 } from '@/lib/quick-notes/quick-note-repository'
-import { enqueueOutbox } from '@/lib/sync/outbox'
+import { buildOutboxIdentity, enqueueOutbox } from '@/lib/sync/outbox'
 import type { CachedFolder, CachedNote, Folder, Note, QuickNote } from '@/types'
 
 interface TrashState {
@@ -218,7 +218,12 @@ async function restoreNoteFromTrash(id: string): Promise<void> {
       _dirty: true,
     }
     await db.notes.put(row)
-    await enqueueOutbox(db, 'note', id, 'update', stripNoteSyncFields(row), { expectedVersion: baseVersion })
+    const payload = stripNoteSyncFields(row)
+    await enqueueOutbox(db, db.spaceId, 'note', id, 'update', payload,
+      await buildOutboxIdentity(payload, {
+        operationId: crypto.randomUUID(), expectedVersion: baseVersion,
+        transportState: 'ready', createdAt: now,
+      }))
   })
 }
 
@@ -230,7 +235,12 @@ async function purgeNoteFromTrash(id: string): Promise<void> {
 
     const baseVersion = existing.version ?? 1
     await db.notes.delete(id)
-    await enqueueOutbox(db, 'note', id, 'delete', { id }, { expectedVersion: baseVersion })
+    const payload = { id }
+    await enqueueOutbox(db, db.spaceId, 'note', id, 'delete', payload,
+      await buildOutboxIdentity(payload, {
+        operationId: crypto.randomUUID(), expectedVersion: baseVersion,
+        transportState: 'ready', createdAt: new Date().toISOString(),
+      }))
   })
 }
 
@@ -251,7 +261,12 @@ async function restoreFolderFromTrash(id: string): Promise<void> {
       _dirty: true,
     }
     await db.folders.put(row)
-    await enqueueOutbox(db, 'folder', id, 'update', stripFolderSyncFields(row), { expectedVersion: baseVersion })
+    const payload = stripFolderSyncFields(row)
+    await enqueueOutbox(db, db.spaceId, 'folder', id, 'update', payload,
+      await buildOutboxIdentity(payload, {
+        operationId: crypto.randomUUID(), expectedVersion: baseVersion,
+        transportState: 'ready', createdAt: now,
+      }))
   })
 }
 
@@ -263,7 +278,12 @@ async function purgeFolderFromTrash(id: string): Promise<void> {
 
     const baseVersion = existing.version ?? 1
     await db.folders.delete(id)
-    await enqueueOutbox(db, 'folder', id, 'delete', { id }, { expectedVersion: baseVersion })
+    const payload = { id }
+    await enqueueOutbox(db, db.spaceId, 'folder', id, 'delete', payload,
+      await buildOutboxIdentity(payload, {
+        operationId: crypto.randomUUID(), expectedVersion: baseVersion,
+        transportState: 'ready', createdAt: new Date().toISOString(),
+      }))
   })
 }
 

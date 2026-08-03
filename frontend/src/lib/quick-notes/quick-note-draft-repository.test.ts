@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PomodoroXIDB } from '@/services/database'
+import type { PomodoroXIDB } from '@/services/database'
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import {
   configureQuickNoteOutboxHook,
   resetQuickNoteOutboxHook,
@@ -40,9 +41,8 @@ describe('quick-note-draft-repository', () => {
 
   beforeEach(async () => {
     resetQuickNoteOutboxHook()
-    dbA = new PomodoroXIDB(`quick-note-draft-a-${crypto.randomUUID()}`)
-    dbB = new PomodoroXIDB(`quick-note-draft-b-${crypto.randomUUID()}`)
-    await Promise.all([dbA.open(), dbB.open()])
+    dbA = await openPomodoroXIDB(`quick-note-draft-a-${crypto.randomUUID()}`)
+    dbB = await openPomodoroXIDB(`quick-note-draft-b-${crypto.randomUUID()}`)
   })
 
   afterEach(async () => {
@@ -200,7 +200,6 @@ describe('quick-note-draft-repository', () => {
         pinned: false,
         archived_at: null,
         archive_file_path: null,
-        session_id: null,
         folder_id: null,
         trashed_at: null,
         migrated_to_note_id: null,
@@ -222,8 +221,12 @@ describe('quick-note-draft-repository', () => {
         entityId: snapshot.draftId,
         action: 'create',
         payload: JSON.stringify(note),
-        createdAt: expect.any(Number),
+        createdAt: expect.any(String),
         synced: false,
+        spaceId: dbA.spaceId,
+        payloadHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        compoundOperationId: null,
+        compoundOrder: null,
         lastError: null,
         lastErrorCode: null,
         failedAt: null,
@@ -231,6 +234,7 @@ describe('quick-note-draft-repository', () => {
         operationId: expect.any(String),
         expectedVersion: null,
         requiresVersionRebase: false,
+        transportState: 'ready',
       }])
       expect(await getRawDraft(dbA)).toBeUndefined()
     })
@@ -348,12 +352,16 @@ describe('quick-note-draft-repository', () => {
       const raw = await getRawDraft(dbA)
       configureQuickNoteOutboxHook(async () => {
         await dbA.outbox.add({
+          spaceId: dbA.spaceId,
           entityType: 'quickNote',
           entityId: snapshot.draftId,
           action: 'create',
           payload: JSON.stringify({ id: snapshot.draftId, content: snapshot.content }),
-          createdAt: Date.now(),
+          createdAt: '2026-07-06T00:00:00.000Z',
           synced: false,
+          payloadHash: '0'.repeat(64),
+          compoundOperationId: null,
+          compoundOrder: null,
           lastError: null,
           lastErrorCode: null,
           failedAt: null,
@@ -361,6 +369,7 @@ describe('quick-note-draft-repository', () => {
           operationId: 'op-qn-delayed-hook',
           expectedVersion: null,
           requiresVersionRebase: false,
+          transportState: 'ready',
         })
         await new Promise<void>((resolve) => setTimeout(resolve, 0))
         throw new Error('delayed custom hook failed')

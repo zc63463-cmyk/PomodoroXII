@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
-import { PomodoroXIDB } from '@/services/database'
+import type { PomodoroXIDB } from '@/services/database'
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { spaceApi } from '@/services/api'
 import { runPullLoop } from './pull-loop'
 import { loadSyncMeta, saveSyncMeta } from './sync-meta'
@@ -13,16 +14,14 @@ import { loadSyncMeta, saveSyncMeta } from './sync-meta'
  */
 
 async function openTestDb(): Promise<PomodoroXIDB> {
-  const db = new PomodoroXIDB('pull-loop-test-' + crypto.randomUUID())
-  await db.open()
-  return db
+  return openPomodoroXIDB('pull-loop-test-' + crypto.randomUUID())
 }
 
 function ok(data: unknown, config: InternalAxiosRequestConfig): AxiosResponse {
   return { data, status: 200, statusText: 'OK', headers: {}, config }
 }
 
-function taskRow(id: string, dirty: boolean) {
+function noteRow(id: string, dirty: boolean) {
   return {
     id,
     title: id,
@@ -31,7 +30,7 @@ function taskRow(id: string, dirty: boolean) {
     _dirty: dirty,
     deletion_state: 'active',
     version: 1,
-  } as unknown as Parameters<PomodoroXIDB['tasks']['put']>[0]
+  } as unknown as Parameters<PomodoroXIDB['notes']['put']>[0]
 }
 
 function page1Data() {
@@ -40,7 +39,7 @@ function page1Data() {
     has_more: true,
     tombstones_has_more: false,
     next_since: '2026-07-06T12:00:00.000Z',
-    next_since_id: 'task-1',
+    next_since_id: 'note-1',
     next_tombstone_since_id: 't1',
   }
 }
@@ -51,7 +50,7 @@ function page2Data() {
     has_more: false,
     tombstones_has_more: false,
     next_since: '2026-07-06T12:01:00.000Z',
-    next_since_id: 'task-2',
+    next_since_id: 'note-2',
     next_tombstone_since_id: 't2',
   }
 }
@@ -62,7 +61,7 @@ function singlePageData() {
     has_more: false,
     tombstones_has_more: false,
     next_since: '2026-07-06T12:00:00.000Z',
-    next_since_id: 'task-final',
+    next_since_id: 'note-final',
     next_tombstone_since_id: 'tf',
   }
 }
@@ -180,7 +179,7 @@ describe('pull-loop', () => {
 
     expect(result.pages).toBe(2)
     expect(captured[0]!.url).toContain('/sync/pull')
-    expect((captured[1]!.params as Record<string, unknown>)?.since_id).toBe('task-1')
+    expect((captured[1]!.params as Record<string, unknown>)?.since_id).toBe('note-1')
   })
 
   it('PL4: 单页 has_more=false → 结束', async () => {
@@ -209,7 +208,7 @@ describe('pull-loop', () => {
     await runPullLoop(db, spaceApi)
 
     const meta = await loadSyncMeta(db)
-    expect(meta.sinceId).toBe('task-2')
+    expect(meta.sinceId).toBe('note-2')
   })
 
   it('PL7: next_tombstone_since_id 推进', async () => {
@@ -367,32 +366,38 @@ describe('pull-loop', () => {
 
   it('PL16: full snapshot 完成后删除未见 clean ghost 并保留 dirty ghost 与 outbox', async () => {
     db = await openTestDb()
-    await db.tasks.bulkPut([taskRow('clean-ghost', false), taskRow('dirty-ghost', true)])
+    await db.notes.bulkPut([noteRow('clean-ghost', false), noteRow('dirty-ghost', true)])
     await db.outbox.add({
-      entityType: 'task',
+      spaceId: db.spaceId,
+      entityType: 'note',
       entityId: 'dirty-ghost',
       action: 'update',
       payload: '{}',
-      createdAt: Date.now(),
+      createdAt: '2026-07-06T00:00:00.000Z',
       synced: false,
+      payloadHash: '0'.repeat(64),
+      compoundOperationId: null,
+      compoundOrder: null,
       operationId: 'op-pull-dirty-ghost',
       expectedVersion: 1,
       requiresVersionRebase: false,
+      transportState: 'ready',
+      lastError: null, lastErrorCode: null, failedAt: null, attemptCount: 0,
     })
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({ ...cursorSinglePage(), tasks: [] }, config)
+      return ok({ ...cursorSinglePage(), notes: [] }, config)
     }
 
     await runPullLoop(db, spaceApi, { isFull: true })
 
-    expect(await db.tasks.get('clean-ghost')).toBeUndefined()
-    expect(await db.tasks.get('dirty-ghost')).toBeDefined()
+    expect(await db.notes.get('clean-ghost')).toBeUndefined()
+    expect(await db.notes.get('dirty-ghost')).toBeDefined()
     expect(await db.outbox.count()).toBe(1)
   })
 
   it('PL17: full snapshot 分页中断时不提前删除 clean ghost', async () => {
     db = await openTestDb()
-    await db.tasks.put(taskRow('clean-ghost', false))
+    await db.notes.put(noteRow('clean-ghost', false))
     let call = 0
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       call++
@@ -401,7 +406,7 @@ describe('pull-loop', () => {
           ...cursorPage1(),
           snapshot_token: 'snap-interrupted',
           snapshot_offset: 1,
-          tasks: [],
+          notes: [],
         }, config)
       }
       throw new Error('page interrupted')
@@ -411,42 +416,45 @@ describe('pull-loop', () => {
       'page interrupted',
     )
 
-    expect(await db.tasks.get('clean-ghost')).toBeDefined()
+    expect(await db.notes.get('clean-ghost')).toBeDefined()
   })
 
   it('PL18: legacy full 只 merge，不按缺失删除本地 clean 实体', async () => {
     db = await openTestDb()
-    await db.tasks.put(taskRow('legacy-local', false))
+    await db.notes.put(noteRow('legacy-local', false))
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({ ...singlePageData(), tasks: [] }, config)
+      return ok({ ...singlePageData(), notes: [] }, config)
     }
 
     await runPullLoop(db, spaceApi, { isFull: true })
 
-    expect(await db.tasks.get('legacy-local')).toBeDefined()
+    expect(await db.notes.get('legacy-local')).toBeDefined()
   })
 
   it('PL19: materialized snapshot reconcile 保护 unsynced outbox 引用', async () => {
     db = await openTestDb()
-    await db.tasks.bulkPut([taskRow('clean-ghost', false), taskRow('outbox-ghost', false)])
+    await db.notes.bulkPut([noteRow('clean-ghost', false), noteRow('outbox-ghost', false)])
     await db.outbox.add({
-      entityType: 'task', entityId: 'outbox-ghost', action: 'update', payload: '{}',
-      createdAt: Date.now(), synced: false,
+      spaceId: db.spaceId,
+      entityType: 'note', entityId: 'outbox-ghost', action: 'update', payload: '{}',
+      createdAt: '2026-07-06T00:00:00.000Z', synced: false,
+      payloadHash: '0'.repeat(64), compoundOperationId: null, compoundOrder: null,
       operationId: 'op-pull-outbox-ghost', expectedVersion: 1, requiresVersionRebase: false,
+      transportState: 'ready', lastError: null, lastErrorCode: null, failedAt: null, attemptCount: 0,
     })
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({ ...cursorSinglePage(), tasks: [] }, config)
+      return ok({ ...cursorSinglePage(), notes: [] }, config)
     }
 
     await runPullLoop(db, spaceApi, { isFull: true })
 
-    expect(await db.tasks.get('clean-ghost')).toBeUndefined()
-    expect(await db.tasks.get('outbox-ghost')).toBeDefined()
+    expect(await db.notes.get('clean-ghost')).toBeUndefined()
+    expect(await db.notes.get('outbox-ghost')).toBeDefined()
   })
 
   it('PL20: full 分页协议或 snapshot_token 中途变化时 fail-closed', async () => {
     db = await openTestDb()
-    await db.tasks.put(taskRow('protocol-ghost', false))
+    await db.notes.put(noteRow('protocol-ghost', false))
     let call = 0
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       call++
@@ -458,20 +466,20 @@ describe('pull-loop', () => {
     await expect(runPullLoop(db, spaceApi, { isFull: true, limit: 1 })).rejects.toThrow(
       'protocol changed',
     )
-    expect(await db.tasks.get('protocol-ghost')).toBeDefined()
+    expect(await db.notes.get('protocol-ghost')).toBeDefined()
     expect((await loadSyncMeta(db)).cursor).toBeNull()
   })
 
   it('PL21: reconcile 失败会回滚终页 merge、cursor 与 lastFullSync', async () => {
     db = await openTestDb()
     await saveSyncMeta(db, { cursor: 7, cursorVersion: 2, lastFullSync: 'old-full' })
-    await db.tasks.put(taskRow('ghost', false))
-    const originalBulkDelete = db.tasks.bulkDelete.bind(db.tasks)
-    vi.spyOn(db.tasks, 'bulkDelete').mockImplementation(() => {
+    await db.notes.put(noteRow('ghost', false))
+    const originalBulkDelete = db.notes.bulkDelete.bind(db.notes)
+    vi.spyOn(db.notes, 'bulkDelete').mockImplementation(() => {
       throw new Error('reconcile failed')
     })
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => ok({
-      ...cursorSinglePage(), next_cursor: 99, tasks: [{
+      ...cursorSinglePage(), next_cursor: 99, notes: [{
         id: 'terminal-row', title: 'terminal', status: 'todo',
         updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
       }],
@@ -481,8 +489,8 @@ describe('pull-loop', () => {
 
     expect((await loadSyncMeta(db)).cursor).toBe(7)
     expect((await loadSyncMeta(db)).lastFullSync).toBe('old-full')
-    expect(await db.tasks.get('terminal-row')).toBeUndefined()
-    expect(await db.tasks.get('ghost')).toBeDefined()
-    db.tasks.bulkDelete = originalBulkDelete
+    expect(await db.notes.get('terminal-row')).toBeUndefined()
+    expect(await db.notes.get('ghost')).toBeDefined()
+    db.notes.bulkDelete = originalBulkDelete
   })
 })

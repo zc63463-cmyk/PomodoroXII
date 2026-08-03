@@ -1,0 +1,67 @@
+{
+  "algorithm": "child-v1",
+  "valid": [
+    {
+      "name": "colon_parent",
+      "parent_id": "a:receipt",
+      "suffix": "pending",
+      "expected": "childp:9:a:receipt:pending"
+    },
+    {
+      "name": "colon_suffix",
+      "parent_id": "a",
+      "suffix": "receipt:pending",
+      "expected": "childp:1:a:receipt:pending"
+    },
+    {
+      "name": "plain_result_127",
+      "parent_id": "p",
+      "suffix": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "expected": "childp:1:p:ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+    },
+    {
+      "name": "plain_result_128",
+      "parent_id": "p",
+      "suffix": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "expected": "childp:1:p:sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+    },
+    {
+      "name": "first_overflow_129",
+      "parent_id": "p",
+      "suffix": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "expected": "childh:693301fc7e44c9a0dd041ba5cfd40b79ed955227252d05216e80359feb28df15"
+    },
+    {
+      "name": "parent_127",
+      "parent_id": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+      "suffix": "focus_session",
+      "expected": "childh:6ab289f80ba8a36bd167e9c88f4493612f1f3ed2902353b2a8d13bf559972891"
+    },
+    {
+      "name": "parent_128",
+      "parent_id": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+      "suffix": "focus_session",
+      "expected": "childh:256b15192a126e33bdb061e96487c1412033e8eaea0e26bc522c52c414702d55"
+    },
+    {
+      "name": "suffix_512",
+      "parent_id": "p",
+      "suffix": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "expected": "childh:9ed298adfe1ff5a387b2cb182ffc58dbe9dc10258e49179fea338ef13f396edf"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "suffix_513",
+      "parent_id": "p",
+      "suffix": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "error": "invalid child operation suffix"
+    },
+    {
+      "name": "suffix_non_ascii",
+      "parent_id": "p",
+      "suffix": "\u8ba1\u5212",
+      "error": "invalid child operation suffix"
+    }
+  ]
+}

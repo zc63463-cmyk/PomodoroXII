@@ -1,5 +1,6 @@
 import { PomodoroXIDB } from '@/services/database'
-import { dexieDbNameForSpace, PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
+import { PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
+import { openPomodoroXIDB } from './dexie-v18-cutover'
 
 type SpaceSwitchListener = (spaceId: string) => void
 
@@ -35,8 +36,7 @@ class SpaceDBManager {
         await this.runBeforeSwitchListeners(context)
       }
 
-      const nextDB = new PomodoroXIDB(dexieDbNameForSpace(spaceId))
-      await nextDB.open()
+      const nextDB = await openPomodoroXIDB(spaceId)
       previousDB?.close()
       this.currentDB = nextDB
       this._currentSpaceId = spaceId
@@ -72,11 +72,9 @@ class SpaceDBManager {
   private async runBeforeSwitchListeners(
     context: BeforeSpaceSwitchContext,
   ): Promise<void> {
-    await Promise.allSettled(
-      Array.from(this.beforeSwitchListeners, (listener) =>
-        Promise.resolve().then(() => listener(context)),
-      ),
-    )
+    await Promise.all(Array.from(this.beforeSwitchListeners, (listener) =>
+      Promise.resolve().then(() => listener(context)),
+    ))
   }
 
   close(): void {
@@ -98,6 +96,18 @@ class SpaceDBManager {
 
   get currentSpaceId(): string | null {
     return this._currentSpaceId
+  }
+
+  get currentBinding(): Readonly<{ database: PomodoroXIDB; spaceId: string }> {
+    const database = this.currentDB
+    const spaceId = this._currentSpaceId
+    if (!database || !spaceId) {
+      throw new Error('SpaceDBManager: No space selected. Call switchTo(spaceId) first.')
+    }
+    if (database.spaceId !== spaceId) {
+      throw new Error('SpaceDBManager: current database/Space binding mismatch')
+    }
+    return { database, spaceId }
   }
 
   get hasSpace(): boolean {

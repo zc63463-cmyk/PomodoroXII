@@ -7,10 +7,14 @@
  * 所有函数首参 db: PomodoroXIDB（HC-6 per-space db 注入）。
  */
 
+import Dexie from 'dexie'
 import type { PomodoroXIDB } from '@/services/database'
 import type { OutboxEvent } from '@/types'
+import { hashCommandPayload } from '@/lib/contracts/payload-hash'
 import {
   ENTITY_TYPE_TO_TABLE,
+  TS3_LOCAL_ENTITY_TO_TABLE,
+  type TS3LocalEntityType,
   type OutboxAction,
   type OutboxMergeResult,
   type SyncEntityType,
@@ -23,9 +27,69 @@ export interface OutboxFailurePatch {
   failedAt?: string
 }
 
-/** S3-Task10: Options for enqueueOutbox to pass expected version. */
-export interface EnqueueOutboxOptions {
-  expectedVersion?: number | null
+export interface OutboxIdentity {
+  operationId: string
+  payloadHash: string
+  expectedVersion: number | null
+  transportState: 'ready' | 'awaiting_s4' | 'blocked_conflict'
+  createdAt: string
+  compoundOperationId?: string | null
+  compoundOrder?: number | null
+}
+
+export async function buildOutboxIdentity(
+  payload: unknown,
+  input: Omit<OutboxIdentity, 'payloadHash'>,
+): Promise<OutboxIdentity> {
+  // Keep a caller-owned Dexie transaction alive while WebCrypto resolves.
+  return { ...input, payloadHash: await Dexie.waitFor(hashCommandPayload(payload)) }
+}
+
+export interface PreparedEntityCommand {
+  requestIndex: number
+  operationId: string
+  entityType: SyncEntityType | TS3LocalEntityType
+  entityId: string
+  action: OutboxAction
+  expectedVersion: number | null
+  payload: unknown
+  payloadHash: string
+}
+
+export interface PreparedEntityBatch {
+  batchId: string
+  items: PreparedEntityCommand[]
+}
+
+const canonicalUtcRfc3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{3})?Z$/
+
+function requireCanonicalUtcRfc3339(value: string): void {
+  if (!canonicalUtcRfc3339.test(value) || Number.isNaN(Date.parse(value)) ||
+      new Date(value).toISOString() !== value) {
+    throw new Error('createdAt must be canonical UTC RFC3339')
+  }
+}
+
+/** Byte-identical child-v1 operation ID derivation shared with S3. */
+export async function boundedChildOperationId(parentId: string, suffix: string): Promise<string> {
+  if (!/^[\x21-\x7e]{1,128}$/.test(parentId)) {
+    throw new Error('operation and batch IDs must use the exact 1-128-byte printable-ASCII validator')
+  }
+  if (!/^[A-Za-z0-9._:-]{1,512}$/.test(suffix)) {
+    throw new Error('invalid child operation suffix')
+  }
+  const candidate = `childp:${new TextEncoder().encode(parentId).byteLength}:${parentId}:${suffix}`
+  if (new TextEncoder().encode(candidate).byteLength <= 128) return candidate
+  const parentBytes = new TextEncoder().encode(parentId)
+  const suffixBytes = new TextEncoder().encode(suffix)
+  const input = new Uint8Array(11 + parentBytes.byteLength + suffixBytes.byteLength)
+  input.set(new TextEncoder().encode('child-v1\0'), 0)
+  new DataView(input.buffer).setUint16(9, parentBytes.byteLength, false)
+  input.set(parentBytes, 11)
+  input.set(suffixBytes, 11 + parentBytes.byteLength)
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', input as unknown as BufferSource)
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `childh:${hex}`
 }
 
 /**
@@ -68,33 +132,55 @@ export function resolveOutboxMerge(
  */
 export async function enqueueOutbox(
   db: PomodoroXIDB,
-  entityType: SyncEntityType,
+  spaceId: string,
+  entityType: SyncEntityType | TS3LocalEntityType,
   entityId: string,
   action: OutboxAction,
   payload: unknown,
-  options?: EnqueueOutboxOptions,
+  identity: OutboxIdentity,
 ): Promise<void> {
-  // 运行时校验 entityType（编译期 SyncEntityType 已收口，此处额外防御）
-  if (!(entityType in ENTITY_TYPE_TO_TABLE)) {
+  if (!spaceId) throw new Error('spaceId is required')
+  if (db.spaceId !== spaceId) throw new Error('outbox_space_database_mismatch')
+  if (!(entityType in ENTITY_TYPE_TO_TABLE) && !(entityType in TS3_LOCAL_ENTITY_TO_TABLE)) {
     throw new Error(`Invalid sync entity type: ${entityType}`)
   }
-  // entityId 空串守卫
   if (!entityId || !entityId.trim()) {
     throw new Error('entityId must not be empty')
   }
-  // payload undefined 守卫（JSON.stringify(undefined) 返回 undefined 非 string）
   if (payload === undefined) {
     throw new Error('payload must not be undefined')
   }
-
+  if (!identity.operationId) throw new Error('operationId is required')
+  if (action === 'create' && identity.expectedVersion !== null) {
+    throw new Error('create expectedVersion must be null')
+  }
+  if (
+    action !== 'create'
+    && (identity.expectedVersion === null
+      || !Number.isInteger(identity.expectedVersion)
+      || identity.expectedVersion < 0)
+  ) {
+    throw new Error('requires a non-negative integer expectedVersion')
+  }
+  requireCanonicalUtcRfc3339(identity.createdAt)
+  const compoundOperationId = identity.compoundOperationId ?? null
+  const compoundOrder = identity.compoundOrder ?? null
+  if ((compoundOperationId === null) !== (compoundOrder === null) ||
+      (compoundOrder !== null && (!Number.isInteger(compoundOrder) || compoundOrder < 0))) {
+    throw new Error('compound identity must be null or a nonnegative ordered pair')
+  }
   const payloadStr = JSON.stringify(payload)
-  const now = Date.now()
+  if (payloadStr === undefined) throw new Error('payload must be JSON serializable')
+  // Validate the caller-provided identity against the exact payload while
+  // keeping the surrounding Dexie transaction alive across WebCrypto.
+  const computedPayloadHash = await Dexie.waitFor(hashCommandPayload(payload))
+  if (computedPayloadHash !== identity.payloadHash) {
+    throw new Error('payloadHash_mismatch')
+  }
 
-  // 查找同实体的未同步行（entityId 字符串索引 + and 过滤 synced）
   const existing = await db.outbox
-    .where('entityId')
-    .equals(entityId)
-    .and((e) => e.entityType === entityType && !e.synced)
+    .where('spaceId').equals(spaceId)
+    .and((e) => e.entityType === entityType && e.entityId === entityId && !e.synced)
     .toArray()
 
   if (existing.length > 0) {
@@ -106,7 +192,9 @@ export async function enqueueOutbox(
     if (merge.action === 'drop_existing') {
       // 删 outbox 行 + 尝试删 Dexie 实体表对应行
       await db.outbox.bulkDelete(existing.map((e) => e.id!))
-      const tableName = ENTITY_TYPE_TO_TABLE[entityType]
+      const tableName = entityType in ENTITY_TYPE_TO_TABLE
+        ? ENTITY_TYPE_TO_TABLE[entityType as SyncEntityType]
+        : TS3_LOCAL_ENTITY_TO_TABLE[entityType as TS3LocalEntityType]
       const table = (
         db as unknown as Record<
           string,
@@ -124,35 +212,35 @@ export async function enqueueOutbox(
     }
 
     if (merge.action === 'keep_existing') {
-      latest.createdAt = now
+      latest.createdAt = identity.createdAt
       clearOutboxFailure(latest)
-      // S3-Task10: preserve operationId; update base version if missing.
-      // 普通 merge 不得清除既有 requiresVersionRebase=true（仅未来明确的 rebase/recovery 操作可清除）。
-      if (latest.action !== 'create' && latest.expectedVersion == null && !latest.requiresVersionRebase && action !== 'create') {
-        latest.expectedVersion = assertValidBaseVersion(action, options?.expectedVersion)
-        latest.requiresVersionRebase = false
-      }
+      if (latest.attemptCount > 0) throw new Error('outbox_command_immutable_after_attempt')
+      latest.payload = payloadStr
+      latest.payloadHash = identity.payloadHash
+      latest.transportState = identity.transportState
+      latest.compoundOperationId = compoundOperationId
+      latest.compoundOrder = compoundOrder
       await db.outbox.put(latest)
       return
     }
 
     // replace：合并到 latest 行
     latest.payload = payloadStr
-    latest.createdAt = now
+    if (latest.attemptCount > 0) throw new Error('outbox_command_immutable_after_attempt')
+    latest.createdAt = identity.createdAt
+    latest.payloadHash = identity.payloadHash
+    latest.transportState = identity.transportState
+    latest.compoundOperationId = compoundOperationId
+    latest.compoundOrder = compoundOrder
     clearOutboxFailure(latest)
     if (merge.newAction) latest.action = merge.newAction
-    // S3-Task10: preserve operationId; create chain → no base version
     if (latest.action === 'create') {
       latest.expectedVersion = null
       latest.requiresVersionRebase = false
-    } else if (latest.expectedVersion == null && !latest.requiresVersionRebase && action !== 'create') {
-      // No reliable version and not a rebase row; use incoming base version
-      latest.expectedVersion = assertValidBaseVersion(action, options?.expectedVersion)
+    } else {
+      latest.expectedVersion = identity.expectedVersion
       latest.requiresVersionRebase = false
     }
-    // else: preserve existing expectedVersion and requiresVersionRebase
-    //   (update→update, update→delete, delete→create with known version,
-    //    or rebase row with requiresVersionRebase=true)
     await db.outbox.put(latest)
 
     // 删除其余重复行
@@ -164,32 +252,36 @@ export async function enqueueOutbox(
   }
 
   // 无已有行 → 直接 add
-  const baseVersion = assertValidBaseVersion(action, options?.expectedVersion)
   await db.outbox.add({
+    spaceId,
     entityType,
     entityId,
     action,
     payload: payloadStr,
-    createdAt: now,
+    payloadHash: identity.payloadHash,
+    compoundOperationId,
+    compoundOrder,
+    createdAt: identity.createdAt,
     synced: false,
     lastError: null,
     lastErrorCode: null,
     failedAt: null,
     attemptCount: 0,
-    operationId: crypto.randomUUID(),
-    expectedVersion: baseVersion,
+    operationId: identity.operationId,
+    expectedVersion: identity.expectedVersion,
     requiresVersionRebase: false,
+    transportState: identity.transportState,
   })
 }
 
 /** 未同步 outbox 行数 — 用 filter 避免 boolean 索引查询（DataError） */
 export async function countUnsyncedOutbox(db: PomodoroXIDB): Promise<number> {
-  return db.outbox.filter((e) => !e.synced).count()
+  return db.outbox.filter((e) => !e.synced && e.transportState === 'ready').count()
 }
 
 /** 未同步 outbox 行列表（按 createdAt 升序，供 S1-2 push-batch 使用，F1 §5.1） */
 export async function listUnsyncedOutbox(db: PomodoroXIDB): Promise<OutboxEvent[]> {
-  return db.outbox.filter((e) => !e.synced).sortBy('createdAt')
+  return db.outbox.filter((e) => !e.synced && e.transportState === 'ready').sortBy('createdAt')
 }
 
 /** 按主键列表批量删除 outbox 行（push 成功后清行用） */
@@ -228,23 +320,6 @@ function clearOutboxFailure(row: OutboxEvent): void {
   row.lastErrorCode = null
   row.failedAt = null
   row.attemptCount = 0
-}
-
-function assertValidBaseVersion(
-  action: OutboxAction,
-  expectedVersion: number | null | undefined,
-): number | null {
-  if (action === 'create') return null
-  if (
-    expectedVersion == null ||
-    !Number.isInteger(expectedVersion) ||
-    expectedVersion < 0
-  ) {
-    throw new Error(
-      `enqueueOutbox: action "${action}" requires a non-negative integer expectedVersion, got: ${expectedVersion}`,
-    )
-  }
-  return expectedVersion
 }
 
 function classifyOutboxError(error: string): string {

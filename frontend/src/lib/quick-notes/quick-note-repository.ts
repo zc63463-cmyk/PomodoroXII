@@ -13,7 +13,7 @@ import {
   extractQuickNoteTags,
   mergeQuickNoteTags,
 } from '@/lib/quick-notes/quick-note-tags'
-import { enqueueOutbox } from '@/lib/sync/outbox'
+import { buildOutboxIdentity, enqueueOutbox } from '@/lib/sync/outbox'
 import type { OutboxAction, SyncEntityType } from '@/lib/sync/types'
 
 export type QuickNoteRepositoryErrorCode =
@@ -83,14 +83,13 @@ export interface QuickNoteCreateInput {
   mood?: QuickNote['mood']
   tags?: string[]
   pinned?: boolean
-  session_id?: string | null
   folder_id?: string | null
   created_at?: string
   updated_at?: string
 }
 
 export type QuickNoteUpdateInput = Partial<
-  Pick<QuickNote, 'content' | 'mood' | 'tags' | 'pinned' | 'folder_id' | 'session_id'>
+  Pick<QuickNote, 'content' | 'mood' | 'tags' | 'pinned' | 'folder_id'>
 > & {
   updated_at?: string
 }
@@ -243,7 +242,6 @@ function buildQuickNote(input: QuickNoteCreateInput): QuickNote {
     pinned: input.pinned ?? false,
     archived_at: null,
     archive_file_path: null,
-    session_id: input.session_id ?? null,
     folder_id: input.folder_id ?? null,
     trashed_at: null,
     migrated_to_note_id: null,
@@ -408,7 +406,14 @@ export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConve
     await db.notes.put(note)
     await db.quickNotes.put(convertedRow)
 
-    await enqueueOutbox(db, 'note', noteId, 'create', stripNoteSyncFields(note))
+    const notePayload = stripNoteSyncFields(note)
+    await enqueueOutbox(
+      db, db.spaceId, 'note', noteId, 'create', notePayload,
+      await buildOutboxIdentity(notePayload, {
+        operationId: crypto.randomUUID(), expectedVersion: null,
+        transportState: 'ready', createdAt: new Date().toISOString(),
+      }),
+    )
     await runConfiguredQuickNoteOutbox(db, {
       entityType: 'quickNote',
       entityId: id,
@@ -461,11 +466,17 @@ async function runConfiguredQuickNoteOutbox(
 
   await enqueueOutbox(
     database,
+    database.spaceId,
     context.entityType,
     context.entityId,
     context.action,
     context.payload,
-    { expectedVersion: context.expectedVersion },
+    await buildOutboxIdentity(context.payload, {
+      operationId: crypto.randomUUID(),
+      expectedVersion: context.expectedVersion ?? null,
+      transportState: 'ready',
+      createdAt: new Date().toISOString(),
+    }),
   )
 }
 
@@ -549,7 +560,6 @@ function normalizeUpdateInput(input: QuickNoteUpdateInput): QuickNoteUpdateInput
   if ('mood' in input && input.mood !== undefined) patch.mood = input.mood
   if ('pinned' in input && input.pinned !== undefined) patch.pinned = input.pinned
   if ('folder_id' in input && input.folder_id !== undefined) patch.folder_id = input.folder_id
-  if ('session_id' in input && input.session_id !== undefined) patch.session_id = input.session_id
   if ('updated_at' in input && input.updated_at !== undefined) patch.updated_at = input.updated_at
 
   if (Object.keys(patch).length === 0) {

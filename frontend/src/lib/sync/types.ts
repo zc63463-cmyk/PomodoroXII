@@ -70,17 +70,15 @@ export const syncEngineStub: SyncEngine = {
 
 /** 14 个 sync-enabled 实体类型（F1 §3.3 / 附录 C） */
 export type SyncEntityType =
-  | 'task' | 'session' | 'note' | 'folder' | 'quickNote'
+  | 'note' | 'folder' | 'quickNote'
   | 'reflection' | 'habit' | 'habitCheckIn' | 'schedule' | 'timeBlock'
-  | 'memoComment' | 'sessionQuickNote' | 'scheduleQuickNote' | 'taskQuickNote'
+  | 'memoComment' | 'scheduleQuickNote'
 
 /** outbox 动作（与 OutboxEvent.action 一致） */
 export type OutboxAction = 'create' | 'update' | 'delete'
 
 /** entityType(camelCase 单数) → Dexie 表名(plural) — drop_existing 删本地实体用 */
 export const ENTITY_TYPE_TO_TABLE: Record<SyncEntityType, string> = {
-  task: 'tasks',
-  session: 'sessions',
   note: 'notes',
   folder: 'folders',
   quickNote: 'quickNotes',
@@ -90,15 +88,11 @@ export const ENTITY_TYPE_TO_TABLE: Record<SyncEntityType, string> = {
   schedule: 'schedules',
   timeBlock: 'timeBlocks',
   memoComment: 'memoComments',
-  sessionQuickNote: 'sessionQuickNotes',
   scheduleQuickNote: 'scheduleQuickNotes',
-  taskQuickNote: 'taskQuickNotes',
 }
 
 /** pull_key(plural) → Dexie 表名(plural) — 14 组全等映射（供 S1-2 merge 使用） */
 export const PULL_KEY_TO_TABLE: Record<string, string> = {
-  tasks: 'tasks',
-  sessions: 'sessions',
   notes: 'notes',
   folders: 'folders',
   quickNotes: 'quickNotes',
@@ -108,10 +102,28 @@ export const PULL_KEY_TO_TABLE: Record<string, string> = {
   schedules: 'schedules',
   timeBlocks: 'timeBlocks',
   memoComments: 'memoComments',
-  sessionQuickNotes: 'sessionQuickNotes',
   scheduleQuickNotes: 'scheduleQuickNotes',
-  taskQuickNotes: 'taskQuickNotes',
 }
+
+export const TS3_LOCAL_ENTITY_TO_TABLE = {
+  project: 'projects',
+  statusDefinition: 'statusDefinitions',
+  typeDefinition: 'typeDefinitions',
+  label: 'labels',
+  workItemLabel: 'workItemLabels',
+  workItem: 'workItems',
+  workItemNote: 'workItemNotes',
+  focusSession: 'focusSessions',
+  sessionTaskContext: 'sessionTaskContexts',
+  sessionAttributionRevision: 'sessionAttributionRevisions',
+  sessionWorkItemPlan: 'sessionWorkItemPlans',
+  sessionWorkItemOutcome: 'sessionWorkItemOutcomes',
+} as const
+
+export type TS3LocalEntityType = keyof typeof TS3_LOCAL_ENTITY_TO_TABLE
+export const TS3_AWAITING_S4_ENTITY_TYPES = new Set<TS3LocalEntityType>(
+  Object.keys(TS3_LOCAL_ENTITY_TO_TABLE) as TS3LocalEntityType[],
+)
 
 /** syncMeta 键名（F1 §2.1，F1-D2 锁定，H2-D 新增 cursor/cursor_version） — 值为 Dexie syncMeta 表的 key */
 export const SYNC_META_KEYS = {
@@ -160,9 +172,9 @@ export type ApiSyncEvent = components['schemas']['SyncEvent']
 
 /** 14 个 pull_key（复数，与 PULL_KEY_TO_TABLE 键的并集子集） */
 export const SYNC_PULL_KEYS = [
-  'tasks', 'sessions', 'notes', 'folders', 'quickNotes', 'reflections',
+  'notes', 'folders', 'quickNotes', 'reflections',
   'habits', 'habitCheckIns', 'schedules', 'timeBlocks', 'memoComments',
-  'sessionQuickNotes', 'scheduleQuickNotes', 'taskQuickNotes',
+  'scheduleQuickNotes',
 ] as const
 export type SyncPullKey = (typeof SYNC_PULL_KEYS)[number]
 

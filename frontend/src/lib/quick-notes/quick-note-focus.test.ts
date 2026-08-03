@@ -15,7 +15,6 @@ function makeNote(id: string): QuickNote {
     pinned: false,
     archived_at: null,
     archive_file_path: null,
-    session_id: null,
     folder_id: null,
     trashed_at: null,
     migrated_to_note_id: null,
