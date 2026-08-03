@@ -1,0 +1,14 @@
+[
+  {
+    "name": "empty-object",
+    "payload": {},
+    "canonicalUtf8": "{}",
+    "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  },
+  {
+    "name": "nested-unicode-and-key-order",
+    "payload": {"z": 1, "a": [true, null, "雪"]},
+    "canonicalUtf8": "{\"a\":[true,null,\"雪\"],\"z\":1}",
+    "sha256": "d625d1d0dc331b7f55c53959732d6fbe3678413b7e013655326ab86130da6559"
+  }
+]
