@@ -63,15 +63,24 @@ describe('buildBatchIdempotencyKey', () => {
   function makeRow(operationId: string, id = 1): OutboxEvent {
     return {
       id,
-      entityType: 'task',
+      spaceId: 'idempotency-test',
+      entityType: 'note',
       entityId: `e${id}`,
       action: 'create',
       payload: '{}',
-      createdAt: 1000,
+      createdAt: '2026-07-06T00:00:00.000Z',
       synced: false,
+      payloadHash: '0'.repeat(64),
+      compoundOperationId: null,
+      compoundOrder: null,
       operationId,
       expectedVersion: null,
       requiresVersionRebase: false,
+      transportState: 'ready',
+      lastError: null,
+      lastErrorCode: null,
+      failedAt: null,
+      attemptCount: 0,
     }
   }
 

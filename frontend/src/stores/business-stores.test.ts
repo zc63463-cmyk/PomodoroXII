@@ -8,8 +8,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useAppStore } from '@/stores/app-store'
 import { useTimerStore } from '@/stores/timer-store'
-import { useSessionStore } from '@/stores/session-store'
-import { useTaskStore } from '@/stores/task-store'
+import { useFocusSessionStore } from '@/stores/focus-session-store'
+import { useTaskSpaceStore } from '@/stores/task-space-store'
 import { useNoteStore } from '@/stores/note-store'
 import { useQuickNoteStore } from '@/stores/quick-note-store'
 import { useFolderStore } from '@/stores/folder-store'
@@ -28,8 +28,8 @@ describe('business stores reset', () => {
     // Reset all stores before each test to ensure isolation
     useAppStore.getState().reset()
     useTimerStore.getState().reset()
-    useSessionStore.getState().reset()
-    useTaskStore.getState().reset()
+    useFocusSessionStore.getState().reset()
+    useTaskSpaceStore.getState().reset()
     useNoteStore.getState().reset()
     useQuickNoteStore.getState().reset()
     useFolderStore.getState().reset()
@@ -66,34 +66,30 @@ describe('business stores reset', () => {
     expect(useTimerStore.getState().activeSessionId).toBeNull()
   })
 
-  it('session-store reset restores sessions, isLoading, error', () => {
-    useSessionStore.setState({
-      sessions: [{ id: 's1' } as never],
-      isLoading: true,
-      error: 'test',
+  it('focus-session-store reset restores the current aggregate projection', () => {
+    useFocusSessionStore.setState({
+      sessions: [{ sessionId: 's1' } as never],
+      currentSessionId: 's1',
     })
-    useSessionStore.getState().reset()
-    expect(useSessionStore.getState().sessions).toEqual([])
-    expect(useSessionStore.getState().isLoading).toBe(false)
-    expect(useSessionStore.getState().error).toBeNull()
+    useFocusSessionStore.getState().reset()
+    expect(useFocusSessionStore.getState().sessions).toEqual([])
+    expect(useFocusSessionStore.getState().currentSessionId).toBeNull()
   })
 
-  it('task-store reset restores tasks, tags, taskTags, taskRelations, isLoading, error', () => {
-    useTaskStore.setState({
-      tasks: [{ id: 't1' } as never],
-      tags: [{ id: 'g1' } as never],
-      taskTags: [{ id: 'tt1' } as never],
-      taskRelations: [{ id: 'tr1' } as never],
-      isLoading: true,
-      error: 'test',
+  it('task-space-store reset restores project, WorkItem, and Note selection', () => {
+    useTaskSpaceStore.setState({
+      projects: [{ id: 'p1' } as never],
+      workItems: [{ id: 'wi1' } as never],
+      selectedProjectId: 'p1',
+      selectedWorkItemId: 'wi1',
+      selectedNote: { noteId: 'n1' } as never,
     })
-    useTaskStore.getState().reset()
-    expect(useTaskStore.getState().tasks).toEqual([])
-    expect(useTaskStore.getState().tags).toEqual([])
-    expect(useTaskStore.getState().taskTags).toEqual([])
-    expect(useTaskStore.getState().taskRelations).toEqual([])
-    expect(useTaskStore.getState().isLoading).toBe(false)
-    expect(useTaskStore.getState().error).toBeNull()
+    useTaskSpaceStore.getState().reset()
+    expect(useTaskSpaceStore.getState().projects).toEqual([])
+    expect(useTaskSpaceStore.getState().workItems).toEqual([])
+    expect(useTaskSpaceStore.getState().selectedProjectId).toBeNull()
+    expect(useTaskSpaceStore.getState().selectedWorkItemId).toBeNull()
+    expect(useTaskSpaceStore.getState().selectedNote).toBeNull()
   })
 
   it('note-store reset restores notes, comments, currentNoteId, isLoading, error', () => {

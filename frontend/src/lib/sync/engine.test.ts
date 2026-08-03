@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
-import { PomodoroXIDB } from '@/services/database'
+import type { PomodoroXIDB } from '@/services/database'
+import type { OutboxEvent } from '@/types'
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { spaceApi } from '@/services/api'
 import { RealSyncEngine } from './engine'
 import { loadSyncMeta } from './sync-meta'
@@ -14,9 +16,7 @@ import { loadSyncMeta } from './sync-meta'
  */
 
 async function openTestDb(): Promise<PomodoroXIDB> {
-  const db = new PomodoroXIDB('engine-test-' + crypto.randomUUID())
-  await db.open()
-  return db
+  return openPomodoroXIDB('engine-test-' + crypto.randomUUID())
 }
 
 function ok(data: unknown, config: InternalAxiosRequestConfig): AxiosResponse {
@@ -44,7 +44,7 @@ function singlePageData() {
     has_more: false,
     tombstones_has_more: false,
     next_since: '2026-07-06T12:00:00.000Z',
-    next_since_id: 'task-final',
+    next_since_id: 'note-final',
     next_tombstone_since_id: 'tf',
   }
 }
@@ -56,7 +56,7 @@ function page1Data() {
     has_more: true,
     tombstones_has_more: false,
     next_since: '2026-07-06T12:00:00.000Z',
-    next_since_id: 'task-1',
+    next_since_id: 'note-1',
     next_tombstone_since_id: 't1',
   }
 }
@@ -67,7 +67,7 @@ function page2Data() {
     has_more: false,
     tombstones_has_more: false,
     next_since: '2026-07-06T12:01:00.000Z',
-    next_since_id: 'task-2',
+    next_since_id: 'note-2',
     next_tombstone_since_id: 't2',
   }
 }
@@ -79,6 +79,35 @@ function emptyPushResponse() {
     conflicts: [],
     errors: [],
     server_time: '2026-07-06T12:00:00.000Z',
+  }
+}
+
+function engineOutboxRow(
+  db: PomodoroXIDB,
+  entityId: string,
+  overrides: Partial<OutboxEvent> = {},
+): OutboxEvent {
+  const action = overrides.action ?? 'update'
+  return {
+    spaceId: db.spaceId,
+    entityType: 'note',
+    entityId,
+    action,
+    payload: '{}',
+    payloadHash: '0'.repeat(64),
+    compoundOperationId: null,
+    compoundOrder: null,
+    createdAt: '2026-07-06T12:00:00.000Z',
+    synced: false,
+    lastError: null,
+    lastErrorCode: null,
+    failedAt: null,
+    attemptCount: 0,
+    operationId: `engine-op-${entityId}`,
+    expectedVersion: action === 'create' ? null : 1,
+    requiresVersionRebase: false,
+    transportState: 'ready',
+    ...overrides,
   }
 }
 
@@ -94,16 +123,16 @@ describe('RealSyncEngine', () => {
 
   // ===== 组 A：markDirty + getPendingCount（EN1, EN2）=====
 
-  it('EN1: markDirty 后 getPendingCount 返回缓存值（不访问 db.tasks）', async () => {
+  it('EN1: markDirty 后 getPendingCount 返回缓存值（不访问 db.notes）', async () => {
     db = await openTestDb()
     const engine = new RealSyncEngine(db, 'space-1')
     // 等 refreshPendingCount 初始化完成
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    // spy db.tasks.get — markDirty 不应访问 Dexie
-    const tasksGetSpy = vi.spyOn(db.tasks, 'get')
+    // spy db.notes.get — markDirty 不应访问 Dexie
+    const tasksGetSpy = vi.spyOn(db.notes, 'get')
 
-    engine.markDirty('task', 't1', 'create')
+    engine.markDirty('note', 't1', 'create')
 
     expect(engine.getPendingCount()).toBe(1)
     expect(tasksGetSpy).not.toHaveBeenCalled()
@@ -116,8 +145,8 @@ describe('RealSyncEngine', () => {
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    engine.markDirty('task', 't1', 'create')
-    engine.markDirty('task', 't2', 'update')
+    engine.markDirty('note', 't1', 'create')
+    engine.markDirty('note', 't2', 'update')
     engine.markDirty('note', 'n1', 'delete')
 
     // 同步返回缓存，不 await Dexie
@@ -161,8 +190,8 @@ describe('RealSyncEngine', () => {
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    // 预存本地 _dirty=true task（updated_at 较旧）
-    await db.tasks.put({
+    // 预存本地 _dirty=true note（updated_at 较旧）
+    await db.notes.put({
       id: 't1',
       updated_at: '2026-01-01T00:00:00.000Z',
       _dirty: true,
@@ -176,7 +205,7 @@ describe('RealSyncEngine', () => {
         return ok(
           {
             ...singlePageData(),
-            tasks: [
+            notes: [
               { id: 't1', updated_at: '2026-07-06T12:00:00.000Z', title: 'remote' },
             ],
           },
@@ -203,17 +232,9 @@ describe('RealSyncEngine', () => {
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
     // 预存 outbox 未同步行（pushAllPending 需要 pending 才发 HTTP）
-    await db.outbox.add({
-      entityType: 'task',
-      entityId: 't1',
-      action: 'update',
-      payload: '{"title":"local"}',
-      createdAt: Date.now(),
-      synced: false,
-      operationId: 'engine-en5-op',
-      expectedVersion: 1,
-      requiresVersionRebase: false,
-    } as never)
+    await db.outbox.add(engineOutboxRow(db, 't1', {
+      payload: '{"title":"local"}', operationId: 'engine-en5-op',
+    }))
 
     // pull 空；push 返回 version_mismatch error
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
@@ -260,18 +281,12 @@ describe('RealSyncEngine', () => {
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
     // 预填 150 行未同步 outbox（batchSize 默认 100 → 两批：100 + 50）
-    const outboxRows = Array.from({ length: 150 }, (_, i) => ({
-      entityType: 'task',
-      entityId: `t${i}`,
-      action: 'update' as const,
+    const outboxRows = Array.from({ length: 150 }, (_, i) => engineOutboxRow(db, `t${i}`, {
       payload: '{"title":"local"}',
-      createdAt: Date.now() + i,
-      synced: false,
+      createdAt: new Date(Date.parse('2026-07-06T12:00:00.000Z') + i).toISOString(),
       operationId: `engine-en6-op-${i}`,
-      expectedVersion: 1,
-      requiresVersionRebase: false,
     }))
-    await db.outbox.bulkAdd(outboxRows as never)
+    await db.outbox.bulkAdd(outboxRows)
 
     let pushCallCount = 0
     const off = engine.onPushComplete(() => {
@@ -350,7 +365,7 @@ describe('RealSyncEngine', () => {
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    await db.tasks.put({
+    await db.notes.put({
       id: 't1',
       updated_at: '2026-01-01T00:00:00.000Z',
       _dirty: true,
@@ -363,7 +378,7 @@ describe('RealSyncEngine', () => {
         return ok(
           {
             ...singlePageData(),
-            tasks: [
+            notes: [
               { id: 't1', updated_at: '2026-07-06T12:00:00.000Z', title: 'remote' },
             ],
           },
@@ -379,9 +394,9 @@ describe('RealSyncEngine', () => {
 
     await engine.resolveConflict(-1, 'accept-remote')
 
-    const task = await db.tasks.get('t1')
-    expect(task?.title).toBe('remote')
-    expect(task?._dirty).toBe(false)
+    const note = await db.notes.get('t1')
+    expect(note?.title).toBe('remote')
+    expect(note?._dirty).toBe(false)
     expect(engine.getConflicts().length).toBe(0)
     engine.destroy()
   })
@@ -391,7 +406,7 @@ describe('RealSyncEngine', () => {
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    await db.tasks.put({
+    await db.notes.put({
       id: 't1',
       updated_at: '2026-01-01T00:00:00.000Z',
       _dirty: true,
@@ -404,7 +419,7 @@ describe('RealSyncEngine', () => {
         return ok(
           {
             ...singlePageData(),
-            tasks: [
+            notes: [
               { id: 't1', updated_at: '2026-07-06T12:00:00.000Z', title: 'remote' },
             ],
           },
@@ -420,9 +435,9 @@ describe('RealSyncEngine', () => {
 
     await engine.resolveConflict(-1, 'keep-local')
 
-    const task = await db.tasks.get('t1')
-    expect(task?.title).toBe('local')
-    expect(task?._dirty).toBe(true)
+    const note = await db.notes.get('t1')
+    expect(note?.title).toBe('local')
+    expect(note?._dirty).toBe(true)
     expect(engine.getConflicts().length).toBe(0)
     engine.destroy()
   })
@@ -432,20 +447,13 @@ describe('RealSyncEngine', () => {
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    const outboxId = await db.outbox.add({
-      entityType: 'task',
-      entityId: 't1',
-      action: 'update',
-      payload: '{}',
-      createdAt: Date.now(),
-      synced: false,
-    } as never)
+    const outboxId = await db.outbox.add(engineOutboxRow(db, 't1'))
 
     // 手动注入冲突（绕过 sync 触发路径，直接测 outboxId>=0 分支）
     ;(engine as unknown as { conflicts: unknown[] }).conflicts = [
       {
         outboxId,
-        entityType: 'task',
+        entityType: 'note',
         entityId: 't1',
         localVersion: {},
         remoteVersion: {},
@@ -522,7 +530,7 @@ describe('RealSyncEngine', () => {
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
     engine.destroy()
-    engine.markDirty('task', 't1', 'create')
+    engine.markDirty('note', 't1', 'create')
 
     expect(engine.getPendingCount()).toBe(0)
   })
@@ -549,8 +557,8 @@ describe('RealSyncEngine', () => {
     }
 
     // 3 次 markDirty 同步调用 → debounce 仅保留最后一个 5000ms timer
-    engine.markDirty('task', 't1', 'create')
-    engine.markDirty('task', 't2', 'update')
+    engine.markDirty('note', 't1', 'create')
+    engine.markDirty('note', 't2', 'update')
     engine.markDirty('note', 'n1', 'delete')
 
     // 推进 5000ms 触发 debounce 后的 sync
@@ -712,14 +720,7 @@ describe('RealSyncEngine', () => {
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    const outboxId = await db.outbox.add({
-      entityType: 'task',
-      entityId: 't1',
-      action: 'update',
-      payload: '{}',
-      createdAt: Date.now(),
-      synced: false,
-    } as never)
+    const outboxId = await db.outbox.add(engineOutboxRow(db, 't1'))
 
     // 注入冲突 + 手动设 status='conflict'（模拟 addConflicts 效果）
     const internal = engine as unknown as {
@@ -729,7 +730,7 @@ describe('RealSyncEngine', () => {
     internal.conflicts = [
       {
         outboxId,
-        entityType: 'task',
+        entityType: 'note',
         entityId: 't1',
         localVersion: {},
         remoteVersion: {},
@@ -968,29 +969,29 @@ describe('RealSyncEngine', () => {
     db = await openTestDb()
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
-    await db.tasks.bulkPut([
+    await db.notes.bulkPut([
       { id: 'first', title: 'local-first', _dirty: true },
       { id: 'second', title: 'local-second', _dirty: true },
     ] as never[])
     await db.outbox.bulkAdd([
-      { entityType: 'task', entityId: 'first', action: 'update', payload: '{}', createdAt: 1, synced: false },
-      { entityType: 'task', entityId: 'second', action: 'update', payload: '{}', createdAt: 2, synced: false },
-    ] as never[])
+      engineOutboxRow(db, 'first', { createdAt: '2026-07-06T12:00:00.001Z' }),
+      engineOutboxRow(db, 'second', { createdAt: '2026-07-06T12:00:00.002Z' }),
+    ])
     const internal = engine as unknown as { conflicts: unknown[]; setStatus: (s: string) => void }
     internal.conflicts = [
-      { outboxId: -1, entityType: 'task', entityId: 'first', localVersion: {}, remoteVersion: { id: 'first', title: 'remote-first' }, conflictType: 'version' },
-      { outboxId: -1, entityType: 'task', entityId: 'second', localVersion: {}, remoteVersion: { id: 'second', title: 'remote-second' }, conflictType: 'version' },
+      { outboxId: -1, entityType: 'note', entityId: 'first', localVersion: {}, remoteVersion: { id: 'first', title: 'remote-first' }, conflictType: 'version' },
+      { outboxId: -1, entityType: 'note', entityId: 'second', localVersion: {}, remoteVersion: { id: 'second', title: 'remote-second' }, conflictType: 'version' },
     ]
     internal.setStatus('conflict')
 
     await engine.resolveConflict(
       -1,
       'accept-remote',
-      { entityType: 'task', entityId: 'second' },
+      { entityType: 'note', entityId: 'second' },
     )
 
-    expect((await db.tasks.get('first'))?.title).toBe('local-first')
-    expect((await db.tasks.get('second'))?.title).toBe('remote-second')
+    expect((await db.notes.get('first'))?.title).toBe('local-first')
+    expect((await db.notes.get('second'))?.title).toBe('remote-second')
     expect(await db.outbox.where('entityId').equals('first').count()).toBe(1)
     expect(await db.outbox.where('entityId').equals('second').count()).toBe(0)
     expect(engine.getConflicts().map((item) => item.entityId)).toEqual(['first'])
@@ -1001,13 +1002,11 @@ describe('RealSyncEngine', () => {
     db = await openTestDb()
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
-    await db.tasks.put({ id: 'atomic', title: 'local', _dirty: true } as never)
-    await db.outbox.add({
-      entityType: 'task', entityId: 'atomic', action: 'update', payload: '{}', createdAt: 1, synced: false,
-    } as never)
+    await db.notes.put({ id: 'atomic', title: 'local', _dirty: true } as never)
+    await db.outbox.add(engineOutboxRow(db, 'atomic'))
     const internal = engine as unknown as { conflicts: unknown[]; setStatus: (s: string) => void }
     internal.conflicts = [{
-      outboxId: -1, entityType: 'task', entityId: 'atomic',
+      outboxId: -1, entityType: 'note', entityId: 'atomic',
       localVersion: {}, remoteVersion: { id: 'atomic', title: 'remote' }, conflictType: 'version',
     }]
     internal.setStatus('conflict')
@@ -1018,10 +1017,10 @@ describe('RealSyncEngine', () => {
     await expect(engine.resolveConflict(
       -1,
       'accept-remote',
-      { entityType: 'task', entityId: 'atomic' },
+      { entityType: 'note', entityId: 'atomic' },
     )).rejects.toThrow('outbox delete failed')
 
-    expect((await db.tasks.get('atomic'))?.title).toBe('local')
+    expect((await db.notes.get('atomic'))?.title).toBe('local')
     expect(await db.outbox.where('entityId').equals('atomic').count()).toBe(1)
     engine.destroy()
   })
@@ -1031,14 +1030,7 @@ describe('RealSyncEngine', () => {
     const engine = new RealSyncEngine(db, 'space-1')
     await vi.waitFor(() => expect(engine.getPendingCount()).toBe(0))
 
-    const outboxId = await db.outbox.add({
-      entityType: 'task',
-      entityId: 't1',
-      action: 'update',
-      payload: '{}',
-      createdAt: Date.now(),
-      synced: false,
-    } as never)
+    const outboxId = await db.outbox.add(engineOutboxRow(db, 't1'))
 
     // 注入冲突 + 手动设 status='conflict'
     const internal = engine as unknown as {
@@ -1046,7 +1038,7 @@ describe('RealSyncEngine', () => {
       setStatus: (s: string) => void
     }
     internal.conflicts = [{
-      outboxId, entityType: 'task', entityId: 't1',
+      outboxId, entityType: 'note', entityId: 't1',
       localVersion: {}, remoteVersion: {}, conflictType: 'version',
     }]
     internal.setStatus('conflict')

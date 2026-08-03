@@ -1,7 +1,7 @@
 /**
  * Push 批处理与冲突响应（F1 §5.1–§5.4）。
  *
- * - buildPushEvents：outbox 行 → API SyncEvent（entityType→entity_type，createdAt→client_updated_at ISO）
+ * - buildPushEvents：outbox 行 → API SyncEvent（entityType→entity_type，createdAt→client_updated_at）
  * - handlePushResponse：applied/conflicts auto-clear outbox；errors 通用不清（重试），
  *   version_mismatch/content_hash_mismatch 进 conflicts（需用户裁决）
  * - pushAllPending：循环分批 100，遇需用户裁决冲突停止
@@ -31,7 +31,9 @@ export function buildPushEvents(rows: OutboxEvent[]): ApiSyncEvent[] {
     entity_id: e.entityId,
     action: e.action,
     payload: JSON.parse(e.payload) as { [key: string]: unknown },
-    client_updated_at: new Date(e.createdAt).toISOString(),
+    // createdAt is already a canonical UTC RFC3339 caller-intent timestamp;
+    // preserve its exact bytes instead of normalizing away an optional .000.
+    client_updated_at: e.createdAt,
   }))
 }
 

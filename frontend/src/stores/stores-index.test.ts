@@ -12,8 +12,8 @@ describe('stores/index.ts', () => {
     expect(STORE_RESET_ORDER).toEqual([
       'sync',
       'timer',
-      'session',
-      'task',
+      'task-space',
+      'focus-session',
       'note',
       'quick-note',
       'folder',

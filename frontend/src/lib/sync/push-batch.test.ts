@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
-import { PomodoroXIDB } from '@/services/database'
+import type { PomodoroXIDB } from '@/services/database'
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { spaceApi } from '@/services/api'
 import { buildPushEvents, pushBatch, pushAllPending } from './push-batch'
 import type { OutboxEvent } from '@/types'
@@ -13,9 +14,7 @@ import type { OutboxEvent } from '@/types'
  */
 
 async function openTestDb(): Promise<PomodoroXIDB> {
-  const db = new PomodoroXIDB('push-test-' + crypto.randomUUID())
-  await db.open()
-  return db
+  return openPomodoroXIDB('push-test-' + crypto.randomUUID())
 }
 
 function ok(data: unknown, config: InternalAxiosRequestConfig): AxiosResponse {
@@ -32,15 +31,24 @@ function makeOutboxRow(
 ): OutboxEvent {
   return {
     id,
+    spaceId: 'push-test',
     entityType,
     entityId,
     action,
     payload: JSON.stringify(payload),
-    createdAt,
+    createdAt: new Date(createdAt).toISOString(),
     synced: false,
+    payloadHash: '0'.repeat(64),
+    compoundOperationId: null,
+    compoundOrder: null,
     operationId: `op-${entityId}-${id}`,
     expectedVersion: action === 'create' ? null : 1,
     requiresVersionRebase: false,
+    transportState: 'ready',
+    lastError: null,
+    lastErrorCode: null,
+    failedAt: null,
+    attemptCount: 0,
   }
 }
 
@@ -55,16 +63,23 @@ describe('push-batch', () => {
 
   it('PB1: buildPushEvents 字段映射 + ISO', () => {
     const rows: OutboxEvent[] = [
-      makeOutboxRow(1, 'task', 't1', 'create', { id: 't1', title: 'X' }, 1751803200000),
+      makeOutboxRow(1, 'note', 't1', 'create', { id: 't1', title: 'X' }, 1751803200000),
     ]
     const events = buildPushEvents(rows)
 
     expect(events).toHaveLength(1)
-    expect(events[0]!.entity_type).toBe('task')
+    expect(events[0]!.entity_type).toBe('note')
     expect(events[0]!.entity_id).toBe('t1')
     expect(events[0]!.action).toBe('create')
     expect(events[0]!.client_updated_at).toBe(new Date(1751803200000).toISOString())
     expect(events[0]!.payload).toEqual({ id: 't1', title: 'X' })
+  })
+
+  it('PB1: preserves a canonical timestamp without adding milliseconds', () => {
+    const row = makeOutboxRow(2, 'note', 't2')
+    row.createdAt = '2026-07-06T12:00:00Z'
+
+    expect(buildPushEvents([row])[0]!.client_updated_at).toBe('2026-07-06T12:00:00Z')
   })
 
   it('PB1-QN: buildPushEvents maps quickNote delete tombstone payload', () => {
@@ -86,11 +101,11 @@ describe('push-batch', () => {
 
   it('PB2: applied 无 resolution → 清 outbox', async () => {
     db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'task', 't1', 'create'))
+    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'create'))
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       return ok({
-        applied: [{ entity_type: 'task', entity_id: 't1', action: 'create' }],
+        applied: [{ entity_type: 'note', entity_id: 't1', action: 'create' }],
         conflicts: [],
         errors: [],
         server_time: '2026-07-06T12:00:00.000Z',
@@ -126,11 +141,11 @@ describe('push-batch', () => {
 
   it('PB3: applied resolution=remote → 清 + remoteWinCount=1', async () => {
     db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'task', 't1', 'update'))
+    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'update'))
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       return ok({
-        applied: [{ entity_type: 'task', entity_id: 't1', action: 'update', resolution: 'remote' }],
+        applied: [{ entity_type: 'note', entity_id: 't1', action: 'update', resolution: 'remote' }],
         conflicts: [],
         errors: [],
         server_time: '2026-07-06T12:00:00.000Z',
@@ -146,12 +161,12 @@ describe('push-batch', () => {
 
   it('PB4: conflicts resolution=local → 清 outbox', async () => {
     db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'task', 't1', 'create'))
+    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'create'))
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       return ok({
         applied: [],
-        conflicts: [{ entity_type: 'task', entity_id: 't1', resolution: 'local' }],
+        conflicts: [{ entity_type: 'note', entity_id: 't1', resolution: 'local' }],
         errors: [],
         server_time: '2026-07-06T12:00:00.000Z',
       }, config)
@@ -165,18 +180,18 @@ describe('push-batch', () => {
 
   it('PB5: conflicts resolution=tombstone → 清 + deletion_state', async () => {
     db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'task', 't1', 'delete'))
-    // 种一行 task 供 tombstone 标记
-    await db.tasks.put({
+    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'delete'))
+    // 种一行 note 供 tombstone 标记
+    await db.notes.put({
       id: 't1', title: 'T', status: 'todo',
       updated_at: '2026-01-01T00:00:00.000Z',
       _dirty: true, deletion_state: 'active', version: 1,
-    } as unknown as Parameters<PomodoroXIDB['tasks']['put']>[0])
+    } as unknown as Parameters<PomodoroXIDB['notes']['put']>[0])
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       return ok({
         applied: [],
-        conflicts: [{ entity_type: 'task', entity_id: 't1', resolution: 'tombstone' }],
+        conflicts: [{ entity_type: 'note', entity_id: 't1', resolution: 'tombstone' }],
         errors: [],
         server_time: '2026-07-06T12:00:00.000Z',
       }, config)
@@ -186,19 +201,19 @@ describe('push-batch', () => {
     await pushBatch(db, spaceApi, rows)
 
     expect(await db.outbox.count()).toBe(0)
-    const task = await db.tasks.get('t1')
-    expect(task!.deletion_state).toBe('deleted')
-    expect(task!._dirty).toBe(false)
+    const note = await db.notes.get('t1')
+    expect(note!.deletion_state).toBe('deleted')
+    expect(note!._dirty).toBe(false)
   })
 
   it('PB6: conflicts resolution=circular_ref → 清 + count', async () => {
     db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'task', 't1', 'create'))
+    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'create'))
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       return ok({
         applied: [],
-        conflicts: [{ entity_type: 'task', entity_id: 't1', resolution: 'circular_ref' }],
+        conflicts: [{ entity_type: 'note', entity_id: 't1', resolution: 'circular_ref' }],
         errors: [],
         server_time: '2026-07-06T12:00:00.000Z',
       }, config)
@@ -213,13 +228,13 @@ describe('push-batch', () => {
 
   it('PB7: errors 通用 → outbox 保留 + retriableErrorCount=1', async () => {
     db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'task', 't1', 'create'))
+    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'create'))
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       return ok({
         applied: [],
         conflicts: [],
-        errors: [{ entity_type: 'task', entity_id: 't1', error: 'something_failed' }],
+        errors: [{ entity_type: 'note', entity_id: 't1', error: 'something_failed' }],
         server_time: '2026-07-06T12:00:00.000Z',
       }, config)
     }
@@ -265,23 +280,15 @@ describe('push-batch', () => {
       lastErrorCode: 'push_error',
       attemptCount: 1,
     })
-    expect(pending!.lastError).toBeUndefined()
+    expect(pending!.lastError).toBeNull()
   })
 
   it('PB8: 150 行 → pushAllPending 调 2 次 POST 且 outbox 清空', async () => {
     db = await openTestDb()
     // 种 150 行 outbox（不带 id 让 Dexie 自增主键）
-    const rows = Array.from({ length: 150 }, (_, i) => ({
-      entityType: 'task' as const,
-      entityId: `t${i}`,
-      action: 'create' as const,
-      payload: JSON.stringify({ id: `t${i}`, title: 'X' }),
-      createdAt: i,
-      synced: false,
-      operationId: `op-t${i}`,
-      expectedVersion: null,
-      requiresVersionRebase: false,
-    }))
+    const rows = Array.from({ length: 150 }, (_, i) =>
+      makeOutboxRow(i + 1, 'note', `t${i}`, 'create', { id: `t${i}`, title: 'X' }, 1751803200000 + i),
+    )
     await db.outbox.bulkAdd(rows)
 
     let postCount = 0
@@ -314,13 +321,13 @@ describe('push-batch', () => {
 
   it('PB9: errors version_mismatch → 进 conflicts + outbox 保留', async () => {
     db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'task', 't1', 'update'))
+    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'update'))
 
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
       return ok({
         applied: [],
         conflicts: [],
-        errors: [{ entity_type: 'task', entity_id: 't1', error: 'version_mismatch' }],
+        errors: [{ entity_type: 'note', entity_id: 't1', error: 'version_mismatch' }],
         server_time: '2026-07-06T12:00:00.000Z',
       }, config)
     }
@@ -330,7 +337,7 @@ describe('push-batch', () => {
 
     expect(result.conflicts).toHaveLength(1)
     expect(result.conflicts[0]!.outboxId).toBe(1)
-    expect(result.conflicts[0]!.entityType).toBe('task')
+    expect(result.conflicts[0]!.entityType).toBe('note')
     expect(result.conflicts[0]!.entityId).toBe('t1')
     expect(await db.outbox.count()).toBe(1)
     const row = await db.outbox.get(1)
@@ -359,17 +366,9 @@ describe('push-batch', () => {
 
   it('PB11: exactly batchSize pushable rows - one POST, all cleared', async () => {
     db = await openTestDb()
-    const rows = Array.from({ length: 3 }, (_, i) => ({
-      entityType: 'task' as const,
-      entityId: `t${i}`,
-      action: 'create' as const,
-      payload: JSON.stringify({ id: `t${i}`, title: 'X' }),
-      createdAt: i,
-      synced: false,
-      operationId: `op-t${i}`,
-      expectedVersion: null,
-      requiresVersionRebase: false,
-    }))
+    const rows = Array.from({ length: 3 }, (_, i) =>
+      makeOutboxRow(i + 1, 'note', `t${i}`, 'create', { id: `t${i}`, title: 'X' }, 1751803200000 + i),
+    )
     await db.outbox.bulkAdd(rows)
 
     let postCount = 0
@@ -394,17 +393,9 @@ describe('push-batch', () => {
 
   it('PB12: exceeds batchSize pushable rows - multiple POSTs, all cleared', async () => {
     db = await openTestDb()
-    const rows = Array.from({ length: 7 }, (_, i) => ({
-      entityType: 'task' as const,
-      entityId: `t${i}`,
-      action: 'create' as const,
-      payload: JSON.stringify({ id: `t${i}`, title: 'X' }),
-      createdAt: i,
-      synced: false,
-      operationId: `op-t${i}`,
-      expectedVersion: null,
-      requiresVersionRebase: false,
-    }))
+    const rows = Array.from({ length: 7 }, (_, i) =>
+      makeOutboxRow(i + 1, 'note', `t${i}`, 'create', { id: `t${i}`, title: 'X' }, 1751803200000 + i),
+    )
     await db.outbox.bulkAdd(rows)
 
     let postCount = 0
@@ -430,26 +421,12 @@ describe('push-batch', () => {
   it('PB13: mixed pushable and rebase rows - only pushable sent, rebase remain', async () => {
     db = await openTestDb()
     // 3 pushable create rows
-    const pushableRows = Array.from({ length: 3 }, (_, i) => ({
-      entityType: 'task' as const,
-      entityId: `p${i}`,
-      action: 'create' as const,
-      payload: JSON.stringify({ id: `p${i}` }),
-      createdAt: i,
-      synced: false,
-      operationId: `op-p${i}`,
-      expectedVersion: null,
-      requiresVersionRebase: false,
-    }))
+    const pushableRows = Array.from({ length: 3 }, (_, i) =>
+      makeOutboxRow(i + 1, 'note', `p${i}`, 'create', { id: `p${i}` }, 1751803200000 + i),
+    )
     // 2 rebase rows (update without reliable version)
     const rebaseRows = Array.from({ length: 2 }, (_, i) => ({
-      entityType: 'task' as const,
-      entityId: `r${i}`,
-      action: 'update' as const,
-      payload: JSON.stringify({ id: `r${i}` }),
-      createdAt: 10 + i,
-      synced: false,
-      operationId: `op-r${i}`,
+      ...makeOutboxRow(i + 10, 'note', `r${i}`, 'update', { id: `r${i}` }, 1751803200010 + i),
       expectedVersion: null,
       requiresVersionRebase: true,
     }))
@@ -483,17 +460,9 @@ describe('push-batch', () => {
 
   it('PB14: full batch all generic errors - pushAllPending stops after one POST, rows preserved', async () => {
     db = await openTestDb()
-    const rows = Array.from({ length: 3 }, (_, i) => ({
-      entityType: 'task' as const,
-      entityId: `t${i}`,
-      action: 'create' as const,
-      payload: JSON.stringify({ id: `t${i}`, title: 'X' }),
-      createdAt: i,
-      synced: false,
-      operationId: `op-t${i}`,
-      expectedVersion: null,
-      requiresVersionRebase: false,
-    }))
+    const rows = Array.from({ length: 3 }, (_, i) =>
+      makeOutboxRow(i + 1, 'note', `t${i}`, 'create', { id: `t${i}`, title: 'X' }, 1751803200000 + i),
+    )
     await db.outbox.bulkAdd(rows)
 
     let postCount = 0
@@ -522,8 +491,8 @@ describe('push-batch', () => {
   it('PB15: pushBatch with all rebase rows - no POST, empty result', async () => {
     db = await openTestDb()
     await db.outbox.bulkPut([
-      { ...makeOutboxRow(1, 'task', 'r1', 'update'), requiresVersionRebase: true, expectedVersion: null },
-      { ...makeOutboxRow(2, 'task', 'r2', 'delete'), requiresVersionRebase: true, expectedVersion: null },
+      { ...makeOutboxRow(1, 'note', 'r1', 'update'), requiresVersionRebase: true, expectedVersion: null },
+      { ...makeOutboxRow(2, 'note', 'r2', 'delete'), requiresVersionRebase: true, expectedVersion: null },
     ])
 
     let postCount = 0
@@ -545,9 +514,9 @@ describe('push-batch', () => {
   it('PB16: pushBatch with mixed pushable/rebase rows - only pushable rows sent', async () => {
     db = await openTestDb()
     await db.outbox.bulkPut([
-      makeOutboxRow(1, 'task', 'p1', 'create'),
-      { ...makeOutboxRow(2, 'task', 'r1', 'update'), requiresVersionRebase: true, expectedVersion: null },
-      makeOutboxRow(3, 'task', 'p2', 'create'),
+      makeOutboxRow(1, 'note', 'p1', 'create'),
+      { ...makeOutboxRow(2, 'note', 'r1', 'update'), requiresVersionRebase: true, expectedVersion: null },
+      makeOutboxRow(3, 'note', 'p2', 'create'),
     ])
 
     let postCount = 0

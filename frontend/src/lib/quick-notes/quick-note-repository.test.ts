@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PomodoroXIDB } from '@/services/database'
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { db, spaceDBManager } from '@/services/space-db'
 import {
   configureQuickNoteOutboxHook,
@@ -51,9 +51,7 @@ describe('quick-note-repository', () => {
   })
 
   it('writes create and default Outbox rows only to the supplied transaction database', async () => {
-    const isolatedDB = new PomodoroXIDB(
-      `quick-note-repo-concrete-${crypto.randomUUID()}`,
-    )
+    const isolatedDB = await openPomodoroXIDB(`quick-note-repo-concrete-${crypto.randomUUID()}`)
 
     try {
       await isolatedDB.transaction(
@@ -398,8 +396,7 @@ describe('quick-note-repository', () => {
   })
 
   it('commits an existing edit and its Outbox update in the supplied database', async () => {
-    const isolated = new PomodoroXIDB(`quick-note-existing-edit-${crypto.randomUUID()}`)
-    await isolated.open()
+    const isolated = await openPomodoroXIDB(`quick-note-existing-edit-${crypto.randomUUID()}`)
     try {
       const created = await isolated.transaction('rw', isolated.quickNotes, isolated.outbox, () =>
         createQuickNoteInTransaction(isolated, { id: 'existing-cas', content: 'before #old' }),

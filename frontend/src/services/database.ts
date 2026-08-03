@@ -8,31 +8,22 @@
  */
 
 import Dexie, { type Table } from 'dexie'
+import { dexieDbNameForSpace } from '@/lib/platform'
+import { toDexieStoreStrings, V18_STORE_DEFINITIONS } from './dexie-v18-schema'
 import type {
-  CachedTask,
-  CachedSession,
   CachedReflection,
   CachedReflectionTemplate,
   CachedSchedule,
   CachedQuickNote,
   CachedNote,
   CachedMemoComment,
-  CachedSessionQuickNote,
   CachedScheduleQuickNote,
-  CachedTaskQuickNote,
   CachedFolder,
   SyncedDailyReport,
   SyncedReportTemplate,
   SyncedHabit,
   SyncedHabitCheckIn,
   SyncedTimeBlock,
-  SyncedSessionEvent,
-  SyncedSessionContext,
-  SyncedCognitiveMark,
-  SyncedTag,
-  SyncedTaskTag,
-  SyncedTaskRelation,
-  SyncedFocusPattern,
   OutboxEvent,
   SyncMeta,
   DailyReport,
@@ -41,21 +32,10 @@ import type {
   HabitCheckIn,
   TimeBlock,
   ReflectionTemplate,
-  SessionEvent,
-  SessionContext,
-  CognitiveMark,
-  Tag,
-  TaskTag,
-  TaskRelation,
-  FocusPattern,
 } from '@/types'
 
 // Re-export for convenience (used by stores that already import from database.ts)
 export type { DailyReport, ReportTemplate, Habit, HabitCheckIn, TimeBlock, ReflectionTemplate }
-// Phase 1 re-exports
-export type { SessionEvent, SessionContext, CognitiveMark }
-// Phase 2 re-exports
-export type { Tag, TaskTag, TaskRelation, FocusPattern }
 
 /**
  * Deep-clone an object to strip any reactive Proxy wrappers.
@@ -84,12 +64,11 @@ export const V16_SYNC_TABLES = [
 export type V16SyncTableName = (typeof V16_SYNC_TABLES)[number]
 
 export class PomodoroXIDB extends Dexie {
-  tasks!: Table<CachedTask>
-  sessions!: Table<CachedSession>
   reflections!: Table<CachedReflection>
   outbox!: Table<OutboxEvent>
   settings!: Table<{ key: string; value: string }>
   syncMeta!: Table<SyncMeta>
+  tags!: Table<Record<string, unknown>>
 
   // v6 tables: daily reports, report templates, habits, time blocks
   reports!: Table<SyncedDailyReport>
@@ -97,19 +76,6 @@ export class PomodoroXIDB extends Dexie {
   habits!: Table<SyncedHabit>
   habitCheckIns!: Table<SyncedHabitCheckIn>
   timeBlocks!: Table<SyncedTimeBlock>
-
-  // Phase 1 tables: session events, context, cognitive marks (v7)
-  sessionEvents!: Table<SyncedSessionEvent>
-  sessionContexts!: Table<SyncedSessionContext>
-  cognitiveMarks!: Table<SyncedCognitiveMark>
-
-  // Phase 2 tables: tags, taskTags, taskRelations (v8)
-  tags!: Table<SyncedTag>
-  taskTags!: Table<SyncedTaskTag>
-  taskRelations!: Table<SyncedTaskRelation>
-
-  // Phase 2 tables: focus patterns (v9)
-  focusPatterns!: Table<SyncedFocusPattern>
 
   // v10 tables: reflection templates
   reflectionTemplates!: Table<CachedReflectionTemplate>
@@ -121,17 +87,41 @@ export class PomodoroXIDB extends Dexie {
 
   // v12 tables: memo comments + session/schedule ↔ quickNote junction tables
   memoComments!: Table<CachedMemoComment>
-  sessionQuickNotes!: Table<CachedSessionQuickNote>
   scheduleQuickNotes!: Table<CachedScheduleQuickNote>
-
-  // v13 tables: task ↔ quickNote junction table
-  taskQuickNotes!: Table<CachedTaskQuickNote>
 
   // v15 tables: folder virtual file system
   folders!: Table<CachedFolder>
 
-  constructor(dbName = 'pomodoroxi') {
+  // TS3 v18 final business/coordinator tables. Rows are intentionally typed at
+  // repository boundaries so the schema can remain one shared Dexie authority.
+  projects!: Table<Record<string, unknown>>
+  workItems!: Table<Record<string, unknown>>
+  workItemNotes!: Table<Record<string, unknown>>
+  workItemNoteConflicts!: Table<Record<string, unknown>>
+  focusSessions!: Table<Record<string, unknown>>
+  sessionTaskContexts!: Table<Record<string, unknown>>
+  sessionAttributionRevisions!: Table<Record<string, unknown>>
+  sessionWorkItemPlans!: Table<Record<string, unknown>>
+  sessionWorkItemOutcomes!: Table<Record<string, unknown>>
+  sessionCommandEnvelopes!: Table<Record<string, unknown>>
+  sessionCommandReceipts!: Table<Record<string, unknown>>
+  sessionCommandQueue!: Table<Record<string, unknown>>
+  sessionCommandReconciliationAttempts!: Table<Record<string, unknown>>
+  sessionReviewDrafts!: Table<Record<string, unknown>>
+  sessionActivationConflicts!: Table<Record<string, unknown>>
+  sessionActivationApplications!: Table<Record<string, unknown>>
+  directCommandIntents!: Table<Record<string, unknown>>
+  timerNoteComposerDrafts!: Table<Record<string, unknown>>
+  statusDefinitions!: Table<Record<string, unknown>>
+  typeDefinitions!: Table<Record<string, unknown>>
+  labels!: Table<Record<string, unknown>>
+  workItemLabels!: Table<Record<string, unknown>>
+
+  constructor(readonly spaceId: string, dbName = dexieDbNameForSpace(spaceId)) {
     super(dbName)
+    if (!spaceId.trim() || dbName !== dexieDbNameForSpace(spaceId)) {
+      throw new Error('space_database_identity_mismatch')
+    }
     this.version(3).stores({
       tasks: 'id, status, created_at, updated_at, due_date, _dirty',
       sessions: 'id, task_id, started_at, type, synced, _dirty',
@@ -288,6 +278,11 @@ export class PomodoroXIDB extends Dexie {
         if (needsExpectedVersion) row.expectedVersion = expectedVersion
         if (needsRebaseState) row.requiresVersionRebase = requiresVersionRebase
       })
-    })
+      })
+
+    // version(18): TS3 breaking Task Space + FocusSession cutover. The native
+    // scan-before-DDL is performed by openPomodoroXIDB; this Dexie declaration
+    // mirrors the final store inventory for normal opens and transactions.
+    this.version(18).stores(toDexieStoreStrings(V18_STORE_DEFINITIONS))
   }
 }

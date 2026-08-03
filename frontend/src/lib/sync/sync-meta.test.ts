@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { PomodoroXIDB } from '@/services/database'
+import type { PomodoroXIDB } from '@/services/database'
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { SYNC_META_KEYS } from './types'
 import { loadSyncMeta, saveSyncMeta, clearSyncCursors, touchLastSyncAt, touchLastFullSync } from './sync-meta'
 
@@ -11,9 +12,7 @@ import { loadSyncMeta, saveSyncMeta, clearSyncCursors, touchLastSyncAt, touchLas
  */
 
 async function openTestDb(): Promise<PomodoroXIDB> {
-  const db = new PomodoroXIDB('sync-meta-test-' + crypto.randomUUID())
-  await db.open()
-  return db
+  return openPomodoroXIDB('sync-meta-test-' + crypto.randomUUID())
 }
 
 describe('sync-meta', () => {
