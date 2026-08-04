@@ -82,14 +82,26 @@ describe('business stores reset', () => {
       workItems: [{ id: 'wi1' } as never],
       selectedProjectId: 'p1',
       selectedWorkItemId: 'wi1',
+      selectedLevel2WorkItemId: 'wi-parent',
       selectedNote: { noteId: 'n1' } as never,
+      spaceId: 'space-1',
+      definitions: { statuses: [], types: [], labels: [] },
+      isLoading: true,
+      error: 'test',
+      repository: {} as never,
     })
     useTaskSpaceStore.getState().reset()
     expect(useTaskSpaceStore.getState().projects).toEqual([])
     expect(useTaskSpaceStore.getState().workItems).toEqual([])
     expect(useTaskSpaceStore.getState().selectedProjectId).toBeNull()
     expect(useTaskSpaceStore.getState().selectedWorkItemId).toBeNull()
+    expect(useTaskSpaceStore.getState().selectedLevel2WorkItemId).toBeNull()
     expect(useTaskSpaceStore.getState().selectedNote).toBeNull()
+    expect(useTaskSpaceStore.getState().spaceId).toBeNull()
+    expect(useTaskSpaceStore.getState().definitions).toBeNull()
+    expect(useTaskSpaceStore.getState().isLoading).toBe(false)
+    expect(useTaskSpaceStore.getState().error).toBeNull()
+    expect(useTaskSpaceStore.getState().repository).toBeNull()
   })
 
   it('note-store reset restores notes, comments, currentNoteId, isLoading, error', () => {
