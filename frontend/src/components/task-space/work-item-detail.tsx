@@ -129,7 +129,12 @@ export function WorkItemDetail({ workItem, definitions, noteEditor }: WorkItemDe
     ),
     createElement(
       'section',
-      { 'aria-label': 'Work item note editor', 'data-note-editor-mount': true, className: 'pt-4' },
+      {
+        'aria-label': 'Work item note editor',
+        'data-note-editor-mount': true,
+        'data-work-item-id': workItem.id,
+        className: 'min-w-0 pt-4',
+      },
       noteEditor ?? createElement('p', { className: 'text-sm text-muted-foreground' }, 'Note editor'),
     ),
   )

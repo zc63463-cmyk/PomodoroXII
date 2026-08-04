@@ -1,7 +1,10 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
+import { canonicalNow } from '@/lib/direct-command-intents'
 import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
-import type { CachedProject, CachedWorkItem, CachedWorkItemNote } from '@/types'
+import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
+import { NoteAutosaveController, type FlushReason } from '@/lib/task-space/note-autosave-controller'
+import type { CachedProject, CachedWorkItem, CachedWorkItemNote, WorkItemNoteConflictRow } from '@/types'
 
 export interface CreateChildInput {
   title?: string
@@ -53,6 +56,21 @@ export interface TaskSpaceRepositoryLike {
   resumePendingDirectCommandIntents: () => Promise<void>
 }
 
+export interface TaskSpaceNoteRepositoryLike {
+  read: (workItemId: string) => Promise<CachedWorkItemNote | null>
+  saveLocal: (input: {
+    workItemId: string
+    expectedLocalRevision: number
+    document: WorkItemNoteDocument
+    operationId: string
+    now: string
+  }) => Promise<CachedWorkItemNote>
+  dispatchReplace: (workItemId: string) => Promise<void>
+  resolveReloadRemote: (workItemId: string) => Promise<void>
+  resolveOverwriteLocal: (workItemId: string) => Promise<void>
+  readConflict: (workItemId: string) => Promise<WorkItemNoteConflictRow | null>
+}
+
 export interface TaskSpaceState {
   spaceId: string | null
   projects: CachedProject[]
@@ -62,13 +80,22 @@ export interface TaskSpaceState {
   selectedWorkItemId: string | null
   selectedLevel2WorkItemId: string | null
   selectedNote: CachedWorkItemNote | null
+  noteConflict: WorkItemNoteConflictRow | null
   isLoading: boolean
   error: string | null
   repository: TaskSpaceRepositoryLike | null
+  noteRepository: TaskSpaceNoteRepositoryLike | null
 }
 
 export interface TaskSpaceActions {
   hydrate: (spaceId: string, repository: TaskSpaceRepositoryLike) => Promise<void>
+  attachNoteRepository: (repository: TaskSpaceNoteRepositoryLike | null) => void
+  loadNote: (workItemId: string) => Promise<void>
+  updateNoteDocument: (document: WorkItemNoteDocument) => void
+  flushNote: (reason: FlushReason) => Promise<void>
+  dispatchNote: (workItemId: string) => Promise<void>
+  resolveReloadRemoteNote: (workItemId: string) => Promise<void>
+  resolveOverwriteLocalNote: (workItemId: string) => Promise<void>
   loadTree: (projectId: string) => Promise<void>
   selectProject: (projectId: string) => Promise<void>
   selectWorkItem: (workItemId: string) => void
@@ -88,9 +115,11 @@ const initialState = (): TaskSpaceState => ({
   selectedWorkItemId: null,
   selectedLevel2WorkItemId: null,
   selectedNote: null,
+  noteConflict: null,
   isLoading: false,
   error: null,
   repository: null,
+  noteRepository: null,
 })
 
 const isCurrent = (state: TaskSpaceState, spaceId: string): boolean => state.spaceId === spaceId
@@ -125,6 +154,40 @@ export function selectProjectTree(items: CachedWorkItem[], projectId: string | n
 export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
   devtools((set, get) => {
     let hydrationSequence = 0
+    type PendingNoteEdit = {
+      revision: number
+      workItemId: string
+      expectedLocalRevision: number
+      document: WorkItemNoteDocument
+      operationId: string
+      now: string
+    }
+    let noteAutosave: NoteAutosaveController<PendingNoteEdit> | null = null
+
+    const ensureNoteAutosave = (): NoteAutosaveController<PendingNoteEdit> => {
+      if (noteAutosave) return noteAutosave
+      noteAutosave = new NoteAutosaveController<PendingNoteEdit>(
+        async (edit) => {
+          const repository = get().noteRepository
+          if (!repository) throw new Error('task_space_note_repository_not_ready')
+          const saved = await repository.saveLocal(edit)
+          const current = get().selectedNote
+          if (!current || current.noteId !== saved.noteId) return
+          if (current.localRevision <= saved.localRevision) {
+            set({ selectedNote: saved })
+          } else {
+            set({ selectedNote: {
+              ...current,
+              version: saved.version,
+              createdAt: saved.createdAt,
+            } })
+          }
+        },
+        800,
+        (error) => set({ error: (error as Error).message }),
+      )
+      return noteAutosave
+    }
 
     return {
       ...initialState(),
@@ -140,6 +203,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           selectedWorkItemId: null,
           selectedLevel2WorkItemId: null,
           selectedNote: null,
+          noteConflict: null,
         })
 
         try {
@@ -172,6 +236,97 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
         } catch (error) {
           if (sequence !== hydrationSequence || !isCurrent(get(), spaceId)) return
           set({ isLoading: false, error: (error as Error).message })
+        }
+      },
+
+      attachNoteRepository(repository) {
+        noteAutosave?.cancel()
+        noteAutosave = null
+        set({ noteRepository: repository, selectedNote: null, noteConflict: null })
+      },
+
+      async loadNote(workItemId) {
+        const repository = get().noteRepository
+        if (!repository) return
+        try {
+          const [selectedNote, noteConflict] = await Promise.all([
+            repository.read(workItemId),
+            repository.readConflict(workItemId),
+          ])
+          if (get().selectedWorkItemId !== workItemId) return
+          set({ selectedNote, noteConflict, error: null })
+        } catch (error) {
+          set({ error: (error as Error).message })
+        }
+      },
+
+      updateNoteDocument(document) {
+        const current = get().selectedNote
+        if (!current) throw new Error('work_item_note_not_loaded')
+        const now = canonicalNow()
+        const nextRevision = current.localRevision + 1
+        set({
+          selectedNote: {
+            ...current,
+            document,
+            localRevision: nextRevision,
+            syncState: 'dirty',
+            updatedAt: now,
+          },
+        })
+        ensureNoteAutosave().schedule({
+          revision: nextRevision,
+          workItemId: current.workItemId,
+          expectedLocalRevision: current.localRevision,
+          document,
+          operationId: crypto.randomUUID(),
+          now,
+        })
+      },
+
+      async flushNote(reason) {
+        try {
+          await noteAutosave?.flush(reason)
+        } catch (error) {
+          set({ error: (error as Error).message })
+          throw error
+        }
+      },
+
+      async dispatchNote(workItemId) {
+        const repository = get().noteRepository
+        if (!repository) throw new Error('task_space_note_repository_not_ready')
+        try {
+          await get().flushNote('current-item-change')
+          await repository.dispatchReplace(workItemId)
+          await get().loadNote(workItemId)
+        } catch (error) {
+          set({ error: (error as Error).message })
+          throw error
+        }
+      },
+
+      async resolveReloadRemoteNote(workItemId) {
+        const repository = get().noteRepository
+        if (!repository) throw new Error('task_space_note_repository_not_ready')
+        try {
+          await repository.resolveReloadRemote(workItemId)
+          await get().loadNote(workItemId)
+        } catch (error) {
+          set({ error: (error as Error).message })
+          throw error
+        }
+      },
+
+      async resolveOverwriteLocalNote(workItemId) {
+        const repository = get().noteRepository
+        if (!repository) throw new Error('task_space_note_repository_not_ready')
+        try {
+          await repository.resolveOverwriteLocal(workItemId)
+          await get().loadNote(workItemId)
+        } catch (error) {
+          set({ error: (error as Error).message })
+          throw error
         }
       },
 
@@ -309,6 +464,8 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
 
       reset() {
         hydrationSequence += 1
+        noteAutosave?.cancel()
+        noteAutosave = null
         set(initialState())
       },
     }

@@ -14,10 +14,17 @@ import { Label } from '@/components/ui/label'
 import { ProjectRail } from '@/components/task-space/project-rail'
 import { WorkItemDetail } from '@/components/task-space/work-item-detail'
 import { WorkItemTree } from '@/components/task-space/work-item-tree'
+import { WorkItemNoteEditor } from '@/components/task-space/work-item-note-editor'
 import { TaskSpaceRepository } from '@/lib/task-space/task-space-repository'
+import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
 import { selectProjectTree, useTaskSpaceStore } from '@/stores/task-space-store'
 import { useSpaceStore } from '@/stores/space-store'
 import { spaceDBManager } from '@/services/space-db'
+import type { WorkItemNoteConflictRow } from '@/types'
+
+type NoteRepositoryWithConflict = {
+  conflict: (workItemId: string) => Promise<WorkItemNoteConflictRow | undefined>
+}
 
 export default function TasksPage() {
   const spaceId = useSpaceStore((state) => state.currentSpaceId)
@@ -26,12 +33,22 @@ export default function TasksPage() {
   const definitions = useTaskSpaceStore((state) => state.definitions)
   const selectedProjectId = useTaskSpaceStore((state) => state.selectedProjectId)
   const selectedWorkItemId = useTaskSpaceStore((state) => state.selectedWorkItemId)
+  const selectedNote = useTaskSpaceStore((state) => state.selectedNote)
+  const noteConflict = useTaskSpaceStore((state) => state.noteConflict)
+  const noteRepositoryReady = useTaskSpaceStore((state) => state.noteRepository !== null)
   const isLoading = useTaskSpaceStore((state) => state.isLoading)
   const error = useTaskSpaceStore((state) => state.error)
   const hydrate = useTaskSpaceStore((state) => state.hydrate)
   const reset = useTaskSpaceStore((state) => state.reset)
   const selectProject = useTaskSpaceStore((state) => state.selectProject)
   const selectWorkItem = useTaskSpaceStore((state) => state.selectWorkItem)
+  const attachNoteRepository = useTaskSpaceStore((state) => state.attachNoteRepository)
+  const loadNote = useTaskSpaceStore((state) => state.loadNote)
+  const updateNoteDocument = useTaskSpaceStore((state) => state.updateNoteDocument)
+  const flushNote = useTaskSpaceStore((state) => state.flushNote)
+  const dispatchNote = useTaskSpaceStore((state) => state.dispatchNote)
+  const resolveReloadRemoteNote = useTaskSpaceStore((state) => state.resolveReloadRemoteNote)
+  const resolveOverwriteLocalNote = useTaskSpaceStore((state) => state.resolveOverwriteLocalNote)
   const createProject = useTaskSpaceStore((state) => state.createProject)
   const createChild = useTaskSpaceStore((state) => state.createChild)
   const [createParentId, setCreateParentId] = useState<string | null>(null)
@@ -44,7 +61,18 @@ export default function TasksPage() {
     }
     let cancelled = false
     try {
-      const repository = new TaskSpaceRepository(spaceDBManager.current, spaceId)
+      const database = spaceDBManager.current
+      const repository = new TaskSpaceRepository(database, spaceId)
+      const noteRepository = new WorkItemNoteRepository(database, spaceId)
+      const noteRepositoryWithConflict = noteRepository as unknown as NoteRepositoryWithConflict
+      attachNoteRepository({
+        read: (workItemId) => noteRepository.read(workItemId),
+        saveLocal: (input) => noteRepository.saveLocal(input),
+        dispatchReplace: (workItemId) => noteRepository.dispatchReplace(workItemId),
+        resolveReloadRemote: (workItemId) => noteRepository.resolveReloadRemote(workItemId),
+        resolveOverwriteLocal: (workItemId) => noteRepository.resolveOverwriteLocal(workItemId),
+        readConflict: async (workItemId) => await noteRepositoryWithConflict.conflict(workItemId) ?? null,
+      })
       void (async () => {
         if (cancelled) return
         await hydrate(spaceId, repository)
@@ -55,8 +83,14 @@ export default function TasksPage() {
     }
     return () => {
       cancelled = true
+      attachNoteRepository(null)
     }
-  }, [hydrate, reset, spaceId])
+  }, [attachNoteRepository, hydrate, reset, spaceId])
+
+  useEffect(() => {
+    if (!selectedWorkItemId || !noteRepositoryReady) return
+    void loadNote(selectedWorkItemId)
+  }, [loadNote, noteRepositoryReady, selectedWorkItemId])
 
   const visibleItems = selectProjectTree(workItems, selectedProjectId)
   const selectedWorkItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
@@ -67,6 +101,11 @@ export default function TasksPage() {
     await createChild(createParentId, { title: childTitle })
     setCreateParentId(null)
     setChildTitle('')
+  }
+
+  const selectWorkItemAndDispatch = (workItemId: string) => {
+    if (selectedWorkItemId && selectedWorkItemId !== workItemId) void dispatchNote(selectedWorkItemId).catch(() => undefined)
+    selectWorkItem(workItemId)
   }
 
   return (
@@ -88,14 +127,28 @@ export default function TasksPage() {
             <WorkItemTree
               items={visibleItems}
               selectedId={selectedWorkItemId}
-              onSelect={selectWorkItem}
+              onSelect={selectWorkItemAndDispatch}
               onCreateChild={setCreateParentId}
             />
           ) : (
             <p className="p-4 text-sm text-muted-foreground">Select a project</p>
           )}
         </section>
-        <WorkItemDetail workItem={selectedWorkItem} definitions={definitions} />
+        <WorkItemDetail
+          workItem={selectedWorkItem}
+          definitions={definitions}
+          noteEditor={selectedNote ? (
+            <WorkItemNoteEditor
+              document={selectedNote.document}
+              onChange={updateNoteDocument}
+              conflict={noteConflict}
+              onReloadRemote={() => resolveReloadRemoteNote(selectedWorkItemId ?? selectedNote.workItemId).catch(() => undefined)}
+              onOverwriteLocal={() => resolveOverwriteLocalNote(selectedWorkItemId ?? selectedNote.workItemId).catch(() => undefined)}
+              saveLabel={selectedNote.syncState === 'conflict' ? 'Conflict requires review' : selectedNote.syncState === 'dirty' ? 'Local edit pending' : 'Saved'}
+              onFlush={(reason) => flushNote(reason).catch(() => undefined)}
+            />
+          ) : undefined}
+        />
       </div>
       <Dialog
         open={createParentId !== null}
