@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
+import { focusSessionApi } from '@/services/focus-session-api'
 import {
   buildProvisionalOperationRow,
   MetaDB,
@@ -11,6 +12,7 @@ import {
   cacheAuthoritativeActivation,
   cacheFocusSession,
 } from './focus-session-repository'
+import { SessionReviewDraftController } from './session-review-draft-registry'
 
 const databases: Array<Awaited<ReturnType<typeof openPomodoroXIDB>> | MetaDB> = []
 
@@ -357,8 +359,8 @@ describe('FocusSession aggregate persistence', () => {
       ...provisionalOperationFixture('space-b'), spaceId: 'space-b', tabId: 'tab-a',
     })
     await meta.sessionTabs.put({
-      tabId: 'tab-a', deviceId: 'device-a', openedAt: '2026-07-15T08:00:00Z',
-      lastSeenAt: '2026-07-15T08:00:00Z', closedAt: null,
+      tabId: 'tab-a', deviceId: 'device-a', openedAt: '2026-07-15T08:00:00.000Z',
+      lastSeenAt: '2026-07-15T08:00:00.000Z', closedAt: null,
     })
     const repository = new FocusSessionRepository(
       db, meta, db.spaceId, { deviceId: 'device-a', tabId: 'tab-a' }, {} as never,
@@ -388,6 +390,111 @@ describe('FocusSession aggregate persistence', () => {
       .toMatchObject(row)
     await expect(repository.saveReviewCache({ ...row, spaceId: 'space-b' }))
       .rejects.toThrow('focus_session_space_mismatch')
+  })
+
+  it('persists the exact review intent before transport and atomically clears it after response', async () => {
+    const db = await openPomodoroXIDB(`focus-review-submit-${crypto.randomUUID()}`)
+    const meta = new MetaDB(`meta-focus-review-submit-${crypto.randomUUID()}`)
+    databases.push(db, meta)
+    await meta.open()
+    const response = aggregateFixture(db.spaceId) as {
+      session: Record<string, unknown>
+      commandEnvelopes: Array<Record<string, unknown>>
+      commandReceipts: Array<Record<string, unknown>>
+      outcomes: Array<Record<string, unknown>>
+    }
+    response.session.endedAt = '2026-07-15T08:25:00Z'
+    response.session.clockState = 'ended'
+    response.session.reviewState = 'completed'
+    response.session.validity = 'valid'
+    response.session.version = 4
+    response.commandEnvelopes = [{
+      commandId: 'cmd-review-1', spaceId: db.spaceId, sessionId: 'fs-1', sessionRevision: 1,
+      workItemId: 'l3', expectedVersion: 2, targetTransition: 'complete', replaySafe: true,
+      payloadHash: 'a'.repeat(64), createdAt: '2026-07-15T08:20:00Z',
+    }]
+    response.commandReceipts = [{
+      commandId: 'cmd-review-1', attempt: 1, state: 'succeeded', errorCode: null, detail: null,
+      recordedAt: '2026-07-15T08:25:00Z',
+    }]
+    response.outcomes = [{
+      id: 'outcome-1', spaceId: db.spaceId, sessionId: 'fs-1', sessionRevision: 1,
+      revision: 1, correctedFromRevision: null, effective: true, workItemId: 'l3', touched: true,
+      result: 'completed', executionPersona: null, personaSwitched: null, personaNote: null,
+      stateCommand: 'complete', commandId: 'cmd-review-1', reviewedAt: '2026-07-15T08:25:00Z',
+      version: 1, createdAt: '2026-07-15T08:25:00Z', updatedAt: '2026-07-15T08:25:00Z',
+    }]
+    await cacheFocusSession(db, db.spaceId, aggregateFixture(db.spaceId))
+    const controller = await SessionReviewDraftController.open({
+      db, spaceId: db.spaceId, sessionId: 'fs-1', initialDraft: {
+        spaceId: db.spaceId, sessionId: 'fs-1', expectedVersion: 3,
+        validity: 'valid', reviewState: 'completed', reviewedAt: '2026-07-15T08:25:00Z', outcomes: [],
+      },
+    })
+    const repository = new FocusSessionRepository(
+      db, meta, db.spaceId, { deviceId: 'device-a', tabId: 'tab-a' }, {} as never,
+      { run: async <T>(_operationId: string, effect: () => Promise<T>) => effect() },
+    )
+    const submit = vi.spyOn(focusSessionApi, 'submitReview')
+      .mockRejectedValueOnce(new Error('transport_response_lost'))
+      .mockResolvedValueOnce(response as never)
+    await expect(repository.submitReview(controller.currentDraft())).rejects.toThrow('transport_response_lost')
+    expect(await db.directCommandIntents.get(controller.currentDraft().operationId)).toMatchObject({ state: 'in_flight' })
+    await repository.submitReview(controller.currentDraft())
+
+    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit.mock.calls[1]).toEqual(submit.mock.calls[0])
+    expect(await db.sessionReviewDrafts.get([db.spaceId, 'fs-1'])).toBeUndefined()
+    expect(await db.directCommandIntents.get(controller.currentDraft().operationId)).toMatchObject({ state: 'terminal' })
+    expect(await db.sessionCommandQueue.get('cmd-review-1')).toMatchObject({ state: 'terminal', lastReceiptState: 'succeeded' })
+    expect(await db.sessionWorkItemOutcomes.get('outcome-1')).toMatchObject({ result: 'completed' })
+    submit.mockRestore()
+    controller.dispose()
+  })
+
+  it('holds an ended provisional review without creating an intent, outcome, or review outbox row', async () => {
+    const db = await openPomodoroXIDB(`focus-review-provisional-${crypto.randomUUID()}`)
+    const meta = new MetaDB(`meta-focus-review-provisional-${crypto.randomUUID()}`)
+    databases.push(db, meta)
+    await meta.open()
+    await meta.sessionTabs.put({
+      tabId: 'tab-a', deviceId: 'device-a', openedAt: '2026-07-15T08:00:00Z',
+      lastSeenAt: '2026-07-15T08:00:00Z', closedAt: null,
+    })
+    await db.projects.put({ id: 'project-1', name: 'Project', version: 1 })
+    await db.workItems.bulkPut([
+      { id: 'l2', projectId: 'project-1', title: 'Parent', depth: 2, parentId: null, statusDefinitionId: 'status-open', version: 4 },
+      { id: 'l3', projectId: 'project-1', title: 'Child', depth: 3, parentId: 'l2', statusDefinitionId: 'status-open', version: 2 },
+    ])
+    const repository = new FocusSessionRepository(
+      db, meta, db.spaceId, { deviceId: 'device-a', tabId: 'tab-a' }, {} as never,
+      { run: async <T>(_operationId: string, effect: () => Promise<T>) => effect() },
+    )
+    await repository.startProvisional({
+      operationId: 'offline-review-1', spaceId: db.spaceId, sessionId: 'offline-review-1',
+      level2WorkItemId: 'l2', level3WorkItemIds: ['l3'], plannedSeconds: 1500,
+      startedAt: '2026-07-15T08:00:00.000Z', deviceId: 'device-a', tabId: 'tab-a',
+      expectedWorkItemVersions: { l2: 4, l3: 2 },
+    })
+    await repository.endProvisional('offline-review-1', {
+      occurredAt: '2026-07-15T08:10:00.000Z', timerCompletion: 'ended_early',
+    })
+    const controller = await SessionReviewDraftController.open({
+      db, spaceId: db.spaceId, sessionId: 'offline-review-1', initialDraft: {
+        spaceId: db.spaceId, sessionId: 'offline-review-1', expectedVersion: 0,
+        validity: 'valid', reviewState: 'completed', reviewedAt: '2026-07-15T08:10:00.000Z', outcomes: [],
+      },
+    })
+    const outboxBefore = await db.outbox.toArray()
+    const result = await repository.submitReview(controller.currentDraft())
+
+    expect(result.session).toMatchObject({ sessionId: 'offline-review-1', ownershipState: 'local_provisional', validity: 'pending', reviewState: 'pending' })
+    expect(await db.outbox.toArray()).toEqual(outboxBefore)
+    expect(await db.sessionWorkItemOutcomes.where('sessionId').equals('offline-review-1').count()).toBe(0)
+    expect(await db.directCommandIntents.get(controller.currentDraft().operationId)).toBeUndefined()
+    expect(await db.sessionReviewDrafts.get([db.spaceId, 'offline-review-1'])).toBeDefined()
+    expect(await meta.provisionalOperations.get('offline-review-1')).toMatchObject({ state: 'awaiting_s4' })
+    controller.dispose()
   })
 
   it('absorbs exactly the provisional activation outbox and removes replaced child rows', async () => {

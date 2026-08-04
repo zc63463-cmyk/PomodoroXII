@@ -1,12 +1,16 @@
 'use client'
 
-import { createElement, useEffect, useState, type ReactNode } from 'react'
+import { createElement, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { FocusedWorkItemNote } from '@/components/timer/focused-work-item-note'
 import { SessionClock } from '@/components/timer/session-clock'
 import { SessionLauncher, type LaunchSelection } from '@/components/timer/session-launcher'
+import { SessionReview } from '@/components/timer/session-review'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
 import { FocusSessionRepository, type LocalFocusSessionAggregate } from '@/lib/focus-session/focus-session-repository'
+import { SessionReviewDraftController, type SessionReviewDraft } from '@/lib/focus-session/session-review-draft-registry'
+import { CommandReconciliation } from '@/lib/focus-session/command-reconciliation'
+import { focusSessionApi } from '@/services/focus-session-api'
 import { TimerNoteComposerDraftController, type TimerNoteComposerDraftDatabase } from '@/lib/task-space/timer-note-composer-draft-registry'
 import { TaskSpaceRepository } from '@/lib/task-space/task-space-repository'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
@@ -26,6 +30,7 @@ import type {
 } from '@/types'
 import { useSpaceStore } from '@/stores/space-store'
 import { useTaskSpaceStore } from '@/stores/task-space-store'
+import { useFocusSessionStore } from '@/stores/focus-session-store'
 import { selectDerivedClock, useTimerStore } from '@/stores/timer-store'
 
 async function readLocalAggregate(database: PomodoroXIDB, sessionId: string): Promise<LocalFocusSessionAggregate> {
@@ -76,6 +81,9 @@ export default function TimerPage() {
   const [noteRepository, setNoteRepository] = useState<WorkItemNoteRepository | null>(null)
   const [focusedNote, setFocusedNote] = useState<CachedWorkItemNote | null>(null)
   const [draftController, setDraftController] = useState<TimerNoteComposerDraftController | null>(null)
+  const [reviewController, setReviewController] = useState<SessionReviewDraftController | null>(null)
+  const [endedAggregate, setEndedAggregate] = useState<LocalFocusSessionAggregate | null>(null)
+  const setReviewDraft = useFocusSessionStore((state) => state.setReviewDraft)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -102,12 +110,29 @@ export default function TimerPage() {
     return () => { cancelled = true }
   }, [coordinator, hydrateTaskSpace, identity, provisionalLock, resetTaskSpace, spaceId])
 
-  const aggregate = localProvisional?.aggregate ?? locator?.session ?? null
-  const plans = aggregate?.plan.filter((plan) => plan.removedAt === null) ?? []
+  const aggregate = localProvisional?.aggregate ?? locator?.session ?? endedAggregate
+  const plans = useMemo(() => aggregate?.plan.filter((plan) => plan.removedAt === null) ?? [], [aggregate?.plan])
   const currentPlan = plans.find((plan) => plan.currentDuringSession) ?? plans[0] ?? null
   const focusedWorkItemId = currentPlan?.workItemId ?? selectedWorkItemId
   const selectedWorkItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
   const clock = useTimerStore((state) => selectDerivedClock(state))
+  const reviewSession = useMemo(() => {
+    if (!aggregate || aggregate.session.clockState !== 'ended' || !spaceId) return null
+    return {
+      spaceId,
+      sessionId: sessionIdOf(aggregate.session),
+      expectedVersion: aggregate.session.version,
+      validity: aggregate.session.validity === 'invalid' ? 'invalid' as const : 'valid' as const,
+      reviewState: aggregate.session.reviewState === 'skipped' ? 'skipped' as const : 'completed' as const,
+    }
+  }, [aggregate, spaceId])
+  const reviewPlanDrafts = useMemo(() => plans.map((plan) => ({
+    workItemId: plan.workItemId,
+    touched: plan.completionDraft,
+    result: plan.completionDraft ? 'completed' as const : 'progressed' as const,
+    stateCommand: plan.completionDraft ? 'complete' as const : 'none' as const,
+    expectedWorkItemVersion: plan.workItemVersionSnapshot,
+  })), [plans])
 
   useEffect(() => {
     let cancelled = false
@@ -157,6 +182,67 @@ export default function TimerPage() {
       setDraftController(null)
     }
   }, [database, focusedWorkItemId, noteRepository, spaceId])
+
+  useEffect(() => {
+    if (!database || !focusRepository || locator || localProvisional) {
+      setEndedAggregate(null)
+      return
+    }
+    let cancelled = false
+    void focusRepository.listCached().then(async (sessions) => {
+      const ended = sessions.find((candidate) => candidate.clockState === 'ended')
+      if (!ended) {
+        if (!cancelled) setEndedAggregate(null)
+        return
+      }
+      const local = await readLocalAggregate(database, ended.sessionId)
+      if (!cancelled) setEndedAggregate(local)
+    }).catch((cause) => {
+      if (!cancelled) setError((cause as Error).message)
+    })
+    return () => { cancelled = true }
+  }, [database, focusRepository, localProvisional, locator])
+
+  useEffect(() => {
+    let createdController: SessionReviewDraftController | null = null
+    if (!database || !reviewSession) {
+      setReviewController((previous) => {
+        previous?.dispose()
+        return null
+      })
+      return
+    }
+    let cancelled = false
+    const initialDraft = {
+      spaceId: reviewSession.spaceId,
+      sessionId: reviewSession.sessionId,
+      expectedVersion: reviewSession.expectedVersion,
+      validity: reviewSession.validity,
+      reviewState: reviewSession.reviewState,
+      reviewedAt: canonicalNow(),
+      outcomes: reviewPlanDrafts,
+    }
+    void SessionReviewDraftController.open({
+      db: database, spaceId: reviewSession.spaceId, sessionId: reviewSession.sessionId, initialDraft,
+    }).then((controller) => {
+      createdController = controller
+      if (cancelled) {
+        controller.dispose()
+        return
+      }
+      setReviewController((previous) => {
+        previous?.dispose()
+        return controller
+      })
+      setReviewDraft(controller.currentDraft())
+    }).catch((cause) => {
+      if (!cancelled) setError((cause as Error).message)
+    })
+    return () => {
+      cancelled = true
+      createdController?.dispose()
+    }
+  }, [database, reviewPlanDrafts, reviewSession, setReviewDraft])
 
   const activePlanIds = new Set(plans.map((plan) => plan.workItemId))
   const availableLevel3 = workItems
@@ -292,7 +378,57 @@ export default function TimerPage() {
     setFocusedNote(await noteRepository.read(workItemId))
   }
 
-  const content: ReactNode = aggregate && session && clock ? createElement('div', { className: 'grid gap-6 p-6' },
+  const submitReview = async (rawDraft: Record<string, unknown>) => {
+    if (!reviewController || !focusRepository || !aggregate || !spaceId) return
+    const current = reviewController.currentDraft()
+    const draft = {
+      ...current,
+      ...rawDraft,
+      operationId: current.operationId,
+      spaceId,
+      sessionId: sessionIdOf(aggregate.session),
+      expectedVersion: aggregate.session.version,
+    } as SessionReviewDraft
+    reviewController.update(draft)
+    await reviewController.flush('before-submit')
+    setReviewDraft(draft)
+    try {
+      await focusRepository.submitReview(draft)
+      setReviewDraft(null)
+    } catch (cause) {
+      setError((cause as Error).message)
+    }
+  }
+
+  const reconcileCommand = async (commandId: string, replaySafe: boolean) => {
+    if (!database || !aggregate) return
+    try {
+      const reconciliation = new CommandReconciliation(database, focusSessionApi)
+      await reconciliation.reconcile(sessionIdOf(aggregate.session), commandId, replaySafe)
+    } catch (cause) { setError((cause as Error).message) }
+  }
+
+  const abandonCommand = async (commandId: string) => {
+    if (!database || !aggregate) return
+    try {
+      const reconciliation = new CommandReconciliation(database, focusSessionApi)
+      await reconciliation.abandon(sessionIdOf(aggregate.session), commandId, canonicalNow())
+    } catch (cause) { setError((cause as Error).message) }
+  }
+
+  const content: ReactNode = aggregate && aggregate.session.clockState === 'ended'
+    ? createElement(SessionReview, {
+      session: aggregate.session,
+      plans,
+      outcomes: aggregate.outcomes,
+      envelopes: aggregate.commandEnvelopes,
+      receipts: aggregate.commandReceipts as never,
+      operationId: reviewController?.currentDraft().operationId,
+      onSubmit: submitReview,
+      onReconcile: reconcileCommand,
+      onAbandon: abandonCommand,
+    })
+    : aggregate && session && clock ? createElement('div', { className: 'grid gap-6 p-6' },
     createElement(SessionClock, {
       session, nowMs, owner: ownershipMode === 'owner',
       onPause: (occurredAt) => clockAction('pause', occurredAt),

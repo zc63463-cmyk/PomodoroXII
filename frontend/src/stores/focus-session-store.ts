@@ -1,10 +1,12 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import type { CachedFocusSession } from '@/types'
+import type { SessionReviewDraft } from '@/lib/focus-session/session-review-draft-registry'
 
 export interface FocusSessionRepositoryLike {
   listCached: () => Promise<CachedFocusSession[]>
   refreshHistory: () => Promise<CachedFocusSession[]>
+  submitReview?: (draft: SessionReviewDraft) => Promise<unknown>
 }
 
 export interface FocusSessionState {
@@ -12,7 +14,7 @@ export interface FocusSessionState {
   selectedSessionId: string | null
   /** Compatibility alias for the pre-Task-6 projection; it is not business state. */
   currentSessionId: string | null
-  reviewDraft: unknown | null
+  reviewDraft: SessionReviewDraft | null
   isLoading: boolean
   error: string | null
   repository: FocusSessionRepositoryLike | null
@@ -21,7 +23,7 @@ export interface FocusSessionState {
 export interface FocusSessionActions {
   hydrate: (repository: FocusSessionRepositoryLike) => Promise<void>
   selectSession: (sessionId: string | null) => void
-  setReviewDraft: (draft: unknown | null) => void
+  setReviewDraft: (draft: SessionReviewDraft | null) => void
   reset: () => void
 }
 
