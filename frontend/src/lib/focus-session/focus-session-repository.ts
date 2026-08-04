@@ -1,4 +1,5 @@
 import Dexie from 'dexie'
+import { canonicalize } from 'json-canonicalize'
 import { assertResponseSpace } from '@/lib/contracts/task-space'
 import {
   activeSessionSchema,
@@ -9,10 +10,14 @@ import {
   sessionAttributionRevisionCommandPostImageSchema,
   sessionTaskContextCommandPostImageSchema,
   sessionWorkItemPlanCommandPostImageSchema,
+  sessionReviewDraftSchema,
   type FocusSessionAggregateView,
   type ProvisionalActivationPayload,
 } from '@/lib/contracts/focus-session'
 import { hashCommandPayload, type JsonValue } from '@/lib/contracts/payload-hash'
+import { canonicalNow, executeDurableDirectCommand, prepareDirectCommandIntent } from '@/lib/direct-command-intents'
+import { requirePersistedExactSessionReviewDraft, type SessionReviewDraft } from './session-review-draft-registry'
+import { focusSessionApi } from '@/services/focus-session-api'
 import { TS3_LOCAL_ENTITY_TO_TABLE } from '@/lib/sync/types'
 import { boundedChildOperationId, enqueueOutbox } from '@/lib/sync/outbox'
 import type { PomodoroXIDB } from '@/services/database'
@@ -198,6 +203,165 @@ export async function cacheFocusSession(
     database.sessionCommandReceipts,
   ], () => putFocusSessionRows(database, rows))
   return rows.session
+}
+
+export type CachedSessionReview = {
+  session: CachedFocusSession
+  outcomes: CachedSessionWorkItemOutcome[]
+  envelopes: CachedSessionCommandEnvelope[]
+  receipts: Array<Record<string, unknown>>
+}
+
+/**
+ * Validate the complete response identity before projecting any review rows.
+ * Receipts intentionally have no space/session fields in the wire contract;
+ * their command IDs are therefore bound to the unique envelope set here.
+ */
+export function toReviewRows(
+  response: FocusSessionAggregateView,
+  expectedSpaceId: string,
+  expectedSessionId: string,
+): CachedSessionReview {
+  if (response.session.spaceId !== expectedSpaceId || response.session.id !== expectedSessionId ||
+      (response.context !== null && (response.context.spaceId !== expectedSpaceId || response.context.sessionId !== expectedSessionId)) ||
+      response.attribution.spaceId !== expectedSpaceId || response.attribution.sessionId !== expectedSessionId ||
+      response.plan.some((row) => row.spaceId !== expectedSpaceId || row.sessionId !== expectedSessionId) ||
+      response.outcomes.some((row) => row.spaceId !== expectedSpaceId || row.sessionId !== expectedSessionId) ||
+      response.commandEnvelopes.some((row) => row.spaceId !== expectedSpaceId || row.sessionId !== expectedSessionId)) {
+    throw new Error('authoritative_review_response_identity_mismatch')
+  }
+  const envelopeIds = new Set(response.commandEnvelopes.map((row) => row.commandId))
+  const receiptKeys = new Set(response.commandReceipts.map((row) => `${row.commandId}\0${row.attempt}`))
+  if (envelopeIds.size !== response.commandEnvelopes.length ||
+      receiptKeys.size !== response.commandReceipts.length ||
+      response.commandReceipts.some((row) => !envelopeIds.has(row.commandId)) ) {
+    throw new Error('authoritative_review_response_receipt_mismatch')
+  }
+  if (response.outcomes.some((row) => row.commandId !== null && !envelopeIds.has(row.commandId))) {
+    throw new Error('authoritative_review_response_command_link_mismatch')
+  }
+  const rows = toSpaceRows(response)
+  return {
+    session: rows.session,
+    outcomes: rows.outcomes,
+    envelopes: rows.envelopes,
+    receipts: rows.receipts,
+  }
+}
+
+type ReviewExpectedVersionMode = 'exact' | 'import_rebased'
+
+function parseExactBoundReviewRequest(requestJson: string): SessionReviewDraft {
+  let request: SessionReviewDraft
+  try {
+    request = sessionReviewDraftSchema.parse(JSON.parse(requestJson))
+  } catch {
+    throw new Error('authoritative_review_bound_request_invalid')
+  }
+  if (canonicalize(request) !== requestJson) throw new Error('authoritative_review_bound_request_invalid')
+  return request
+}
+
+function requireReviewDraftMatchesBoundRequest(
+  row: Record<string, unknown> | undefined,
+  spaceId: string,
+  sessionId: string,
+  boundRequest: SessionReviewDraft,
+  mode: ReviewExpectedVersionMode,
+  stage: 'apply' | 'delete',
+): void {
+  const error = `authoritative_review_draft_changed_before_${stage}`
+  if (!row || row.spaceId !== spaceId || row.sessionId !== sessionId || row.operationId !== boundRequest.operationId ||
+      typeof row.draftJson !== 'string') throw new Error(error)
+  let current: SessionReviewDraft
+  try { current = sessionReviewDraftSchema.parse(JSON.parse(row.draftJson)) } catch { throw new Error(error) }
+  const { expectedVersion: currentVersion, ...currentBusiness } = current
+  const { expectedVersion: boundVersion, ...boundBusiness } = boundRequest
+  if (canonicalize(current) !== row.draftJson || current.spaceId !== spaceId || current.sessionId !== sessionId ||
+      current.operationId !== row.operationId || canonicalize(currentBusiness) !== canonicalize(boundBusiness) ||
+      (mode === 'exact' && currentVersion !== boundVersion) ||
+      (mode === 'import_rebased' && boundVersion <= 0)) throw new Error(error)
+}
+
+function requireAuthoritativeReviewTransaction(db: PomodoroXIDB): void {
+  const transaction = Dexie.currentTransaction
+  const required = [
+    'directCommandIntents', 'focusSessions', 'sessionWorkItemOutcomes',
+    'sessionCommandEnvelopes', 'sessionCommandReceipts', 'sessionCommandQueue',
+    'sessionReviewDrafts',
+  ]
+  if (!transaction || transaction.db !== db || required.some((name) => !transaction.storeNames.includes(name))) {
+    throw new Error('authoritative_review_transaction_required')
+  }
+}
+
+function latestReviewReceipt(
+  receipts: Array<Record<string, unknown>>,
+  commandId: string,
+): Record<string, unknown> | undefined {
+  return receipts.filter((row) => row.commandId === commandId)
+    .sort((left, right) => Number(right.attempt ?? 0) - Number(left.attempt ?? 0))[0]
+}
+
+export async function applyAuthoritativeReviewAndClearDraft(
+  db: PomodoroXIDB,
+  spaceId: string,
+  sessionId: string,
+  boundRequestJson: string,
+  expectedVersionMode: ReviewExpectedVersionMode,
+  response: FocusSessionAggregateView,
+): Promise<void> {
+  requireAuthoritativeReviewTransaction(db)
+  const boundRequest = parseExactBoundReviewRequest(boundRequestJson)
+  const draft = await db.sessionReviewDrafts.get([spaceId, sessionId]) as Record<string, unknown> | undefined
+  requireReviewDraftMatchesBoundRequest(draft, spaceId, sessionId, boundRequest, expectedVersionMode, 'apply')
+  const rows = toReviewRows(response, spaceId, sessionId)
+
+  // Command envelopes and materialized outcomes are append-only facts. A
+  // response may repeat an existing row, but it may not rewrite its bytes.
+  const existingEnvelopes = await db.sessionCommandEnvelopes.bulkGet(
+    rows.envelopes.map((row) => row.commandId),
+  ) as Array<Record<string, unknown> | undefined>
+  for (const [index, existing] of existingEnvelopes.entries()) {
+    if (!existing) continue
+    const incoming = rows.envelopes[index]
+    if (canonicalize(existing) !== canonicalize(incoming)) {
+      throw new Error('authoritative_review_envelope_mutation')
+    }
+  }
+  const existingOutcomes = await db.sessionWorkItemOutcomes.bulkGet(
+    rows.outcomes.map((row) => row.id),
+  ) as Array<Record<string, unknown> | undefined>
+  for (const [index, existing] of existingOutcomes.entries()) {
+    if (!existing) continue
+    const incoming = rows.outcomes[index]
+    if (canonicalize(existing) !== canonicalize(incoming)) {
+      throw new Error('authoritative_review_outcome_mutation')
+    }
+  }
+
+  await db.focusSessions.put({ id: rows.session.sessionId, ...rows.session })
+  await db.sessionWorkItemOutcomes.bulkPut(rows.outcomes)
+  await db.sessionCommandEnvelopes.bulkPut(rows.envelopes)
+  if (rows.receipts.length > 0) await db.sessionCommandReceipts.bulkPut(rows.receipts)
+  for (const envelope of rows.envelopes) {
+    const envelopeJson = canonicalize(envelope)
+    if (envelopeJson === undefined) throw new Error('authoritative_review_envelope_not_canonical')
+    const receipt = latestReviewReceipt(rows.receipts, envelope.commandId)
+    const receiptState = typeof receipt?.state === 'string' ? receipt.state : 'pending'
+    await db.sessionCommandQueue.put({
+      commandId: envelope.commandId, spaceId, sessionId,
+      payloadHash: envelope.payloadHash, replaySafe: envelope.replaySafe,
+      envelopeJson,
+      state: receiptState === 'pending' || receiptState === 'unknown' ? 'held' : 'terminal',
+      lastReceiptState: receiptState,
+      createdAt: envelope.createdAt, updatedAt: canonicalNow(),
+    })
+  }
+
+  const currentDraft = await db.sessionReviewDrafts.get([spaceId, sessionId]) as Record<string, unknown> | undefined
+  requireReviewDraftMatchesBoundRequest(currentDraft, spaceId, sessionId, boundRequest, expectedVersionMode, 'delete')
+  await db.sessionReviewDrafts.delete([spaceId, sessionId])
 }
 
 export const provisionalOutboxKey = (entityType: string, entityId: string) =>
@@ -604,6 +768,66 @@ export class FocusSessionRepository {
 
   async refreshHistory(): Promise<CachedFocusSession[]> {
     return this.listCached()
+  }
+
+  async submitReview(input: SessionReviewDraft): Promise<CachedSessionReview> {
+    const draft = sessionReviewDraftSchema.parse(input)
+    if (draft.spaceId !== this.spaceId) throw new Error('space_scope_mismatch')
+    await requirePersistedExactSessionReviewDraft(this.db, draft)
+    const cached = await this.requireSession(draft.sessionId)
+    assertLocalContentWritable(cached)
+
+    if (cached.ownershipState === 'local_provisional') {
+      if (cached.endedAt === null || cached.clockState !== 'ended') {
+        throw new Error('provisional_review_requires_terminal_session')
+      }
+      const candidates = await this.meta.provisionalOperations
+        .where('sessionId').equals(draft.sessionId)
+        .and((row) => row.spaceId === this.spaceId && row.deviceId === this.identity.deviceId &&
+          row.tabId === this.identity.tabId && row.state === 'awaiting_s4')
+        .toArray()
+      if (candidates.length !== 1) throw new Error('provisional_review_import_not_pending')
+      const operation = candidates[0]!
+      const heldOutcomes = (await this.db.outbox.toArray())
+        .filter((row) => row.compoundOperationId === operation.operationId && row.entityType === 'sessionWorkItemOutcome').length
+      const outcomes = await this.db.sessionWorkItemOutcomes.where('sessionId').equals(draft.sessionId).count()
+      const directIntent = await this.db.directCommandIntents.get(draft.operationId)
+      const tab = await this.meta.sessionTabs.get(this.identity.tabId)
+      if (!tab || tab.deviceId !== this.identity.deviceId || tab.closedAt !== null ||
+          operation.spaceId !== this.spaceId || operation.sessionId !== draft.sessionId ||
+          operation.deviceId !== this.identity.deviceId || operation.tabId !== this.identity.tabId ||
+          operation.state !== 'awaiting_s4' || heldOutcomes !== 0 || outcomes !== 0 || directIntent) {
+        throw new Error('provisional_review_import_boundary_mismatch')
+      }
+      return {
+        session: cached,
+        outcomes: [],
+        envelopes: await this.db.sessionCommandEnvelopes.where('sessionId').equals(draft.sessionId).toArray() as CachedSessionCommandEnvelope[],
+        receipts: await this.db.sessionCommandReceipts.where('sessionId').equals(draft.sessionId).toArray() as Array<Record<string, unknown>>,
+      }
+    }
+
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'submit_review', spaceId: draft.spaceId, targetId: draft.sessionId,
+      request: draft as unknown as Record<string, JsonValue>,
+      now: canonicalNow(),
+    }, draft.operationId)
+    const response = await executeDurableDirectCommand({
+      db: this.db,
+      intent,
+      businessTables: [
+        this.db.focusSessions, this.db.sessionWorkItemOutcomes,
+        this.db.sessionCommandEnvelopes, this.db.sessionCommandReceipts,
+        this.db.sessionCommandQueue, this.db.sessionReviewDrafts,
+      ],
+      sendExactRequest: (request) => focusSessionApi.submitReview(request as never),
+      parseResult: (value) => focusSessionAggregateSchema.parse(value),
+      applyResult: (authoritative) => applyAuthoritativeReviewAndClearDraft(
+        this.db, this.spaceId, draft.sessionId, intent.requestJson, 'exact', authoritative,
+      ),
+      now: canonicalNow,
+    })
+    return toReviewRows(response, this.spaceId, draft.sessionId)
   }
 
   private async cacheAuthoritative(action: Promise<FocusSessionAggregateView>): Promise<void> {
