@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { liveQuery } from 'dexie'
-import { spaceDBManager, db } from '@/services/space-db'
+import { spaceDBManager, db, withDetachedSpaceDatabase } from '@/services/space-db'
 import { PomodoroXIDB } from '@/services/database'
 import { dexieDbNameForSpace, PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
 
@@ -17,6 +17,20 @@ describe('SpaceDBManager', () => {
     await spaceDBManager.switchTo('test-t26')
     const notes = await db.notes.toArray()
     expect(notes).toEqual([])
+  })
+
+  it('opens a detached Space DB without changing the current binding', async () => {
+    await spaceDBManager.switchTo('test-detached-current')
+    const current = spaceDBManager.current
+    const observed = await withDetachedSpaceDatabase('test-detached-target', async (detached) => {
+      expect(detached.spaceId).toBe('test-detached-target')
+      expect(spaceDBManager.current).toBe(current)
+      expect(spaceDBManager.currentSpaceId).toBe('test-detached-current')
+      return detached.spaceId
+    })
+    expect(observed).toBe('test-detached-target')
+    expect(spaceDBManager.current).toBe(current)
+    expect(spaceDBManager.currentSpaceId).toBe('test-detached-current')
   })
 
   it('T27: switching A to B makes db point to B', async () => {

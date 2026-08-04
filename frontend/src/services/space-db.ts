@@ -143,6 +143,18 @@ class SpaceDBManager {
 
 const spaceDBManager = new SpaceDBManager()
 
+export async function withDetachedSpaceDatabase<T>(
+  spaceId: string,
+  action: (database: PomodoroXIDB) => Promise<T> | T,
+): Promise<T> {
+  const database = await openPomodoroXIDB(spaceId)
+  try {
+    return await action(database)
+  } finally {
+    database.close()
+  }
+}
+
 export const db = spaceDBManager.proxy as PomodoroXIDB
 export { spaceDBManager }
 export type { SpaceDBManager }

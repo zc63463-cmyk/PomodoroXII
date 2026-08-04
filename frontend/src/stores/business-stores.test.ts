@@ -22,6 +22,7 @@ import { useSearchStore } from '@/stores/search-store'
 import { useTrashStore } from '@/stores/trash-store'
 import { useSyncStore } from '@/stores/sync-store'
 import { useSettingsStore } from '@/stores/settings-store'
+import { selectDerivedClock } from '@/stores/timer-store'
 
 describe('business stores reset', () => {
   beforeEach(() => {
@@ -50,20 +51,28 @@ describe('business stores reset', () => {
     expect(useAppStore.getState().isOnline).toBe(true)
   })
 
-  it('timer-store reset restores mode, status, duration, remaining, activeSessionId', () => {
-    useTimerStore.setState({
-      mode: 'countdown',
-      status: 'running',
-      duration: 300,
-      remaining: 120,
-      activeSessionId: 'sess-1',
-    })
-    useTimerStore.getState().reset()
-    expect(useTimerStore.getState().mode).toBe('pomodoro')
-    expect(useTimerStore.getState().status).toBe('idle')
-    expect(useTimerStore.getState().duration).toBe(1500)
-    expect(useTimerStore.getState().remaining).toBe(1500)
-    expect(useTimerStore.getState().activeSessionId).toBeNull()
+  it('timer-store derives time from the active Session and rejects a second Space start', () => {
+    useTimerStore.getState().installLocator({
+      spaceId: 'space-a', sessionId: 'fs-1', operationId: 'op-1', state: 'active',
+      ownerDeviceId: 'device-a', ownerTabId: 'tab-a', ownershipEpoch: 1,
+      leaseExpiresAt: '2026-07-15T08:03:00Z', updatedAt: '2026-07-15T08:00:00Z',
+      session: {
+        session: {
+          id: 'fs-1', spaceId: 'space-a', sessionRevision: 1,
+          startedAt: '2026-07-15T08:00:00Z', endedAt: null, pauseStartedAt: null,
+          plannedSeconds: 1500, grossSeconds: 0, pausedSeconds: 0, breakSeconds: 0,
+          focusedSeconds: 0, clockState: 'running', timerCompletion: null,
+          validity: 'pending', validityReason: null, overallProgress: null, mood: null,
+          reviewState: 'not_required', ownershipState: 'authoritative', sessionNote: '',
+          version: 1, createdAt: '2026-07-15T08:00:00Z', updatedAt: '2026-07-15T08:00:00Z',
+        }, context: null, attribution: {} as never, plan: [], outcomes: [],
+        commandEnvelopes: [], commandReceipts: [],
+      },
+    } as never, { deviceId: 'device-a', tabId: 'tab-a' })
+    useTimerStore.getState().setNow(Date.parse('2026-07-15T08:05:00Z'))
+    expect(selectDerivedClock(useTimerStore.getState())?.remainingSeconds).toBe(1200)
+    expect(() => useTimerStore.getState().assertCanStart('space-b')).toThrow('active_session_exists')
+    expect(Object.keys(useTimerStore.getState())).not.toContain('tick')
   })
 
   it('focus-session-store reset restores the current aggregate projection', () => {
