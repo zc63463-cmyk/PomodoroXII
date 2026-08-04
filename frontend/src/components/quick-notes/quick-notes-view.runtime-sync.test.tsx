@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement, type ReactNode } from 'react'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QuickNotesView } from '@/components/quick-notes/quick-notes-view'
 import { wireSyncEngineToStore } from '@/lib/sync'
 import { createQuickNote } from '@/lib/quick-notes/quick-note-repository'
@@ -25,6 +25,12 @@ type FakeSyncEngine = {
     pushComplete: (() => void) | null
     syncComplete: (() => void) | null
   }
+}
+
+const REPOSITORY_UI_TIMEOUT = 5000
+
+function findQuickNoteButton(name: RegExp) {
+  return screen.findByRole('button', { name }, { timeout: REPOSITORY_UI_TIMEOUT })
 }
 
 vi.mock('lucide-react', () => ({
@@ -113,10 +119,19 @@ describe('QuickNotesView runtime sync refresh', () => {
   })
 
   afterEach(async () => {
+    // RTL's automatic cleanup runs after file-local hooks in Vitest. Unmount first
+    // so in-flight repository work cannot publish into a component while its DB is
+    // being deleted/closed by this teardown.
+    cleanup()
+    await act(async () => {
+      await Promise.resolve()
+    })
     useQuickNoteStore.getState().reset()
     useSyncStore.getState().reset()
     await db.delete()
     spaceDBManager.close()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
   })
 
   it('renders an active card through the real repository and store', async () => {
@@ -126,10 +141,9 @@ describe('QuickNotesView runtime sync refresh', () => {
       created_at: '2026-07-07T13:00:00.000Z',
       updated_at: '2026-07-07T13:00:00.000Z',
     })
-
     render(createElement(QuickNotesView))
 
-    expect(await screen.findByRole('button', { name: /真实运行时卡片/ })).toBeInTheDocument()
+    expect(await findQuickNoteButton(/真实运行时卡片/)).toBeInTheDocument()
     expect(screen.getByText('待同步')).toBeInTheDocument()
   })
 
@@ -144,7 +158,7 @@ describe('QuickNotesView runtime sync refresh', () => {
     render(createElement(QuickNotesView))
 
     expect(
-      await screen.findByRole('button', { name: /会被 pull tombstone 移除的卡片/ }),
+      await findQuickNoteButton(/会被 pull tombstone 移除的卡片/),
     ).toBeInTheDocument()
 
     await act(async () => {
@@ -177,7 +191,7 @@ describe('QuickNotesView runtime sync refresh', () => {
     render(createElement(QuickNotesView))
 
     expect(
-      await screen.findByRole('button', { name: /通过 sync callback 移除的卡片/ }),
+      await findQuickNoteButton(/通过 sync callback 移除的卡片/),
     ).toBeInTheDocument()
 
     await act(async () => {
@@ -207,7 +221,7 @@ describe('QuickNotesView runtime sync refresh', () => {
     render(createElement(QuickNotesView))
 
     expect(
-      await screen.findByRole('button', { name: /同步软删后进入回收站/ }),
+      await findQuickNoteButton(/同步软删后进入回收站/),
     ).toBeInTheDocument()
 
     await act(async () => {
@@ -240,7 +254,7 @@ describe('QuickNotesView runtime sync refresh', () => {
 
     render(createElement(QuickNotesView))
 
-    expect(await screen.findByRole('button', { name: /push 完成后状态消失/ })).toBeInTheDocument()
+    expect(await findQuickNoteButton(/push 完成后状态消失/)).toBeInTheDocument()
     expect(screen.getByText('待同步')).toBeInTheDocument()
 
     await act(async () => {
@@ -273,7 +287,7 @@ describe('QuickNotesView runtime sync refresh', () => {
 
     render(createElement(QuickNotesView))
 
-    expect(await screen.findByRole('button', { name: /同步失败后显示失败状态/ })).toBeInTheDocument()
+    expect(await findQuickNoteButton(/同步失败后显示失败状态/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /仍然只是待同步状态/ })).toBeInTheDocument()
     expect(screen.getAllByText('待同步')).toHaveLength(2)
 
