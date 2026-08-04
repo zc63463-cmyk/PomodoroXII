@@ -63,7 +63,7 @@ describe('SpaceSwitchProvider', () => {
   it('dispatching pxii:space-switched resets all 17 business stores', () => {
     // Mutate stores to non-default state
     useSyncStore.setState({ status: 'error', pendingCount: 99 })
-    useTimerStore.setState({ mode: 'countdown', status: 'running' })
+    useTimerStore.setState({ ownershipMode: 'owner', error: 'dirty' })
     useAppStore.setState({ isOnline: false })
 
     render(createElement(SpaceSwitchProvider, null, 'test'))
@@ -72,8 +72,8 @@ describe('SpaceSwitchProvider', () => {
     // Verify stores were reset
     expect(useSyncStore.getState().status).toBe('idle')
     expect(useSyncStore.getState().pendingCount).toBe(0)
-    expect(useTimerStore.getState().mode).toBe('pomodoro')
-    expect(useTimerStore.getState().status).toBe('idle')
+    expect(useTimerStore.getState().locator).toBeNull()
+    expect(useTimerStore.getState().ownershipMode).toBe('none')
     expect(useAppStore.getState().isOnline).toBe(true)
   })
 
