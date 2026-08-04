@@ -501,7 +501,12 @@ class TestTypedResponseSchemas:
         schema = app.openapi()
         component = schema["components"]["schemas"]["ProjectResponse"]
         props = set(component["properties"])
-        assert props == {"id", "key", "name", "nextWorkItemNumber"}
+        assert props == {
+            "id", "spaceId", "key", "name", "description",
+            "nextWorkItemNumber", "rank", "archivedAt", "version",
+            "createdAt", "updatedAt",
+        }
+        assert set(component["required"]) == props
         assert "next_work_item_number" not in props
 
     def test_work_item_response_is_independent_schema(self) -> None:
@@ -509,7 +514,17 @@ class TestTypedResponseSchemas:
         schema = app.openapi()
         component = schema["components"]["schemas"]["WorkItemResponse"]
         props = set(component["properties"])
-        assert props == {"id", "displayKey", "projectId", "title"}
+        assert props == {
+            "id", "spaceId", "displayKey", "projectId", "title",
+            "description", "typeDefinitionId", "statusDefinitionId",
+            "priority", "parentId", "childRank", "depth",
+            "completionWindowStart", "completionWindowEnd", "reviewPoint",
+            "hardDeadline", "effortEstimateLowerSeconds",
+            "effortEstimateUpperSeconds", "effortActualSeconds", "confidence",
+            "completedAt", "cancelledAt", "archivedAt", "markedAsAttention",
+            "version", "createdAt", "updatedAt",
+        }
+        assert set(component["required"]) == props
         assert "display_key" not in props
         assert "project_id" not in props
 
@@ -519,9 +534,10 @@ class TestTypedResponseSchemas:
         component = schema["components"]["schemas"]["WorkItemNoteResponse"]
         props = set(component["properties"])
         assert props == {
-            "id", "workItemId", "documentJson", "contentVersion",
-            "writeSupported", "version",
+            "spaceId", "noteId", "workItemId", "document", "version",
+            "createdAt", "updatedAt",
         }
+        assert set(component["required"]) == props
         assert "work_item_id" not in props
         assert "content_version" not in props
         assert "write_supported" not in props
@@ -580,7 +596,7 @@ class TestTypedResponseSchemas:
     def test_checklist_block_is_independent_schema(self) -> None:
         """ChecklistBlock must be a named component with camelCase blockId."""
         schema = app.openapi()
-        component = schema["components"]["schemas"]["ChecklistBlock"]
+        component = schema["components"]["schemas"]["ChecklistBlock-Output"]
         props = set(component["properties"])
         assert props == {"type", "blockId", "items"}
         assert "block_id" not in props
@@ -588,7 +604,7 @@ class TestTypedResponseSchemas:
     def test_checklist_item_uses_camel_case_fields(self) -> None:
         """ChecklistItem must use camelCase itemId, not snake_case."""
         schema = app.openapi()
-        component = schema["components"]["schemas"]["ChecklistItem"]
+        component = schema["components"]["schemas"]["ChecklistItem-Output"]
         props = set(component["properties"])
         assert "itemId" in props
         assert "item_id" not in props

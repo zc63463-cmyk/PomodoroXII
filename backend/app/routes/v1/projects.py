@@ -32,6 +32,30 @@ from app.task_space.contracts import (
 router = APIRouter()
 
 
+def _space_id(scope) -> str:
+    value = getattr(getattr(scope, "scope", None), "space_id", None)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("authorized Space runtime handle is required")
+    return value
+
+
+def _project_response(value, space_id: str) -> ProjectResponse:
+    """Map a complete snake_case query row to the wire response."""
+    return ProjectResponse(
+        id=str(value["id"]),
+        space_id=space_id,
+        key=str(value["key"]),
+        name=str(value["name"]),
+        description=value["description"],
+        next_work_item_number=int(value["next_work_item_number"]),
+        rank=int(value["rank"]),
+        archived_at=value["archived_at"],
+        version=int(value["version"]),
+        created_at=str(value["created_at"]),
+        updated_at=str(value["updated_at"]),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Collection routes
 # --------------------------------------------------------------------------- #
@@ -49,16 +73,9 @@ async def list_projects(
         scope,
         TaskSpacePageQuery(cursor=cursor, limit=limit, filters={}),
     )
+    space_id = _space_id(scope)
     return ProjectPageResponse(
-        items=[
-            ProjectResponse(
-                id=str(item["id"]),
-                key=str(item["key"]),
-                name=str(item["name"]),
-                next_work_item_number=int(item["next_work_item_number"]),
-            )
-            for item in page.items
-        ],
+        items=[_project_response(item, space_id) for item in page.items],
         next_cursor=page.next_cursor,
     )
 
@@ -115,10 +132,4 @@ async def get_project(
 ) -> ProjectResponse:
     """Get a single project by ID."""
     view = await query_module.get_project(scope, project_id)
-    v = view.value
-    return ProjectResponse(
-        id=str(v["id"]),
-        key=str(v["key"]),
-        name=str(v["name"]),
-        next_work_item_number=int(v["next_work_item_number"]),
-    )
+    return _project_response(view.value, _space_id(scope))

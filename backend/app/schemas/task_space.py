@@ -6,7 +6,7 @@ snake_case.  ``WireModel`` is alias-only (rejects snake_case input);
 """
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -77,9 +77,16 @@ class ProjectResponse(WireResponseModel):
     """Project view returned by query routes."""
 
     id: str
+    space_id: str
     key: str
     name: str
+    description: str | None
     next_work_item_number: int = Field(ge=1)
+    rank: int = Field(ge=0)
+    archived_at: str | None
+    version: int = Field(ge=1)
+    created_at: str
+    updated_at: str
 
 
 class WorkItemCreate(WireModel):
@@ -98,9 +105,32 @@ class WorkItemResponse(WireResponseModel):
     """Work item view returned by query routes."""
 
     id: str
+    space_id: str
     display_key: str
     project_id: str
     title: str
+    description: str | None
+    type_definition_id: str
+    status_definition_id: str
+    priority: str | None
+    parent_id: str | None
+    child_rank: int = Field(ge=0)
+    depth: Literal[1, 2, 3]
+    completion_window_start: str | None
+    completion_window_end: str | None
+    review_point: str | None
+    hard_deadline: str | None
+    effort_estimate_lower_seconds: int | None = Field(ge=0)
+    effort_estimate_upper_seconds: int | None = Field(ge=0)
+    effort_actual_seconds: int = Field(ge=0)
+    confidence: str | None
+    completed_at: str | None
+    cancelled_at: str | None
+    archived_at: str | None
+    marked_as_attention: bool
+    version: int = Field(ge=1)
+    created_at: str
+    updated_at: str
 
 
 # --------------------------------------------------------------------------- #
@@ -171,12 +201,12 @@ class TaskSpaceAcceptedResponse(WireResponseModel):
 
 class ProjectPageResponse(WireResponseModel):
     items: list[ProjectResponse]
-    next_cursor: str | None = None
+    next_cursor: str | None
 
 
 class WorkItemPageResponse(WireResponseModel):
     items: list[WorkItemResponse]
-    next_cursor: str | None = None
+    next_cursor: str | None
 
 
 class TaskSpacePageResponse(WireResponseModel):

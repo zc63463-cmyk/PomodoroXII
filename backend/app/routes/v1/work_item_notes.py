@@ -9,6 +9,9 @@ No generic note promotion, tree, or legacy alias routes exist.
 """
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app.deps import get_space_runtime_handle
@@ -66,6 +69,30 @@ def _map_note_document(document: WorkItemNoteDocumentV1) -> dict[str, object]:
     }
 
 
+def _space_id(scope) -> str:
+    value = getattr(getattr(scope, "scope", None), "space_id", None)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("authorized Space runtime handle is required")
+    return value
+
+
+def _wire_document(value: object) -> object:
+    """Normalize persisted document keys to the camelCase wire contract."""
+    if isinstance(value, Mapping):
+        aliases = {
+            "content_version": "contentVersion",
+            "block_id": "blockId",
+            "item_id": "itemId",
+        }
+        return {
+            aliases.get(str(key), str(key)): _wire_document(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_wire_document(item) for item in value]
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # Note read
 # --------------------------------------------------------------------------- #
@@ -82,14 +109,21 @@ async def read_note(
     if view is None:
         raise HTTPException(status_code=404, detail="note_not_found")
     v = view.value
-    document_json = str(v["document_json"])
+    raw_document = v.get("document")
+    if raw_document is None:
+        document_json = v.get("document_json")
+        if not isinstance(document_json, str):
+            raise RuntimeError("authoritative WorkItemNote document is required")
+        raw_document = json.loads(document_json)
+    document = _wire_document(raw_document)
     return WorkItemNoteResponse(
-        id=str(v["id"]),
+        space_id=_space_id(scope),
+        note_id=str(v["id"]),
         work_item_id=str(v["work_item_id"]),
-        document_json=document_json,
-        content_version=v["content_version"],
-        write_supported=bool(v["write_supported"]),
+        document=WorkItemNoteDocumentV1.model_validate(document),
         version=int(v["version"]),
+        created_at=str(v["created_at"]),
+        updated_at=str(v["updated_at"]),
     )
 
 

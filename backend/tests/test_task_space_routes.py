@@ -7,7 +7,6 @@ provider-backed integration works end-to-end through the real app.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -324,6 +323,117 @@ class TestTaskSpaceIntegration:
         assert listed.status_code == 200
         assert "items" in listed.json()
 
+    async def test_task_space_reads_return_complete_authoritative_wire_rows(self, client) -> None:
+        """Read routes expose the fields consumed by the strict frontend schemas."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_payload = {"key": "FULL", "name": "Complete rows"}
+        project = await client.post(
+            "/api/v1/projects",
+            json={
+                "commandId": "complete-project",
+                "spaceId": space_id,
+                "payloadHash": canonical_payload_hash(project_payload),
+                "key": "full",
+                "name": "Complete rows",
+            },
+            headers={**headers, "Idempotency-Key": "complete-project"},
+        )
+        assert project.status_code == 201
+        project_id = project.json()["entityId"]
+
+        work_item_payload = {
+            "title": "Complete task",
+            "description": None,
+            "parent_id": None,
+            "type_definition_id": None,
+            "status_definition_id": None,
+            "priority": "high",
+        }
+        created = await client.post(
+            "/api/v1/work-items",
+            json={
+                "commandId": "complete-work-item",
+                "spaceId": space_id,
+                "projectId": project_id,
+                "payloadHash": canonical_payload_hash(work_item_payload),
+                "title": "Complete task",
+                "priority": "high",
+            },
+            headers={**headers, "Idempotency-Key": "complete-work-item"},
+        )
+        assert created.status_code == 201
+        created_value = created.json()
+        work_item_id = created_value["entityId"]
+        assert created_value["value"]["depth"] == 1
+        assert created_value["value"]["createdAt"]
+        assert created_value["value"]["updatedAt"]
+
+        project_read = await client.get(f"/api/v1/projects/{project_id}", headers=headers)
+        assert project_read.status_code == 200
+        project_value = project_read.json()
+        assert set(project_value) == {
+            "id", "spaceId", "key", "name", "description",
+            "nextWorkItemNumber", "rank", "archivedAt", "version",
+            "createdAt", "updatedAt",
+        }
+        assert project_value["spaceId"] == space_id
+        assert project_value["createdAt"]
+        assert project_value["updatedAt"]
+
+        work_item_read = await client.get(
+            f"/api/v1/work-items/{work_item_id}", headers=headers
+        )
+        assert work_item_read.status_code == 200
+        work_item_value = work_item_read.json()
+        assert set(work_item_value) == {
+            "id", "spaceId", "projectId", "displayKey", "title", "description",
+            "typeDefinitionId", "statusDefinitionId", "priority", "parentId",
+            "childRank", "depth", "completionWindowStart", "completionWindowEnd",
+            "reviewPoint", "hardDeadline", "effortEstimateLowerSeconds",
+            "effortEstimateUpperSeconds", "effortActualSeconds", "confidence",
+            "completedAt", "cancelledAt", "archivedAt", "markedAsAttention",
+            "version", "createdAt", "updatedAt",
+        }
+        assert work_item_value["spaceId"] == space_id
+        assert work_item_value["depth"] == 1
+        assert work_item_value["priority"] == "high"
+        assert work_item_value["createdAt"]
+        assert work_item_value["updatedAt"]
+
+        note_document = {
+            "contentVersion": 1,
+            "blocks": [{"type": "paragraph", "blockId": "p1", "text": "Body"}],
+        }
+        note_payload = {"document": note_document}
+        note = await client.put(
+            f"/api/v1/work-items/{work_item_id}/note",
+            json={
+                "commandId": "complete-note",
+                "spaceId": space_id,
+                "expectedVersion": None,
+                "payloadHash": canonical_payload_hash(note_payload),
+                "document": note_document,
+            },
+            headers={**headers, "Idempotency-Key": "complete-note"},
+        )
+        assert note.status_code == 200
+        note_read = await client.get(
+            f"/api/v1/work-items/{work_item_id}/note", headers=headers
+        )
+        assert note_read.status_code == 200
+        note_value = note_read.json()
+        assert set(note_value) == {
+            "spaceId", "noteId", "workItemId", "document", "version",
+            "createdAt", "updatedAt",
+        }
+        assert note_value["spaceId"] == space_id
+        assert note_value["workItemId"] == work_item_id
+        assert note_value["document"] == note_document
+        assert note_value["createdAt"]
+        assert note_value["updatedAt"]
+
     async def test_note_toggle_checklist_rejects_stale_version(self, client) -> None:
         """Toggle with a stale expectedVersion must 409 without mutating state."""
         from app.mutation.types import canonical_payload_hash
@@ -410,8 +520,7 @@ class TestTaskSpaceIntegration:
         )
         assert before.status_code == 200
         before_value = before.json()
-        assert before_value["documentJson"]
-        assert json.loads(before_value["documentJson"]) == note_document
+        assert before_value["document"] == note_document
 
         # --- Toggle with a stale expectedVersion (current - 1 = 0) ---
         toggle_payload = {"block_id": "cb1", "item_id": "ci1", "checked": True}
@@ -441,5 +550,4 @@ class TestTaskSpaceIntegration:
         assert after.status_code == 200
         after_value = after.json()
         assert after_value["version"] == before_value["version"]
-        assert after_value["contentVersion"] == before_value["contentVersion"]
-        assert after_value["documentJson"] == before_value["documentJson"]
+        assert after_value["document"] == before_value["document"]
