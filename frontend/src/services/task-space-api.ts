@@ -40,8 +40,9 @@ async function command<TWire extends Record<string, unknown>, TInternal extends 
 export const taskSpaceApi = {
   async listProjects(spaceId: string, cursor?: string): Promise<{ items: Project[]; nextCursor: string | null }> {
     const response = await spaceApi.get('/projects', { params: { cursor, limit: 100 } })
-    const page = projectSchema.array().parse((response.data as { items?: unknown }).items ?? [])
-    return { items: page.map((item) => assertResponseSpace(item, spaceId)), nextCursor: typeof (response.data as { nextCursor?: unknown }).nextCursor === 'string' ? (response.data as { nextCursor: string }).nextCursor : null }
+    const data = response.data as { items?: unknown; nextCursor?: unknown }
+    const page = projectSchema.array().parse(data.items ?? [])
+    return { items: page.map((item) => assertResponseSpace(item, spaceId)), nextCursor: typeof data.nextCursor === 'string' ? data.nextCursor : null }
   },
   async getProject(spaceId: string, projectId: string): Promise<Project> {
     const response = await spaceApi.get(`/projects/${encodeURIComponent(projectId)}`)
@@ -53,8 +54,9 @@ export const taskSpaceApi = {
   },
   async listWorkItems(spaceId: string, projectId: string, cursor?: string): Promise<{ items: WorkItem[]; nextCursor: string | null }> {
     const response = await spaceApi.get('/work-items', { params: { projectId, cursor, limit: 100 } })
-    const page = workItemSchema.array().parse((response.data as { items?: unknown }).items ?? [])
-    return { items: page.map((item) => assertResponseSpace(item, spaceId)), nextCursor: typeof (response.data as { nextCursor?: unknown }).nextCursor === 'string' ? (response.data as { nextCursor: string }).nextCursor : null }
+    const data = response.data as { items?: unknown; nextCursor?: unknown }
+    const page = workItemSchema.array().parse(data.items ?? [])
+    return { items: page.map((item) => assertResponseSpace(item, spaceId)), nextCursor: typeof data.nextCursor === 'string' ? data.nextCursor : null }
   },
   async getWorkItem(spaceId: string, workItemId: string): Promise<WorkItem> {
     const response = await spaceApi.get(`/work-items/${encodeURIComponent(workItemId)}`)

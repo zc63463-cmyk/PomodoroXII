@@ -47,6 +47,54 @@ from app.task_space.contracts import (
 from app.task_space.module import DefaultTaskSpaceCommandModule
 from app.task_space.queries import DefaultTaskSpaceQueryModule
 
+_WIRE_TIMESTAMP = "2026-01-01T00:00:00Z"
+
+
+def _project_row(project_id: str = "p1") -> dict[str, object]:
+    return {
+        "id": project_id,
+        "key": "TEST",
+        "name": "Test",
+        "description": None,
+        "next_work_item_number": 1,
+        "rank": 0,
+        "archived_at": None,
+        "version": 1,
+        "created_at": _WIRE_TIMESTAMP,
+        "updated_at": _WIRE_TIMESTAMP,
+    }
+
+
+def _work_item_row(work_item_id: str = "w1") -> dict[str, object]:
+    return {
+        "id": work_item_id,
+        "display_key": "TEST-1",
+        "project_id": "p1",
+        "title": "Test work item",
+        "description": None,
+        "type_definition_id": "type-1",
+        "status_definition_id": "status-1",
+        "priority": None,
+        "parent_id": None,
+        "child_rank": 0,
+        "depth": 1,
+        "completion_window_start": None,
+        "completion_window_end": None,
+        "review_point": None,
+        "hard_deadline": None,
+        "effort_estimate_lower_seconds": None,
+        "effort_estimate_upper_seconds": None,
+        "effort_actual_seconds": 0,
+        "confidence": None,
+        "completed_at": None,
+        "cancelled_at": None,
+        "archived_at": None,
+        "marked_as_attention": False,
+        "version": 1,
+        "created_at": _WIRE_TIMESTAMP,
+        "updated_at": _WIRE_TIMESTAMP,
+    }
+
 # --------------------------------------------------------------------------- #
 # Fakes
 # --------------------------------------------------------------------------- #
@@ -63,22 +111,14 @@ class FakeTaskSpaceQueryModule:
         self.calls.append(("list_projects", scope, query))
         self.raw_queries.append(query)
         return TaskSpacePage(
-            items=({
-                "id": "p1",
-                "key": "TEST",
-                "name": "Test",
-                "next_work_item_number": 1,
-            },),
+            items=(_project_row(),),
             next_cursor=None,
         )
 
     async def get_project(self, scope: Any, project_id: str) -> TaskSpaceView:
         self.calls.append(("get_project", scope, project_id))
         self.raw_queries.append(project_id)
-        return TaskSpaceView(
-            value={"id": project_id, "key": "TEST", "name": "Test",
-                   "next_work_item_number": 1}
-        )
+        return TaskSpaceView(value=_project_row(project_id))
 
     async def list_definitions(self, scope: Any) -> TaskSpaceDefinitionsView:
         self.calls.append(("list_definitions", scope))
@@ -93,14 +133,7 @@ class FakeTaskSpaceQueryModule:
     async def get_work_item(self, scope: Any, work_item_id: str) -> TaskSpaceView:
         self.calls.append(("get_work_item", scope, work_item_id))
         self.raw_queries.append(work_item_id)
-        return TaskSpaceView(
-            value={
-                "id": work_item_id,
-                "display_key": "TEST-1",
-                "project_id": "p1",
-                "title": "Test work item",
-            }
-        )
+        return TaskSpaceView(value=_work_item_row(work_item_id))
 
     async def read_note(self, scope: Any, work_item_id: str) -> TaskSpaceView | None:
         self.calls.append(("read_note", scope, work_item_id))
@@ -108,10 +141,10 @@ class FakeTaskSpaceQueryModule:
         return TaskSpaceView(value={
             "id": "note-1",
             "work_item_id": work_item_id,
-            "document_json": '{"blocks":[],"contentVersion":1}',
-            "content_version": 1,
-            "write_supported": True,
+            "document": {"blocks": [], "contentVersion": 1},
             "version": 1,
+            "created_at": _WIRE_TIMESTAMP,
+            "updated_at": _WIRE_TIMESTAMP,
         })
 
 

@@ -90,14 +90,16 @@ class DefaultTaskSpaceQueryModule:
     async def list_work_items(
         self, scope: SpaceRuntimeHandle, query: TaskSpacePageQuery
     ) -> TaskSpacePage:
-        project_id = str(query.filters["project_id"])
+        project_id = query.filters.get("project_id")
         async with scope.session_factory() as session:
+            statement = select(WorkItem)
+            if project_id is not None:
+                statement = statement.where(WorkItem.project_id == str(project_id))
             rows = tuple(
-                _row(row) for row in (
+                _row(row)
+                for row in (
                     await session.execute(
-                        select(WorkItem)
-                        .where(WorkItem.project_id == project_id)
-                        .order_by(
+                        statement.order_by(
                             WorkItem.parent_id.isnot(None),
                             WorkItem.parent_id.asc(),
                             WorkItem.child_rank.asc(),
@@ -134,6 +136,9 @@ class DefaultTaskSpaceQueryModule:
             return None
         value = _row(row)
         raw = json.loads(str(value["document_json"]))
-        value["content_version"] = raw.get("contentVersion")
-        value["write_supported"] = raw.get("contentVersion") == 1
+        value["document"] = raw
+        value["content_version"] = raw.get(
+            "contentVersion", raw.get("content_version")
+        )
+        value["write_supported"] = value["content_version"] == 1
         return TaskSpaceView(value)

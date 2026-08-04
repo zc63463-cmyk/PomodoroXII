@@ -1311,7 +1311,7 @@ export interface components {
             /** Payloadhash */
             payloadHash: string;
             /** Blocks */
-            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock"])[];
+            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock-Input"])[];
         };
         /**
          * AuthLoginResponse
@@ -1352,7 +1352,7 @@ export interface components {
             type: string;
         };
         /** ChecklistBlock */
-        ChecklistBlock: {
+        "ChecklistBlock-Input": {
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -1361,10 +1361,22 @@ export interface components {
             /** Blockid */
             blockId: string;
             /** Items */
-            items: components["schemas"]["ChecklistItem"][];
+            items: components["schemas"]["ChecklistItem-Input"][];
+        };
+        /** ChecklistBlock */
+        "ChecklistBlock-Output": {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "checklist";
+            /** Blockid */
+            blockId: string;
+            /** Items */
+            items: components["schemas"]["ChecklistItem-Output"][];
         };
         /** ChecklistItem */
-        ChecklistItem: {
+        "ChecklistItem-Input": {
             /** Itemid */
             itemId: string;
             /** Text */
@@ -1372,7 +1384,18 @@ export interface components {
             /** Checked */
             checked: boolean;
             /** Children */
-            children?: components["schemas"]["ChecklistItem"][];
+            children?: components["schemas"]["ChecklistItem-Input"][];
+        };
+        /** ChecklistItem */
+        "ChecklistItem-Output": {
+            /** Itemid */
+            itemId: string;
+            /** Text */
+            text: string;
+            /** Checked */
+            checked: boolean;
+            /** Children */
+            children?: components["schemas"]["ChecklistItem-Output"][];
         };
         /** CreateProjectRequest */
         CreateProjectRequest: {
@@ -2211,7 +2234,7 @@ export interface components {
             /** Items */
             items: components["schemas"]["ProjectResponse"][];
             /** Nextcursor */
-            nextCursor?: string | null;
+            nextCursor: string | null;
         };
         /**
          * ProjectResponse
@@ -2220,12 +2243,26 @@ export interface components {
         ProjectResponse: {
             /** Id */
             id: string;
+            /** Spaceid */
+            spaceId: string;
             /** Key */
             key: string;
             /** Name */
             name: string;
+            /** Description */
+            description: string | null;
             /** Nextworkitemnumber */
             nextWorkItemNumber: number;
+            /** Rank */
+            rank: number;
+            /** Archivedat */
+            archivedAt: string | null;
+            /** Version */
+            version: number;
+            /** Createdat */
+            createdAt: string;
+            /** Updatedat */
+            updatedAt: string;
         };
         /**
          * QuickNoteConvertResponse
@@ -2472,7 +2509,7 @@ export interface components {
             expectedVersion?: number | null;
             /** Payloadhash */
             payloadHash: string;
-            document: components["schemas"]["WorkItemNoteDocumentV1"];
+            document: components["schemas"]["WorkItemNoteDocumentV1-Input"];
         };
         /**
          * RequestValidationErrorResponse
@@ -3141,43 +3178,54 @@ export interface components {
             change_summary: string;
         };
         /** WorkItemNoteDocumentV1 */
-        WorkItemNoteDocumentV1: {
+        "WorkItemNoteDocumentV1-Input": {
             /**
              * Contentversion
              * @constant
              */
             contentVersion: 1;
             /** Blocks */
-            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock"])[];
+            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock-Input"])[];
+        };
+        /** WorkItemNoteDocumentV1 */
+        "WorkItemNoteDocumentV1-Output": {
+            /**
+             * Contentversion
+             * @constant
+             */
+            contentVersion: 1;
+            /** Blocks */
+            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock-Output"])[];
         };
         /**
          * WorkItemNoteResponse
          * @description Work item note view returned by the read route.
          *
          *     Fields are sourced from the actual query/model data: the ORM row
-         *     (``id``, ``work_item_id``, ``version``) and the parsed document JSON
-         *     (``content_version``, ``write_supported``).
+         *     (``id``, ``work_item_id``, timestamps, and ``version``), the authorized
+         *     Space scope, and the parsed document JSON.
          */
         WorkItemNoteResponse: {
-            /** Id */
-            id: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Noteid */
+            noteId: string;
             /** Workitemid */
             workItemId: string;
-            /** Documentjson */
-            documentJson: string;
-            /** Contentversion */
-            contentVersion: number | null;
-            /** Writesupported */
-            writeSupported: boolean;
+            document: components["schemas"]["WorkItemNoteDocumentV1-Output"];
             /** Version */
             version: number;
+            /** Createdat */
+            createdAt: string;
+            /** Updatedat */
+            updatedAt: string;
         };
         /** WorkItemPageResponse */
         WorkItemPageResponse: {
             /** Items */
             items: components["schemas"]["WorkItemResponse"][];
             /** Nextcursor */
-            nextCursor?: string | null;
+            nextCursor: string | null;
         };
         /**
          * WorkItemResponse
@@ -3186,12 +3234,61 @@ export interface components {
         WorkItemResponse: {
             /** Id */
             id: string;
+            /** Spaceid */
+            spaceId: string;
             /** Displaykey */
             displayKey: string;
             /** Projectid */
             projectId: string;
             /** Title */
             title: string;
+            /** Description */
+            description: string | null;
+            /** Typedefinitionid */
+            typeDefinitionId: string;
+            /** Statusdefinitionid */
+            statusDefinitionId: string;
+            /** Priority */
+            priority: string | null;
+            /** Parentid */
+            parentId: string | null;
+            /** Childrank */
+            childRank: number;
+            /**
+             * Depth
+             * @enum {integer}
+             */
+            depth: 1 | 2 | 3;
+            /** Completionwindowstart */
+            completionWindowStart: string | null;
+            /** Completionwindowend */
+            completionWindowEnd: string | null;
+            /** Reviewpoint */
+            reviewPoint: string | null;
+            /** Harddeadline */
+            hardDeadline: string | null;
+            /** Effortestimatelowerseconds */
+            effortEstimateLowerSeconds: number | null;
+            /** Effortestimateupperseconds */
+            effortEstimateUpperSeconds: number | null;
+            /** Effortactualseconds */
+            effortActualSeconds: number;
+            /** Confidence */
+            confidence: string | null;
+            /** Completedat */
+            completedAt: string | null;
+            /** Cancelledat */
+            cancelledAt: string | null;
+            /** Archivedat */
+            archivedAt: string | null;
+            /** Markedasattention */
+            markedAsAttention: boolean;
+            /** Version */
+            version: number;
+            /** Createdat */
+            createdAt: string;
+            /** Updatedat */
+            updatedAt: string;
         };
         /**
          * CanonicalErrorResponse

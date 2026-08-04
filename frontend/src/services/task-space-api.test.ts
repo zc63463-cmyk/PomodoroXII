@@ -8,6 +8,31 @@ vi.mock('./api', () => ({
 }))
 
 const accepted = { commandId: 'op-1', entityType: 'project', entityId: 'p-1', version: 1, value: {} }
+const timestamp = '2026-01-01T00:00:00Z'
+
+const projectWire = {
+  id: 'p-1', spaceId: 'space-a', key: 'RM', name: 'Roadmap', description: null,
+  nextWorkItemNumber: 2, rank: 0, archivedAt: null, version: 1,
+  createdAt: timestamp, updatedAt: timestamp,
+}
+
+const workItemWire = {
+  id: 'w-1', spaceId: 'space-a', projectId: 'p-1', displayKey: 'RM-1',
+  title: 'First task', description: null, typeDefinitionId: 'type-1',
+  statusDefinitionId: 'status-1', priority: 'high', parentId: null,
+  childRank: 0, depth: 1, completionWindowStart: null,
+  completionWindowEnd: null, reviewPoint: null, hardDeadline: null,
+  effortEstimateLowerSeconds: null, effortEstimateUpperSeconds: null,
+  effortActualSeconds: 0, confidence: 'medium', completedAt: null,
+  cancelledAt: null, archivedAt: null, markedAsAttention: false, version: 1,
+  createdAt: timestamp, updatedAt: timestamp,
+}
+
+const noteWire = {
+  spaceId: 'space-a', noteId: 'n-1', workItemId: 'w-1',
+  document: { contentVersion: 1, blocks: [] }, version: 1,
+  createdAt: timestamp, updatedAt: timestamp,
+}
 
 describe('taskSpaceApi', () => {
   beforeEach(() => vi.clearAllMocks())
@@ -44,5 +69,26 @@ describe('taskSpaceApi', () => {
     expect(vi.mocked(spaceApi.post).mock.calls.map(([path]) => path)).toEqual([
       '/work-items/wi-1/note/append-blocks', '/work-items/wi-1/note/toggle-checklist-item',
     ])
+  })
+
+  it('parses complete camelCase REST read responses at the frontend boundary', async () => {
+    vi.mocked(spaceApi.get)
+      .mockResolvedValueOnce({ data: { items: [projectWire], nextCursor: null } })
+      .mockResolvedValueOnce({ data: projectWire })
+      .mockResolvedValueOnce({ data: { items: [workItemWire], nextCursor: null } })
+      .mockResolvedValueOnce({ data: workItemWire })
+      .mockResolvedValueOnce({ data: noteWire })
+
+    const projects = await taskSpaceApi.listProjects('space-a')
+    expect(projects.items[0]?.nextWorkItemNumber).toBe(2)
+    expect((await taskSpaceApi.getProject('space-a', 'p-1')).spaceId).toBe('space-a')
+
+    const workItems = await taskSpaceApi.listWorkItems('space-a', 'p-1')
+    expect(workItems.items[0]?.displayKey).toBe('RM-1')
+    expect((await taskSpaceApi.getWorkItem('space-a', 'w-1')).depth).toBe(1)
+
+    const note = await taskSpaceApi.getNote('space-a', 'w-1')
+    expect(note.noteId).toBe('n-1')
+    expect(note.document.contentVersion).toBe(1)
   })
 })

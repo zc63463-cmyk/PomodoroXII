@@ -100,16 +100,17 @@ class WorkItemNoteResponse(WireResponseModel):
     """Work item note view returned by the read route.
 
     Fields are sourced from the actual query/model data: the ORM row
-    (``id``, ``work_item_id``, ``version``) and the parsed document JSON
-    (``content_version``, ``write_supported``).
+    (``id``, ``work_item_id``, timestamps, and ``version``), the authorized
+    Space scope, and the parsed document JSON.
     """
 
-    id: str
+    space_id: str
+    note_id: str
     work_item_id: str
-    document_json: str
-    content_version: int | None
-    write_supported: bool
+    document: WorkItemNoteDocumentV1
     version: int
+    created_at: str
+    updated_at: str
 
 
 # --------------------------------------------------------------------------- #
