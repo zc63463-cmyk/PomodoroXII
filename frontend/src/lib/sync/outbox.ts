@@ -30,6 +30,8 @@ export interface OutboxFailurePatch {
 export interface OutboxIdentity {
   operationId: string
   payloadHash: string
+  /** Optional canonical command-hash projection when storage payload is a post-image. */
+  hashPayload?: unknown
   expectedVersion: number | null
   transportState: 'ready' | 'awaiting_s4' | 'blocked_conflict'
   createdAt: string
@@ -42,7 +44,10 @@ export async function buildOutboxIdentity(
   input: Omit<OutboxIdentity, 'payloadHash'>,
 ): Promise<OutboxIdentity> {
   // Keep a caller-owned Dexie transaction alive while WebCrypto resolves.
-  return { ...input, payloadHash: await Dexie.waitFor(hashCommandPayload(payload)) }
+  return {
+    ...input,
+    payloadHash: await Dexie.waitFor(hashCommandPayload(input.hashPayload ?? payload)),
+  }
 }
 
 export interface PreparedEntityCommand {
@@ -173,7 +178,9 @@ export async function enqueueOutbox(
   if (payloadStr === undefined) throw new Error('payload must be JSON serializable')
   // Validate the caller-provided identity against the exact payload while
   // keeping the surrounding Dexie transaction alive across WebCrypto.
-  const computedPayloadHash = await Dexie.waitFor(hashCommandPayload(payload))
+  const computedPayloadHash = await Dexie.waitFor(
+    hashCommandPayload(identity.hashPayload ?? payload),
+  )
   if (computedPayloadHash !== identity.payloadHash) {
     throw new Error('payloadHash_mismatch')
   }
@@ -183,15 +190,18 @@ export async function enqueueOutbox(
     .and((e) => e.entityType === entityType && e.entityId === entityId && !e.synced)
     .toArray()
 
-  if (existing.length > 0) {
-    const latest = existing.reduce((a, b) =>
+  // An attempted command is immutable. A newer local edit gets its own row;
+  // the in-flight row is removed only after its response is acknowledged.
+  const mergeable = existing.filter((row) => row.attemptCount === 0)
+  if (mergeable.length > 0) {
+    const latest = mergeable.reduce((a, b) =>
       a.createdAt > b.createdAt ? a : b,
     )
     const merge = resolveOutboxMerge(latest.action, action)
 
     if (merge.action === 'drop_existing') {
       // 删 outbox 行 + 尝试删 Dexie 实体表对应行
-      await db.outbox.bulkDelete(existing.map((e) => e.id!))
+      await db.outbox.bulkDelete(mergeable.map((e) => e.id!))
       const tableName = entityType in ENTITY_TYPE_TO_TABLE
         ? ENTITY_TYPE_TO_TABLE[entityType as SyncEntityType]
         : TS3_LOCAL_ENTITY_TO_TABLE[entityType as TS3LocalEntityType]
@@ -244,7 +254,7 @@ export async function enqueueOutbox(
     await db.outbox.put(latest)
 
     // 删除其余重复行
-    const olderIds = existing
+    const olderIds = mergeable
       .filter((e) => e.id !== latest.id)
       .map((e) => e.id!)
     if (olderIds.length > 0) await db.outbox.bulkDelete(olderIds)
