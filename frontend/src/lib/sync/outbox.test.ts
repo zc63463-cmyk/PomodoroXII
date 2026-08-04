@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { PomodoroXIDB } from '@/services/database'
+import { hashCommandPayload } from '@/lib/contracts/payload-hash'
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import type { OutboxEvent } from '@/types'
 import {
@@ -172,6 +173,20 @@ describe('v18 outbox identity and atomic enqueue', () => {
     await expect(enqueueOutbox(
       db, 'other-space', 'note', 'n', 'create', payload, identity,
     )).rejects.toThrow('outbox_space_database_mismatch')
+  })
+
+  it('supports a command hash projection for complete post-image payloads', async () => {
+    db = await openTestDb()
+    const payload = { noteId: 'note-1', document: { contentVersion: 1, blocks: [] }, version: 4 }
+    const hashPayload = { document: payload.document }
+    const identity = await buildOutboxIdentity(payload, {
+      operationId: 'note-projection', expectedVersion: 4,
+      transportState: 'awaiting_s4', createdAt: createdAt(0), hashPayload,
+    })
+    await enqueueOutbox(db, db.spaceId, 'workItemNote', 'note-1', 'update', payload, identity)
+    expect((await db.outbox.get(1))?.payloadHash)
+      .toBe(await hashCommandPayload(hashPayload))
+    expect(JSON.parse((await db.outbox.get(1))!.payload)).toEqual(payload)
   })
 
   it('records retry failure without deleting the immutable row', async () => {
