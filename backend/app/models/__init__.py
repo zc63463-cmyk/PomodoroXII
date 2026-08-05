@@ -21,7 +21,9 @@ from app.models.session_revision import (
 )
 from app.models.setting import Setting
 from app.models.sync_audit_log import SyncAuditLog
+from app.models.sync_client import SyncClient
 from app.models.sync_outbox import SyncOutbox
+from app.models.sync_recovery import SyncRecoveryChunk, SyncRecoveryManifest
 from app.models.sync_state import SyncSnapshot, SyncState
 from app.models.time_block import TimeBlock
 from app.models.tombstone import Tombstone
@@ -47,6 +49,9 @@ __all__ = [
     "SyncState",
     "SyncSnapshot",
     "SyncAuditLog",
+    "SyncClient",
+    "SyncRecoveryManifest",
+    "SyncRecoveryChunk",
     "MutationBatch",
     "MutationOperation",
     "MutationStep",

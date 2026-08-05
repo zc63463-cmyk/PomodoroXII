@@ -123,8 +123,8 @@ def test_alembic_head_matches_metadata(tmp_path: Path, schema: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_space_alembic_unique_head_is_task_space_focus_session() -> None:
-    """The Space Alembic chain must have exactly one head: space_010."""
+def test_space_alembic_unique_head_is_sync_clients_streaming() -> None:
+    """The Space Alembic chain must have exactly one head: space_011."""
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
@@ -138,7 +138,7 @@ def test_space_alembic_unique_head_is_task_space_focus_session() -> None:
     assert len(heads) == 1, (
         f"Space Alembic must have exactly one head, got {len(heads)}: {heads}"
     )
-    assert heads[0] == "space_010_task_space_focus_session", (
-        f"Space Alembic head must be 'space_010_task_space_focus_session', "
+    assert heads[0] == "space_011_sync_clients_streaming", (
+        f"Space Alembic head must be 'space_011_sync_clients_streaming', "
         f"got {heads[0]!r}"
     )

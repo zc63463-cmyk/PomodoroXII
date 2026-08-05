@@ -60,7 +60,7 @@ def test_space_008_upgrades_through_task_space_and_preserves_legacy_visibility(
     } <= observed["tables"]
     assert {"operation_id", "batch_id", "version", "visible"} <= observed["columns"]
     assert observed["legacy"] == (None, None, None, 1)
-    assert observed["head"] == "space_010_task_space_focus_session"
+    assert observed["head"] == "space_011_sync_clients_streaming"
 
 
 def test_bound_after_callback_commits_or_rolls_back_and_closes(tmp_path: Path) -> None:

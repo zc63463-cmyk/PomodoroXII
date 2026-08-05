@@ -78,7 +78,7 @@ async def _start_owner_executor(runtime):
 
 
 @pytest.mark.asyncio
-async def test_provision_is_at_space_010_and_index_v2_before_meta_visibility(
+async def test_provision_is_at_space_011_and_index_v2_before_meta_visibility(
     _isolate_env: Path, tmp_path: Path
 ) -> None:
     from app.db.meta_session import close_meta_db, init_meta_db
@@ -114,7 +114,7 @@ async def test_provision_is_at_space_010_and_index_v2_before_meta_visibility(
             )
         async with handle.scope.containment.open_verified() as opens:
             migration = await runtime.migrations.verify_open("space", opens.database_target)
-            assert migration.revision == "space_010_task_space_focus_session"
+            assert migration.revision == "space_011_sync_clients_streaming"
             assert runtime.index_schema.verify_open(opens.index_target).version == 2
         assert not (settings.spaces_data_dir / "space-new" / "notes" / ".mutations").exists()
     finally:

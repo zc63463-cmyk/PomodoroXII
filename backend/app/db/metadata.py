@@ -36,6 +36,9 @@ FINAL_TASK_SPACE_TABLES = frozenset(
         "session_work_item_outcomes",
         "session_command_envelopes",
         "session_command_receipts",
+        "sync_clients",
+        "sync_recovery_manifests",
+        "sync_recovery_chunks",
     }
 )
 REMOVED_LEGACY_SPACE_COLUMNS = {
