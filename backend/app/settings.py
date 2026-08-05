@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     # --- Auth / JWT -------------------------------------------------------
     secret_key: str = "change-me"
+    sync_cursor_secret: str = "change-me-sync-cursor-secret-change-me"
     algorithm: str = "HS256"
     master_token_expire_days: PositiveInt = 7
     space_token_expire_hours: PositiveInt = 8
@@ -34,6 +35,7 @@ class Settings(BaseSettings):
     # --- Spaces layout ----------------------------------------------------
     spaces_data_dir: Path = Path("./data/spaces")
     engine_pool_max_size: PositiveInt = 5
+    sync_client_ttl_days: PositiveInt = 30
 
     # --- HTTP / runtime ---------------------------------------------------
     cors_origins: Annotated[list[str], NoDecode] = [
@@ -104,6 +106,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "POMODOROXII_SECRET_KEY must be at least 32 UTF-8 bytes in production. "
                 "Generate a strong key with: openssl rand -hex 32"
+            )
+        cursor_secret = self.sync_cursor_secret.strip()
+        if len(cursor_secret.encode("utf-8")) < 32:
+            raise ValueError(
+                "POMODOROXII_SYNC_CURSOR_SECRET must be at least 32 UTF-8 bytes in production."
+            )
+        if cursor_secret == self.secret_key:
+            raise ValueError(
+                "POMODOROXII_SYNC_CURSOR_SECRET must be distinct from POMODOROXII_SECRET_KEY."
+            )
+        if cursor_secret.lower() in {
+            "change-me-sync-cursor-secret-change-me",
+            "change-me",
+            "secret",
+            "password",
+        }:
+            raise ValueError(
+                "POMODOROXII_SYNC_CURSOR_SECRET is set to a known weak value."
             )
         return self
 

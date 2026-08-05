@@ -404,17 +404,32 @@ class SyncCursorExpiredError(AppError):
     legacy_error_type = "sync_cursor_expired"
     code = "cursor_expired"
 
-    def __init__(self, *, floor: int, current_cursor: int) -> None:
+    def __init__(
+        self,
+        *,
+        floor: int | None = None,
+        current_cursor: int | None = None,
+        recovery_action: str | None = None,
+    ) -> None:
+        """Create a safe cursor-expiry error for legacy or v2 callers.
+
+        The timestamp/sequence cursor path still exposes its historical
+        ``floor`` and ``current_cursor`` fields.  Opaque v2 decoding has no
+        authoritative row context and therefore supplies only a recovery
+        action; decoded token contents are deliberately never copied into the
+        exception or its wire details.
+        """
+        if (floor is None) != (current_cursor is None):
+            raise ValueError("floor and current_cursor must be supplied together")
+        if recovery_action is None:
+            recovery_action = "full_sync" if floor is not None else "full_recovery"
         self.floor = floor
         self.current_cursor = current_cursor
-        self.recovery_action = "full_sync"
-        super().__init__(
-            details={
-                "floor": floor,
-                "current_cursor": current_cursor,
-                "recovery_action": self.recovery_action,
-            }
-        )
+        self.recovery_action = recovery_action
+        details: dict[str, Any] = {"recovery_action": recovery_action}
+        if floor is not None:
+            details.update({"floor": floor, "current_cursor": current_cursor})
+        super().__init__(details=details)
 
 
 class CursorUpgradeRequiredError(AppError):
@@ -527,13 +542,14 @@ def register_exception_handlers(app: FastAPI) -> None:
             "error_type": exc.error_type,
         }
         if isinstance(exc, SyncCursorExpiredError):
-            legacy.update(
-                {
-                    "floor": exc.floor,
-                    "current_cursor": exc.current_cursor,
-                    "recovery_action": exc.recovery_action,
-                }
-            )
+            if exc.floor is not None:
+                legacy.update(
+                    {
+                        "floor": exc.floor,
+                        "current_cursor": exc.current_cursor,
+                    }
+                )
+            legacy["recovery_action"] = exc.recovery_action
         elif isinstance(exc, SyncSnapshotExpiredError):
             legacy["recovery_action"] = exc.recovery_action
         return _response(
