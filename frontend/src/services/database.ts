@@ -10,6 +10,7 @@
 import Dexie, { type Table } from 'dexie'
 import { dexieDbNameForSpace } from '@/lib/platform'
 import { toDexieStoreStrings, V18_STORE_DEFINITIONS } from './dexie-v18-schema'
+import type { SessionCommandReceiptView } from '@/lib/contracts/focus-session'
 import type {
   CachedReflection,
   CachedReflectionTemplate,
@@ -104,7 +105,7 @@ export class PomodoroXIDB extends Dexie {
   sessionWorkItemPlans!: Table<Record<string, unknown>>
   sessionWorkItemOutcomes!: Table<Record<string, unknown>>
   sessionCommandEnvelopes!: Table<Record<string, unknown>>
-  sessionCommandReceipts!: Table<Record<string, unknown>>
+  sessionCommandReceipts!: Table<SessionCommandReceiptView, [string, number]>
   sessionCommandQueue!: Table<Record<string, unknown>>
   sessionCommandReconciliationAttempts!: Table<Record<string, unknown>>
   sessionReviewDrafts!: Table<Record<string, unknown>>

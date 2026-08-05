@@ -4,10 +4,10 @@ import { createElement, useEffect, useMemo, useState, type ReactNode } from 'rea
 import { FocusedWorkItemNote } from '@/components/timer/focused-work-item-note'
 import { SessionClock } from '@/components/timer/session-clock'
 import { SessionLauncher, type LaunchSelection } from '@/components/timer/session-launcher'
-import { SessionReview } from '@/components/timer/session-review'
+import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
-import { FocusSessionRepository, type LocalFocusSessionAggregate } from '@/lib/focus-session/focus-session-repository'
+import { FocusSessionRepository, readSessionCommandReceipts, type LocalFocusSessionAggregate } from '@/lib/focus-session/focus-session-repository'
 import { SessionReviewDraftController, type SessionReviewDraft } from '@/lib/focus-session/session-review-draft-registry'
 import { CommandReconciliation } from '@/lib/focus-session/command-reconciliation'
 import { focusSessionApi } from '@/services/focus-session-api'
@@ -48,7 +48,7 @@ async function readLocalAggregate(database: PomodoroXIDB, sessionId: string): Pr
     plan: await database.sessionWorkItemPlans.where('sessionId').equals(sessionId).toArray() as CachedSessionWorkItemPlan[],
     outcomes: await database.sessionWorkItemOutcomes.where('sessionId').equals(sessionId).toArray() as CachedSessionWorkItemOutcome[],
     commandEnvelopes: await database.sessionCommandEnvelopes.where('sessionId').equals(sessionId).toArray() as CachedSessionCommandEnvelope[],
-    commandReceipts: await database.sessionCommandReceipts.where('sessionId').equals(sessionId).toArray() as Array<Record<string, unknown>>,
+    commandReceipts: await readSessionCommandReceipts(database, sessionId) as Array<Record<string, unknown>>,
   }
 }
 
@@ -83,6 +83,7 @@ export default function TimerPage() {
   const [draftController, setDraftController] = useState<TimerNoteComposerDraftController | null>(null)
   const [reviewController, setReviewController] = useState<SessionReviewDraftController | null>(null)
   const [endedAggregate, setEndedAggregate] = useState<LocalFocusSessionAggregate | null>(null)
+  const reviewDraft = useFocusSessionStore((state) => state.reviewDraft)
   const setReviewDraft = useFocusSessionStore((state) => state.setReviewDraft)
   const [error, setError] = useState<string | null>(null)
 
@@ -117,7 +118,7 @@ export default function TimerPage() {
   const selectedWorkItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
   const clock = useTimerStore((state) => selectDerivedClock(state))
   const reviewSession = useMemo(() => {
-    if (!aggregate || aggregate.session.clockState !== 'ended' || !spaceId) return null
+    if (!aggregate || !spaceId || !isReviewableEndedSession(aggregate.session)) return null
     return {
       spaceId,
       sessionId: sessionIdOf(aggregate.session),
@@ -190,7 +191,7 @@ export default function TimerPage() {
     }
     let cancelled = false
     void focusRepository.listCached().then(async (sessions) => {
-      const ended = sessions.find((candidate) => candidate.clockState === 'ended')
+      const ended = selectReviewSession(sessions)
       if (!ended) {
         if (!cancelled) setEndedAggregate(null)
         return
@@ -210,6 +211,7 @@ export default function TimerPage() {
         previous?.dispose()
         return null
       })
+      setReviewDraft(null)
       return
     }
     let cancelled = false
@@ -378,34 +380,57 @@ export default function TimerPage() {
     setFocusedNote(await noteRepository.read(workItemId))
   }
 
-  const submitReview = async (rawDraft: Record<string, unknown>) => {
-    if (!reviewController || !focusRepository || !aggregate || !spaceId) return
-    const current = reviewController.currentDraft()
-    const draft = {
-      ...current,
-      ...rawDraft,
-      operationId: current.operationId,
-      spaceId,
-      sessionId: sessionIdOf(aggregate.session),
-      expectedVersion: aggregate.session.version,
-    } as SessionReviewDraft
-    reviewController.update(draft)
-    await reviewController.flush('before-submit')
-    setReviewDraft(draft)
+  const updateReviewDraft = async (draft: SessionReviewDraft) => {
+    if (!reviewController) return
     try {
-      await focusRepository.submitReview(draft)
+      reviewController.update(draft)
+      const persisted = reviewController.currentDraft()
+      setReviewDraft(persisted)
+      await reviewController.flush('before-submit')
+    } catch (cause) {
+      setError((cause as Error).message)
+    }
+  }
+
+  const submitReview = async (draft: SessionReviewDraft) => {
+    if (!reviewController || !focusRepository || !aggregate || !spaceId) return
+    if (draft.spaceId !== spaceId || draft.sessionId !== sessionIdOf(aggregate.session) ||
+        draft.operationId !== reviewController.currentDraft().operationId) {
+      setError('review_draft_identity_mismatch')
+      return
+    }
+    try {
+      reviewController.update(draft)
+      await reviewController.flush('before-submit')
+      setReviewDraft(reviewController.currentDraft())
+      const result = await focusRepository.submitReview(draft)
+      if (result.session.ownershipState === 'local_provisional' && result.session.reviewState === 'pending') {
+        // S4 has not imported this terminal provisional Session yet. Keep the
+        // exact durable draft and controller alive for post-import recovery.
+        setReviewDraft(reviewController.currentDraft())
+        return
+      }
+      const refreshed = await readLocalAggregate(database!, draft.sessionId)
+      setEndedAggregate(refreshed)
+      reviewController.dispose()
+      setReviewController(null)
       setReviewDraft(null)
     } catch (cause) {
       setError((cause as Error).message)
     }
   }
 
-  const reconcileCommand = async (commandId: string, replaySafe: boolean) => {
-    if (!database || !aggregate) return
+  const reconcileCommand = async (commandId: string, replaySafe: boolean): Promise<boolean> => {
+    if (!database || !aggregate) return false
     try {
       const reconciliation = new CommandReconciliation(database, focusSessionApi)
       await reconciliation.reconcile(sessionIdOf(aggregate.session), commandId, replaySafe)
-    } catch (cause) { setError((cause as Error).message) }
+      setEndedAggregate(await readLocalAggregate(database, sessionIdOf(aggregate.session)))
+      return true
+    } catch (cause) {
+      setError((cause as Error).message)
+      return false
+    }
   }
 
   const abandonCommand = async (commandId: string) => {
@@ -413,6 +438,7 @@ export default function TimerPage() {
     try {
       const reconciliation = new CommandReconciliation(database, focusSessionApi)
       await reconciliation.abandon(sessionIdOf(aggregate.session), commandId, canonicalNow())
+      setEndedAggregate(await readLocalAggregate(database, sessionIdOf(aggregate.session)))
     } catch (cause) { setError((cause as Error).message) }
   }
 
@@ -423,7 +449,9 @@ export default function TimerPage() {
       outcomes: aggregate.outcomes,
       envelopes: aggregate.commandEnvelopes,
       receipts: aggregate.commandReceipts as never,
-      operationId: reviewController?.currentDraft().operationId,
+      draft: reviewDraft,
+      readOnly: !reviewSession,
+      onDraftChange: updateReviewDraft,
       onSubmit: submitReview,
       onReconcile: reconcileCommand,
       onAbandon: abandonCommand,

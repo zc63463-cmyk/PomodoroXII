@@ -7,11 +7,15 @@ import {
   deriveClockStateFromPersistedFacts,
   focusSessionAggregateSchema,
   focusSessionCommandPostImageSchema,
+  sessionCommandReceiptSchema,
+  sessionCommandReceiptWireSchema,
   sessionAttributionRevisionCommandPostImageSchema,
   sessionTaskContextCommandPostImageSchema,
   sessionWorkItemPlanCommandPostImageSchema,
   sessionReviewDraftSchema,
   type FocusSessionAggregateView,
+  type SessionCommandReceiptView,
+  type SessionCommandReceiptWireView,
   type ProvisionalActivationPayload,
 } from '@/lib/contracts/focus-session'
 import { hashCommandPayload, type JsonValue } from '@/lib/contracts/payload-hash'
@@ -66,6 +70,150 @@ export interface FocusSessionRows {
   receipts: Array<Record<string, unknown>>
 }
 
+type LocalFocusSessionAggregateView = Omit<FocusSessionAggregateView, 'commandReceipts'> & {
+  commandReceipts: SessionCommandReceiptView[]
+}
+
+function receiptContent(receipt: SessionCommandReceiptView): string {
+  const value = {
+    commandId: receipt.commandId,
+    state: receipt.state,
+    errorCode: receipt.errorCode,
+    detail: receipt.detail,
+    recordedAt: receipt.recordedAt,
+    ...(receipt.retryable === undefined ? {} : { retryable: receipt.retryable }),
+    ...(receipt.result === undefined ? {} : { result: receipt.result }),
+  }
+  const canonical = canonicalize(value)
+  if (canonical === undefined) throw new Error('session_command_receipt_not_canonical')
+  return canonical
+}
+
+function assertReceiptEnvelopeMembership(
+  receipts: SessionCommandReceiptView[],
+  envelopes: Array<{ commandId: string }>,
+): void {
+  const envelopeIds = new Set(envelopes.map((envelope) => envelope.commandId))
+  if (envelopeIds.size !== envelopes.length ||
+      receipts.some((receipt) => !envelopeIds.has(receipt.commandId))) {
+    throw new Error('authoritative_review_response_receipt_mismatch')
+  }
+  const receiptKeys = new Set(receipts.map((receipt) => `${receipt.commandId}\0${receipt.attempt}`))
+  if (receiptKeys.size !== receipts.length) {
+    throw new Error('authoritative_review_response_receipt_mismatch')
+  }
+}
+
+function isLocalReceipt(receipt: SessionCommandReceiptWireView): receipt is SessionCommandReceiptView {
+  return 'attempt' in receipt && 'recordedAt' in receipt
+}
+
+export async function normalizeSessionCommandReceipts(
+  database: PomodoroXIDB,
+  rawReceipts: unknown[],
+): Promise<SessionCommandReceiptView[]> {
+  const parsed = rawReceipts.map((raw) => sessionCommandReceiptWireSchema.parse(raw))
+  const commandIds = [...new Set(parsed.map((receipt) => receipt.commandId))]
+  const existing = (await database.sessionCommandReceipts.toArray())
+    .filter((receipt) => commandIds.includes(receipt.commandId))
+    .sort((left, right) => left.attempt - right.attempt)
+  const known = new Map<string, SessionCommandReceiptView[]>()
+  for (const receipt of existing) {
+    const rows = known.get(receipt.commandId) ?? []
+    rows.push(receipt)
+    known.set(receipt.commandId, rows)
+  }
+
+  const normalized: SessionCommandReceiptView[] = []
+  for (const receipt of parsed) {
+    if (isLocalReceipt(receipt)) {
+      const local = sessionCommandReceiptSchema.parse(receipt)
+      const rows = known.get(local.commandId) ?? []
+      const sameIdentity = rows.find((row) => row.attempt === local.attempt)
+      if (sameIdentity && receiptContent(sameIdentity) !== receiptContent(local)) {
+        throw new Error('session_command_receipt_mutation')
+      }
+      if (!sameIdentity) rows.push(local)
+      known.set(local.commandId, rows)
+      normalized.push(local)
+      continue
+    }
+
+    const backend = receipt
+    const candidate: Omit<SessionCommandReceiptView, 'attempt'> = {
+      commandId: backend.commandId,
+      state: backend.state,
+      errorCode: backend.errorCode,
+      detail: backend.details,
+      recordedAt: backend.updatedAt,
+      retryable: backend.retryable,
+      result: backend.result,
+    }
+    const rows = known.get(backend.commandId) ?? []
+    const existingMatch = rows.find((row) => receiptContent(row) === receiptContent({ ...candidate, attempt: row.attempt }))
+    const attempt = existingMatch?.attempt ?? ((rows.length > 0 ? Math.max(...rows.map((row) => row.attempt)) : 0) + 1)
+    const local = sessionCommandReceiptSchema.parse({ ...candidate, attempt })
+    if (!existingMatch) rows.push(local)
+    known.set(backend.commandId, rows)
+    normalized.push(local)
+  }
+  return normalized
+}
+
+async function normalizeAggregateReceipts(
+  database: PomodoroXIDB,
+  raw: unknown,
+): Promise<LocalFocusSessionAggregateView> {
+  const parsed = focusSessionAggregateSchema.parse(raw)
+  const receipts = await normalizeSessionCommandReceipts(database, parsed.commandReceipts)
+  assertReceiptEnvelopeMembership(receipts, parsed.commandEnvelopes)
+  return { ...parsed, commandReceipts: receipts } as LocalFocusSessionAggregateView
+}
+
+export async function persistImmutableSessionCommandReceipts(
+  database: PomodoroXIDB,
+  rawReceipts: unknown[],
+  allowedCommandIds: ReadonlySet<string>,
+): Promise<SessionCommandReceiptView[]> {
+  const parsed = await normalizeSessionCommandReceipts(database, rawReceipts)
+  if (parsed.some((receipt) => !allowedCommandIds.has(receipt.commandId))) {
+    throw new Error('authoritative_review_response_receipt_mismatch')
+  }
+  const byIdentity = new Map<string, SessionCommandReceiptView>()
+  for (const receipt of parsed) {
+    const identity = `${receipt.commandId}\0${receipt.attempt}`
+    const previous = byIdentity.get(identity)
+    if (previous && canonicalize(previous) !== canonicalize(receipt)) {
+      throw new Error('session_command_receipt_mutation')
+    }
+    byIdentity.set(identity, receipt)
+  }
+  const receipts = [...byIdentity.values()]
+  const existing = await database.sessionCommandReceipts.bulkGet(
+    receipts.map((receipt) => [receipt.commandId, receipt.attempt] as [string, number]),
+  ) as Array<SessionCommandReceiptView | undefined>
+  for (const [index, row] of existing.entries()) {
+    if (row && canonicalize(row) !== canonicalize(receipts[index])) {
+      throw new Error('session_command_receipt_mutation')
+    }
+  }
+  if (receipts.length > 0) {
+    await database.sessionCommandReceipts.bulkPut(receipts)
+  }
+  return receipts
+}
+
+export async function readSessionCommandReceipts(
+  database: PomodoroXIDB,
+  sessionId: string,
+): Promise<SessionCommandReceiptView[]> {
+  const envelopes = await database.sessionCommandEnvelopes
+    .where('sessionId').equals(sessionId).toArray()
+  const commandIds = new Set(envelopes.map((envelope) => envelope.commandId))
+  return (await database.sessionCommandReceipts.toArray())
+    .filter((receipt) => commandIds.has(receipt.commandId))
+}
+
 async function runTransaction(
   database: PomodoroXIDB,
   tables: unknown[],
@@ -91,10 +239,16 @@ function assertSessionIdentity(aggregate: LocalFocusSessionAggregate): void {
       aggregate.commandEnvelopes.some((row) => row.sessionId !== sessionId)) {
     throw new Error('focus_session_identity_mismatch')
   }
+  assertReceiptEnvelopeMembership(
+    aggregate.commandReceipts.map((receipt) => sessionCommandReceiptSchema.parse(receipt)),
+    aggregate.commandEnvelopes,
+  )
 }
 
-export function toSpaceRows(raw: FocusSessionAggregateView): FocusSessionRows {
+export function toSpaceRows(raw: LocalFocusSessionAggregateView): FocusSessionRows {
   const parsed = focusSessionAggregateSchema.parse(raw)
+  const localReceipts = parsed.commandReceipts.map((receipt) => sessionCommandReceiptSchema.parse(receipt))
+  assertReceiptEnvelopeMembership(localReceipts, parsed.commandEnvelopes)
   const sessionWire = parsed.session
   const derivedState = deriveClockStateFromPersistedFacts(sessionWire)
   if (derivedState !== sessionWire.clockState) {
@@ -116,7 +270,7 @@ export function toSpaceRows(raw: FocusSessionAggregateView): FocusSessionRows {
   const outcomes = parsed.outcomes.map((row) => withoutSpace(row, sessionWire.spaceId) as CachedSessionWorkItemOutcome)
   for (const row of parsed.commandEnvelopes) assertResponseSpace(row, sessionWire.spaceId)
   const envelopes = parsed.commandEnvelopes as CachedSessionCommandEnvelope[]
-  const receipts = parsed.commandReceipts as Array<Record<string, unknown>>
+  const receipts = localReceipts as Array<Record<string, unknown>>
   const aggregate: LocalFocusSessionAggregate = {
     session, context, attribution, plan: plans, outcomes,
     commandEnvelopes: envelopes, commandReceipts: receipts,
@@ -138,7 +292,11 @@ export async function putFocusSessionRows(
   await database.sessionWorkItemPlans.bulkPut(rows.plans)
   await database.sessionWorkItemOutcomes.bulkPut(rows.outcomes)
   await database.sessionCommandEnvelopes.bulkPut(rows.envelopes)
-  await database.sessionCommandReceipts.bulkPut(rows.receipts)
+  await persistImmutableSessionCommandReceipts(
+    database,
+    rows.receipts,
+    new Set(rows.envelopes.map((envelope) => envelope.commandId)),
+  )
 }
 
 async function removeReplacedSessionChildren(
@@ -190,7 +348,7 @@ export async function cacheFocusSession(
   expectedSpaceId: string,
   raw: unknown,
 ): Promise<CachedFocusSession> {
-  const aggregate = focusSessionAggregateSchema.parse(raw)
+  const aggregate = await normalizeAggregateReceipts(database, raw)
   assertResponseSpace(aggregate.session, expectedSpaceId)
   for (const row of [aggregate.context, aggregate.attribution, ...aggregate.plan, ...aggregate.outcomes]) {
     if (row) assertResponseSpace(row, expectedSpaceId)
@@ -217,30 +375,26 @@ export type CachedSessionReview = {
  * Receipts intentionally have no space/session fields in the wire contract;
  * their command IDs are therefore bound to the unique envelope set here.
  */
-export function toReviewRows(
+export async function toReviewRows(
+  database: PomodoroXIDB,
   response: FocusSessionAggregateView,
   expectedSpaceId: string,
   expectedSessionId: string,
-): CachedSessionReview {
-  if (response.session.spaceId !== expectedSpaceId || response.session.id !== expectedSessionId ||
-      (response.context !== null && (response.context.spaceId !== expectedSpaceId || response.context.sessionId !== expectedSessionId)) ||
-      response.attribution.spaceId !== expectedSpaceId || response.attribution.sessionId !== expectedSessionId ||
-      response.plan.some((row) => row.spaceId !== expectedSpaceId || row.sessionId !== expectedSessionId) ||
-      response.outcomes.some((row) => row.spaceId !== expectedSpaceId || row.sessionId !== expectedSessionId) ||
-      response.commandEnvelopes.some((row) => row.spaceId !== expectedSpaceId || row.sessionId !== expectedSessionId)) {
+): Promise<CachedSessionReview> {
+  const normalized = await normalizeAggregateReceipts(database, response)
+  if (normalized.session.spaceId !== expectedSpaceId || normalized.session.id !== expectedSessionId ||
+      (normalized.context !== null && (normalized.context.spaceId !== expectedSpaceId || normalized.context.sessionId !== expectedSessionId)) ||
+      normalized.attribution.spaceId !== expectedSpaceId || normalized.attribution.sessionId !== expectedSessionId ||
+      normalized.plan.some((row) => row.spaceId !== expectedSpaceId || row.sessionId !== expectedSessionId) ||
+      normalized.outcomes.some((row) => row.spaceId !== expectedSpaceId || row.sessionId !== expectedSessionId) ||
+      normalized.commandEnvelopes.some((row) => row.spaceId !== expectedSpaceId || row.sessionId !== expectedSessionId)) {
     throw new Error('authoritative_review_response_identity_mismatch')
   }
-  const envelopeIds = new Set(response.commandEnvelopes.map((row) => row.commandId))
-  const receiptKeys = new Set(response.commandReceipts.map((row) => `${row.commandId}\0${row.attempt}`))
-  if (envelopeIds.size !== response.commandEnvelopes.length ||
-      receiptKeys.size !== response.commandReceipts.length ||
-      response.commandReceipts.some((row) => !envelopeIds.has(row.commandId)) ) {
-    throw new Error('authoritative_review_response_receipt_mismatch')
-  }
-  if (response.outcomes.some((row) => row.commandId !== null && !envelopeIds.has(row.commandId))) {
+  const envelopeIds = new Set(normalized.commandEnvelopes.map((row) => row.commandId))
+  if (normalized.outcomes.some((row) => row.commandId !== null && !envelopeIds.has(row.commandId))) {
     throw new Error('authoritative_review_response_command_link_mismatch')
   }
-  const rows = toSpaceRows(response)
+  const rows = toSpaceRows(normalized)
   return {
     session: rows.session,
     outcomes: rows.outcomes,
@@ -315,7 +469,7 @@ export async function applyAuthoritativeReviewAndClearDraft(
   const boundRequest = parseExactBoundReviewRequest(boundRequestJson)
   const draft = await db.sessionReviewDrafts.get([spaceId, sessionId]) as Record<string, unknown> | undefined
   requireReviewDraftMatchesBoundRequest(draft, spaceId, sessionId, boundRequest, expectedVersionMode, 'apply')
-  const rows = toReviewRows(response, spaceId, sessionId)
+  const rows = await toReviewRows(db, response, spaceId, sessionId)
 
   // Command envelopes and materialized outcomes are append-only facts. A
   // response may repeat an existing row, but it may not rewrite its bytes.
@@ -343,7 +497,11 @@ export async function applyAuthoritativeReviewAndClearDraft(
   await db.focusSessions.put({ id: rows.session.sessionId, ...rows.session })
   await db.sessionWorkItemOutcomes.bulkPut(rows.outcomes)
   await db.sessionCommandEnvelopes.bulkPut(rows.envelopes)
-  if (rows.receipts.length > 0) await db.sessionCommandReceipts.bulkPut(rows.receipts)
+  await persistImmutableSessionCommandReceipts(
+    db,
+    rows.receipts,
+    new Set(rows.envelopes.map((envelope) => envelope.commandId)),
+  )
   for (const envelope of rows.envelopes) {
     const envelopeJson = canonicalize(envelope)
     if (envelopeJson === undefined) throw new Error('authoritative_review_envelope_not_canonical')
@@ -476,7 +634,7 @@ export async function cacheAuthoritativeActivation(
   if (result.kind !== 'authoritative' && result.kind !== 'resumed') {
     throw new Error('authoritative_activation_result_kind_required')
   }
-  const aggregate = result.session
+  const aggregate = await normalizeAggregateReceipts(database, result.session)
   assertResponseSpace(aggregate.session, operation.spaceId)
   if (operation.sessionId !== provisional.session.sessionId ||
       result.spaceId !== operation.spaceId || result.sessionId !== operation.sessionId ||
@@ -555,7 +713,7 @@ export async function cacheResolvedProvisionalWinner(
   rawResult: unknown,
 ): Promise<CachedFocusSession> {
   const result = activeSessionSchema.parse(rawResult)
-  const aggregate = result.session
+  const aggregate = await normalizeAggregateReceipts(database, result.session)
   if (conflict.provisionalOperationId !== operation.operationId ||
       conflict.provisionalSpaceId !== operation.spaceId ||
       conflict.provisionalSessionId !== operation.sessionId ||
@@ -773,40 +931,24 @@ export class FocusSessionRepository {
   async submitReview(input: SessionReviewDraft): Promise<CachedSessionReview> {
     const draft = sessionReviewDraftSchema.parse(input)
     if (draft.spaceId !== this.spaceId) throw new Error('space_scope_mismatch')
-    await requirePersistedExactSessionReviewDraft(this.db, draft)
     const cached = await this.requireSession(draft.sessionId)
     assertLocalContentWritable(cached)
 
     if (cached.ownershipState === 'local_provisional') {
-      if (cached.endedAt === null || cached.clockState !== 'ended') {
-        throw new Error('provisional_review_requires_terminal_session')
-      }
       const candidates = await this.meta.provisionalOperations
         .where('sessionId').equals(draft.sessionId)
         .and((row) => row.spaceId === this.spaceId && row.deviceId === this.identity.deviceId &&
           row.tabId === this.identity.tabId && row.state === 'awaiting_s4')
         .toArray()
       if (candidates.length !== 1) throw new Error('provisional_review_import_not_pending')
-      const operation = candidates[0]!
-      const heldOutcomes = (await this.db.outbox.toArray())
-        .filter((row) => row.compoundOperationId === operation.operationId && row.entityType === 'sessionWorkItemOutcome').length
-      const outcomes = await this.db.sessionWorkItemOutcomes.where('sessionId').equals(draft.sessionId).count()
-      const directIntent = await this.db.directCommandIntents.get(draft.operationId)
-      const tab = await this.meta.sessionTabs.get(this.identity.tabId)
-      if (!tab || tab.deviceId !== this.identity.deviceId || tab.closedAt !== null ||
-          operation.spaceId !== this.spaceId || operation.sessionId !== draft.sessionId ||
-          operation.deviceId !== this.identity.deviceId || operation.tabId !== this.identity.tabId ||
-          operation.state !== 'awaiting_s4' || heldOutcomes !== 0 || outcomes !== 0 || directIntent) {
-        throw new Error('provisional_review_import_boundary_mismatch')
-      }
-      return {
-        session: cached,
-        outcomes: [],
-        envelopes: await this.db.sessionCommandEnvelopes.where('sessionId').equals(draft.sessionId).toArray() as CachedSessionCommandEnvelope[],
-        receipts: await this.db.sessionCommandReceipts.where('sessionId').equals(draft.sessionId).toArray() as Array<Record<string, unknown>>,
-      }
+      const operationId = candidates[0]!.operationId
+      return this.provisionalLock.run(
+        operationId,
+        () => this.submitProvisionalReviewLocked(draft, operationId),
+      )
     }
 
+    await requirePersistedExactSessionReviewDraft(this.db, draft)
     const intent = await prepareDirectCommandIntent(this.db, {
       kind: 'submit_review', spaceId: draft.spaceId, targetId: draft.sessionId,
       request: draft as unknown as Record<string, JsonValue>,
@@ -827,7 +969,50 @@ export class FocusSessionRepository {
       ),
       now: canonicalNow,
     })
-    return toReviewRows(response, this.spaceId, draft.sessionId)
+    return toReviewRows(this.db, response, this.spaceId, draft.sessionId)
+  }
+
+  private async submitProvisionalReviewLocked(
+    draft: SessionReviewDraft,
+    lockedOperationId: string,
+  ): Promise<CachedSessionReview> {
+    await requirePersistedExactSessionReviewDraft(this.db, draft)
+    const cached = await this.requireSession(draft.sessionId)
+    assertLocalContentWritable(cached)
+    if (cached.ownershipState !== 'local_provisional') throw new Error('provisional_review_import_not_pending')
+    if (cached.endedAt === null || cached.clockState !== 'ended') {
+      throw new Error('provisional_review_requires_terminal_session')
+    }
+    if (cached.validity !== 'pending' || cached.reviewState !== 'pending') {
+      throw new Error('provisional_review_import_boundary_mismatch')
+    }
+    const candidates = await this.meta.provisionalOperations
+      .where('sessionId').equals(draft.sessionId)
+      .and((row) => row.spaceId === this.spaceId && row.deviceId === this.identity.deviceId &&
+        row.tabId === this.identity.tabId && row.state === 'awaiting_s4')
+      .toArray()
+    if (candidates.length !== 1) throw new Error('provisional_review_import_not_pending')
+    const operation = candidates[0]!
+    if (operation.operationId !== lockedOperationId) {
+      throw new Error('provisional_review_import_boundary_mismatch')
+    }
+    const heldOutcomes = (await this.db.outbox.toArray())
+      .filter((row) => row.compoundOperationId === operation.operationId && row.entityType === 'sessionWorkItemOutcome').length
+    const outcomes = await this.db.sessionWorkItemOutcomes.where('sessionId').equals(draft.sessionId).count()
+    const directIntent = await this.db.directCommandIntents.get(draft.operationId)
+    const tab = await this.meta.sessionTabs.get(this.identity.tabId)
+    if (!tab || tab.deviceId !== this.identity.deviceId || tab.closedAt !== null ||
+        operation.spaceId !== this.spaceId || operation.sessionId !== draft.sessionId ||
+        operation.deviceId !== this.identity.deviceId || operation.tabId !== this.identity.tabId ||
+        operation.state !== 'awaiting_s4' || heldOutcomes !== 0 || outcomes !== 0 || directIntent) {
+      throw new Error('provisional_review_import_boundary_mismatch')
+    }
+    return {
+      session: cached,
+      outcomes: [],
+      envelopes: await this.db.sessionCommandEnvelopes.where('sessionId').equals(draft.sessionId).toArray() as CachedSessionCommandEnvelope[],
+      receipts: await readSessionCommandReceipts(this.db, draft.sessionId) as Array<Record<string, unknown>>,
+    }
   }
 
   private async cacheAuthoritative(action: Promise<FocusSessionAggregateView>): Promise<void> {
@@ -1197,7 +1382,7 @@ export class FocusSessionRepository {
     const plans = await this.db.sessionWorkItemPlans.where('sessionId').equals(sessionId).toArray() as CachedSessionWorkItemPlan[]
     const outcomes = await this.db.sessionWorkItemOutcomes.where('sessionId').equals(sessionId).toArray() as CachedSessionWorkItemOutcome[]
     const envelopes = await this.db.sessionCommandEnvelopes.where('sessionId').equals(sessionId).toArray() as CachedSessionCommandEnvelope[]
-    const receipts = await this.db.sessionCommandReceipts.where('sessionId').equals(sessionId).toArray() as Array<Record<string, unknown>>
+    const receipts = await readSessionCommandReceipts(this.db, sessionId) as Array<Record<string, unknown>>
     const attribution = attributions.find((row) => row.effective) ?? attributions.sort((left, right) => right.revision - left.revision)[0]
     if (!attribution) throw new Error('focus_session_attribution_not_found')
     const aggregate = {

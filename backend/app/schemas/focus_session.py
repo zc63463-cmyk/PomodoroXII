@@ -461,14 +461,141 @@ class ReconcileFocusSessionCommandsRequest(WireModel):
 # --------------------------------------------------------------------------- #
 
 
+class FocusSessionResponse(WireResponseModel):
+    """Authoritative FocusSession wire post-image."""
+
+    id: str = Field(min_length=1, max_length=64)
+    space_id: str = Field(min_length=1, max_length=64)
+    created_at: CanonicalUtc
+    updated_at: CanonicalUtc
+    version: int = Field(ge=0)
+    session_revision: int = Field(ge=0)
+    started_at: CanonicalUtc
+    ended_at: CanonicalUtc | None
+    pause_started_at: CanonicalUtc | None
+    planned_seconds: int = Field(gt=0)
+    gross_seconds: int = Field(ge=0)
+    paused_seconds: int = Field(ge=0)
+    break_seconds: int = Field(ge=0)
+    focused_seconds: int = Field(ge=0)
+    timer_completion: Literal["completed", "ended_early", "interrupted"] | None
+    validity: Literal["pending", "valid", "invalid"]
+    validity_reason: str | None
+    overall_progress: Literal["smooth", "progressed", "stuck", "interrupted"] | None
+    mood: Literal["great", "good", "normal", "bad"] | None
+    session_note: str = Field(max_length=20_000)
+    review_state: Literal["not_required", "pending", "completed", "skipped"]
+    ownership_state: Literal["authoritative", "local_provisional", "activation_conflict"]
+
+
+class SessionTaskContextResponse(WireResponseModel):
+    id: str = Field(min_length=1, max_length=64)
+    space_id: str = Field(min_length=1, max_length=64)
+    created_at: CanonicalUtc
+    updated_at: CanonicalUtc
+    version: int = Field(ge=0)
+    session_id: str = Field(min_length=1, max_length=64)
+    project_id: str = Field(min_length=1, max_length=64)
+    level2_work_item_id: str = Field(min_length=1, max_length=64)
+    project_title_snapshot: str = Field(min_length=1, max_length=500)
+    level2_title_snapshot: str = Field(min_length=1, max_length=500)
+    level2_parent_id_snapshot: str | None
+    level2_status_definition_id_snapshot: str = Field(min_length=1, max_length=64)
+    level2_version_snapshot: int = Field(ge=0)
+    level2_effort_lower_seconds_snapshot: int | None = Field(default=None, ge=0)
+    level2_effort_upper_seconds_snapshot: int | None = Field(default=None, ge=0)
+    linked_at: CanonicalUtc
+    link_method: Literal["explicit", "contextual_confirmed"]
+
+
+class SessionAttributionRevisionResponse(WireResponseModel):
+    id: str = Field(min_length=1, max_length=64)
+    space_id: str = Field(min_length=1, max_length=64)
+    created_at: CanonicalUtc
+    updated_at: CanonicalUtc
+    version: int = Field(ge=0)
+    session_id: str = Field(min_length=1, max_length=64)
+    revision: int = Field(gt=0)
+    project_id: str = Field(min_length=1, max_length=64)
+    level2_work_item_id: str = Field(min_length=1, max_length=64)
+    reason: str | None
+    corrected_from_revision: int | None = Field(default=None, gt=0)
+    effective: bool
+
+
+class SessionWorkItemPlanResponse(WireResponseModel):
+    id: str = Field(min_length=1, max_length=64)
+    space_id: str = Field(min_length=1, max_length=64)
+    created_at: CanonicalUtc
+    updated_at: CanonicalUtc
+    version: int = Field(ge=0)
+    session_id: str = Field(min_length=1, max_length=64)
+    work_item_id: str = Field(min_length=1, max_length=64)
+    title_snapshot: str = Field(min_length=1, max_length=500)
+    level2_work_item_id_snapshot: str = Field(min_length=1, max_length=64)
+    work_item_version_snapshot: int = Field(ge=0)
+    plan_rank: int = Field(ge=0)
+    source: Literal["before_start", "during_session", "review_materialized"]
+    added_at: CanonicalUtc
+    removed_at: CanonicalUtc | None
+    removal_reason: str | None
+    current_during_session: bool
+    completion_draft: bool
+
+
+class SessionWorkItemOutcomeResponse(WireResponseModel):
+    id: str = Field(min_length=1, max_length=64)
+    space_id: str = Field(min_length=1, max_length=64)
+    created_at: CanonicalUtc
+    updated_at: CanonicalUtc
+    version: int = Field(ge=0)
+    session_id: str = Field(min_length=1, max_length=64)
+    session_revision: int = Field(ge=0)
+    revision: int = Field(gt=0)
+    corrected_from_revision: int | None = Field(default=None, gt=0)
+    effective: bool
+    work_item_id: str = Field(min_length=1, max_length=64)
+    touched: bool
+    result: Literal["completed", "progressed", "stuck", "untouched", "cancelled"]
+    execution_persona: Literal["ox", "pig", "hajimi", "wukong"] | None
+    persona_switched: bool | None
+    persona_note: str | None = Field(default=None, max_length=2_000)
+    state_command: Literal["complete", "cancel", "none"]
+    command_id: str | None
+    reviewed_at: CanonicalUtc | None
+
+
+class SessionCommandEnvelopeResponse(WireResponseModel):
+    command_id: str = Field(min_length=1, max_length=128)
+    space_id: str = Field(min_length=1, max_length=64)
+    session_id: str = Field(min_length=1, max_length=64)
+    session_revision: int = Field(ge=0)
+    work_item_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    target_transition: Literal["complete", "cancel"]
+    replay_safe: bool
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at: CanonicalUtc
+
+
+class SessionCommandReceiptResponse(WireResponseModel):
+    command_id: str = Field(min_length=1, max_length=128)
+    state: Literal["not_needed", "pending", "succeeded", "failed", "conflict", "unknown", "abandoned"]
+    error_code: str | None
+    retryable: bool
+    details: dict[str, Any] | None
+    result: Any | None
+    updated_at: CanonicalUtc
+
+
 class FocusSessionAggregateResponse(WireResponseModel):
-    session: dict[str, Any]
-    context: dict[str, Any] | None
-    attribution: list[dict[str, Any]]
-    plan: list[dict[str, Any]]
-    outcomes: list[dict[str, Any]]
-    command_envelopes: list[dict[str, Any]]
-    command_receipts: list[dict[str, Any]]
+    session: FocusSessionResponse
+    context: SessionTaskContextResponse | None
+    attribution: SessionAttributionRevisionResponse
+    plan: list[SessionWorkItemPlanResponse]
+    outcomes: list[SessionWorkItemOutcomeResponse]
+    command_envelopes: list[SessionCommandEnvelopeResponse]
+    command_receipts: list[SessionCommandReceiptResponse]
 
 
 class ActiveSessionLocatorResponse(WireResponseModel):

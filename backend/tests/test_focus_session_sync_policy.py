@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.errors import MutationRejectedError
-from app.focus_session.policy import FOCUS_SESSION_POLICY_TYPES
+from app.focus_session.policy import FOCUS_SESSION_POLICY_TYPES, _resolve_transition_status_id
 from app.mutation.types import MutationRequest, MutationRuleViolation
 
 EXPECTED_TYPES = frozenset({
@@ -221,7 +221,10 @@ def _activation_request(
 
 def _activation_rows() -> dict[tuple[str, str], dict[str, object]]:
     return {
-        ("project", "proj-1"): {"id": "proj-1", "title": "Project 1", "version": 1},
+        # Mirror the real Project catalog field (``name``); the old fake used
+        # the Task Space ``title`` alias and failed before exercising the
+        # activation version/tree assertions below.
+        ("project", "proj-1"): {"id": "proj-1", "name": "Project 1", "version": 1},
         ("work_item", "root"): {
             "id": "root", "project_id": "proj-1", "parent_id": None,
             "title": "Root", "version": 1, "completed_at": None, "cancelled_at": None,
@@ -251,6 +254,12 @@ class TestPolicyEntityTypes:
 
     def test_policy_types_are_frozen(self) -> None:
         assert isinstance(FOCUS_SESSION_POLICY_TYPES, frozenset)
+
+    def test_malformed_historical_transition_fails_closed(self) -> None:
+        with pytest.raises(MutationRuleViolation) as captured:
+            _resolve_transition_status_id("complete-now")
+        assert captured.value.code == "active_session_recovery_required"
+        assert captured.value.details["reason"] == "invalid_target_transition"
 
 
 class TestSyncPolicyMatrix:

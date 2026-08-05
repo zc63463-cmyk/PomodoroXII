@@ -593,6 +593,7 @@ REGISTRY.register(EntitySpec(
         FieldSpec("work_item_id", "string", nullable=False),
         FieldSpec("title_snapshot", "string", nullable=False),
         FieldSpec("level2_snapshot", "string", nullable=True),
+        FieldSpec("work_item_version_snapshot", "integer", nullable=False, default=0),
         FieldSpec("plan_rank", "integer", nullable=False, default=0),
         FieldSpec("source", "string", nullable=False),
         FieldSpec("added_at", "datetime", nullable=False),

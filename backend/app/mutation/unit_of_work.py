@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -1881,9 +1881,12 @@ class MutationUnitOfWork:
         return RecoveryInspection((), (), (), clean, ())
 
     async def execute(
-        self, scope: SpaceRuntimeHandle, request: MutationRequest, operation_id: str
+        self, scope: SpaceRuntimeHandle, request: MutationRequest, operation_id: str,
+        *, result_hook: Callable[[MutationResult], Awaitable[Mapping[str, object]]] | None = None,
     ) -> MutationResult:
-        outcome = await self.execute_batch(scope, (request,), operation_id, operation_ids=(operation_id,))
+        outcome = await self.execute_batch(
+            scope, (request,), operation_id, operation_ids=(operation_id,), result_hook=result_hook,
+        )
         if outcome.rejected:
             raise MutationRejectedError(outcome.rejected[0])
         return outcome.applied[0]
@@ -1895,6 +1898,7 @@ class MutationUnitOfWork:
         batch_id: str,
         *,
         operation_ids: Sequence[str] | None = None,
+        result_hook: Callable[[MutationResult], Awaitable[Mapping[str, object]]] | None = None,
     ) -> BatchMutationResult:
         requested = tuple(requests)
         if operation_ids is None:
@@ -1916,6 +1920,7 @@ class MutationUnitOfWork:
             ),
             batch_id,
             operation_id_derivations=operation_id_derivations,
+            result_hook=result_hook,
         )
 
     async def execute_prepared_batch(
@@ -1923,8 +1928,10 @@ class MutationUnitOfWork:
         scope: SpaceRuntimeHandle,
         items: Sequence[PreparedBatchItem],
         batch_id: str,
+        *,
+        result_hook: Callable[[MutationResult], Awaitable[Mapping[str, object]]] | None = None,
     ) -> BatchMutationResult:
-        return await self._execute_prepared_batch(scope, items, batch_id)
+        return await self._execute_prepared_batch(scope, items, batch_id, result_hook=result_hook)
 
     async def _execute_prepared_batch(
         self,
@@ -1933,6 +1940,7 @@ class MutationUnitOfWork:
         batch_id: str,
         *,
         operation_id_derivations: Mapping[str, tuple[str, str]] | None = None,
+        result_hook: Callable[[MutationResult], Awaitable[Mapping[str, object]]] | None = None,
     ) -> BatchMutationResult:
         validate_operation_id(batch_id)
         prepared = tuple(items)
@@ -1966,7 +1974,7 @@ class MutationUnitOfWork:
                 )
             existing = await journal.find_batch(batch_id)
             if existing is not None:
-                return await self._resume_or_return(existing, request_hash)
+                return await self._resume_or_return(existing, request_hash, journal)
             bindings = await journal.find_operation_batch_bindings(operation_ids)
             foreign_bindings = tuple(
                 sorted((operation_id, owner) for operation_id, owner in bindings.items() if owner != batch_id)
@@ -2014,14 +2022,22 @@ class MutationUnitOfWork:
                 scope, journal, batch_id, compilation.operation_ids, compilation.commands,
                 lease.fence_receipt(scope.scope.space_id),
             )
-            return await journal.finalize_batch(batch_id)
+            result = await journal.finalize_batch(batch_id)
+            if result_hook is not None:
+                for applied in result.applied:
+                    value = await result_hook(applied)
+                    await journal.update_operation_result(applied.operation_id, value)
+                result = await journal.hydrate_result(result)
+            return result
 
-    async def _resume_or_return(self, existing: JournalBatch, request_hash: str) -> BatchMutationResult:
+    async def _resume_or_return(
+        self, existing: JournalBatch, request_hash: str, journal: MutationJournal,
+    ) -> BatchMutationResult:
         if existing.request_hash != request_hash:
             raise IdempotencyConflictError(requested_batch_id=existing.batch_id)
         if existing.state not in (MutationState.FINALIZED, MutationState.ABORTED):
             raise SpaceRecoveryRequiredError("existing mutation receipt requires recovery")
-        return existing.result
+        return await journal.hydrate_result(existing.result)
 
     async def _publish_stages(self, scope, lease, operation_ids, commands) -> tuple[object, ...]:
         stages = scope.mutation_stages

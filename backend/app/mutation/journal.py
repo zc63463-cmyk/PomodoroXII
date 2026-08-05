@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,7 @@ from app.mutation.types import (
     StepState,
     persisted_command_bytes,
 )
+from app.services.time import utc_now_iso_ms
 
 LEGAL_TRANSITIONS = {
     MutationState.INTENT: frozenset({MutationState.STAGED, MutationState.ABORTED}),
@@ -180,6 +181,60 @@ class MutationJournal:
                 _decode_result(row.batch_id, row.result_json),
             )
 
+    async def hydrate_result(self, result: BatchMutationResult) -> BatchMutationResult:
+        """Replace applied values with the operation's durable post-image.
+
+        The batch receipt is created before the business transaction commits,
+        so the initial value may be an admission result. FocusSession stores its
+        complete response image on the child operation after commit; replay must
+        read that immutable image instead of querying the now-mutated aggregate.
+        """
+        if not result.applied:
+            return result
+        operation_ids = tuple(item.operation_id for item in result.applied)
+        async with self._sessions() as session:
+            rows = tuple(
+                await session.execute(
+                    select(MutationOperation.operation_id, MutationOperation.result_json)
+                    .where(MutationOperation.operation_id.in_(operation_ids))
+                )
+            )
+        values: dict[str, Mapping[str, object]] = {}
+        for operation_id, result_json in rows:
+            if result_json is None:
+                continue
+            try:
+                decoded = json.loads(result_json)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise IllegalMutationTransition("operation result is invalid") from exc
+            if not isinstance(decoded, Mapping):
+                raise IllegalMutationTransition("operation result is not an object")
+            values[operation_id] = decoded
+        applied = tuple(
+            replace(item, value=values[item.operation_id])
+            if item.operation_id in values else item
+            for item in result.applied
+        )
+        return BatchMutationResult(
+            result.batch_id, applied, result.rejected, result.operation_id_derivations,
+        )
+
+    async def update_operation_result(
+        self, operation_id: str, value: Mapping[str, object],
+    ) -> None:
+        """Persist an immutable post-commit response image for replay."""
+        encoded = json.dumps(
+            to_wire_json(value), ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+        async with self._sessions.begin() as session:
+            operation = await session.get(MutationOperation, operation_id)
+            if operation is None:
+                raise IllegalMutationTransition("operation result target is missing")
+            if MutationState(operation.state) is not MutationState.FINALIZED:
+                raise IllegalMutationTransition("operation result target is not finalized")
+            operation.result_json = encoded
+            operation.updated_at = utc_now_iso_ms()
+
     async def find_operation_batch_bindings(
         self, operation_ids: tuple[str, ...]
     ) -> dict[str, str]:
@@ -254,6 +309,12 @@ class MutationJournal:
                             [item.target for item in command.projections], separators=(",", ":")
                         ),
                         state=MutationState.INTENT,
+                        result_json=json.dumps(
+                            to_wire_json(command.result_value),
+                            ensure_ascii=True,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
                     )
                 )
                 for descriptor in persisted.projections:

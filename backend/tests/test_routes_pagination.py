@@ -286,12 +286,17 @@ async def test_list_trash_returns_paginated_envelope(client):
         headers=headers,
     )
     qn_id = create_resp.json()["id"]
-    # DELETE on quick_note creates a tombstone (hard delete for quick_note?
-    # Actually the trash.py shows quick_note uses trashed_at via restore).
-    # Use trash purge to ensure an entry appears in tombstones.
-    await client.delete(
+    # Active QuickNotes are intentionally rejected by the Trash guard.
+    purge = await client.delete(
         f"/api/v1/trash/quick_note/{qn_id}", headers=headers
     )
+    assert purge.status_code == 422
+    # The legacy QuickNote delete contract is a hard delete with a tombstone;
+    # use it to leave one durable item for the pagination assertion.
+    deleted = await client.delete(
+        f"/api/v1/quick-notes/{qn_id}", headers=headers
+    )
+    assert deleted.status_code == 200
     resp = await client.get("/api/v1/trash", headers=headers)
     assert resp.status_code == 200
     data = resp.json()

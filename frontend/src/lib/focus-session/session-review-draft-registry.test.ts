@@ -49,4 +49,42 @@ describe('SessionReviewDraftController', () => {
       ...controller.currentDraft(), operationId: 'different-operation',
     })).toThrow('review_draft_identity_change_forbidden')
   })
+
+  it('does not resurrect a deleted draft after the controller is disposed', async () => {
+    const db = await openPomodoroXIDB(`review-draft-dispose-${crypto.randomUUID()}`)
+    databases.push(db)
+    const controller = await SessionReviewDraftController.open({
+      db, spaceId: db.spaceId, sessionId: 'fs-1', initialDraft,
+    })
+
+    await db.sessionReviewDrafts.delete([db.spaceId, 'fs-1'])
+    controller.dispose()
+    await controller.flush('space-switch')
+
+    expect(await db.sessionReviewDrafts.get([db.spaceId, 'fs-1'])).toBeUndefined()
+  })
+
+  it('finishes an already queued flush before disposing the controller', async () => {
+    const db = await openPomodoroXIDB(`review-draft-dispose-flush-${crypto.randomUUID()}`)
+    databases.push(db)
+    const controller = await SessionReviewDraftController.open({
+      db, spaceId: db.spaceId, sessionId: 'fs-1', initialDraft,
+    })
+    const next = {
+      ...controller.currentDraft(),
+      validity: 'invalid' as const,
+    }
+
+    controller.update(next)
+    const flush = controller.flush('unmount')
+    const dispose = controller.dispose()
+
+    await Promise.all([flush, dispose])
+
+    const persisted = await db.sessionReviewDrafts.get([db.spaceId, 'fs-1'])
+    expect(JSON.parse(String(persisted?.draftJson))).toMatchObject({
+      validity: 'invalid',
+      reviewState: 'completed',
+    })
+  })
 })

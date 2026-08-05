@@ -32,19 +32,82 @@ from app.routes.v1.contract_dependencies import (
     get_active_session_coordinator,
     get_focus_session_module,
 )
+from app.routes.v1.focus_sessions import _map_review_outcome
 from app.routes.v1.focus_sessions import router as focus_sessions_router
-from app.schemas.focus_session import ActivateProvisionalRequest, HeartbeatRequest
+from app.schemas.focus_session import (
+    ActivateProvisionalRequest,
+    HeartbeatRequest,
+    ReviewOutcomePayload,
+)
 
 # --------------------------------------------------------------------------- #
 # Fakes
 # --------------------------------------------------------------------------- #
 
 
+def test_review_outcome_mapping_preserves_optional_persona_field_presence() -> None:
+    required = ReviewOutcomePayload.model_validate({
+        "workItemId": "l3-a", "touched": True, "result": "completed",
+        "stateCommand": "complete", "expectedWorkItemVersion": 2,
+    })
+    explicit_null = ReviewOutcomePayload.model_validate({
+        "workItemId": "l3-a", "touched": True, "result": "completed",
+        "executionPersona": None, "personaSwitched": None, "personaNote": None,
+        "stateCommand": "complete", "expectedWorkItemVersion": 2,
+    })
+
+    omitted = _map_review_outcome(required)
+    present = _map_review_outcome(explicit_null)
+    assert "execution_persona" not in omitted
+    assert "persona_switched" not in omitted
+    assert "persona_note" not in omitted
+    assert present["execution_persona"] is None
+    assert present["persona_switched"] is None
+    assert present["persona_note"] is None
+
+
 def _focus_value(session_id: str) -> dict[str, Any]:
+    timestamp = "2026-07-15T08:00:00Z"
     return {
-        "session": {"id": session_id},
+        "session": {
+            "id": session_id,
+            "spaceId": "space-a",
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+            "version": 1,
+            "sessionRevision": 1,
+            "startedAt": timestamp,
+            "endedAt": None,
+            "pauseStartedAt": None,
+            "plannedSeconds": 1500,
+            "grossSeconds": 0,
+            "pausedSeconds": 0,
+            "breakSeconds": 0,
+            "focusedSeconds": 0,
+            "timerCompletion": None,
+            "validity": "pending",
+            "validityReason": None,
+            "overallProgress": None,
+            "mood": None,
+            "sessionNote": "",
+            "reviewState": "not_required",
+            "ownershipState": "authoritative",
+        },
         "context": None,
-        "attribution": [],
+        "attribution": {
+            "id": f"attr-{session_id}",
+            "spaceId": "space-a",
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+            "version": 1,
+            "sessionId": session_id,
+            "revision": 1,
+            "projectId": "project-a",
+            "level2WorkItemId": "l2-a",
+            "reason": None,
+            "correctedFromRevision": None,
+            "effective": True,
+        },
         "plan": [],
         "outcomes": [],
         "commandEnvelopes": [],
@@ -834,7 +897,7 @@ def test_focus_session_provider_not_installed_raises() -> None:
     app = FastAPI()
     app.include_router(focus_sessions_router, prefix="/api/v1/focus-sessions")
     client = TestClient(app, raise_server_exceptions=True)
-    with pytest.raises(RuntimeError, match="provider is not installed"):
+    with pytest.raises(RuntimeError, match="SpaceRuntime is not installed"):
         client.get("/api/v1/focus-sessions/session-a")
 
 

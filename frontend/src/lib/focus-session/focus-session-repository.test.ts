@@ -11,6 +11,9 @@ import {
   buildActivateProvisionalPayload,
   cacheAuthoritativeActivation,
   cacheFocusSession,
+  readSessionCommandReceipts,
+  normalizeSessionCommandReceipts,
+  persistImmutableSessionCommandReceipts,
 } from './focus-session-repository'
 import { SessionReviewDraftController } from './session-review-draft-registry'
 
@@ -73,6 +76,90 @@ const provisionalOperationFixture = (spaceId: string): ProvisionalOperationRow =
 })
 
 describe('FocusSession aggregate persistence', () => {
+  it('rejects a changed receipt for an existing command instead of overwriting it', async () => {
+    const db = await openPomodoroXIDB(`focus-receipt-immutability-${crypto.randomUUID()}`)
+    databases.push(db)
+    const original = {
+      commandId: 'cmd-a', attempt: 1, state: 'unknown', errorCode: null,
+      detail: null, recordedAt: '2026-07-15T08:00:00Z',
+    }
+    await persistImmutableSessionCommandReceipts(db, [original], new Set(['cmd-a']))
+
+    await expect(persistImmutableSessionCommandReceipts(db, [{
+      ...original, state: 'succeeded', recordedAt: '2026-07-15T08:01:00Z',
+    }], new Set(['cmd-a']))).rejects.toThrow('session_command_receipt_mutation')
+    expect(await db.sessionCommandReceipts.get(['cmd-a', 1])).toEqual(original)
+  })
+
+  it('keeps receipt attempts append-only and scopes reads through session envelopes', async () => {
+    const db = await openPomodoroXIDB(`focus-receipt-attempts-${crypto.randomUUID()}`)
+    databases.push(db)
+    await db.sessionCommandEnvelopes.put({
+      commandId: 'cmd-a', spaceId: db.spaceId, sessionId: 'fs-1', sessionRevision: 1,
+      workItemId: 'wi-1', expectedVersion: 1, targetTransition: 'complete', replaySafe: true,
+      payloadHash: 'a'.repeat(64), createdAt: '2026-07-15T08:00:00Z',
+    })
+    const attempts = [
+      { commandId: 'cmd-a', attempt: 1, state: 'unknown' as const, errorCode: null, detail: null, recordedAt: '2026-07-15T08:00:00Z' },
+      { commandId: 'cmd-a', attempt: 2, state: 'succeeded' as const, errorCode: null, detail: null, recordedAt: '2026-07-15T08:01:00Z' },
+    ]
+    await persistImmutableSessionCommandReceipts(db, attempts, new Set(['cmd-a']))
+
+    expect(await db.sessionCommandReceipts.count()).toBe(2)
+    expect(await readSessionCommandReceipts(db, 'fs-1')).toEqual(attempts)
+    expect(await readSessionCommandReceipts(db, 'other-session')).toEqual([])
+  })
+
+  it('normalizes backend receipts, reuses identical attempts, and appends changed content', async () => {
+    const db = await openPomodoroXIDB(`focus-backend-receipt-${crypto.randomUUID()}`)
+    databases.push(db)
+    const envelope = {
+      commandId: 'cmd-backend', spaceId: db.spaceId, sessionId: 'fs-1', sessionRevision: 1,
+      workItemId: 'wi-1', expectedVersion: 1, targetTransition: 'complete', replaySafe: true,
+      payloadHash: 'a'.repeat(64), createdAt: '2026-07-15T08:00:00Z',
+    }
+    await db.sessionCommandEnvelopes.put(envelope)
+    const backend = {
+      commandId: 'cmd-backend', state: 'unknown', errorCode: null, retryable: true,
+      details: { source: 'backend' }, result: null, updatedAt: '2026-07-15T08:01:00Z',
+    }
+    const first = await persistImmutableSessionCommandReceipts(db, [backend], new Set(['cmd-backend']))
+    expect(first[0]).toMatchObject({
+      commandId: 'cmd-backend', attempt: 1, detail: { source: 'backend' },
+      recordedAt: '2026-07-15T08:01:00Z', retryable: true,
+    })
+    const repeated = await persistImmutableSessionCommandReceipts(db, [backend], new Set(['cmd-backend']))
+    expect(repeated[0]?.attempt).toBe(1)
+
+    const changed = { ...backend, state: 'succeeded', result: { applied: true }, updatedAt: '2026-07-15T08:02:00Z' }
+    const second = await persistImmutableSessionCommandReceipts(db, [changed], new Set(['cmd-backend']))
+    expect(second[0]).toMatchObject({ commandId: 'cmd-backend', attempt: 2, state: 'succeeded' })
+    expect(await normalizeSessionCommandReceipts(db, [backend])).toEqual(first)
+    expect(await db.sessionCommandReceipts.toArray()).toHaveLength(2)
+  })
+
+  it('rejects an orphan backend receipt before generic cache writes', async () => {
+    const db = await openPomodoroXIDB(`focus-orphan-receipt-${crypto.randomUUID()}`)
+    databases.push(db)
+    const raw = aggregateFixture(db.spaceId) as {
+      commandEnvelopes: Array<Record<string, unknown>>
+      commandReceipts: Array<Record<string, unknown>>
+    }
+    raw.commandEnvelopes = [{
+      commandId: 'cmd-envelope', spaceId: db.spaceId, sessionId: 'fs-1', sessionRevision: 1,
+      workItemId: 'l3', expectedVersion: 2, targetTransition: 'complete', replaySafe: true,
+      payloadHash: 'a'.repeat(64), createdAt: '2026-07-15T08:00:00Z',
+    }]
+    raw.commandReceipts = [{
+      commandId: 'cmd-foreign', state: 'succeeded', errorCode: null, retryable: false,
+      details: null, result: null, updatedAt: '2026-07-15T08:01:00Z',
+    }]
+    await expect(cacheFocusSession(db, db.spaceId, raw)).rejects
+      .toThrow('authoritative_review_response_receipt_mismatch')
+    expect(await db.focusSessions.count()).toBe(0)
+    expect(await db.sessionCommandReceipts.count()).toBe(0)
+  })
+
   it('stores the parsed aggregate rows in one Space database', async () => {
     const db = await openPomodoroXIDB(`focus-${crypto.randomUUID()}`)
     databases.push(db)
@@ -466,9 +553,16 @@ describe('FocusSession aggregate persistence', () => {
       { id: 'l2', projectId: 'project-1', title: 'Parent', depth: 2, parentId: null, statusDefinitionId: 'status-open', version: 4 },
       { id: 'l3', projectId: 'project-1', title: 'Child', depth: 3, parentId: 'l2', statusDefinitionId: 'status-open', version: 2 },
     ])
+    const lockRun = vi.fn((_operationId: string) => undefined)
+    const provisionalLock = {
+      run: <T>(operationId: string, effect: () => Promise<T>) => {
+        lockRun(operationId)
+        return effect()
+      },
+    }
     const repository = new FocusSessionRepository(
       db, meta, db.spaceId, { deviceId: 'device-a', tabId: 'tab-a' }, {} as never,
-      { run: async <T>(_operationId: string, effect: () => Promise<T>) => effect() },
+      provisionalLock,
     )
     await repository.startProvisional({
       operationId: 'offline-review-1', spaceId: db.spaceId, sessionId: 'offline-review-1',
@@ -488,6 +582,8 @@ describe('FocusSession aggregate persistence', () => {
     const outboxBefore = await db.outbox.toArray()
     const result = await repository.submitReview(controller.currentDraft())
 
+    expect(lockRun).toHaveBeenCalledTimes(3)
+    expect(lockRun.mock.calls.at(-1)?.[0]).toBe('offline-review-1')
     expect(result.session).toMatchObject({ sessionId: 'offline-review-1', ownershipState: 'local_provisional', validity: 'pending', reviewState: 'pending' })
     expect(await db.outbox.toArray()).toEqual(outboxBefore)
     expect(await db.sessionWorkItemOutcomes.where('sessionId').equals('offline-review-1').count()).toBe(0)

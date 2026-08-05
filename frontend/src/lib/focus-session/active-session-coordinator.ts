@@ -11,6 +11,7 @@ import {
   buildActivateProvisionalPayload,
   cacheAuthoritativeActivation,
   cacheFocusSession,
+  readSessionCommandReceipts,
   type LocalFocusSessionAggregate,
 } from './focus-session-repository'
 import { BrowserProvisionalOperationLock, type ProvisionalOperationLock } from './provisional-operation-lock'
@@ -151,7 +152,7 @@ async function loadProvisionalAggregate(
     plan: await database.sessionWorkItemPlans.where('sessionId').equals(sessionId).toArray() as LocalFocusSessionAggregate['plan'],
     outcomes: await database.sessionWorkItemOutcomes.where('sessionId').equals(sessionId).toArray() as LocalFocusSessionAggregate['outcomes'],
     commandEnvelopes: await database.sessionCommandEnvelopes.where('sessionId').equals(sessionId).toArray() as LocalFocusSessionAggregate['commandEnvelopes'],
-    commandReceipts: await database.sessionCommandReceipts.where('sessionId').equals(sessionId).toArray() as LocalFocusSessionAggregate['commandReceipts'],
+    commandReceipts: await readSessionCommandReceipts(database, sessionId) as LocalFocusSessionAggregate['commandReceipts'],
   }
 }
 
