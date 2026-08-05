@@ -28,7 +28,7 @@ FINAL_TABLES = {
 LEGACY_TABLES = {"tasks", "sessions", "task_quick_notes", "session_quick_notes"}
 
 
-def test_space_010_creates_exact_final_tables_and_seeds(tmp_path) -> None:
+def test_space_head_creates_exact_final_tables_and_seeds(tmp_path) -> None:
     path = tmp_path / "space.db"
     run_migrations("space", path)
     with sqlite3.connect(path) as conn:
@@ -76,7 +76,7 @@ def test_space_010_creates_exact_final_tables_and_seeds(tmp_path) -> None:
         assert "uq_session_work_item_outcome_effective" in outcome_indexes
 
 
-def test_space_010_downgrade_rejects_non_seed_rows(tmp_path: Path) -> None:
+def test_space_head_downgrade_rejects_non_seed_rows(tmp_path: Path) -> None:
     path = tmp_path / "space.db"
     run_migrations("space", path)
     with sqlite3.connect(path) as conn:
@@ -154,7 +154,7 @@ def _upgrade_to_009(path: Path, *, after=None) -> None:
     run_bound_command("space", path, command.upgrade, "space_009_mutation_journal", after=after)
 
 
-def test_space_010_rejects_nonempty_legacy_authority_before_ddl(tmp_path: Path) -> None:
+def test_space_head_rejects_nonempty_legacy_authority_before_ddl(tmp_path: Path) -> None:
     path = tmp_path / "space.db"
 
     def seed(maintenance) -> None:
@@ -177,7 +177,7 @@ def test_space_010_rejects_nonempty_legacy_authority_before_ddl(tmp_path: Path) 
         assert conn.execute("SELECT id FROM tasks").fetchone() == ("legacy",)
 
 
-def test_space_010_rejects_removed_authority_in_terminal_mutation_json(tmp_path: Path) -> None:
+def test_space_head_rejects_removed_authority_in_terminal_mutation_json(tmp_path: Path) -> None:
     path = tmp_path / "space.db"
 
     def seed(maintenance) -> None:

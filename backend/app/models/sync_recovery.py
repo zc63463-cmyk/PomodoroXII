@@ -2,6 +2,7 @@
 
 from sqlalchemy import CheckConstraint, ForeignKey, Integer, LargeBinary, String
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql.elements import conv
 
 from app.db.base import Base
 
@@ -13,23 +14,23 @@ class SyncRecoveryManifest(Base):
     __table_args__ = (
         CheckConstraint(
             "generation >= 0",
-            name="generation_nonnegative",
+            name=conv("ck_sync_manifest_generation_nonnegative"),
         ),
         CheckConstraint(
             "waterline >= 0",
-            name="waterline_nonnegative",
+            name=conv("ck_sync_manifest_waterline_nonnegative"),
         ),
         CheckConstraint(
             "total_entities >= 0",
-            name="entities_nonnegative",
+            name=conv("ck_sync_manifest_entities_nonnegative"),
         ),
         CheckConstraint(
             "total_chunks >= 0",
-            name="chunks_nonnegative",
+            name=conv("ck_sync_manifest_chunks_nonnegative"),
         ),
         CheckConstraint(
             "total_uncompressed_bytes >= 0",
-            name="bytes_nonnegative",
+            name=conv("ck_sync_manifest_bytes_nonnegative"),
         ),
     )
 
@@ -54,15 +55,15 @@ class SyncRecoveryChunk(Base):
     __table_args__ = (
         CheckConstraint(
             "chunk_index >= 0",
-            name="index_nonnegative",
+            name=conv("ck_sync_chunk_index_nonnegative"),
         ),
         CheckConstraint(
             "entity_count BETWEEN 1 AND 500",
-            name="entities",
+            name=conv("ck_sync_chunk_entities"),
         ),
         CheckConstraint(
             "uncompressed_bytes BETWEEN 1 AND 8388608",
-            name="bytes",
+            name=conv("ck_sync_chunk_bytes"),
         ),
     )
 
