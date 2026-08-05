@@ -8,7 +8,6 @@
  */
 
 import type { InternalAxiosRequestConfig } from 'axios'
-import type { OutboxEvent } from '@/types'
 
 const MUTATION_METHODS = new Set(['post', 'put', 'patch', 'delete'])
 
@@ -25,7 +24,7 @@ export function ensureMutationIdempotencyKey(
 }
 
 export async function buildBatchIdempotencyKey(
-  rows: readonly OutboxEvent[],
+  rows: ReadonlyArray<{ operationId: string }>,
 ): Promise<string> {
   if (rows.length === 0) {
     throw new Error('Cannot build idempotency key for empty batch')
