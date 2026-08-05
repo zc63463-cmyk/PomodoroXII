@@ -178,7 +178,7 @@ async def test_coordinator_replaces_managed_space_007_under_bound_authority(
     result = await coordinator.upgrade("space", path)
     assert result.changed is True
     assert result.previous_revision == "space_007_session_mood_check"
-    assert result.head == "space_010_task_space_focus_session"
+    assert result.head == "space_011_sync_clients_streaming"
     status = await coordinator.verify("space", path)
     assert status.at_head and status.integrity_ok
 
@@ -881,6 +881,9 @@ SPACE_TABLES = {
     "session_work_item_outcomes",
     "session_command_envelopes",
     "session_command_receipts",
+    "sync_clients",
+    "sync_recovery_manifests",
+    "sync_recovery_chunks",
 }
 
 
@@ -1083,7 +1086,7 @@ def test_managed_space_007_upgrades_to_008_with_existing_outbox_cursor(tmp_path:
                 connection.execute(
                     text("SELECT version_num FROM alembic_version_space")
                 ).scalar_one()
-                == "space_010_task_space_focus_session"
+                == "space_011_sync_clients_streaming"
             )
     finally:
         engine.dispose()
@@ -1125,7 +1128,7 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
                 connection.execute(
                     text("SELECT version_num FROM alembic_version_space")
                 ).scalar_one()
-                == "space_010_task_space_focus_session"
+                == "space_011_sync_clients_streaming"
             )
     finally:
         engine.dispose()
@@ -1169,7 +1172,7 @@ def test_exact_space_legacy_adoption_backfills_outbox_visibility(tmp_path: Path)
             ).one() == (None, None, None, 1)
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_010_task_space_focus_session"
+            ).scalar_one() == "space_011_sync_clients_streaming"
     finally:
         engine.dispose()
 

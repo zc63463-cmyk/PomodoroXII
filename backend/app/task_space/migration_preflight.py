@@ -18,7 +18,7 @@ LEGACY_ENTITY_TYPES = (
 )
 LEGACY_TABLES = ("tasks", "sessions", "task_quick_notes", "session_quick_notes")
 SAFE_MUTATION_TERMINALS = ("FINALIZED", "ABORTED", "COMPENSATED")
-TASK_SPACE_TARGET_HEAD = "space_010_task_space_focus_session"
+TASK_SPACE_TARGET_HEAD = "space_011_sync_clients_streaming"
 
 
 def _contains_removed_authority(value: object) -> bool:
