@@ -101,6 +101,14 @@ describe('buildBatchIdempotencyKey', () => {
     expect(key).toHaveLength(69)
   })
 
+  it('accepts the minimal persisted operation-id row shape', async () => {
+    const key = await buildBatchIdempotencyKey([
+      { operationId: 'op-a' },
+      { operationId: 'op-b' },
+    ])
+    expect(key).toMatch(/^sync-[0-9a-f]{64}$/)
+  })
+
   it('produces same key for same operationIds in same order', async () => {
     const rows1 = [makeRow('op-1', 1), makeRow('op-2', 2)]
     const rows2 = [makeRow('op-1', 1), makeRow('op-2', 2)]
