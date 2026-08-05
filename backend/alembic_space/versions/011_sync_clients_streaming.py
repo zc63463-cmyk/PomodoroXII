@@ -77,23 +77,23 @@ def upgrade() -> None:
         sa.Column("manifest_sha256", sa.String(64), nullable=False),
         sa.CheckConstraint(
             "generation >= 0",
-            name=op.f("ck_sync_recovery_manifests_generation_nonnegative"),
+            name=op.f("ck_sync_manifest_generation_nonnegative"),
         ),
         sa.CheckConstraint(
             "waterline >= 0",
-            name=op.f("ck_sync_recovery_manifests_waterline_nonnegative"),
+            name=op.f("ck_sync_manifest_waterline_nonnegative"),
         ),
         sa.CheckConstraint(
             "total_entities >= 0",
-            name=op.f("ck_sync_recovery_manifests_entities_nonnegative"),
+            name=op.f("ck_sync_manifest_entities_nonnegative"),
         ),
         sa.CheckConstraint(
             "total_chunks >= 0",
-            name=op.f("ck_sync_recovery_manifests_chunks_nonnegative"),
+            name=op.f("ck_sync_manifest_chunks_nonnegative"),
         ),
         sa.CheckConstraint(
             "total_uncompressed_bytes >= 0",
-            name=op.f("ck_sync_recovery_manifests_bytes_nonnegative"),
+            name=op.f("ck_sync_manifest_bytes_nonnegative"),
         ),
     )
     op.create_table(
@@ -112,15 +112,15 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("manifest_token", "chunk_index"),
         sa.CheckConstraint(
             "chunk_index >= 0",
-            name=op.f("ck_sync_recovery_chunks_index_nonnegative"),
+            name=op.f("ck_sync_chunk_index_nonnegative"),
         ),
         sa.CheckConstraint(
             "entity_count BETWEEN 1 AND 500",
-            name=op.f("ck_sync_recovery_chunks_entities"),
+            name=op.f("ck_sync_chunk_entities"),
         ),
         sa.CheckConstraint(
             "uncompressed_bytes BETWEEN 1 AND 8388608",
-            name=op.f("ck_sync_recovery_chunks_bytes"),
+            name=op.f("ck_sync_chunk_bytes"),
         ),
     )
     _add_tombstone_delete_sequence()

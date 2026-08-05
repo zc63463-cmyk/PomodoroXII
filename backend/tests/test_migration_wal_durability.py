@@ -15,6 +15,52 @@ from app.runtime.durability import (
 from app.runtime.sqlite_vfs import MaintenanceOptions
 
 
+def test_failed_space_011_body_rolls_back_s4_rows(bound_sqlite_pair) -> None:
+    """A failed S4 migration body leaves protocol rows and baseline data intact."""
+    from app.runtime.sqlite_vfs import _alembic_maintenance_adapter
+
+    source, _backup = bound_sqlite_pair
+    with source.open_maintenance(MaintenanceOptions(read_only=False)) as maintenance:
+        maintenance.execute("CREATE TABLE baseline (value TEXT NOT NULL)")
+        maintenance.execute(
+            "CREATE TABLE sync_clients (client_id TEXT PRIMARY KEY, ack_sequence INTEGER)"
+        )
+        maintenance.execute(
+            "CREATE TABLE sync_recovery_manifests (token TEXT PRIMARY KEY)"
+        )
+        maintenance.execute("INSERT INTO baseline VALUES ('kept')")
+        maintenance.commit()
+        adapter = _alembic_maintenance_adapter(
+            maintenance,
+            expected_identity=source.identity,
+            require_write=True,
+        )
+        with pytest.raises(RuntimeError, match="injected space_011 failure"):
+            with adapter:
+                adapter.run(
+                    lambda connection: (
+                        connection.execute(
+                            text(
+                                "INSERT INTO sync_clients VALUES ('client-a', 5)"
+                            )
+                        ),
+                        connection.execute(
+                            text(
+                                "INSERT INTO sync_recovery_manifests VALUES ('manifest-a')"
+                            )
+                        ),
+                        (_ for _ in ()).throw(
+                            RuntimeError("injected space_011 failure")
+                        ),
+                    )
+                )
+        assert maintenance.execute(
+            "SELECT value FROM baseline"
+        ).fetchone() == ("kept",)
+        assert maintenance.execute("SELECT * FROM sync_clients").fetchall() == []
+        assert maintenance.execute("SELECT * FROM sync_recovery_manifests").fetchall() == []
+
+
 @pytest.fixture
 def bound_sqlite_pair(tmp_path: Path):
     from app.runtime.sqlite_vfs import (

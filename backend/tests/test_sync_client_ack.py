@@ -45,6 +45,11 @@ def test_space_011_adds_only_s4_columns_and_backfills_provable_tombstones(tmp_pa
             "VALUES ('note', 'known', 'delete', '{}', 't', 1)"
         )
         connection.execute(
+            "INSERT INTO sync_outbox "
+            "(entity_type, entity_id, action, payload, created_at, visible) "
+            "VALUES ('note', 'known', 'delete', '{}', 't', 1)"
+        )
+        connection.execute(
             "INSERT INTO tombstones (entity_type, entity_id, deleted_at) "
             "VALUES ('note', 'known', 't')"
         )
@@ -65,9 +70,17 @@ def test_space_011_adds_only_s4_columns_and_backfills_provable_tombstones(tmp_pa
             )
         }
         assert {"sync_clients", "sync_recovery_manifests", "sync_recovery_chunks"} <= tables
+        connection.execute(
+            "INSERT INTO sync_clients "
+            "(client_id, catalog_hash, registered_at, last_seen_at, expires_at) "
+            "VALUES ('default-check', 'c', 't', 't', 't')"
+        )
+        assert connection.execute(
+            "SELECT requires_recovery FROM sync_clients WHERE client_id = 'default-check'"
+        ).fetchone() == (1,)
         assert connection.execute(
             "SELECT delete_sequence FROM tombstones WHERE entity_id = 'known'"
-        ).fetchone() == (2,)
+        ).fetchone() == (3,)
         assert connection.execute(
             "SELECT delete_sequence FROM tombstones WHERE entity_id = 'unmatched'"
         ).fetchone() == (None,)
@@ -95,7 +108,6 @@ def test_space_011_numeric_checks_reject_negative_values(tmp_path: Path) -> None
             VALUES ('note', 'note', 't');
             """
         )
-
         def reject(statement: str) -> None:
             connection.execute("SAVEPOINT constraint_probe")
             try:
@@ -144,3 +156,13 @@ def test_space_011_downgrade_removes_only_s4_schema(tmp_path: Path) -> None:
         assert connection.execute(
             "SELECT version_num FROM alembic_version_space"
         ).fetchone() == (SPACE_010,)
+        remaining = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert {"sync_outbox", "tombstones", "sync_state"} <= remaining
+        assert "operation_id" in {
+            row[1] for row in connection.execute("PRAGMA table_info(sync_outbox)")
+        }
