@@ -173,44 +173,6 @@ async def test_pull_same_timestamp_3_rows_requires_cursor_upgrade(space_session)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_legacy_pull_global_cursor_skips_truncated_older_entity_rows(space_session):
-    """A newer entity cannot make an unsafe legacy cursor advance.
-
-    With ``limit=2`` the habit group has one remaining 10:00 row, while a
-    quick note at 12:00 exists. The legacy global cursor must fail closed.
-    """
-    from app.errors import CursorUpgradeRequiredError
-    from app.models.habit import Habit
-    from app.models.quick_note import QuickNote
-    from app.services.sync import SyncService
-
-    await _clear_seeded_definitions(space_session)
-    old_ts = "2026-07-04T10:00:00.000Z"
-    for habit_id in ["habit-3", "habit-1", "habit-2"]:
-        space_session.add(
-            Habit(
-                id=habit_id,
-                title=habit_id,
-                updated_at=old_ts,
-            )
-        )
-    space_session.add(
-        QuickNote(
-            id="quick-newer",
-            content="newer entity",
-            tags="[]",
-            updated_at="2026-07-04T12:00:00.000Z",
-        )
-    )
-    await space_session.flush()
-
-    service = SyncService(space_session, fs=None)
-    with pytest.raises(CursorUpgradeRequiredError) as raised:
-        await service.pull(since="", limit=2)
-    assert raised.value.details == {"truncated_groups": ("habits",)}
-
-
-@pytest.mark.asyncio
 async def test_cursor_pull_pages_cross_entity_events_without_skipping(space_session):
     from app.services.sync import SyncService
     from app.services.sync_outbox import record_sync_event

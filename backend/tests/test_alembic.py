@@ -36,6 +36,7 @@ from tests.migrations import alembic_config, migration_engine, run_bound_command
                 "session_attribution_revisions", "session_work_item_plans",
                 "session_work_item_outcomes", "session_command_envelopes",
                 "session_command_receipts",
+                "sync_clients", "sync_recovery_manifests", "sync_recovery_chunks",
             },
         ),
     ],

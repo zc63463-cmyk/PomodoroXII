@@ -69,6 +69,7 @@ class JournalBatch:
     batch_id: str
     request_hash: str
     state: MutationState
+    accepted_count: int
     result: BatchMutationResult
 
 
@@ -106,6 +107,7 @@ def _encode_result(result: BatchMutationResult) -> str:
                     result.operation_id_derivations.items()
                 )
             },
+            "input_count": result.input_count,
         },
         ensure_ascii=True,
         sort_keys=True,
@@ -146,6 +148,7 @@ def _decode_result(batch_id: str, payload: str | None) -> BatchMutationResult:
                 for item in raw["rejected"]
             ),
             raw.get("operation_id_derivations", {}),
+            raw.get("input_count"),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise IllegalMutationTransition("batch receipt is invalid") from exc
@@ -178,6 +181,7 @@ class MutationJournal:
                 row.batch_id,
                 row.command_hash,
                 MutationState(row.state),
+                row.accepted_count,
                 _decode_result(row.batch_id, row.result_json),
             )
 

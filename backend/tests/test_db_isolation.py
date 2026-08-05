@@ -3,7 +3,7 @@
 Verifies that:
 1. Meta DB contains only its four application-wide tables.
 2. Space DB excludes meta tables (``spaces``, ``meta_settings`` absent).
-3. Space DB contains all 33 business/infra/setting tables.
+3. Space DB contains all 36 business/infra/setting tables.
 """
 
 import pytest
@@ -71,6 +71,7 @@ async def test_space_db_has_all_business_tables(_isolate_env, space_session):
         # Sync infrastructure (7)
         "tombstones", "sync_outbox", "sync_audit_log",
         "sync_state", "sync_snapshots",
+        "sync_clients", "sync_recovery_manifests", "sync_recovery_chunks",
         "session_command_envelopes", "session_command_receipts",
         # Setting (1)
         "settings",
@@ -80,7 +81,7 @@ async def test_space_db_has_all_business_tables(_isolate_env, space_session):
     actual_business = set(tables) - {"spaces", "meta_settings", "alembic_version_space", "alembic_version_meta"}
     missing = expected_business_tables - actual_business
     assert not missing, f"Space DB missing business tables: {missing}"
-    assert len(actual_business) == 33, (
-        f"Space DB has {len(actual_business)} business tables, expected 33: "
+    assert len(actual_business) == 36, (
+        f"Space DB has {len(actual_business)} business tables, expected 36: "
         f"extra={actual_business - expected_business_tables}"
     )

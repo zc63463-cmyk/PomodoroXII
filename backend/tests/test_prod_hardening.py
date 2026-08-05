@@ -198,10 +198,13 @@ async def test_body_limit_does_not_send_second_start_after_response_started():
 
 
 async def test_declared_oversize_gets_request_id_and_security_headers(client):
+    from app.settings import settings
+
+    oversized = settings.request_body_max_bytes + 1
     response = await client.post(
         "/api/v1/auth/login",
         content=b"x",
-        headers={"content-length": str(10 * 1024 * 1024 + 1)},
+        headers={"content-length": str(oversized)},
     )
     assert response.status_code == 413
     assert response.json()["error_type"] == "request_too_large"
@@ -211,7 +214,7 @@ async def test_declared_oversize_gets_request_id_and_security_headers(client):
         "/api/v1/auth/login",
         content=b"x",
         headers={
-            "content-length": str(10 * 1024 * 1024 + 1),
+            "content-length": str(oversized),
             "origin": "http://localhost:5173",
         },
     )

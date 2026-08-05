@@ -695,6 +695,7 @@ class BatchMutationResult:
     applied: tuple[MutationResult, ...]
     rejected: tuple[MutationRejection, ...]
     operation_id_derivations: Mapping[str, object] = field(default_factory=dict)
+    input_count: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -707,6 +708,11 @@ class BatchMutationResult:
             "rejected",
             require_typed_tuple(self.rejected, MutationRejection, label="rejected"),
         )
+        expected_input_count = len(self.applied) + len(self.rejected)
+        if self.input_count is None:
+            object.__setattr__(self, "input_count", expected_input_count)
+        elif type(self.input_count) is not int or self.input_count != expected_input_count:
+            raise ValueError("batch result input_count does not cover every input item")
         result_ids = {
             *(item.operation_id for item in self.applied),
             *(item.operation_id for item in self.rejected),

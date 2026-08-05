@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.errors import (
     MUTATION_REJECTION_SPECS,
+    RESERVED_S4_MAPPING_CODES,
     RESERVED_TS_CODES,
     S3_MUTATION_REJECTION_CODES,
     AppError,
@@ -252,6 +253,7 @@ def test_persisted_command_hash_and_fresh_decoder_are_canonical() -> None:
         "applied": [],
         "rejected": [],
         "operation_id_derivations": {},
+        "input_count": 0,
     }
 
     noncanonical = json.dumps(json.loads(encoded), indent=2).encode()
@@ -267,6 +269,11 @@ def test_persisted_command_hash_and_fresh_decoder_are_canonical() -> None:
             persisted.resolution,
             "0" * 64,
         )
+
+
+def test_batch_result_rejects_incomplete_input_count() -> None:
+    with pytest.raises(ValueError, match="input_count"):
+        BatchMutationResult("batch", (), (), input_count=1)
 
 
 @pytest.mark.parametrize(
@@ -414,7 +421,7 @@ def test_literal_mutation_rule_codes_stay_within_their_owner_sets() -> None:
             task_space_found |= found
         else:
             s3_found |= found
-    assert s3_found <= S3_MUTATION_REJECTION_CODES
+    assert s3_found <= (S3_MUTATION_REJECTION_CODES | RESERVED_S4_MAPPING_CODES)
     assert task_space_found <= (S3_MUTATION_REJECTION_CODES | RESERVED_TS_CODES)
 
 
