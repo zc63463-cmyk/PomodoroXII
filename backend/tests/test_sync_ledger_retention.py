@@ -206,6 +206,84 @@ async def test_ack_waterline_prunes_visible_ledger_and_linked_tombstones(
 
 
 @pytest.mark.asyncio
+async def test_prune_recreates_missing_state_from_allocated_high_watermark(
+    space_session,
+) -> None:
+    from app.models.sync_client import SyncClient
+    from app.models.sync_state import SyncState
+    from app.sync.retention import RetentionCoordinator
+
+    event = (await _record_events(space_session, 1))[0]
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    await space_session.delete(state)
+    space_session.add(
+        SyncClient(
+            client_id="client-a",
+            ack_sequence=event.id,
+            catalog_hash="c" * 64,
+            registered_at="2026-08-01T00:00:00.000Z",
+            last_seen_at="2026-08-01T00:00:00.000Z",
+            expires_at="2099-08-01T00:00:00.000Z",
+            requires_recovery=False,
+            recovery_generation=0,
+        )
+    )
+    await space_session.flush()
+    await space_session.commit()
+
+    result = await RetentionCoordinator("c" * 64, 30).prune(
+        _RetentionScope(space_session)
+    )
+
+    assert result.waterline == event.id
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    assert state.current_cursor == event.id
+    assert state.retention_floor == event.id
+
+
+@pytest.mark.asyncio
+async def test_retention_invariant_is_raised_after_bounded_maintenance_commits(
+    space_session,
+) -> None:
+    from app.models.sync_client import SyncClient
+    from app.models.sync_state import SyncState
+    from app.sync.retention import RetentionCoordinator
+
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    state.current_cursor = 0
+    space_session.add_all(
+        [
+            SyncClient(
+                client_id=f"expired-client-{index:03d}",
+                ack_sequence=2,
+                catalog_hash="c" * 64,
+                registered_at="2020-01-01T00:00:00.000Z",
+                last_seen_at="2020-01-01T00:00:00.000Z",
+                expires_at="2020-01-02T00:00:00.000Z",
+                requires_recovery=False,
+                recovery_generation=0,
+            )
+            for index in range(101)
+        ]
+    )
+    await space_session.flush()
+    await space_session.commit()
+
+    with pytest.raises(RuntimeError, match="ack waterline exceeds allocated cursor"):
+        await RetentionCoordinator("c" * 64, 30).prune(
+            _RetentionScope(space_session)
+        )
+
+    assert await space_session.get(SyncClient, "expired-client-000") is None
+    unprocessed = await space_session.get(SyncClient, "expired-client-100")
+    assert unprocessed is not None
+    assert unprocessed.requires_recovery is False
+
+
+@pytest.mark.asyncio
 async def test_expiry_maintenance_is_bounded_and_reaches_the_101st_client(
     space_session,
 ) -> None:
@@ -228,7 +306,7 @@ async def test_expiry_maintenance_is_bounded_and_reaches_the_101st_client(
         ]
     )
     await space_session.flush()
-    registry = SyncClientRegistry(space_session, "c" * 64, 30)
+    registry = SyncClientRegistry(space_session, "c" * 64, 30, space_id="space-a")
     first = await registry.expire_inactive()
     assert len(first) == 100
     assert await registry.minimum_safe_retention_sequence() == 3

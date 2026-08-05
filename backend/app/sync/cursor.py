@@ -19,6 +19,8 @@ from app.errors import SyncCursorExpiredError
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _CATALOG_HASH = re.compile(r"^[0-9a-f]{64}$")
+_MIN_TOKEN_BYTES = 16
+_MAX_TOKEN_BYTES = 2048
 _CURSOR_FIELDS = frozenset(
     {"catalog_hash", "client_id", "generation", "sequence", "space_id", "version"}
 )
@@ -101,12 +103,18 @@ class SyncCursorCodec:
         signature = hmac.digest(self._secret, payload, "sha256")
         payload_segment = base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
         signature_segment = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
-        return f"{payload_segment}.{signature_segment}"
+        token = f"{payload_segment}.{signature_segment}"
+        if not _MIN_TOKEN_BYTES <= len(token.encode("ascii")) <= _MAX_TOKEN_BYTES:
+            raise ValueError("cursor token must be 16..2048 ASCII bytes")
+        return token
 
     def decode(self, token: str) -> CursorPosition:
         try:
             if not isinstance(token, str) or token.strip() != token:
                 raise ValueError("token")
+            token_bytes = token.encode("ascii")
+            if not _MIN_TOKEN_BYTES <= len(token_bytes) <= _MAX_TOKEN_BYTES:
+                raise ValueError("token length")
             parts = token.split(".")
             if len(parts) != 2 or not all(parts):
                 raise ValueError("segments")

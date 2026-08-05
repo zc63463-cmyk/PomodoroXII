@@ -9,6 +9,7 @@ from sqlalchemy import delete
 from app.models.sync_outbox import SyncOutbox
 from app.models.sync_state import SyncState
 from app.models.tombstone import Tombstone
+from app.services.sync_outbox import get_current_cursor
 from app.sync.clients import SyncClientRegistry
 
 
@@ -63,6 +64,8 @@ class RetentionCoordinator:
 
     async def prune(self, scope) -> RetentionResult:
         scope_id = self.space_id or self._scope_space_id(scope)
+        pending_error: RuntimeError | None = None
+        result = RetentionResult(None, 0, 0)
         async with scope.exclusive_space_resources("sync-retention", 60) as lease:
             await self._recover(scope, lease)
             async with scope.session_factory() as session, session.begin():
@@ -79,41 +82,50 @@ class RetentionCoordinator:
                 await registry.delete_expired_registrations(limit=100)
                 floor = await registry.minimum_safe_retention_sequence()
                 if floor is None:
-                    return RetentionResult(None, 0, 0)
+                    result = RetentionResult(None, 0, 0)
+                else:
+                    state = await session.get(SyncState, 1)
+                    if state is None:
+                        state = SyncState(
+                            id=1,
+                            retention_floor=0,
+                            current_cursor=await get_current_cursor(session),
+                        )
+                        session.add(state)
+                        await session.flush()
+                    if floor > state.current_cursor:
+                        pending_error = RuntimeError(
+                            "ack waterline exceeds allocated cursor"
+                        )
+                    else:
+                        # The durable floor is monotonic even if a manually
+                        # repaired client row is older than the committed floor.
+                        waterline = max(state.retention_floor, floor)
 
-                state = await session.get(SyncState, 1)
-                if state is None:
-                    state = SyncState(id=1, retention_floor=0, current_cursor=0)
-                    session.add(state)
-                    await session.flush()
-                if floor > state.current_cursor:
-                    raise RuntimeError("ack waterline exceeds allocated cursor")
-
-                # The durable floor is monotonic even if a manually repaired
-                # client row is older than the already committed floor.
-                waterline = max(state.retention_floor, floor)
-
-                ledger = await session.execute(
-                    delete(SyncOutbox).where(
-                        SyncOutbox.visible.is_(True), SyncOutbox.id <= waterline
-                    )
-                )
-                tombstones = await session.execute(
-                    delete(Tombstone).where(
-                        Tombstone.delete_sequence.is_not(None),
-                        Tombstone.delete_sequence <= waterline,
-                    )
-                )
-                state.retention_floor = waterline
-                await session.flush()
-                assert_fence = getattr(lease, "assert_fence", None)
-                if assert_fence is not None and scope_id is not None:
-                    assert_fence(scope_id)
-                return RetentionResult(
-                    waterline=waterline,
-                    ledger_rows=int(ledger.rowcount or 0),
-                    tombstones=int(tombstones.rowcount or 0),
-                )
+                        ledger = await session.execute(
+                            delete(SyncOutbox).where(
+                                SyncOutbox.visible.is_(True), SyncOutbox.id <= waterline
+                            )
+                        )
+                        tombstones = await session.execute(
+                            delete(Tombstone).where(
+                                Tombstone.delete_sequence.is_not(None),
+                                Tombstone.delete_sequence <= waterline,
+                            )
+                        )
+                        state.retention_floor = waterline
+                        await session.flush()
+                        assert_fence = getattr(lease, "assert_fence", None)
+                        if assert_fence is not None and scope_id is not None:
+                            assert_fence(scope_id)
+                        result = RetentionResult(
+                            waterline=waterline,
+                            ledger_rows=int(ledger.rowcount or 0),
+                            tombstones=int(tombstones.rowcount or 0),
+                        )
+        if pending_error is not None:
+            raise pending_error
+        return result
 
 
 __all__ = ["RetentionCoordinator", "RetentionResult"]
