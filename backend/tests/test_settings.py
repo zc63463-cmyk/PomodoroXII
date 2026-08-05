@@ -12,6 +12,11 @@ from app.settings import Settings
 # --------------------------------------------------------------------------- #
 def _make_settings(**env_overrides: str | None) -> Settings:
     """Create a Settings instance with temporary env overrides."""
+    if env_overrides.get("environment") == "production":
+        env_overrides.setdefault(
+            "sync_cursor_secret",
+            "test-sync-cursor-secret-0123456789abcdef",
+        )
     old_values: dict[str, str | None] = {}
     for key, value in env_overrides.items():
         env_key = f"POMODOROXII_{key.upper()}"
@@ -74,6 +79,22 @@ class TestSecretKeyValidation:
             secret_key=secret,
             environment="production",
         ).secret_key == secret
+
+    def test_rejects_weak_cursor_secret_in_production(self):
+        with pytest.raises(ValueError, match="SYNC_CURSOR_SECRET.*weak"):
+            _make_settings(
+                secret_key="a-very-secure-random-key-1234567890",
+                sync_cursor_secret="change-me-sync-cursor-secret-change-me",
+                environment="production",
+            )
+
+    def test_rejects_cursor_secret_reuse_in_production(self):
+        with pytest.raises(ValueError, match="distinct"):
+            _make_settings(
+                secret_key="a-very-secure-random-key-1234567890",
+                sync_cursor_secret="a-very-secure-random-key-1234567890",
+                environment="production",
+            )
 
 
 # --------------------------------------------------------------------------- #

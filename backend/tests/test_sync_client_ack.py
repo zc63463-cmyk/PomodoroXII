@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import sqlite3
 from pathlib import Path
 
@@ -10,6 +11,141 @@ from alembic import command
 from alembic.script import ScriptDirectory
 
 from tests.migrations import alembic_config, run_bound_command
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda token: token[:-1] + ("A" if token[-1] != "A" else "B"),
+        lambda token: token + ".extra",
+        lambda token: token.replace(".", "", 1),
+    ],
+)
+def test_opaque_cursor_tamper_is_safe_and_does_not_leak_sequence(mutate) -> None:
+    from app.errors import SyncCursorExpiredError
+    from app.sync.cursor import CursorPosition, SyncCursorCodec
+
+    codec = SyncCursorCodec(b"x" * 32)
+    token = codec.encode(CursorPosition(42, "c" * 64, "space-a", "client-a", 0))
+    with pytest.raises(SyncCursorExpiredError) as raised:
+        codec.decode(mutate(token))
+    assert raised.value.code == "cursor_expired"
+    assert raised.value.details == {"recovery_action": "full_recovery"}
+    assert "42" not in raised.value.detail
+
+
+def test_opaque_cursor_round_trip_handles_period_in_signature(monkeypatch) -> None:
+    from app.sync.cursor import CursorPosition, SyncCursorCodec
+
+    signature = b"." + bytes(range(31))
+    monkeypatch.setattr(hmac, "digest", lambda *_args: signature)
+    codec = SyncCursorCodec(b"x" * 32)
+    position = CursorPosition(9, "c" * 64, "space-a", "client-a", 0)
+    token = codec.encode(position)
+    assert token.count(".") == 1
+    assert codec.decode(token) == position
+
+
+@pytest.mark.asyncio
+async def test_ack_is_monotonic_and_idempotent(space_session) -> None:
+    from app.models.sync_client import SyncClient
+    from app.models.sync_state import SyncState
+    from app.sync.clients import SyncClientRegistry
+    from app.sync.cursor import CursorPosition
+
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    state.retention_floor = 0
+    state.current_cursor = 10
+    space_session.add(
+        SyncClient(
+            client_id="client-a",
+            ack_sequence=5,
+            catalog_hash="c" * 64,
+            registered_at="2026-08-01T00:00:00.000Z",
+            last_seen_at="2026-08-01T00:00:00.000Z",
+            expires_at="2099-08-01T00:00:00.000Z",
+            requires_recovery=False,
+            recovery_generation=0,
+        )
+    )
+    await space_session.flush()
+    registry = SyncClientRegistry(space_session, "c" * 64, 30)
+
+    accepted = await registry.acknowledge(
+        "client-a", CursorPosition(8, "c" * 64, "space-a", "client-a", 0)
+    )
+    assert accepted.result is not None and accepted.result.accepted is True
+    assert accepted.result.requires_recovery is False
+
+    equal = await registry.acknowledge(
+        "client-a", CursorPosition(8, "c" * 64, "space-a", "client-a", 0)
+    )
+    assert equal.result == accepted.result
+
+    backwards = await registry.acknowledge(
+        "client-a", CursorPosition(7, "c" * 64, "space-a", "client-a", 0)
+    )
+    assert backwards.error is not None
+    assert backwards.error.code == "cursor_expired"
+
+    future = await registry.acknowledge(
+        "client-a", CursorPosition(11, "c" * 64, "space-a", "client-a", 0)
+    )
+    assert future.error is not None
+    assert future.error.code == "cursor_expired"
+
+
+@pytest.mark.asyncio
+async def test_recovery_ack_requires_current_completed_manifest(space_session) -> None:
+    from app.models.sync_client import SyncClient
+    from app.models.sync_recovery import SyncRecoveryManifest
+    from app.models.sync_state import SyncState
+    from app.sync.clients import SyncClientRegistry
+    from app.sync.cursor import CursorPosition
+
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    state.retention_floor = 0
+    state.current_cursor = 12
+    space_session.add(
+        SyncClient(
+            client_id="client-a",
+            ack_sequence=0,
+            catalog_hash="c" * 64,
+            registered_at="2026-08-01T00:00:00.000Z",
+            last_seen_at="2026-08-01T00:00:00.000Z",
+            expires_at="2099-08-01T00:00:00.000Z",
+            requires_recovery=True,
+            recovery_generation=1,
+            recovery_manifest_token="manifest-a",
+            recovery_waterline=9,
+            recovery_completed_at="2026-08-01T01:00:00.000Z",
+        )
+    )
+    space_session.add(
+        SyncRecoveryManifest(
+            token="manifest-a",
+            space_id="space-a",
+            client_id="client-a",
+            generation=1,
+            catalog_hash="c" * 64,
+            waterline=9,
+            total_entities=0,
+            total_chunks=0,
+            total_uncompressed_bytes=0,
+            created_at="2026-08-01T00:00:00.000Z",
+            expires_at="2099-08-01T00:00:00.000Z",
+            manifest_sha256="d" * 64,
+        )
+    )
+    await space_session.flush()
+    registry = SyncClientRegistry(space_session, "c" * 64, 30, space_id="space-a")
+    decision = await registry.acknowledge(
+        "client-a", CursorPosition(9, "c" * 64, "space-a", "client-a", 1)
+    )
+    assert decision.result is not None
+    assert decision.result.requires_recovery is False
 
 SPACE_010 = "space_010_task_space_focus_session"
 SPACE_011 = "space_011_sync_clients_streaming"
