@@ -262,6 +262,7 @@ def upgrade() -> None:
         sa.Column("work_item_id", sa.String(36), nullable=False),
         sa.Column("title_snapshot", sa.String(500), nullable=False),
         sa.Column("level2_snapshot", sa.String(500)),
+        sa.Column("work_item_version_snapshot", sa.Integer, nullable=False, server_default="0"),
         sa.Column("plan_rank", sa.Integer, nullable=False, server_default="0"),
         sa.Column("source", sa.String(32), nullable=False),
         sa.Column("added_at", sa.String(32), nullable=False),

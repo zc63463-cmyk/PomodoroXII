@@ -56,6 +56,9 @@ class SessionWorkItemPlan(Base, SyncMixin):
     work_item_id: Mapped[str] = mapped_column(String(36), nullable=False)
     title_snapshot: Mapped[str] = mapped_column(String(500), nullable=False)
     level2_snapshot: Mapped[str | None] = mapped_column(String(500))
+    work_item_version_snapshot: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     plan_rank: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     added_at: Mapped[str] = mapped_column(String(32), nullable=False)

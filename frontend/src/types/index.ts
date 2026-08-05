@@ -560,7 +560,6 @@ export interface SessionCommandQueueRow {
 }
 
 export interface CommandReconciliationAttemptRow {
-  attemptId: string
   operationId: string
   spaceId: string
   sessionId: string

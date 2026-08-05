@@ -157,6 +157,24 @@ async def test_purge_active_folder_is_rejected(client):
     assert resp.status_code == 422
 
 
+@pytest.mark.asyncio
+async def test_purge_active_quick_note_is_rejected(client):
+    """A QuickNote must enter Trash before it can be permanently purged."""
+    space_token = await _setup_login_and_space_token(client)
+    headers = {"Authorization": f"Bearer {space_token}"}
+
+    resp = await client.post(
+        "/api/v1/quick-notes", json={"content": "Still active"}, headers=headers
+    )
+    assert resp.status_code == 201
+    quick_note_id = resp.json()["id"]
+
+    resp = await client.delete(
+        f"/api/v1/trash/quick_note/{quick_note_id}", headers=headers
+    )
+    assert resp.status_code == 422
+
+
 # --------------------------------------------------------------------------- #
 # D-2: Note soft-delete -> trash -> restore -> purge cycle
 # --------------------------------------------------------------------------- #

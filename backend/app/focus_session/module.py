@@ -6,8 +6,10 @@ All write operations go through S3 ``MutationUnitOfWork.execute``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from app.errors import SpaceRecoveryRequiredError
 from app.focus_session.commands import (
     build_focus_request,
     validate_reconcile_shape,
@@ -118,94 +120,80 @@ class DefaultFocusSessionModule(FocusSessionModule):
     async def start(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("start", command)
-        require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        return await self._execute(scope, "start", command)
 
     async def pause(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("pause", command)
-        require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        return await self._execute(scope, "pause", command)
 
     async def resume(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("resume", command)
-        require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        return await self._execute(scope, "resume", command)
 
     async def end(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("end", command)
-        require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        return await self._execute(scope, "end", command)
 
     async def update_note(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("update_note", command)
-        require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        return await self._execute(scope, "update_note", command)
 
     async def set_current_plan_item(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("set_current_plan_item", command)
-        require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        return await self._execute(scope, "set_current_plan_item", command)
 
     async def set_completion_draft(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("set_completion_draft", command)
-        require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        return await self._execute(scope, "set_completion_draft", command)
 
     async def add_plan_item(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("add_plan_item", command)
-        require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        return await self._execute(scope, "add_plan_item", command)
 
     async def remove_plan_item(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("remove_plan_item", command)
-        require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        return await self._execute(scope, "remove_plan_item", command)
 
     async def submit_review(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
     ) -> FocusSessionView:
-        request = build_focus_request("submit_review", command)
-        if command.ownership_epoch is not None:
+        return await self._execute(scope, "submit_review", command)
+
+    async def _execute(
+        self, scope: SpaceRuntimeHandle, action: str,
+        command: FocusSessionCommand,
+    ) -> FocusSessionView:
+        request = build_focus_request(action, command)
+        if action == "submit_review" and command.ownership_epoch is not None:
             raise ValueError("post-terminal review requires no owner epoch")
         require_focus_scope(scope, command.space_id, command.session_id)
-        result = await self._uow.execute(scope, request, command.command_id)
-        view = focus_session_view(dict(result.value))
-        return FocusSessionView(value=view)
+        if command.session_id is None:
+            raise ValueError("FocusSession command requires session_id")
+
+        async def post_image(_result: object) -> Mapping[str, object]:
+            aggregate = await self._query.load(scope, command.session_id)
+            if aggregate.get("session") is None:
+                raise RuntimeError("FocusSession mutation committed without a queryable Session")
+            return focus_session_view(dict(aggregate))
+
+        result = await self._uow.execute(
+            scope, request, command.command_id, result_hook=post_image,
+        )
+        required = {
+            "session", "context", "attribution", "plan", "outcomes",
+            "commandEnvelopes", "commandReceipts",
+        }
+        if not result.value.keys() >= required:
+            raise SpaceRecoveryRequiredError("FocusSession replay post-image is unavailable")
+        return FocusSessionView(value=result.value)
 
     async def reconcile_commands(
         self, scope: SpaceRuntimeHandle, command: FocusSessionCommand,
@@ -214,4 +202,13 @@ class DefaultFocusSessionModule(FocusSessionModule):
         validate_reconcile_shape(command)
         require_focus_scope(scope, command.space_id, command.session_id)
         result = await self._uow.execute(scope, request, command.command_id)
-        return FocusSessionView(value=dict(result.value))
+        if self._reconciler is None:
+            raise RuntimeError("FocusSession command reconciler is not installed")
+        reconcile = getattr(self._reconciler, "reconcile", None)
+        if not callable(reconcile):
+            raise TypeError("FocusSession command reconciler has no reconcile method")
+        return await reconcile(
+            scope,
+            command,
+            admission=dict(result.value),
+        )

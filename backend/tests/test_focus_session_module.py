@@ -177,11 +177,14 @@ class TestFocusSessionModuleIntegration:
     """Integration tests using the S3 mutation fixture infrastructure."""
 
     @pytest.fixture
-    def focus_fixture(self, mutation_fixture_factory):
+    async def focus_fixture(self, mutation_fixture_factory):
         """Build a focus session fixture with FocusSessionMutationPolicy."""
         from app.focus_session.module import DefaultFocusSessionModule
         from app.focus_session.policy import FocusSessionMutationPolicy
         from app.focus_session.query import FocusSessionQuery
+        from app.models.project import Project
+        from app.models.work_item import WorkItem
+        from app.models.work_item_definition import StatusDefinition, TypeDefinition
 
         def locator_reader(_scope, request):
             payload = request.payload
@@ -197,6 +200,42 @@ class TestFocusSessionModuleIntegration:
 
         policy = FocusSessionMutationPolicy(locator_reader=locator_reader)
         mutation = mutation_fixture_factory(policies=(policy,))
+        # Start now freezes the real Project and WorkItem identities into the
+        # session context. Keep this module fixture representative of that
+        # production precondition instead of relying on payload-only snapshots.
+        async with mutation.scope.session_factory() as session:
+            session.add(TypeDefinition(id="type-task", name="Task", rank=0))
+            session.add(StatusDefinition(
+                id="status-todo", name="To Do", category="not_started", rank=0,
+            ))
+            session.add(Project(
+                id="proj-1",
+                key="TEST",
+                name="Test Project",
+                default_status_definition_id="status-todo",
+                default_type_definition_id="type-task",
+            ))
+            session.add(WorkItem(
+                id="l2-a",
+                project_id="proj-1",
+                display_key="TEST-1",
+                title="Level 2 Item A",
+                type_definition_id="type-task",
+                status_definition_id="status-todo",
+                parent_id=None,
+                version=1,
+            ))
+            session.add(WorkItem(
+                id="l3-a",
+                project_id="proj-1",
+                display_key="TEST-2",
+                title="Level 3 Item A",
+                type_definition_id="type-task",
+                status_definition_id="status-todo",
+                parent_id="l2-a",
+                version=1,
+            ))
+            await session.commit()
         module = DefaultFocusSessionModule(
             uow=mutation.uow,
             query=FocusSessionQuery(),
@@ -396,6 +435,105 @@ class TestFocusSessionModuleIntegration:
         )
         assert aggregate["plan"][0]["currentDuringSession"] is False
         assert aggregate["session"]["version"] == 1
+
+    @pytest.mark.asyncio
+    async def test_add_plan_item_freezes_new_work_item_version_snapshot(
+        self, focus_fixture,
+    ) -> None:
+        """A during-session plan line must retain the real WorkItem version."""
+        from app.models.work_item import WorkItem
+
+        async with focus_fixture.scope.session_factory() as session:
+            session.add(WorkItem(
+                id="root",
+                project_id="proj-1",
+                display_key="TEST-ROOT",
+                title="Root Item",
+                type_definition_id="type-task",
+                status_definition_id="status-todo",
+                parent_id=None,
+                version=1,
+            ))
+            level2 = await session.get(WorkItem, "l2-a")
+            assert level2 is not None
+            level2.parent_id = "root"
+            session.add(WorkItem(
+                id="l3-b",
+                project_id="proj-1",
+                display_key="TEST-3",
+                title="Level 3 Item B",
+                type_definition_id="type-task",
+                status_definition_id="status-todo",
+                parent_id="l2-a",
+                version=1,
+            ))
+            await session.commit()
+
+        await focus_fixture.module.start(
+            focus_fixture.scope, self._start_command()
+        )
+        payload = {
+            "owner_device_id": "device-a",
+            "owner_tab_id": "tab-a",
+            "work_item_id": "l3-b",
+            "expected_work_item_version": 1,
+            "plan_rank": 1,
+            "added_at": "2026-07-15T08:10:00Z",
+        }
+        command = FocusSessionCommand(
+            command_id="add-plan-l3-b",
+            space_id="space-test",
+            session_id="fs-1",
+            ownership_epoch=1,
+            payload_hash=canonical_payload_hash(
+                focus_business_payload("add_plan_item", payload)
+            ),
+            payload=payload,
+        )
+
+        view = await focus_fixture.module.add_plan_item(
+            focus_fixture.scope, command
+        )
+
+        added = next(item for item in view.value["plan"] if item["workItemId"] == "l3-b")
+        assert added["workItemVersionSnapshot"] == 1
+        aggregate = await focus_fixture.module._query.load(
+            focus_fixture.scope, "fs-1"
+        )
+        queried = next(item for item in aggregate["plan"] if item["workItemId"] == "l3-b")
+        assert queried["workItemVersionSnapshot"] == 1
+
+    @pytest.mark.asyncio
+    async def test_replaying_operation_returns_original_post_image_after_later_mutation(
+        self, focus_fixture,
+    ) -> None:
+        """An idempotent replay must not expose a later mutable aggregate state."""
+        start_command = self._start_command()
+        first = await focus_fixture.module.start(focus_fixture.scope, start_command)
+        assert first.value["session"]["version"] == 1
+        assert first.value["session"]["clockState"] == "running"
+
+        pause_payload = {
+            "occurred_at": "2026-07-15T08:30:00Z",
+            "expected_version": 1,
+            "owner_device_id": "device-a",
+            "owner_tab_id": "tab-a",
+        }
+        pause_command = FocusSessionCommand(
+            command_id="pause-before-start-replay",
+            space_id="space-test",
+            session_id="fs-1",
+            ownership_epoch=1,
+            payload_hash=canonical_payload_hash(
+                focus_business_payload("pause", pause_payload)
+            ),
+            payload=pause_payload,
+        )
+        await focus_fixture.module.pause(focus_fixture.scope, pause_command)
+
+        replay = await focus_fixture.module.start(focus_fixture.scope, start_command)
+        assert replay.value["session"]["version"] == 1
+        assert replay.value["session"]["clockState"] == "running"
 
     @pytest.mark.asyncio
     async def test_reconcile_non_null_ownership_epoch_rejected_before_admission(

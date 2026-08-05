@@ -31,16 +31,24 @@ router = APIRouter()
 
 
 def _map_review_outcome(outcome: ReviewOutcomePayload) -> dict[str, object]:
-    return {
+    mapped: dict[str, object] = {
         "work_item_id": outcome.work_item_id,
         "touched": outcome.touched,
         "result": outcome.result,
-        "execution_persona": outcome.execution_persona,
-        "persona_switched": outcome.persona_switched,
-        "persona_note": outcome.persona_note,
         "state_command": outcome.state_command,
         "expected_work_item_version": outcome.expected_work_item_version,
     }
+    # Preserve whether optional persona fields were actually present on the
+    # wire. The caller hash intentionally distinguishes omitted fields from
+    # explicit nulls, so injecting defaults here would invalidate valid hashes.
+    for wire_name, field_name in (
+        ("execution_persona", "execution_persona"),
+        ("persona_switched", "persona_switched"),
+        ("persona_note", "persona_note"),
+    ):
+        if field_name in outcome.model_fields_set:
+            mapped[wire_name] = getattr(outcome, field_name)
+    return mapped
 
 
 def _map_review_payload(body: SubmitFocusSessionReviewRequest) -> dict[str, object]:

@@ -1,8 +1,10 @@
 import { canonicalize } from 'json-canonicalize'
 import type { PomodoroXIDB } from '@/services/database'
+import { focusSessionAggregateSchema } from '@/lib/contracts/focus-session'
 import { focusSessionApi, type ReconcileInput } from '@/services/focus-session-api'
 import { hashCommandPayload, type JsonValue } from '@/lib/contracts/payload-hash'
 import type { CommandReconciliationAttemptRow, SessionCommandQueueRow } from '@/types'
+import { persistImmutableSessionCommandReceipts, toReviewRows } from './focus-session-repository'
 
 type ReconciliationRequestIntent = Omit<ReconcileInput, 'operationId'>
 
@@ -22,10 +24,7 @@ const reconciliationHashPayload = (request: ReconciliationRequestIntent): JsonVa
 const now = () => new Date().toISOString()
 
 async function findAttempt(db: PomodoroXIDB, operationId: string): Promise<CommandReconciliationAttemptRow | undefined> {
-  return await db.sessionCommandReconciliationAttempts
-    .toCollection()
-    .filter((row) => row.operationId === operationId)
-    .first() as CommandReconciliationAttemptRow | undefined
+  return await db.sessionCommandReconciliationAttempts.get(operationId) as CommandReconciliationAttemptRow | undefined
 }
 
 export async function prepareReconciliationAttempt(
@@ -68,7 +67,6 @@ export async function prepareReconciliationAttempt(
 
     const timestamp = now()
     const row: CommandReconciliationAttemptRow = {
-      attemptId: crypto.randomUUID(),
       operationId: requestedOperationId ?? crypto.randomUUID(),
       spaceId: request.spaceId,
       sessionId: request.sessionId,
@@ -144,29 +142,35 @@ export class CommandReconciliation {
         throw new Error('reconciliation_claim_lost')
       }
       await this.db.sessionCommandQueue.update(commandId, { state: 'querying', updatedAt: now() })
-      await this.db.sessionCommandReconciliationAttempts.update(attempt.attemptId, { state: 'in_flight', updatedAt: now() })
+      await this.db.sessionCommandReconciliationAttempts.update(attempt.operationId, { state: 'in_flight', updatedAt: now() })
     })
 
-    let aggregate: { commandReceipts?: Array<Record<string, unknown>> }
+    let aggregate: ReturnType<typeof focusSessionAggregateSchema.parse>
+    let terminal: Record<string, unknown> | undefined
+    let state: 'held' | 'terminal'
     try {
-      aggregate = await this.api.reconcileCommands({ operationId: attempt.operationId, ...boundRequest }) as unknown as { commandReceipts?: Array<Record<string, unknown>> }
+      aggregate = focusSessionAggregateSchema.parse(
+        await this.api.reconcileCommands({ operationId: attempt.operationId, ...boundRequest }),
+      )
+      const rows = await toReviewRows(this.db, aggregate, request.spaceId, sessionId)
+      const receipts = await persistImmutableSessionCommandReceipts(
+        this.db,
+        rows.receipts,
+        new Set(rows.envelopes.map((envelope) => envelope.commandId)),
+      )
+      terminal = latestReceipt(receipts, commandId)
+      state = terminalState(terminal?.state) ? 'terminal' : 'held'
     } catch (error) {
       await this.db.sessionCommandQueue.update(commandId, { state: 'held', lastReceiptState: 'unknown', updatedAt: now() })
       throw error
     }
-    const receipts = Array.isArray(aggregate.commandReceipts) ? aggregate.commandReceipts : []
-    if (receipts.length > 0) await this.db.sessionCommandReceipts.bulkPut(receipts)
-    const terminal = latestReceipt(receipts, commandId)
-    const state = terminalState(terminal?.state)
-      ? 'terminal'
-      : 'held'
     await this.db.transaction('rw', this.db.sessionCommandQueue, this.db.sessionCommandReconciliationAttempts, async () => {
       await this.db.sessionCommandQueue.update(commandId, {
         state,
         lastReceiptState: terminal?.state ?? 'unknown',
         updatedAt: now(),
       })
-      await this.db.sessionCommandReconciliationAttempts.update(attempt.attemptId, {
+      await this.db.sessionCommandReconciliationAttempts.update(attempt.operationId, {
         state: 'terminal', updatedAt: now(),
       })
     })

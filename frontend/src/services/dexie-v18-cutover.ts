@@ -145,10 +145,61 @@ export async function atomicDexieV18Cutover(dbName: string): Promise<void> {
   })
 }
 
+async function readNativeReceiptSchema(
+  dbName: string,
+): Promise<{ version: number; keyPath: string | string[] | null; storeNames: string[] }> {
+  return await new Promise<{ version: number; keyPath: string | string[] | null; storeNames: string[] }>((resolve, reject) => {
+    const request = indexedDB.open(dbName)
+    request.onsuccess = () => {
+      const database = request.result
+      try {
+        const storeNames = Array.from(database.objectStoreNames).sort()
+        const keyPath = database.objectStoreNames.contains('sessionCommandReceipts')
+          ? database.transaction('sessionCommandReceipts', 'readonly').objectStore('sessionCommandReceipts').keyPath
+          : null
+        resolve({ version: database.version, keyPath, storeNames })
+      } catch (error) {
+        reject(error)
+      } finally {
+        database.close()
+      }
+    }
+    request.onerror = () => reject(request.error ?? new Error('dexie_v18_schema_probe_failed'))
+  })
+}
+
+function stableSerialize(value: unknown): string {
+  if (value instanceof Date) return JSON.stringify(value.toISOString())
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`
+  }
+  const serialized = JSON.stringify(value)
+  return serialized === undefined ? String(value) : serialized
+}
+
+function assertNativeV18Inventory(storeNames: string[]): void {
+  const expected = Object.values(V18_STORE_DEFINITIONS)
+    .filter((definition) => !definition.removed)
+    .map((definition) => definition.name)
+    .sort()
+  if (stableSerialize(storeNames) !== stableSerialize(expected)) {
+    const unexpected = storeNames.find((name) => !expected.includes(name))
+    throw new Error(unexpected ? `unsupported_client_schema:180_store:${unexpected}` : 'unsupported_client_schema:180_inventory')
+  }
+}
+
 export async function openPomodoroXIDB(spaceId: string) {
   if (!spaceId.trim()) throw new Error('spaceId is required')
   const dbName = dexieDbNameForSpace(spaceId)
   await atomicDexieV18Cutover(dbName)
+  const nativeReceiptSchema = await readNativeReceiptSchema(dbName)
+  assertNativeV18Inventory(nativeReceiptSchema.storeNames)
+  const nativeReceiptKeyPath = nativeReceiptSchema.keyPath
+  if (!Array.isArray(nativeReceiptKeyPath) || nativeReceiptKeyPath.length !== 2 ||
+      nativeReceiptKeyPath[0] !== 'commandId' || nativeReceiptKeyPath[1] !== 'attempt') {
+    throw new Error('unsupported_client_schema:180_receipt_key')
+  }
   const { PomodoroXIDB } = await import('./database')
   const database = new PomodoroXIDB(spaceId, dbName)
   await database.open()
@@ -156,6 +207,10 @@ export async function openPomodoroXIDB(spaceId: string) {
     database.close()
     throw new Error('space_database_open_identity_mismatch')
   }
+  // V18 is the locked breaking cutover. A database already opened with an
+  // earlier draft of V18 may still carry the old commandId-only receipt key;
+  // refuse it explicitly instead of allowing composite-key writes to fail
+  // nondeterministically or overwrite receipt history.
   return database
 }
 

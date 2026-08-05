@@ -48,14 +48,31 @@ const sessionCommandEnvelopeSchema = z.object({
   createdAt: utc,
 }).strict()
 
-const sessionCommandReceiptSchema = z.object({
+const sessionCommandReceiptBackendSchema = z.object({
+  commandId: operationId,
+  state: receiptStateSchema,
+  errorCode: z.string().nullable(),
+  retryable: z.boolean(),
+  details: z.record(z.string(), z.unknown()).nullable(),
+  result: z.unknown().nullable(),
+  updatedAt: utc,
+}).strict()
+
+export const sessionCommandReceiptSchema = z.object({
   commandId: operationId,
   attempt: nonnegativeVersion,
   state: receiptStateSchema,
   errorCode: z.string().nullable(),
   detail: z.record(z.string(), z.unknown()).nullable(),
   recordedAt: utc,
+  retryable: z.boolean().optional(),
+  result: z.unknown().nullable().optional(),
 }).strict()
+
+export const sessionCommandReceiptWireSchema = z.union([
+  sessionCommandReceiptBackendSchema,
+  sessionCommandReceiptSchema,
+])
 
 const sessionTaskContextBusiness = {
   sessionId: id,
@@ -185,7 +202,7 @@ export const focusSessionAggregateSchema = z.object({
   plan: z.array(sessionWorkItemPlanSchema),
   outcomes: z.array(sessionWorkItemOutcomeSchema),
   commandEnvelopes: z.array(sessionCommandEnvelopeSchema),
-  commandReceipts: z.array(sessionCommandReceiptSchema),
+  commandReceipts: z.array(sessionCommandReceiptWireSchema),
 }).strict()
 
 export function deriveClockStateFromPersistedFacts(row: Pick<z.infer<typeof focusSessionRecoveryWireSchema>, 'endedAt' | 'pauseStartedAt'>) {
@@ -379,6 +396,7 @@ export type SessionWorkItemPlanView = z.infer<typeof sessionWorkItemPlanSchema>
 export type SessionWorkItemOutcomeView = z.infer<typeof sessionWorkItemOutcomeSchema>
 export type SessionCommandEnvelopeView = z.infer<typeof sessionCommandEnvelopeSchema>
 export type SessionCommandReceiptView = z.infer<typeof sessionCommandReceiptSchema>
+export type SessionCommandReceiptWireView = z.infer<typeof sessionCommandReceiptWireSchema>
 export type ProvisionalActivationPayload = z.infer<typeof activateProvisionalPayloadSchema>
 export type ReconcileFocusSessionCommandsInput = z.infer<typeof reconcileFocusSessionCommandsInputSchema>
 export type ActiveSessionLocator = z.infer<typeof activeSessionLocatorSchema>

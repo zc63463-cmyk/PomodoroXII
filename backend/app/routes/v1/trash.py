@@ -306,6 +306,10 @@ async def purge_item(
         obj = await db.get(QuickNote, entity_id)
         if obj is None:
             raise NotFoundError(f"quick_note '{entity_id}' not found")
+        if obj.trashed_at is None:
+            raise ValidationError(
+                f"quick_note '{entity_id}' is not trashed; refuse to purge"
+            )
         await store.uow.execute(
             scope,
             store.entity_commands.delete(

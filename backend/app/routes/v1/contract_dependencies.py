@@ -36,9 +36,27 @@ def get_task_space_command_module(
     return DefaultTaskSpaceCommandModule(uow)
 
 
-def get_focus_session_module() -> "FocusSessionModule":
-    """Return the installed FocusSessionModule or fail closed."""
-    raise RuntimeError("FocusSessionModule provider is not installed")
+def get_focus_session_module(
+    uow=Depends(get_mutation_uow),
+) -> "FocusSessionModule":
+    """Build the FocusSession adapter over the shared S3 UoW."""
+    from app.focus_session.command_reconciler import (
+        S3ReceiptWriter,
+        S3StoredTaskCommandLookup,
+        SessionCommandReconciler,
+    )
+    from app.focus_session.module import DefaultFocusSessionModule
+    from app.focus_session.query import FocusSessionQuery
+
+    query = FocusSessionQuery()
+    task_space = DefaultTaskSpaceCommandModule(uow)
+    reconciler = SessionCommandReconciler(
+        task_space,
+        S3StoredTaskCommandLookup(),
+        S3ReceiptWriter(uow),
+        query,
+    )
+    return DefaultFocusSessionModule(uow=uow, query=query, reconciler=reconciler)
 
 
 def get_active_session_coordinator() -> "ActiveSessionCoordinator":

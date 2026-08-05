@@ -14,12 +14,18 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from types import MappingProxyType
 
+from app.focus_session.contracts import CommandReceiptState
 from app.focus_session.effort_projection import EffortProjectionCompiler
+from app.focus_session.receipts import decode_reconcile_coordination
+from app.models.mutation import MutationOperation
+from app.mutation.journal import MutationJournal
 from app.mutation.types import (
     DbMutationPlan,
     MutationCommand,
     MutationRequest,
+    MutationState,
     SyncEventPlan,
+    decode_persisted_command,
     require_frozen_object,
     validate_canonical_timestamp,
 )
@@ -27,6 +33,8 @@ from app.mutation.types import (
     MutationRuleViolation as _MutationRuleViolation,
 )
 from app.mutation.unit_of_work import MutationCompileContext, MutationDomainPolicy
+from app.task_space.contracts import SYSTEM_STATUS_IDS, MutateWorkItem
+from app.task_space.module import build_task_space_request
 
 FOCUS_SESSION_POLICY_TYPES = frozenset({
     "focus_session",
@@ -64,6 +72,36 @@ _SYNC_MATRIX: dict[tuple[str, str], bool] = {
     ("session_work_item_outcome", "update"): False,
     ("session_work_item_outcome", "delete"): False,
 }
+
+
+def _resolve_transition_status_id(target_transition: object) -> str:
+    """Resolve the seeded Task Space status ID without leaking ``KeyError``.
+
+    Historical envelopes are persisted input.  A malformed transition must
+    become the same recoverable domain rejection as any other invalid
+    reconciliation admission, rather than escaping from a dictionary lookup.
+    """
+    if not isinstance(target_transition, str):
+        raise _MutationRuleViolation(
+            "active_session_recovery_required",
+            {"reason": "invalid_target_transition"},
+            retryable=True,
+        )
+    status_key = {"complete": "completed", "cancel": "cancelled"}.get(target_transition)
+    if status_key is None:
+        raise _MutationRuleViolation(
+            "active_session_recovery_required",
+            {"reason": "invalid_target_transition", "transition": target_transition},
+            retryable=True,
+        )
+    status_id = SYSTEM_STATUS_IDS.get(status_key)
+    if not isinstance(status_id, str) or not status_id:
+        raise _MutationRuleViolation(
+            "active_session_recovery_required",
+            {"reason": "invalid_target_transition", "transition": target_transition},
+            retryable=True,
+        )
+    return status_id
 
 _FOCUS_CLOCK_FIELDS = frozenset({
     "ended_at", "pause_started_at", "gross_seconds", "paused_seconds",
@@ -404,9 +442,13 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             context.authority.row("work_item", str(l3_id))
             for l3_id in l3_ids
         )
+        project = context.authority.row("project", project_id)
+        if project is None:
+            raise _MutationRuleViolation("not_found", {"entityId": project_id})
         structure_snapshot = _work_item_structure_snapshot(
             l2,
             level3_rows,
+            project,
         )
         session_row = _focus_session_row(
             id=session_id,
@@ -478,6 +520,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                     )
                 ),
                 level2_snapshot=context_l2_id,
+                work_item_version_snapshot=int((level3_rows[index] or {}).get("version", 0)),
                 plan_rank=index,
                 source="before_start",
                 added_at=started_at,
@@ -506,10 +549,13 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         for plan_row in plan_rows:
             sync_events.append(_create_sync("session_work_item_plan", plan_row, started_at))
         value = require_frozen_object({
-            "session": _to_camel_session(session_row),
-            "context": _to_camel_context(context_row),
-            "attribution": [_to_camel_attribution(attribution_row)],
-            "plan": [_to_camel_plan(p) for p in plan_rows],
+            "session": _to_camel_session(session_row, context.scope.scope.space_id),
+            "context": _to_camel_context(context_row, context.scope.scope.space_id),
+            "attribution": _to_camel_attribution(attribution_row, context.scope.scope.space_id),
+            "plan": [
+                _to_camel_plan(p, context.scope.scope.space_id, _snapshot_mapping(context_row))
+                for p in plan_rows
+            ],
         })
         return context.command(
             request=request,
@@ -618,7 +664,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 )
                 db_plans.extend(effort_plans)
                 sync_events.extend(effort_events)
-        value = require_frozen_object({"session": _to_camel_session(frozen_after)})
+        value = require_frozen_object({"session": _to_camel_session(frozen_after, context.scope.scope.space_id)})
         return context.command(
             request=request,
             db_plans=tuple(db_plans),
@@ -1031,7 +1077,9 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             db_plans.extend(effort_plans)
             sync_events.extend(effort_events)
 
-        value_dict: dict[str, object] = {"session": _to_camel_session(frozen_after)}
+        value_dict: dict[str, object] = {
+            "session": _to_camel_session(frozen_after, context.scope.scope.space_id)
+        }
         if outcomes_raw:
             value_dict["outcomes"] = len(outcomes_raw)
         return context.command(
@@ -1045,11 +1093,181 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         self, context: MutationCompileContext, request: MutationRequest,
     ) -> MutationCommand:
         context.require_space(str(request.payload.get("space_id", "")))
+        session_id = str(request.payload.get("session_id", request.entity_id))
+        session = context.authority.row("focus_session", session_id)
+        if session is None:
+            raise _MutationRuleViolation("not_found", {"entityId": session_id})
+        command_ids = request.payload.get("command_ids", ())
+        abandon_ids = set(request.payload.get("abandon_command_ids", ()))
+        if not isinstance(command_ids, (tuple, list)) or not command_ids:
+            raise _MutationRuleViolation(
+                "active_session_recovery_required", {"reason": "command_ids"}
+            )
+        caller_replay_safe = request.payload.get("replay_safe") is True
+        root_command_id = str(request.payload.get("command_id", context.operation_id))
+        decision_at = request.payload.get("decision_at")
+        envelope_rows = {
+            str(row.get("command_id")): row
+            for row in context.authority.rows("session_command_envelope")
+            if str(row.get("session_id")) == session_id
+        }
+        decisions: dict[str, Mapping[str, object]] = {}
+        db_plans: list[DbMutationPlan] = []
+
+        def coordination(row: Mapping[str, object] | None) -> Mapping[str, object] | None:
+            if row is None:
+                return None
+            try:
+                value = decode_reconcile_coordination(
+                    state=CommandReceiptState(str(row.get("state"))),
+                    result_json=row.get("result_json"),
+                )
+            except (TypeError, ValueError) as exc:
+                raise _MutationRuleViolation(
+                    "idempotency_conflict", {"reason": "malformed_coordination"}
+                ) from exc
+            if value is None:
+                return None
+            return {"kind": value["kind"], "root_command_id": value["rootCommandId"]}
+
+        async def original_state(envelope: Mapping[str, object]) -> str:
+            command = MutateWorkItem(
+                command_id=str(envelope["command_id"]),
+                space_id=str(envelope["space_id"]),
+                work_item_id=str(envelope["work_item_id"]),
+                expected_version=int(envelope["expected_version"]),
+                payload={
+                    "operation": "transition",
+                    "status_definition_id": _resolve_transition_status_id(
+                        envelope.get("target_transition")
+                    ),
+                },
+                payload_hash=str(envelope["payload_hash"]),
+            )
+            expected_request = build_task_space_request(command)
+            async with context.scope.session_factory() as db_session:
+                operation = await db_session.get(MutationOperation, str(envelope["command_id"]))
+            if operation is None:
+                return "absent"
+            try:
+                persisted = decode_persisted_command(operation.command_json)
+            except (TypeError, ValueError) as exc:
+                raise _MutationRuleViolation(
+                    "idempotency_conflict", {"reason": "stored_request_invalid"}
+                ) from exc
+            if persisted.request.request_hash != expected_request.request_hash:
+                raise _MutationRuleViolation(
+                    "idempotency_conflict", {"reason": "stored_request_identity_mismatch"}
+                )
+            batch = await MutationJournal(context.scope.session_factory).find_batch(operation.batch_id)
+            if batch is None or batch.state not in {MutationState.FINALIZED, MutationState.ABORTED}:
+                return "nonterminal"
+            return "terminal"
+
+        def receipt_plan(
+            envelope: Mapping[str, object],
+            current: Mapping[str, object] | None,
+            *,
+            state: str,
+            result: object | None,
+            updated_at: str,
+        ) -> None:
+            after = require_frozen_object({
+                "command_id": str(envelope["command_id"]),
+                "state": state,
+                "error_code": None,
+                "retryable": False,
+                "details_json": None,
+                "result_json": _json_payload(result),
+                "updated_at": updated_at,
+            })
+            if current is None:
+                db_plans.append(_insert_plan(context.catalog, "session_command_receipt", after))
+            else:
+                db_plans.append(_update_plan(context.catalog, "session_command_receipt", current, after))
+
+        for raw_id in command_ids:
+            command_id = str(raw_id)
+            envelope = envelope_rows.get(command_id)
+            if envelope is None or str(envelope.get("space_id")) != str(request.payload.get("space_id")):
+                raise _MutationRuleViolation(
+                    "active_session_recovery_required", {"reason": "envelope_selection", "commandId": command_id}
+                )
+            current = context.authority.row("session_command_receipt", command_id)
+            current_coordination = coordination(current)
+            state = str(current.get("state")) if current is not None else "pending"
+            original = await original_state(envelope)
+            if original == "terminal" or state in {"succeeded", "failed", "conflict", "abandoned"}:
+                decisions[command_id] = {"kind": "observe", "receipt_state": state}
+                continue
+            if command_id in abandon_ids:
+                if original != "absent" or (
+                    current_coordination is not None
+                    and current_coordination.get("kind") == "replay_claimed"
+                ):
+                    raise _MutationRuleViolation(
+                        "active_session_recovery_required", {"reason": "abandon_not_admissible", "commandId": command_id}
+                    )
+                timestamp = str(decision_at)
+                _require_canonical_timestamp(timestamp)
+                receipt_plan(
+                    envelope,
+                    current,
+                    state="abandoned",
+                    result={
+                        "decision": "abandoned",
+                        "decision_at": timestamp,
+                        "root_command_id": root_command_id,
+                    },
+                    updated_at=timestamp,
+                )
+                decisions[command_id] = {
+                    "kind": "abandoned",
+                    "root_command_id": root_command_id,
+                    "decision_at": timestamp,
+                }
+                continue
+            if (
+                original == "absent"
+                and caller_replay_safe
+                and bool(envelope.get("replay_safe"))
+                and not (
+                    current_coordination is not None
+                    and current_coordination.get("kind") == "replay_claimed"
+                    and current_coordination.get("root_command_id") != root_command_id
+                )
+            ):
+                if current_coordination is None or current_coordination.get("kind") == "replay_finished_unknown":
+                    state = state if state in {"pending", "unknown"} else "pending"
+                    receipt_plan(
+                        envelope,
+                        current,
+                        state=state,
+                        result={
+                            "_reconcileCoordination": {
+                                "kind": "replay_claimed",
+                                "rootCommandId": root_command_id,
+                            }
+                        },
+                        updated_at=str(current.get("updated_at") if current else envelope.get("created_at")),
+                    )
+                decisions[command_id] = {"kind": "replay_claimed", "root_command_id": root_command_id}
+                continue
+            decisions[command_id] = {"kind": "observe", "receipt_state": state}
+
+        # A FocusSession request must retain one authoritative Session post-image
+        # even though reconciliation only changes system receipt rows.
+        session_image = require_frozen_object(dict(session))
+        db_plans.insert(0, _update_plan(context.catalog, "focus_session", session_image, session_image))
+        sync_events = (_update_sync("focus_session", session_image, str(session_image["updated_at"])),)
         return context.command(
             request=request,
-            db_plans=(),
-            sync_events=(),
-            value=require_frozen_object({"admitted": True}),
+            db_plans=tuple(db_plans),
+            sync_events=sync_events,
+            value=require_frozen_object({
+                "ordered_command_ids": tuple(str(item) for item in command_ids),
+                "decisions": decisions,
+            }),
         )
 
     async def _compile_attribution(
@@ -1264,8 +1482,8 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             db_plans=tuple(plans),
             sync_events=tuple(events),
             value=require_frozen_object({
-                "session": _to_camel_session(session_image),
-                "attribution": [_to_camel_attribution(new_row)],
+                "session": _to_camel_session(session_image, context.scope.scope.space_id),
+                "attribution": _to_camel_attribution(new_row, context.scope.scope.space_id),
             }),
         )
 
@@ -1288,6 +1506,9 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             if row.get("session_id") == session_id
         ]
         response_rows = [dict(row) for row in rows]
+        response_context = dict(
+            context.authority.row("session_task_context", f"ctx-{session_id}") or {}
+        )
         plans: list[DbMutationPlan] = []
         events: list[SyncEventPlan] = []
         now = str(request.payload.get("occurred_at") or request.payload.get("added_at") or session.get("updated_at", ""))
@@ -1348,6 +1569,10 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             expected_work_item_version = request.payload.get("expected_work_item_version")
             self._validate_work_item_snapshot(context, work_item, expected_work_item_version)
             context_row = context.authority.row("session_task_context", f"ctx-{session_id}")
+            if context_row is None:
+                raise _MutationRuleViolation(
+                    "not_found", {"entityId": session_id, "reason": "session_context_missing"}
+                )
             level2_id = context_row.get("level2_work_item_id") if context_row else None
             if level2_id is not None and work_item.get("parent_id") != level2_id:
                 raise _MutationRuleViolation("invalid_work_item_tree", {"reason": "plan_parent"})
@@ -1359,6 +1584,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 work_item_id=work_item_id,
                 title_snapshot=str(work_item.get("title", "")),
                 level2_snapshot=level2_id,
+                work_item_version_snapshot=int(work_item.get("version", 0)),
                 plan_rank=int(request.payload.get("plan_rank", len(rows))),
                 source="during_session",
                 added_at=str(request.payload.get("added_at", now)),
@@ -1372,6 +1598,40 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             )
             plans.append(_insert_plan(context.catalog, "session_work_item_plan", plan))
             events.append(_create_sync("session_work_item_plan", plan, now))
+            frozen_structure = _parse_work_item_structure_snapshot(
+                context_row.get("structure_snapshot")
+            )
+            if frozen_structure is None:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {"reason": "invalid_frozen_work_item_snapshot"},
+                )
+            frozen_plan = frozen_structure.get("plan")
+            if not isinstance(frozen_plan, Mapping):
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {"reason": "invalid_frozen_work_item_snapshot"},
+                )
+            structure_after = dict(frozen_structure)
+            structure_after["plan"] = {
+                **dict(frozen_plan),
+                work_item_id: _work_item_identity_snapshot(work_item),
+            }
+            context_after = dict(context_row)
+            context_after["structure_snapshot"] = json.dumps(
+                structure_after,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            context_after["updated_at"] = now
+            context_after["version"] = int(context_row.get("version", 1)) + 1
+            frozen_context_after = require_frozen_object(context_after)
+            plans.append(_update_plan(
+                context.catalog, "session_task_context", context_row, frozen_context_after,
+            ))
+            events.append(_update_sync("session_task_context", frozen_context_after, now))
+            response_context = dict(frozen_context_after)
             response_rows.append(dict(plan))
         elif action == "remove":
             row = _find_plan(rows, request.payload.get("plan_item_id"))
@@ -1401,8 +1661,15 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             db_plans=tuple(plans),
             sync_events=tuple(events),
             value=require_frozen_object({
-                "session": _to_camel_session(session),
-                "plan": [_to_camel_plan(row) for row in response_rows],
+                "session": _to_camel_session(session, context.scope.scope.space_id),
+                "plan": [
+                    _to_camel_plan(
+                        row,
+                        context.scope.scope.space_id,
+                        _snapshot_mapping(response_context),
+                    )
+                    for row in response_rows
+                ],
             }),
         )
 
@@ -1511,7 +1778,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             raise _MutationRuleViolation("not_found", {"entityId": project_id})
         def context_get(name: str, camel: str | None = None) -> object:
             return raw_context.get(name, raw_context.get(camel or _snake_to_camel(name)))
-        if context_get("project_title_snapshot", "projectTitleSnapshot") != project.get("title"):
+        if context_get("project_title_snapshot", "projectTitleSnapshot") != project.get("name"):
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "context_project_snapshot"})
         if context_row["title_snapshot"] != l2.get("title") or context_row["parent_snapshot"] != l2.get("parent_id"):
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "context_work_item_snapshot"})
@@ -1594,6 +1861,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 work_item_id=work_item_id,
                 title_snapshot=str(item_get("title_snapshot", "titleSnapshot") or ""),
                 level2_snapshot=l2_id,
+                work_item_version_snapshot=int(work_item.get("version", 0)),
                 plan_rank=plan_rank,
                 source=str(source),
                 added_at=added_at,
@@ -1619,6 +1887,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                     context.authority.row("work_item", str(item["work_item_id"]))
                     for item in converted_plans
                 ),
+                context.authority.row("project", str(context_row["project_id"])),
             ),
         })
         attribution = _attribution_row(
@@ -1651,10 +1920,13 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             db_plans=tuple(plans),
             sync_events=tuple(sync_events),
             value=require_frozen_object({
-                "session": _to_camel_session(row),
-                "context": _to_camel_context(context_row),
-                "attribution": [_to_camel_attribution(attribution)],
-                "plan": [_to_camel_plan(item) for item in converted_plans],
+                "session": _to_camel_session(row, context.scope.scope.space_id),
+                "context": _to_camel_context(context_row, context.scope.scope.space_id),
+                "attribution": _to_camel_attribution(attribution, context.scope.scope.space_id),
+                "plan": [
+                    _to_camel_plan(item, context.scope.scope.space_id, _snapshot_mapping(context_row))
+                    for item in converted_plans
+                ],
             }),
         )
 
@@ -1670,6 +1942,75 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         now = str(request.payload.get("updated_at", envelope.get("created_at", "")))
         _require_canonical_timestamp(now)
         state = str(request.payload.get("state", "pending"))
+        if state not in {
+            "not_needed", "pending", "succeeded", "failed", "conflict", "unknown", "abandoned",
+        }:
+            raise _MutationRuleViolation(
+                "work_item_structure_changed", {"reason": "receipt_state"}
+            )
+        expected_coordination = request.payload.get("expected_coordination")
+        if expected_coordination is not None:
+            if not isinstance(expected_coordination, Mapping) or set(expected_coordination) != {
+                "kind", "root_command_id"
+            } or expected_coordination.get("kind") not in {
+                "replay_claimed", "replay_finished_unknown"
+            } or not isinstance(expected_coordination.get("root_command_id"), str):
+                raise _MutationRuleViolation(
+                    "active_session_recovery_required", {"reason": "receipt_coordination"}
+                )
+            try:
+                from app.mutation.types import validate_operation_id
+                validate_operation_id(str(expected_coordination["root_command_id"]))
+            except (TypeError, ValueError) as exc:
+                raise _MutationRuleViolation(
+                    "active_session_recovery_required", {"reason": "receipt_coordination"}
+                ) from exc
+        current_coordination = None
+        if current is not None:
+            try:
+                current_coordination = decode_reconcile_coordination(
+                    state=CommandReceiptState(str(current.get("state"))),
+                    result_json=current.get("result_json"),
+                )
+            except (TypeError, ValueError) as exc:
+                raise _MutationRuleViolation(
+                    "idempotency_conflict", {"reason": "malformed_coordination"}
+                ) from exc
+            current_coordination = (
+                None
+                if current_coordination is None
+                else {
+                    "kind": current_coordination["kind"],
+                    "root_command_id": current_coordination["rootCommandId"],
+                }
+            )
+            if str(current.get("state")) in {"succeeded", "failed", "conflict", "abandoned", "not_needed"}:
+                raise _MutationRuleViolation(
+                    "idempotency_conflict", {"reason": "terminal_receipt_immutable"}
+                )
+            if current_coordination != expected_coordination:
+                raise _MutationRuleViolation(
+                    "idempotency_conflict", {"reason": "session_command_not_replay_claimed"}
+                )
+        if state in {"pending", "unknown"}:
+            result = request.payload.get("result")
+            try:
+                coordination_value = decode_reconcile_coordination(
+                    state=CommandReceiptState(state),
+                    result_json=_json_payload(result),
+                )
+            except (TypeError, ValueError) as exc:
+                raise _MutationRuleViolation(
+                    "active_session_recovery_required", {"reason": "receipt_coordination"}
+                ) from exc
+            if state == "unknown" and coordination_value is None:
+                raise _MutationRuleViolation(
+                    "active_session_recovery_required", {"reason": "unknown_receipt_coordination"}
+                )
+        elif isinstance(request.payload.get("result"), Mapping) and "_reconcileCoordination" in request.payload["result"]:
+            raise _MutationRuleViolation(
+                "active_session_recovery_required", {"reason": "terminal_receipt_coordination"}
+            )
         after = {
             "command_id": command_id,
             "state": state,
@@ -1734,7 +2075,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             "focus_session", frozen_after,
             str(frozen_after.get("updated_at", "")),
         )
-        value = require_frozen_object({"session": _to_camel_session(frozen_after)})
+        value = require_frozen_object({"session": _to_camel_session(frozen_after, context.scope.scope.space_id)})
         return context.command(
             request=request,
             db_plans=(db_plan,),
@@ -2488,6 +2829,12 @@ _WORK_ITEM_FROZEN_FIELDS = (
     "version",
 )
 
+_PROJECT_FROZEN_FIELDS = (
+    "id", "created_at", "key", "name", "description", "rank",
+    "default_status_definition_id", "default_type_definition_id",
+    "archived_at", "version",
+)
+
 
 def _work_item_identity_snapshot(row: Mapping[str, object]) -> Mapping[str, object]:
     return {
@@ -2496,9 +2843,19 @@ def _work_item_identity_snapshot(row: Mapping[str, object]) -> Mapping[str, obje
     }
 
 
+def _project_identity_snapshot(row: Mapping[str, object] | None) -> Mapping[str, object]:
+    if row is None:
+        return {}
+    return {
+        field: (str(row.get(field)) if field == "id" else row.get(field))
+        for field in _PROJECT_FROZEN_FIELDS
+    }
+
+
 def _work_item_structure_snapshot(
     level2: Mapping[str, object] | None,
     level3_rows: tuple[Mapping[str, object] | None, ...],
+    project: Mapping[str, object] | None = None,
 ) -> str:
     if level2 is None:
         return "{}"
@@ -2509,6 +2866,7 @@ def _work_item_structure_snapshot(
     }
     return json.dumps(
         {
+            "project": _project_identity_snapshot(project),
             "level2": _work_item_identity_snapshot(level2),
             "plan": plan,
         },
@@ -2606,6 +2964,7 @@ def _attribution_row(
 def _plan_row(
     *, id: str, session_id: str, work_item_id: str,
     title_snapshot: str, level2_snapshot: str | None,
+    work_item_version_snapshot: int,
     plan_rank: int, source: str, added_at: str,
     removed_at: str | None, removal_reason: str | None,
     current_during_session: bool, completion_draft: bool,
@@ -2620,6 +2979,7 @@ def _plan_row(
         "work_item_id": work_item_id,
         "title_snapshot": title_snapshot,
         "level2_snapshot": level2_snapshot,
+        "work_item_version_snapshot": work_item_version_snapshot,
         "plan_rank": plan_rank,
         "source": source,
         "added_at": added_at,
@@ -2710,9 +3070,15 @@ def _update_sync(
 # camelCase projectors
 # ---------------------------------------------------------------------------
 
-def _to_camel_session(row: Mapping[str, object]) -> Mapping[str, object]:
+def _to_camel_session(
+    row: Mapping[str, object], space_id: str | None = None,
+) -> Mapping[str, object]:
     return require_frozen_object({
         "id": row.get("id"),
+        "spaceId": row.get("space_id", space_id),
+        "createdAt": row.get("created_at"),
+        "updatedAt": row.get("updated_at"),
+        "version": row.get("version"),
         "sessionRevision": row.get("session_revision"),
         "startedAt": row.get("started_at"),
         "endedAt": row.get("ended_at"),
@@ -2730,30 +3096,60 @@ def _to_camel_session(row: Mapping[str, object]) -> Mapping[str, object]:
         "sessionNote": row.get("session_note"),
         "reviewState": row.get("review_state"),
         "ownershipState": row.get("ownership_state"),
-        "version": row.get("version"),
     })
 
 
-def _to_camel_context(row: Mapping[str, object]) -> Mapping[str, object]:
+def _snapshot_mapping(row: Mapping[str, object]) -> Mapping[str, object]:
+    raw = row.get("structure_snapshot")
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, Mapping) else {}
+
+
+def _to_camel_context(
+    row: Mapping[str, object], space_id: str | None = None,
+) -> Mapping[str, object]:
+    snapshot = _snapshot_mapping(row)
+    project = snapshot.get("project") if isinstance(snapshot.get("project"), Mapping) else {}
+    level2 = snapshot.get("level2") if isinstance(snapshot.get("level2"), Mapping) else {}
     return require_frozen_object({
         "id": row.get("id"),
+        "spaceId": row.get("space_id", space_id),
+        "createdAt": row.get("created_at"),
+        "updatedAt": row.get("updated_at"),
+        "version": row.get("version"),
         "sessionId": row.get("session_id"),
         "projectId": row.get("project_id"),
         "level2WorkItemId": row.get("level2_work_item_id"),
-        "titleSnapshot": row.get("title_snapshot"),
-        "parentSnapshot": row.get("parent_snapshot"),
-        "estimateSnapshot": row.get("estimate_snapshot"),
-        "statusSnapshot": row.get("status_snapshot"),
-        "structureSnapshot": row.get("structure_snapshot"),
+        "projectTitleSnapshot": project.get("name") or row.get("project_title_snapshot"),
+        "level2TitleSnapshot": level2.get("title") or row.get("title_snapshot"),
+        "level2ParentIdSnapshot": level2.get("parent_id", row.get("parent_snapshot")),
+        "level2StatusDefinitionIdSnapshot": level2.get("status_definition_id") or row.get("status_snapshot"),
+        "level2VersionSnapshot": level2.get("version", row.get("level2_version_snapshot", 0)),
+        "level2EffortLowerSecondsSnapshot": level2.get(
+            "effort_estimate_lower_seconds", row.get("effort_lower")
+        ),
+        "level2EffortUpperSecondsSnapshot": level2.get(
+            "effort_estimate_upper_seconds", row.get("effort_upper", row.get("estimate_snapshot"))
+        ),
         "linkedAt": row.get("linked_at"),
-        "linkMethod": row.get("link_method"),
-        "version": row.get("version"),
+        "linkMethod": "explicit" if row.get("link_method") == "manual" else row.get("link_method"),
     })
 
 
-def _to_camel_attribution(row: Mapping[str, object]) -> Mapping[str, object]:
+def _to_camel_attribution(
+    row: Mapping[str, object], space_id: str | None = None,
+) -> Mapping[str, object]:
     return require_frozen_object({
         "id": row.get("id"),
+        "spaceId": row.get("space_id", space_id),
+        "createdAt": row.get("created_at"),
+        "updatedAt": row.get("updated_at"),
+        "version": row.get("version"),
         "sessionId": row.get("session_id"),
         "revision": row.get("revision"),
         "projectId": row.get("project_id"),
@@ -2761,17 +3157,31 @@ def _to_camel_attribution(row: Mapping[str, object]) -> Mapping[str, object]:
         "reason": row.get("reason"),
         "correctedFromRevision": row.get("corrected_from_revision"),
         "effective": row.get("effective"),
-        "version": row.get("version"),
     })
 
 
-def _to_camel_plan(row: Mapping[str, object]) -> Mapping[str, object]:
+def _to_camel_plan(
+    row: Mapping[str, object], space_id: str | None = None,
+    snapshot: Mapping[str, object] | None = None,
+) -> Mapping[str, object]:
+    snapshot = snapshot or {}
+    plan_snapshot = snapshot.get("plan")
+    frozen = plan_snapshot.get(str(row.get("work_item_id")), {}) if isinstance(plan_snapshot, Mapping) else {}
+    if not isinstance(frozen, Mapping):
+        frozen = {}
     return require_frozen_object({
         "id": row.get("id"),
+        "spaceId": row.get("space_id", space_id),
+        "createdAt": row.get("created_at"),
+        "updatedAt": row.get("updated_at"),
+        "version": row.get("version"),
         "sessionId": row.get("session_id"),
         "workItemId": row.get("work_item_id"),
         "titleSnapshot": row.get("title_snapshot"),
-        "level2Snapshot": row.get("level2_snapshot"),
+        "level2WorkItemIdSnapshot": frozen.get("parent_id", row.get("level2_snapshot")),
+        "workItemVersionSnapshot": row.get(
+            "work_item_version_snapshot", frozen.get("version")
+        ),
         "planRank": row.get("plan_rank"),
         "source": row.get("source"),
         "addedAt": row.get("added_at"),
@@ -2779,13 +3189,18 @@ def _to_camel_plan(row: Mapping[str, object]) -> Mapping[str, object]:
         "removalReason": row.get("removal_reason"),
         "currentDuringSession": row.get("current_during_session"),
         "completionDraft": row.get("completion_draft"),
-        "version": row.get("version"),
     })
 
 
-def _to_camel_outcome(row: Mapping[str, object]) -> Mapping[str, object]:
+def _to_camel_outcome(
+    row: Mapping[str, object], space_id: str | None = None,
+) -> Mapping[str, object]:
     return require_frozen_object({
         "id": row.get("id"),
+        "spaceId": row.get("space_id", space_id),
+        "createdAt": row.get("created_at"),
+        "updatedAt": row.get("updated_at"),
+        "version": row.get("version"),
         "sessionId": row.get("session_id"),
         "sessionRevision": row.get("session_revision"),
         "revision": row.get("revision"),
@@ -2794,14 +3209,12 @@ def _to_camel_outcome(row: Mapping[str, object]) -> Mapping[str, object]:
         "workItemId": row.get("work_item_id"),
         "touched": row.get("touched"),
         "result": row.get("result"),
-        "persona": row.get("persona"),
         "executionPersona": row.get("execution_persona"),
         "personaSwitched": row.get("persona_switched"),
         "personaNote": row.get("persona_note"),
         "stateCommand": row.get("state_command"),
         "commandId": row.get("command_id"),
         "reviewedAt": row.get("reviewed_at"),
-        "version": row.get("version"),
     })
 
 

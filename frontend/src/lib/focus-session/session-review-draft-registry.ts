@@ -10,6 +10,10 @@ export type SessionReviewDraft = z.infer<typeof sessionReviewDraftSchema>
 
 export class SessionReviewDraftController {
   private readonly unregister: () => void
+  private disposed = false
+  private disposing = false
+  private disposePromise: Promise<void> | null = null
+  private flushQueue: Promise<void> = Promise.resolve()
 
   private constructor(
     readonly database: PomodoroXIDB,
@@ -57,6 +61,7 @@ export class SessionReviewDraftController {
   }
 
   update(next: SessionReviewDraft): void {
+    if (this.disposed || this.disposing) throw new Error('review_draft_controller_disposed')
     if (next.spaceId !== this.spaceId || next.sessionId !== this.sessionId ||
         next.operationId !== this.draft.operationId) {
       throw new Error('review_draft_identity_change_forbidden')
@@ -65,19 +70,34 @@ export class SessionReviewDraftController {
   }
 
   async flush(_reason: DraftFlushReason): Promise<void> {
+    if (this.disposed || this.disposing) {
+      await this.flushQueue
+      return
+    }
     const draftJson = canonicalize(this.draft)
     if (draftJson === undefined) throw new Error('review_draft_not_canonical')
-    await this.database.sessionReviewDrafts.put({
+    const row = {
       spaceId: this.spaceId,
       sessionId: this.sessionId,
       draftJson,
       operationId: this.draft.operationId,
       updatedAt: canonicalNow(),
+    }
+    const write = this.flushQueue.then(async () => {
+      if (!this.disposed) await this.database.sessionReviewDrafts.put(row)
     })
+    this.flushQueue = write.catch(() => undefined)
+    await write
   }
 
-  dispose(): void {
-    this.unregister()
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise
+    this.disposing = true
+    this.disposePromise = this.flushQueue.finally(() => {
+      this.disposed = true
+      this.unregister()
+    })
+    return this.disposePromise
   }
 }
 
