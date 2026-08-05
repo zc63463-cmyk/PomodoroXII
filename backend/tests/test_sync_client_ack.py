@@ -46,6 +46,15 @@ def test_opaque_cursor_round_trip_handles_period_in_signature(monkeypatch) -> No
     assert codec.decode(token) == position
 
 
+@pytest.mark.parametrize("token", ["a.b", "a" * 2049])
+def test_opaque_cursor_enforces_ascii_token_length(token: str) -> None:
+    from app.errors import SyncCursorExpiredError
+    from app.sync.cursor import SyncCursorCodec
+
+    with pytest.raises(SyncCursorExpiredError):
+        SyncCursorCodec(b"x" * 32).decode(token)
+
+
 @pytest.mark.asyncio
 async def test_ack_is_monotonic_and_idempotent(space_session) -> None:
     from app.models.sync_client import SyncClient
@@ -70,7 +79,7 @@ async def test_ack_is_monotonic_and_idempotent(space_session) -> None:
         )
     )
     await space_session.flush()
-    registry = SyncClientRegistry(space_session, "c" * 64, 30)
+    registry = SyncClientRegistry(space_session, "c" * 64, 30, space_id="space-a")
 
     accepted = await registry.acknowledge(
         "client-a", CursorPosition(8, "c" * 64, "space-a", "client-a", 0)
@@ -94,6 +103,171 @@ async def test_ack_is_monotonic_and_idempotent(space_session) -> None:
     )
     assert future.error is not None
     assert future.error.code == "cursor_expired"
+
+
+@pytest.mark.asyncio
+async def test_ack_rejects_expired_client_without_refreshing_lease(space_session) -> None:
+    from app.models.sync_client import SyncClient
+    from app.models.sync_state import SyncState
+    from app.sync.clients import SyncClientRegistry
+    from app.sync.cursor import CursorPosition
+
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    state.current_cursor = 10
+    row = SyncClient(
+        client_id="expired-client",
+        ack_sequence=5,
+        catalog_hash="c" * 64,
+        registered_at="2026-08-01T00:00:00.000Z",
+        last_seen_at="2026-08-01T00:00:00.000Z",
+        expires_at="2026-08-01T00:00:00.000Z",
+        requires_recovery=False,
+        recovery_generation=0,
+    )
+    space_session.add(row)
+    await space_session.flush()
+    registry = SyncClientRegistry(
+        space_session,
+        "c" * 64,
+        30,
+        space_id="space-a",
+        now_factory=lambda: "2026-08-02T00:00:00.000Z",
+    )
+
+    decision = await registry.acknowledge(
+        "expired-client", CursorPosition(6, "c" * 64, "space-a", "expired-client", 0)
+    )
+
+    assert decision.error is not None
+    await space_session.refresh(row)
+    assert row.ack_sequence == 5
+    assert row.expires_at == "2026-08-01T00:00:00.000Z"
+    assert row.requires_recovery is False
+
+
+def test_registry_requires_authoritative_space_binding(space_session) -> None:
+    from app.sync.clients import SyncClientRegistry
+
+    with pytest.raises(TypeError):
+        SyncClientRegistry(space_session, "c" * 64, 30)
+
+
+@pytest.mark.asyncio
+async def test_recovery_ack_rejects_backward_waterline_without_clearing_state(
+    space_session,
+) -> None:
+    from app.models.sync_client import SyncClient
+    from app.models.sync_recovery import SyncRecoveryManifest
+    from app.models.sync_state import SyncState
+    from app.sync.clients import SyncClientRegistry
+    from app.sync.cursor import CursorPosition
+
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    state.current_cursor = 12
+    row = SyncClient(
+        client_id="recovering-client",
+        ack_sequence=10,
+        catalog_hash="c" * 64,
+        registered_at="2026-08-01T00:00:00.000Z",
+        last_seen_at="2026-08-01T00:00:00.000Z",
+        expires_at="2099-08-01T00:00:00.000Z",
+        requires_recovery=True,
+        recovery_generation=2,
+        recovery_manifest_token="manifest-backward",
+        recovery_waterline=9,
+        recovery_completed_at="2026-08-01T01:00:00.000Z",
+    )
+    space_session.add(row)
+    space_session.add(
+        SyncRecoveryManifest(
+            token="manifest-backward",
+            space_id="space-a",
+            client_id="recovering-client",
+            generation=2,
+            catalog_hash="c" * 64,
+            waterline=9,
+            total_entities=0,
+            total_chunks=0,
+            total_uncompressed_bytes=0,
+            created_at="2026-08-01T00:00:00.000Z",
+            expires_at="2099-08-01T00:00:00.000Z",
+            manifest_sha256="d" * 64,
+        )
+    )
+    await space_session.flush()
+    registry = SyncClientRegistry(space_session, "c" * 64, 30, space_id="space-a")
+
+    decision = await registry.acknowledge(
+        "recovering-client",
+        CursorPosition(9, "c" * 64, "space-a", "recovering-client", 2),
+    )
+
+    assert decision.error is not None
+    await space_session.refresh(row)
+    assert row.requires_recovery is True
+    assert row.recovery_manifest_token == "manifest-backward"
+    assert row.recovery_waterline == 9
+    assert row.recovery_completed_at == "2026-08-01T01:00:00.000Z"
+
+
+@pytest.mark.asyncio
+async def test_begin_recovery_advances_generation_and_binds_manifest(space_session) -> None:
+    from app.models.sync_client import SyncClient
+    from app.sync.clients import SyncClientRegistry
+
+    row = SyncClient(
+        client_id="recovery-client",
+        ack_sequence=3,
+        catalog_hash="c" * 64,
+        registered_at="2026-08-01T00:00:00.000Z",
+        last_seen_at="2026-08-01T00:00:00.000Z",
+        expires_at="2099-08-01T00:00:00.000Z",
+        requires_recovery=True,
+        recovery_generation=4,
+    )
+    space_session.add(row)
+    await space_session.flush()
+    registry = SyncClientRegistry(space_session, "c" * 64, 30, space_id="space-a")
+
+    registration = await registry.begin_recovery(
+        "recovery-client", manifest_token="manifest-next", waterline=11
+    )
+
+    assert registration.recovery_generation == 5
+    assert registration.recovery_manifest_token == "manifest-next"
+    assert registration.recovery_waterline == 11
+    assert registration.recovery_completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_collect_gc_removes_unreferenced_same_catalog_manifest(space_session) -> None:
+    from app.models.sync_recovery import SyncRecoveryManifest
+    from app.sync.clients import SyncClientRegistry
+
+    space_session.add(
+        SyncRecoveryManifest(
+            token="orphan-manifest",
+            space_id="space-a",
+            client_id="client-a",
+            generation=1,
+            catalog_hash="c" * 64,
+            waterline=4,
+            total_entities=0,
+            total_chunks=0,
+            total_uncompressed_bytes=0,
+            created_at="2026-08-01T00:00:00.000Z",
+            expires_at="2099-08-01T00:00:00.000Z",
+            manifest_sha256="d" * 64,
+        )
+    )
+    await space_session.flush()
+    registry = SyncClientRegistry(space_session, "c" * 64, 30, space_id="space-a")
+
+    await registry.collect_expired_recovery()
+
+    assert await space_session.get(SyncRecoveryManifest, "orphan-manifest") is None
 
 
 @pytest.mark.asyncio
@@ -146,6 +320,60 @@ async def test_recovery_ack_requires_current_completed_manifest(space_session) -
     )
     assert decision.result is not None
     assert decision.result.requires_recovery is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_ack_rejects_manifest_waterline_mismatch(space_session) -> None:
+    from app.models.sync_client import SyncClient
+    from app.models.sync_recovery import SyncRecoveryManifest
+    from app.models.sync_state import SyncState
+    from app.sync.clients import SyncClientRegistry
+    from app.sync.cursor import CursorPosition
+
+    state = await space_session.get(SyncState, 1)
+    assert state is not None
+    state.current_cursor = 12
+    row = SyncClient(
+        client_id="waterline-client",
+        ack_sequence=0,
+        catalog_hash="c" * 64,
+        registered_at="2026-08-01T00:00:00.000Z",
+        last_seen_at="2026-08-01T00:00:00.000Z",
+        expires_at="2099-08-01T00:00:00.000Z",
+        requires_recovery=True,
+        recovery_generation=1,
+        recovery_manifest_token="manifest-waterline",
+        recovery_waterline=9,
+        recovery_completed_at="2026-08-01T01:00:00.000Z",
+    )
+    space_session.add(row)
+    space_session.add(
+        SyncRecoveryManifest(
+            token="manifest-waterline",
+            space_id="space-a",
+            client_id="waterline-client",
+            generation=1,
+            catalog_hash="c" * 64,
+            waterline=8,
+            total_entities=0,
+            total_chunks=0,
+            total_uncompressed_bytes=0,
+            created_at="2026-08-01T00:00:00.000Z",
+            expires_at="2099-08-01T00:00:00.000Z",
+            manifest_sha256="d" * 64,
+        )
+    )
+    await space_session.flush()
+    registry = SyncClientRegistry(space_session, "c" * 64, 30, space_id="space-a")
+
+    decision = await registry.acknowledge(
+        "waterline-client",
+        CursorPosition(9, "c" * 64, "space-a", "waterline-client", 1),
+    )
+
+    assert decision.error is not None
+    await space_session.refresh(row)
+    assert row.requires_recovery is True
 
 SPACE_010 = "space_010_task_space_focus_session"
 SPACE_011 = "space_011_sync_clients_streaming"

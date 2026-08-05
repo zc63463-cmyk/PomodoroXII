@@ -76,7 +76,7 @@ class SyncClientRegistry:
         catalog_hash: str,
         ttl_days: int,
         *,
-        space_id: str | None = None,
+        space_id: str,
         now_factory=utc_now_iso_ms,
     ) -> None:
         if type(ttl_days) is not int or ttl_days <= 0:
@@ -86,7 +86,7 @@ class SyncClientRegistry:
         self.db = session
         self.catalog_hash = catalog_hash
         self.ttl_days = ttl_days
-        self.space_id = space_id
+        self.space_id = _validate_identifier(space_id, field="space_id")
         self._now_factory = now_factory
 
     def _now(self) -> str:
@@ -140,6 +140,31 @@ class SyncClientRegistry:
         await self.db.flush()
         return self._registration(row)
 
+    async def begin_recovery(
+        self,
+        client_id: str,
+        *,
+        manifest_token: str,
+        waterline: int,
+    ) -> ClientRegistration:
+        """Advance the recovery generation and bind a new manifest pointer."""
+        client_id = _validate_identifier(client_id, field="client_id")
+        manifest_token = _validate_identifier(manifest_token, field="manifest_token")
+        if type(waterline) is not int or waterline < 0:
+            raise ValueError("waterline must be a nonnegative integer")
+        row = await self.db.get(SyncClient, client_id)
+        if row is None or row.catalog_hash != self.catalog_hash:
+            raise ValueError("client registration is missing or stale")
+        if row.recovery_generation >= 2**31 - 1:
+            raise ValueError("recovery generation exhausted")
+        row.recovery_generation += 1
+        row.requires_recovery = True
+        row.recovery_manifest_token = manifest_token
+        row.recovery_waterline = waterline
+        row.recovery_completed_at = None
+        await self.db.flush()
+        return self._registration(row)
+
     async def acknowledge(self, client_id: str, position) -> AckDecision:
         from app.sync.cursor import CursorPosition
 
@@ -158,7 +183,10 @@ class SyncClientRegistry:
 
         if position.client_id != client_id:
             return reject()
-        if self.space_id is not None and position.space_id != self.space_id:
+        now = self._now()
+        if position.space_id != self.space_id:
+            return reject()
+        if row.expires_at <= now:
             return reject()
         if position.catalog_hash != self.catalog_hash or row.catalog_hash != self.catalog_hash:
             row.requires_recovery = True
@@ -176,7 +204,9 @@ class SyncClientRegistry:
         if position.sequence > current_cursor or position.sequence < floor:
             return reject()
 
-        now = self._now()
+        if position.sequence < row.ack_sequence:
+            return reject()
+
         if row.requires_recovery:
             token = row.recovery_manifest_token
             if row.recovery_waterline is None or row.recovery_completed_at is None or token is None:
@@ -191,6 +221,7 @@ class SyncClientRegistry:
                 or manifest.client_id != client_id
                 or manifest.catalog_hash != self.catalog_hash
                 or manifest.generation != row.recovery_generation
+                or manifest.waterline != row.recovery_waterline
                 or manifest.expires_at <= now
             ):
                 return reject()
@@ -199,8 +230,6 @@ class SyncClientRegistry:
             row.recovery_waterline = None
             row.recovery_completed_at = None
 
-        if position.sequence < row.ack_sequence:
-            return reject()
         row.ack_sequence = position.sequence
         row.last_seen_at = now
         row.expires_at = _expires_at(now, self.ttl_days)
@@ -273,11 +302,10 @@ class SyncClientRegistry:
             SyncRecoveryManifest.client_id != SyncClient.client_id,
             SyncRecoveryManifest.generation != SyncClient.recovery_generation,
         )
-        if self.space_id is not None:
-            stale_manifest = or_(
-                stale_manifest,
-                SyncRecoveryManifest.space_id != self.space_id,
-            )
+        stale_manifest = or_(
+            stale_manifest,
+            SyncRecoveryManifest.space_id != self.space_id,
+        )
         rows = (
             await self.db.execute(
                 select(SyncClient)
@@ -314,9 +342,9 @@ class SyncClientRegistry:
         if changed:
             await self.db.flush()
 
-        # Delete only stale manifests that are already unreferenced.  The
-        # query is deliberately bounded so a maintenance call cannot create
-        # an unbounded transaction.
+        # Delete only manifests that are already unreferenced.  This includes
+        # superseded same-catalog generations, and remains bounded so one
+        # maintenance call cannot create an unbounded transaction.
         referenced = select(SyncClient.recovery_manifest_token).where(
             SyncClient.recovery_manifest_token.is_not(None)
         )
@@ -324,10 +352,6 @@ class SyncClientRegistry:
             await self.db.execute(
                 select(SyncRecoveryManifest)
                 .where(
-                    or_(
-                        SyncRecoveryManifest.expires_at <= now,
-                        SyncRecoveryManifest.catalog_hash != self.catalog_hash,
-                    ),
                     ~SyncRecoveryManifest.token.in_(referenced),
                 )
                 .order_by(SyncRecoveryManifest.token.asc())
