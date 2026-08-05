@@ -17,6 +17,8 @@ from typing import Annotated, Self
 from pydantic import PositiveInt, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+SYNC_RAW_ENVELOPE_FRAMING_HEADROOM_BYTES = 1024 * 1024
+
 
 class Settings(BaseSettings):
     """Central configuration loaded from environment / .env file."""
@@ -43,8 +45,9 @@ class Settings(BaseSettings):
         "http://localhost:4173",
     ]
     trusted_proxy_cidrs: Annotated[list[str], NoDecode] = []
-    request_body_max_bytes: PositiveInt = 10 * 1024 * 1024
+    request_body_max_bytes: PositiveInt = 11 * 1024 * 1024
     sync_event_payload_max_bytes: PositiveInt = 256 * 1024
+    sync_canonical_batch_max_bytes: PositiveInt = 10 * 1024 * 1024
     debug: bool = False
     environment: str = "development"
     backup_enabled: bool = False
@@ -124,6 +127,22 @@ class Settings(BaseSettings):
         }:
             raise ValueError(
                 "POMODOROXII_SYNC_CURSOR_SECRET is set to a known weak value."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_sync_payload_budgets(self) -> Self:
+        if self.sync_event_payload_max_bytes > self.sync_canonical_batch_max_bytes:
+            raise ValueError(
+                "sync_event_payload_max_bytes must not exceed sync_canonical_batch_max_bytes"
+            )
+        required_raw = (
+            self.sync_canonical_batch_max_bytes
+            + SYNC_RAW_ENVELOPE_FRAMING_HEADROOM_BYTES
+        )
+        if self.request_body_max_bytes < required_raw:
+            raise ValueError(
+                "request_body_max_bytes must cover canonical batch plus fixed framing headroom"
             )
         return self
 

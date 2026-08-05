@@ -26,6 +26,7 @@ class TestModelRegistration:
             # Sync infrastructure (5)
             "tombstones", "settings", "sync_outbox", "sync_audit_log",
             "sync_state", "sync_snapshots",
+            "sync_clients", "sync_recovery_manifests", "sync_recovery_chunks",
             # Mutation journal (3)
             "mutation_batches", "mutation_operations", "mutation_steps",
         }
@@ -36,7 +37,7 @@ class TestModelRegistration:
         }
         assert space_tables == expected_space_tables
         assert meta_tables.isdisjoint(space_tables)
-        assert len(meta_tables | space_tables) == 37
+        assert len(meta_tables | space_tables) == 40
 
     def test_all_models_import_from_db_base(self):
         """No model should import from app.database — only app.db.base."""

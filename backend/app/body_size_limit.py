@@ -75,6 +75,7 @@ class BodySizeLimitMiddleware:
             return
 
         received = 0
+        raw_body = bytearray()
         complete = False
         response_started = False
         detected_error: _RequestBodyError | None = None
@@ -109,6 +110,7 @@ class BodySizeLimitMiddleware:
                 )
                 complete = True
                 return {"type": "http.request", "body": b"", "more_body": False}
+            raw_body.extend(message.get("body", b""))
             if not message.get("more_body", False):
                 complete = True
                 if declared_size is not None and received != declared_size:
@@ -118,6 +120,7 @@ class BodySizeLimitMiddleware:
                         "Request body length does not match Content-Length",
                     )
                     return {"type": "http.request", "body": b"", "more_body": False}
+                scope.setdefault("state", {})["raw_body"] = bytes(raw_body)
             return message
 
         async def tracked_send(message: Message) -> None:
