@@ -1,0 +1,26 @@
+[
+  {
+    "record": {
+      "entity_id": "vector-1",
+      "entity_type": "quickNote",
+      "kind": "entity",
+      "payload": {
+        "content": "slash/line\n漢字",
+        "id": "vector-1",
+        "spaceId": "spc_test",
+        "version": 0
+      },
+      "updated_at": "2026-08-06T00:00:00.000Z",
+      "version": 0
+    },
+    "jsonl_base64": "eyJlbnRpdHlfaWQiOiJ2ZWN0b3ItMSIsImVudGl0eV90eXBlIjoicXVpY2tOb3RlIiwia2luZCI6ImVudGl0eSIsInBheWxvYWQiOnsiY29udGVudCI6InNsYXNoL2xpbmVcbua8ouWtlyIsImlkIjoidmVjdG9yLTEiLCJzcGFjZUlkIjoic3BjX3Rlc3QiLCJ2ZXJzaW9uIjowfSwidXBkYXRlZF9hdCI6IjIwMjYtMDgtMDZUMDA6MDA6MDAuMDAwWiIsInZlcnNpb24iOjB9Cg==",
+    "sha256": "00acfd0be269eae37303fe9adf1ab7925e67d0f68dfc50b2c37872efb167725c",
+    "entity_count": 1
+  },
+  {
+    "record": null,
+    "jsonl_base64": "",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "entity_count": 0
+  }
+]

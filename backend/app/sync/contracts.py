@@ -6,6 +6,9 @@ must enter through the same frozen contracts before opening a Space runtime.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import math
 import re
@@ -29,6 +32,7 @@ from app.sync.clients import AckResult
 MAX_JS_SAFE_INTEGER = 2**53 - 1
 MAX_SYNC_RECORDS = 500
 MAX_DECODED_CANONICAL_PAGE_BYTES = 8 * 1024 * 1024
+MAX_RECOVERY_BASE64_CHARS = 11_184_812
 MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
 MAX_CANONICAL_BATCH_BYTES = 10 * 1024 * 1024
 SYNC_UTC_RFC3339_PATTERN = re.compile(
@@ -554,6 +558,83 @@ class PullPage:
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotDescriptor:
+    """Internal durable snapshot identity returned by snapshot creation."""
+
+    manifest_token: str
+    first_page_token: str
+    catalog_hash: str
+    waterline: int
+    generation: int
+    total_entities: int
+    total_chunks: int
+    total_uncompressed_bytes: int
+
+    def __post_init__(self) -> None:
+        _validate_string(self.manifest_token, field="manifest_token", pattern=_ASCII_ID)
+        validate_page_token(self.first_page_token)
+        if _SHA256.fullmatch(self.catalog_hash) is None:
+            raise ValueError("invalid snapshot catalog hash")
+        for field in (
+            "waterline",
+            "generation",
+            "total_entities",
+            "total_chunks",
+            "total_uncompressed_bytes",
+        ):
+            require_safe_nonnegative_int(getattr(self, field), field=field)
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryPage:
+    """One complete persisted recovery chunk projected onto the public wire."""
+
+    next_page_token: str | None
+    has_more: bool
+    catalog_hash: str
+    waterline_cursor: str
+    entity_count: int
+    jsonl_base64: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if self.next_page_token is not None:
+            validate_page_token(self.next_page_token)
+        if type(self.has_more) is not bool:
+            raise TypeError("has_more must be bool")
+        if _SHA256.fullmatch(self.catalog_hash) is None or _SHA256.fullmatch(self.sha256) is None:
+            raise ValueError("invalid recovery page hash")
+        validate_cursor_token(self.waterline_cursor)
+        require_safe_nonnegative_int(self.entity_count, field="entity_count")
+        if self.entity_count > MAX_SYNC_RECORDS:
+            raise ValueError("recovery page exceeds record limit")
+        if not isinstance(self.jsonl_base64, str):
+            raise TypeError("jsonl_base64 must be text")
+        try:
+            encoded = self.jsonl_base64.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("recovery payload must be ASCII base64") from exc
+        if len(encoded) > MAX_RECOVERY_BASE64_CHARS:
+            raise ValueError("recovery payload exceeds encoded byte budget")
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("recovery payload is not canonical base64") from exc
+        if base64.b64encode(decoded) != encoded:
+            raise ValueError("recovery payload has an alternate base64 spelling")
+        if len(decoded) > MAX_DECODED_CANONICAL_PAGE_BYTES:
+            raise ValueError("recovery payload exceeds decoded byte budget")
+        if hashlib.sha256(decoded).hexdigest() != self.sha256:
+            raise ValueError("recovery payload hash mismatch")
+        if decoded.count(b"\n") != self.entity_count:
+            raise ValueError("recovery payload entity count mismatch")
+        if decoded and not decoded.endswith(b"\n"):
+            raise ValueError("recovery payload is not canonical JSONL")
+        if self.has_more != (self.next_page_token is not None):
+            raise ValueError("recovery continuation metadata is inconsistent")
+
+
+@dataclass(frozen=True, slots=True)
 class PullPageEnvelope:
     cursor: Any
     catalog_hash: str
@@ -667,12 +748,15 @@ __all__ = [
     "MAX_CANONICAL_BATCH_BYTES",
     "MAX_EVENT_PAYLOAD_BYTES",
     "MAX_JS_SAFE_INTEGER",
+    "MAX_RECOVERY_BASE64_CHARS",
     "MAX_SYNC_RECORDS",
     "MappedSyncBatch",
     "OperationQueryItem",
     "OperationQueryResult",
     "PullPage",
     "PullPageEnvelope",
+    "RecoveryPage",
+    "SnapshotDescriptor",
     "PushApplied",
     "PushConflict",
     "PushError",
