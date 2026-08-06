@@ -487,6 +487,156 @@ def test_domain_policy_fixture_is_catalog_wide_and_wire_parseable() -> None:
     for case in cases:
         SyncEventInput.from_mapping(case.event)
 
+    assert {
+        case.authoritative_running_operation
+        for case in cases
+        if case.authoritative_running_operation is not None
+    } == {
+        "session_note",
+        "current_item",
+        "completion_draft",
+        "plan_add",
+        "plan_remove",
+    }
+
+
+@pytest.mark.parametrize(
+    "case",
+    tuple(
+        case
+        for case in sync_domain_policy_cases()
+        if case.authoritative_running_operation is not None
+    ),
+    ids=lambda case: case.name,
+)
+@pytest.mark.asyncio
+async def test_sync_cannot_bypass_authoritative_active_session_owner(
+    mutation_fixture_factory, monkeypatch, case
+) -> None:
+    from sqlalchemy import func, select
+
+    import app.mutation.unit_of_work as mutation_uow
+    from app.focus_session.policy import FocusSessionMutationPolicy
+    from app.models.focus_session import FocusSession
+    from app.models.mutation import MutationOperation, MutationStep
+    from app.models.session_revision import SessionWorkItemPlan
+    from app.models.sync_client import SyncClient
+    from app.models.sync_outbox import SyncOutbox
+    from app.sync.contracts import SyncEventInput
+    from app.sync.protocol import SyncProtocol
+
+    def locator_reader(_scope, request):
+        return {
+            "state": "claimed",
+            "space_id": "space-test",
+            "session_id": request.entity_id,
+            "operation_id": request.entity_id,
+            "owner_device_id": "device-authoritative",
+            "owner_tab_id": "tab-authoritative",
+            "ownership_epoch": 7,
+        }
+
+    policy = FocusSessionMutationPolicy(locator_reader=locator_reader)
+    policy_calls = []
+    original_policy_compile = policy.compile
+
+    async def track_policy_call(context, request):
+        policy_calls.append((request.entity_type, request.name))
+        return await original_policy_compile(context, request)
+
+    monkeypatch.setattr(policy, "compile", track_policy_call)
+    mutation = mutation_fixture_factory(policies=(policy,))
+    async with mutation._sessions.begin() as session:
+        session.add(
+            SyncClient(
+                client_id="authoritative-observer",
+                ack_sequence=0,
+                catalog_hash=mutation.catalog.hash,
+                registered_at="2026-08-05T09:00:00.000Z",
+                last_seen_at="2026-08-05T09:00:00.000Z",
+                expires_at="2099-08-05T00:00:00.000Z",
+                requires_recovery=False,
+                recovery_generation=0,
+            )
+        )
+        session.add(
+            FocusSession(
+                id="authoritative-session",
+                created_at="2026-08-05T09:00:00.000Z",
+                updated_at="2026-08-05T09:00:00.000Z",
+                version=1,
+                session_revision=1,
+                started_at="2026-08-05T09:00:00.000Z",
+                ended_at=None,
+                pause_started_at=None,
+                planned_seconds=1500,
+                gross_seconds=0,
+                paused_seconds=0,
+                break_seconds=0,
+                focused_seconds=0,
+                validity="pending",
+                review_state="not_required",
+                ownership_state="authoritative",
+                session_note="authoritative note",
+            )
+        )
+        session.add(
+            SessionWorkItemPlan(
+                id="authoritative-plan",
+                created_at="2026-08-05T09:00:00.000Z",
+                updated_at="2026-08-05T09:00:00.000Z",
+                version=1,
+                session_id="authoritative-session",
+                work_item_id="work-item-current",
+                title_snapshot="Current item",
+                level2_snapshot="level-2",
+                work_item_version_snapshot=1,
+                plan_rank=0,
+                source="before_start",
+                added_at="2026-08-05T09:00:00.000Z",
+                removed_at=None,
+                removal_reason=None,
+                current_during_session=False,
+                completion_draft=False,
+            )
+        )
+
+    before = mutation.overlay_snapshot()
+
+    async def poison_generic_fallback(*args, **kwargs):
+        raise AssertionError("FocusSession Sync event reached generic fallback")
+
+    monkeypatch.setattr(
+        mutation_uow, "compile_catalog_entity_command", poison_generic_fallback
+    )
+    event = SyncEventInput.from_mapping(case.event)
+    result = await SyncProtocol(
+        mutation.scope, mutation.uow, catalog=mutation.catalog
+    ).push("authoritative-observer", [event], f"batch-{case.name}")
+
+    assert result.applied == ()
+    assert result.conflicts == ()
+    assert [(item.operation_id, item.code) for item in result.errors] == [
+        (event.operation_id, "stale_session_owner")
+    ]
+    expected_entity_type = (
+        "focus_session"
+        if case.authoritative_running_operation == "session_note"
+        else "session_work_item_plan"
+    )
+    expected_request_name = (
+        "entity.create"
+        if case.authoritative_running_operation == "plan_add"
+        else "entity.update"
+    )
+    assert policy_calls == [(expected_entity_type, expected_request_name)]
+    assert mutation.overlay_snapshot() == before
+    assert await mutation.visible_events() == ()
+    async with mutation._sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(MutationOperation)) == 0
+        assert await session.scalar(select(func.count()).select_from(MutationStep)) == 0
+        assert await session.scalar(select(func.count()).select_from(SyncOutbox)) == 0
+
 
 @pytest.mark.parametrize(
     "case",
