@@ -1718,7 +1718,11 @@ class _Scope:
 
 class _Catalog:
     def get(self, entity_type: str):
-        return SimpleNamespace(sync_enabled=True, effective_sync_entity_type=f"wire-{entity_type}")
+        return SimpleNamespace(
+            sync_enabled=True,
+            effective_sync_entity_type=f"wire-{entity_type}",
+            fields=(),
+        )
 
 
 class _Compiler:
@@ -4166,10 +4170,13 @@ async def test_production_note_policy_executes_db_markdown_index_fts_and_ledger(
             note_id
         ]
         assert event is not None and event.visible is True
-        assert json.loads(event.payload) == {
-            **{field: getattr(stored, field) for field in CATALOG.get("note").field_names},
-            "content": body.decode("utf-8"),
+        expected_payload = {
+            field.name: getattr(stored, field.name)
+            for field in CATALOG.get("note").fields
         }
+        expected_payload["tags"] = json.loads(expected_payload["tags"])
+        expected_payload["content"] = body.decode("utf-8")
+        assert json.loads(event.payload) == expected_payload
     finally:
         stages.close()
         await file_system.close()

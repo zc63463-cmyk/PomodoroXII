@@ -67,7 +67,7 @@ RESERVED_TS_CODES = frozenset(
     }
 )
 RESERVED_S4_MAPPING_CODES = frozenset(
-    {"entity_not_sync_enabled", "payload_field_not_allowed"}
+    {"entity_not_sync_enabled", "payload_field_not_allowed", "tombstone_conflict"}
 )
 
 
@@ -81,6 +81,9 @@ MUTATION_REJECTION_SPECS = MappingProxyType(
             403, "Mutation does not belong to the authorized Space", "authorization_error"
         ),
         "version_conflict": _spec(409, "Entity version conflict", "conflict"),
+        "tombstone_conflict": _spec(
+            409, "Entity was deleted and cannot be resurrected", "conflict"
+        ),
         "cycle_detected": _spec(409, "Mutation would create a cycle", "conflict"),
         "relation_endpoint_missing": _spec(409, "Relation endpoint does not exist", "conflict"),
         "entity_id_mismatch": _spec(
