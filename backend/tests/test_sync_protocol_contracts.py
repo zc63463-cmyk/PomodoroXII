@@ -526,15 +526,9 @@ async def test_sync_cannot_bypass_authoritative_active_session_owner(
     from app.sync.protocol import SyncProtocol
 
     def locator_reader(_scope, request):
-        return {
-            "state": "claimed",
-            "space_id": "space-test",
-            "session_id": request.entity_id,
-            "operation_id": request.entity_id,
-            "owner_device_id": "device-authoritative",
-            "owner_tab_id": "tab-authoritative",
-            "ownership_epoch": 7,
-        }
+        raise AssertionError(
+            f"Sync owner rejection consulted coordinator locator: {request.entity_id}"
+        )
 
     policy = FocusSessionMutationPolicy(locator_reader=locator_reader)
     policy_calls = []
@@ -619,6 +613,7 @@ async def test_sync_cannot_bypass_authoritative_active_session_owner(
     assert [(item.operation_id, item.code) for item in result.errors] == [
         (event.operation_id, "stale_session_owner")
     ]
+    assert result.errors[0].details["reason"] == "authoritative_session"
     expected_entity_type = (
         "focus_session"
         if case.authoritative_running_operation == "session_note"
