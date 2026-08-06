@@ -166,6 +166,32 @@ class TestCoreResponseSchemas:
         assert properties["rejected"].get("items") == {"type": "string"}
 
 
+class TestSyncV2ResponseSchemas:
+    @pytest.mark.parametrize(
+        ("method", "path", "component_name"),
+        [
+            ("post", "/api/v1/sync/v2/operations/query", "SyncV2OperationQueryResponse"),
+            ("post", "/api/v1/sync/v2/push", "SyncV2PushResponse"),
+            ("get", "/api/v1/sync/v2/pull", "SyncV2PullResponse"),
+            ("get", "/api/v1/sync/v2/recover", "SyncV2RecoveryResponse"),
+            ("post", "/api/v1/sync/v2/ack", "SyncV2AckResponse"),
+            ("get", "/api/v1/sync/v2/status", "SyncV2StatusResponse"),
+        ],
+    )
+    async def test_v2_responses_reference_strict_components(
+        self, client, method: str, path: str, component_name: str
+    ) -> None:
+        openapi = await _openapi(client)
+        _assert_component_ref(_response_schema(openapi, method, path), component_name)
+
+    async def test_legacy_sync_components_are_absent(self, client) -> None:
+        schemas = (await _openapi(client))["components"]["schemas"]
+        assert not {
+            "SyncEvent", "SyncPushRequest", "SyncPushResponse", "SyncPullResponse",
+            "SyncFullResponse", "SyncStatusResponse",
+        } & schemas.keys()
+
+
 class TestStatsResponseSchemas:
     """All three stats routes expose precise, reusable response components."""
 

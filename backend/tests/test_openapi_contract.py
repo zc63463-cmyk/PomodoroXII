@@ -275,6 +275,22 @@ class TestOpenAPIContractGate:
             f"Got {len(operations)} operations, expected at least 73"
         )
 
+    async def test_sync_cutover_exposes_only_v2_operation_set(self, client):
+        schema = (await client.get("/openapi.json")).json()
+        sync_operations = {
+            (method, path)
+            for method, path, _operation in _iter_operations(schema)
+            if path.startswith("/api/v1/sync/")
+        }
+        assert sync_operations == {
+            ("POST", "/api/v1/sync/v2/operations/query"),
+            ("POST", "/api/v1/sync/v2/push"),
+            ("GET", "/api/v1/sync/v2/pull"),
+            ("GET", "/api/v1/sync/v2/recover"),
+            ("POST", "/api/v1/sync/v2/ack"),
+            ("GET", "/api/v1/sync/v2/status"),
+        }
+
     def test_error_status_detection_covers_numeric_and_range_keys(self):
         """Error response detection covers numeric statuses and OpenAPI ranges."""
         assert all(
