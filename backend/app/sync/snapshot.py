@@ -212,6 +212,15 @@ class _ChunkDescriptor:
     payload_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ManifestInspection:
+    sha256: str
+    total_chunks: int
+    total_entities: int
+    total_uncompressed_bytes: int
+    indexes_are_contiguous: bool
+
+
 class SyncPageTokenCodec:
     """HMAC-authenticated opaque recovery continuation tokens."""
 
@@ -314,20 +323,11 @@ class SyncSnapshotSerializer:
         return require_frozen_i_json_object(payload)
 
 
-def _canonical_manifest_bytes(
-    manifest: SyncRecoveryManifest, chunks: tuple[_ChunkDescriptor, ...]
-) -> bytes:
-    return rfc8785.dumps(
+def _canonical_manifest_hash_parts(manifest: SyncRecoveryManifest) -> tuple[bytes, bytes]:
+    canonical = rfc8785.dumps(
         {
             "catalog_hash": manifest.catalog_hash,
-            "chunks": [
-                {
-                    "entity_count": chunk.entity_count,
-                    "payload_sha256": chunk.payload_sha256,
-                    "uncompressed_bytes": chunk.uncompressed_bytes,
-                }
-                for chunk in chunks
-            ],
+            "chunks": [],
             "client_id": manifest.client_id,
             "generation": manifest.generation,
             "space_id": manifest.space_id,
@@ -337,6 +337,11 @@ def _canonical_manifest_bytes(
             "waterline": manifest.waterline,
         }
     )
+    marker = b'"chunks":[]'
+    prefix, separator, suffix = canonical.partition(marker)
+    if not separator:
+        raise RuntimeError("canonical manifest omitted chunks")
+    return prefix + b'"chunks":[', b"]" + suffix
 
 
 def decode_persisted_chunk_bounded(
@@ -468,6 +473,68 @@ class SyncSnapshotStore:
             client.recovery_completed_at = None
         await self.db.flush()
 
+    async def _inspect_manifest_chunks(
+        self, manifest: SyncRecoveryManifest
+    ) -> _ManifestInspection:
+        prefix, suffix = _canonical_manifest_hash_parts(manifest)
+        digest = hashlib.sha256()
+        digest.update(prefix)
+        total_chunks = 0
+        total_entities = 0
+        total_uncompressed_bytes = 0
+        indexes_are_contiguous = True
+        last_chunk_index = -1
+        first = True
+        while True:
+            rows = tuple(
+                await self.db.execute(
+                    select(
+                        SyncRecoveryChunk.chunk_index,
+                        SyncRecoveryChunk.entity_count,
+                        SyncRecoveryChunk.uncompressed_bytes,
+                        SyncRecoveryChunk.payload_sha256,
+                    )
+                    .where(
+                        SyncRecoveryChunk.manifest_token == manifest.token,
+                        SyncRecoveryChunk.chunk_index > last_chunk_index,
+                    )
+                    .order_by(SyncRecoveryChunk.chunk_index.asc())
+                    .limit(MAX_CHUNK_ENTITIES)
+                )
+            )
+            if not rows:
+                break
+            for row in rows:
+                chunk = _ChunkDescriptor(*row)
+                indexes_are_contiguous = (
+                    indexes_are_contiguous and chunk.chunk_index == total_chunks
+                )
+                if not first:
+                    digest.update(b",")
+                digest.update(
+                    rfc8785.dumps(
+                        {
+                            "entity_count": chunk.entity_count,
+                            "payload_sha256": chunk.payload_sha256,
+                            "uncompressed_bytes": chunk.uncompressed_bytes,
+                        }
+                    )
+                )
+                first = False
+                total_chunks += 1
+                total_entities += chunk.entity_count
+                total_uncompressed_bytes += chunk.uncompressed_bytes
+                del chunk
+            last_chunk_index = rows[-1][0]
+        digest.update(suffix)
+        return _ManifestInspection(
+            digest.hexdigest(),
+            total_chunks,
+            total_entities,
+            total_uncompressed_bytes,
+            indexes_are_contiguous,
+        )
+
     async def create(self, scope: object, lease: object, client_id: str) -> SnapshotCreateDecision:
         self._assert_lease(scope, lease)
         client_id = validate_client_id(client_id)
@@ -514,30 +581,28 @@ class SyncSnapshotStore:
             raise RuntimeError("snapshot recovery generation changed unexpectedly")
         current = bytearray()
         current_count = 0
-        descriptors: list[_ChunkDescriptor] = []
+        total_chunks = 0
+        total_entities = 0
+        total_uncompressed_bytes = 0
 
         async def flush_chunk() -> None:
             nonlocal current, current_count
+            nonlocal total_chunks, total_entities, total_uncompressed_bytes
             if not current:
                 return
             raw = bytes(current)
             chunk = SyncRecoveryChunk(
                 manifest_token=token,
-                chunk_index=len(descriptors),
+                chunk_index=total_chunks,
                 entity_count=current_count,
                 uncompressed_bytes=len(raw),
                 payload_gzip=gzip.compress(raw, mtime=0),
                 payload_sha256=hashlib.sha256(raw).hexdigest(),
             )
             self.db.add(chunk)
-            descriptors.append(
-                _ChunkDescriptor(
-                    chunk.chunk_index,
-                    chunk.entity_count,
-                    chunk.uncompressed_bytes,
-                    chunk.payload_sha256,
-                )
-            )
+            total_chunks += 1
+            total_entities += current_count
+            total_uncompressed_bytes += len(raw)
             current = bytearray()
             current_count = 0
             await self.db.flush()
@@ -558,14 +623,18 @@ class SyncSnapshotStore:
             await self._mark_unusable(manifest, client)
             return SnapshotCreateDecision(None, exc)
 
-        manifest.total_chunks = len(descriptors)
-        manifest.total_entities = sum(chunk.entity_count for chunk in descriptors)
-        manifest.total_uncompressed_bytes = sum(
-            chunk.uncompressed_bytes for chunk in descriptors
-        )
-        manifest.manifest_sha256 = hashlib.sha256(
-            _canonical_manifest_bytes(manifest, tuple(descriptors))
-        ).hexdigest()
+        manifest.total_chunks = total_chunks
+        manifest.total_entities = total_entities
+        manifest.total_uncompressed_bytes = total_uncompressed_bytes
+        inspection = await self._inspect_manifest_chunks(manifest)
+        if (
+            not inspection.indexes_are_contiguous
+            or inspection.total_chunks != total_chunks
+            or inspection.total_entities != total_entities
+            or inspection.total_uncompressed_bytes != total_uncompressed_bytes
+        ):
+            raise RuntimeError("persisted snapshot chunks disagree with creation totals")
+        manifest.manifest_sha256 = inspection.sha256
         if old_manifest_token is not None and old_manifest_token != token:
             old = await self.db.get(SyncRecoveryManifest, old_manifest_token)
             if old is not None:
@@ -620,8 +689,6 @@ class SyncSnapshotStore:
 
         if client is None or manifest is None:
             return expired()
-        if client.recovery_completed_at is not None:
-            return expired()
         if (
             position.space_id != space_id
             or position.client_id != client_id
@@ -637,30 +704,13 @@ class SyncSnapshotStore:
         if manifest.catalog_hash != self.catalog.hash or client.catalog_hash != self.catalog.hash:
             await self._mark_unusable(manifest, client)
             return expired()
-        descriptors = tuple(
-            _ChunkDescriptor(*row)
-            for row in await self.db.execute(
-                select(
-                    SyncRecoveryChunk.chunk_index,
-                    SyncRecoveryChunk.entity_count,
-                    SyncRecoveryChunk.uncompressed_bytes,
-                    SyncRecoveryChunk.payload_sha256,
-                )
-                .where(SyncRecoveryChunk.manifest_token == manifest.token)
-                .order_by(SyncRecoveryChunk.chunk_index.asc())
-            )
-        )
+        inspection = await self._inspect_manifest_chunks(manifest)
         valid_descriptors = (
-            len(descriptors) == manifest.total_chunks
-            and tuple(chunk.chunk_index for chunk in descriptors)
-            == tuple(range(len(descriptors)))
-            and sum(chunk.entity_count for chunk in descriptors) == manifest.total_entities
-            and sum(chunk.uncompressed_bytes for chunk in descriptors)
-            == manifest.total_uncompressed_bytes
-            and hashlib.sha256(
-                _canonical_manifest_bytes(manifest, descriptors)
-            ).hexdigest()
-            == manifest.manifest_sha256
+            inspection.indexes_are_contiguous
+            and inspection.total_chunks == manifest.total_chunks
+            and inspection.total_entities == manifest.total_entities
+            and inspection.total_uncompressed_bytes == manifest.total_uncompressed_bytes
+            and inspection.sha256 == manifest.manifest_sha256
         )
         if not valid_descriptors:
             await self._mark_unusable(manifest, client)

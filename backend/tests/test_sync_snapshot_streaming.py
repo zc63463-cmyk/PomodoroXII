@@ -89,6 +89,95 @@ async def test_snapshot_chunks_are_bounded_and_resume_without_duplicates(space_s
 
 
 @pytest.mark.asyncio
+async def test_snapshot_creation_does_not_retain_one_descriptor_per_chunk(
+    space_session, monkeypatch
+):
+    import app.sync.snapshot as snapshot
+
+    class TrackingDescriptor:
+        live = 0
+        peak = 0
+
+        def __init__(
+            self,
+            chunk_index: int,
+            entity_count: int,
+            uncompressed_bytes: int,
+            payload_sha256: str,
+        ) -> None:
+            self.chunk_index = chunk_index
+            self.entity_count = entity_count
+            self.uncompressed_bytes = uncompressed_bytes
+            self.payload_sha256 = payload_sha256
+            type(self).live += 1
+            type(self).peak = max(type(self).peak, type(self).live)
+
+        def __del__(self) -> None:
+            type(self).live -= 1
+
+    monkeypatch.setattr(snapshot, "MAX_CHUNK_ENTITIES", 1)
+    monkeypatch.setattr(snapshot, "_ChunkDescriptor", TrackingDescriptor)
+    space_session.add_all(notes(10))
+    await space_session.flush()
+    registry = SyncClientRegistry(space_session, CATALOG.hash, 30, space_id="spc_test")
+    await registry.register_or_touch("client-a")
+    note_catalog = SimpleNamespace(
+        hash=CATALOG.hash,
+        list_sync_enabled=lambda: (CATALOG.get("note"),),
+        model_for=lambda _name: Note,
+    )
+    store = snapshot.SyncSnapshotStore(
+        space_session,
+        note_catalog,
+        snapshot.SyncPageTokenCodec(b"page-token-secret-0123456789abcdef"),
+        snapshot.SyncSnapshotSerializer(),
+        cursor=SyncCursorCodec(b"cursor-secret-0123456789abcdefghij"),
+    )
+
+    created = await store.create(scope_for("spc_test", "body"), TestLease(), "client-a")
+
+    assert created.error is None
+    assert TrackingDescriptor.peak <= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "error_type"),
+    [([], TypeError), ({"spaceId": "spc_test"}, ValueError)],
+)
+async def test_invalid_serializer_output_fails_before_any_chunk_write(
+    space_session, payload, error_type
+):
+    from app.sync.snapshot import SyncPageTokenCodec, SyncSnapshotStore
+
+    class InvalidSerializer:
+        async def serialize(self, _scope, _spec, _row):
+            return payload
+
+    space_session.add_all(notes(1))
+    await space_session.flush()
+    registry = SyncClientRegistry(space_session, CATALOG.hash, 30, space_id="spc_test")
+    await registry.register_or_touch("client-a")
+    note_catalog = SimpleNamespace(
+        hash=CATALOG.hash,
+        list_sync_enabled=lambda: (CATALOG.get("note"),),
+        model_for=lambda _name: Note,
+    )
+    store = SyncSnapshotStore(
+        space_session,
+        note_catalog,
+        SyncPageTokenCodec(b"page-token-secret-0123456789abcdef"),
+        InvalidSerializer(),
+        cursor=SyncCursorCodec(b"cursor-secret-0123456789abcdefghij"),
+    )
+
+    with pytest.raises(error_type):
+        await store.create(scope_for("spc_test", "body"), TestLease(), "client-a")
+
+    assert await space_session.scalar(select(SyncRecoveryChunk).limit(1)) is None
+
+
+@pytest.mark.asyncio
 async def test_waterline_uses_allocated_cursor_and_empty_snapshot_has_terminal_page(space_session):
     from app.sync.snapshot import SyncPageTokenCodec, SyncSnapshotSerializer, SyncSnapshotStore
 
@@ -121,6 +210,40 @@ async def test_waterline_uses_allocated_cursor_and_empty_snapshot_has_terminal_p
     assert page.page.jsonl_base64 == ""
     assert page.page.sha256 == hashlib.sha256(b"").hexdigest()
     assert cursor.decode(page.page.waterline_cursor).sequence == 6
+
+
+@pytest.mark.asyncio
+async def test_terminal_recovery_page_replays_after_response_loss(space_session):
+    from app.sync.snapshot import SyncPageTokenCodec, SyncSnapshotSerializer, SyncSnapshotStore
+
+    registry = SyncClientRegistry(space_session, CATALOG.hash, 30, space_id="spc_test")
+    await registry.register_or_touch("client-a")
+    empty_catalog = SimpleNamespace(
+        hash=CATALOG.hash,
+        list_sync_enabled=lambda: (),
+        model_for=lambda _name: None,
+    )
+    store = SyncSnapshotStore(
+        space_session,
+        empty_catalog,
+        SyncPageTokenCodec(b"page-token-secret-0123456789abcdef"),
+        SyncSnapshotSerializer(),
+        cursor=SyncCursorCodec(b"cursor-secret-0123456789abcdefghij"),
+        ttl_days=30,
+    )
+    created = await store.create(scope_for("spc_test"), TestLease(), "client-a")
+    assert created.descriptor is not None
+
+    first = await store.page(
+        scope_for("spc_test"), TestLease(), "client-a", created.descriptor.first_page_token
+    )
+    replay = await store.page(
+        scope_for("spc_test"), TestLease(), "client-a", created.descriptor.first_page_token
+    )
+
+    assert first.error is None and first.page is not None
+    assert replay.error is None
+    assert replay.page == first.page
 
 
 @pytest.mark.parametrize(
@@ -588,6 +711,65 @@ async def test_expired_generation_collection_removes_chunks_and_rejects_old_toke
     assert expired.error is not None
     assert expired.error.code == "cursor_expired"
     assert dict(expired.error.details) == {"recovery_action": "full_recovery"}
+
+
+@pytest.mark.asyncio
+async def test_one_maintenance_cycle_preserves_the_101st_referenced_recovery_pin(
+    space_session,
+):
+    expired_at = "2026-08-01T00:00:00.000Z"
+    clients = []
+    manifests = []
+    for index in range(101):
+        client_id = f"client-{index:03d}"
+        manifest_token = f"manifest-{index:03d}"
+        clients.append(
+            SyncClient(
+                client_id=client_id,
+                ack_sequence=0,
+                catalog_hash=CATALOG.hash,
+                registered_at=expired_at,
+                last_seen_at=expired_at,
+                expires_at=expired_at,
+                requires_recovery=True,
+                recovery_generation=1,
+                recovery_manifest_token=manifest_token,
+                recovery_waterline=index + 1,
+            )
+        )
+        manifests.append(
+            SyncRecoveryManifest(
+                token=manifest_token,
+                space_id="spc_test",
+                client_id=client_id,
+                generation=1,
+                catalog_hash=CATALOG.hash,
+                waterline=index + 1,
+                total_entities=0,
+                total_chunks=0,
+                total_uncompressed_bytes=0,
+                created_at=expired_at,
+                expires_at=expired_at,
+                manifest_sha256="d" * 64,
+            )
+        )
+    space_session.add_all([*clients, *manifests])
+    await space_session.flush()
+    registry = SyncClientRegistry(
+        space_session,
+        CATALOG.hash,
+        30,
+        space_id="spc_test",
+        now_factory=lambda: "2026-08-02T00:00:00.000Z",
+    )
+
+    await registry.expire_inactive()
+    assert await registry.collect_expired_recovery() == 100
+
+    unprocessed = await space_session.get(SyncClient, "client-100")
+    assert unprocessed is not None
+    assert unprocessed.recovery_manifest_token == "manifest-100"
+    assert await registry.minimum_safe_retention_sequence() == 101
 
 
 @pytest.mark.asyncio

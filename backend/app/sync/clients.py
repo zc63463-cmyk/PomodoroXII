@@ -265,9 +265,9 @@ class SyncClientRegistry:
             await self.db.execute(
                 select(SyncClient)
                 .where(
+                    SyncClient.recovery_manifest_token.is_(None),
                     or_(
                         SyncClient.requires_recovery.is_(False),
-                        SyncClient.recovery_manifest_token.is_not(None),
                         SyncClient.recovery_waterline.is_not(None),
                         SyncClient.recovery_completed_at.is_not(None),
                         SyncClient.catalog_hash != self.catalog_hash,
@@ -297,6 +297,8 @@ class SyncClientRegistry:
         now = self._now()
         stale_manifest = or_(
             SyncRecoveryManifest.token.is_(None),
+            SyncClient.expires_at <= now,
+            SyncClient.catalog_hash != self.catalog_hash,
             SyncRecoveryManifest.expires_at <= now,
             SyncRecoveryManifest.catalog_hash != self.catalog_hash,
             SyncRecoveryManifest.client_id != SyncClient.client_id,
