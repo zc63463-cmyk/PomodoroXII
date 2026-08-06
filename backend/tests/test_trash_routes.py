@@ -18,6 +18,12 @@ from __future__ import annotations
 
 import pytest
 
+from tests.sync_v2_helpers import (
+    pull_sync_v2,
+    ready_sync_v2_client,
+    recover_sync_v2,
+)
+
 pytestmark = pytest.mark.provisioned_space_storage
 
 
@@ -52,6 +58,7 @@ async def test_purge_folder_cascades_to_descendants(client):
     """purge_item on a folder deletes the folder + all descendants."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = await ready_sync_v2_client(client, headers)
 
     # Create root + 2 children + 1 grandchild (so cascade depth > 1).
     resp = await client.post(
@@ -103,10 +110,13 @@ async def test_purge_folder_cascades_to_descendants(client):
         resp = await client.get(f"/api/v1/folders/{fid}", headers=headers)
         assert resp.status_code == 404, f"folder {fid} should be purged"
 
-    # Verify tombstones exist for all via /sync/full.
-    resp = await client.get("/api/v1/sync/full", headers=headers)
-    assert resp.status_code == 200
-    tomb_ids = {t["entity_id"] for t in resp.json()["tombstones"]}
+    # Sync v2 exposes purge tombstones as incremental delete events.
+    page = await pull_sync_v2(client, headers, client_id)
+    tomb_ids = {
+        event["entity_id"]
+        for event in page["events"]
+        if event["entity_type"] == "folder" and event["action"] == "delete"
+    }
     for fid in (root_id, child1_id, child2_id, grandchild1_id):
         assert fid in tomb_ids, f"tombstone for {fid} should exist"
 
@@ -259,6 +269,7 @@ async def test_note_purge_writes_tombstone_and_returns_404(client):
     """DELETE /trash/note/{id} (purge) hard-deletes + writes tombstone."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = await ready_sync_v2_client(client, headers)
 
     note_id = await _create_note(client, headers, content="purge me")
 
@@ -278,10 +289,13 @@ async def test_note_purge_writes_tombstone_and_returns_404(client):
     resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
     assert resp.status_code == 404
 
-    # Tombstone visible in /sync/full.
-    resp = await client.get("/api/v1/sync/full", headers=headers)
-    assert resp.status_code == 200
-    tomb_ids = [t["entity_id"] for t in resp.json()["tombstones"]]
+    # Tombstone visible as a Sync v2 incremental delete event.
+    page = await pull_sync_v2(client, headers, client_id)
+    tomb_ids = [
+        event["entity_id"]
+        for event in page["events"]
+        if event["entity_type"] == "note" and event["action"] == "delete"
+    ]
     assert note_id in tomb_ids
 
 
@@ -391,6 +405,7 @@ async def test_note_purge_creates_sync_events(client):
     """Note purge via KnowledgeStore creates sync events (durable pipeline proof)."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = await ready_sync_v2_client(client, headers)
 
     note_id = await _create_note(client, headers, content="sync event test")
 
@@ -404,19 +419,22 @@ async def test_note_purge_creates_sync_events(client):
     )
     assert resp.status_code == 200
 
-    # Verify sync events were created (the durable pipeline records them).
-    resp = await client.get("/api/v1/sync/full", headers=headers)
-    assert resp.status_code == 200
-    data = resp.json()
-
-    # Tombstone should exist.
-    tomb_ids = [t["entity_id"] for t in data["tombstones"]]
+    # Verify a v2 delete event was created by the durable pipeline.
+    data = await pull_sync_v2(client, headers, client_id)
+    tomb_ids = [
+        event["entity_id"]
+        for event in data["events"]
+        if event["entity_type"] == "note" and event["action"] == "delete"
+    ]
     assert note_id in tomb_ids
 
-    # The purged note must NOT appear in the notes group (hard-deleted).
-    notes = data.get("notes", [])
-    note_rows = [e for e in notes if e.get("id") == note_id]
-    assert len(note_rows) == 0, "purged note should not appear in sync/full notes"
+    records, _waterline = await recover_sync_v2(
+        client, headers, "note-purge-recovery-client"
+    )
+    assert not any(
+        record["entity_type"] == "note" and record["entity_id"] == note_id
+        for record in records
+    )
 
 
 @pytest.mark.asyncio
@@ -424,6 +442,7 @@ async def test_folder_purge_creates_tombstones_for_all_descendants(client):
     """Folder cascade purge creates tombstones for root + all descendants."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = await ready_sync_v2_client(client, headers)
 
     # Create root + child + grandchild.
     resp = await client.post(
@@ -460,10 +479,13 @@ async def test_folder_purge_creates_tombstones_for_all_descendants(client):
     )
     assert resp.status_code == 200
 
-    # Verify tombstones exist for all three folders.
-    resp = await client.get("/api/v1/sync/full", headers=headers)
-    assert resp.status_code == 200
-    tomb_ids = {t["entity_id"] for t in resp.json()["tombstones"]}
+    # Verify v2 delete events exist for all three folders.
+    page = await pull_sync_v2(client, headers, client_id)
+    tomb_ids = {
+        event["entity_id"]
+        for event in page["events"]
+        if event["entity_type"] == "folder" and event["action"] == "delete"
+    }
     assert root_id in tomb_ids
     assert child_id in tomb_ids
     assert grandchild_id in tomb_ids

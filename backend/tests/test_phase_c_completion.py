@@ -16,6 +16,13 @@ import uuid
 
 import pytest
 
+from tests.sync_v2_helpers import (
+    make_sync_v2_event,
+    pull_sync_v2,
+    push_sync_v2,
+    ready_sync_v2_client,
+)
+
 pytestmark = pytest.mark.provisioned_space_storage
 
 # --------------------------------------------------------------------------- #
@@ -61,13 +68,13 @@ _CREATE_PAYLOADS: dict[str, dict] = {
     "quick-notes": {"content": "Test quick note"},
 }
 
-# Maps URL path segment → (sync entity_type, sync pull_key).
-_ENTITY_INFO: dict[str, tuple[str, str]] = {
-    "habits": ("habit", "habits"),
-    "reflections": ("reflection", "reflections"),
-    "schedules": ("schedule", "schedules"),
-    "time-blocks": ("timeBlock", "timeBlocks"),
-    "quick-notes": ("quickNote", "quickNotes"),
+# Maps URL path segment to its Sync v2 entity type.
+_ENTITY_INFO: dict[str, str] = {
+    "habits": "habit",
+    "reflections": "reflection",
+    "schedules": "schedule",
+    "time-blocks": "timeBlock",
+    "quick-notes": "quickNote",
 }
 
 
@@ -85,9 +92,10 @@ async def test_rest_delete_writes_tombstone_visible_in_pull(client, route_segmen
     only task had this coverage before; now session/habit/reflection/
     schedule/timeBlock/quickNote all have it.
     """
-    entity_type, pull_key = _ENTITY_INFO[route_segment]
+    entity_type = _ENTITY_INFO[route_segment]
     token = await _setup_login_and_space_token(client)
     h = _headers(token)
+    client_id = await ready_sync_v2_client(client, h)
 
     # 1. Create entity via REST POST.
     resp = await client.post(
@@ -103,28 +111,14 @@ async def test_rest_delete_writes_tombstone_visible_in_pull(client, route_segmen
     assert resp.status_code in (200, 204), f"DELETE failed: {resp.text}"
 
     # 3. Pull — tombstone must be present.
-    resp = await client.get("/api/v1/sync/pull?since=&limit=100", headers=h)
-    assert resp.status_code == 200
-    data = resp.json()
-
-    tomb_ids = [t["entity_id"] for t in data["tombstones"]]
-    assert entity_id in tomb_ids, (
-        f"Tombstone for {entity_type} '{entity_id}' not found in pull. "
-        f"Tombstones: {tomb_ids}"
-    )
-
-    # 4. Verify the entity row is gone from pull results.
-    row_ids = [r["id"] for r in data.get(pull_key, [])]
-    assert entity_id not in row_ids, (
-        f"{entity_type} '{entity_id}' should be deleted but still in pull.{pull_key}"
-    )
-
-    # 5. Verify tombstone entity_type matches.
-    tomb_entry = next(t for t in data["tombstones"] if t["entity_id"] == entity_id)
-    assert tomb_entry["entity_type"] == entity_type, (
-        f"Tombstone entity_type mismatch: expected '{entity_type}', "
-        f"got '{tomb_entry['entity_type']}'"
-    )
+    data = await pull_sync_v2(client, h, client_id)
+    delete_events = [
+        event
+        for event in data["events"]
+        if event["entity_id"] == entity_id and event["action"] == "delete"
+    ]
+    assert len(delete_events) == 1
+    assert delete_events[0]["entity_type"] == entity_type
 
 
 # --------------------------------------------------------------------------- #
@@ -292,6 +286,7 @@ async def test_http_push_after_rest_delete_returns_tombstone_conflict(client):
     """
     token = await _setup_login_and_space_token(client)
     h = _headers(token)
+    client_id = await ready_sync_v2_client(client, h)
 
     # 1. Create habit via REST.
     resp = await client.post(
@@ -307,13 +302,15 @@ async def test_http_push_after_rest_delete_returns_tombstone_conflict(client):
     assert resp.status_code in (200, 204)
 
     # 3. push create with same id → should get conflict_tombstone.
-    resp = await client.post(
-        "/api/v1/sync/push",
-        json={"events": [{
-            "entity_type": "habit",
-            "entity_id": task_id,
-            "action": "create",
-            "payload": {
+    data = await push_sync_v2(
+        client,
+        h,
+        client_id,
+        [make_sync_v2_event(
+            entity_type="habit",
+            entity_id=task_id,
+            action="create",
+            payload={
                 "id": task_id,
                 "title": "Resurrected",
                 "description": "",
@@ -325,12 +322,9 @@ async def test_http_push_after_rest_delete_returns_tombstone_conflict(client):
                 "sort_order": 0,
                 "archived": False,
             },
-            "client_updated_at": "2026-07-04T15:00:00.000Z",
-        }]},
-        headers=h,
+            client_updated_at="2026-07-04T15:00:00.000Z",
+        )],
     )
-    assert resp.status_code == 200
-    data = resp.json()
     tombstone_conflicts = [
         c for c in data["conflicts"] if c.get("resolution") == "tombstone"
     ]
@@ -349,6 +343,7 @@ async def test_http_push_update_after_rest_delete_returns_tombstone_conflict(cli
     """
     token = await _setup_login_and_space_token(client)
     h = _headers(token)
+    client_id = await ready_sync_v2_client(client, h)
 
     # 1. Create + delete via REST.
     resp = await client.post(
@@ -360,19 +355,19 @@ async def test_http_push_update_after_rest_delete_returns_tombstone_conflict(cli
     await client.delete(f"/api/v1/habits/{task_id}", headers=h)
 
     # 2. push update with same id.
-    resp = await client.post(
-        "/api/v1/sync/push",
-        json={"events": [{
-            "entity_type": "habit",
-            "entity_id": task_id,
-            "action": "update",
-            "payload": {"title": "Resurrected via update"},
-            "client_updated_at": "2026-07-04T15:00:00.000Z",
-        }]},
-        headers=h,
+    data = await push_sync_v2(
+        client,
+        h,
+        client_id,
+        [make_sync_v2_event(
+            entity_type="habit",
+            entity_id=task_id,
+            action="update",
+            payload={"title": "Resurrected via update"},
+            expected_version=1,
+            client_updated_at="2026-07-04T15:00:00.000Z",
+        )],
     )
-    assert resp.status_code == 200
-    data = resp.json()
     tombstone_conflicts = [
         c for c in data["conflicts"] if c.get("resolution") == "tombstone"
     ]

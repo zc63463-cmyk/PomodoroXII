@@ -24,6 +24,13 @@ import uuid
 
 import pytest
 
+from tests.sync_v2_helpers import (
+    make_sync_v2_event,
+    pull_sync_v2,
+    push_sync_v2,
+    ready_sync_v2_client,
+)
+
 pytestmark = pytest.mark.provisioned_space_storage
 
 
@@ -301,50 +308,47 @@ async def test_cursor_pull_excludes_invisible_events_but_keeps_allocated_cursor(
 
 @pytest.mark.asyncio
 async def test_cursor_pull_empty_ledger_returns_zero_cursor(client):
-    """GET /sync/pull?cursor=0 on a fresh space (no events) returns next_cursor=None."""
+    """A ready v2 client receives an empty incremental page on a fresh space."""
     _, space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = await ready_sync_v2_client(client, headers)
 
-    resp = await client.get(
-        "/api/v1/sync/pull?cursor=0&limit=10", headers=headers,
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["cursor_version"] == 2
+    body = await pull_sync_v2(client, headers, client_id, limit=10)
+    assert body["events"] == []
     assert body["has_more"] is False
-    # No events in the ledger → next_cursor stays at the requested cursor (0).
-    assert body["next_cursor"] == 0
+    assert isinstance(body["next_cursor"], str)
+    assert body["next_cursor"]
 
 
 @pytest.mark.asyncio
 async def test_cursor_pull_via_http_after_push_returns_events(client):
-    """POST /sync/push then GET /sync/pull?cursor=0 returns the pushed events."""
+    """Sync v2 push followed by pull returns the pushed event."""
     _, space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = await ready_sync_v2_client(client, headers)
 
     eid = uuid.uuid4().hex
-    resp = await client.post(
-        "/api/v1/sync/push",
-        json={"events": [{
-            "entity_type": "habit",
-            "entity_id": eid,
-            "action": "create",
-            "payload": {"id": eid, "title": "Cursor HTTP"},
-            "client_updated_at": "2026-07-04T10:00:00.000Z",
-        }]},
-        headers=headers,
+    await push_sync_v2(
+        client,
+        headers,
+        client_id,
+        [make_sync_v2_event(
+            entity_type="habit",
+            entity_id=eid,
+            action="create",
+            payload={"id": eid, "title": "Cursor HTTP"},
+            client_updated_at="2026-07-04T10:00:00.000Z",
+        )],
     )
-    assert resp.status_code == 200
 
-    resp = await client.get(
-        "/api/v1/sync/pull?cursor=0&limit=10", headers=headers,
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["cursor_version"] == 2
-    habit_ids = [t["id"] for t in body.get("habits", [])]
+    body = await pull_sync_v2(client, headers, client_id, limit=10)
+    habit_ids = [
+        event["entity_id"]
+        for event in body["events"]
+        if event["entity_type"] == "habit"
+    ]
     assert eid in habit_ids
-    assert body["next_cursor"] is not None
+    assert body["next_cursor"]
     assert body["has_more"] is False
 
 

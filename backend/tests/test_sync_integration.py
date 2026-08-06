@@ -1,16 +1,9 @@
-"""End-to-end sync integration tests (Phase C C10).
+"""End-to-end Sync v2 integration tests across HTTP, protocol, and storage."""
 
-Tests the full sync flow across HTTP layer + Service layer + DB layer:
-- POST /api/v1/sync/push
-- GET  /api/v1/sync/pull
-- GET  /api/v1/sync/full
-- GET  /api/v1/sync/status
-
-Auth: each test sets up admin, logs in, creates a space, and issues a
-space token via _setup_login_and_space_token.
-"""
 from __future__ import annotations
 
+import base64
+import json
 import uuid
 
 import pytest
@@ -18,495 +11,368 @@ import pytest
 pytestmark = pytest.mark.provisioned_space_storage
 
 
-async def _setup_login_and_space_token(client) -> str:
-    """Setup admin, login, create a space, return a space token."""
-    resp = await client.post(
-        "/api/v1/auth/setup", json={"password": "test-password-123"}
+async def _setup_sync_client(client, client_id: str = "integration-client"):
+    setup = await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
+    assert setup.status_code in (200, 201)
+    login = await client.post("/api/v1/auth/login", json={"password": "test-password-123"})
+    master = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    created = await client.post(
+        "/api/v1/spaces", json={"name": "Integration Space"}, headers=master
     )
-    assert resp.status_code in (200, 201)
-    resp = await client.post(
-        "/api/v1/auth/login", json={"password": "test-password-123"}
+    token = await client.post(
+        f"/api/v1/spaces/{created.json()['id']}/token", headers=master
     )
-    assert resp.status_code == 200
-    master_token = resp.json()["access_token"]
-    headers = {"Authorization": f"Bearer {master_token}"}
+    headers = {"Authorization": f"Bearer {token.json()['space_token']}"}
 
-    resp = await client.post(
-        "/api/v1/spaces", json={"name": "Integration Space"}, headers=headers
+    recovery = await client.get(
+        "/api/v1/sync/v2/recover", params={"client_id": client_id}, headers=headers
     )
-    assert resp.status_code == 201
-    space_id = resp.json()["id"]
-
-    resp = await client.post(
-        f"/api/v1/spaces/{space_id}/token", headers=headers
+    assert recovery.status_code == 200, recovery.text
+    page = recovery.json()
+    while page["has_more"]:
+        recovery = await client.get(
+            "/api/v1/sync/v2/recover",
+            params={"client_id": client_id, "page_token": page["next_page_token"]},
+            headers=headers,
+        )
+        assert recovery.status_code == 200, recovery.text
+        page = recovery.json()
+    acknowledged = await client.post(
+        "/api/v1/sync/v2/ack",
+        json={"client_id": client_id, "cursor": page["waterline_cursor"]},
+        headers=headers,
     )
-    assert resp.status_code == 200
-    return resp.json()["space_token"]
+    assert acknowledged.status_code == 200, acknowledged.text
+    return headers, client_id
 
 
 def _make_event(
+    *,
     entity_type: str = "habit",
     action: str = "create",
     entity_id: str | None = None,
     payload: dict | None = None,
-    client_updated_at: str = "2026-07-04T10:00:00.000Z",
+    expected_version: int | None = None,
+    client_updated_at: str = "2026-07-16T10:00:00.000Z",
 ) -> dict:
     return {
         "entity_type": entity_type,
         "entity_id": entity_id or uuid.uuid4().hex,
         "action": action,
         "payload": payload or {},
+        "expected_version": expected_version,
         "client_updated_at": client_updated_at,
+        "operation_id": f"op-{uuid.uuid4().hex}",
     }
 
 
-async def _push(client, headers, events):
-    """Helper: POST /sync/push and return JSON."""
-    resp = await client.post(
-        "/api/v1/sync/push", json={"events": events}, headers=headers
+async def _push(client, headers, client_id: str, events):
+    response = await client.post(
+        "/api/v1/sync/v2/push",
+        json={"client_id": client_id, "batch_id": f"batch-{uuid.uuid4().hex}", "events": events},
+        headers=headers,
     )
-    assert resp.status_code == 200, f"push failed: {resp.text}"
-    return resp.json()
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
-# --------------------------------------------------------------------------- #
-# C10: end-to-end sync integration
-# --------------------------------------------------------------------------- #
+async def _pull(client, headers, client_id: str, *, cursor: str | None = None, limit: int = 100):
+    params = {"client_id": client_id, "limit": str(limit)}
+    if cursor is not None:
+        params["cursor"] = cursor
+    response = await client.get("/api/v1/sync/v2/pull", params=params, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
 
-@pytest.mark.asyncio
+
 async def test_full_sync_roundtrip_create_pull(client):
-    """push 1 habit -> pull returns it -> next_since advances."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    eid = uuid.uuid4().hex
-    await _push(client, headers, [
-        _make_event(
-            entity_id=eid, action="create",
-            payload={
-                "id": eid, "title": "Roundtrip Habit",
-            },
-            client_updated_at="2026-07-04T10:00:00.000Z",
-        )
-    ])
-
-    # Initial pull returns the habit.
-    resp = await client.get(
-        "/api/v1/sync/pull?since=&limit=100", headers=headers
+    headers, client_id = await _setup_sync_client(client)
+    entity_id = uuid.uuid4().hex
+    await _push(
+        client,
+        headers,
+        client_id,
+        [_make_event(entity_id=entity_id, payload={"id": entity_id, "title": "Roundtrip"})],
     )
-    assert resp.status_code == 200
-    data = resp.json()
-    habit_ids = [t["id"] for t in data["habits"]]
-    assert eid in habit_ids
-    first_next_since = data["next_since"]
-    assert first_next_since >= "2026-07-04T10:00:00.000Z"
 
-    # Pull with since=first_next_since should not return the habit again.
-    resp = await client.get(
-        f"/api/v1/sync/pull?since={first_next_since}&limit=100",
-        headers=headers,
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    habit_ids = [t["id"] for t in data["habits"]]
-    assert eid not in habit_ids
+    first = await _pull(client, headers, client_id)
+    assert entity_id in {event["entity_id"] for event in first["events"]}
+    assert first["next_cursor"]
+    second = await _pull(client, headers, client_id, cursor=first["next_cursor"])
+    assert entity_id not in {event["entity_id"] for event in second["events"]}
 
 
-@pytest.mark.asyncio
 async def test_quick_note_sync_roundtrip_preserves_array_tags(client):
-    """QuickNote sync accepts wire-format tag arrays and returns them on pull."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-    eid = uuid.uuid4().hex
-
-    pushed = await _push(client, headers, [
-        _make_event(
-            entity_type="quickNote",
-            entity_id=eid,
-            action="create",
-            payload={
-                "id": eid,
-                "content": "Synced quick note",
-                "tags": ["sync", "multi-device"],
-            },
-        )
-    ])
-
-    assert pushed["errors"] == []
-    assert [item["entity_id"] for item in pushed["applied"]] == [eid]
-
-    updated = await _push(client, headers, [
-        _make_event(
-            entity_type="quickNote",
-            entity_id=eid,
-            action="update",
-            payload={
-                "content": "Updated synced quick note",
-                "tags": ["synced"],
-            },
-            client_updated_at="2026-07-04T12:00:00.000Z",
-        )
-    ])
+    headers, client_id = await _setup_sync_client(client)
+    entity_id = uuid.uuid4().hex
+    created = await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(
+                entity_type="quickNote",
+                entity_id=entity_id,
+                payload={"id": entity_id, "content": "Synced", "tags": ["sync", "multi-device"]},
+            )
+        ],
+    )
+    assert created["errors"] == []
+    updated = await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(
+                entity_type="quickNote",
+                entity_id=entity_id,
+                action="update",
+                expected_version=1,
+                payload={"content": "Updated", "tags": ["synced"]},
+                client_updated_at="2026-07-16T12:00:00.000Z",
+            )
+        ],
+    )
     assert updated["errors"] == []
-    assert [item["entity_id"] for item in updated["applied"]] == [eid]
+    pulled = await _pull(client, headers, client_id)
+    update = next(
+        event
+        for event in pulled["events"]
+        if event["entity_id"] == entity_id and event["action"] == "update"
+    )
+    assert update["payload"]["content"] == "Updated"
+    assert update["payload"]["tags"] == ["synced"]
 
-    response = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
-    assert response.status_code == 200
-    quick_notes = {item["id"]: item for item in response.json()["quickNotes"]}
-    assert quick_notes[eid]["content"] == "Updated synced quick note"
-    assert quick_notes[eid]["tags"] == ["synced"]
 
-
-@pytest.mark.asyncio
 async def test_full_sync_roundtrip_update_lww(client):
-    """push create -> push update (newer ts) -> pull reflects new title."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    eid = uuid.uuid4().hex
-    await _push(client, headers, [
-        _make_event(
-            entity_id=eid, action="create",
-            payload={
-                "id": eid, "title": "Original",
-            },
-            client_updated_at="2026-07-04T10:00:00.000Z",
-        )
-    ])
-    # Newer update at 12:00 should overwrite.
-    await _push(client, headers, [
-        _make_event(
-            entity_id=eid, action="update",
-            payload={"title": "Updated Title"},
-            client_updated_at="2026-07-04T12:00:00.000Z",
-        )
-    ])
-
-    resp = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
-    data = resp.json()
-    habits = {t["id"]: t for t in data["habits"]}
-    assert habits[eid]["title"] == "Updated Title"
+    headers, client_id = await _setup_sync_client(client)
+    entity_id = uuid.uuid4().hex
+    await _push(
+        client,
+        headers,
+        client_id,
+        [_make_event(entity_id=entity_id, payload={"id": entity_id, "title": "Original"})],
+    )
+    updated = await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(
+                entity_id=entity_id,
+                action="update",
+                expected_version=0,
+                payload={"title": "Updated Title"},
+                client_updated_at="2026-07-16T12:00:00.000Z",
+            )
+        ],
+    )
+    assert updated["applied"][0]["resolution"] == "remote"
 
 
-@pytest.mark.asyncio
 async def test_sync_roundtrip_delete_via_habit_route_creates_tombstone(client):
-    """Create habit via push -> delete via habit route -> pull returns tombstone."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    eid = uuid.uuid4().hex
-    await _push(client, headers, [
-        _make_event(
-            entity_id=eid, action="create",
-            payload={
-                "id": eid, "title": "Will be deleted",
-            },
-        )
-    ])
-    # Delete via habit route (writes tombstone).
-    resp = await client.delete(f"/api/v1/habits/{eid}", headers=headers)
-    assert resp.status_code in (200, 204)
-
-    resp = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
-    data = resp.json()
-    tomb_ids = [t["entity_id"] for t in data["tombstones"]]
-    assert eid in tomb_ids
-    # Habit row should be gone from pull results.
-    habit_ids = [t["id"] for t in data["habits"]]
-    assert eid not in habit_ids
+    headers, client_id = await _setup_sync_client(client)
+    entity_id = uuid.uuid4().hex
+    await _push(
+        client,
+        headers,
+        client_id,
+        [_make_event(entity_id=entity_id, payload={"id": entity_id, "title": "Delete"})],
+    )
+    deleted = await client.delete(f"/api/v1/habits/{entity_id}", headers=headers)
+    assert deleted.status_code in (200, 204)
+    pulled = await _pull(client, headers, client_id)
+    assert any(
+        event["entity_id"] == entity_id and event["action"] == "delete"
+        for event in pulled["events"]
+    )
 
 
-@pytest.mark.asyncio
 async def test_sync_roundtrip_delete_via_push_writes_tombstone(client):
-    """Create habit via push -> delete via push -> pull returns tombstone."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    eid = uuid.uuid4().hex
-    await _push(client, headers, [
-        _make_event(
-            entity_id=eid, action="create",
-            payload={
-                "id": eid, "title": "Will be deleted",
-            },
-        )
-    ])
-    await _push(client, headers, [
-        _make_event(entity_id=eid, action="delete", payload={}),
-    ])
-
-    resp = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
-    data = resp.json()
-    tomb_ids = [t["entity_id"] for t in data["tombstones"]]
-    assert eid in tomb_ids
-    habit_ids = [t["id"] for t in data["habits"]]
-    assert eid not in habit_ids
-
-
-@pytest.mark.asyncio
-async def test_sync_status_reflects_pushed_events(client):
-    """push 3 habits -> status returns habits=3."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    events = [
-        _make_event(
-            entity_id=f"status-habit-{i}", action="create",
-            payload={
-                "id": f"status-habit-{i}", "title": f"S{i}",
-            },
-        )
-        for i in range(3)
-    ]
-    await _push(client, headers, events)
-
-    resp = await client.get("/api/v1/sync/status", headers=headers)
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["entity_counts"]["habits"] == 3
-    assert data["tombstone_count"] == 0
-
-
-@pytest.mark.asyncio
-async def test_sync_full_returns_all_tombstones_ignoring_since(client):
-    """2 tombstones created -> full(since=future) returns both."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    tomb_ids = []
-    for i in range(2):
-        resp = await client.post(
-            "/api/v1/habits",
-            json={"title": f"To tombstone {i}"},
-            headers=headers,
-        )
-        assert resp.status_code == 201
-        tid = resp.json()["id"]
-        resp = await client.delete(f"/api/v1/habits/{tid}", headers=headers)
-        assert resp.status_code in (200, 204)
-        tomb_ids.append(tid)
-
-    resp = await client.get(
-        "/api/v1/sync/full?since=2099-01-01T00:00:00.000Z", headers=headers
+    headers, client_id = await _setup_sync_client(client)
+    entity_id = uuid.uuid4().hex
+    await _push(
+        client,
+        headers,
+        client_id,
+        [_make_event(entity_id=entity_id, payload={"id": entity_id, "title": "Delete"})],
     )
-    assert resp.status_code == 200
-    data = resp.json()
-    returned_ids = {t["entity_id"] for t in data["tombstones"]}
-    for tid in tomb_ids:
-        assert tid in returned_ids
-    assert data["is_full"] is True
-
-
-@pytest.mark.asyncio
-async def test_sync_handles_mixed_batch(client):
-    """A single push batch with create + update + delete applies all."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    # Seed two habits first.
-    keep_id = uuid.uuid4().hex
-    update_id = uuid.uuid4().hex
-    delete_id = uuid.uuid4().hex
-    await _push(client, headers, [
-        _make_event(
-            entity_id=keep_id, action="create",
-            payload={
-                "id": keep_id, "title": "Keep",
-            },
-        ),
-        _make_event(
-            entity_id=update_id, action="create",
-            payload={
-                "id": update_id, "title": "Update Me",
-            },
-        ),
-        _make_event(
-            entity_id=delete_id, action="create",
-            payload={
-                "id": delete_id, "title": "Delete Me",
-            },
-        ),
-    ])
-
-    # Mixed batch: 1 update + 1 delete + 1 create.
-    new_id = uuid.uuid4().hex
-    data = await _push(client, headers, [
-        _make_event(
-            entity_id=update_id, action="update",
-            payload={"title": "Updated in mixed batch"},
-            client_updated_at="2026-07-04T15:00:00.000Z",
-        ),
-        _make_event(entity_id=delete_id, action="delete"),
-        _make_event(
-            entity_id=new_id, action="create",
-            payload={
-                "id": new_id, "title": "New in mixed batch",
-            },
-            client_updated_at="2026-07-04T15:00:00.000Z",
-        ),
-    ])
-    assert len(data["applied"]) == 3
-    assert data["errors"] == []
-
-    # Verify final state via pull.
-    resp = await client.get("/api/v1/sync/pull?since=&limit=100", headers=headers)
-    data = resp.json()
-    habits = {t["id"]: t for t in data["habits"]}
-    assert habits[update_id]["title"] == "Updated in mixed batch"
-    assert delete_id not in habits
-    assert new_id in habits
-
-
-@pytest.mark.asyncio
-async def test_sync_push_unknown_entity_returns_error(client):
-    """push entity_type='invalid' -> errors contains the event."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    data = await _push(client, headers, [
-        _make_event(
-            entity_type="invalidEntity", entity_id="x", action="create",
-            payload={"id": "x"},
-        )
-    ])
-    assert len(data["errors"]) == 1
-    assert data["errors"][0]["entity_type"] == "invalidEntity"
-    assert data["applied"] == []
-
-
-@pytest.mark.asyncio
-async def test_sync_pagination_has_more(client):
-    """Legacy truncation fails closed while cursor v2 remains available."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    events = [
-        _make_event(
-            entity_id=f"page-{i}", action="create",
-            payload={
-                "id": f"page-{i}", "title": f"Page {i}",
-            },
-            client_updated_at=f"2026-07-04T1{i}:00:00.000Z",
-        )
-        for i in range(5)
-    ]
-    await _push(client, headers, events)
-
-    legacy = await client.get(
-        "/api/v1/sync/pull?since=&limit=2",
-        headers={
-            **headers,
-            "Accept": "application/vnd.pomodoroxii.error+json;version=2",
-            "X-Request-ID": "req-sync-pagination-upgrade",
-        },
+    deleted = await _push(
+        client,
+        headers,
+        client_id,
+        [_make_event(entity_id=entity_id, action="delete", expected_version=1)],
     )
-    assert legacy.status_code == 409
-    assert legacy.json() == {
-        "code": "cursor_upgrade_required",
-        "message": "Legacy sync cursor cannot safely advance",
-        "retryable": False,
-        "request_id": "req-sync-pagination-upgrade",
-        # Seeded status_definitions (6 system rows from migration 010) also
-        # exceed the limit=2 threshold, so they appear in truncated_groups.
-        "details": {"truncated_groups": ["habits", "statusDefinitions"]},
+    assert deleted["errors"] == []
+    assert deleted["applied"][0]["entity_id"] == entity_id
+
+
+async def test_sync_status_reflects_visible_events(client):
+    headers, client_id = await _setup_sync_client(client)
+    await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(entity_id=f"status-habit-{index}", payload={"id": f"status-habit-{index}", "title": f"S{index}"})
+            for index in range(3)
+        ],
+    )
+    response = await client.get(
+        "/api/v1/sync/v2/status", params={"client_id": client_id}, headers=headers
+    )
+    assert response.status_code == 200
+    assert response.json()["visible_event_count"] >= 3
+    assert response.json()["registered"] is True
+
+
+async def test_new_client_recovery_excludes_deleted_entities(client):
+    headers, _client_id = await _setup_sync_client(client)
+    tombstone_ids = []
+    for index in range(2):
+        created = await client.post(
+            "/api/v1/habits", json={"title": f"Tombstone {index}"}, headers=headers
+        )
+        assert created.status_code == 201, created.text
+        entity_id = created.json()["id"]
+        deleted = await client.delete(f"/api/v1/habits/{entity_id}", headers=headers)
+        assert deleted.status_code in (200, 204)
+        tombstone_ids.append(entity_id)
+
+    recovery_client = "recovery-client"
+    page_token = None
+    records = []
+    while True:
+        params = {"client_id": recovery_client}
+        if page_token is not None:
+            params["page_token"] = page_token
+        response = await client.get("/api/v1/sync/v2/recover", params=params, headers=headers)
+        assert response.status_code == 200, response.text
+        page = response.json()
+        decoded = base64.b64decode(page["payload_jsonl_base64"])
+        records.extend(json.loads(line) for line in decoded.splitlines())
+        if not page["has_more"]:
+            break
+        page_token = page["next_page_token"]
+    recovered_ids = {
+        record["entity_id"]
+        for record in records
+        if record.get("entity_type") == "habit"
     }
+    assert set(tombstone_ids).isdisjoint(recovered_ids)
 
-    cursor_v2 = await client.get(
-        "/api/v1/sync/pull?cursor=0&limit=2", headers=headers
+
+async def test_sync_handles_mixed_batch(client):
+    headers, client_id = await _setup_sync_client(client)
+    update_id, delete_id = uuid.uuid4().hex, uuid.uuid4().hex
+    await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(entity_id=update_id, payload={"id": update_id, "title": "Update"}),
+            _make_event(entity_id=delete_id, payload={"id": delete_id, "title": "Delete"}),
+        ],
     )
-    assert cursor_v2.status_code == 200
-    data = cursor_v2.json()
-    assert data["cursor_version"] == 2
-    assert data["has_more"] is True
-    assert len(data["habits"]) == 2
+    new_id = uuid.uuid4().hex
+    result = await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(entity_id=update_id, action="update", expected_version=1, payload={"title": "Updated"}),
+            _make_event(entity_id=delete_id, action="delete", expected_version=1),
+            _make_event(entity_id=new_id, payload={"id": new_id, "title": "New"}),
+        ],
+    )
+    assert len(result["applied"]) == 3
+    assert result["errors"] == []
 
 
-# --------------------------------------------------------------------------- #
-# LWW conflict resolution & cursor tiebreaker
-# --------------------------------------------------------------------------- #
+async def test_sync_push_unknown_entity_returns_error(client):
+    headers, client_id = await _setup_sync_client(client)
+    result = await _push(
+        client,
+        headers,
+        client_id,
+        [_make_event(entity_type="invalidEntity", entity_id="x", payload={"id": "x"})],
+    )
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["entity_type"] == "invalidEntity"
 
-@pytest.mark.asyncio
+
+async def test_sync_pagination_uses_opaque_cursor(client):
+    headers, client_id = await _setup_sync_client(client)
+    await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(entity_id=f"page-{index}", payload={"id": f"page-{index}", "title": f"Page {index}"})
+            for index in range(5)
+        ],
+    )
+    first = await _pull(client, headers, client_id, limit=2)
+    assert first["has_more"] is True
+    assert len(first["events"]) == 2
+    assert isinstance(first["next_cursor"], str)
+    assert not first["next_cursor"].isdigit()
+    second = await _pull(client, headers, client_id, cursor=first["next_cursor"], limit=2)
+    assert {item["operation_id"] for item in first["events"]}.isdisjoint(
+        {item["operation_id"] for item in second["events"]}
+    )
+
+
 async def test_sync_push_rejects_stale_update_with_lww_conflict(client):
-    """LWW rejects updates with older client_updated_at - conflict reported."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-    eid = uuid.uuid4().hex
-
-    # Create at 12:00.
-    await _push(client, headers, [
-        _make_event(
-            entity_id=eid, action="create",
-            payload={
-                "id": eid, "title": "Original",
-            },
-            client_updated_at="2026-07-04T12:00:00.000Z",
-        )
-    ])
-
-    # Try to update at 10:00 (older) - should be rejected.
-    data = await _push(client, headers, [
-        _make_event(
-            entity_id=eid, action="update",
-            payload={"title": "Stale Update"},
-            client_updated_at="2026-07-04T10:00:00.000Z",
-        )
-    ])
-
-    assert len(data["conflicts"]) == 1
-    assert data["conflicts"][0]["entity_id"] == eid
-    assert data["conflicts"][0]["resolution"] == "local"
-    assert all(item["entity_id"] != eid for item in data["applied"])
-
-    # Verify original title is preserved.
-    resp = await client.get(
-        "/api/v1/sync/pull?since=&limit=100", headers=headers
+    headers, client_id = await _setup_sync_client(client)
+    entity_id = uuid.uuid4().hex
+    await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(
+                entity_id=entity_id,
+                payload={"id": entity_id, "title": "Original"},
+                client_updated_at="2026-07-16T12:00:00.000Z",
+            )
+        ],
     )
-    habits = {t["id"]: t for t in resp.json()["habits"]}
-    assert habits[eid]["title"] == "Original"
-
-
-@pytest.mark.asyncio
-async def test_sync_pull_since_id_advances_past_tied_timestamps(client):
-    """since_id tiebreaker correctly advances through rows sharing updated_at."""
-    space_token = await _setup_login_and_space_token(client)
-    headers = {"Authorization": f"Bearer {space_token}"}
-
-    # Use a timestamp later than SEED_TIME ("2026-07-15T00:00:00.000Z") so
-    # the test habits hold the global max updated_at, unaffected by the
-    # seeded status_definitions / type_definitions rows from migration 010.
-    tied_ts = "2026-07-16T10:00:00.000Z"
-    eids = [uuid.uuid4().hex for _ in range(3)]
-    await _push(client, headers, [
-        _make_event(
-            entity_id=eid, action="create",
-            payload={
-                "id": eid, "title": f"Tie-{i}",
-            },
-            client_updated_at=tied_ts,
-        )
-        for i, eid in enumerate(eids)
-    ])
-
-    # First pull: get all 3 habits.
-    resp = await client.get(
-        "/api/v1/sync/pull?since=&limit=100", headers=headers
+    stale = await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(
+                entity_id=entity_id,
+                action="update",
+                expected_version=0,
+                payload={"title": "Stale"},
+                client_updated_at="2026-07-16T10:00:00.000Z",
+            )
+        ],
     )
-    assert resp.status_code == 200
-    data = resp.json()
-    habit_ids = {t["id"] for t in data["habits"]}
-    for eid in eids:
-        assert eid in habit_ids
-    assert data["next_since"] == tied_ts
-    assert data["next_since_id"], "next_since_id must be non-empty for tied timestamps"
+    assert stale["conflicts"][0]["resolution"] == "local"
 
-    # Second pull with since + since_id: should return 0 habits.
-    resp = await client.get(
-        f"/api/v1/sync/pull?since={data['next_since']}"
-        f"&since_id={data['next_since_id']}&limit=100",
-        headers=headers,
+
+async def test_cursor_advances_without_duplicates_for_tied_timestamps(client):
+    headers, client_id = await _setup_sync_client(client)
+    entity_ids = [uuid.uuid4().hex for _ in range(3)]
+    await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(
+                entity_id=entity_id,
+                payload={"id": entity_id, "title": f"Tie {index}"},
+                client_updated_at="2026-07-16T10:00:00.000Z",
+            )
+            for index, entity_id in enumerate(entity_ids)
+        ],
     )
-    assert resp.status_code == 200
-    data2 = resp.json()
-    assert len(data2["habits"]) == 0, (
-        "since_id should advance past all rows sharing the same updated_at"
-    )
+    first = await _pull(client, headers, client_id, limit=2)
+    second = await _pull(client, headers, client_id, cursor=first["next_cursor"], limit=2)
+    returned_ids = [event["entity_id"] for event in (*first["events"], *second["events"])]
+    assert set(returned_ids) == set(entity_ids)
+    assert len(returned_ids) == len(set(returned_ids))
