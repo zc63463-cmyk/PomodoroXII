@@ -638,7 +638,8 @@ async def test_unknown_payload_field_rejected_at_compile(entity_fixture):
         request = entity_fixture.commands.create(
             scope, "schedule", payload, expected_version=None
         )
-        with pytest.raises((ValueError, MutationRejectedError)):
+        with pytest.raises(MutationRejectedError) as raised:
             await entity_fixture.uow.execute(scope, request, "op-unknown-field")
+        assert raised.value.rejection.code == "payload_field_not_allowed"
     finally:
         await scope.aclose()

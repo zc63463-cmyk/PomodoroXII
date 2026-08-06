@@ -66,7 +66,9 @@ RESERVED_TS_CODES = frozenset(
         "work_item_structure_changed",
     }
 )
-RESERVED_S4_MAPPING_CODES = frozenset({"entity_not_sync_enabled"})
+RESERVED_S4_MAPPING_CODES = frozenset(
+    {"entity_not_sync_enabled", "payload_field_not_allowed"}
+)
 
 
 def _spec(status: int, message: str, legacy: str, retryable: bool = False) -> MutationRejectionSpec:
@@ -118,6 +120,9 @@ MUTATION_REJECTION_SPECS = MappingProxyType(
         "work_item_structure_changed": _spec(409, "Work item structure changed", "conflict"),
         "entity_not_sync_enabled": _spec(
             422, "Entity type is not sync-enabled", "validation_error"
+        ),
+        "payload_field_not_allowed": _spec(
+            422, "Payload field is not allowed", "validation_error"
         ),
     }
 )

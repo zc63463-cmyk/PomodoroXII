@@ -522,7 +522,10 @@ def _require_catalog_spec(
 def _require_payload_fields(spec: EntitySpec, payload: Mapping[str, object]) -> None:
     unknown = tuple(sorted(set(payload) - set(spec.field_names)))
     if unknown:
-        raise ValueError(f"payload contains fields outside the compiled catalog: {unknown!r}")
+        raise MutationRuleViolation(
+            "payload_field_not_allowed",
+            {"entityType": spec.name, "fields": unknown},
+        )
 
 
 def _require_current_version(
