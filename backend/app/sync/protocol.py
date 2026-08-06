@@ -31,6 +31,7 @@ from app.sync.contracts import (
     PushConflict,
     PushError,
     PushResult,
+    RecoveryPage,
     SyncEventInput,
     SyncEventRecord,
     SyncLedgerIntegrityError,
@@ -40,10 +41,16 @@ from app.sync.contracts import (
     validate_client_id,
     validate_cursor_token,
     validate_operation_query_inputs,
+    validate_page_token,
     validate_pull_limit,
     validate_sync_push_inputs,
 )
 from app.sync.cursor import CursorPosition, SyncCursorCodec
+from app.sync.snapshot import (
+    SyncPageTokenCodec,
+    SyncSnapshotSerializer,
+    SyncSnapshotStore,
+)
 
 
 def _now_utc() -> str:
@@ -271,6 +278,8 @@ class SyncProtocol:
         mapper: SyncCommandMapper | None = None,
         cursor: SyncCursorCodec | None = None,
         ttl_days: int | None = None,
+        page_tokens: SyncPageTokenCodec | None = None,
+        snapshot_serializer: SyncSnapshotSerializer | None = None,
     ) -> None:
         self.scope = scope
         self.uow = uow or getattr(scope, "uow", None)
@@ -291,6 +300,12 @@ class SyncProtocol:
             ttl_days = settings.sync_client_ttl_days
         self.cursor = cursor
         self.ttl_days = ttl_days
+        if page_tokens is None:
+            page_tokens = SyncPageTokenCodec(
+                settings.sync_cursor_secret.encode("utf-8") + b":snapshot"
+            )
+        self.page_tokens = page_tokens
+        self.snapshot_serializer = snapshot_serializer or SyncSnapshotSerializer()
 
     @asynccontextmanager
     async def _exclusive(self, purpose: str) -> AsyncIterator[object]:
@@ -589,6 +604,58 @@ class SyncProtocol:
             if decision.result is None:
                 raise RuntimeError("ACK decision did not contain a result")
             return decision.result
+
+    async def recover(
+        self, client_id: str, page_token: str | None = None
+    ) -> RecoveryPage:
+        """Create or resume one manifest-bound bounded full-recovery page."""
+        client_id = validate_client_id(client_id)
+        if page_token is not None:
+            validate_page_token(page_token)
+        pending: AppError | None = None
+        page = None
+        async with self._exclusive("sync-recovery") as lease:
+            await self._recover(lease)
+            async with self.scope.session_factory() as session:
+                async with session.begin():
+                    registry = SyncClientRegistry(
+                        session,
+                        catalog_hash=self.catalog.hash,
+                        ttl_days=self.ttl_days,
+                        space_id=_space_id(self.scope),
+                    )
+                    await registry.expire_inactive()
+                    await registry.register_or_touch(client_id)
+                    await registry.collect_expired_recovery()
+                    snapshots = SyncSnapshotStore(
+                        session,
+                        self.catalog,
+                        self.page_tokens,
+                        self.snapshot_serializer,
+                        cursor=self.cursor,
+                        ttl_days=self.ttl_days,
+                    )
+                    if page_token is None:
+                        created = await snapshots.create(self.scope, lease, client_id)
+                        if created.error is not None:
+                            pending = created.error
+                        else:
+                            assert created.descriptor is not None
+                            decision = await snapshots.page(
+                                self.scope,
+                                lease,
+                                client_id,
+                                created.descriptor.first_page_token,
+                            )
+                            page, pending = decision.page, decision.error
+                    else:
+                        decision = await snapshots.page(self.scope, lease, client_id, page_token)
+                        page, pending = decision.page, decision.error
+        if pending is not None:
+            raise pending
+        if page is None:
+            raise RuntimeError("sync recovery did not produce a page")
+        return page
 
     async def status(self, client_id: str | None = None) -> SyncStatusResult:
         if client_id is not None:
