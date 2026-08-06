@@ -412,19 +412,21 @@ class SyncSnapshotStore:
         for spec in self.catalog.list_sync_enabled():
             model = self.catalog.model_for(spec.name)
             key_names = tuple(column.name for column in model.__table__.primary_key.columns)
-            primary_key = getattr(model, key_names[0])
+            primary_key_columns = tuple(getattr(model, name) for name in key_names)
             last_primary_key: tuple[object, ...] | None = None
             while True:
-                query = select(model).order_by(primary_key.asc()).limit(MAX_CHUNK_ENTITIES)
+                query = (
+                    select(model)
+                    .order_by(*(column.asc() for column in primary_key_columns))
+                    .limit(MAX_CHUNK_ENTITIES)
+                )
                 if last_primary_key is not None:
                     if len(key_names) == 1:
-                        query = query.where(primary_key > last_primary_key[0])
+                        query = query.where(primary_key_columns[0] > last_primary_key[0])
                     else:
                         query = query.where(
-                            tuple_(*(getattr(model, name) for name in key_names))
-                            > tuple(last_primary_key)
+                            tuple_(*primary_key_columns) > tuple(last_primary_key)
                         )
-                        query = query.order_by(*(getattr(model, name).asc() for name in key_names))
                 rows = tuple((await self.db.scalars(query)).all())
                 if not rows:
                     break
@@ -498,6 +500,18 @@ class SyncSnapshotStore:
         )
         self.db.add(manifest)
         await self.db.flush()
+        registry = SyncClientRegistry(
+            self.db,
+            self.catalog.hash,
+            self.ttl_days,
+            space_id=space_id,
+            now_factory=self._now_factory,
+        )
+        registration = await registry.begin_recovery(
+            client_id, manifest_token=token, waterline=waterline
+        )
+        if registration.recovery_generation != generation:
+            raise RuntimeError("snapshot recovery generation changed unexpectedly")
         current = bytearray()
         current_count = 0
         descriptors: list[_ChunkDescriptor] = []
@@ -552,18 +566,6 @@ class SyncSnapshotStore:
         manifest.manifest_sha256 = hashlib.sha256(
             _canonical_manifest_bytes(manifest, tuple(descriptors))
         ).hexdigest()
-        registry = SyncClientRegistry(
-            self.db,
-            self.catalog.hash,
-            self.ttl_days,
-            space_id=space_id,
-            now_factory=self._now_factory,
-        )
-        registration = await registry.begin_recovery(
-            client_id, manifest_token=token, waterline=waterline
-        )
-        if registration.recovery_generation != generation:
-            raise RuntimeError("snapshot recovery generation changed unexpectedly")
         if old_manifest_token is not None and old_manifest_token != token:
             old = await self.db.get(SyncRecoveryManifest, old_manifest_token)
             if old is not None:
