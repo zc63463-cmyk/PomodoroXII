@@ -351,52 +351,90 @@ def _event(payload: dict[str, Any] | None = None):
         "entity_id": "x",
         "action": "create",
         "payload": payload or {},
+        "expected_version": None,
+        "client_updated_at": "2026-08-06T10:00:00.000Z",
+        "operation_id": "prod-hardening-op",
     }
 
 
 @pytest.mark.parametrize("count", [1, 500])
 def test_sync_event_count_accepts_bounds(count):
-    from app.schemas.sync import SyncPushRequest
+    from app.schemas.sync import SyncV2PushRequest
 
-    assert len(SyncPushRequest(events=[_event() for _ in range(count)]).events) == count
+    request = SyncV2PushRequest(
+        client_id="prod-hardening-client",
+        batch_id="prod-hardening-batch",
+        events=[
+            {**_event(), "operation_id": f"prod-hardening-op-{index}"}
+            for index in range(count)
+        ],
+    )
+    assert len(request.events) == count
 
 
 @pytest.mark.parametrize("count", [0, 501])
 def test_sync_event_count_rejects_outside_bounds(count):
-    from app.schemas.sync import SyncPushRequest
+    from app.schemas.sync import SyncV2PushRequest
 
     with pytest.raises(ValidationError):
-        SyncPushRequest(events=[_event() for _ in range(count)])
+        SyncV2PushRequest(
+            client_id="prod-hardening-client",
+            batch_id="prod-hardening-batch",
+            events=[
+                {**_event(), "operation_id": f"prod-hardening-op-{index}"}
+                for index in range(count)
+            ],
+        )
 
 
 def test_sync_payload_utf8_compact_json_boundary(monkeypatch):
     import app.settings as settings_module
-    from app.schemas.sync import SyncEvent
+    from app.sync.contracts import (
+        SyncEventInput,
+        SyncInputError,
+        canonical_sync_event_bytes,
+        validate_sync_push_inputs,
+    )
 
-    monkeypatch.setattr(settings_module.settings, "sync_event_payload_max_bytes", 11)
-    assert SyncEvent(**_event({"x": "你"})).payload == {"x": "你"}  # exactly 11 bytes
-    with pytest.raises(ValidationError):
-        SyncEvent(**_event({"x": "你你"}))  # 14 UTF-8 bytes
+    exact = SyncEventInput.from_mapping(_event({"x": "你"}))
+    exact_size = len(canonical_sync_event_bytes(exact))
+    monkeypatch.setattr(
+        settings_module.settings, "sync_event_payload_max_bytes", exact_size
+    )
+    validate_sync_push_inputs(
+        "prod-hardening-client",
+        "prod-hardening-batch",
+        [exact],
+        max_event_bytes=settings_module.settings.sync_event_payload_max_bytes,
+    )
+    plus_one = SyncEventInput.from_mapping(_event({"x": "你你"}))
+    with pytest.raises(SyncInputError):
+        validate_sync_push_inputs(
+            "prod-hardening-client",
+            "prod-hardening-batch",
+            [plus_one],
+            max_event_bytes=settings_module.settings.sync_event_payload_max_bytes,
+        )
 
 
 @pytest.mark.parametrize("payload", [{"x": float("nan")}, {"x": float("inf")}, {"x": object()}])
 def test_sync_payload_rejects_non_json_values(payload):
-    from app.schemas.sync import SyncEvent
+    from app.schemas.sync import SyncV2Event
 
     with pytest.raises(ValidationError) as exc_info:
-        SyncEvent(**_event(payload))
-    assert "valid JSON" in str(exc_info.value)
+        SyncV2Event(**_event(payload))
+    assert "non_i_json" in str(exc_info.value)
 
 
 async def test_sync_validation_uses_safe_422_envelope():
     from app.errors import register_exception_handlers
-    from app.schemas.sync import SyncPushRequest
+    from app.schemas.sync import SyncV2PushRequest
 
     app = FastAPI()
     register_exception_handlers(app)
 
     @app.post("/sync")
-    async def sync(body: SyncPushRequest):
+    async def sync(body: SyncV2PushRequest):
         return body
 
     async with httpx.AsyncClient(
@@ -404,7 +442,7 @@ async def test_sync_validation_uses_safe_422_envelope():
     ) as local_client:
         response = await local_client.post(
             "/sync",
-            content='{"events":[{"entity_type":"task","entity_id":"x","action":"create","payload":{"x":NaN}}]}',
+            content='{"client_id":"prod-hardening-client","batch_id":"prod-hardening-batch","events":[{"entity_type":"task","entity_id":"x","action":"create","payload":{"x":NaN},"expected_version":null,"client_updated_at":"2026-08-06T10:00:00.000Z","operation_id":"prod-hardening-op"}]}',
             headers={"content-type": "application/json"},
         )
     assert response.status_code == 422
@@ -487,7 +525,9 @@ async def test_metrics_auth_and_prometheus_contract(client):
 
 async def test_openapi_sync_bounds_and_metrics_security(client):
     schema = (await client.get("/openapi.json")).json()
-    events = schema["components"]["schemas"]["SyncPushRequest"]["properties"]["events"]
+    events = schema["paths"]["/api/v1/sync/v2/push"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["schema"]["properties"]["events"]
     assert events["minItems"] == 1
     assert events["maxItems"] == 500
     metrics = schema["paths"]["/api/metrics"]["get"]

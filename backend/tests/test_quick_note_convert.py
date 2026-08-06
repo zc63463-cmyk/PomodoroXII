@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.sync_v2_helpers import recover_sync_v2
+
 pytestmark = pytest.mark.provisioned_space_storage
 
 # --------------------------------------------------------------------------- #
@@ -285,8 +287,7 @@ async def test_convert_creates_sync_events(client):
 
     Proves the conversion goes through the durable mutation pipeline
     rather than direct ORM operations: the new note and the archived
-    quick note must both appear in /sync/full (which materializes
-    entity rows visible to sync clients).
+    quick note must both appear in the Sync v2 recovery snapshot.
     """
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
@@ -301,24 +302,26 @@ async def test_convert_creates_sync_events(client):
     assert resp.status_code == 200, resp.text
     note_id = resp.json()["note_id"]
 
-    # Verify both the new note and the archived quick note are visible
-    # in /sync/full.  The endpoint materializes entity rows grouped by
-    # pull_key (notes, quickNotes, memoComments, ...).
-    resp = await client.get("/api/v1/sync/full", headers=headers)
-    assert resp.status_code == 200
-    data = resp.json()
-
-    notes = data.get("notes", [])
-    quick_notes = data.get("quickNotes", [])
-
-    note_rows = [e for e in notes if e.get("id") == note_id]
-    assert len(note_rows) > 0, "expected converted note in sync/full"
+    # Recovery is the v2 full-state replacement and contains live entity records.
+    records, _waterline = await recover_sync_v2(
+        client, headers, "quick-note-convert-client"
+    )
+    note_rows = [
+        record["payload"]
+        for record in records
+        if record["entity_type"] == "note" and record["entity_id"] == note_id
+    ]
+    assert len(note_rows) > 0, "expected converted note in recovery"
     assert "durable convert test" in note_rows[0].get("title", "")
 
-    qn_rows = [e for e in quick_notes if e.get("id") == qn_id]
-    assert len(qn_rows) > 0, "expected archived quick note in sync/full"
-    assert qn_rows[0].get("archived_at") is not None
-    assert qn_rows[0].get("migrated_to_note_id") == note_id
+    qn_rows = [
+        record["payload"]
+        for record in records
+        if record["entity_type"] == "quickNote" and record["entity_id"] == qn_id
+    ]
+    assert len(qn_rows) > 0, "expected archived quick note in recovery"
+    assert qn_rows[0].get("archivedAt") is not None
+    assert qn_rows[0].get("migratedToNoteId") == note_id
 
 
 @pytest.mark.asyncio

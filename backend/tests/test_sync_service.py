@@ -11,6 +11,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.sync_v2_helpers import (
+    make_sync_v2_event,
+    push_sync_v2,
+    ready_sync_v2_client,
+)
+
 pytestmark = pytest.mark.provisioned_space_storage
 
 # --------------------------------------------------------------------------- #
@@ -1151,6 +1157,7 @@ async def test_http_push_tombstone_conflict_excluded_from_applied(client):
     )
     space_token = resp.json()["space_token"]
     headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = await ready_sync_v2_client(client, headers)
 
     # Create a habit via REST, then delete it (writes tombstone).
     eid = uuid.uuid4().hex
@@ -1164,18 +1171,18 @@ async def test_http_push_tombstone_conflict_excluded_from_applied(client):
     assert resp.status_code in (200, 204)
 
     # Push create same id → should conflict with tombstone, not be applied.
-    resp = await client.post(
-        "/api/v1/sync/push",
-        json={"events": [_make_event(
+    data = await push_sync_v2(
+        client,
+        headers,
+        client_id,
+        [make_sync_v2_event(
+            entity_type="habit",
             entity_id=eid, action="create",
             payload={"id": eid, "title": "Resurrected"},
-        )]},
-        headers=headers,
+        )],
     )
-    assert resp.status_code == 200
-    data = resp.json()
     assert any(c.get("resolution") == "tombstone" for c in data["conflicts"]), (
-        f"expected tombstone conflict, got {data['conflicts']}"
+        f"expected tombstone conflict, got {data}"
     )
     applied_ids = [a["entity_id"] for a in data["applied"]]
     assert eid not in applied_ids, (
