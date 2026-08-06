@@ -7,10 +7,11 @@ wire key and delegates all entity/domain invariants to ``EntityCommand``.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Sequence
 
 from app.commands.entity import EntityCommand
-from app.errors import IdempotencyConflictError
+from app.errors import IdempotencyConflictError, to_wire_json
 from app.mutation.types import (
     MutationRejection,
     MutationRequest,
@@ -40,9 +41,32 @@ class SyncCommandMapper:
                 "entity_not_sync_enabled",
                 {"entity_type": event.entity_type, "entity_id": event.entity_id},
             )
+        json_fields = {field.name for field in spec.fields if field.type == "json"}
+        storage_payload = {
+            key: (
+                json.dumps(
+                    to_wire_json(value),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if key in json_fields
+                else value
+            )
+            for key, value in event.payload.items()
+        }
+        storage_event = SyncEventInput(
+            entity_type=event.entity_type,
+            entity_id=event.entity_id,
+            action=event.action,
+            payload=storage_payload,
+            expected_version=event.expected_version,
+            client_updated_at=event.client_updated_at,
+            operation_id=event.operation_id,
+        )
         # EntityCommand.from_sync_event resolves aliases again and owns all
         # identity, delete-payload, CAS/LWW, tree, relation, and policy rules.
-        return self.commands.from_sync_event(scope, event)
+        return self.commands.from_sync_event(scope, storage_event)
 
     def partition(self, scope: object, events: Sequence[SyncEventInput]) -> MappedSyncBatch:
         parsed = tuple(events)

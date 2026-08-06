@@ -696,6 +696,148 @@ def test_mapper_propagates_expected_version_and_client_timestamp() -> None:
     assert request.entity_id == event.entity_id
 
 
+@pytest.mark.asyncio
+async def test_sync_mapper_rejects_create_for_authoritative_tombstone(
+    entity_fixture,
+) -> None:
+    from app.errors import MutationRejectedError
+    from app.models.tombstone import Tombstone
+    from app.sync.commands import SyncCommandMapper
+    from app.sync.contracts import SyncEventInput
+
+    async with entity_fixture._sessions.begin() as session:
+        session.add(
+            Tombstone(
+                entity_type="schedule",
+                entity_id="deleted-schedule",
+                deleted_at=UTC,
+                delete_sequence=1,
+            )
+        )
+
+    event = SyncEventInput(
+        **_event(
+            entity_id="deleted-schedule",
+            operation_id="tombstone-create-op",
+            payload={
+                "id": "deleted-schedule",
+                "title": "Resurrected",
+                "due_at": "2026-08-07T10:00:00.000Z",
+            },
+        )
+    )
+    scope = entity_fixture.open_mutation_scope()
+    try:
+        request = SyncCommandMapper(
+            entity_fixture.catalog, entity_fixture.commands
+        ).to_request(scope, event)
+        with pytest.raises(MutationRejectedError) as raised:
+            await entity_fixture.uow.execute(scope, request, event.operation_id)
+    finally:
+        await scope.aclose()
+
+    assert raised.value.rejection.code == "tombstone_conflict"
+    assert raised.value.rejection.details["resolution"] == "tombstone"
+
+
+def test_mapper_normalizes_catalog_json_fields_for_database_storage() -> None:
+    from app.commands.entity import EntityCommand
+    from app.registry import CATALOG
+    from app.sync.commands import SyncCommandMapper
+    from app.sync.contracts import SyncEventInput
+
+    event = SyncEventInput(
+        **_event(
+            entity_type="quickNote",
+            payload={"content": "capture", "tags": ["sync", "array"]},
+        )
+    )
+    request = SyncCommandMapper(CATALOG, EntityCommand(CATALOG)).to_request(None, event)
+    assert request.payload["tags"] == '["sync","array"]'
+    assert event.payload["tags"] == ("sync", "array")
+
+    string_event = SyncEventInput(
+        **_event(
+            entity_type="quickNote",
+            entity_id="quick-string",
+            operation_id="quick-string-op",
+            payload={"content": "capture", "tags": "9007199254740992"},
+        )
+    )
+    string_request = SyncCommandMapper(
+        CATALOG, EntityCommand(CATALOG)
+    ).to_request(None, string_event)
+    assert string_request.payload["tags"] == '"9007199254740992"'
+
+
+def test_sync_wire_payload_rejects_json_that_decodes_to_unsafe_i_json() -> None:
+    from app.errors import SpaceRecoveryRequiredError
+    from app.mutation.unit_of_work import _sync_wire_payload
+    from app.registry import CATALOG
+
+    spec = CATALOG.get_by_sync_key("quickNote")
+    with pytest.raises(SpaceRecoveryRequiredError):
+        _sync_wire_payload(spec, {"tags": "9007199254740992"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_action", ["create", "update"])
+async def test_same_batch_delete_blocks_resurrection(
+    entity_fixture, second_action: str
+) -> None:
+    from app.sync.commands import SyncCommandMapper
+    from app.sync.contracts import SyncEventInput
+
+    entity_id = f"same-batch-{second_action}"
+    await entity_fixture.seed_schedule(
+        entity_id,
+        version=1,
+        updated_at="2026-08-05T10:00:00.000Z",
+    )
+    delete_event = SyncEventInput(
+        **_event(
+            entity_id=entity_id,
+            action="delete",
+            payload={},
+            expected_version=1,
+            operation_id=f"{entity_id}-delete",
+        )
+    )
+    second_event = SyncEventInput(
+        **_event(
+            entity_id=entity_id,
+            action=second_action,
+            payload=(
+                {
+                    "id": entity_id,
+                    "title": "Resurrected",
+                    "due_at": "2026-08-07T10:00:00.000Z",
+                }
+                if second_action == "create"
+                else {"title": "Resurrected"}
+            ),
+            expected_version=None if second_action == "create" else 1,
+            operation_id=f"{entity_id}-{second_action}",
+        )
+    )
+    mapper = SyncCommandMapper(entity_fixture.catalog, entity_fixture.commands)
+    scope = entity_fixture.open_mutation_scope()
+    try:
+        result = await entity_fixture.uow.execute_batch(
+            scope,
+            (mapper.to_request(scope, delete_event), mapper.to_request(scope, second_event)),
+            f"{entity_id}-batch",
+            operation_ids=(delete_event.operation_id, second_event.operation_id),
+        )
+    finally:
+        await scope.aclose()
+
+    assert [item.operation_id for item in result.applied] == [delete_event.operation_id]
+    assert [item.operation_id for item in result.rejected] == [second_event.operation_id]
+    assert result.rejected[0].code == "tombstone_conflict"
+    assert result.rejected[0].details["resolution"] == "tombstone"
+
+
 def test_mapper_partitions_unknown_entity_as_durable_pre_rejection() -> None:
     from app.commands.entity import EntityCommand
     from app.registry import CATALOG

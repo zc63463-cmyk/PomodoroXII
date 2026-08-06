@@ -18,6 +18,7 @@ from app.errors import (
     IdempotencyConflictError,
     MutationRejectedError,
     SpaceRecoveryRequiredError,
+    to_wire_json,
 )
 from app.file_system.engine.base import _make_filename
 from app.file_system.frontmatter import strip_frontmatter
@@ -292,11 +293,13 @@ class AuthorityOverlay:
         catalog: CompiledEntityCatalog,
         rows: Mapping[tuple[str, object], Mapping[str, object]],
         *,
+        tombstones: frozenset[tuple[str, str]] = frozenset(),
         markdown: Mapping[str, bytes] | None = None,
         derived: Mapping[tuple[ProjectionActionTag, str], bytes | None] | None = None,
     ) -> None:
         self.catalog = catalog
         self._rows = dict(rows)
+        self._tombstones = set(tombstones)
         self._markdown = dict(markdown or {})
         self._derived = dict(derived or {})
         self._reserved_paths = set(self._markdown)
@@ -341,7 +344,23 @@ class AuthorityOverlay:
                 for target, payload in snapshot.fts.items()
             },
         }
-        return cls(catalog, rows, markdown=snapshot.markdown, derived=derived)
+        from sqlalchemy import text as sa_text
+
+        tombstones = frozenset(
+            (str(row.entity_type), str(row.entity_id))
+            for row in (
+                await session.execute(
+                    sa_text("SELECT entity_type, entity_id FROM tombstones")
+                )
+            )
+        )
+        return cls(
+            catalog,
+            rows,
+            tombstones=tombstones,
+            markdown=snapshot.markdown,
+            derived=derived,
+        )
 
     def row(self, entity_type: str, entity_id: object) -> Mapping[str, object] | None:
         return self._rows.get((entity_type, entity_id))
@@ -357,6 +376,9 @@ class AuthorityOverlay:
             )
             if kind == entity_type and spec.primary_key in row
         )
+
+    def is_tombstoned(self, entity_type: str, entity_id: str) -> bool:
+        return (entity_type, entity_id) in self._tombstones
 
     def markdown(self, target: str) -> bytes | None:
         return self._markdown.get(target)
@@ -376,6 +398,7 @@ class AuthorityOverlay:
 
     def apply(self, command: MutationCommand) -> None:
         rows = dict(self._rows)
+        tombstones = set(self._tombstones)
         markdown = dict(self._markdown)
         derived = dict(self._derived)
         reserved = set(self._reserved_paths)
@@ -441,6 +464,11 @@ class AuthorityOverlay:
                     )
                 rows.pop(key)
 
+        for event in command.sync_events:
+            if event.action == "delete":
+                spec = self.catalog.get(event.entity_type)
+                tombstones.add((spec.effective_sync_entity_type, event.entity_id))
+
         for projection in command.projections:
             target = str(projection.target)
             if projection.tag.value == "markdown_write":
@@ -505,6 +533,7 @@ class AuthorityOverlay:
                 derived[(projection.tag, target)] = projection.after
 
         self._rows = rows
+        self._tombstones = tombstones
         self._markdown = markdown
         self._derived = derived
         self._reserved_paths = reserved
@@ -596,6 +625,27 @@ def _complete_create_row(
         else:
             raise ValueError(f"required catalog field is missing: {spec.name}.{field.name}")
     return require_frozen_object(row)
+
+
+def _sync_wire_payload(
+    spec: EntitySpec, row: Mapping[str, object]
+) -> Mapping[str, object]:
+    from app.sync.contracts import SyncInputError, validate_i_json_graph
+
+    payload = dict(row)
+    for field in spec.fields:
+        value = payload.get(field.name)
+        if field.type != "json" or not isinstance(value, str):
+            continue
+        try:
+            decoded = json.loads(value)
+            validate_i_json_graph(decoded)
+            payload[field.name] = to_wire_json(decoded)
+        except (SyncInputError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SpaceRecoveryRequiredError(
+                f"authoritative {spec.name}.{field.name} JSON is invalid"
+            ) from exc
+    return require_frozen_object(payload)
 
 
 async def compile_catalog_entity_command(
@@ -735,6 +785,25 @@ class MutationCompiler:
         operation_id: str,
     ) -> MutationCommand:
         policy = self._policies.get(request.entity_type)
+        try:
+            spec = self.catalog.get(request.entity_type)
+        except KeyError:
+            if policy is None:
+                raise MutationRuleViolation(
+                    "not_found", {"entityType": request.entity_type}
+                ) from None
+            spec = None
+        if (
+            spec is not None
+            and request.name in {"entity.create", "entity.update"}
+            and overlay.is_tombstoned(
+                spec.effective_sync_entity_type, request.entity_id
+            )
+        ):
+            raise MutationRuleViolation(
+                "tombstone_conflict",
+                {"entityId": request.entity_id, "resolution": "tombstone"},
+            )
         context = MutationCompileContext(
             scope,
             overlay,
@@ -745,7 +814,7 @@ class MutationCompiler:
         )
         if policy is not None:
             return await policy.compile(context, request)
-        spec = _require_catalog_spec(self.catalog, request.entity_type)
+        assert spec is not None
         if (
             spec.storage_type is StorageType.FS_DB_SPLIT
             or spec.delete_strategy == "cascade_soft_delete"
@@ -2095,7 +2164,7 @@ class MutationUnitOfWork:
                         entity_type=spec.effective_sync_entity_type,
                         entity_id=event.entity_id,
                         action=event.action,
-                        payload=event.payload,
+                        payload=_sync_wire_payload(spec, event.payload),
                         operation_id=operation_id,
                         batch_id=batch_id,
                         version=event.version,

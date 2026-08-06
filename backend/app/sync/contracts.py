@@ -332,6 +332,9 @@ class SyncEventInput:
         }
         if any(not isinstance(key, str) for key in value):
             raise SyncInputError("invalid_event", {"reason": "non_string_object_key"})
+        missing = sorted(allowed - set(value))
+        if missing:
+            raise SyncInputError("invalid_event", {"missing": missing})
         unexpected = sorted(set(value) - allowed)
         if unexpected:
             raise SyncInputError("invalid_event", {"unexpected": unexpected})
@@ -340,8 +343,8 @@ class SyncEventInput:
                 entity_type=value["entity_type"],
                 entity_id=value["entity_id"],
                 action=value["action"],
-                payload=value.get("payload", {}),
-                expected_version=value.get("expected_version"),
+                payload=value["payload"],
+                expected_version=value["expected_version"],
                 client_updated_at=value["client_updated_at"],
                 operation_id=value["operation_id"],
             )
