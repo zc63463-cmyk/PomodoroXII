@@ -6,6 +6,8 @@ import {
   type RawAxiosHeaders,
 } from 'axios'
 
+import { API_V1_PREFIX } from '@/lib/platform'
+
 import type {
   ApiSyncV2AckResponse,
   ApiSyncV2OperationQueryResponse,
@@ -25,7 +27,17 @@ import {
 
 export const SYNC_V2_ERROR_ACCEPT =
   'application/vnd.pomodoroxii.error+json;version=2' as const
-export const SYNC_V2_PUSH_PATH = '/api/v1/sync/v2/push' as const
+export const SYNC_V2_PATHS = {
+  queryOperations: '/sync/v2/operations/query',
+  push: '/sync/v2/push',
+  pull: '/sync/v2/pull',
+  recover: '/sync/v2/recover',
+  ack: '/sync/v2/ack',
+  status: '/sync/v2/status',
+} as const
+
+export const SYNC_V2_PUSH_REQUEST_PATH =
+  `${API_V1_PREFIX}${SYNC_V2_PATHS.push}` as const
 
 function syncV2RequestConfig(config: AxiosRequestConfig = {}): AxiosRequestConfig {
   // AxiosRequestConfig permits optional header values, while AxiosHeaders.from
@@ -45,7 +57,7 @@ export async function syncV2QueryOperations(
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2OperationQueryResponse>> {
   const response = await api.post(
-    '/api/v1/sync/v2/operations/query',
+    SYNC_V2_PATHS.queryOperations,
     { client_id: body.client_id, operation_ids: [...body.operation_ids] },
     syncV2RequestConfig(config),
   )
@@ -61,7 +73,7 @@ export async function syncV2Push(
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2PushResponse>> {
   const response = await api.post(
-    SYNC_V2_PUSH_PATH, body, syncV2RequestConfig(config),
+    SYNC_V2_PATHS.push, body, syncV2RequestConfig(config),
   )
   return parsedResponse(response, parseSyncV2PushResponse(response.data))
 }
@@ -72,7 +84,7 @@ export async function syncV2PushCanonical(
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2PushResponse>> {
   const response = await api.post(
-    SYNC_V2_PUSH_PATH,
+    SYNC_V2_PATHS.push,
     canonicalBody,
     syncV2RequestConfig({
       ...config,
@@ -88,7 +100,7 @@ export async function syncV2Pull(
   params: { client_id: string; cursor: string | null; limit?: number },
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2PullResponse>> {
-  const response = await api.get('/api/v1/sync/v2/pull', syncV2RequestConfig({
+  const response = await api.get(SYNC_V2_PATHS.pull, syncV2RequestConfig({
     ...config,
     params: { ...(config.params as object | undefined), ...params },
   }))
@@ -100,7 +112,7 @@ export async function syncV2Recover(
   params: { client_id: string; page_token: string | null },
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2RecoveryResponse>> {
-  const response = await api.get('/api/v1/sync/v2/recover', syncV2RequestConfig({
+  const response = await api.get(SYNC_V2_PATHS.recover, syncV2RequestConfig({
     ...config,
     params: { ...(config.params as object | undefined), ...params },
   }))
@@ -113,7 +125,7 @@ export async function syncV2Ack(
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2AckResponse>> {
   const response = await api.post(
-    '/api/v1/sync/v2/ack', body, syncV2RequestConfig(config),
+    SYNC_V2_PATHS.ack, body, syncV2RequestConfig(config),
   )
   return parsedResponse(response, parseSyncV2AckResponse(response.data))
 }
@@ -123,7 +135,7 @@ export async function syncV2Status(
   params: { client_id?: string } = {},
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2StatusResponse>> {
-  const response = await api.get('/api/v1/sync/v2/status', syncV2RequestConfig({
+  const response = await api.get(SYNC_V2_PATHS.status, syncV2RequestConfig({
     ...config,
     params: { ...(config.params as object | undefined), ...params },
   }))

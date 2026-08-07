@@ -116,7 +116,7 @@ export interface SyncPendingPushBatch {
   events: unknown[]
   idempotencyKey: string
   requestMethod: 'POST'
-  requestPath: '/api/v1/sync/v2/push'
+  requestPath: typeof import('../lib/sync/transport').SYNC_V2_PUSH_REQUEST_PATH
   headers: {
     accept: 'application/vnd.pomodoroxii.error+json;version=2'
     contentType: 'application/json'

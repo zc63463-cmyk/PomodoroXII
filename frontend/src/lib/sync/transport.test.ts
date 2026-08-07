@@ -63,9 +63,9 @@ describe('Sync v2 transport', () => {
     await syncV2Status(api, { client_id: 'client-a' }, config)
 
     expect(calls.map((call) => call.url)).toEqual([
-      '/api/v1/sync/v2/operations/query', '/api/v1/sync/v2/push',
-      '/api/v1/sync/v2/pull', '/api/v1/sync/v2/recover',
-      '/api/v1/sync/v2/ack', '/api/v1/sync/v2/status',
+      '/sync/v2/operations/query', '/sync/v2/push',
+      '/sync/v2/pull', '/sync/v2/recover',
+      '/sync/v2/ack', '/sync/v2/status',
     ])
     for (const call of calls) {
       expect(call.headers.get('Accept')).toBe(SYNC_V2_ERROR_ACCEPT)
