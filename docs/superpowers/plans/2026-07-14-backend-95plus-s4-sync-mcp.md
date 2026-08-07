@@ -7936,7 +7936,7 @@ cd backend
 .\.venv\Scripts\ruff.exe check --no-cache app tests
 ```
 
-Expected: the reused S3 authority gate reports eleven routes and all recognized application-wide `SyncOutbox` reads; then pytest/ruff PASS with zero critical XFAIL/XPASS, no invisible-read bypass, and no Adapter boundary violation.
+Expected: the reused S3 authority gate reports nine routes (the unchanged eight-route S3 set plus `routes/v1/sync.py`) and all recognized application-wide `SyncOutbox` reads; then pytest/ruff PASS with zero critical XFAIL/XPASS, no invisible-read bypass, and no Adapter boundary violation.
 
 - [ ] **Step 4: Run the official-client and generated-contract gate**
 
