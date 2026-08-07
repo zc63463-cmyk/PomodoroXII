@@ -6,7 +6,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from sqlalchemy import func, select
 
@@ -46,11 +46,16 @@ from app.sync.contracts import (
     validate_sync_push_inputs,
 )
 from app.sync.cursor import CursorPosition, SyncCursorCodec
+from app.sync.operations import SYNC_OPERATION_BY_NAME, SyncOperationName
 from app.sync.snapshot import (
     SyncPageTokenCodec,
     SyncSnapshotSerializer,
     SyncSnapshotStore,
 )
+
+if TYPE_CHECKING:
+    from app.auth.authority import Principal
+    from app.runtime.bootstrap import RuntimeServices
 
 
 def _now_utc() -> str:
@@ -703,14 +708,12 @@ class SyncProtocol:
 
 @asynccontextmanager
 async def protocol_for_call(
-    services: Any,
-    principal: object,
+    services: RuntimeServices,
+    principal: Principal,
     space_id: str,
-    operation_name: str,
+    operation_name: SyncOperationName,
 ) -> AsyncIterator[SyncProtocol]:
     """Open exactly one catalog-authorized runtime handle for a Sync call."""
-    from app.sync.operations import SYNC_OPERATION_BY_NAME
-
     spec = SYNC_OPERATION_BY_NAME[operation_name]
     handle = await services.scope.open(principal, space_id, spec.runtime_mode)
     async with handle:

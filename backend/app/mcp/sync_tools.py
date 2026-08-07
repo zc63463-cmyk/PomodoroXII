@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -53,10 +53,17 @@ from app.sync.contracts import (
     validate_pull_limit,
     validate_sync_push_inputs,
 )
-from app.sync.operations import SYNC_OPERATION_BY_NAME, sync_input_app_error
-from app.sync.protocol import SyncProtocol
+from app.sync.operations import (
+    SYNC_OPERATION_BY_NAME,
+    SyncOperationName,
+    sync_input_app_error,
+)
+from app.sync.protocol import SyncProtocol, protocol_for_call
 
-RuntimeServicesProvider = Callable[[], Any]
+if TYPE_CHECKING:
+    from app.runtime.bootstrap import RuntimeServices
+
+RuntimeServicesProvider = Callable[[], "RuntimeServices"]
 SafeLimit = Annotated[StrictInt, Field(ge=1, le=500)]
 Identifier = Annotated[StrictStr, Field(min_length=1, max_length=64)]
 OperationIdentifier = Annotated[StrictStr, Field(min_length=1, max_length=128)]
@@ -215,17 +222,16 @@ class McpSyncProtocolFactory:
 
     @asynccontextmanager
     async def open_authenticated(
-        self, *, principal: Principal, space_id: str, operation_name: str
+        self,
+        *,
+        principal: Principal,
+        space_id: str,
+        operation_name: SyncOperationName,
     ) -> AsyncIterator[SyncProtocol]:
-        services = self._services_provider()
-        spec = SYNC_OPERATION_BY_NAME[operation_name]
-        handle = await services.scope.open(principal, space_id, spec.runtime_mode)
-        async with handle:
-            yield SyncProtocol(
-                handle,
-                services.mutation_uow,
-                catalog=services.catalog,
-            )
+        async with protocol_for_call(
+            self._services_provider(), principal, space_id, operation_name
+        ) as protocol:
+            yield protocol
 
 
 def _factory() -> McpSyncProtocolFactory:
