@@ -90,3 +90,11 @@ def test_mcp_tools_consistent_with_registration():
         f"MCP registered stats tools drift from STAT_SPECS: "
         f"missing={expected - actual}, extra={actual - expected}"
     )
+
+
+def test_sync_catalog_tools_are_not_classified_as_stats_tools():
+    """The complete Sync v2 adapter must not widen the stats catalog."""
+    from app.sync.operations import SYNC_OPERATIONS
+
+    sync_tools = {spec.mcp_tool for spec in SYNC_OPERATIONS}
+    assert get_actual_stats_mcp_tools().isdisjoint(sync_tools)

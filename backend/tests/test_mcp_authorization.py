@@ -305,6 +305,46 @@ async def test_space_token_cannot_authorize_another_space_before_storage(
 
 
 @pytest.mark.asyncio
+async def test_sync_space_token_cannot_open_another_space_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    import app.mcp.sync_tools as sync_tools
+    from app.auth.authority import Principal
+    from app.errors import AuthorizationError
+    from app.mcp.sync_tools import McpSyncProtocolFactory
+
+    principal = Principal(
+        subject="admin",
+        token_type="space",
+        epoch=1,
+        expires_at=4_102_444_800,
+        space_id="spc_a",
+    )
+    open_scope = AsyncMock(
+        side_effect=AuthorizationError("Token is not valid for this Space")
+    )
+    services = SimpleNamespace(
+        scope=SimpleNamespace(open=open_scope),
+        mutation_uow=object(),
+        catalog=object(),
+    )
+    monkeypatch.setattr(sync_tools, "current_mcp_principal", lambda: principal)
+    monkeypatch.setattr(
+        sync_tools,
+        "_installed_factory",
+        McpSyncProtocolFactory(lambda: services),
+    )
+
+    with pytest.raises(ToolError) as raised:
+        await sync_tools.sync_pull("spc_b", "client-a", None, 100)
+
+    assert json.loads(str(raised.value))["code"] == "forbidden"
+    open_scope.assert_awaited_once_with(principal, "spc_b", "write")
+
+
+@pytest.mark.asyncio
 async def test_unregistered_space_returns_canonical_error_before_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
