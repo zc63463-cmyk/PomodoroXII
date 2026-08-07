@@ -978,6 +978,7 @@ _PROTOCOL_METHOD = {
 
 def _install_real_factory_with_fake_protocol(monkeypatch, protocol, handle):
     import app.mcp.sync_tools as sync_tools
+    import app.sync.protocol as protocol_module
 
     services = SimpleNamespace(
         scope=SimpleNamespace(open=AsyncMock(return_value=handle)),
@@ -987,7 +988,7 @@ def _install_real_factory_with_fake_protocol(monkeypatch, protocol, handle):
     factory = sync_tools.McpSyncProtocolFactory(lambda: services)
     monkeypatch.setattr(factory, "authenticate", AsyncMock(return_value=Principal("test", "trusted_stdio", 0, None)))
     monkeypatch.setattr(sync_tools, "_installed_factory", factory)
-    monkeypatch.setattr(sync_tools, "SyncProtocol", lambda *_args, **_kwargs: protocol)
+    monkeypatch.setattr(protocol_module, "SyncProtocol", lambda *_args, **_kwargs: protocol)
     return sync_tools, services
 
 
@@ -1120,6 +1121,41 @@ async def test_protocol_factory_closes_handle_once_on_all_body_paths(
     "operation_name",
     ["query_operations", "push", "pull", "recover", "ack", "status"],
 )
+async def test_mcp_protocol_factory_delegates_to_shared_protocol_helper(
+    monkeypatch, operation_name: str
+) -> None:
+    import app.mcp.sync_tools as sync_tools
+
+    services = object()
+    principal = Principal("test", "trusted_stdio", 0, None)
+    sentinel = object()
+    calls: list[tuple[object, Principal, str, str]] = []
+
+    @asynccontextmanager
+    async def fake_protocol_for_call(
+        actual_services, actual_principal, space_id, actual_operation_name
+    ):
+        calls.append(
+            (actual_services, actual_principal, space_id, actual_operation_name)
+        )
+        yield sentinel
+
+    monkeypatch.setattr(sync_tools, "protocol_for_call", fake_protocol_for_call)
+    factory = sync_tools.McpSyncProtocolFactory(lambda: services)
+
+    async with factory.open_authenticated(
+        principal=principal, space_id="space-a", operation_name=operation_name
+    ) as protocol:
+        assert protocol is sentinel
+
+    assert calls == [(services, principal, "space-a", operation_name)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation_name",
+    ["query_operations", "push", "pull", "recover", "ack", "status"],
+)
 async def test_rest_protocol_helper_uses_the_same_catalog_mode_and_lifetime(
     monkeypatch, operation_name: str
 ) -> None:
@@ -1177,6 +1213,7 @@ async def _install_tool_with_real_runtime_handle(
     tmp_path, monkeypatch, protocol, *, file_system=None
 ):
     import app.mcp.sync_tools as sync_tools
+    import app.sync.protocol as protocol_module
     from app.mcp.server import mcp
     from app.runtime.leases import LeaseMode, RuntimeLeaseCoordinator
     from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
@@ -1233,7 +1270,7 @@ async def _install_tool_with_real_runtime_handle(
         "authenticate",
         AsyncMock(return_value=Principal("test", "trusted_stdio", 0, None)),
     )
-    monkeypatch.setattr(sync_tools, "SyncProtocol", lambda *_args, **_kwargs: protocol)
+    monkeypatch.setattr(protocol_module, "SyncProtocol", lambda *_args, **_kwargs: protocol)
     tool = await mcp.get_tool("sync_pull")
     monkeypatch.setattr(tool, "_protocol_factory", factory)
     return tool, leases, opened

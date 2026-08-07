@@ -17,6 +17,10 @@ from app.sync.contracts import (
     validate_sync_push_inputs,
 )
 
+SyncOperationName = Literal[
+    "query_operations", "push", "pull", "recover", "ack", "status"
+]
+
 
 class SyncTransportInputError(AppError):
     """Canonical Adapter for transport-neutral Sync input failures."""
@@ -38,7 +42,7 @@ def sync_input_app_error(error: SyncInputError) -> AppError:
 
 @dataclass(frozen=True, slots=True)
 class ValidatedSyncCall:
-    operation: str
+    operation: SyncOperationName
     client_id: str | None = None
     batch_id: str | None = None
     events: tuple[SyncEventInput, ...] = ()
@@ -188,7 +192,7 @@ def validate_status_call(pairs: Sequence[tuple[str, str]]) -> ValidatedSyncCall:
 
 @dataclass(frozen=True, slots=True)
 class SyncOperationSpec:
-    name: str
+    name: SyncOperationName
     rest_method: str
     rest_path: str
     mcp_tool: str
@@ -209,6 +213,7 @@ SYNC_OPERATION_BY_NAME = {item.name: item for item in SYNC_OPERATIONS}
 __all__ = [
     "SYNC_OPERATIONS",
     "SYNC_OPERATION_BY_NAME",
+    "SyncOperationName",
     "SyncOperationSpec",
     "SyncTransportInputError",
     "ValidatedSyncCall",
