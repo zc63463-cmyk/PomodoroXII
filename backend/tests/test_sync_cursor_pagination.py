@@ -40,6 +40,7 @@ pytestmark = pytest.mark.provisioned_space_storage
 
 
 @pytest.mark.asyncio
+@pytest.mark.self_contained_measurement
 async def test_incremental_pull_512_max_payloads_peak_heap_is_bounded() -> None:
     """The executable pull probe stays complete and below the 256 MiB heap gate."""
     script = Path(__file__).resolve().parents[1] / "scripts" / "measure_sync_pull.py"

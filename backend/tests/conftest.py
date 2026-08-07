@@ -39,6 +39,10 @@ _RUN_ROOT_PATTERN = re.compile(r"run-[0-9a-f]{16}\Z")
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
+        "self_contained_measurement: skip application fixture bootstrap for an isolated probe",
+    )
+    config.addinivalue_line(
+        "markers",
         "provisioned_space_storage: explicitly provision storage for Spaces "
         "created through the test HTTP client",
     )
@@ -168,6 +172,9 @@ def _isolate_env(
     The directory is newly created from a nodeid hash below a run-scoped root,
     so isolation does not depend on deleting leftovers from earlier tests.
     """
+    if request.node.get_closest_marker("self_contained_measurement") is not None:
+        return tmp_path
+
     _ensure_inside_temp_root(tmp_path, test_run_root)
 
     meta_db = tmp_path / "meta.db"
