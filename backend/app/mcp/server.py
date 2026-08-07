@@ -39,6 +39,10 @@ from app.mcp.auth import (
     current_mcp_principal,
     trusted_stdio_context,
 )
+from app.mcp.sync_tools import (
+    McpSyncProtocolFactory,
+    register_sync_tools,
+)
 from app.runtime.bootstrap import RuntimeServices
 from app.runtime.scope import AccessMode
 from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
@@ -169,6 +173,7 @@ mcp = FastMCP(
     ),
     auth=_InstalledRuntimeTokenVerifier(),
 )
+register_sync_tools(mcp, McpSyncProtocolFactory(_require_runtime_services))
 
 
 # --------------------------------------------------------------------------- #
@@ -303,54 +308,6 @@ async def get_entity_schema(entity_type: str) -> dict:
 
     _require_master_principal()
     return MetaService().get_schema(entity_type)
-
-
-# --------------------------------------------------------------------------- #
-# Tools — Sync
-# --------------------------------------------------------------------------- #
-
-@mcp.tool
-@canonical_mcp_errors
-async def get_sync_status(space_id: str) -> dict:
-    """Get sync status: per-entity row counts + tombstone count.
-
-    Args:
-        space_id: The space to query.
-
-    Returns:
-        Dict with server_time, entity_counts (per entity type), and
-        tombstone_count.
-    """
-    from app.services.sync import SyncService
-
-    scope = await _authorize_space(space_id, "read")
-    async with get_space_session(scope) as db:
-        return await SyncService(db).status()
-
-
-@mcp.tool
-@canonical_mcp_errors
-async def sync_pull(
-    space_id: str,
-    since: str = "",
-    limit: int = 1000,
-) -> dict:
-    """Pull changes from the server since a given timestamp.
-
-    Args:
-        space_id: The space to sync from.
-        since: ISO timestamp; only entities updated after this are returned.
-               Empty string = full pull.
-        limit: Max entities per type (default 1000).
-
-    Returns:
-        Dict with all entity lists, tombstones, next_since, has_more.
-    """
-    from app.services.sync import SyncService
-
-    scope = await _authorize_space(space_id, "read")
-    async with get_space_session(scope) as db:
-        return await SyncService(db).pull(since=since, limit=limit)
 
 
 # --------------------------------------------------------------------------- #
