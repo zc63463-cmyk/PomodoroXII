@@ -1,7 +1,11 @@
 import Dexie from 'dexie'
 import { describe, expect, it } from 'vitest'
 import { dexieDbNameForSpace } from '@/lib/platform'
-import { atomicDexieV18Cutover, openPomodoroXIDB } from './dexie-v18-cutover'
+import {
+  DEXIE_V19_NATIVE_VERSION,
+  atomicDexieV18Cutover,
+  openPomodoroXIDB,
+} from './dexie-v18-cutover'
 import { applyNativeV18Schema, DEXIE_V18_NATIVE_VERSION, expectedV18SchemaInventory, V18_REMOVED_STORE_NAMES, V18_STORE_DEFINITIONS } from './dexie-v18-schema'
 
 const v17Stores = {
@@ -21,12 +25,14 @@ const openRaw = async (name: string) => {
 }
 
 describe('Dexie v18 native cutover', () => {
-  it('opens a clean Space with the exact final inventory and no removed stores', async () => {
+  it('opens a clean Space with the final v18 business inventory layered into v19', async () => {
     const spaceId = `v18-clean-${crypto.randomUUID()}`
     const db = await openPomodoroXIDB(spaceId)
-    expect(db.verno).toBe(18)
+    expect(db.verno).toBe(19)
     const names = db.tables.map((table) => table.name).sort()
-    expect(names).toEqual(expectedV18SchemaInventory().map((entry) => entry.name))
+    expect(names).toEqual(expect.arrayContaining(
+      expectedV18SchemaInventory().map((entry) => entry.name),
+    ))
     for (const removed of V18_REMOVED_STORE_NAMES) expect(names).not.toContain(removed)
     expect(db.quickNotes.schema.indexes.map((entry) => entry.name)).not.toContain('session_id')
     expect(db.timeBlocks.schema.indexes.map((entry) => entry.name)).not.toContain('task_id')
@@ -47,6 +53,33 @@ describe('Dexie v18 native cutover', () => {
     expect(probe.version).toBe(DEXIE_V18_NATIVE_VERSION)
     expect(Array.from(probe.objectStoreNames).sort()).toEqual(expectedV18SchemaInventory().map((entry) => entry.name))
     probe.close()
+    await Dexie.delete(name)
+  })
+
+  it('reopens an already completed native v19 database', async () => {
+    const spaceId = `v19-reopen-${crypto.randomUUID()}`
+    const first = await openPomodoroXIDB(spaceId)
+    first.close()
+
+    const reopened = await openPomodoroXIDB(spaceId)
+
+    expect(reopened.verno).toBe(DEXIE_V19_NATIVE_VERSION / 10)
+    await reopened.delete()
+  })
+
+  it('rejects a future native database version without rewriting it', async () => {
+    const spaceId = `v19-future-${crypto.randomUUID()}`
+    const name = dexieDbNameForSpace(spaceId)
+    const request = indexedDB.open(name, DEXIE_V19_NATIVE_VERSION + 10)
+    request.onupgradeneeded = () => request.result.createObjectStore('future', { keyPath: 'id' })
+    await new Promise<void>((resolve, reject) => {
+      request.onsuccess = () => { request.result.close(); resolve() }
+      request.onerror = () => reject(request.error)
+    })
+
+    await expect(openPomodoroXIDB(spaceId)).rejects.toThrow(
+      `unsupported_client_schema:${DEXIE_V19_NATIVE_VERSION + 10}`,
+    )
     await Dexie.delete(name)
   })
 

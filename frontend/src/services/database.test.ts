@@ -2,9 +2,11 @@ import Dexie from 'dexie'
 import { afterEach, describe, expect, it } from 'vitest'
 import { dexieDbNameForSpace } from '@/lib/platform'
 import { openPomodoroXIDB } from './dexie-v18-cutover'
+import { INITIAL_S4_OUTBOX_FIELDS, PomodoroXIDB } from './database'
 import {
-  DEXIE_V18_NATIVE_VERSION,
+  V18_STORE_DEFINITIONS,
   expectedV18SchemaInventory,
+  toDexieStoreStrings,
 } from './dexie-v18-schema'
 
 const v17Stores = {
@@ -48,29 +50,29 @@ afterEach(async () => {
 })
 
 describe('PomodoroXIDB v18 schema', () => {
-  it('opens a clean Space with exactly the final v18 inventory', async () => {
+  it('opens a clean Space through the v18 cutover into v19', async () => {
     const spaceId = `v18-${crypto.randomUUID()}`
     const database = await openPomodoroXIDB(spaceId)
 
     expect(database.spaceId).toBe(spaceId)
     expect(database.name).toBe(dexieDbNameForSpace(spaceId))
-    expect(database.verno).toBe(18)
-    expect(database.tables.map((table) => table.name).sort()).toEqual(
-      expectedV18SchemaInventory().map((store) => store.name).sort(),
-    )
+    expect(database.verno).toBe(19)
+    expect(database.tables.map((table) => table.name)).toEqual(expect.arrayContaining(
+      expectedV18SchemaInventory().map((store) => store.name),
+    ))
     expect(database.tables.map((table) => table.name)).not.toEqual(
       expect.arrayContaining(removedV18Stores),
     )
     await database.delete()
   })
 
-  it('upgrades an empty v17 database atomically to v18', async () => {
+  it('upgrades an empty v17 database atomically through v18 into v19', async () => {
     const spaceId = `v18-empty-${crypto.randomUUID()}`
     const old = await openV17(spaceId)
     old.close()
 
     const database = await openPomodoroXIDB(spaceId)
-    expect(database.verno).toBe(DEXIE_V18_NATIVE_VERSION / 10)
+    expect(database.verno).toBe(19)
     expect(database.quickNotes.schema.indexes.map((index) => index.name))
       .not.toContain('session_id')
     expect(database.timeBlocks.schema.indexes.map((index) => index.name))
@@ -132,5 +134,68 @@ describe('PomodoroXIDB v18 schema', () => {
 
     await expect(openPomodoroXIDB(spaceId)).rejects.toThrow('legacy_client_data_present')
     await Dexie.delete(dexieDbNameForSpace(spaceId))
+  })
+})
+
+describe('PomodoroXIDB v19 Sync protocol staging', () => {
+  it('opens a clean v19 database without dropping v18 business stores', async () => {
+    const spaceId = `v19-clean-${crypto.randomUUID()}`
+    const database = new PomodoroXIDB(spaceId)
+    await database.open()
+
+    expect(database.verno).toBe(19)
+    expect(database.tables.map((table) => table.name)).toEqual(expect.arrayContaining([
+      ...expectedV18SchemaInventory().map((store) => store.name),
+      'syncAdmissionState',
+      'syncRecoveryState',
+      'syncRecoveryChunks',
+      'syncPushBatches',
+      'syncTerminalApplications',
+    ]))
+    expect(database.tables.map((table) => table.name)).toContain('workItems')
+    await database.delete()
+  })
+
+  it('upgrades a valid v18 outbox row atomically with S4 defaults', async () => {
+    const spaceId = `v19-upgrade-${crypto.randomUUID()}`
+    const name = dexieDbNameForSpace(spaceId)
+    const old = new Dexie(name)
+    old.version(18).stores(toDexieStoreStrings(V18_STORE_DEFINITIONS))
+    await old.open()
+    await old.table('outbox').put({
+      id: 1,
+      spaceId,
+      entityType: 'note',
+      entityId: 'note-a',
+      action: 'create',
+      payload: '{"id":"note-a"}',
+      payloadHash: 'a'.repeat(64),
+      operationId: 'operation-a',
+      compoundOperationId: null,
+      compoundOrder: null,
+      expectedVersion: null,
+      requiresVersionRebase: false,
+      transportState: 'ready',
+      createdAt: '2026-08-07T01:00:00.000Z',
+      synced: false,
+      lastError: null,
+      lastErrorCode: null,
+      failedAt: null,
+      attemptCount: 0,
+    })
+    old.close()
+
+    const database = new PomodoroXIDB(spaceId, name)
+    await database.open()
+
+    expect(await database.outbox.get(1)).toMatchObject(INITIAL_S4_OUTBOX_FIELDS)
+    expect(await database.syncAdmissionState.get('active')).toEqual({
+      key: 'active',
+      state: 'pending',
+      readyRoots: [],
+      readyRootSetSha256: null,
+      errorCode: null,
+    })
+    await database.delete()
   })
 })

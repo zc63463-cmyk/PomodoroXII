@@ -21,6 +21,11 @@ import { MetaDB, type ActiveSessionLocatorMirror } from '@/services/meta-databas
 import type { PomodoroXIDB } from '@/services/database'
 import { useTimerStore } from '@/stores/timer-store'
 import { touchTabIdentity, type TabIdentity } from './tab-identity'
+import {
+  transitionProvisionalOperation,
+} from '@/lib/sync/provisional-operation-authority'
+import type { ProvisionalOperationRow } from '@/services/meta-database'
+import { withSpaceAuthorityFence, type SpaceAuthorityToken } from '@/lib/sync/space-authority-fence'
 
 export type LocatedActiveSessionResponse = ActiveSessionView | {
   kind: 'activation_conflict'
@@ -395,9 +400,11 @@ export class ActiveSessionCoordinatorClient {
   }
 
   async reconcileProvisional(operationId: string): Promise<void> {
-    return this.provisionalLock.run(operationId, async () => {
+    const initial = await this.meta.provisionalOperations.get(operationId)
+    if (!initial) return
+    return withSpaceAuthorityFence(initial.spaceId, (token) => this.provisionalLock.run(operationId, async () => {
       const operation = await this.meta.provisionalOperations.get(operationId)
-      if (!operation || operation.state === 'resolved' || operation.state === 'awaiting_s4' || operation.state === 'conflict') return
+      if (!operation || operation.state === 'activation_resolved' || operation.state === 'awaiting_s4' || operation.state === 'conflict') return
       const activateProvisional = this.api.activateProvisional
       if (!activateProvisional) throw new Error('active_session_activation_unavailable')
       if (operation.deviceId !== this.identity.deviceId || operation.tabId !== this.identity.tabId) {
@@ -406,12 +413,12 @@ export class ActiveSessionCoordinatorClient {
       await withDetachedSpaceDatabase(operation.spaceId, async (database) => {
         const aggregate = await loadProvisionalAggregate(database, operation.sessionId)
         if (aggregate.session.endedAt !== null || aggregate.session.clockState === 'ended') {
-          await this.meta.provisionalOperations.update(operationId, {
+          await this.transitionProvisional(token, operationId, ['pending', 'activating'], {
             state: 'awaiting_s4', updatedAt: new Date().toISOString(),
           })
           return
         }
-        await this.meta.provisionalOperations.update(operationId, {
+        await this.transitionProvisional(token, operationId, ['pending'], {
           state: 'activating', updatedAt: new Date().toISOString(),
         })
         try {
@@ -425,11 +432,11 @@ export class ActiveSessionCoordinatorClient {
           if (!active) throw new Error('active_session_activation_empty')
           if (response.kind !== 'activation_conflict') {
             await cacheAuthoritativeActivation(database, operation, response, aggregate)
-            await this.meta.provisionalOperations.update(operationId, {
-              state: 'resolved', updatedAt: new Date().toISOString(),
+            await this.transitionProvisional(token, operationId, ['activating'], {
+              state: 'activation_resolved', updatedAt: new Date().toISOString(),
             })
           } else {
-            await this.meta.provisionalOperations.update(operationId, {
+            await this.transitionProvisional(token, operationId, ['activating'], {
               state: 'conflict', updatedAt: new Date().toISOString(),
             })
           }
@@ -437,14 +444,30 @@ export class ActiveSessionCoordinatorClient {
         } catch (error) {
           const current = await this.meta.provisionalOperations.get(operationId)
           if (current?.state === 'activating') {
-            await this.meta.provisionalOperations.update(operationId, {
+            await this.transitionProvisional(token, operationId, ['activating'], {
               state: 'pending', updatedAt: new Date().toISOString(),
             })
           }
           throw error
         }
       })
-    })
+    }))
+  }
+
+  private transitionProvisional(
+    token: SpaceAuthorityToken,
+    operationId: string,
+    expectedStates: readonly ProvisionalOperationRow['state'][],
+    patch: Readonly<Partial<ProvisionalOperationRow>>,
+  ): Promise<ProvisionalOperationRow> {
+    return transitionProvisionalOperation(
+      this.meta,
+      token.spaceId,
+      token,
+      operationId,
+      expectedStates,
+      patch,
+    )
   }
 
   private requireLocator(): ActiveSessionView {

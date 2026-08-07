@@ -1,6 +1,7 @@
 import type { PomodoroXIDB } from '@/services/database'
 import type { QuickNote } from '@/types'
 import { createQuickNoteInTransaction } from '@/lib/quick-notes/quick-note-repository'
+import { withSpaceAuthorityFence } from '@/lib/sync/space-authority-fence'
 
 export const QUICK_NOTE_NEW_DRAFT_KEY = 'quickNote:newDraft:v1'
 export const QUICK_NOTE_NEW_DRAFT_VERSION = 1 as const
@@ -72,7 +73,7 @@ export function createDexieQuickNoteDraftAdapter(
     },
 
     async record(snapshot) {
-      return database.transaction(
+      return withSpaceAuthorityFence(database.spaceId, (token) => database.transaction(
         'rw',
         database.quickNotes,
         database.outbox,
@@ -84,14 +85,14 @@ export function createDexieQuickNoteDraftAdapter(
             throw new Error('QuickNote draft ownership changed before record')
           }
 
-          const note = await createQuickNoteInTransaction(database, {
+          const note = await createQuickNoteInTransaction(database, token, {
             id: snapshot.draftId,
             content: snapshot.content,
           })
           await database.settings.delete(QUICK_NOTE_NEW_DRAFT_KEY)
           return note
         },
-      )
+      ))
     },
   }
 }

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import type { PomodoroXIDB } from '@/services/database'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { INITIAL_S4_OUTBOX_FIELDS, type PomodoroXIDB } from '@/services/database'
 import { hashCommandPayload } from '@/lib/contracts/payload-hash'
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import type { OutboxEvent } from '@/types'
@@ -7,15 +7,34 @@ import {
   buildOutboxIdentity,
   boundedChildOperationId,
   countUnsyncedOutbox,
-  deleteOutboxByIds,
   enqueueOutbox,
-  listUnsyncedOutbox,
-  markOutboxEventsFailed,
+  prepareHeldProvisionalBatch,
   resolveOutboxMerge,
 } from './outbox'
-import { ENTITY_TYPE_TO_TABLE, type OutboxAction, type SyncEntityType } from './types'
+import type { OutboxIdentity } from './outbox'
+import { withSpaceAuthorityFence } from './space-authority-fence'
+import {
+  ENTITY_TYPE_TO_TABLE,
+  FINAL_SYNC_ENTITY_TO_TABLE,
+  FINAL_SYNC_ENTITY_TYPES,
+  type OutboxAction,
+  type SyncEntityType,
+} from './types'
 
 const createdAt = (millis: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, 0, millis)).toISOString()
+const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+class FakeLockManager {
+  request<T>(_name: string, _options: { mode: 'exclusive' }, callback: () => Promise<T>): Promise<T> {
+    return callback()
+  }
+}
+beforeEach(() => Object.defineProperty(navigator, 'locks', {
+  configurable: true, value: new FakeLockManager(),
+}))
+afterEach(() => {
+  if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks)
+  else Reflect.deleteProperty(navigator, 'locks')
+})
 
 async function openTestDb(): Promise<PomodoroXIDB> {
   return openPomodoroXIDB(`outbox-${crypto.randomUUID()}`)
@@ -28,7 +47,7 @@ async function enqueueTest(
   action: OutboxAction,
   payload: unknown,
   expectedVersion: number | null = action === 'create' ? null : 1,
-  transportState: OutboxEvent['transportState'] = 'ready',
+  transportState: OutboxIdentity['transportState'] = 'ready',
   timestamp = createdAt(0),
 ): Promise<void> {
   const identity = await buildOutboxIdentity(payload, {
@@ -37,7 +56,20 @@ async function enqueueTest(
     transportState,
     createdAt: timestamp,
   })
-  await enqueueOutbox(db, db.spaceId, entityType, entityId, action, payload, identity)
+  await withSpaceAuthorityFence(db.spaceId, (token) =>
+    enqueueOutbox(db, db.spaceId, token, entityType, entityId, action, payload, identity))
+}
+
+async function enqueueWithFence(
+  db: PomodoroXIDB,
+  entityType: SyncEntityType,
+  entityId: string,
+  action: OutboxAction,
+  payload: unknown,
+  identity: OutboxIdentity,
+): Promise<void> {
+  await withSpaceAuthorityFence(db.spaceId, (token) =>
+    enqueueOutbox(db, db.spaceId, token, entityType, entityId, action, payload, identity))
 }
 
 function storedEvent(
@@ -63,6 +95,7 @@ function storedEvent(
     lastErrorCode: null,
     failedAt: null,
     attemptCount: 0,
+    ...INITIAL_S4_OUTBOX_FIELDS,
     ...overrides,
   }
 }
@@ -104,6 +137,7 @@ describe('v18 outbox identity and atomic enqueue', () => {
       expectedVersion: null,
       transportState: 'ready',
       synced: false,
+      ...INITIAL_S4_OUTBOX_FIELDS,
     })
     expect(row?.createdAt).toBe(createdAt(0))
     expect(row?.payloadHash).toMatch(/^[0-9a-f]{64}$/)
@@ -150,12 +184,12 @@ describe('v18 outbox identity and atomic enqueue', () => {
       operationId: 'op-hash', expectedVersion: null,
       transportState: 'ready', createdAt: createdAt(0),
     })
-    await expect(enqueueOutbox(
-      db, db.spaceId, 'note', 'note-hash', 'create', payload,
+    await expect(enqueueWithFence(
+      db, 'note', 'note-hash', 'create', payload,
       { ...identity, payloadHash: 'f'.repeat(64) },
     )).rejects.toThrow('payloadHash_mismatch')
-    await expect(enqueueOutbox(
-      db, db.spaceId, 'note', 'note-time', 'create', payload,
+    await expect(enqueueWithFence(
+      db, 'note', 'note-time', 'create', payload,
       { ...identity, operationId: 'op-time', createdAt: '2026-01-01T00:00:00Z' },
     )).rejects.toThrow('canonical UTC RFC3339')
   })
@@ -167,12 +201,12 @@ describe('v18 outbox identity and atomic enqueue', () => {
       operationId: 'op-awaiting', expectedVersion: null,
       transportState: 'awaiting_s4', createdAt: createdAt(0),
     })
-    await enqueueOutbox(db, db.spaceId, 'workItem', 'wi-1', 'create', payload, identity)
+    await enqueueWithFence(db, 'workItem', 'wi-1', 'create', payload, identity)
     expect(await countUnsyncedOutbox(db)).toBe(0)
-    expect(await listUnsyncedOutbox(db)).toEqual([])
-    await expect(enqueueOutbox(
-      db, 'other-space', 'note', 'n', 'create', payload, identity,
-    )).rejects.toThrow('outbox_space_database_mismatch')
+    const database = db
+    await expect(withSpaceAuthorityFence('other-space', (token) => enqueueOutbox(
+      database, 'other-space', token, 'note', 'n', 'create', payload, identity,
+    ))).rejects.toThrow('space_database_binding_mismatch')
   })
 
   it('supports a command hash projection for complete post-image payloads', async () => {
@@ -183,33 +217,12 @@ describe('v18 outbox identity and atomic enqueue', () => {
       operationId: 'note-projection', expectedVersion: 4,
       transportState: 'awaiting_s4', createdAt: createdAt(0), hashPayload,
     })
-    await enqueueOutbox(db, db.spaceId, 'workItemNote', 'note-1', 'update', payload, identity)
+    await enqueueWithFence(db, 'workItemNote', 'note-1', 'update', payload, identity)
     expect((await db.outbox.get(1))?.payloadHash)
       .toBe(await hashCommandPayload(hashPayload))
     expect(JSON.parse((await db.outbox.get(1))!.payload)).toEqual(payload)
   })
 
-  it('records retry failure without deleting the immutable row', async () => {
-    db = await openTestDb()
-    await db.outbox.add(storedEvent(db, { entityId: 'failed' }))
-    const row = await db.outbox.where('entityId').equals('failed').first()
-    await markOutboxEventsFailed(db, [{ outboxId: row!.id!, error: 'version_mismatch' }])
-    expect(await db.outbox.get(row!.id!)).toMatchObject({
-      lastError: 'version_mismatch', lastErrorCode: 'version_mismatch', attemptCount: 1,
-    })
-  })
-
-  it('orders ready rows by canonical createdAt and supports deletion by id', async () => {
-    db = await openTestDb()
-    const rows = await db.outbox.bulkAdd([
-      storedEvent(db, { entityId: 'later', createdAt: createdAt(2) }),
-      storedEvent(db, { entityId: 'earlier', createdAt: createdAt(1) }),
-      storedEvent(db, { entityId: 'held', transportState: 'blocked_conflict', createdAt: createdAt(0) }),
-    ], { allKeys: true })
-    expect((await listUnsyncedOutbox(db)).map((row) => row.entityId)).toEqual(['earlier', 'later'])
-    await deleteOutboxByIds(db, [rows[0]!])
-    expect(await db.outbox.get(rows[0]!)).toBeUndefined()
-  })
 })
 
 describe('child operation IDs', () => {
@@ -222,7 +235,59 @@ describe('child operation IDs', () => {
   })
 })
 
+describe('held provisional compound authority', () => {
+  it('preserves persisted root and parent-before-child operation order', async () => {
+    const db = await openTestDb()
+    const root = 'compound-a'
+    const rows = [
+      storedEvent(db, { entityType: 'focusSession', entityId: 'session-a' }),
+      storedEvent(db, { entityType: 'sessionTaskContext', entityId: 'context-a' }),
+      storedEvent(db, { entityType: 'sessionAttributionRevision', entityId: 'attribute-a' }),
+      storedEvent(db, {
+        entityType: 'sessionWorkItemPlan', entityId: 'plan-a',
+        payload: JSON.stringify({ planRank: 2 }),
+      }),
+    ].map((row, index) => ({
+      ...row, id: index + 1, operationId: `operation-${index}`,
+      compoundOperationId: root, compoundOrder: index,
+      transportState: 'awaiting_s4' as const,
+    }))
+
+    expect(prepareHeldProvisionalBatch(rows)).toMatchObject({
+      batchId: root,
+      items: rows.map((row, requestIndex) => ({
+        requestIndex, operationId: row.operationId, entityType: row.entityType,
+      })),
+    })
+    await db.delete()
+  })
+
+  it('rejects a missing compound child or an order gap', async () => {
+    const db = await openTestDb()
+    const rows = [0, 2, 3].map((compoundOrder, index) => ({
+      ...storedEvent(db), id: index + 1, operationId: `operation-${index}`,
+      entityType: ['focusSession', 'sessionTaskContext', 'sessionAttributionRevision'][index]!,
+      compoundOperationId: 'compound-a', compoundOrder,
+      transportState: 'awaiting_s4' as const,
+    }))
+    expect(() => prepareHeldProvisionalBatch(rows))
+      .toThrow('provisional_compound_order_or_operation_id_invalid')
+    await db.delete()
+  })
+})
+
 describe('sync entity table inventory', () => {
+  it('contains exactly the 22 final Sync v2 entity keys', () => {
+    expect(FINAL_SYNC_ENTITY_TYPES).toEqual([
+      'note', 'folder', 'quickNote', 'reflection', 'habit', 'habitCheckIn',
+      'schedule', 'timeBlock', 'memoComment', 'scheduleQuickNote',
+      'project', 'statusDefinition', 'typeDefinition', 'label', 'workItemLabel',
+      'workItem', 'workItemNote', 'focusSession', 'sessionTaskContext',
+      'sessionAttributionRevision', 'sessionWorkItemPlan', 'sessionWorkItemOutcome',
+    ])
+    expect(Object.keys(FINAL_SYNC_ENTITY_TO_TABLE)).toEqual(FINAL_SYNC_ENTITY_TYPES)
+  })
+
   it('contains only final sync-enabled entity tables', () => {
     expect(Object.keys(ENTITY_TYPE_TO_TABLE)).toEqual([
       'note', 'folder', 'quickNote', 'reflection', 'habit', 'habitCheckIn',

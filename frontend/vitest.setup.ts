@@ -8,3 +8,23 @@ process.env.TZ = "UTC";
 
 import "fake-indexeddb/auto";
 import "@testing-library/jest-dom/vitest";
+
+class VitestLockManager {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  request<T>(name: string, _options: { mode: "exclusive" }, callback: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(name) ?? Promise.resolve();
+    const result = previous.then(callback);
+    const tail = result.then(() => undefined, () => undefined);
+    this.tails.set(name, tail);
+    void tail.finally(() => {
+      if (this.tails.get(name) === tail) this.tails.delete(name);
+    });
+    return result;
+  }
+}
+
+Object.defineProperty(navigator, "locks", {
+  configurable: true,
+  value: new VitestLockManager(),
+});

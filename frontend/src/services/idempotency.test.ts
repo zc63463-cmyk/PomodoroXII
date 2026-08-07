@@ -3,6 +3,7 @@ import { AxiosHeaders } from 'axios'
 import type { InternalAxiosRequestConfig } from 'axios'
 import { ensureMutationIdempotencyKey, buildBatchIdempotencyKey } from '@/services/idempotency'
 import type { OutboxEvent } from '@/types'
+import { INITIAL_S4_OUTBOX_FIELDS } from '@/services/database'
 
 function makeConfig(method: string): InternalAxiosRequestConfig {
   return {
@@ -77,6 +78,7 @@ describe('buildBatchIdempotencyKey', () => {
       expectedVersion: null,
       requiresVersionRebase: false,
       transportState: 'ready',
+      ...INITIAL_S4_OUTBOX_FIELDS,
       lastError: null,
       lastErrorCode: null,
       failedAt: null,

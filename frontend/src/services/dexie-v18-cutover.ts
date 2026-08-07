@@ -2,6 +2,7 @@ import { dexieDbNameForSpace } from '@/lib/platform'
 import { DEXIE_V17_NATIVE_VERSION, DEXIE_V18_NATIVE_VERSION, V18_REMOVED_STORE_NAMES, V18_STORE_DEFINITIONS, applyNativeV18Schema } from './dexie-v18-schema'
 
 export const REMOVED_V18_TABLES = V18_REMOVED_STORE_NAMES
+export const DEXIE_V19_NATIVE_VERSION = 190
 
 const LEGACY_REFERENCE_PATHS = new Map<string, readonly string[]>([
   ['quickNotes', ['session_id']],
@@ -189,28 +190,63 @@ function assertNativeV18Inventory(storeNames: string[]): void {
   }
 }
 
+export async function readExistingNativeIndexedDbVersionWithoutUpgrade(
+  dbName: string,
+): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const request = indexedDB.open(dbName)
+    let missing = false
+    request.onupgradeneeded = () => {
+      missing = true
+      request.transaction?.abort()
+    }
+    request.onblocked = () => reject(new Error('indexeddb_version_read_blocked'))
+    request.onerror = () => reject(missing
+      ? new Error('space_database_missing')
+      : request.error ?? new Error('indexeddb_version_read_failed'))
+    request.onsuccess = () => {
+      const database = request.result
+      const version = database.version
+      database.close()
+      resolve(version)
+    }
+  })
+}
+
+async function requireAlreadyCompletedV19AfterVersionError(dbName: string): Promise<void> {
+  const version = await readExistingNativeIndexedDbVersionWithoutUpgrade(dbName)
+  if (version !== DEXIE_V19_NATIVE_VERSION) {
+    throw new Error(`unsupported_client_schema:${version}`)
+  }
+}
+
 export async function openPomodoroXIDB(spaceId: string) {
   if (!spaceId.trim()) throw new Error('spaceId is required')
   const dbName = dexieDbNameForSpace(spaceId)
-  await atomicDexieV18Cutover(dbName)
-  const nativeReceiptSchema = await readNativeReceiptSchema(dbName)
-  assertNativeV18Inventory(nativeReceiptSchema.storeNames)
-  const nativeReceiptKeyPath = nativeReceiptSchema.keyPath
-  if (!Array.isArray(nativeReceiptKeyPath) || nativeReceiptKeyPath.length !== 2 ||
-      nativeReceiptKeyPath[0] !== 'commandId' || nativeReceiptKeyPath[1] !== 'attempt') {
-    throw new Error('unsupported_client_schema:180_receipt_key')
+  let alreadyV19 = false
+  try {
+    await atomicDexieV18Cutover(dbName)
+  } catch (error) {
+    if (!(error instanceof DOMException) || error.name !== 'VersionError') throw error
+    await requireAlreadyCompletedV19AfterVersionError(dbName)
+    alreadyV19 = true
+  }
+  if (!alreadyV19) {
+    const nativeReceiptSchema = await readNativeReceiptSchema(dbName)
+    assertNativeV18Inventory(nativeReceiptSchema.storeNames)
+    const nativeReceiptKeyPath = nativeReceiptSchema.keyPath
+    if (!Array.isArray(nativeReceiptKeyPath) || nativeReceiptKeyPath.length !== 2 ||
+        nativeReceiptKeyPath[0] !== 'commandId' || nativeReceiptKeyPath[1] !== 'attempt') {
+      throw new Error('unsupported_client_schema:180_receipt_key')
+    }
   }
   const { PomodoroXIDB } = await import('./database')
   const database = new PomodoroXIDB(spaceId, dbName)
   await database.open()
-  if (database.name !== dbName || database.spaceId !== spaceId || database.verno !== 18) {
+  if (database.name !== dbName || database.spaceId !== spaceId || database.verno !== 19) {
     database.close()
     throw new Error('space_database_open_identity_mismatch')
   }
-  // V18 is the locked breaking cutover. A database already opened with an
-  // earlier draft of V18 may still carry the old commandId-only receipt key;
-  // refuse it explicitly instead of allowing composite-key writes to fail
-  // nondeterministically or overwrite receipt history.
   return database
 }
 

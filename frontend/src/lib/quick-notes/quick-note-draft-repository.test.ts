@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PomodoroXIDB } from '@/services/database'
+import { INITIAL_S4_OUTBOX_FIELDS, type PomodoroXIDB } from '@/services/database'
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import {
   configureQuickNoteOutboxHook,
@@ -13,6 +13,13 @@ import {
 } from '@/lib/quick-notes/quick-note-draft-repository'
 
 const UPDATED_AT = '2026-07-10T04:00:00.000Z'
+const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+
+class FakeLockManager {
+  request<T>(_name: string, _options: { mode: 'exclusive' }, callback: () => Promise<T>): Promise<T> {
+    return callback()
+  }
+}
 
 function createSnapshot(
   draftId: string,
@@ -40,6 +47,7 @@ describe('quick-note-draft-repository', () => {
   let dbB: PomodoroXIDB
 
   beforeEach(async () => {
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: new FakeLockManager() })
     resetQuickNoteOutboxHook()
     dbA = await openPomodoroXIDB(`quick-note-draft-a-${crypto.randomUUID()}`)
     dbB = await openPomodoroXIDB(`quick-note-draft-b-${crypto.randomUUID()}`)
@@ -48,6 +56,8 @@ describe('quick-note-draft-repository', () => {
   afterEach(async () => {
     resetQuickNoteOutboxHook()
     await Promise.all([dbA.delete(), dbB.delete()])
+    if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks)
+    else Reflect.deleteProperty(navigator, 'locks')
   })
 
   describe('owner-aware Dexie adapter', () => {
@@ -235,6 +245,11 @@ describe('quick-note-draft-repository', () => {
         expectedVersion: null,
         requiresVersionRebase: false,
         transportState: 'ready',
+        serverOutcomeCanonicalBase64: null,
+        retryable: false,
+        nextAttemptAt: null,
+        retryPredecessorOperationId: null,
+        retrySuccessorOperationId: null,
       }])
       expect(await getRawDraft(dbA)).toBeUndefined()
     })
@@ -366,6 +381,7 @@ describe('quick-note-draft-repository', () => {
           lastErrorCode: null,
           failedAt: null,
           attemptCount: 0,
+          ...INITIAL_S4_OUTBOX_FIELDS,
           operationId: 'op-qn-delayed-hook',
           expectedVersion: null,
           requiresVersionRebase: false,

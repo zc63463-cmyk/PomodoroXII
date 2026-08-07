@@ -1,22 +1,31 @@
 /**
- * RealSyncEngine — 组装 S1-2 runPullLoop + pushAllPending（F1 §6.1）。
+ * RealSyncEngine — coordinates the fenced Sync v2 recovery, pull, and push cycle.
  *
  * 实现 F0 §8.1 全 12 方法 + withSyncLock 多 Tab 互斥。
  * - markDirty：pendingCountCache++ + scheduleSync debounce（DR-7）
- * - sync/fullSync：withSyncLock 包裹 runSyncCycle（复用 S1-2，禁止内联 HTTP）
+ * - sync/fullSync hold one Space Web Lock across all protocol and authority writes.
  * - resolveConflict：outboxId<0 分支（S1-Hard-3）
  * - destroy：清 timer + 标志位（DR-4）
  */
 
 import type { AxiosInstance } from 'axios'
 import type { PomodoroXIDB } from '@/services/database'
+import { metaDB, type MetaDB } from '@/services/meta-database'
 import { spaceApi } from '@/services/api'
-import { runPullLoop } from './pull-loop'
-import { pushAllPending } from './push-batch'
-import { loadSyncMeta, touchLastSyncAt } from './sync-meta'
+import { runPullLoopV2 } from './pull-loop'
+import { pushAllPendingUnderFence } from './push-batch'
+import { admitTs3AwaitingS4 } from './admission'
+import { loadSyncV2Meta } from './sync-meta'
 import { countUnsyncedOutbox } from './outbox'
-import { withSyncLock } from './sync-lock'
-import { notifyRemoteWin, notifyCircularRef } from './toast'
+import { getOrCreateClientId } from './client-registry'
+import { runFullRecovery } from './recovery'
+import { reconcileSpaceCommittedTerminalEvidence } from './terminal-application'
+import {
+  requireSpaceAuthorityToken,
+  requireSpaceDatabaseBinding,
+  withSpaceAuthorityFence,
+  type SpaceAuthorityToken,
+} from './space-authority-fence'
 import {
   ENTITY_TYPE_TO_TABLE,
   type SyncEngine,
@@ -26,12 +35,12 @@ import {
 } from './types'
 
 const SYNC_DEBOUNCE_MS = 5000
-const RESYNC_DELAY_MS = 30_000
 
 export class RealSyncEngine implements SyncEngine {
   private db: PomodoroXIDB
   private spaceId: string
   private api: AxiosInstance
+  private meta: MetaDB
   private status: SyncStatus = 'idle'
   private lastSyncedAt: string | null = null
   private pendingCountCache = 0
@@ -46,10 +55,11 @@ export class RealSyncEngine implements SyncEngine {
     syncComplete: Set<() => void>
   } = { pull: new Set(), push: new Set(), conflict: new Set(), syncComplete: new Set() }
 
-  constructor(db: PomodoroXIDB, spaceId: string, api?: AxiosInstance) {
+  constructor(db: PomodoroXIDB, spaceId: string, api?: AxiosInstance, meta: MetaDB = metaDB) {
     this.db = db
     this.spaceId = spaceId
     this.api = api ?? spaceApi
+    this.meta = meta
     // 初始化 pendingCount 缓存（异步，不阻塞构造）
     void this.refreshPendingCount()
   }
@@ -66,16 +76,10 @@ export class RealSyncEngine implements SyncEngine {
     if (this.destroyed) return
     if (this.isSyncing) return
     if (typeof navigator !== 'undefined' && !navigator.onLine) return
-    await withSyncLock(
-      this.spaceId,
-      async () => {
-        if (this.destroyed) return
-        const meta = await loadSyncMeta(this.db)
-        const isFull = meta.since === '' && meta.cursor == null
-        await this.runSyncCycle(isFull)
-      },
-      () => this.scheduleSync(RESYNC_DELAY_MS),
-    )
+    await withSpaceAuthorityFence(this.spaceId, async (token) => {
+      if (this.destroyed) return
+      await this.runSyncCycle(false, token)
+    })
   }
 
   getStatus(): SyncStatus {
@@ -99,6 +103,9 @@ export class RealSyncEngine implements SyncEngine {
     resolution: 'accept-remote' | 'keep-local',
     target?: { entityType: string; entityId: string },
   ): Promise<void> {
+    return withSpaceAuthorityFence(this.spaceId, async (token) => {
+    requireSpaceAuthorityToken(token, this.spaceId)
+    requireSpaceDatabaseBinding(this.db, this.spaceId)
     if (this.destroyed) return
     const conflict = this.conflicts.find(
       (candidate) =>
@@ -171,20 +178,17 @@ export class RealSyncEngine implements SyncEngine {
     }
     // S1-4.2：resolve 也走 wire（含仍 conflict 时 store 应仍为 conflict）
     this.fireSyncComplete()
+    })
   }
 
   async fullSync(): Promise<void> {
     if (this.destroyed) return
     if (this.isSyncing) return
     if (typeof navigator !== 'undefined' && !navigator.onLine) return
-    await withSyncLock(
-      this.spaceId,
-      async () => {
-        if (this.destroyed) return
-        await this.runSyncCycle(true)
-      },
-      () => this.scheduleSync(RESYNC_DELAY_MS),
-    )
+    await withSpaceAuthorityFence(this.spaceId, async (token) => {
+      if (this.destroyed) return
+      await this.runSyncCycle(true, token)
+    })
   }
 
   destroy(): void {
@@ -256,53 +260,39 @@ export class RealSyncEngine implements SyncEngine {
     this.listeners.syncComplete.forEach((cb) => cb())
   }
 
-  private requiresFullRestart(err: unknown): boolean {
-    const response = (err as { response?: { status?: number; data?: { error_type?: string } } })
-      ?.response
-    return response?.status === 409 && (
-      response.data?.error_type === 'sync_cursor_expired'
-      || response.data?.error_type === 'sync_snapshot_expired'
-    )
-  }
-
-  /** sync/fullSync 共用内核：runPullLoop → pushAllPending（禁止内联 HTTP） */
-  private async runSyncCycle(isFull: boolean): Promise<void> {
+  /** Shared fenced kernel for incremental and full synchronization. */
+  private async runSyncCycle(isFull: boolean, token: SpaceAuthorityToken): Promise<void> {
     if (this.destroyed) return
     this.isSyncing = true
     this.setStatus('syncing')
     try {
-      // 1. Pull；过期 cursor 必须 fail-closed 并恢复为真正 snapshot，恢复前禁止 push。
-      let pullResult
-      try {
-        pullResult = await runPullLoop(this.db, this.api, { isFull })
-      } catch (err) {
-        if (this.requiresFullRestart(err)) {
-          pullResult = await runPullLoop(this.db, this.api, { isFull: true })
-        } else {
-          throw err
-        }
+      const clientId = await getOrCreateClientId(this.db, this.spaceId, token)
+      await reconcileSpaceCommittedTerminalEvidence(this.db, this.meta, this.spaceId, token)
+      await admitTs3AwaitingS4(this.db, this.meta, this.spaceId, token)
+      let v2Meta = await loadSyncV2Meta(this.db)
+      if (isFull || v2Meta.requiresFullRecovery || v2Meta.cursor === null) {
+        await runFullRecovery(this.db, this.api, this.spaceId, clientId, token)
+        v2Meta = await loadSyncV2Meta(this.db)
       }
+      const pullResult = await runPullLoopV2(this.db, this.api, this.spaceId, clientId, token)
       if (this.destroyed) return
       // S1-Hard-1：pull dirtyConflicts 统一进 addConflicts
       this.addConflicts(pullResult.dirtyConflicts)
       // DR-10：onPullComplete 每周期一次（循环外）
       this.listeners.pull.forEach((cb) => cb())
 
-      // 2. Push（S1-2 pushAllPending 内部已分批 + 遇冲突停止）
-      const pushResult = await pushAllPending(this.db, this.api)
+      // 2. Query and push each durable authority unit under the same fence.
+      const pushResult = await pushAllPendingUnderFence(
+        this.db, this.meta, this.spaceId, clientId, this.api, token,
+      )
       if (this.destroyed) return
-      this.addConflicts(pushResult.conflicts)
-      if (pushResult.remoteWinCount > 0) notifyRemoteWin(pushResult.remoteWinCount)
-      if (pushResult.circularRefCount > 0) {
-        notifyCircularRef(pushResult.circularRefCount)
-      }
+      if (pushResult.state === 'blocked') this.setStatus('syncing')
       // S1-Hard-2：onPushComplete 每周期一次（循环外）
       this.listeners.push.forEach((cb) => cb())
 
       // 3. 收尾
       await this.refreshPendingCount()
       this.lastSyncedAt = new Date().toISOString()
-      await touchLastSyncAt(this.db, this.lastSyncedAt)
       this.setStatus(this.conflicts.length > 0 ? 'conflict' : 'idle')
       // S1-4.1：周期末触发 onSyncComplete（成功路径）
       this.fireSyncComplete()
