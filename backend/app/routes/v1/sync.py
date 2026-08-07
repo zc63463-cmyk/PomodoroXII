@@ -24,7 +24,6 @@ from app.schemas.sync import (
 from app.settings import settings
 from app.sync.contracts import SyncInputError
 from app.sync.operations import (
-    SYNC_OPERATION_BY_NAME,
     ValidatedSyncCall,
     sync_input_app_error,
     validate_ack_call,
@@ -34,7 +33,7 @@ from app.sync.operations import (
     validate_recover_call,
     validate_status_call,
 )
-from app.sync.protocol import SyncProtocol
+from app.sync.protocol import SyncProtocol, protocol_for_call
 
 router = APIRouter()
 
@@ -119,12 +118,10 @@ def _protocol_dependency(validator: Any):
             epoch=int(user.get("epoch", 0)),
             expires_at=user.get("exp") if isinstance(user.get("exp"), int) else None,
         )
-        spec = SYNC_OPERATION_BY_NAME[call.operation]
-        handle = await services.scope.open(principal, str(user["space_id"]), spec.runtime_mode)
-        try:
-            yield SyncProtocol(handle, services.mutation_uow, catalog=services.catalog)
-        finally:
-            await handle.aclose()
+        async with protocol_for_call(
+            services, principal, str(user["space_id"]), call.operation
+        ) as protocol:
+            yield protocol
 
     return dependency
 

@@ -701,4 +701,25 @@ class SyncProtocol:
             )
 
 
-__all__ = ["BoundedPullPage", "SyncProtocol", "read_visible_event_page_bounded"]
+@asynccontextmanager
+async def protocol_for_call(
+    services: Any,
+    principal: object,
+    space_id: str,
+    operation_name: str,
+) -> AsyncIterator[SyncProtocol]:
+    """Open exactly one catalog-authorized runtime handle for a Sync call."""
+    from app.sync.operations import SYNC_OPERATION_BY_NAME
+
+    spec = SYNC_OPERATION_BY_NAME[operation_name]
+    handle = await services.scope.open(principal, space_id, spec.runtime_mode)
+    async with handle:
+        yield SyncProtocol(handle, services.mutation_uow, catalog=services.catalog)
+
+
+__all__ = [
+    "BoundedPullPage",
+    "SyncProtocol",
+    "protocol_for_call",
+    "read_visible_event_page_bounded",
+]

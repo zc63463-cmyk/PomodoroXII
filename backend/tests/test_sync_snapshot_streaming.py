@@ -63,6 +63,7 @@ async def test_snapshot_chunks_are_bounded_and_resume_without_duplicates(space_s
     tracemalloc.stop()
     assert created.error is None
     assert created.descriptor is not None
+    assert created.descriptor.total_entities == 10_000
     chunks = tuple(
         await space_session.scalars(
             select(SyncRecoveryChunk)
