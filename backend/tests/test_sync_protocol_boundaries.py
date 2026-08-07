@@ -43,6 +43,31 @@ def _imported_names(tree: ast.AST) -> set[str]:
     return names
 
 
+def _imported_modules(tree: ast.AST) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
+
+
+def _literal_open_modes(tree: ast.AST) -> set[str]:
+    modes: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _dotted_name(node.func).endswith(".open"):
+            continue
+        if len(node.args) > 2 and isinstance(node.args[2], ast.Constant):
+            if isinstance(node.args[2].value, str):
+                modes.add(node.args[2].value)
+        for keyword in node.keywords:
+            if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+                if isinstance(keyword.value.value, str):
+                    modes.add(keyword.value.value)
+    return modes
+
+
 def _called_names(tree: ast.AST) -> set[str]:
     return {
         node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
@@ -86,21 +111,25 @@ def test_only_protocol_decodes_opaque_cursor_tokens() -> None:
 
 def test_protocol_is_transport_neutral_and_runtime_modes_are_public() -> None:
     protocol = _module_tree("app.sync.protocol")
-    imported = _imported_names(protocol)
+    imported = _imported_modules(protocol) | _imported_names(protocol)
     assert not ({"fastapi", "FastAPI", "FastMCP", "fastmcp"} & imported)
     assert {spec.runtime_mode for spec in SYNC_OPERATIONS} <= {"read", "write"}
 
     for module_name in ("app.routes.v1.sync", "app.mcp.sync_tools"):
         tree = _module_tree(module_name)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not _dotted_name(node.func).endswith(".open"):
-                continue
-            for keyword in node.keywords:
-                assert not (
-                    keyword.arg == "mode"
-                    and isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value == "mutation"
-                )
+        assert "mutation" not in _literal_open_modes(tree)
+
+
+def test_runtime_mode_guard_rejects_positional_and_keyword_mutation() -> None:
+    positional = ast.parse('scope.open(principal, "space-a", "mutation")')
+    keyword = ast.parse('scope.open(principal, "space-a", mode="mutation")')
+    assert _literal_open_modes(positional) == {"mutation"}
+    assert _literal_open_modes(keyword) == {"mutation"}
+
+
+def test_transport_import_guard_rejects_aliased_framework_imports() -> None:
+    tree = ast.parse("import fastapi as web\nfrom fastmcp import FastMCP as ToolServer\n")
+    assert _imported_modules(tree) == {"fastapi", "fastmcp"}
 
 
 def test_operation_catalog_is_the_exact_rest_and_mcp_surface() -> None:
@@ -134,7 +163,8 @@ def test_backend_authority_gate_covers_sync_route_and_all_outbox_reads(tmp_path:
         BACKEND_APP, (Path("routes/v1/sync.py"),)
     )
     assert app_files > 0
-    assert route_files == 9
+    expected_routes = len(gate.S3_ROUTE_FILES) + 1
+    assert route_files == expected_routes == 9
     assert reads > 0
 
     copied_app = tmp_path / "app"
