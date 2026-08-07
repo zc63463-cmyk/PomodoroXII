@@ -20,7 +20,12 @@ The cursor contract:
 """
 from __future__ import annotations
 
+import argparse
+import importlib.util
+import sys
+import tracemalloc
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +37,37 @@ from tests.sync_v2_helpers import (
 )
 
 pytestmark = pytest.mark.provisioned_space_storage
+
+
+@pytest.mark.asyncio
+async def test_incremental_pull_512_max_payloads_peak_heap_is_bounded() -> None:
+    """The executable pull probe stays complete and below the 256 MiB heap gate."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "measure_sync_pull.py"
+    spec = importlib.util.spec_from_file_location("task8_measure_sync_pull", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    arguments = argparse.Namespace(events=512, payload_bytes=262144, limit=500, output=None)
+
+    tracemalloc.start()
+    try:
+        result = await module._measure(arguments)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert result == {
+        "events": 512,
+        "payload_bytes": 262144,
+        "requested_limit": 500,
+        "returned_events": 512,
+        "canonical_page_bytes": result["canonical_page_bytes"],
+        "has_more": True,
+        "pull_complete": True,
+    }
+    assert result["canonical_page_bytes"] <= 8 * 1024 * 1024
+    assert peak <= 256 * 1024 * 1024
 
 
 async def _setup_login_and_space_token(client) -> tuple[str, str]:

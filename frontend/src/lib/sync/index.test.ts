@@ -1,4 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join, relative } from 'node:path'
+
+import axios, { type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockEngineInstances: Array<{
   destroy: ReturnType<typeof vi.fn>
@@ -14,7 +18,7 @@ const mockEngineInstances: Array<{
 }> = []
 
 vi.mock('./engine', () => ({
-  // ★必须用 function（非箭头）才能被 `new` 调用（Vitest v4 要求）
+  // 必须用 function（非箭头）才能被 `new` 调用（Vitest v4 要求）
   RealSyncEngine: vi.fn().mockImplementation(function () {
     const instance = {
       destroy: vi.fn(),
@@ -37,7 +41,7 @@ vi.mock('@/services/space-db', () => ({
   spaceDBManager: { hasSpace: true, current: { name: 'mock-db' } },
 }))
 
-// ★关键：mock useSyncStore 暴露 setState 静态方法（D2）
+// mock useSyncStore 暴露 setState 静态方法（D2）
 const mockSetState = vi.fn()
 vi.mock('@/stores/sync-store', () => ({
   useSyncStore: { setState: mockSetState, getState: () => ({}) },
@@ -70,7 +74,7 @@ describe('lib/sync/index', () => {
     mod.bootstrapSyncEngine('space-1')
 
     expect(RealSyncEngine).toHaveBeenCalledWith(expect.anything(), 'space-1')
-    // ★用 namespace 访问 live binding（解构会在赋值前捕获旧值）
+    // 用 namespace 访问 live binding（解构会在赋值前捕获旧值）
     expect(mod.syncEngine).toBe(mockEngineInstances[0])
   })
 
@@ -85,7 +89,7 @@ describe('lib/sync/index', () => {
     const pullCb = engine.onPullComplete.mock.calls[0]![0] as () => void
     pullCb()
 
-    // S1-4.1：onPullComplete wire 仅 invalidate；终态由 onSyncComplete 写
+    // onPullComplete wire 仅 invalidate；终态由 onSyncComplete 写
     expect(queryClient.invalidateQueries).toHaveBeenCalledWith({
       queryKey: ['pxii', 'space-1'],
     })
@@ -114,11 +118,9 @@ describe('lib/sync/index', () => {
 
     mod.bootstrapSyncEngine('space-1')
     const first = mockEngineInstances[0]!
-
     mod.bootstrapSyncEngine('space-2')
     const second = mockEngineInstances[1]!
 
-    // 第二次 bootstrap 内部 destroy 了第一个实例
     expect(first.destroy).toHaveBeenCalledTimes(1)
     expect(second).not.toBe(first)
     expect(mod.syncEngine).toBe(second)
@@ -130,7 +132,6 @@ describe('lib/sync/index', () => {
     mod.bootstrapSyncEngine('space-1')
     const engine = mockEngineInstances[0]!
     mockSetState.mockClear()
-
     engine.getStatus.mockReturnValue('idle')
     engine.getLastSyncedAt.mockReturnValue('2026-07-07T08:30:00Z')
     engine.getPendingCount.mockReturnValue(0)
@@ -157,7 +158,6 @@ describe('lib/sync/index', () => {
     mod.bootstrapSyncEngine('space-1')
     const engine = mockEngineInstances[0]!
     mockSetState.mockClear()
-
     engine.getStatus.mockReturnValue('infra-error')
     engine.getLastSyncedAt.mockReturnValue(null)
     engine.getPendingCount.mockReturnValue(0)
@@ -173,5 +173,90 @@ describe('lib/sync/index', () => {
       }),
     )
     expect(mockRefreshQuickNotesFromRepository).toHaveBeenCalledTimes(1)
+  })
+})
+
+function productionSyncSources(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(root, entry.name)
+    if (entry.isDirectory()) return productionSyncSources(path)
+    return entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') ? [path] : []
+  })
+}
+
+function adapter(responseData: unknown, capture: InternalAxiosRequestConfig[]) {
+  return async (config: InternalAxiosRequestConfig): Promise<AxiosResponse> => {
+    capture.push(config)
+    return { data: responseData, status: 200, statusText: 'OK', headers: {}, config }
+  }
+}
+
+describe('Sync v2 public boundary', () => {
+  it('keeps every Sync v2 URL literal in transport.ts', () => {
+    const root = join(process.cwd(), 'src', 'lib', 'sync')
+    const offenders = productionSyncSources(root).filter((path) =>
+      path !== join(root, 'transport.ts')
+      && readFileSync(path, 'utf8').includes('/api/v1/sync/v2/'),
+    )
+    expect(offenders.map((path) => relative(root, path))).toEqual([])
+  })
+
+  it('routes all six calls through canonical Accept and strict parsers', async () => {
+    const transport = await import('./transport')
+    const calls: InternalAxiosRequestConfig[] = []
+    const api = axios.create()
+    const catalogHash = 'a'.repeat(64)
+    const cursor = 'opaque-cursor-0001'
+
+    api.defaults.adapter = adapter({ items: [{
+      operation_id: 'op-a', state: 'unknown', batch_id: null, result: null,
+    }] }, calls)
+    await transport.syncV2QueryOperations(api, {
+      client_id: 'client-a', operation_ids: ['op-a'],
+    })
+    api.defaults.adapter = adapter({
+      batch_id: 'batch-a', applied: [], conflicts: [], errors: [],
+    }, calls)
+    await transport.syncV2Push(api, {
+      client_id: 'client-a', batch_id: 'batch-a', events: [],
+    })
+    api.defaults.adapter = adapter({
+      events: [], next_cursor: cursor, has_more: false, catalog_hash: catalogHash,
+    }, calls)
+    await transport.syncV2Pull(api, { client_id: 'client-a', cursor: null })
+    api.defaults.adapter = adapter({
+      payload_jsonl_base64: '', entity_count: 0, chunk_sha256: '0'.repeat(64),
+      next_page_token: null, has_more: false, catalog_hash: catalogHash,
+      waterline_cursor: cursor,
+    }, calls)
+    await transport.syncV2Recover(api, { client_id: 'client-a', page_token: null })
+    api.defaults.adapter = adapter({
+      client_id: 'client-a', accepted: true, requires_recovery: false,
+      catalog_hash: catalogHash,
+    }, calls)
+    await transport.syncV2Ack(api, { client_id: 'client-a', cursor })
+    api.defaults.adapter = adapter({
+      catalog_hash: catalogHash, client_id: 'client-a', registered: true,
+      requires_recovery: false, recovery_action: null,
+      visible_event_count: 0, active_client_count: 1, recovery_client_count: 0,
+    }, calls)
+    await transport.syncV2Status(api, { client_id: 'client-a' })
+
+    expect(calls.map((call) => call.url)).toEqual([
+      '/api/v1/sync/v2/operations/query', '/api/v1/sync/v2/push',
+      '/api/v1/sync/v2/pull', '/api/v1/sync/v2/recover',
+      '/api/v1/sync/v2/ack', '/api/v1/sync/v2/status',
+    ])
+    for (const call of calls) {
+      expect(call.headers.get('Accept')).toBe(transport.SYNC_V2_ERROR_ACCEPT)
+    }
+
+    api.defaults.adapter = adapter({
+      events: [], next_cursor: cursor, has_more: false,
+      catalog_hash: catalogHash, unexpected: true,
+    }, [])
+    await expect(transport.syncV2Pull(api, {
+      client_id: 'client-a', cursor: null,
+    })).rejects.toThrow()
   })
 })

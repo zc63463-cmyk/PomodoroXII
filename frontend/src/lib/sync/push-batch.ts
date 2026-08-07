@@ -32,7 +32,11 @@ import {
   withSpaceAuthorityFence,
   type SpaceAuthorityToken,
 } from './space-authority-fence'
-import { syncV2PushCanonical, syncV2QueryOperations } from './transport'
+import {
+  SYNC_V2_PUSH_PATH,
+  syncV2PushCanonical,
+  syncV2QueryOperations,
+} from './transport'
 import {
   applyTerminalResultTwoPhase,
   reconcileSpaceCommittedTerminalEvidence,
@@ -45,8 +49,6 @@ import {
 import { getOrCreateClientId } from './client-registry'
 import { resumeImportedProvisionalReviews } from '@/lib/focus-session/focus-session-repository'
 import type { ApiSyncV2Event } from './types'
-
-export const SYNC_V2_PUSH_PATH = '/api/v1/sync/v2/push' as const
 
 export type QueryDecision =
   | { kind: 'unknown' }

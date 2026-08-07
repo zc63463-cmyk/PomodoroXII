@@ -24,6 +24,7 @@ import {
   type ApiSyncV2PushResponse,
   type SyncEntityType,
 } from './types'
+import { SYNC_V2_PUSH_PATH } from './transport'
 
 export class PushAuthorityIntegrityError extends Error {
   constructor(readonly code: string) { super(code) }
@@ -469,7 +470,7 @@ export async function validatePendingPushReceipt(
   receipt: SyncPendingPushBatch,
 ): Promise<void> {
   if (receipt.key !== 'active' || receipt.requestMethod !== 'POST' ||
-      receipt.requestPath !== '/api/v1/sync/v2/push' ||
+      receipt.requestPath !== SYNC_V2_PUSH_PATH ||
       receipt.headers.accept !== 'application/vnd.pomodoroxii.error+json;version=2' ||
       receipt.headers.contentType !== 'application/json' ||
       receipt.headers.idempotencyKey !== receipt.idempotencyKey ||

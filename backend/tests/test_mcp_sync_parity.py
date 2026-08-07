@@ -1116,6 +1116,38 @@ async def test_protocol_factory_closes_handle_once_on_all_body_paths(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation_name",
+    ["query_operations", "push", "pull", "recover", "ack", "status"],
+)
+async def test_rest_protocol_helper_uses_the_same_catalog_mode_and_lifetime(
+    monkeypatch, operation_name: str
+) -> None:
+    import app.sync.protocol as protocol_module
+
+    handle = _Handle()
+    services = SimpleNamespace(
+        scope=SimpleNamespace(open=AsyncMock(return_value=handle)),
+        mutation_uow=object(),
+        catalog=object(),
+    )
+    sentinel = object()
+    monkeypatch.setattr(protocol_module, "SyncProtocol", lambda *_args, **_kwargs: sentinel)
+    principal = Principal("test", "space", 0, "space-a")
+
+    async with protocol_module.protocol_for_call(
+        services, principal, "space-a", operation_name
+    ) as protocol:
+        assert protocol is sentinel
+        assert handle.active is True
+
+    expected_mode = "read" if operation_name == "status" else "write"
+    services.scope.open.assert_awaited_once_with(principal, "space-a", expected_mode)
+    assert handle.closed == 1
+    assert handle.active is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("primary", [ValidationError("body"), asyncio.CancelledError()])
 async def test_protocol_factory_preserves_primary_before_cleanup_failure(primary) -> None:
     from app.mcp.sync_tools import McpSyncProtocolFactory

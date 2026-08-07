@@ -25,6 +25,7 @@ import {
 
 export const SYNC_V2_ERROR_ACCEPT =
   'application/vnd.pomodoroxii.error+json;version=2' as const
+export const SYNC_V2_PUSH_PATH = '/api/v1/sync/v2/push' as const
 
 function syncV2RequestConfig(config: AxiosRequestConfig = {}): AxiosRequestConfig {
   // AxiosRequestConfig permits optional header values, while AxiosHeaders.from
@@ -60,7 +61,7 @@ export async function syncV2Push(
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2PushResponse>> {
   const response = await api.post(
-    '/api/v1/sync/v2/push', body, syncV2RequestConfig(config),
+    SYNC_V2_PUSH_PATH, body, syncV2RequestConfig(config),
   )
   return parsedResponse(response, parseSyncV2PushResponse(response.data))
 }
@@ -71,7 +72,7 @@ export async function syncV2PushCanonical(
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2PushResponse>> {
   const response = await api.post(
-    '/api/v1/sync/v2/push',
+    SYNC_V2_PUSH_PATH,
     canonicalBody,
     syncV2RequestConfig({
       ...config,
