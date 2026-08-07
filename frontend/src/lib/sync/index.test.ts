@@ -4,6 +4,8 @@ import { join, relative } from 'node:path'
 import axios, { type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { API_V1_PREFIX } from '@/lib/platform'
+
 const mockEngineInstances: Array<{
   destroy: ReturnType<typeof vi.fn>
   sync: ReturnType<typeof vi.fn>
@@ -180,7 +182,9 @@ function productionSyncSources(root: string): string[] {
   return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
     const path = join(root, entry.name)
     if (entry.isDirectory()) return productionSyncSources(path)
-    return entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') ? [path] : []
+    if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) return []
+    if (path.endsWith(join('types', 'api-generated.ts'))) return []
+    return [path]
   })
 }
 
@@ -193,18 +197,18 @@ function adapter(responseData: unknown, capture: InternalAxiosRequestConfig[]) {
 
 describe('Sync v2 public boundary', () => {
   it('keeps every Sync v2 URL literal in transport.ts', () => {
-    const root = join(process.cwd(), 'src', 'lib', 'sync')
-    const offenders = productionSyncSources(root).filter((path) =>
-      path !== join(root, 'transport.ts')
+    const sourceRoot = join(process.cwd(), 'src')
+    const offenders = productionSyncSources(sourceRoot).filter((path) =>
+      !path.endsWith(join('lib', 'sync', 'transport.ts'))
       && readFileSync(path, 'utf8').includes('/api/v1/sync/v2/'),
     )
-    expect(offenders.map((path) => relative(root, path))).toEqual([])
+    expect(offenders.map((path) => relative(sourceRoot, path))).toEqual([])
   })
 
   it('routes all six calls through canonical Accept and strict parsers', async () => {
     const transport = await import('./transport')
     const calls: InternalAxiosRequestConfig[] = []
-    const api = axios.create()
+    const api = axios.create({ baseURL: API_V1_PREFIX })
     const catalogHash = 'a'.repeat(64)
     const cursor = 'opaque-cursor-0001'
 
@@ -242,7 +246,7 @@ describe('Sync v2 public boundary', () => {
     }, calls)
     await transport.syncV2Status(api, { client_id: 'client-a' })
 
-    expect(calls.map((call) => call.url)).toEqual([
+    expect(calls.map((call) => api.getUri({ ...call, params: undefined }))).toEqual([
       '/api/v1/sync/v2/operations/query', '/api/v1/sync/v2/push',
       '/api/v1/sync/v2/pull', '/api/v1/sync/v2/recover',
       '/api/v1/sync/v2/ack', '/api/v1/sync/v2/status',

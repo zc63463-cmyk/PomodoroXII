@@ -33,7 +33,7 @@ import {
   type SpaceAuthorityToken,
 } from './space-authority-fence'
 import {
-  SYNC_V2_PUSH_PATH,
+  SYNC_V2_PUSH_REQUEST_PATH,
   syncV2PushCanonical,
   syncV2QueryOperations,
 } from './transport'
@@ -303,7 +303,7 @@ export async function createPendingPushBatchAfterUnknown(
     readyRootSetSha256: selected.readyRootSetSha256,
     events: structuredClone(events),
     idempotencyKey: selected.authority.batchId,
-    requestMethod: 'POST', requestPath: SYNC_V2_PUSH_PATH,
+    requestMethod: 'POST', requestPath: SYNC_V2_PUSH_REQUEST_PATH,
     headers: {
       accept: 'application/vnd.pomodoroxii.error+json;version=2',
       contentType: 'application/json', idempotencyKey: selected.authority.batchId,
