@@ -3,6 +3,12 @@ import { acceptedMutationSchema, parseNoteDocument, workItemNoteCommandPostImage
 import { hashCommandPayload } from '@/lib/contracts/payload-hash'
 import { canonicalNow } from '@/lib/direct-command-intents'
 import { enqueueOutbox } from '@/lib/sync/outbox'
+import {
+  requireSpaceAuthorityToken,
+  requireSpaceDatabaseBinding,
+  withSpaceAuthorityFence,
+  type SpaceAuthorityToken,
+} from '@/lib/sync/space-authority-fence'
 import type { PomodoroXIDB } from '@/services/database'
 import { taskSpaceApi } from '@/services/task-space-api'
 import type { CachedWorkItemNote, OutboxEvent, WorkItemNoteConflictRow } from '@/types'
@@ -151,9 +157,10 @@ export class WorkItemNoteRepository {
   }
 
   async saveLocal(input: SaveLocalNoteInput): Promise<CachedWorkItemNote> {
-    const document = parseNoteDocument(input.document)
-    const payloadHash = await hashCommandPayload({ document })
-    return this.db.transaction('rw', this.db.workItemNotes, this.db.outbox, async () => {
+    return this.withAuthority(async (token) => {
+      const document = parseNoteDocument(input.document)
+      const payloadHash = await hashCommandPayload({ document })
+      return this.db.transaction('rw', this.db.workItemNotes, this.db.outbox, async () => {
       const current = await this.find(input.workItemId)
       if (!current) throw new Error('work_item_note_not_loaded')
       if (current.syncState === 'conflict') throw new Error('version_conflict')
@@ -169,7 +176,7 @@ export class WorkItemNoteRepository {
       }
       await this.db.workItemNotes.put(storeNoteRow(next))
       await enqueueOutbox(
-        this.db, this.spaceId, 'workItemNote', current.noteId, 'update',
+        this.db, this.spaceId, token, 'workItemNote', current.noteId, 'update',
         serializeWorkItemNoteCommandPostImage(next),
         {
           operationId: input.operationId,
@@ -181,10 +188,19 @@ export class WorkItemNoteRepository {
         },
       )
       return next
-    }) as Promise<CachedWorkItemNote>
+      }) as Promise<CachedWorkItemNote>
+    })
   }
 
   async dispatchReplace(workItemId: string): Promise<void> {
+    return this.withAuthority((token) => this.dispatchReplaceAuthorized(token, workItemId))
+  }
+
+  private async dispatchReplaceAuthorized(
+    token: SpaceAuthorityToken,
+    workItemId: string,
+  ): Promise<void> {
+    this.assertAuthority(token)
     const sent = await this.find(workItemId)
     if (!sent || sent.syncState !== 'dirty') return
     const row = await this.pendingOutbox(sent.noteId)
@@ -199,32 +215,35 @@ export class WorkItemNoteRepository {
         document: sent.document,
         operationId: row.operationId,
       }), this.spaceId, sent)
-      await this.acknowledge(row, sentRevision, remote)
+      await this.acknowledge(token, row, sentRevision, remote)
     } catch (error) {
       if (!isVersionConflict(error)) throw error
       const remoteWire = await this.api.getNote(this.spaceId, workItemId)
       const remote = parseWireNote(remoteWire, this.spaceId, sent)
-      await this.preserveConflict(row, sent, remote)
+      await this.preserveConflict(token, row, sent, remote)
       throw new Error('version_conflict')
     }
   }
 
   async appendBlocks(input: AppendBlocksInput): Promise<void> {
-    await this.applyLocalDocument(input, (document) => parseNoteDocument({
+    await this.withAuthority(async (token) => {
+    await this.applyLocalDocument(token, input, (document) => parseNoteDocument({
       ...document,
       blocks: [...document.blocks, ...input.blocks],
     }))
-    await this.dispatchFocused(input.workItemId, (row) => this.api.appendBlocks({
+    await this.dispatchFocused(token, input.workItemId, (row) => this.api.appendBlocks({
       spaceId: this.spaceId,
       workItemId: input.workItemId,
       expectedVersion: row.version,
       blocks: input.blocks,
       operationId: row.operationId,
     }))
+    })
   }
 
   async toggleChecklistItem(input: ToggleChecklistItemInput): Promise<void> {
-    await this.applyLocalDocument(input, (document) => {
+    await this.withAuthority(async (token) => {
+    await this.applyLocalDocument(token, input, (document) => {
       let found = false
       type ChecklistNode = {
         itemId: string
@@ -246,7 +265,7 @@ export class WorkItemNoteRepository {
       if (!found) throw new Error('checklist_item_not_found')
       return parseNoteDocument({ ...document, blocks })
     })
-    await this.dispatchFocused(input.workItemId, (row) => this.api.toggleChecklistItem({
+    await this.dispatchFocused(token, input.workItemId, (row) => this.api.toggleChecklistItem({
       spaceId: this.spaceId,
       workItemId: input.workItemId,
       expectedVersion: row.version,
@@ -255,10 +274,13 @@ export class WorkItemNoteRepository {
       checked: input.checked,
       operationId: row.operationId,
     }))
+    })
   }
 
   async resolveReloadRemote(workItemId: string): Promise<void> {
-    await this.db.transaction(
+    await this.withAuthority(async (token) => {
+      this.assertAuthority(token)
+      await this.db.transaction(
       'rw', this.db.workItemNotes, this.db.workItemNoteConflicts, this.db.outbox,
       async () => {
         const conflict = await this.conflict(workItemId)
@@ -272,13 +294,15 @@ export class WorkItemNoteRepository {
           localRevision: current.localRevision + 1,
           syncState: 'clean',
         }))
-        await this.deleteOutbox(conflict.noteId)
+        await this.deleteOutbox(token, conflict.noteId)
         await this.db.workItemNoteConflicts.delete(workItemId)
       },
-    )
+      )
+    })
   }
 
   async resolveOverwriteLocal(workItemId: string): Promise<void> {
+    await this.withAuthority(async (token) => {
     const conflict = await this.conflict(workItemId)
     if (!conflict) throw new Error('conflict_not_found')
     const operationId = crypto.randomUUID()
@@ -297,10 +321,10 @@ export class WorkItemNoteRepository {
           syncState: 'dirty',
           updatedAt: createdAt,
         }
-        await this.deleteOutbox(conflict.noteId)
+        await this.deleteOutbox(token, conflict.noteId)
         await this.db.workItemNotes.put(storeNoteRow(next))
         await enqueueOutbox(
-          this.db, this.spaceId, 'workItemNote', conflict.noteId, 'update',
+          this.db, this.spaceId, token, 'workItemNote', conflict.noteId, 'update',
           serializeWorkItemNoteCommandPostImage(next),
           {
             operationId,
@@ -314,13 +338,16 @@ export class WorkItemNoteRepository {
         await this.db.workItemNoteConflicts.delete(workItemId)
       },
     )
-    await this.dispatchReplace(workItemId)
+    await this.dispatchReplaceAuthorized(token, workItemId)
+    })
   }
 
   private async applyLocalDocument(
+    token: SpaceAuthorityToken,
     input: { workItemId: string; expectedLocalRevision: number; operationId: string; now: string },
     transform: (document: WorkItemNoteDocument) => WorkItemNoteDocument,
   ): Promise<CachedWorkItemNote> {
+    this.assertAuthority(token)
     const current = await this.find(input.workItemId)
     if (!current) throw new Error('work_item_note_not_loaded')
     const nextDocument = parseNoteDocument(transform(current.document))
@@ -339,7 +366,7 @@ export class WorkItemNoteRepository {
       }
       await this.db.workItemNotes.put(storeRow(next))
       await enqueueOutbox(
-        this.db, this.spaceId, 'workItemNote', latest.noteId, 'update',
+        this.db, this.spaceId, token, 'workItemNote', latest.noteId, 'update',
         serializeWorkItemNoteCommandPostImage(next),
         {
           operationId: input.operationId,
@@ -355,9 +382,11 @@ export class WorkItemNoteRepository {
   }
 
   private async dispatchFocused(
+    token: SpaceAuthorityToken,
     workItemId: string,
     send: (row: CachedWorkItemNote & { operationId: string }) => Promise<unknown>,
   ): Promise<void> {
+    this.assertAuthority(token)
     const sent = await this.find(workItemId)
     if (!sent || sent.syncState !== 'dirty') return
     const row = await this.pendingOutbox(sent.noteId)
@@ -365,16 +394,22 @@ export class WorkItemNoteRepository {
     await this.db.outbox.update(row.id!, { attemptCount: row.attemptCount + 1 })
     try {
       const remote = parseWireNote(await send({ ...sent, operationId: row.operationId }), this.spaceId, sent)
-      await this.acknowledge(row, sent.localRevision, remote)
+      await this.acknowledge(token, row, sent.localRevision, remote)
     } catch (error) {
       if (!isVersionConflict(error)) throw error
       const remote = parseWireNote(await this.api.getNote(this.spaceId, workItemId), this.spaceId, sent)
-      await this.preserveConflict(row, sent, remote)
+      await this.preserveConflict(token, row, sent, remote)
       throw new Error('version_conflict')
     }
   }
 
-  private async acknowledge(row: OutboxEvent, sentRevision: number, remote: WorkItemNote): Promise<void> {
+  private async acknowledge(
+    token: SpaceAuthorityToken,
+    row: OutboxEvent,
+    sentRevision: number,
+    remote: WorkItemNote,
+  ): Promise<void> {
+    this.assertAuthority(token)
     await this.db.transaction('rw', this.db.workItemNotes, this.db.outbox, async () => {
       const current = await this.db.workItemNotes.get(remote.noteId) as CachedWorkItemNote | undefined
       if (!current) return
@@ -397,7 +432,7 @@ export class WorkItemNoteRepository {
       }
       await this.db.workItemNotes.put(storeNoteRow(next))
       await enqueueOutbox(
-        this.db, this.spaceId, 'workItemNote', next.noteId, 'update',
+        this.db, this.spaceId, token, 'workItemNote', next.noteId, 'update',
         serializeWorkItemNoteCommandPostImage(next),
         {
           operationId: crypto.randomUUID(),
@@ -411,7 +446,13 @@ export class WorkItemNoteRepository {
     })
   }
 
-  private async preserveConflict(row: OutboxEvent, sent: CachedWorkItemNote, remote: WorkItemNote): Promise<void> {
+  private async preserveConflict(
+    token: SpaceAuthorityToken,
+    row: OutboxEvent,
+    sent: CachedWorkItemNote,
+    remote: WorkItemNote,
+  ): Promise<void> {
+    this.assertAuthority(token)
     await this.db.transaction(
       'rw', this.db.workItemNotes, this.db.workItemNoteConflicts, this.db.outbox,
       async () => {
@@ -450,10 +491,22 @@ export class WorkItemNoteRepository {
     ).first()
   }
 
-  private async deleteOutbox(noteId: string): Promise<void> {
+  private async deleteOutbox(token: SpaceAuthorityToken, noteId: string): Promise<void> {
+    this.assertAuthority(token)
     const rows = await this.db.outbox.where('entityId').equals(noteId).filter((row) =>
       row.entityType === 'workItemNote' && !row.synced,
     ).toArray()
     await this.db.outbox.bulkDelete(rows.map((row) => row.id!).filter((id): id is number => id !== undefined))
+  }
+
+  private withAuthority<T>(
+    work: (token: SpaceAuthorityToken) => Promise<T>,
+  ): Promise<T> {
+    return withSpaceAuthorityFence(this.spaceId, work)
+  }
+
+  private assertAuthority(token: SpaceAuthorityToken): void {
+    requireSpaceAuthorityToken(token, this.spaceId)
+    requireSpaceDatabaseBinding(this.db, this.spaceId)
   }
 }

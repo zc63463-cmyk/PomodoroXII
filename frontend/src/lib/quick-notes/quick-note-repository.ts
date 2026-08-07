@@ -14,6 +14,10 @@ import {
   mergeQuickNoteTags,
 } from '@/lib/quick-notes/quick-note-tags'
 import { buildOutboxIdentity, enqueueOutbox } from '@/lib/sync/outbox'
+import {
+  withSpaceAuthorityFence,
+  type SpaceAuthorityToken,
+} from '@/lib/sync/space-authority-fence'
 import type { OutboxAction, SyncEntityType } from '@/lib/sync/types'
 
 export type QuickNoteRepositoryErrorCode =
@@ -205,23 +209,25 @@ export async function createQuickNote(
 ): Promise<QuickNote> {
   const database = spaceDBManager.current
 
-  return database.transaction(
-    'rw',
-    database.quickNotes,
-    database.outbox,
-    () => createQuickNoteInTransaction(database, input),
-  )
+  return withSpaceAuthorityFence(database.spaceId, (token) =>
+    database.transaction(
+      'rw',
+      database.quickNotes,
+      database.outbox,
+      () => createQuickNoteInTransaction(database, token, input),
+    ))
 }
 
 /** @internal Call only from a transaction containing quickNotes and outbox. */
 export async function createQuickNoteInTransaction(
   database: PomodoroXIDB,
+  token: SpaceAuthorityToken,
   input: QuickNoteCreateInput,
 ): Promise<QuickNote> {
   const note = buildQuickNote(input)
 
   await database.quickNotes.put(toCachedQuickNote(note))
-  await runConfiguredQuickNoteOutbox(database, {
+  await runConfiguredQuickNoteOutbox(database, token, {
     entityType: 'quickNote',
     entityId: note.id,
     action: 'create',
@@ -282,7 +288,8 @@ export async function commitQuickNoteExistingEdit(
   database: PomodoroXIDB,
   input: Readonly<{ id: string; expectedUpdatedAt: string; content: string }>,
 ): Promise<QuickNoteExistingEditCommitResult> {
-  return database.transaction('rw', database.quickNotes, database.outbox, async () => {
+  return withSpaceAuthorityFence(database.spaceId, (token) =>
+    database.transaction('rw', database.quickNotes, database.outbox, async () => {
     const existing = await database.quickNotes.get(input.id)
     if (!existing) return { kind: 'missing-or-inactive' }
     const current = stripSyncFields(existing)
@@ -305,12 +312,12 @@ export async function commitQuickNoteExistingEdit(
     }
     await database.quickNotes.put(row)
     const note = stripSyncFields(row)
-    await runConfiguredQuickNoteOutbox(database, {
+    await runConfiguredQuickNoteOutbox(database, token, {
       entityType: 'quickNote', entityId: note.id, action: 'update', payload: note,
       expectedVersion: baseVersion,
     })
     return { kind: 'saved', note }
-  })
+    }))
 }
 
 export async function moveQuickNoteToTrash(id: string): Promise<QuickNote> {
@@ -368,8 +375,11 @@ export async function purgeQuickNote(id: string): Promise<void> {
 }
 
 export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConvertResult> {
-  return db.transaction('rw', db.quickNotes, db.notes, db.outbox, async () => {
-    const existing = await getExistingQuickNote(id)
+  const database = spaceDBManager.current
+  return withSpaceAuthorityFence(database.spaceId, (token) =>
+    database.transaction('rw', database.quickNotes, database.notes, database.outbox, async () => {
+    const existing = await database.quickNotes.get(id)
+    if (!existing) throw new QuickNoteRepositoryError('not_found')
     const source = stripSyncFields(existing)
     assertActiveForConvert(source)
 
@@ -403,18 +413,18 @@ export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConve
       _dirty: true,
     }
 
-    await db.notes.put(note)
-    await db.quickNotes.put(convertedRow)
+    await database.notes.put(note)
+    await database.quickNotes.put(convertedRow)
 
     const notePayload = stripNoteSyncFields(note)
     await enqueueOutbox(
-      db, db.spaceId, 'note', noteId, 'create', notePayload,
+      database, database.spaceId, token, 'note', noteId, 'create', notePayload,
       await buildOutboxIdentity(notePayload, {
         operationId: crypto.randomUUID(), expectedVersion: null,
         transportState: 'ready', createdAt: new Date().toISOString(),
       }),
     )
-    await runConfiguredQuickNoteOutbox(db, {
+    await runConfiguredQuickNoteOutbox(database, token, {
       entityType: 'quickNote',
       entityId: id,
       action: 'update',
@@ -423,7 +433,7 @@ export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConve
     })
 
     return { noteId, quickNoteId: id }
-  })
+    }))
 }
 
 async function runQuickNoteMutation<T>(
@@ -433,13 +443,15 @@ async function runQuickNoteMutation<T>(
   },
   write: () => Promise<T | { result: T; payload: QuickNote | { id: string }; expectedVersion?: number | null }>,
 ): Promise<T> {
-  return db.transaction('rw', db.quickNotes, db.outbox, async () => {
+  const database = spaceDBManager.current
+  return withSpaceAuthorityFence(database.spaceId, (token) =>
+    database.transaction('rw', database.quickNotes, database.outbox, async () => {
     const written = await write()
     const { result, payload, expectedVersion } = normalizeQuickNoteMutationResult(written)
     const hookPayload = payload ?? context.payload
 
     if (context.sync !== false && hookPayload) {
-      await runConfiguredQuickNoteOutbox(db, {
+      await runConfiguredQuickNoteOutbox(database, token, {
         entityType: 'quickNote',
         entityId: context.entityId,
         action: context.action,
@@ -449,11 +461,12 @@ async function runQuickNoteMutation<T>(
     }
 
     return result
-  })
+    }))
 }
 
 async function runConfiguredQuickNoteOutbox(
   database: PomodoroXIDB,
+  token: SpaceAuthorityToken,
   context: QuickNoteMutationContext,
 ): Promise<void> {
   if (quickNoteOutboxConfiguration.kind === 'disabled') return
@@ -467,6 +480,7 @@ async function runConfiguredQuickNoteOutbox(
   await enqueueOutbox(
     database,
     database.spaceId,
+    token,
     context.entityType,
     context.entityId,
     context.action,

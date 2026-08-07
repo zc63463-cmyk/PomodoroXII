@@ -11,6 +11,11 @@ import Dexie, { type Table } from 'dexie'
 import { dexieDbNameForSpace } from '@/lib/platform'
 import { toDexieStoreStrings, V18_STORE_DEFINITIONS } from './dexie-v18-schema'
 import type { SessionCommandReceiptView } from '@/lib/contracts/focus-session'
+import {
+  ENTITY_TYPE_TO_TABLE,
+  TS3_LOCAL_ENTITY_TO_TABLE,
+  type SyncEntityType,
+} from '@/lib/sync/types'
 import type {
   CachedReflection,
   CachedReflectionTemplate,
@@ -37,6 +42,183 @@ import type {
 
 // Re-export for convenience (used by stores that already import from database.ts)
 export type { DailyReport, ReportTemplate, Habit, HabitCheckIn, TimeBlock, ReflectionTemplate }
+
+export interface FrozenOutboxIdentity {
+  durableKey: number
+  spaceId: string
+  entityType: SyncEntityType | keyof typeof TS3_LOCAL_ENTITY_TO_TABLE
+  entityId: string
+  action: 'create' | 'update' | 'delete'
+  payloadCanonicalBase64: string
+  payloadHash: string
+  operationId: string
+  retryPredecessorOperationId: string | null
+  expectedVersion: number | null
+  createdAt: string
+  transportState: OutboxEvent['transportState']
+  compoundOperationId: string | null
+  compoundOrder: number | null
+  attemptCount: number
+}
+
+export interface ReadyRootIdentity {
+  rootKind: 'compound' | 'standalone'
+  rootId: string
+  orderedChildren: FrozenOutboxIdentity[]
+  rootSha256: string
+}
+
+export interface SyncAdmissionState {
+  key: 'active'
+  state: 'pending' | 'meta_pending' | 'ready' | 'failed'
+  readyRoots: ReadyRootIdentity[]
+  readyRootSetSha256: string | null
+  errorCode: string | null
+}
+
+export interface SyncRecoveryState {
+  key: 'active'
+  spaceId: string
+  recoveryId: string
+  clientId: string
+  nextPageToken: string | null
+  catalogHash: string
+  waterlineCursor: string
+  nextChunkIndex: number
+  state: 'downloading' | 'ready'
+}
+
+export interface SyncRecoveryChunk {
+  spaceId: string
+  recoveryId: string
+  index: number
+  sha256: string
+  entityCount: number
+  payloadJsonlBase64: string
+  pageTokenUsed: string | null
+  nextPageToken: string | null
+  hasMore: boolean
+  catalogHash: string
+  waterlineCursor: string
+}
+
+export interface SyncPendingPushBatch {
+  key: 'active'
+  spaceId: string
+  clientId: string
+  authorityKind: 'compound' | 'direct_note_retry' | 'standalone_batch'
+  compoundOperationId: string | null
+  batchId: string
+  operationIds: string[]
+  frozenRows: FrozenOutboxIdentity[]
+  readyRoots: ReadyRootIdentity[]
+  readyRootSetSha256: string
+  events: unknown[]
+  idempotencyKey: string
+  requestMethod: 'POST'
+  requestPath: '/api/v1/sync/v2/push'
+  headers: {
+    accept: 'application/vnd.pomodoroxii.error+json;version=2'
+    contentType: 'application/json'
+    idempotencyKey: string
+  }
+  eventCanonicalBase64: string[]
+  eventSha256: string[]
+  requestCanonicalBase64: string
+  requestSha256: string
+  receiptCreatedAt: string
+}
+
+export interface SyncTerminalApplicationEvidence {
+  evidenceId: string
+  spaceId: string
+  source: 'operation_query' | 'push_response'
+  state: 'space_committed' | 'meta_reconciled'
+  authorityKind: SyncPendingPushBatch['authorityKind']
+  batchId: string
+  compoundOperationId: string | null
+  operationIds: string[]
+  operationIdsSha256: string
+  readyRoots: ReadyRootIdentity[]
+  readyRootSetSha256: string
+  resultCanonicalBase64: string
+  resultSha256: string
+  appliedCount: number
+  committedAt: string
+  metaReconciledAt: string | null
+}
+
+export interface S4OutboxTerminalFields {
+  serverOutcomeCanonicalBase64: string | null
+  retryable: boolean
+  nextAttemptAt: string | null
+  retryPredecessorOperationId: string | null
+  retrySuccessorOperationId: string | null
+}
+
+export const INITIAL_S4_OUTBOX_FIELDS = Object.freeze({
+  serverOutcomeCanonicalBase64: null,
+  retryable: false,
+  nextAttemptAt: null,
+  retryPredecessorOperationId: null,
+  retrySuccessorOperationId: null,
+} satisfies S4OutboxTerminalFields)
+
+const S4_OUTBOX_FIELD_NAMES = [
+  'serverOutcomeCanonicalBase64',
+  'retryable',
+  'nextAttemptAt',
+  'retryPredecessorOperationId',
+  'retrySuccessorOperationId',
+] as const satisfies readonly (keyof S4OutboxTerminalFields)[]
+
+type V18OutboxUpgradeRow = Omit<OutboxEvent, keyof S4OutboxTerminalFields>
+
+const FINAL_SYNC_ENTITY_TYPE_SET = new Set<string>([
+  ...Object.keys(ENTITY_TYPE_TO_TABLE),
+  ...Object.keys(TS3_LOCAL_ENTITY_TO_TABLE),
+])
+
+function requireCanonicalStoredTimestamp(value: unknown): void {
+  if (typeof value !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) ||
+      Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
+    throw new Error('invalid_v18_outbox_authority_for_v19')
+  }
+}
+
+function requireStrictV18OutboxUpgradeRow(
+  row: V18OutboxUpgradeRow,
+  owningSpaceId: string,
+): void {
+  const compoundValid =
+    (row.compoundOperationId === null && row.compoundOrder === null) ||
+    (typeof row.compoundOperationId === 'string' && row.compoundOperationId.length > 0 &&
+      Number.isSafeInteger(row.compoundOrder) && row.compoundOrder! >= 0)
+  const expectedVersionValid = row.expectedVersion === null ||
+    (Number.isSafeInteger(row.expectedVersion) && row.expectedVersion! >= 0)
+  if (!Number.isSafeInteger(row.id) || row.id! < 1 ||
+      owningSpaceId.length === 0 || row.spaceId !== owningSpaceId ||
+      !FINAL_SYNC_ENTITY_TYPE_SET.has(row.entityType) ||
+      !['create', 'update', 'delete'].includes(row.action) ||
+      typeof row.payload !== 'string' || !/^[0-9a-f]{64}$/.test(row.payloadHash) ||
+      !/^[\x21-\x7e]{1,128}$/.test(row.operationId) ||
+      !expectedVersionValid ||
+      (row.action === 'create' && row.expectedVersion !== null) ||
+      (row.action !== 'create' && row.expectedVersion === null &&
+        row.requiresVersionRebase !== true) ||
+      typeof row.requiresVersionRebase !== 'boolean' ||
+      !['ready', 'awaiting_s4', 'blocked_conflict'].includes(row.transportState) ||
+      !compoundValid || !Number.isSafeInteger(row.attemptCount) || row.attemptCount < 0 ||
+      typeof row.synced !== 'boolean') {
+    throw new Error('invalid_v18_outbox_authority_for_v19')
+  }
+  requireCanonicalStoredTimestamp(row.createdAt)
+  if (S4_OUTBOX_FIELD_NAMES.some((field) =>
+    Object.prototype.hasOwnProperty.call(row, field))) {
+    throw new Error('v19_outbox_fields_preexist_or_partial')
+  }
+}
 
 /**
  * Deep-clone an object to strip any reactive Proxy wrappers.
@@ -117,6 +299,12 @@ export class PomodoroXIDB extends Dexie {
   typeDefinitions!: Table<Record<string, unknown>>
   labels!: Table<Record<string, unknown>>
   workItemLabels!: Table<Record<string, unknown>>
+
+  syncAdmissionState!: Table<SyncAdmissionState, 'active'>
+  syncRecoveryState!: Table<SyncRecoveryState, 'active'>
+  syncRecoveryChunks!: Table<SyncRecoveryChunk, [string, number]>
+  syncPushBatches!: Table<SyncPendingPushBatch, 'active'>
+  syncTerminalApplications!: Table<SyncTerminalApplicationEvidence, string>
 
   constructor(readonly spaceId: string, dbName = dexieDbNameForSpace(spaceId)) {
     super(dbName)
@@ -285,5 +473,26 @@ export class PomodoroXIDB extends Dexie {
     // scan-before-DDL is performed by openPomodoroXIDB; this Dexie declaration
     // mirrors the final store inventory for normal opens and transactions.
     this.version(18).stores(toDexieStoreStrings(V18_STORE_DEFINITIONS))
+    this.version(19).stores({
+      ...toDexieStoreStrings(V18_STORE_DEFINITIONS),
+      syncAdmissionState: 'key, state',
+      syncRecoveryState: 'key, spaceId, state',
+      syncRecoveryChunks: '[recoveryId+index], spaceId, recoveryId, index',
+      syncPushBatches: 'key, batchId, clientId, receiptCreatedAt',
+      syncTerminalApplications:
+        'evidenceId, spaceId, state, compoundOperationId, resultSha256',
+    }).upgrade(async (tx) => {
+      await tx.table<V18OutboxUpgradeRow>('outbox').toCollection().modify((row) => {
+        requireStrictV18OutboxUpgradeRow(row, this.spaceId)
+        Object.assign(row, INITIAL_S4_OUTBOX_FIELDS)
+      })
+      await tx.table<SyncAdmissionState>('syncAdmissionState').put({
+        key: 'active',
+        state: 'pending',
+        readyRoots: [],
+        readyRootSetSha256: null,
+        errorCode: null,
+      })
+    })
   }
 }

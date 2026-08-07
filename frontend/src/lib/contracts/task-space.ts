@@ -1,5 +1,7 @@
 import { canonicalize } from 'json-canonicalize'
 import { z } from 'zod'
+import type { JsonValue } from './payload-hash'
+import type { OutboxAction, SyncEntityType } from '@/lib/sync/types'
 
 const id = z.string().min(1).max(64)
 const entityId = z.string().min(1).max(36)
@@ -104,6 +106,122 @@ export const workItemNoteSchema = z.object({
   updatedAt: utc,
 }).strict()
 export const workItemNoteCommandPostImageSchema = workItemNoteSchema.omit({ spaceId: true })
+
+export const statusDefinitionSchema = z.object({
+  id: entityId,
+  category: z.string().min(1),
+  name: z.string().min(1).max(200),
+  icon: z.string().nullable(),
+  color: z.string().nullable(),
+  rank: z.number().int().nonnegative(),
+  system: z.boolean(),
+  archivedAt: utc.nullable(),
+  version: z.number().int().positive(),
+  createdAt: utc,
+  updatedAt: utc,
+}).strict()
+
+export const typeDefinitionSchema = z.object({
+  id: entityId,
+  name: z.string().min(1).max(200),
+  icon: z.string().nullable(),
+  color: z.string().nullable(),
+  rank: z.number().int().nonnegative(),
+  system: z.boolean(),
+  archivedAt: utc.nullable(),
+  version: z.number().int().positive(),
+  createdAt: utc,
+  updatedAt: utc,
+}).strict()
+
+export const labelSchema = z.object({
+  id: entityId,
+  name: z.string().min(1).max(200),
+  color: z.string().nullable(),
+  archivedAt: utc.nullable(),
+  version: z.number().int().positive(),
+  createdAt: utc,
+  updatedAt: utc,
+}).strict()
+
+export const workItemLabelSchema = z.object({
+  workItemId: entityId,
+  labelId: entityId,
+}).strict()
+
+type TaskSpaceSyncEntityType = Extract<SyncEntityType,
+  'project' | 'statusDefinition' | 'typeDefinition' | 'label' |
+  'workItemLabel' | 'workItem' | 'workItemNote'>
+
+const cachedProjectSchema = projectSchema.omit({ spaceId: true })
+const cachedWorkItemSchema = workItemSchema.omit({ spaceId: true })
+const genericDeleteSchema = z.strictObject({ id: entityId })
+
+export function taskSpaceEntityBusinessPayloadForHash(
+  entityType: TaskSpaceSyncEntityType,
+  action: OutboxAction,
+  postImage: JsonValue,
+): JsonValue {
+  if (action === 'delete') return genericDeleteSchema.parse(postImage)
+  switch (entityType) {
+    case 'project': {
+      const row = cachedProjectSchema.parse(postImage)
+      return {
+        name: row.name, key: row.key, description: row.description,
+        next_work_item_number: row.nextWorkItemNumber,
+        rank: row.rank, archived_at: row.archivedAt,
+      }
+    }
+    case 'statusDefinition': {
+      const row = statusDefinitionSchema.parse(postImage)
+      return {
+        category: row.category, name: row.name, icon: row.icon, color: row.color,
+        rank: row.rank, system: row.system, archived_at: row.archivedAt,
+      }
+    }
+    case 'typeDefinition': {
+      const row = typeDefinitionSchema.parse(postImage)
+      return {
+        name: row.name, icon: row.icon, color: row.color, rank: row.rank,
+        system: row.system, archived_at: row.archivedAt,
+      }
+    }
+    case 'label': {
+      const row = labelSchema.parse(postImage)
+      return { name: row.name, color: row.color, archived_at: row.archivedAt }
+    }
+    case 'workItemLabel': {
+      const row = workItemLabelSchema.parse(postImage)
+      return { work_item_id: row.workItemId, label_id: row.labelId }
+    }
+    case 'workItem': {
+      const row = cachedWorkItemSchema.parse(postImage)
+      return {
+        project_id: row.projectId, display_key: row.displayKey,
+        title: row.title, description: row.description,
+        type_definition_id: row.typeDefinitionId,
+        status_definition_id: row.statusDefinitionId,
+        priority: row.priority, parent_id: row.parentId, child_rank: row.childRank,
+        depth: row.depth, completion_window_start: row.completionWindowStart,
+        completion_window_end: row.completionWindowEnd,
+        review_point: row.reviewPoint, hard_deadline: row.hardDeadline,
+        effort_estimate_lower_seconds: row.effortEstimateLowerSeconds,
+        effort_estimate_upper_seconds: row.effortEstimateUpperSeconds,
+        effort_actual_seconds: row.effortActualSeconds, confidence: row.confidence,
+        completed_at: row.completedAt, cancelled_at: row.cancelledAt,
+        archived_at: row.archivedAt, marked_as_attention: row.markedAsAttention,
+      }
+    }
+    case 'workItemNote': {
+      const row = workItemNoteCommandPostImageSchema.parse(postImage)
+      return { document: row.document }
+    }
+    default: {
+      const exhaustive: never = entityType
+      throw new Error(`missing Task Space hash builder: ${String(exhaustive)}`)
+    }
+  }
+}
 
 export const projectPageSchema = z.object({ items: z.array(projectSchema), nextCursor: z.string().nullable() }).strict()
 export const workItemPageSchema = z.object({ items: z.array(workItemSchema), nextCursor: z.string().nullable() }).strict()

@@ -1,496 +1,72 @@
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
-import type { PomodoroXIDB } from '@/services/database'
+
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { spaceApi } from '@/services/api'
-import { runPullLoop } from './pull-loop'
-import { loadSyncMeta, saveSyncMeta } from './sync-meta'
+import { runPullLoopV2, assertPullProgress, validateSyncV2PullLimit } from './pull-loop'
+import { loadSyncV2Meta, writeSyncV2Meta } from './sync-meta'
+import { withSpaceAuthorityFence } from './space-authority-fence'
+import type { PomodoroXIDB } from '@/services/database'
 
-/**
- * pull-loop.ts 单测（PL1–PL9 + H2-D cursor 协议 PL10–PL13）。
- *
- * 验证 F1 §2.4 + §2.4b 分页循环 + 游标持久化 + isFull 路径 + H2-D cursor 双协议。
- * Mock 模式：spaceApi.defaults.adapter = async (config) => ({ data, status, ... })
- */
-
-async function openTestDb(): Promise<PomodoroXIDB> {
-  return openPomodoroXIDB('pull-loop-test-' + crypto.randomUUID())
-}
+const catalogHash = 'a'.repeat(64)
+const originalAdapter = spaceApi.defaults.adapter
 
 function ok(data: unknown, config: InternalAxiosRequestConfig): AxiosResponse {
   return { data, status: 200, statusText: 'OK', headers: {}, config }
 }
 
-function noteRow(id: string, dirty: boolean) {
-  return {
-    id,
-    title: id,
-    status: 'todo',
-    updated_at: '2026-01-01T00:00:00.000Z',
-    _dirty: dirty,
-    deletion_state: 'active',
-    version: 1,
-  } as unknown as Parameters<PomodoroXIDB['notes']['put']>[0]
-}
-
-function page1Data() {
-  return {
-    server_time: '2026-07-06T12:00:00.000Z',
-    has_more: true,
-    tombstones_has_more: false,
-    next_since: '2026-07-06T12:00:00.000Z',
-    next_since_id: 'note-1',
-    next_tombstone_since_id: 't1',
-  }
-}
-
-function page2Data() {
-  return {
-    server_time: '2026-07-06T12:01:00.000Z',
-    has_more: false,
-    tombstones_has_more: false,
-    next_since: '2026-07-06T12:01:00.000Z',
-    next_since_id: 'note-2',
-    next_tombstone_since_id: 't2',
-  }
-}
-
-function singlePageData() {
-  return {
-    server_time: '2026-07-06T12:00:00.000Z',
-    has_more: false,
-    tombstones_has_more: false,
-    next_since: '2026-07-06T12:00:00.000Z',
-    next_since_id: 'note-final',
-    next_tombstone_since_id: 'tf',
-  }
-}
-
-// H2-D cursor 协议 mock 数据
-function cursorPage1() {
-  return {
-    server_time: '2026-07-06T12:00:00.000Z',
-    has_more: true,
-    tombstones_has_more: false,
-    next_since: '',
-    next_since_id: '',
-    next_tombstone_since_id: '',
-    next_cursor: 42,
-    cursor_version: 2,
-    snapshot_token: 'snapshot-stable',
-    snapshot_offset: 1,
-  }
-}
-
-function cursorPage2() {
-  return {
-    server_time: '2026-07-06T12:01:00.000Z',
-    has_more: false,
-    tombstones_has_more: false,
-    next_since: '',
-    next_since_id: '',
-    next_tombstone_since_id: '',
-    next_cursor: 84,
-    cursor_version: 2,
-    snapshot_token: 'snapshot-stable',
-    snapshot_offset: 2,
-  }
-}
-
-function cursorSinglePage() {
-  return {
-    server_time: '2026-07-06T12:00:00.000Z',
-    has_more: false,
-    tombstones_has_more: false,
-    next_since: '',
-    next_since_id: '',
-    next_tombstone_since_id: '',
-    next_cursor: 99,
-    cursor_version: 2,
-    snapshot_token: 'snapshot-single',
-    snapshot_offset: 0,
-  }
-}
-
-describe('pull-loop', () => {
-  let db: PomodoroXIDB
-  const originalAdapter = spaceApi.defaults.adapter
+describe('Sync v2 pull loop', () => {
+  let db: PomodoroXIDB | undefined
 
   afterEach(async () => {
     spaceApi.defaults.adapter = originalAdapter
-    vi.restoreAllMocks()
     if (db) await db.delete()
+    db = undefined
   })
 
-  // ---- 旧协议测试（保持兼容） ----
-
-  it('PL1: 有 since → 调 /sync/pull', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { since: '2026-01-01T00:00:00.000Z' })
-
-    let capturedUrl = ''
-    let capturedSince = ''
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      capturedUrl = config.url ?? ''
-      capturedSince = (config.params as Record<string, unknown>)?.since as string
-      return ok(singlePageData(), config)
-    }
-
-    await runPullLoop(db, spaceApi)
-
-    expect(capturedUrl).toContain('/sync/pull')
-    expect(capturedSince).toBe('2026-01-01T00:00:00.000Z')
+  it('validates the locked 1..500 page limit and cursor progress', () => {
+    expect(validateSyncV2PullLimit(undefined)).toBe(500)
+    expect(validateSyncV2PullLimit(1)).toBe(1)
+    expect(() => validateSyncV2PullLimit(0)).toThrow()
+    expect(() => validateSyncV2PullLimit(501)).toThrow()
+    expect(() => assertPullProgress('same', {
+      events: [{ operation_id: 'op', batch_id: 'batch', entity_type: 'note',
+        entity_id: 'n', action: 'update', payload: {}, version: 1,
+        created_at: '2026-07-14T10:00:00.000Z' }],
+      next_cursor: 'same', has_more: false, catalog_hash: catalogHash,
+    })).toThrow()
   })
 
-  it('PL2: isFull=true → /sync/full + clearSyncCursors', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, {
-      since: '2026-01-01T00:00:00.000Z',
-      sinceId: 'old-id',
-      tombstoneSinceId: 'old-tid',
-    })
-
-    let capturedUrl = ''
+  it('persists every page before ACK and resumes from the opaque cursor', async () => {
+    db = await openPomodoroXIDB(`pull-loop-${crypto.randomUUID()}`)
+    await withSpaceAuthorityFence(db.spaceId, (token) => writeSyncV2Meta(
+      db!, db!.spaceId, token,
+      { cursor: 'cursor-start-0001', pendingAck: null, catalogHash, requiresFullRecovery: false },
+    ))
+    const calls: string[] = []
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      capturedUrl = config.url ?? ''
-      return ok(singlePageData(), config)
-    }
-
-    await runPullLoop(db, spaceApi, { isFull: true })
-
-    expect(capturedUrl).toContain('/sync/full')
-    const meta = await loadSyncMeta(db)
-    expect(meta.since).toBe('2026-07-06T12:00:00.000Z')
-  })
-
-  it('PL3/PL6: has_more 两页 → pages=2 且 next_since_id 传入下一页', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { since: '2026-01-01T00:00:00.000Z' })
-
-    const captured: InternalAxiosRequestConfig[] = []
-    let call = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      call++
-      captured.push(config)
-      return ok(call === 1 ? page1Data() : page2Data(), config)
-    }
-
-    const result = await runPullLoop(db, spaceApi)
-
-    expect(result.pages).toBe(2)
-    expect(captured[0]!.url).toContain('/sync/pull')
-    expect((captured[1]!.params as Record<string, unknown>)?.since_id).toBe('note-1')
-  })
-
-  it('PL4: 单页 has_more=false → 结束', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { since: '2026-01-01T00:00:00.000Z' })
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok(singlePageData(), config)
-    }
-
-    const result = await runPullLoop(db, spaceApi)
-
-    expect(result.pages).toBe(1)
-  })
-
-  it('PL5: 两页 → syncMeta 持久化最终游标', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { since: '2026-01-01T00:00:00.000Z' })
-
-    let call = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      call++
-      return ok(call === 1 ? page1Data() : page2Data(), config)
-    }
-
-    await runPullLoop(db, spaceApi)
-
-    const meta = await loadSyncMeta(db)
-    expect(meta.sinceId).toBe('note-2')
-  })
-
-  it('PL7: next_tombstone_since_id 推进', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { since: '2026-01-01T00:00:00.000Z' })
-
-    const captured: InternalAxiosRequestConfig[] = []
-    let call = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      call++
-      captured.push(config)
-      return ok(call === 1 ? page1Data() : page2Data(), config)
-    }
-
-    await runPullLoop(db, spaceApi)
-
-    expect((captured[1]!.params as Record<string, unknown>)?.tombstone_since_id).toBe('t1')
-  })
-
-  it('PL8: full 结束 → touchLastFullSync', async () => {
-    db = await openTestDb()
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok(singlePageData(), config)
-    }
-
-    await runPullLoop(db, spaceApi, { isFull: true })
-
-    const meta = await loadSyncMeta(db)
-    expect(meta.lastFullSync).toBe('2026-07-06T12:00:00.000Z')
-  })
-
-  it('PL9: 空变更响应（无实体组）→ 不报错', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { since: '2026-01-01T00:00:00.000Z' })
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok(singlePageData(), config)
-    }
-
-    const result = await runPullLoop(db, spaceApi)
-
-    expect(result.pages).toBe(1)
-    expect(result.dirtyConflicts).toHaveLength(0)
-  })
-
-  // ---- H2-D cursor 协议测试 ----
-
-  it('PL10: 有 cursor → 调 /sync/pull?cursor=N', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { cursor: 10, cursorVersion: 2 })
-
-    let capturedCursor: unknown = undefined
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      capturedCursor = (config.params as Record<string, unknown>)?.cursor
-      return ok(cursorSinglePage(), config)
-    }
-
-    await runPullLoop(db, spaceApi)
-
-    expect(capturedCursor).toBe(10)
-  })
-
-  it('PL11: cursor 两页 → next_cursor 传入下一页', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { cursor: 0, cursorVersion: 2 })
-
-    const captured: InternalAxiosRequestConfig[] = []
-    let call = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      call++
-      captured.push(config)
-      return ok(call === 1 ? cursorPage1() : cursorPage2(), config)
-    }
-
-    const result = await runPullLoop(db, spaceApi)
-
-    expect(result.pages).toBe(2)
-    // 第二页请求应携带 cursor=42（第一页返回的 next_cursor）
-    expect((captured[1]!.params as Record<string, unknown>)?.cursor).toBe(42)
-  })
-
-  it('PL12: cursor isFull → /sync/full?cursor=0', async () => {
-    db = await openTestDb()
-
-    let capturedUrl = ''
-    let capturedCursor: unknown = undefined
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      capturedUrl = config.url ?? ''
-      capturedCursor = (config.params as Record<string, unknown>)?.cursor
-      return ok(cursorSinglePage(), config)
-    }
-
-    await runPullLoop(db, spaceApi, { isFull: true })
-
-    expect(capturedUrl).toContain('/sync/full')
-    expect(capturedCursor).toBe(0)
-  })
-
-  it('PL13: cursor 协议结束后 syncMeta 持久化 cursor', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { cursor: 0, cursorVersion: 2 })
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok(cursorSinglePage(), config)
-    }
-
-    await runPullLoop(db, spaceApi)
-
-    const meta = await loadSyncMeta(db)
-    expect(meta.cursor).toBe(99) // cursorSinglePage.next_cursor
-    expect(meta.cursorVersion).toBe(2)
-  })
-
-  it('PL14: legacy 首轮后第二轮仍走 legacy，不发送 null cursor', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { since: '2026-01-01T00:00:00.000Z' })
-    const cursors: unknown[] = []
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      cursors.push((config.params as Record<string, unknown>)?.cursor)
-      return ok(singlePageData(), config)
-    }
-
-    await runPullLoop(db, spaceApi)
-    await runPullLoop(db, spaceApi)
-
-    expect(cursors).toEqual([undefined, undefined])
-    expect((await db.syncMeta.get('cursor'))?.value).toBe('')
-    expect((await loadSyncMeta(db)).cursor).toBeNull()
-  })
-
-  it('PL15: full snapshot 使用 snapshot token/offset 分页且只在结束后保存 snapshot_cursor', async () => {
-    db = await openTestDb()
-    const captured: InternalAxiosRequestConfig[] = []
-    let call = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      captured.push(config)
-      call++
-      return ok(
-        call === 1
-          ? { ...cursorPage1(), next_cursor: 200, snapshot_token: 'snap-200', snapshot_offset: 1 }
-          : { ...cursorPage2(), next_cursor: 200, snapshot_token: 'snap-200', snapshot_offset: 2 },
-        config,
-      )
-    }
-
-    await runPullLoop(db, spaceApi, { isFull: true, limit: 1 })
-
-    expect(captured[0]!.url).toContain('/sync/full')
-    expect(captured[1]!.url).toContain('/sync/full')
-    expect((captured[1]!.params as Record<string, unknown>).snapshot_token).toBe('snap-200')
-    expect((captured[1]!.params as Record<string, unknown>).snapshot_offset).toBe(1)
-    expect((await loadSyncMeta(db)).cursor).toBe(200)
-  })
-
-  it('PL16: full snapshot 完成后删除未见 clean ghost 并保留 dirty ghost 与 outbox', async () => {
-    db = await openTestDb()
-    await db.notes.bulkPut([noteRow('clean-ghost', false), noteRow('dirty-ghost', true)])
-    await db.outbox.add({
-      spaceId: db.spaceId,
-      entityType: 'note',
-      entityId: 'dirty-ghost',
-      action: 'update',
-      payload: '{}',
-      createdAt: '2026-07-06T00:00:00.000Z',
-      synced: false,
-      payloadHash: '0'.repeat(64),
-      compoundOperationId: null,
-      compoundOrder: null,
-      operationId: 'op-pull-dirty-ghost',
-      expectedVersion: 1,
-      requiresVersionRebase: false,
-      transportState: 'ready',
-      lastError: null, lastErrorCode: null, failedAt: null, attemptCount: 0,
-    })
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({ ...cursorSinglePage(), notes: [] }, config)
-    }
-
-    await runPullLoop(db, spaceApi, { isFull: true })
-
-    expect(await db.notes.get('clean-ghost')).toBeUndefined()
-    expect(await db.notes.get('dirty-ghost')).toBeDefined()
-    expect(await db.outbox.count()).toBe(1)
-  })
-
-  it('PL17: full snapshot 分页中断时不提前删除 clean ghost', async () => {
-    db = await openTestDb()
-    await db.notes.put(noteRow('clean-ghost', false))
-    let call = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      call++
-      if (call === 1) {
-        return ok({
-          ...cursorPage1(),
-          snapshot_token: 'snap-interrupted',
-          snapshot_offset: 1,
-          notes: [],
-        }, config)
+      const url = config.url ?? ''
+      calls.push(url)
+      if (url.endsWith('/sync/v2/pull')) {
+        return ok({ events: [], next_cursor: 'cursor-next-0001', has_more: false,
+          catalog_hash: catalogHash }, config)
       }
-      throw new Error('page interrupted')
+      if (url.endsWith('/sync/v2/ack')) {
+        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+        return ok({ client_id: body.client_id, accepted: true,
+          requires_recovery: false, catalog_hash: catalogHash }, config)
+      }
+      throw new Error(`unexpected URL ${url}`)
     }
 
-    await expect(runPullLoop(db, spaceApi, { isFull: true, limit: 1 })).rejects.toThrow(
-      'page interrupted',
-    )
-
-    expect(await db.notes.get('clean-ghost')).toBeDefined()
-  })
-
-  it('PL18: legacy full 只 merge，不按缺失删除本地 clean 实体', async () => {
-    db = await openTestDb()
-    await db.notes.put(noteRow('legacy-local', false))
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({ ...singlePageData(), notes: [] }, config)
-    }
-
-    await runPullLoop(db, spaceApi, { isFull: true })
-
-    expect(await db.notes.get('legacy-local')).toBeDefined()
-  })
-
-  it('PL19: materialized snapshot reconcile 保护 unsynced outbox 引用', async () => {
-    db = await openTestDb()
-    await db.notes.bulkPut([noteRow('clean-ghost', false), noteRow('outbox-ghost', false)])
-    await db.outbox.add({
-      spaceId: db.spaceId,
-      entityType: 'note', entityId: 'outbox-ghost', action: 'update', payload: '{}',
-      createdAt: '2026-07-06T00:00:00.000Z', synced: false,
-      payloadHash: '0'.repeat(64), compoundOperationId: null, compoundOrder: null,
-      operationId: 'op-pull-outbox-ghost', expectedVersion: 1, requiresVersionRebase: false,
-      transportState: 'ready', lastError: null, lastErrorCode: null, failedAt: null, attemptCount: 0,
+    await withSpaceAuthorityFence(db.spaceId, async (token) => {
+      await expect(runPullLoopV2(db!, spaceApi, db!.spaceId, 'client-a', token))
+        .resolves.toMatchObject({ pages: 1, dirtyConflicts: [] })
     })
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({ ...cursorSinglePage(), notes: [] }, config)
-    }
 
-    await runPullLoop(db, spaceApi, { isFull: true })
-
-    expect(await db.notes.get('clean-ghost')).toBeUndefined()
-    expect(await db.notes.get('outbox-ghost')).toBeDefined()
-  })
-
-  it('PL20: full 分页协议或 snapshot_token 中途变化时 fail-closed', async () => {
-    db = await openTestDb()
-    await db.notes.put(noteRow('protocol-ghost', false))
-    let call = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      call++
-      return ok(call === 1
-        ? { ...cursorPage1(), snapshot_token: 'stable-a' }
-        : { ...cursorPage2(), snapshot_token: 'changed-b' }, config)
-    }
-
-    await expect(runPullLoop(db, spaceApi, { isFull: true, limit: 1 })).rejects.toThrow(
-      'protocol changed',
-    )
-    expect(await db.notes.get('protocol-ghost')).toBeDefined()
-    expect((await loadSyncMeta(db)).cursor).toBeNull()
-  })
-
-  it('PL21: reconcile 失败会回滚终页 merge、cursor 与 lastFullSync', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { cursor: 7, cursorVersion: 2, lastFullSync: 'old-full' })
-    await db.notes.put(noteRow('ghost', false))
-    const originalBulkDelete = db.notes.bulkDelete.bind(db.notes)
-    vi.spyOn(db.notes, 'bulkDelete').mockImplementation(() => {
-      throw new Error('reconcile failed')
+    expect(calls).toEqual(['/api/v1/sync/v2/pull', '/api/v1/sync/v2/ack'])
+    await expect(loadSyncV2Meta(db)).resolves.toMatchObject({
+      cursor: 'cursor-next-0001', pendingAck: null, requiresFullRecovery: false,
     })
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => ok({
-      ...cursorSinglePage(), next_cursor: 99, notes: [{
-        id: 'terminal-row', title: 'terminal', status: 'todo',
-        updated_at: '2026-07-06T12:00:00.000Z', deletion_state: 'active', version: 1,
-      }],
-    }, config)
-
-    await expect(runPullLoop(db, spaceApi, { isFull: true })).rejects.toThrow('reconcile failed')
-
-    expect((await loadSyncMeta(db)).cursor).toBe(7)
-    expect((await loadSyncMeta(db)).lastFullSync).toBe('old-full')
-    expect(await db.notes.get('terminal-row')).toBeUndefined()
-    expect(await db.notes.get('ghost')).toBeDefined()
-    db.notes.bulkDelete = originalBulkDelete
   })
 })

@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import type { JsonValue } from './payload-hash'
+import type { OutboxAction, SyncEntityType } from '@/lib/sync/types'
 
 const id = z.string().min(1).max(64)
 const utc = z.string().datetime({ offset: true })
@@ -194,6 +196,104 @@ const focusSessionBusiness = {
 export const focusSessionRecoveryWireSchema = z.object({ ...syncWireSystem, ...focusSessionBusiness }).strict()
 export const focusSessionCommandPostImageSchema = z.object({ ...syncCommandSystem, ...focusSessionBusiness }).strict()
 export const focusSessionSchema = z.object({ ...syncWireSystem, ...focusSessionBusiness, clockState: clockStateSchema }).strict()
+
+type FocusSessionSyncEntityType = Extract<SyncEntityType,
+  'focusSession' | 'sessionTaskContext' | 'sessionAttributionRevision' |
+  'sessionWorkItemPlan' | 'sessionWorkItemOutcome'>
+
+const focusDeleteSchema = z.strictObject({ id })
+
+export const focusSessionBusinessPostImage = (
+  row: z.infer<typeof focusSessionCommandPostImageSchema>,
+): JsonValue => ({
+  session_revision: row.sessionRevision, started_at: row.startedAt,
+  ended_at: row.endedAt, pause_started_at: row.pauseStartedAt,
+  planned_seconds: row.plannedSeconds, gross_seconds: row.grossSeconds,
+  paused_seconds: row.pausedSeconds, break_seconds: row.breakSeconds,
+  focused_seconds: row.focusedSeconds, timer_completion: row.timerCompletion,
+  validity: row.validity, validity_reason: row.validityReason,
+  overall_progress: row.overallProgress, mood: row.mood,
+  review_state: row.reviewState, ownership_state: row.ownershipState,
+  session_note: row.sessionNote,
+})
+
+export const sessionTaskContextBusinessPostImage = (
+  row: z.infer<typeof sessionTaskContextCommandPostImageSchema>,
+): JsonValue => ({
+  session_id: row.sessionId, project_id: row.projectId,
+  level2_work_item_id: row.level2WorkItemId,
+  project_title_snapshot: row.projectTitleSnapshot,
+  level2_title_snapshot: row.level2TitleSnapshot,
+  level2_parent_id_snapshot: row.level2ParentIdSnapshot,
+  level2_status_definition_id_snapshot: row.level2StatusDefinitionIdSnapshot,
+  level2_version_snapshot: row.level2VersionSnapshot,
+  level2_effort_lower_seconds_snapshot: row.level2EffortLowerSecondsSnapshot,
+  level2_effort_upper_seconds_snapshot: row.level2EffortUpperSecondsSnapshot,
+  linked_at: row.linkedAt, link_method: row.linkMethod,
+})
+
+export const sessionAttributionBusinessPostImage = (
+  row: z.infer<typeof sessionAttributionRevisionCommandPostImageSchema>,
+): JsonValue => ({
+  session_id: row.sessionId, revision: row.revision, project_id: row.projectId,
+  level2_work_item_id: row.level2WorkItemId, reason: row.reason,
+  corrected_from_revision: row.correctedFromRevision,
+  effective: row.effective, created_at: row.createdAt,
+})
+
+export const sessionPlanBusinessPostImage = (
+  row: z.infer<typeof sessionWorkItemPlanCommandPostImageSchema>,
+): JsonValue => ({
+  session_id: row.sessionId, work_item_id: row.workItemId,
+  title_snapshot: row.titleSnapshot,
+  level2_work_item_id_snapshot: row.level2WorkItemIdSnapshot,
+  work_item_version_snapshot: row.workItemVersionSnapshot,
+  plan_rank: row.planRank, source: row.source, added_at: row.addedAt,
+  removed_at: row.removedAt, removal_reason: row.removalReason,
+  current_during_session: row.currentDuringSession,
+  completion_draft: row.completionDraft,
+})
+
+export const sessionOutcomeBusinessPostImage = (
+  row: z.infer<typeof sessionWorkItemOutcomeCommandPostImageSchema>,
+): JsonValue => ({
+  session_id: row.sessionId, session_revision: row.sessionRevision,
+  revision: row.revision, corrected_from_revision: row.correctedFromRevision,
+  effective: row.effective, work_item_id: row.workItemId, touched: row.touched,
+  result: row.result, execution_persona: row.executionPersona,
+  persona_switched: row.personaSwitched, persona_note: row.personaNote,
+  state_command: row.stateCommand, command_id: row.commandId,
+  reviewed_at: row.reviewedAt,
+})
+
+export function focusSessionEntityBusinessPayloadForHash(
+  entityType: FocusSessionSyncEntityType,
+  action: OutboxAction,
+  postImage: JsonValue,
+): JsonValue {
+  if (action === 'delete') return focusDeleteSchema.parse(postImage)
+  switch (entityType) {
+    case 'focusSession':
+      return focusSessionBusinessPostImage(
+        focusSessionCommandPostImageSchema.parse(postImage))
+    case 'sessionTaskContext':
+      return sessionTaskContextBusinessPostImage(
+        sessionTaskContextCommandPostImageSchema.parse(postImage))
+    case 'sessionAttributionRevision':
+      return sessionAttributionBusinessPostImage(
+        sessionAttributionRevisionCommandPostImageSchema.parse(postImage))
+    case 'sessionWorkItemPlan':
+      return sessionPlanBusinessPostImage(
+        sessionWorkItemPlanCommandPostImageSchema.parse(postImage))
+    case 'sessionWorkItemOutcome':
+      return sessionOutcomeBusinessPostImage(
+        sessionWorkItemOutcomeCommandPostImageSchema.parse(postImage))
+    default: {
+      const exhaustive: never = entityType
+      throw new Error(`missing FocusSession hash builder: ${String(exhaustive)}`)
+    }
+  }
+}
 
 export const focusSessionAggregateSchema = z.object({
   session: focusSessionSchema,

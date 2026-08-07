@@ -1,550 +1,236 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
-import type { PomodoroXIDB } from '@/services/database'
+
+import { INITIAL_S4_OUTBOX_FIELDS, type PomodoroXIDB } from '@/services/database'
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { spaceApi } from '@/services/api'
-import { buildPushEvents, pushBatch, pushAllPending } from './push-batch'
+import {
+  buildProvisionalOperationRow,
+  INITIAL_S4_PROVISIONAL_FIELDS,
+  MetaDB,
+} from '@/services/meta-database'
 import type { OutboxEvent } from '@/types'
+import {
+  decodeCanonicalBase64,
+  encodeBase64,
+  selectOneAuthorityUnit,
+  sha256Canonical,
+  sha256Utf8,
+  type PushSelection,
+} from './authority-identity'
+import {
+  classifyOperationQuery,
+  createPendingPushBatchAfterUnknown,
+  pushActivePendingBatch,
+  pushAllPendingUnderFence,
+} from './push-batch'
+import { withSpaceAuthorityFence } from './space-authority-fence'
+import { recomputeEntityBusinessPayloadHash } from './entity-payload-hash'
+import type { JsonValue } from '@/lib/contracts/payload-hash'
 
-/**
- * push-batch.ts 单测（PB1–PB10）。
- *
- * 验证 F1 §5.1–§5.4 push 批处理 + 冲突响应处理。
- * Mock 模式：spaceApi.defaults.adapter = async (config) => ({ data, status, ... })
- */
-
-async function openTestDb(): Promise<PomodoroXIDB> {
-  return openPomodoroXIDB('push-test-' + crypto.randomUUID())
-}
+const originalAdapter = spaceApi.defaults.adapter
 
 function ok(data: unknown, config: InternalAxiosRequestConfig): AxiosResponse {
   return { data, status: 200, statusText: 'OK', headers: {}, config }
 }
 
-function makeOutboxRow(
-  id: number,
-  entityType: OutboxEvent['entityType'],
-  entityId: string,
-  action: OutboxEvent['action'] = 'create',
-  payload: unknown = { id: entityId, title: 'X' },
-  createdAt = 1751803200000,
-): OutboxEvent {
-  return {
-    id,
-    spaceId: 'push-test',
-    entityType,
-    entityId,
-    action,
-    payload: JSON.stringify(payload),
-    createdAt: new Date(createdAt).toISOString(),
-    synced: false,
-    payloadHash: '0'.repeat(64),
-    compoundOperationId: null,
-    compoundOrder: null,
-    operationId: `op-${entityId}-${id}`,
-    expectedVersion: action === 'create' ? null : 1,
-    requiresVersionRebase: false,
-    transportState: 'ready',
-    lastError: null,
-    lastErrorCode: null,
-    failedAt: null,
-    attemptCount: 0,
-  }
-}
-
-describe('push-batch', () => {
-  let db: PomodoroXIDB
-  const originalAdapter = spaceApi.defaults.adapter
-
+describe('Sync v2 push receipt', () => {
+  let db: PomodoroXIDB | undefined
+  let meta: MetaDB | undefined
   afterEach(async () => {
     spaceApi.defaults.adapter = originalAdapter
     if (db) await db.delete()
+    if (meta) await meta.delete()
+    db = undefined
+    meta = undefined
   })
 
-  it('PB1: buildPushEvents 字段映射 + ISO', () => {
-    const rows: OutboxEvent[] = [
-      makeOutboxRow(1, 'note', 't1', 'create', { id: 't1', title: 'X' }, 1751803200000),
+  async function scheduleRow(
+    spaceId: string,
+    id: number,
+    transportState: OutboxEvent['transportState'] = 'ready',
+  ): Promise<OutboxEvent> {
+    const entityId = `schedule-${id}`
+    const timestamp = '2026-08-07T01:00:00.000Z'
+    const payload = {
+      id: entityId, title: 'Focus', due_at: timestamp, completed_at: null,
+      priority: 'medium', color: '#123456', all_day: false,
+      start_time: null, end_time: null, created_at: timestamp, updated_at: timestamp,
+    }
+    return {
+      id, spaceId, entityType: 'schedule', entityId, action: 'create',
+      payload: JSON.stringify(payload),
+      payloadHash: await recomputeEntityBusinessPayloadHash('schedule', 'create', payload),
+      operationId: `schedule-operation-${id}`,
+      compoundOperationId: null, compoundOrder: null, expectedVersion: null,
+      requiresVersionRebase: false, transportState, createdAt: timestamp,
+      synced: false, lastError: null, lastErrorCode: null, failedAt: null,
+      attemptCount: 0, ...INITIAL_S4_OUTBOX_FIELDS,
+    }
+  }
+
+  async function addAwaitingCompound(
+    targetDb: PomodoroXIDB,
+    targetMeta: MetaDB,
+    suffix: string,
+    firstId: number,
+  ): Promise<void> {
+    const timestamp = '2026-08-07T01:00:00.000Z'
+    const root = `compound-${suffix}`
+    const sessionId = `session-${suffix}`
+    const payloads = [
+      {
+        id: sessionId, version: 1, createdAt: timestamp, updatedAt: timestamp,
+        sessionRevision: 1, startedAt: timestamp, endedAt: null,
+        pauseStartedAt: null, plannedSeconds: 1500, grossSeconds: 0,
+        pausedSeconds: 0, breakSeconds: 0, focusedSeconds: 0,
+        timerCompletion: null, validity: 'pending', validityReason: null,
+        overallProgress: null, mood: null, reviewState: 'pending',
+        ownershipState: 'local_provisional', sessionNote: '',
+      },
+      {
+        id: `context-${suffix}`, version: 1, createdAt: timestamp, updatedAt: timestamp,
+        sessionId, projectId: 'project-a', level2WorkItemId: 'work-a',
+        projectTitleSnapshot: 'Project', level2TitleSnapshot: 'Work',
+        level2ParentIdSnapshot: null, level2StatusDefinitionIdSnapshot: 'status-a',
+        level2VersionSnapshot: 1, level2EffortLowerSecondsSnapshot: null,
+        level2EffortUpperSecondsSnapshot: null, linkedAt: timestamp, linkMethod: 'explicit',
+      },
+      {
+        id: `attribution-${suffix}`, version: 1, createdAt: timestamp, updatedAt: timestamp,
+        sessionId, revision: 1, projectId: 'project-a', level2WorkItemId: 'work-a',
+        reason: null, correctedFromRevision: null, effective: true,
+      },
     ]
-    const events = buildPushEvents(rows)
-
-    expect(events).toHaveLength(1)
-    expect(events[0]!.entity_type).toBe('note')
-    expect(events[0]!.entity_id).toBe('t1')
-    expect(events[0]!.action).toBe('create')
-    expect(events[0]!.client_updated_at).toBe(new Date(1751803200000).toISOString())
-    expect(events[0]!.payload).toEqual({ id: 't1', title: 'X' })
-  })
-
-  it('PB1: preserves a canonical timestamp without adding milliseconds', () => {
-    const row = makeOutboxRow(2, 'note', 't2')
-    row.createdAt = '2026-07-06T12:00:00Z'
-
-    expect(buildPushEvents([row])[0]!.client_updated_at).toBe('2026-07-06T12:00:00Z')
-  })
-
-  it('PB1-QN: buildPushEvents maps quickNote delete tombstone payload', () => {
-    const rows: OutboxEvent[] = [
-      makeOutboxRow(11, 'quickNote', 'qn1', 'delete', { id: 'qn1' }, 1751803200000),
-    ]
-
-    const events = buildPushEvents(rows)
-
-    expect(events).toHaveLength(1)
-    expect(events[0]).toMatchObject({
-      entity_type: 'quickNote',
-      entity_id: 'qn1',
-      action: 'delete',
-      payload: { id: 'qn1' },
-      client_updated_at: new Date(1751803200000).toISOString(),
-    })
-  })
-
-  it('PB2: applied 无 resolution → 清 outbox', async () => {
-    db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'create'))
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({
-        applied: [{ entity_type: 'note', entity_id: 't1', action: 'create' }],
-        conflicts: [],
-        errors: [],
-        server_time: '2026-07-06T12:00:00.000Z',
-      }, config)
-    }
-
-    const rows = await db.outbox.toArray()
-    const result = await pushBatch(db, spaceApi, rows)
-
-    expect(result.clearedOutboxIds).toContain(1)
-    expect(await db.outbox.count()).toBe(0)
-  })
-
-  it('PB2-QN: applied quickNote delete clears the repository tombstone outbox', async () => {
-    db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(21, 'quickNote', 'qn1', 'delete', { id: 'qn1' }))
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({
-        applied: [{ entity_type: 'quickNote', entity_id: 'qn1', action: 'delete' }],
-        conflicts: [],
-        errors: [],
-        server_time: '2026-07-06T12:00:00.000Z',
-      }, config)
-    }
-
-    const rows = await db.outbox.toArray()
-    const result = await pushBatch(db, spaceApi, rows)
-
-    expect(result.clearedOutboxIds).toContain(21)
-    expect(await db.outbox.where('entityId').equals('qn1').count()).toBe(0)
-  })
-
-  it('PB3: applied resolution=remote → 清 + remoteWinCount=1', async () => {
-    db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'update'))
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({
-        applied: [{ entity_type: 'note', entity_id: 't1', action: 'update', resolution: 'remote' }],
-        conflicts: [],
-        errors: [],
-        server_time: '2026-07-06T12:00:00.000Z',
-      }, config)
-    }
-
-    const rows = await db.outbox.toArray()
-    const result = await pushBatch(db, spaceApi, rows)
-
-    expect(await db.outbox.count()).toBe(0)
-    expect(result.remoteWinCount).toBe(1)
-  })
-
-  it('PB4: conflicts resolution=local → 清 outbox', async () => {
-    db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'create'))
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({
-        applied: [],
-        conflicts: [{ entity_type: 'note', entity_id: 't1', resolution: 'local' }],
-        errors: [],
-        server_time: '2026-07-06T12:00:00.000Z',
-      }, config)
-    }
-
-    const rows = await db.outbox.toArray()
-    await pushBatch(db, spaceApi, rows)
-
-    expect(await db.outbox.count()).toBe(0)
-  })
-
-  it('PB5: conflicts resolution=tombstone → 清 + deletion_state', async () => {
-    db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'delete'))
-    // 种一行 note 供 tombstone 标记
-    await db.notes.put({
-      id: 't1', title: 'T', status: 'todo',
-      updated_at: '2026-01-01T00:00:00.000Z',
-      _dirty: true, deletion_state: 'active', version: 1,
-    } as unknown as Parameters<PomodoroXIDB['notes']['put']>[0])
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({
-        applied: [],
-        conflicts: [{ entity_type: 'note', entity_id: 't1', resolution: 'tombstone' }],
-        errors: [],
-        server_time: '2026-07-06T12:00:00.000Z',
-      }, config)
-    }
-
-    const rows = await db.outbox.toArray()
-    await pushBatch(db, spaceApi, rows)
-
-    expect(await db.outbox.count()).toBe(0)
-    const note = await db.notes.get('t1')
-    expect(note!.deletion_state).toBe('deleted')
-    expect(note!._dirty).toBe(false)
-  })
-
-  it('PB6: conflicts resolution=circular_ref → 清 + count', async () => {
-    db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'create'))
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({
-        applied: [],
-        conflicts: [{ entity_type: 'note', entity_id: 't1', resolution: 'circular_ref' }],
-        errors: [],
-        server_time: '2026-07-06T12:00:00.000Z',
-      }, config)
-    }
-
-    const rows = await db.outbox.toArray()
-    const result = await pushBatch(db, spaceApi, rows)
-
-    expect(await db.outbox.count()).toBe(0)
-    expect(result.circularRefCount).toBe(1)
-  })
-
-  it('PB7: errors 通用 → outbox 保留 + retriableErrorCount=1', async () => {
-    db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'create'))
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({
-        applied: [],
-        conflicts: [],
-        errors: [{ entity_type: 'note', entity_id: 't1', error: 'something_failed' }],
-        server_time: '2026-07-06T12:00:00.000Z',
-      }, config)
-    }
-
-    const rows = await db.outbox.toArray()
-    const result = await pushBatch(db, spaceApi, rows)
-
-    expect(await db.outbox.count()).toBe(1)
-    expect(result.retriableErrorCount).toBe(1)
-    const row = await db.outbox.get(1)
-    expect(row).toMatchObject({
-      lastError: 'something_failed',
-      lastErrorCode: 'push_error',
-      attemptCount: 1,
-    })
-    expect(row!.failedAt).toEqual(expect.any(String))
-  })
-
-  it('PB7-QN: generic quickNote push error marks only the matching outbox event failed', async () => {
-    db = await openTestDb()
-    await db.outbox.bulkPut([
-      makeOutboxRow(31, 'quickNote', 'failed-qn', 'update', { id: 'failed-qn', content: 'A' }),
-      makeOutboxRow(32, 'quickNote', 'pending-qn', 'update', { id: 'pending-qn', content: 'B' }),
-    ])
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({
-        applied: [],
-        conflicts: [],
-        errors: [{ entity_type: 'quickNote', entity_id: 'failed-qn', error: 'quick_note_rejected' }],
-        server_time: '2026-07-06T12:00:00.000Z',
-      }, config)
-    }
-
-    const rows = await db.outbox.toArray()
-    const result = await pushBatch(db, spaceApi, rows)
-    const failed = await db.outbox.get(31)
-    const pending = await db.outbox.get(32)
-
-    expect(result.retriableErrorCount).toBe(1)
-    expect(failed).toMatchObject({
-      lastError: 'quick_note_rejected',
-      lastErrorCode: 'push_error',
-      attemptCount: 1,
-    })
-    expect(pending!.lastError).toBeNull()
-  })
-
-  it('PB8: 150 行 → pushAllPending 调 2 次 POST 且 outbox 清空', async () => {
-    db = await openTestDb()
-    // 种 150 行 outbox（不带 id 让 Dexie 自增主键）
-    const rows = Array.from({ length: 150 }, (_, i) =>
-      makeOutboxRow(i + 1, 'note', `t${i}`, 'create', { id: `t${i}`, title: 'X' }, 1751803200000 + i),
-    )
-    await db.outbox.bulkAdd(rows)
-
-    let postCount = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      if (config.url?.includes('/sync/push')) {
-        postCount++
-        // 动态生成 applied：请求中的所有 events 都成功应用
-        const body =
-          typeof config.data === 'string' ? JSON.parse(config.data) : config.data
-        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
-        return ok({
-          applied: events.map((e) => ({
-            entity_type: e.entity_type,
-            entity_id: e.entity_id,
-            action: e.action,
-          })),
-          conflicts: [],
-          errors: [],
-          server_time: '2026-07-06T12:00:00.000Z',
-        }, config)
+    const entityTypes = [
+      'focusSession', 'sessionTaskContext', 'sessionAttributionRevision',
+    ] as const
+    const rows = await Promise.all(payloads.map(async (payload, index): Promise<OutboxEvent> => {
+      const payloadValue = JSON.parse(JSON.stringify(payload)) as JsonValue
+      return {
+        id: firstId + index, spaceId: targetDb.spaceId, entityType: entityTypes[index]!,
+        entityId: String(payload.id), action: 'create', payload: JSON.stringify(payloadValue),
+        payloadHash: await recomputeEntityBusinessPayloadHash(
+          entityTypes[index]!, 'create', payloadValue,
+        ),
+        operationId: `${root}-operation-${index}`, compoundOperationId: root,
+        compoundOrder: index, expectedVersion: null, requiresVersionRebase: false,
+        transportState: 'awaiting_s4', createdAt: timestamp, synced: false,
+        lastError: null, lastErrorCode: null, failedAt: null, attemptCount: 0,
+        ...INITIAL_S4_OUTBOX_FIELDS,
       }
-      return ok({}, config)
-    }
-
-    await pushAllPending(db, spaceApi, 100)
-
-    expect(postCount).toBe(2)
-    expect(await db.outbox.count()).toBe(0)
-  })
-
-  it('PB9: errors version_mismatch → 进 conflicts + outbox 保留', async () => {
-    db = await openTestDb()
-    await db.outbox.put(makeOutboxRow(1, 'note', 't1', 'update'))
-
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      return ok({
-        applied: [],
-        conflicts: [],
-        errors: [{ entity_type: 'note', entity_id: 't1', error: 'version_mismatch' }],
-        server_time: '2026-07-06T12:00:00.000Z',
-      }, config)
-    }
-
-    const rows = await db.outbox.toArray()
-    const result = await pushBatch(db, spaceApi, rows)
-
-    expect(result.conflicts).toHaveLength(1)
-    expect(result.conflicts[0]!.outboxId).toBe(1)
-    expect(result.conflicts[0]!.entityType).toBe('note')
-    expect(result.conflicts[0]!.entityId).toBe('t1')
-    expect(await db.outbox.count()).toBe(1)
-    const row = await db.outbox.get(1)
-    expect(row).toMatchObject({
-      lastError: 'version_mismatch',
-      lastErrorCode: 'version_mismatch',
-      attemptCount: 1,
-    })
-  })
-
-  it('PB10: 空 outbox → pushAllPending no-op', async () => {
-    db = await openTestDb()
-
-    let postCount = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      if (config.url?.includes('/sync/push')) postCount++
-      return ok({ applied: [], conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z' }, config)
-    }
-
-    const result = await pushAllPending(db, spaceApi)
-
-    expect(postCount).toBe(0)
-    expect(result.clearedOutboxIds).toHaveLength(0)
-    expect(result.conflicts).toHaveLength(0)
-  })
-
-  it('PB11: exactly batchSize pushable rows - one POST, all cleared', async () => {
-    db = await openTestDb()
-    const rows = Array.from({ length: 3 }, (_, i) =>
-      makeOutboxRow(i + 1, 'note', `t${i}`, 'create', { id: `t${i}`, title: 'X' }, 1751803200000 + i),
-    )
-    await db.outbox.bulkAdd(rows)
-
-    let postCount = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      if (config.url?.includes('/sync/push')) {
-        postCount++
-        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
-        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
-        return ok({
-          applied: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, action: e.action })),
-          conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z',
-        }, config)
-      }
-      return ok({}, config)
-    }
-
-    await pushAllPending(db, spaceApi, 3)
-
-    expect(postCount).toBe(1)
-    expect(await db.outbox.count()).toBe(0)
-  })
-
-  it('PB12: exceeds batchSize pushable rows - multiple POSTs, all cleared', async () => {
-    db = await openTestDb()
-    const rows = Array.from({ length: 7 }, (_, i) =>
-      makeOutboxRow(i + 1, 'note', `t${i}`, 'create', { id: `t${i}`, title: 'X' }, 1751803200000 + i),
-    )
-    await db.outbox.bulkAdd(rows)
-
-    let postCount = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      if (config.url?.includes('/sync/push')) {
-        postCount++
-        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
-        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
-        return ok({
-          applied: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, action: e.action })),
-          conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z',
-        }, config)
-      }
-      return ok({}, config)
-    }
-
-    await pushAllPending(db, spaceApi, 3)
-
-    expect(postCount).toBe(3)
-    expect(await db.outbox.count()).toBe(0)
-  })
-
-  it('PB13: mixed pushable and rebase rows - only pushable sent, rebase remain', async () => {
-    db = await openTestDb()
-    // 3 pushable create rows
-    const pushableRows = Array.from({ length: 3 }, (_, i) =>
-      makeOutboxRow(i + 1, 'note', `p${i}`, 'create', { id: `p${i}` }, 1751803200000 + i),
-    )
-    // 2 rebase rows (update without reliable version)
-    const rebaseRows = Array.from({ length: 2 }, (_, i) => ({
-      ...makeOutboxRow(i + 10, 'note', `r${i}`, 'update', { id: `r${i}` }, 1751803200010 + i),
-      expectedVersion: null,
-      requiresVersionRebase: true,
     }))
-    await db.outbox.bulkAdd([...pushableRows, ...rebaseRows])
+    await targetDb.outbox.bulkPut(rows)
+    const provisional = await buildProvisionalOperationRow({
+      operationId: root, spaceId: targetDb.spaceId, sessionId,
+      deviceId: 'device-a', tabId: 'tab-a', level2WorkItemId: 'work-a',
+      level3WorkItemIds: [], plannedSeconds: 1500, startedAt: timestamp,
+      expectedWorkItemVersions: { 'work-a': 1 },
+    }, null)
+    await targetMeta.provisionalOperations.put({
+      ...provisional, state: 'awaiting_s4', ...INITIAL_S4_PROVISIONAL_FIELDS,
+    })
+  }
 
-    let postCount = 0
-    const pushedIds: string[] = []
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      if (config.url?.includes('/sync/push')) {
-        postCount++
-        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
-        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
-        pushedIds.push(...events.map((e) => e.entity_id))
-        return ok({
-          applied: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, action: e.action })),
-          conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z',
-        }, config)
-      }
-      return ok({}, config)
+  it('persists exact canonical request authority before any push', async () => {
+    db = await openPomodoroXIDB(`push-test-${crypto.randomUUID()}`)
+    const payloadText = '{"id":"note-a"}'
+    const frozen = {
+      durableKey: 1, spaceId: db.spaceId, entityType: 'note' as const,
+      entityId: 'note-a', action: 'delete' as const,
+      payloadCanonicalBase64: encodeBase64(new TextEncoder().encode(payloadText)),
+      payloadHash: 'a'.repeat(64), operationId: 'op-a',
+      retryPredecessorOperationId: null, expectedVersion: 1,
+      createdAt: '2026-07-14T10:00:00.000Z', transportState: 'ready' as const,
+      compoundOperationId: null, compoundOrder: null, attemptCount: 0,
     }
-
-    await pushAllPending(db, spaceApi, 100)
-
-    expect(postCount).toBe(1)
-    expect(pushedIds).toEqual(['p0', 'p1', 'p2'])
-    // Rebase rows remain in outbox
-    const remaining = await db.outbox.toArray()
-    expect(remaining).toHaveLength(2)
-    expect(remaining.every((r) => r.requiresVersionRebase === true)).toBe(true)
+    const document = { rootKind: 'standalone' as const, rootId: 'op-a',
+      orderedChildren: [frozen] }
+    const readyRoots = [{ ...document, rootSha256: await sha256Canonical(document) }]
+    const selected: PushSelection = {
+      authority: { kind: 'standalone_batch', batchId: await sha256Utf8('op-a'),
+        compoundOperationId: null, orderedOperationIds: ['op-a'] },
+      operationIds: ['op-a'], frozenRows: [frozen], readyRoots,
+      readyRootSetSha256: await sha256Canonical(readyRoots),
+    }
+    await withSpaceAuthorityFence(db.spaceId, async (token) => {
+      const receipt = await createPendingPushBatchAfterUnknown(
+        db!, {} as MetaDB, db!.spaceId, 'client-a', selected, token,
+      )
+      expect(receipt.operationIds).toEqual(['op-a'])
+      expect(receipt.requestPath).toBe('/api/v1/sync/v2/push')
+      expect(await db!.syncPushBatches.get('active')).toEqual(receipt)
+    })
   })
 
-  it('PB14: full batch all generic errors - pushAllPending stops after one POST, rows preserved', async () => {
-    db = await openTestDb()
-    const rows = Array.from({ length: 3 }, (_, i) =>
-      makeOutboxRow(i + 1, 'note', `t${i}`, 'create', { id: `t${i}`, title: 'X' }, 1751803200000 + i),
-    )
-    await db.outbox.bulkAdd(rows)
-
-    let postCount = 0
-    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      if (config.url?.includes('/sync/push')) {
-        postCount++
-        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
-        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
-        return ok({
-          applied: [],
-          conflicts: [],
-          errors: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, error: 'something_failed' })),
-          server_time: '2026-07-06T12:00:00.000Z',
-        }, config)
-      }
-      return ok({}, config)
-    }
-
-    const result = await pushAllPending(db, spaceApi, 3)
-
-    expect(postCount).toBe(1)
-    expect(result.retriableErrorCount).toBe(3)
-    expect(await db.outbox.count()).toBe(3)
+  it('classifies blockers before terminal or unknown work', async () => {
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => ok({ items: [
+      { operation_id: 'op-a', state: 'pending', batch_id: 'batch-a', result: null },
+      { operation_id: 'op-b', state: 'unknown', batch_id: null, result: null },
+    ] }, config)
+    await expect(classifyOperationQuery(spaceApi, 'client-a', ['op-a', 'op-b']))
+      .resolves.toEqual({ kind: 'blocked', state: 'pending' })
   })
 
-  it('PB15: pushBatch with all rebase rows - no POST, empty result', async () => {
-    db = await openTestDb()
-    await db.outbox.bulkPut([
-      { ...makeOutboxRow(1, 'note', 'r1', 'update'), requiresVersionRebase: true, expectedVersion: null },
-      { ...makeOutboxRow(2, 'note', 'r2', 'delete'), requiresVersionRebase: true, expectedVersion: null },
-    ])
-
-    let postCount = 0
+  it('replays the exact persisted canonical request bytes', async () => {
+    db = await openPomodoroXIDB(`push-replay-${crypto.randomUUID()}`)
+    meta = new MetaDB(`push-replay-meta-${crypto.randomUUID()}`)
+    await meta.open()
+    await db.outbox.put(await scheduleRow(db.spaceId, 1))
+    const selected = (await selectOneAuthorityUnit(db))!
+    let sentBody: unknown
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      if (config.url?.includes('/sync/push')) postCount++
-      return ok({ applied: [], conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z' }, config)
+      if (config.url?.endsWith('/operations/query')) {
+        return ok({ items: selected.operationIds.map((operationId) => ({
+          operation_id: operationId, state: 'unknown', batch_id: null, result: null,
+        })) }, config)
+      }
+      sentBody = config.data
+      return ok({
+        batch_id: selected.authority.batchId,
+        applied: selected.frozenRows.map((row) => ({
+          operation_id: row.operationId, entity_type: row.entityType,
+          entity_id: row.entityId, version: 1, resolution: null,
+        })),
+        conflicts: [], errors: [],
+      }, config)
     }
-
-    const rows = await db.outbox.toArray()
-    const result = await pushBatch(db, spaceApi, rows)
-
-    expect(postCount).toBe(0)
-    expect(result.clearedOutboxIds).toHaveLength(0)
-    expect(result.conflicts).toHaveLength(0)
-    expect(result.retriableErrorCount).toBe(0)
-    expect(await db.outbox.count()).toBe(2)
+    await withSpaceAuthorityFence(db.spaceId, async (token) => {
+      const receipt = await createPendingPushBatchAfterUnknown(
+        db!, meta!, db!.spaceId, 'client-a', selected, token,
+      )
+      const expected = new TextDecoder('utf-8', { fatal: true }).decode(
+        decodeCanonicalBase64(receipt.requestCanonicalBase64),
+      )
+      await pushActivePendingBatch(db!, meta!, db!.spaceId, spaceApi, token)
+      expect(sentBody).toBe(expected)
+    })
   })
 
-  it('PB16: pushBatch with mixed pushable/rebase rows - only pushable rows sent', async () => {
-    db = await openTestDb()
-    await db.outbox.bulkPut([
-      makeOutboxRow(1, 'note', 'p1', 'create'),
-      { ...makeOutboxRow(2, 'note', 'r1', 'update'), requiresVersionRebase: true, expectedVersion: null },
-      makeOutboxRow(3, 'note', 'p2', 'create'),
-    ])
-
-    let postCount = 0
-    const pushedIds: string[] = []
+  it('stops after one typed authority restart', async () => {
+    db = await openPomodoroXIDB(`push-restart-${crypto.randomUUID()}`)
+    meta = new MetaDB(`push-restart-meta-${crypto.randomUUID()}`)
+    await meta.open()
+    await db.outbox.put(await scheduleRow(db.spaceId, 1, 'awaiting_s4'))
+    let queryCount = 0
     spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-      if (config.url?.includes('/sync/push')) {
-        postCount++
-        const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
-        const events = (body as { events: Array<{ entity_type: string; entity_id: string; action: string }> }).events
-        pushedIds.push(...events.map((e) => e.entity_id))
-        return ok({
-          applied: events.map((e) => ({ entity_type: e.entity_type, entity_id: e.entity_id, action: e.action })),
-          conflicts: [], errors: [], server_time: '2026-07-06T12:00:00.000Z',
-        }, config)
+      if (!config.url?.endsWith('/operations/query')) {
+        throw new Error('push_must_not_be_reached')
       }
-      return ok({}, config)
+      queryCount += 1
+      await addAwaitingCompound(db!, meta!, String(queryCount), queryCount * 10)
+      const operationIds = (JSON.parse(String(config.data)) as { operation_ids: string[] })
+        .operation_ids
+      return ok({ items: operationIds.map((operationId) => ({
+        operation_id: operationId, state: 'unknown', batch_id: null, result: null,
+      })) }, config)
     }
-
-    const rows = await db.outbox.toArray()
-    const result = await pushBatch(db, spaceApi, rows)
-
-    expect(postCount).toBe(1)
-    expect(pushedIds).toEqual(['p1', 'p2'])
-    expect(result.clearedOutboxIds).toContain(1)
-    expect(result.clearedOutboxIds).toContain(3)
-    const remaining = await db.outbox.toArray()
-    expect(remaining).toHaveLength(1)
-    expect(remaining[0]!.entityId).toBe('r1')
-    expect(remaining[0]!.requiresVersionRebase).toBe(true)
+    await expect(withSpaceAuthorityFence(db.spaceId, (token) =>
+      pushAllPendingUnderFence(db!, meta!, db!.spaceId, 'client-a', spaceApi, token)))
+      .rejects.toThrow('push_authority_restart_exhausted')
+    expect(queryCount).toBe(2)
+    expect(await db.syncPushBatches.get('active')).toMatchObject({
+      operationIds: ['schedule-operation-1'],
+    })
   })
 })

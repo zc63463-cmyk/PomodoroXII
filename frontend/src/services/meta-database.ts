@@ -41,7 +41,64 @@ export interface SessionTabRow {
   lastSeenAt: string
   closedAt: string | null
 }
-export interface ProvisionalOperationRow {
+
+export interface S4ProvisionalOperationFields {
+  transportReadyRootSha256: string | null
+  terminalEvidenceId: string | null
+  terminalResultSha256: string | null
+  terminalOperationIdsSha256: string | null
+}
+
+export type S4ProvisionalOperationState =
+  | 'pending' | 'activating' | 'conflict' | 'awaiting_s4'
+  | 'activation_resolved' | 'transport_ready' | 'transport_resolved'
+
+export const S4_PROVISIONAL_OPERATION_STATES = [
+  'pending', 'activating', 'conflict', 'awaiting_s4',
+  'activation_resolved', 'transport_ready', 'transport_resolved',
+] as const satisfies readonly S4ProvisionalOperationState[]
+
+export const INITIAL_S4_PROVISIONAL_FIELDS = Object.freeze({
+  transportReadyRootSha256: null,
+  terminalEvidenceId: null,
+  terminalResultSha256: null,
+  terminalOperationIdsSha256: null,
+} satisfies S4ProvisionalOperationFields)
+
+const S4_PROVISIONAL_FIELD_NAMES = [
+  'transportReadyRootSha256', 'terminalEvidenceId',
+  'terminalResultSha256', 'terminalOperationIdsSha256',
+] as const satisfies readonly (keyof S4ProvisionalOperationFields)[]
+
+type MetaV2ProvisionalOperationRow = Omit<
+  ProvisionalOperationRow, keyof S4ProvisionalOperationFields | 'state'
+> & { state: 'pending' | 'activating' | 'conflict' | 'awaiting_s4' | 'resolved' }
+
+function requireCanonicalStoredTimestamp(value: unknown): void {
+  if (typeof value !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) ||
+      Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
+    throw new Error('invalid_meta_v2_provisional_authority_for_v3')
+  }
+}
+
+function requireStrictMetaV2ProvisionalRow(row: MetaV2ProvisionalOperationRow): void {
+  if (!/^[\x21-\x7e]{1,128}$/.test(row.operationId) ||
+      typeof row.spaceId !== 'string' || row.spaceId.length === 0 ||
+      typeof row.sessionId !== 'string' || row.sessionId.length === 0 ||
+      typeof row.intentJson !== 'string' || !/^[0-9a-f]{64}$/.test(row.payloadHash) ||
+      !['pending', 'activating', 'conflict', 'awaiting_s4', 'resolved'].includes(row.state)) {
+    throw new Error('invalid_meta_v2_provisional_authority_for_v3')
+  }
+  requireCanonicalStoredTimestamp(row.createdAt)
+  requireCanonicalStoredTimestamp(row.updatedAt)
+  if (S4_PROVISIONAL_FIELD_NAMES.some((field) =>
+    Object.prototype.hasOwnProperty.call(row, field))) {
+    throw new Error('meta_v3_provisional_fields_preexist_or_partial')
+  }
+}
+
+export interface ProvisionalOperationRow extends S4ProvisionalOperationFields {
   operationId: string
   deviceId: string
   tabId: string
@@ -50,7 +107,7 @@ export interface ProvisionalOperationRow {
   cachedOwnershipEpoch: number | null
   intentJson: string
   payloadHash: string
-  state: 'pending' | 'activating' | 'conflict' | 'awaiting_s4' | 'resolved'
+  state: S4ProvisionalOperationState
   resolutionOperationId?: string | null
   resolutionConflictIdentityJson?: string | null
   resolutionSelectedRole?: 'active' | 'candidate' | null
@@ -106,6 +163,7 @@ export async function buildProvisionalOperationRow(
     state: 'pending',
     createdAt: input.startedAt,
     updatedAt: input.startedAt,
+    ...INITIAL_S4_PROVISIONAL_FIELDS,
   }
 }
 
@@ -129,6 +187,18 @@ export class MetaDB extends Dexie {
       deviceIdentity: 'key, deviceId',
       sessionTabs: 'tabId, deviceId, lastSeenAt, closedAt',
       provisionalOperations: 'operationId, deviceId, spaceId, sessionId, state, createdAt',
+    })
+    this.version(3).stores({
+      provisionalOperations: 'operationId, deviceId, spaceId, sessionId, state, createdAt',
+    }).upgrade(async (tx) => {
+      await tx.table<MetaV2ProvisionalOperationRow>('provisionalOperations')
+        .toCollection().modify((row) => {
+          requireStrictMetaV2ProvisionalRow(row)
+          Object.assign(row, {
+            state: row.state === 'resolved' ? 'activation_resolved' : row.state,
+            ...INITIAL_S4_PROVISIONAL_FIELDS,
+          })
+        })
     })
   }
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { taskSpaceApi } from '@/services/task-space-api'
@@ -6,9 +6,29 @@ import { WorkItemNoteRepository } from './work-item-note-repository'
 
 const databases: Array<Awaited<ReturnType<typeof openPomodoroXIDB>>> = []
 const timestamp = '2026-07-15T08:00:00.000Z'
+const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+
+class FakeLockManager {
+  request<T>(
+    _name: string,
+    _options: { mode: 'exclusive' },
+    callback: () => Promise<T>,
+  ): Promise<T> {
+    return callback()
+  }
+}
+
+beforeEach(() => {
+  Object.defineProperty(navigator, 'locks', {
+    configurable: true,
+    value: new FakeLockManager(),
+  })
+})
 
 afterEach(async () => {
   while (databases.length > 0) await databases.pop()!.delete()
+  if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks)
+  else Reflect.deleteProperty(navigator, 'locks')
 })
 
 const documentWithText = (text: string): WorkItemNoteDocument => ({

@@ -8,24 +8,23 @@
  */
 
 import Dexie from 'dexie'
-import type { PomodoroXIDB } from '@/services/database'
-import type { OutboxEvent } from '@/types'
+import { INITIAL_S4_OUTBOX_FIELDS, type PomodoroXIDB } from '@/services/database'
+import type { CachedSessionWorkItemPlan, OutboxEvent } from '@/types'
 import { hashCommandPayload } from '@/lib/contracts/payload-hash'
 import {
+  requireSpaceAuthorityToken,
+  requireSpaceDatabaseBinding,
+  type SpaceAuthorityToken,
+} from './space-authority-fence'
+import {
   ENTITY_TYPE_TO_TABLE,
+  FINAL_SYNC_ENTITY_TO_TABLE,
   TS3_LOCAL_ENTITY_TO_TABLE,
   type TS3LocalEntityType,
   type OutboxAction,
   type OutboxMergeResult,
   type SyncEntityType,
 } from './types'
-
-export interface OutboxFailurePatch {
-  outboxId: number
-  error: string
-  errorCode?: string | null
-  failedAt?: string
-}
 
 export interface OutboxIdentity {
   operationId: string
@@ -64,6 +63,49 @@ export interface PreparedEntityCommand {
 export interface PreparedEntityBatch {
   batchId: string
   items: PreparedEntityCommand[]
+}
+
+export function prepareHeldProvisionalBatch(rows: OutboxEvent[]): PreparedEntityBatch {
+  if (rows.length < 3) throw new Error('provisional_compound_batch_incomplete')
+  const spaceId = rows[0]!.spaceId
+  const compoundOperationId = rows[0]!.compoundOperationId
+  if (!compoundOperationId || rows.some((row) =>
+    row.spaceId !== spaceId || row.compoundOperationId !== compoundOperationId ||
+    row.compoundOrder === null || row.action !== 'create' ||
+    row.expectedVersion !== null)) {
+    throw new Error('provisional_compound_identity_mismatch')
+  }
+  const ordered = [...rows].sort((left, right) =>
+    left.compoundOrder! - right.compoundOrder!)
+  if (ordered.some((row, index) => row.compoundOrder !== index) ||
+      new Set(ordered.map((row) => row.operationId)).size !== ordered.length) {
+    throw new Error('provisional_compound_order_or_operation_id_invalid')
+  }
+  const expectedPrefix = [
+    'focusSession', 'sessionTaskContext', 'sessionAttributionRevision',
+  ]
+  if (expectedPrefix.some((entityType, index) => ordered[index]?.entityType !== entityType) ||
+      ordered.slice(3).some((row) => row.entityType !== 'sessionWorkItemPlan')) {
+    throw new Error('provisional_compound_parent_before_child_order_invalid')
+  }
+  const planRanks = ordered.slice(3).map((row) =>
+    (JSON.parse(row.payload) as CachedSessionWorkItemPlan).planRank)
+  if (planRanks.some((rank, index) => index > 0 && rank < planRanks[index - 1]!)) {
+    throw new Error('provisional_plan_rank_order_invalid')
+  }
+  return {
+    batchId: compoundOperationId,
+    items: ordered.map((row, requestIndex) => ({
+      requestIndex,
+      operationId: row.operationId,
+      entityType: row.entityType as SyncEntityType,
+      entityId: row.entityId,
+      action: row.action,
+      expectedVersion: null,
+      payload: JSON.parse(row.payload),
+      payloadHash: row.payloadHash,
+    })),
+  }
 }
 
 const canonicalUtcRfc3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{3})?Z$/
@@ -138,14 +180,16 @@ export function resolveOutboxMerge(
 export async function enqueueOutbox(
   db: PomodoroXIDB,
   spaceId: string,
+  token: SpaceAuthorityToken,
   entityType: SyncEntityType | TS3LocalEntityType,
   entityId: string,
   action: OutboxAction,
   payload: unknown,
   identity: OutboxIdentity,
 ): Promise<void> {
+  requireSpaceAuthorityToken(token, spaceId)
+  requireSpaceDatabaseBinding(db, spaceId)
   if (!spaceId) throw new Error('spaceId is required')
-  if (db.spaceId !== spaceId) throw new Error('outbox_space_database_mismatch')
   if (!(entityType in ENTITY_TYPE_TO_TABLE) && !(entityType in TS3_LOCAL_ENTITY_TO_TABLE)) {
     throw new Error(`Invalid sync entity type: ${entityType}`)
   }
@@ -202,9 +246,7 @@ export async function enqueueOutbox(
     if (merge.action === 'drop_existing') {
       // 删 outbox 行 + 尝试删 Dexie 实体表对应行
       await db.outbox.bulkDelete(mergeable.map((e) => e.id!))
-      const tableName = entityType in ENTITY_TYPE_TO_TABLE
-        ? ENTITY_TYPE_TO_TABLE[entityType as SyncEntityType]
-        : TS3_LOCAL_ENTITY_TO_TABLE[entityType as TS3LocalEntityType]
+      const tableName = FINAL_SYNC_ENTITY_TO_TABLE[entityType]
       const table = (
         db as unknown as Record<
           string,
@@ -281,6 +323,7 @@ export async function enqueueOutbox(
     expectedVersion: identity.expectedVersion,
     requiresVersionRebase: false,
     transportState: identity.transportState,
+    ...INITIAL_S4_OUTBOX_FIELDS,
   })
 }
 
@@ -289,51 +332,9 @@ export async function countUnsyncedOutbox(db: PomodoroXIDB): Promise<number> {
   return db.outbox.filter((e) => !e.synced && e.transportState === 'ready').count()
 }
 
-/** 未同步 outbox 行列表（按 createdAt 升序，供 S1-2 push-batch 使用，F1 §5.1） */
-export async function listUnsyncedOutbox(db: PomodoroXIDB): Promise<OutboxEvent[]> {
-  return db.outbox.filter((e) => !e.synced && e.transportState === 'ready').sortBy('createdAt')
-}
-
-/** 按主键列表批量删除 outbox 行（push 成功后清行用） */
-export async function deleteOutboxByIds(
-  db: PomodoroXIDB,
-  ids: number[],
-): Promise<void> {
-  if (ids.length > 0) await db.outbox.bulkDelete(ids)
-}
-
-/** Persist per-event push failure metadata without clearing the outbox row. */
-export async function markOutboxEventsFailed(
-  db: PomodoroXIDB,
-  failures: OutboxFailurePatch[],
-): Promise<void> {
-  if (failures.length === 0) return
-
-  const failedAtFallback = new Date().toISOString()
-  await db.transaction('rw', db.outbox, async () => {
-    for (const failure of failures) {
-      const row = await db.outbox.get(failure.outboxId)
-      if (!row || row.synced) continue
-
-      await db.outbox.update(failure.outboxId, {
-        lastError: failure.error,
-        lastErrorCode: failure.errorCode ?? classifyOutboxError(failure.error),
-        failedAt: failure.failedAt ?? failedAtFallback,
-        attemptCount: (row.attemptCount ?? 0) + 1,
-      })
-    }
-  })
-}
-
 function clearOutboxFailure(row: OutboxEvent): void {
   row.lastError = null
   row.lastErrorCode = null
   row.failedAt = null
   row.attemptCount = 0
-}
-
-function classifyOutboxError(error: string): string {
-  if (error.includes('version_mismatch')) return 'version_mismatch'
-  if (error.includes('content_hash_mismatch')) return 'content_hash_mismatch'
-  return 'push_error'
 }

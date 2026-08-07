@@ -24,6 +24,17 @@ import { requirePersistedExactSessionReviewDraft, type SessionReviewDraft } from
 import { focusSessionApi } from '@/services/focus-session-api'
 import { TS3_LOCAL_ENTITY_TO_TABLE } from '@/lib/sync/types'
 import { boundedChildOperationId, enqueueOutbox } from '@/lib/sync/outbox'
+import {
+  requireSpaceAuthorityToken,
+  requireSpaceDatabaseBinding,
+  withSpaceAuthorityFence,
+  type SpaceAuthorityToken,
+} from '@/lib/sync/space-authority-fence'
+import {
+  claimProvisionalOperation,
+  transitionProvisionalOperation,
+} from '@/lib/sync/provisional-operation-authority'
+import { parseAndValidateTerminalEvidenceResult } from '@/lib/sync/authority-identity'
 import type { PomodoroXIDB } from '@/services/database'
 import {
   buildProvisionalOperationRow,
@@ -38,8 +49,10 @@ import type {
   CachedSessionTaskContext,
   CachedSessionWorkItemOutcome,
   CachedSessionWorkItemPlan,
+  DirectCommandIntentRow,
   SessionActivationApplicationReceiptRow,
   SessionActivationConflictRow,
+  SessionReviewDraftRow,
 } from '@/types'
 import type { ProvisionalOperationLock } from './provisional-operation-lock'
 
@@ -72,6 +85,107 @@ export interface FocusSessionRows {
 
 type LocalFocusSessionAggregateView = Omit<FocusSessionAggregateView, 'commandReceipts'> & {
   commandReceipts: SessionCommandReceiptView[]
+}
+
+export async function resumeImportedProvisionalReviews(
+  db: PomodoroXIDB,
+  meta: MetaDB,
+  spaceId: string,
+  token: SpaceAuthorityToken,
+): Promise<void> {
+  requireSpaceAuthorityToken(token, spaceId)
+  requireSpaceDatabaseBinding(db, spaceId)
+  const draftRows = await db.sessionReviewDrafts
+    .where('spaceId').equals(spaceId).sortBy('sessionId') as unknown as SessionReviewDraftRow[]
+  for (const draftRow of draftRows) {
+    const draft = sessionReviewDraftSchema.parse(JSON.parse(draftRow.draftJson))
+    if (draft.spaceId !== spaceId || draft.sessionId !== draftRow.sessionId ||
+        draft.operationId !== draftRow.operationId) {
+      throw new Error('imported_review_draft_identity_mismatch')
+    }
+    const roots = await meta.provisionalOperations.where('sessionId').equals(draft.sessionId)
+      .and((row) => row.spaceId === spaceId && row.state === 'transport_resolved').toArray()
+    if (roots.length === 0) continue
+    if (roots.length !== 1) throw new Error('imported_review_root_ambiguous')
+    const root = roots[0]!
+    if (!root.terminalEvidenceId || !root.terminalResultSha256 ||
+        !root.terminalOperationIdsSha256 || !root.transportReadyRootSha256) {
+      throw new Error('imported_review_transport_resolution_incomplete')
+    }
+    const evidence = await db.syncTerminalApplications.get(root.terminalEvidenceId)
+    if (!evidence || evidence.state !== 'meta_reconciled' || evidence.spaceId !== spaceId ||
+        evidence.compoundOperationId !== root.operationId ||
+        evidence.resultSha256 !== root.terminalResultSha256 ||
+        evidence.operationIdsSha256 !== root.terminalOperationIdsSha256 ||
+        evidence.readyRoots.length !== 1 ||
+        evidence.readyRoots[0]!.rootKind !== 'compound' ||
+        evidence.readyRoots[0]!.rootId !== root.operationId ||
+        evidence.readyRoots[0]!.rootSha256 !== root.transportReadyRootSha256) {
+      throw new Error('imported_review_terminal_evidence_mismatch')
+    }
+    const terminal = await parseAndValidateTerminalEvidenceResult(evidence)
+    const importedRoot = evidence.readyRoots[0]!
+    const focusChildren = importedRoot.orderedChildren.filter((child) =>
+      child.entityType === 'focusSession' && child.entityId === draft.sessionId &&
+      child.action === 'create' && child.compoundOperationId === root.operationId)
+    if (terminal.conflicts.length !== 0 || terminal.errors.length !== 0 ||
+        terminal.applied.length !== evidence.operationIds.length ||
+        evidence.appliedCount !== evidence.operationIds.length || focusChildren.length !== 1 ||
+        !terminal.applied.some((item) => item.operation_id === focusChildren[0]!.operationId &&
+          item.entity_type === 'focusSession' && item.entity_id === draft.sessionId)) {
+      throw new Error('imported_review_root_not_fully_applied')
+    }
+    const existingIntent = await db.directCommandIntents.get(
+      draft.operationId,
+    ) as unknown as DirectCommandIntentRow | undefined
+    let intent: DirectCommandIntentRow
+    if (existingIntent) {
+      const exactRequest = sessionReviewDraftSchema.parse(JSON.parse(existingIntent.requestJson))
+      const { expectedVersion: _persistedCas, ...persistedBusiness } = exactRequest
+      const { expectedVersion: _preImportCas, ...draftBusiness } = draft
+      if (existingIntent.kind !== 'submit_review' ||
+          existingIntent.spaceId !== spaceId ||
+          existingIntent.targetId !== draft.sessionId ||
+          !['prepared', 'in_flight'].includes(existingIntent.state) ||
+          exactRequest.operationId !== draft.operationId ||
+          exactRequest.expectedVersion <= 0 ||
+          canonicalize(exactRequest) !== existingIntent.requestJson ||
+          canonicalize(persistedBusiness) !== canonicalize(draftBusiness) ||
+          await hashCommandPayload(exactRequest) !== existingIntent.requestHash) {
+        throw new Error('imported_review_existing_intent_mismatch')
+      }
+      intent = existingIntent
+    } else {
+      const session = await db.focusSessions.get(
+        draft.sessionId,
+      ) as unknown as CachedFocusSession | undefined
+      const outcomes = await db.sessionWorkItemOutcomes.where('sessionId').equals(draft.sessionId).count()
+      if (!session || session.version <= 0 || session.endedAt === null ||
+          session.clockState !== 'ended' || session.ownershipState !== 'local_provisional' ||
+          session.validity !== 'pending' || session.reviewState !== 'pending' || outcomes !== 0) {
+        throw new Error('imported_review_authoritative_session_not_ready')
+      }
+      intent = await prepareDirectCommandIntent(db, {
+        kind: 'submit_review', spaceId, targetId: draft.sessionId,
+        request: sessionReviewDraftSchema.parse({ ...draft, expectedVersion: session.version }),
+        now: canonicalNow(),
+      }, draft.operationId)
+    }
+    await executeDurableDirectCommand({
+      db, intent,
+      businessTables: [db.focusSessions, db.sessionWorkItemOutcomes,
+        db.sessionCommandEnvelopes, db.sessionCommandReceipts,
+        db.sessionCommandQueue, db.sessionReviewDrafts],
+      sendExactRequest: (request) => focusSessionApi.submitReview(
+        sessionReviewDraftSchema.parse(request),
+      ),
+      parseResult: (value) => focusSessionAggregateSchema.parse(value),
+      applyResult: (response) => applyAuthoritativeReviewAndClearDraft(
+        db, spaceId, draft.sessionId, intent.requestJson, 'import_rebased', response,
+      ),
+      now: canonicalNow,
+    })
+  }
 }
 
 function receiptContent(receipt: SessionCommandReceiptView): string {
@@ -881,7 +995,10 @@ async function reindexUnattemptedProvisionalPlanOutbox(
   db: PomodoroXIDB,
   compoundOperationId: string,
   sessionId: string,
+  token: SpaceAuthorityToken,
 ): Promise<void> {
+  requireSpaceAuthorityToken(token, db.spaceId)
+  requireSpaceDatabaseBinding(db, db.spaceId)
   const plans = await db.sessionWorkItemPlans.where('sessionId').equals(sessionId).toArray() as CachedSessionWorkItemPlan[]
   plans.sort((left, right) => left.planRank - right.planRank || left.id.localeCompare(right.id))
   const outboxRows = (await db.outbox.toArray()).filter((row) =>
@@ -1045,20 +1162,24 @@ export class FocusSessionRepository {
 
   private async withLocalOwner<T>(
     staleSession: CachedFocusSession,
-    effect: (session: CachedFocusSession, proof: LocalOwnerProof) => Promise<T>,
+    effect: (session: CachedFocusSession, proof: LocalOwnerProof, token: SpaceAuthorityToken) => Promise<T>,
   ): Promise<T> {
-    assertLocalContentWritable(staleSession)
-    const candidates = await this.meta.provisionalOperations
-      .where('sessionId').equals(staleSession.sessionId)
-      .and((row) => row.spaceId === this.spaceId &&
-        row.deviceId === this.identity.deviceId && row.tabId === this.identity.tabId &&
-        (row.state === 'pending' || row.state === 'activating'))
-      .toArray()
-    if (candidates.length !== 1) throw new Error('active_session_not_owned')
-    return this.provisionalLock.run(candidates[0]!.operationId, async () => {
-      const current = await this.requireSession(staleSession.sessionId)
-      const proof = await this.requireLocalOwner(current)
-      return effect(current, proof)
+    return withSpaceAuthorityFence(this.spaceId, async (token) => {
+      requireSpaceAuthorityToken(token, this.spaceId)
+      requireSpaceDatabaseBinding(this.db, this.spaceId)
+      assertLocalContentWritable(staleSession)
+      const candidates = await this.meta.provisionalOperations
+        .where('sessionId').equals(staleSession.sessionId)
+        .and((row) => row.spaceId === this.spaceId &&
+          row.deviceId === this.identity.deviceId && row.tabId === this.identity.tabId &&
+          (row.state === 'pending' || row.state === 'activating'))
+        .toArray()
+      if (candidates.length !== 1) throw new Error('active_session_not_owned')
+      return this.provisionalLock.run(candidates[0]!.operationId, async () => {
+        const current = await this.requireSession(staleSession.sessionId)
+        const proof = await this.requireLocalOwner(current)
+        return effect(current, proof, token)
+      })
     })
   }
 
@@ -1091,7 +1212,10 @@ export class FocusSessionRepository {
     previous: CachedFocusSession,
     next: CachedFocusSession,
     operation: ProvisionalOperationRow,
+    token: SpaceAuthorityToken,
   ): Promise<CachedFocusSession> {
+    requireSpaceAuthorityToken(token, this.spaceId)
+    requireSpaceDatabaseBinding(this.db, this.spaceId)
     const payloadHash = await hashCommandPayload(localSessionCreateHashPayload(next))
     const operationId = await boundedChildOperationId(operation.operationId, 'focus_session')
     await this.db.transaction('rw', this.db.focusSessions, this.db.outbox, async () => {
@@ -1099,7 +1223,7 @@ export class FocusSessionRepository {
         .and((row) => row.entityType === 'focusSession' && row.entityId === next.sessionId && !row.synced)
         .first()
       await this.db.focusSessions.put({ id: next.sessionId, ...next })
-      await enqueueOutbox(this.db, this.spaceId, 'focusSession', next.sessionId,
+      await enqueueOutbox(this.db, this.spaceId, token, 'focusSession', next.sessionId,
         previous.version === 0 ? 'create' : 'update', serializeFocusSessionCommandPostImage(next), {
           operationId,
           payloadHash,
@@ -1120,14 +1244,14 @@ export class FocusSessionRepository {
     if (session.ownershipState !== 'local_provisional' || session.clockState !== 'running') {
       throw new Error('provisional_session_not_running')
     }
-    return this.withLocalOwner(session, (current, { operation }) => this.persistProvisionalClock(current, {
+    return this.withLocalOwner(session, (current, { operation }, token) => this.persistProvisionalClock(current, {
       ...current,
       ...this.clockAt(current, occurredAt),
       sessionRevision: current.sessionRevision + 1,
       pauseStartedAt: occurredAt,
       clockState: 'paused',
       updatedAt: occurredAt,
-    }, operation))
+    }, operation, token))
   }
 
   async resumeProvisional(sessionId: string, occurredAt: string): Promise<CachedFocusSession> {
@@ -1136,14 +1260,14 @@ export class FocusSessionRepository {
     if (session.ownershipState !== 'local_provisional' || session.clockState !== 'paused') {
       throw new Error('provisional_session_not_paused')
     }
-    return this.withLocalOwner(session, (current, { operation }) => this.persistProvisionalClock(current, {
+    return this.withLocalOwner(session, (current, { operation }, token) => this.persistProvisionalClock(current, {
       ...current,
       ...this.clockAt(current, occurredAt),
       sessionRevision: current.sessionRevision + 1,
       pauseStartedAt: null,
       clockState: 'running',
       updatedAt: occurredAt,
-    }, operation))
+    }, operation, token))
   }
 
   async endProvisional(
@@ -1155,7 +1279,7 @@ export class FocusSessionRepository {
     if (session.ownershipState !== 'local_provisional' || session.clockState === 'ended') {
       throw new Error('provisional_session_not_active')
     }
-    return this.withLocalOwner(session, async (current, { operation }) => {
+    return this.withLocalOwner(session, async (current, { operation }, token) => {
       const next = await this.persistProvisionalClock(current, {
         ...current,
         ...this.clockAt(current, input.occurredAt),
@@ -1167,10 +1291,11 @@ export class FocusSessionRepository {
         validity: 'pending',
         reviewState: 'pending',
         updatedAt: input.occurredAt,
-      }, operation)
-      await this.meta.provisionalOperations.update(operation.operationId, {
-        state: 'awaiting_s4', updatedAt: input.occurredAt,
-      })
+      }, operation, token)
+      await transitionProvisionalOperation(this.meta, this.spaceId, token,
+        operation.operationId, ['pending', 'activating'], {
+          state: 'awaiting_s4', updatedAt: input.occurredAt,
+        })
       return next
     })
   }
@@ -1187,7 +1312,7 @@ export class FocusSessionRepository {
       return
     }
     const createdAt = new Date().toISOString()
-    await this.withLocalOwner(session, async (_current, { operation, transportState }) => {
+    await this.withLocalOwner(session, async (_current, { operation, transportState }, token) => {
       const lockedRows = await this.db.sessionWorkItemPlans.where('sessionId').equals(sessionId).toArray() as CachedSessionWorkItemPlan[]
       if (workItemId !== null && !lockedRows.some((row) => row.workItemId === workItemId && row.removedAt === null)) {
         throw new Error('session_plan_item_not_found')
@@ -1204,7 +1329,7 @@ export class FocusSessionRepository {
           const payloadHash = await Dexie.waitFor(hashCommandPayload(localPlanCreateHashPayload(next)))
           const operationId = await Dexie.waitFor(boundedChildOperationId(operation.operationId, `plan:${row.id}`))
           await this.db.sessionWorkItemPlans.put(next)
-          await enqueueOutbox(this.db, this.spaceId, 'sessionWorkItemPlan', row.id,
+          await enqueueOutbox(this.db, this.spaceId, token, 'sessionWorkItemPlan', row.id,
             localCreate ? 'create' : 'update', serializeSessionPlanCommandPostImage(next), {
               operationId, payloadHash,
               hashPayload: localPlanCreateHashPayload(next),
@@ -1226,7 +1351,7 @@ export class FocusSessionRepository {
       return
     }
     const createdAt = new Date().toISOString()
-    await this.withLocalOwner(session, async (current, { operation, transportState }) => {
+    await this.withLocalOwner(session, async (current, { operation, transportState }, token) => {
       const operationId = await boundedChildOperationId(operation.operationId, 'focus_session')
       await this.db.transaction('rw', this.db.focusSessions, this.db.outbox, async () => {
         const next = { ...current, sessionNote, updatedAt: createdAt }
@@ -1236,7 +1361,7 @@ export class FocusSessionRepository {
           .and((row) => row.entityType === 'focusSession' && row.entityId === sessionId && !row.synced)
           .first()
         await this.db.focusSessions.put({ id: next.sessionId, ...next })
-        await enqueueOutbox(this.db, this.spaceId, 'focusSession', sessionId,
+        await enqueueOutbox(this.db, this.spaceId, token, 'focusSession', sessionId,
           localCreate ? 'create' : 'update', serializeFocusSessionCommandPostImage(next), {
             operationId, payloadHash,
             hashPayload: localSessionCreateHashPayload(next),
@@ -1263,7 +1388,7 @@ export class FocusSessionRepository {
       return
     }
     const createdAt = new Date().toISOString()
-    await this.withLocalOwner(session, async (_current, { operation, transportState }) => {
+    await this.withLocalOwner(session, async (_current, { operation, transportState }, token) => {
       const lockedRow = await this.db.sessionWorkItemPlans.get(planItemId) as CachedSessionWorkItemPlan | undefined
       if (!lockedRow || lockedRow.sessionId !== sessionId) throw new Error('session_plan_item_not_found')
       const next: CachedSessionWorkItemPlan = { ...lockedRow, completionDraft, updatedAt: createdAt }
@@ -1272,7 +1397,7 @@ export class FocusSessionRepository {
       const operationId = await boundedChildOperationId(operation.operationId, `plan:${lockedRow.id}`)
       await this.db.transaction('rw', this.db.sessionWorkItemPlans, this.db.outbox, async () => {
         await this.db.sessionWorkItemPlans.put(next)
-        await enqueueOutbox(this.db, this.spaceId, 'sessionWorkItemPlan', lockedRow.id,
+        await enqueueOutbox(this.db, this.spaceId, token, 'sessionWorkItemPlan', lockedRow.id,
           localCreate ? 'create' : 'update', serializeSessionPlanCommandPostImage(next), {
             operationId, payloadHash,
             hashPayload: localPlanCreateHashPayload(next),
@@ -1306,7 +1431,7 @@ export class FocusSessionRepository {
       }))
       return
     }
-    await this.withLocalOwner(session, async (_current, { operation, transportState }) => {
+    await this.withLocalOwner(session, async (_current, { operation, transportState }, token) => {
       const lockedContext = await this.db.sessionTaskContexts.where('sessionId').equals(sessionId).first() as CachedSessionTaskContext | undefined
       const lockedWorkItem = await this.db.workItems.get(workItemId) as typeof workItem
       if (!lockedContext || !lockedWorkItem || lockedWorkItem.depth !== 3 ||
@@ -1326,13 +1451,13 @@ export class FocusSessionRepository {
       const operationId = await boundedChildOperationId(operation.operationId, `plan:${next.id}`)
       await this.db.transaction('rw', this.db.sessionWorkItemPlans, this.db.outbox, async () => {
         await this.db.sessionWorkItemPlans.add(next)
-        await enqueueOutbox(this.db, this.spaceId, 'sessionWorkItemPlan', next.id, 'create',
+        await enqueueOutbox(this.db, this.spaceId, token, 'sessionWorkItemPlan', next.id, 'create',
           serializeSessionPlanCommandPostImage(next), {
             operationId, payloadHash, expectedVersion: null, transportState,
             hashPayload: localPlanCreateHashPayload(next),
             createdAt: addedAt, compoundOperationId: operation.operationId, compoundOrder: 0,
           })
-        await reindexUnattemptedProvisionalPlanOutbox(this.db, operation.operationId, sessionId)
+        await reindexUnattemptedProvisionalPlanOutbox(this.db, operation.operationId, sessionId, token)
       })
     })
   }
@@ -1352,7 +1477,7 @@ export class FocusSessionRepository {
       await this.cacheAuthoritative(this.active.removePlanItem({ sessionId, planItemId, removedAt, removalReason }))
       return
     }
-    await this.withLocalOwner(session, async (_current, { operation, transportState }) => {
+    await this.withLocalOwner(session, async (_current, { operation, transportState }, token) => {
       const lockedRow = await this.db.sessionWorkItemPlans.get(planItemId) as CachedSessionWorkItemPlan | undefined
       if (!lockedRow || lockedRow.sessionId !== sessionId) throw new Error('session_plan_item_not_found')
       const next: CachedSessionWorkItemPlan = {
@@ -1363,7 +1488,7 @@ export class FocusSessionRepository {
       const operationId = await boundedChildOperationId(operation.operationId, `plan:${lockedRow.id}`)
       await this.db.transaction('rw', this.db.sessionWorkItemPlans, this.db.outbox, async () => {
         await this.db.sessionWorkItemPlans.put(next)
-        await enqueueOutbox(this.db, this.spaceId, 'sessionWorkItemPlan', lockedRow.id,
+        await enqueueOutbox(this.db, this.spaceId, token, 'sessionWorkItemPlan', lockedRow.id,
           localCreate ? 'create' : 'update', serializeSessionPlanCommandPostImage(next), {
             operationId, payloadHash,
             hashPayload: localPlanCreateHashPayload(next),
@@ -1434,7 +1559,10 @@ export class FocusSessionRepository {
   private async persistProvisionalAggregateAndOutbox(
     aggregate: LocalFocusSessionAggregate,
     operation: ProvisionalOperationRow,
+    token: SpaceAuthorityToken,
   ): Promise<void> {
+    requireSpaceAuthorityToken(token, this.spaceId)
+    requireSpaceDatabaseBinding(this.db, this.spaceId)
     if (!aggregate.context || aggregate.attribution.revision !== 1 || !aggregate.attribution.effective ||
         aggregate.plan.some((item) => item.source === 'review_materialized')) {
       throw new Error('invalid_initial_provisional_aggregate')
@@ -1486,7 +1614,7 @@ export class FocusSessionRepository {
             ? { id: item.entityId, ...item.row }
             : item.row
           await this.db.table(TS3_LOCAL_ENTITY_TO_TABLE[item.entityType]).put(storedRow)
-          await enqueueOutbox(this.db, this.spaceId, item.entityType, item.entityId, 'create', item.postImage, {
+          await enqueueOutbox(this.db, this.spaceId, token, item.entityType, item.entityId, 'create', item.postImage, {
             operationId: item.operationId, payloadHash: item.payloadHash,
             hashPayload: item.businessPayload,
             expectedVersion: null, transportState: 'awaiting_s4',
@@ -1502,72 +1630,81 @@ export class FocusSessionRepository {
     input: ProvisionalStartInput,
     snapshots: { project: Record<string, unknown>; level2: Record<string, unknown>; level3: Array<Record<string, unknown>> } | null,
     operation: ProvisionalOperationRow,
+    token: SpaceAuthorityToken,
   ): Promise<LocalFocusSessionAggregate> {
+    requireSpaceAuthorityToken(token, this.spaceId)
+    requireSpaceDatabaseBinding(this.db, this.spaceId)
     const existing = await this.db.focusSessions.get(operation.sessionId)
     if (existing) {
       if (operation.state === 'awaiting_s4' &&
           (existing.endedAt !== null || existing.clockState === 'ended')) {
         throw new Error('terminal_provisional_requires_s4_import')
       }
-      if (operation.state === 'activating' || operation.state === 'conflict' || operation.state === 'resolved') {
+      if (operation.state === 'activating' || operation.state === 'conflict' || operation.state === 'activation_resolved') {
         throw new Error('provisional_start_recovery_required')
       }
       const aggregate = await this.readCachedAggregate(operation.sessionId)
       await assertCompleteProvisionalOutbox(this.db, this.spaceId, operation.operationId, aggregate)
       return aggregate
     }
-    if (operation.state === 'awaiting_s4' || operation.state === 'conflict' || operation.state === 'resolved') {
+    if (operation.state === 'awaiting_s4' || operation.state === 'conflict' || operation.state === 'activation_resolved') {
       throw new Error('provisional_start_recovery_required')
     }
     const aggregate = buildLocalProvisionalAggregate(
       input,
       snapshots ?? await this.requireCachedStartSnapshots(input),
     )
-    await this.meta.provisionalOperations.update(operation.operationId, { state: 'activating', updatedAt: input.startedAt })
+    await transitionProvisionalOperation(this.meta, this.spaceId, token,
+      operation.operationId, ['pending'], { state: 'activating', updatedAt: input.startedAt })
     try {
-      await this.persistProvisionalAggregateAndOutbox(aggregate, operation)
-      await this.meta.provisionalOperations.update(operation.operationId, { state: 'pending', updatedAt: input.startedAt })
+      await this.persistProvisionalAggregateAndOutbox(aggregate, operation, token)
+      await transitionProvisionalOperation(this.meta, this.spaceId, token,
+        operation.operationId, ['activating'], { state: 'pending', updatedAt: input.startedAt })
       return aggregate
     } catch (error) {
       const current = await this.meta.provisionalOperations.get(operation.operationId)
       if (current?.intentJson === operation.intentJson && current.payloadHash === operation.payloadHash &&
           current.state === 'activating') {
-        await this.meta.provisionalOperations.update(operation.operationId, {
-          state: 'pending', updatedAt: new Date().toISOString(),
-        })
+        await transitionProvisionalOperation(this.meta, this.spaceId, token,
+          operation.operationId, ['activating'], {
+            state: 'pending', updatedAt: new Date().toISOString(),
+          })
       }
       throw error
     }
   }
 
   async startProvisional(input: ProvisionalStartInput): Promise<LocalFocusSessionAggregate> {
-    return this.provisionalLock.run(input.operationId, async () => {
+    return withSpaceAuthorityFence(this.spaceId, (token) => this.provisionalLock.run(input.operationId, async () => {
       const cachedLocator = await this.meta.activeSessionLocator.get('active')
       const metaRow = await buildProvisionalOperationRow(input, cachedLocator?.ownershipEpoch ?? null)
       const existing = await this.meta.provisionalOperations.get(metaRow.operationId)
       if (existing) {
-        const claim = await this.meta.claimProvisional(metaRow)
-        if (claim.disposition === 'existing') return this.resumeExistingProvisionalStart(input, null, claim.row)
+        const claim = await claimProvisionalOperation(this.meta, this.spaceId, token, metaRow)
+        if (claim.disposition === 'existing') return this.resumeExistingProvisionalStart(input, null, claim.row, token)
       }
       const snapshots = await this.requireCachedStartSnapshots(input)
-      const claim = await this.meta.claimProvisional(metaRow)
-      if (claim.disposition === 'existing') return this.resumeExistingProvisionalStart(input, snapshots, claim.row)
-      await this.meta.provisionalOperations.update(metaRow.operationId, { state: 'activating', updatedAt: input.startedAt })
+      const claim = await claimProvisionalOperation(this.meta, this.spaceId, token, metaRow)
+      if (claim.disposition === 'existing') return this.resumeExistingProvisionalStart(input, snapshots, claim.row, token)
+      await transitionProvisionalOperation(this.meta, this.spaceId, token,
+        metaRow.operationId, ['pending'], { state: 'activating', updatedAt: input.startedAt })
       try {
         const aggregate = buildLocalProvisionalAggregate(input, snapshots)
-        await this.persistProvisionalAggregateAndOutbox(aggregate, metaRow)
-        await this.meta.provisionalOperations.update(metaRow.operationId, { state: 'pending', updatedAt: input.startedAt })
+        await this.persistProvisionalAggregateAndOutbox(aggregate, metaRow, token)
+        await transitionProvisionalOperation(this.meta, this.spaceId, token,
+          metaRow.operationId, ['activating'], { state: 'pending', updatedAt: input.startedAt })
         return aggregate
       } catch (error) {
         const current = await this.meta.provisionalOperations.get(metaRow.operationId)
         if (current?.intentJson === metaRow.intentJson && current.payloadHash === metaRow.payloadHash && current.state === 'activating') {
-          await this.meta.provisionalOperations.update(metaRow.operationId, {
-            state: 'pending', updatedAt: new Date().toISOString(),
-          })
+          await transitionProvisionalOperation(this.meta, this.spaceId, token,
+            metaRow.operationId, ['activating'], {
+              state: 'pending', updatedAt: new Date().toISOString(),
+            })
         }
         throw error
       }
-    })
+    }))
   }
 
   async saveReviewCache(row: Record<string, unknown>): Promise<void> {

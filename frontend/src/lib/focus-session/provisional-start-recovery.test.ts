@@ -1,12 +1,23 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { buildProvisionalOperationRow, MetaDB } from '@/services/meta-database'
 import { recoverProvisionalStarts } from './provisional-start-recovery'
 
 const databases: Array<Awaited<ReturnType<typeof openPomodoroXIDB>> | MetaDB> = []
+const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+class FakeLockManager {
+  request<T>(_name: string, _options: { mode: 'exclusive' }, callback: () => Promise<T>): Promise<T> {
+    return callback()
+  }
+}
+beforeEach(() => Object.defineProperty(navigator, 'locks', {
+  configurable: true, value: new FakeLockManager(),
+}))
 
 afterEach(async () => {
   while (databases.length > 0) await databases.pop()!.delete()
+  if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks)
+  else Reflect.deleteProperty(navigator, 'locks')
 })
 
 async function operation(db: MetaDB, spaceId: string, state: 'pending' | 'activating') {

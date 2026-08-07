@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import Dexie from 'dexie'
 import { canonicalize } from 'json-canonicalize'
 import { hashCommandPayload } from '@/lib/contracts/payload-hash'
 import {
   buildProvisionalOperationRow,
+  INITIAL_S4_PROVISIONAL_FIELDS,
   MetaDB,
   type CanonicalProvisionalStartIntent,
   type ProvisionalOperationRow,
@@ -29,6 +31,7 @@ const provisionalOperationFixture = (
   intentJson: '{"spaceId":"space-a","sessionId":"fs-a"}',
   payloadHash: 'a'.repeat(64), state: 'pending',
   createdAt: '2026-07-15T08:00:00Z', updatedAt: '2026-07-15T08:00:00Z',
+  ...INITIAL_S4_PROVISIONAL_FIELDS,
   ...overrides,
 })
 
@@ -48,14 +51,75 @@ const provisionalIntentFixture = (
   ...overrides,
 })
 
-describe('MetaDB v2 coordination mirrors', () => {
-  it('defines the v2 locator, identity, Tab, and provisional stores', async () => {
+describe('MetaDB v3 coordination mirrors', () => {
+  it('defines the v3 locator, identity, Tab, and provisional stores', async () => {
     const db = await openMeta('schema')
 
-    expect(db.verno).toBe(2)
+    expect(db.verno).toBe(3)
     expect(db.tables.map((table) => table.name).sort()).toEqual([
       'activeSessionLocator', 'deviceIdentity', 'provisionalOperations', 'sessionTabs', 'spaces',
     ])
+  })
+
+  it('strictly upgrades a v2 resolved provisional row with four null bindings', async () => {
+    const name = `pxii-meta-upgrade-${crypto.randomUUID()}`
+    const old = new Dexie(name)
+    old.version(2).stores({
+      spaces: 'id, name, is_default',
+      activeSessionLocator: 'key, spaceId, sessionId, state, ownershipEpoch',
+      deviceIdentity: 'key, deviceId',
+      sessionTabs: 'tabId, deviceId, lastSeenAt, closedAt',
+      provisionalOperations: 'operationId, deviceId, spaceId, sessionId, state, createdAt',
+    })
+    await old.open()
+    await old.table('provisionalOperations').put({
+      operationId: 'operation-a', deviceId: 'device-a', tabId: 'tab-a',
+      spaceId: 'space-a', sessionId: 'session-a', cachedOwnershipEpoch: null,
+      intentJson: '{"spaceId":"space-a"}', payloadHash: 'a'.repeat(64),
+      state: 'resolved', createdAt: '2026-08-07T01:00:00.000Z',
+      updatedAt: '2026-08-07T01:01:00.000Z',
+    })
+    old.close()
+
+    const upgraded = new MetaDB(name)
+    databases.push(upgraded)
+    await upgraded.open()
+
+    expect(await upgraded.provisionalOperations.get('operation-a')).toMatchObject({
+      state: 'activation_resolved',
+      ...INITIAL_S4_PROVISIONAL_FIELDS,
+    })
+  })
+
+  it('atomically rejects a v2 row with pre-existing partial S4 fields', async () => {
+    const name = `pxii-meta-partial-${crypto.randomUUID()}`
+    const old = new Dexie(name)
+    old.version(2).stores({
+      spaces: 'id, name, is_default',
+      activeSessionLocator: 'key, spaceId, sessionId, state, ownershipEpoch',
+      deviceIdentity: 'key, deviceId',
+      sessionTabs: 'tabId, deviceId, lastSeenAt, closedAt',
+      provisionalOperations: 'operationId, deviceId, spaceId, sessionId, state, createdAt',
+    })
+    await old.open()
+    await old.table('provisionalOperations').put({
+      operationId: 'operation-a', deviceId: 'device-a', tabId: 'tab-a',
+      spaceId: 'space-a', sessionId: 'session-a', cachedOwnershipEpoch: null,
+      intentJson: '{"spaceId":"space-a"}', payloadHash: 'a'.repeat(64), state: 'awaiting_s4',
+      createdAt: '2026-08-07T01:00:00.000Z', updatedAt: '2026-08-07T01:01:00.000Z',
+      terminalEvidenceId: null,
+    })
+    old.close()
+
+    const upgraded = new MetaDB(name)
+    databases.push(upgraded)
+    await expect(upgraded.open()).rejects.toThrow('meta_v3_provisional_fields_preexist_or_partial')
+
+    const probe = new Dexie(name)
+    probe.version(2).stores({ provisionalOperations: 'operationId' })
+    await probe.open()
+    expect(probe.verno).toBe(2)
+    probe.close()
   })
 
   it('stores locator identity without Session business content', async () => {

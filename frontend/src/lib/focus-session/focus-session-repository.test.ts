@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { focusSessionApi } from '@/services/focus-session-api'
 import {
   buildProvisionalOperationRow,
+  INITIAL_S4_PROVISIONAL_FIELDS,
   MetaDB,
   type ProvisionalOperationRow,
 } from '@/services/meta-database'
@@ -14,13 +15,29 @@ import {
   readSessionCommandReceipts,
   normalizeSessionCommandReceipts,
   persistImmutableSessionCommandReceipts,
+  resumeImportedProvisionalReviews,
 } from './focus-session-repository'
 import { SessionReviewDraftController } from './session-review-draft-registry'
+import { admitTs3AwaitingS4 } from '@/lib/sync/admission'
+import { selectOneAuthorityUnit } from '@/lib/sync/authority-identity'
+import { withSpaceAuthorityFence } from '@/lib/sync/space-authority-fence'
+import { applyTerminalResultTwoPhase } from '@/lib/sync/terminal-application'
 
 const databases: Array<Awaited<ReturnType<typeof openPomodoroXIDB>> | MetaDB> = []
+const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+class FakeLockManager {
+  request<T>(_name: string, _options: { mode: 'exclusive' }, callback: () => Promise<T>): Promise<T> {
+    return callback()
+  }
+}
+beforeEach(() => Object.defineProperty(navigator, 'locks', {
+  configurable: true, value: new FakeLockManager(),
+}))
 
 afterEach(async () => {
   while (databases.length > 0) await databases.pop()!.delete()
+  if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks)
+  else Reflect.deleteProperty(navigator, 'locks')
 })
 
 const aggregateFixture = (
@@ -73,6 +90,7 @@ const provisionalOperationFixture = (spaceId: string): ProvisionalOperationRow =
   spaceId, sessionId: 'fs-1', cachedOwnershipEpoch: null,
   intentJson: '{}', payloadHash: 'a'.repeat(64), state: 'pending',
   createdAt: '2026-07-15T08:00:00Z', updatedAt: '2026-07-15T08:00:00Z',
+  ...INITIAL_S4_PROVISIONAL_FIELDS,
 })
 
 describe('FocusSession aggregate persistence', () => {
@@ -590,6 +608,79 @@ describe('FocusSession aggregate persistence', () => {
     expect(await db.directCommandIntents.get(controller.currentDraft().operationId)).toBeUndefined()
     expect(await db.sessionReviewDrafts.get([db.spaceId, 'offline-review-1'])).toBeDefined()
     expect(await meta.provisionalOperations.get('offline-review-1')).toMatchObject({ state: 'awaiting_s4' })
+    controller.dispose()
+  })
+
+  it('resumes an imported provisional review from exact terminal evidence', async () => {
+    const db = await openPomodoroXIDB(`focus-review-import-${crypto.randomUUID()}`)
+    const meta = new MetaDB(`meta-focus-review-import-${crypto.randomUUID()}`)
+    databases.push(db, meta)
+    await meta.open()
+    await meta.sessionTabs.put({
+      tabId: 'tab-a', deviceId: 'device-a', openedAt: '2026-07-15T08:00:00Z',
+      lastSeenAt: '2026-07-15T08:00:00Z', closedAt: null,
+    })
+    await db.projects.put({ id: 'project-1', name: 'Project', version: 1 })
+    await db.workItems.bulkPut([
+      { id: 'l2', projectId: 'project-1', title: 'Parent', depth: 2, parentId: null, statusDefinitionId: 'status-open', version: 4 },
+      { id: 'l3', projectId: 'project-1', title: 'Child', depth: 3, parentId: 'l2', statusDefinitionId: 'status-open', version: 2 },
+    ])
+    const repository = new FocusSessionRepository(
+      db, meta, db.spaceId, { deviceId: 'device-a', tabId: 'tab-a' }, {} as never,
+      { run: async <T>(_operationId: string, effect: () => Promise<T>) => effect() },
+    )
+    await repository.startProvisional({
+      operationId: 'offline-review-import', spaceId: db.spaceId, sessionId: 'fs-1',
+      level2WorkItemId: 'l2', level3WorkItemIds: ['l3'], plannedSeconds: 1500,
+      startedAt: '2026-07-15T08:00:00.000Z', deviceId: 'device-a', tabId: 'tab-a',
+      expectedWorkItemVersions: { l2: 4, l3: 2 },
+    })
+    await repository.endProvisional('fs-1', {
+      occurredAt: '2026-07-15T08:10:00.000Z', timerCompletion: 'ended_early',
+    })
+    const controller = await SessionReviewDraftController.open({
+      db, spaceId: db.spaceId, sessionId: 'fs-1', initialDraft: {
+        operationId: 'review-import-operation', spaceId: db.spaceId, sessionId: 'fs-1',
+        expectedVersion: 0, validity: 'valid', reviewState: 'completed',
+        reviewedAt: '2026-07-15T08:10:00.000Z', outcomes: [],
+      },
+    })
+    await repository.submitReview(controller.currentDraft())
+
+    const response = aggregateFixture(db.spaceId) as { session: Record<string, unknown> }
+    Object.assign(response.session, {
+      endedAt: '2026-07-15T08:10:00Z', clockState: 'ended',
+      reviewState: 'completed', validity: 'valid', version: 4,
+    })
+    const submit = vi.spyOn(focusSessionApi, 'submitReview').mockResolvedValue(response as never)
+    await withSpaceAuthorityFence(db.spaceId, async (token) => {
+      await admitTs3AwaitingS4(db, meta, db.spaceId, token)
+      const selected = await selectOneAuthorityUnit(db)
+      expect(selected?.authority.kind).toBe('compound')
+      await applyTerminalResultTwoPhase(db, meta, db.spaceId, token, selected!, {
+        batch_id: selected!.authority.batchId,
+        applied: selected!.frozenRows.map((row) => ({
+          operation_id: row.operationId,
+          entity_type: row.entityType,
+          entity_id: row.entityId,
+          version: 1,
+          resolution: null,
+        })),
+        conflicts: [],
+        errors: [],
+      }, 'push_response')
+      await db.focusSessions.update('fs-1', { version: 3 })
+      await resumeImportedProvisionalReviews(db, meta, db.spaceId, token)
+    })
+
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: controller.currentDraft().operationId,
+      expectedVersion: 3,
+    }))
+    expect(await db.sessionReviewDrafts.get([db.spaceId, 'fs-1'])).toBeUndefined()
+    expect(await db.directCommandIntents.get(controller.currentDraft().operationId))
+      .toMatchObject({ state: 'terminal' })
+    submit.mockRestore()
     controller.dispose()
   })
 

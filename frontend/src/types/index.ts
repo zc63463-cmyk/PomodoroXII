@@ -255,13 +255,23 @@ export interface OutboxEvent {
   compoundOrder: number | null
   expectedVersion: number | null
   requiresVersionRebase: boolean
-  transportState: 'ready' | 'awaiting_s4' | 'blocked_conflict'
+  transportState:
+    | 'ready'
+    | 'awaiting_s4'
+    | 'blocked_conflict'
+    | 'terminal_conflict'
+    | 'terminal_error'
   createdAt: string
   synced: boolean
   lastError: string | null
   lastErrorCode: string | null
   failedAt: string | null
   attemptCount: number
+  serverOutcomeCanonicalBase64: string | null
+  retryable: boolean
+  nextAttemptAt: string | null
+  retryPredecessorOperationId: string | null
+  retrySuccessorOperationId: string | null
 }
 
 // Sync meta stored in IndexedDB
