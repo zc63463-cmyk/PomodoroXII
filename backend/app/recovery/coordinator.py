@@ -3,10 +3,13 @@
 import inspect
 import os
 import shutil
+import sqlite3
 import uuid
 from contextlib import closing
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
 
 from .contracts import (
     MetaSnapshot,
@@ -39,17 +42,22 @@ class RecoveryCoordinator:
         index_schema=None,
         active_coordination_inspector=None,
         effort_projection_compiler=None,
+        failpoint=None,
         **_unused,
     ) -> None:
         self.lease_coordinator = lease_coordinator
         self.source_root = Path(source_root or getattr(meta, "root", ".")).expanduser().resolve()
-        self.active_root = Path(active_root or self.source_root).expanduser().resolve()
+        active_root_input = Path(active_root or self.source_root).expanduser().absolute()
+        if active_root_input.is_symlink():
+            raise DomainFailure("snapshot_invalid", "active root may not be a symlink")
+        self.active_root = active_root_input.resolve()
         self.catalog = catalog
         self.meta = meta
         self.spaces = spaces
         self.index_schema = index_schema
         self.active_coordination_inspector = active_coordination_inspector
         self.effort_projection_compiler = effort_projection_compiler
+        self.failpoint = failpoint or (lambda _name: None)
 
     async def snapshot(self, target: Path) -> PublishedSnapshotReceipt:
         target = Path(target).expanduser()
@@ -72,19 +80,23 @@ class RecoveryCoordinator:
             await lease.release()
 
     async def _snapshot_under_lease(self, target: Path, lease) -> PublishedSnapshotReceipt:
-        if lease is not None:
-            from app.runtime.leases import LeaseMode
+        if lease is None:
+            raise DomainFailure("snapshot_invalid", "global exclusive lease is required")
+        from app.runtime.leases import LeaseMode
 
-            lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope="global")
+        lease.assert_active_owner(mode=LeaseMode.EXCLUSIVE, scope="global")
         temporary = target / f".{uuid.uuid4().hex}.tmp"
+        final: Path | None = None
         temporary.mkdir(parents=True)
         try:
             files: list[SnapshotFile] = []
-            for source, relative, kind in self._database_sources():
+            spaces = self._registered_spaces()
+            for source, relative, kind in self._database_sources(spaces):
                 destination = temporary / relative
                 result = backup_sqlite(source, destination)
                 files.append(SnapshotFile(relative, result.size, result.sha256, kind))
-            for source, relative, kind in self._asset_sources():
+                self.failpoint(f"database_copy:{relative}")
+            for source, relative, kind in self._asset_sources(spaces):
                 source = Path(source)
                 if source.is_symlink() or not source.is_file():
                     raise DomainFailure("snapshot_invalid", f"invalid asset {source}")
@@ -100,11 +112,11 @@ class RecoveryCoordinator:
                         kind,
                     )
                 )
-            manifest = await self._build_manifest(files, lease)
+                self.failpoint(f"asset_copy:{relative}")
+            manifest = await self._build_manifest(files, lease, spaces, temporary)
             required = {"meta/meta.db"}
-            spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
             for space in spaces:
-                sid = str(getattr(space, "space_id", getattr(space, "id", "space")))
+                sid = space.space_id
                 required.update({f"spaces/{sid}/space.db", f"spaces/{sid}/index.db"})
             if not required.issubset({item.relative_path for item in files}):
                 raise DomainFailure("snapshot_invalid", "snapshot inventory is incomplete")
@@ -113,22 +125,26 @@ class RecoveryCoordinator:
             fsync_file(temporary / "manifest.json")
             digest = sha256_file(temporary / "manifest.json")
             (temporary / "manifest.sha256").write_text(digest + "\n", encoding="ascii")
+            self.failpoint("manifest_write")
             fsync_file(temporary / "manifest.sha256")
             fsync_directory(temporary)
-            if lease is not None:
-                lease.assert_fence("global")
+            self.failpoint("fsync")
+            lease.assert_fence("global")
             final = (
                 target
                 / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{manifest.catalog_hash[:12]}"
             )
             os.replace(temporary, final)
+            self.failpoint("atomic_publish")
             fsync_directory(target)
             return PublishedSnapshotReceipt(final.resolve(), manifest, digest)
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)
+            if final is not None:
+                shutil.rmtree(final, ignore_errors=True)
             raise
 
-    def _database_sources(self):
+    def _meta_db_path(self) -> Path:
         meta_db = (
             getattr(self.meta, "db_path", None)
             or getattr(self.meta, "path", None)
@@ -137,15 +153,60 @@ class RecoveryCoordinator:
         if not Path(meta_db).is_file() or Path(meta_db).is_symlink():
             raise DomainFailure("snapshot_invalid", "meta database is missing or symlinked")
         self._assert_source_path(meta_db)
-        yield meta_db, "meta/meta.db", "meta_db"
-        spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
-        for space in spaces:
-            sid = str(getattr(space, "space_id", getattr(space, "id", "space")))
-            root = Path(
-                getattr(space, "root", getattr(space, "path", self.source_root / "spaces" / sid))
+        return Path(meta_db)
+
+    def _registered_spaces(self) -> tuple[SimpleNamespace, ...]:
+        meta_db = self._meta_db_path()
+        with closing(sqlite3.connect(meta_db)) as connection:
+            try:
+                rows = connection.execute(
+                    "SELECT id, db_path, notes_dir FROM spaces ORDER BY id"
+                ).fetchall()
+            except sqlite3.DatabaseError as exc:
+                raise DomainFailure(
+                    "snapshot_invalid", "Meta Space registry is unavailable"
+                ) from exc
+        spaces: list[SimpleNamespace] = []
+        for space_id, db_path, notes_dir in rows:
+            relative = validate_relative_path(f"spaces/{space_id}")
+            canonical_root = self.active_root / relative
+            if canonical_root.is_symlink() or any(
+                parent.is_symlink()
+                for parent in canonical_root.parents
+                if parent != self.active_root.parent
+            ):
+                raise DomainFailure("snapshot_invalid", f"symlinked Space root: {space_id}")
+            root = canonical_root.resolve()
+            expected_db = (root / "space.db").resolve()
+            expected_notes = (root / "notes").resolve()
+            if Path(db_path).expanduser().resolve() != expected_db:
+                raise DomainFailure("snapshot_invalid", f"noncanonical Space DB path: {space_id}")
+            if Path(notes_dir).expanduser().resolve() != expected_notes:
+                raise DomainFailure("snapshot_invalid", f"noncanonical Notes path: {space_id}")
+            spaces.append(
+                SimpleNamespace(
+                    space_id=str(space_id),
+                    root=root,
+                    db_path=expected_db,
+                    index_db_path=root / "index.db",
+                )
             )
-            db = getattr(space, "db_path", root / "space.db")
-            idx = getattr(space, "index_db_path", root / "index.db")
+        injected = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
+        injected_ids = {
+            str(getattr(space, "space_id", getattr(space, "id", ""))) for space in injected
+        }
+        registered_ids = {space.space_id for space in spaces}
+        if injected_ids and injected_ids != registered_ids:
+            raise DomainFailure("snapshot_invalid", "injected Spaces do not match Meta registry")
+        return tuple(spaces)
+
+    def _database_sources(self, spaces):
+        meta_db = self._meta_db_path()
+        yield meta_db, "meta/meta.db", "meta_db"
+        for space in spaces:
+            sid = space.space_id
+            db = space.db_path
+            idx = space.index_db_path
             validate_relative_path(f"spaces/{sid}")
             self._assert_source_path(db)
             self._assert_source_path(idx)
@@ -164,17 +225,14 @@ class RecoveryCoordinator:
             path.resolve().relative_to(self.active_root)
         except ValueError as exc:
             raise DomainFailure("snapshot_invalid", f"source escapes active root: {path}") from exc
+        if any(parent.is_symlink() for parent in path.parents if parent != self.active_root.parent):
+            raise DomainFailure("snapshot_invalid", f"symlinked source ancestor: {path}")
 
-    def _asset_sources(self):
-        spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
+    def _asset_sources(self, spaces):
         for space in spaces:
-            sid = str(getattr(space, "space_id", getattr(space, "id", "space")))
-            root = Path(
-                getattr(space, "root", getattr(space, "path", self.source_root / "spaces" / sid))
-            ).resolve()
+            sid = space.space_id
+            root = space.root
             for base, kind in ((root / "notes", "note"), (root / "index", "index_asset")):
-                if not base.exists():
-                    continue
                 if base.is_symlink() or not base.is_dir():
                     raise DomainFailure("snapshot_invalid", f"invalid asset directory: {base}")
                 for source in base.rglob("*"):
@@ -188,7 +246,7 @@ class RecoveryCoordinator:
                         ) from exc
                     yield source, f"spaces/{sid}/{relative.as_posix()}", kind
 
-    async def _build_manifest(self, files, lease) -> SnapshotManifest:
+    async def _build_manifest(self, files, lease, spaces, snapshot_root: Path) -> SnapshotManifest:
         catalog_hash = str(getattr(self.catalog, "hash", "0" * 64))
         if len(catalog_hash) != 64 or any(c not in "0123456789abcdef" for c in catalog_hash):
             raise DomainFailure("snapshot_invalid", "catalog hash is invalid")
@@ -209,47 +267,34 @@ class RecoveryCoordinator:
             self.active_coordination_inspector,
             self.meta,
             "inspect_read_only",
-            self.meta,
         )
         if coordination is None:
-            coordination = self._inspect(
-                self.meta,
-                "active_session_coordination",
-                {"classification": "empty", "result": "clean_or_recoverable"},
-            )
+            coordination = self._inspect(self.meta, "active_session_coordination", None)
+        coordination = self._normalize_receipt(coordination)
+        if coordination.get("result") != "clean_or_recoverable":
+            raise DomainFailure("active_session_recovery_required")
         effort = await self._inspect_async(
             self.effort_projection_compiler,
             self.spaces,
             "verify_all",
-            self.spaces,
         )
         if effort is None:
-            effort = self._inspect(self.meta, "effort_projection", {"result": "verified"})
-        spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
+            effort = self._inspect(self.meta, "effort_projection", None)
+        if isinstance(effort, tuple):
+            if effort:
+                raise DomainFailure("snapshot_invalid", "effort projection drift")
+            effort = {"result": "verified"}
+        effort = self._normalize_receipt(effort)
+        if effort.get("result") != "verified":
+            raise DomainFailure("snapshot_invalid", "effort projection drift")
         space_records = tuple(
             sorted(
-                (
-                    SpaceSnapshot(
-                        str(getattr(space, "space_id", getattr(space, "id", "space"))),
-                        str(getattr(space, "space_head", "")),
-                        int(
-                            getattr(
-                                space,
-                                "index_schema_version",
-                                getattr(self.index_schema, "version", 0),
-                            )
-                        ),
-                        str(getattr(space, "sync_waterline", "")),
-                        dict(getattr(space, "entity_counts", {})),
-                        dict(getattr(space, "note_hashes", {})),
-                    )
-                    for space in spaces
-                ),
+                (self._inspect_space_snapshot(snapshot_root, space.space_id) for space in spaces),
                 key=lambda item: item.space_id,
             )
         )
         meta = MetaSnapshot(
-            str(getattr(self.meta, "schema_head", "meta_002_active_session_locator")),
+            self._schema_head(snapshot_root / "meta" / "meta.db"),
             coordination,
             effort,
         )
@@ -267,11 +312,13 @@ class RecoveryCoordinator:
 
     @staticmethod
     def _inspect(owner, name: str, default):
+        if owner is None:
+            return default
         value = getattr(owner, name, default)
         return value() if callable(value) else value
 
     @staticmethod
-    async def _inspect_async(owner, argument, method_name: str, fallback):
+    async def _inspect_async(owner, argument, method_name: str):
         if owner is None:
             return None
         method = getattr(owner, method_name, None)
@@ -282,7 +329,85 @@ class RecoveryCoordinator:
             value = await value
         return value
 
-    def verify(self, snapshot: PublishedSnapshotReceipt | Path) -> VerificationResult:
+    @staticmethod
+    def _normalize_receipt(value) -> dict[str, object]:
+        if value is None:
+            raise DomainFailure("snapshot_invalid", "required recovery inspector is unavailable")
+        if is_dataclass(value):
+            value = asdict(value)
+        elif isinstance(value, MappingProxyType):
+            value = dict(value)
+        if not isinstance(value, dict):
+            raise DomainFailure("snapshot_invalid", "recovery inspector receipt is invalid")
+        return dict(value)
+
+    @staticmethod
+    def _schema_head(path: Path) -> str:
+        with closing(sqlite3.connect(path)) as connection:
+            try:
+                row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+            except sqlite3.DatabaseError as exc:
+                raise DomainFailure(
+                    "snapshot_invalid", f"schema head is unavailable: {path.name}"
+                ) from exc
+        if row is None or not isinstance(row[0], str) or not row[0]:
+            raise DomainFailure("snapshot_invalid", f"schema head is unavailable: {path.name}")
+        return row[0]
+
+    def _inspect_space_snapshot(self, snapshot_root: Path, space_id: str) -> SpaceSnapshot:
+        space_root = snapshot_root / "spaces" / space_id
+        space_db = space_root / "space.db"
+        index_db = space_root / "index.db"
+        entity_counts: dict[str, int] = {}
+        waterlines: list[str] = []
+        with closing(sqlite3.connect(space_db)) as connection:
+            tables = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )
+            ]
+            for table in sorted(tables):
+                quoted = table.replace('"', '""')
+                entity_counts[table] = int(
+                    connection.execute(f'SELECT COUNT(*) FROM "{quoted}"').fetchone()[0]
+                )
+                columns = {row[1] for row in connection.execute(f'PRAGMA table_info("{quoted}")')}
+                if "updated_at" in columns:
+                    row = connection.execute(f'SELECT MAX(updated_at) FROM "{quoted}"').fetchone()
+                    if row and isinstance(row[0], str) and row[0]:
+                        waterlines.append(row[0])
+        with closing(sqlite3.connect(index_db)) as connection:
+            try:
+                row = connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='version'"
+                ).fetchone()
+            except sqlite3.DatabaseError as exc:
+                raise DomainFailure(
+                    "snapshot_invalid", "index schema version is unavailable"
+                ) from exc
+        if row is None:
+            raise DomainFailure("snapshot_invalid", "index schema version is unavailable")
+        notes_root = space_root / "notes"
+        note_hashes = (
+            {
+                note.relative_to(notes_root).as_posix(): sha256_file(note)
+                for note in sorted(notes_root.rglob("*"))
+                if note.is_file()
+            }
+            if notes_root.is_dir()
+            else {}
+        )
+        return SpaceSnapshot(
+            space_id,
+            self._schema_head(space_db),
+            int(row[0]),
+            max(waterlines, default=""),
+            entity_counts,
+            note_hashes,
+        )
+
+    async def verify(self, snapshot: PublishedSnapshotReceipt | Path) -> VerificationResult:
         root = snapshot.root if isinstance(snapshot, PublishedSnapshotReceipt) else Path(snapshot)
         failures: list[str] = []
         manifest = None
@@ -309,6 +434,27 @@ class RecoveryCoordinator:
                 "sessionQuickNote",
             } & set(manifest.catalog_entity_types):
                 failures.append("catalog_invalid")
+            coordination = self._normalize_receipt(manifest.meta.active_session_coordination)
+            effort = self._normalize_receipt(manifest.meta.effort_projection)
+            if coordination.get("result") != "clean_or_recoverable":
+                failures.append("active_session_recovery_required")
+            if effort.get("result") != "verified":
+                failures.append("effort_projection")
+            current_types = tuple(
+                sorted(
+                    getattr(spec, "effective_sync_entity_type", getattr(spec, "name", ""))
+                    for spec in (
+                        self.catalog.list()
+                        if self.catalog is not None and hasattr(self.catalog, "list")
+                        else ()
+                    )
+                )
+            )
+            if (
+                manifest.catalog_hash != getattr(self.catalog, "hash", None)
+                or manifest.catalog_entity_types != current_types
+            ):
+                failures.append("catalog_mismatch")
             listed = {validate_relative_path(item.relative_path): item for item in manifest.files}
             for relative, item in listed.items():
                 path = root / relative
@@ -338,6 +484,19 @@ class RecoveryCoordinator:
                     and path.relative_to(root).as_posix() not in listed
                 ):
                     failures.append(f"unlisted:{path.relative_to(root).as_posix()}")
+            try:
+                if manifest.meta.schema_head != self._schema_head(root / "meta" / "meta.db"):
+                    failures.append("meta_schema_head")
+                derived_spaces = tuple(
+                    self._inspect_space_snapshot(root, space.space_id) for space in manifest.spaces
+                )
+                if derived_spaces != manifest.spaces:
+                    failures.append("space_manifest")
+                registered_ids = self._registered_ids_from_snapshot(root / "meta" / "meta.db")
+                if registered_ids != tuple(space.space_id for space in manifest.spaces):
+                    failures.append("space_registry")
+            except DomainFailure as exc:
+                failures.append(exc.record.code)
             if isinstance(snapshot, PublishedSnapshotReceipt) and (
                 digest != snapshot.manifest_sha256 or manifest != snapshot.manifest
             ):
@@ -356,3 +515,14 @@ class RecoveryCoordinator:
         return VerificationResult(
             True, digest, manifest, len(manifest.files), len(manifest.spaces), ()
         )
+
+    @staticmethod
+    def _registered_ids_from_snapshot(meta_db: Path) -> tuple[str, ...]:
+        with closing(sqlite3.connect(meta_db)) as connection:
+            try:
+                rows = connection.execute("SELECT id FROM spaces ORDER BY id").fetchall()
+            except sqlite3.DatabaseError as exc:
+                raise DomainFailure(
+                    "snapshot_invalid", "Meta Space registry is unavailable"
+                ) from exc
+        return tuple(str(row[0]) for row in rows)
