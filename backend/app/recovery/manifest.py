@@ -63,6 +63,10 @@ def write_manifest(root: Path, manifest: SnapshotManifest) -> str:
 
 def parse_manifest(payload: bytes | str) -> SnapshotManifest:
     raw = json.loads(payload)
+    if not isinstance(raw, dict):
+        raise ValueError("manifest must be an object")
+    if isinstance(payload, bytes) and canonical_json_from_raw(raw) != payload:
+        raise ValueError("manifest is not canonical")
     meta = raw["meta"]
     return SnapshotManifest(
         schema_version=raw["schema_version"], created_at=raw["created_at"], source_fence=raw["source_fence"],
@@ -72,3 +76,7 @@ def parse_manifest(payload: bytes | str) -> SnapshotManifest:
         spaces=tuple(SpaceSnapshot(item["space_id"], item["space_head"], item["index_schema_version"], item["sync_waterline"], item["entity_counts"], item["note_hashes"]) for item in raw["spaces"]),
         files=tuple(SnapshotFile(item["relative_path"], item["size"], item["sha256"], item["kind"]) for item in raw["files"]),
     )
+
+
+def canonical_json_from_raw(raw: dict[str, object]) -> bytes:
+    return (json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
