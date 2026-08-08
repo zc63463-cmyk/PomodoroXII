@@ -233,6 +233,8 @@ class RecoveryCoordinator:
             sid = space.space_id
             root = space.root
             for base, kind in ((root / "notes", "note"), (root / "index", "index_asset")):
+                if kind == "index_asset" and not base.exists():
+                    continue
                 if base.is_symlink() or not base.is_dir():
                     raise DomainFailure("snapshot_invalid", f"invalid asset directory: {base}")
                 for source in base.rglob("*"):
@@ -294,7 +296,7 @@ class RecoveryCoordinator:
             )
         )
         meta = MetaSnapshot(
-            self._schema_head(snapshot_root / "meta" / "meta.db"),
+            self._schema_head(snapshot_root / "meta" / "meta.db", "meta"),
             coordination,
             effort,
         )
@@ -342,10 +344,16 @@ class RecoveryCoordinator:
         return dict(value)
 
     @staticmethod
-    def _schema_head(path: Path) -> str:
+    def _schema_head(path: Path, kind: str) -> str:
+        version_table = {
+            "meta": "alembic_version_meta",
+            "space": "alembic_version_space",
+        }.get(kind)
+        if version_table is None:
+            raise DomainFailure("snapshot_invalid", "unknown database kind")
         with closing(sqlite3.connect(path)) as connection:
             try:
-                row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+                row = connection.execute(f'SELECT version_num FROM "{version_table}"').fetchone()
             except sqlite3.DatabaseError as exc:
                 raise DomainFailure(
                     "snapshot_invalid", f"schema head is unavailable: {path.name}"
@@ -400,7 +408,7 @@ class RecoveryCoordinator:
         )
         return SpaceSnapshot(
             space_id,
-            self._schema_head(space_db),
+            self._schema_head(space_db, "space"),
             int(row[0]),
             max(waterlines, default=""),
             entity_counts,
@@ -485,7 +493,9 @@ class RecoveryCoordinator:
                 ):
                     failures.append(f"unlisted:{path.relative_to(root).as_posix()}")
             try:
-                if manifest.meta.schema_head != self._schema_head(root / "meta" / "meta.db"):
+                if manifest.meta.schema_head != self._schema_head(
+                    root / "meta" / "meta.db", "meta"
+                ):
                     failures.append("meta_schema_head")
                 derived_spaces = tuple(
                     self._inspect_space_snapshot(root, space.space_id) for space in manifest.spaces
