@@ -5395,7 +5395,7 @@ function verifyCrossWave(plans) {
   requireSha256(
     'S4 final gate',
     [s4Task8Step3, s4Task8Step4, s4Task8Step5].join('\n'),
-    'e2ccba131eb86da7b2b88047decf61f40aaec72f0d1bc308737d093778f93511',
+    '4f8be45fd2de5e1b0df162e8cdd64e1fe0e09453332c3c73905501b6c153ab64',
   );
 
   for (const required of [
