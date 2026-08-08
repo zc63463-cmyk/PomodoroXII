@@ -73,6 +73,7 @@ from app.focus_session.contracts import CommandReceiptState
 from app.models.focus_session import FocusSession
 from app.models.session_command import SessionCommandEnvelope, SessionCommandReceipt
 from app.mutation.types import (
+    bounded_child_operation_id,
     canonical_json_bytes,
     canonical_payload_hash,
 )
@@ -146,6 +147,20 @@ _IDENTITY_KEYS = frozenset(
 _NON_BUSINESS_KEYS = frozenset({"pair", "children"})
 _INTENT_EXCLUDED_KEYS = _IDENTITY_KEYS | _NON_BUSINESS_KEYS
 _CHILD_ROLES = frozenset({"candidate", "active", "winner", "loser"})
+# Authoritative child-suffix registry: role -> suffix passed to
+# ``bounded_child_operation_id(parent_operation_id, suffix)``.
+#
+# Evidence review (round 3): the TS2 plan mandates that every conflict/
+# resolution child be derived via ``bounded_child_operation_id`` (plan
+# line 31) but NEVER names the suffix strings for ``candidate``/``active``/
+# ``winner``/``loser``; the only production suffixes with authority are the
+# business receipt/command/batch suffixes (``receipt:*``, ``command:*``,
+# batch indexes) which are not ActiveSession child roles.  Until TS2/TS0
+# defines them, the registry is EMPTY and every named-child declaration
+# fails closed with ``child_id_derivation_unproven``.  A future TS2
+# authority must populate this map with citable contract lines before any
+# named child can pass.
+_CHILD_SUFFIX_BY_ROLE: dict[str, str] = {}
 _CANONICAL_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$")
 _OPERATION_ID_RE = re.compile(r"[\x21-\x7e]{1,128}")
 _PAYLOAD_HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -183,6 +198,8 @@ CODE_CHILD_PAYLOAD_HASH_MISMATCH = "child_payload_hash_mismatch"
 CODE_CHILDREN_DECLARATION_MISSING = "children_declaration_missing"
 CODE_CHILDREN_DECLARATION_INVALID = "children_declaration_invalid"
 CODE_CHILDREN_DECLARATION_CONFLICT = "children_declaration_conflict"
+CODE_CHILD_ID_DERIVATION_UNPROVEN = "child_id_derivation_unproven"
+CODE_CHILD_ID_DERIVATION_MISMATCH = "child_id_derivation_mismatch"
 CODE_SESSION_OWNERSHIP_INVALID = "session_ownership_invalid"
 CODE_SESSION_INVALID_MARKER = "session_invalid_marker_mismatch"
 CODE_UNPROVEN_COMBINATION = "unproven_combination"
@@ -814,6 +831,9 @@ class ActiveSessionCoordinationInspector:
             if "children" in intent:
                 return CODE_CHILDREN_DECLARATION_INVALID
             return CODE_CHILDREN_DECLARATION_MISSING
+        derivation = _verify_child_derivation(str(locator["operation_id"]), intent, roles)
+        if derivation is not None:
+            return derivation
         if not set(roles) <= set(children):
             return CODE_CHILDREN_DECLARATION_MISSING
         child_ids = [children[role].operation_id for role in roles]
@@ -1159,6 +1179,43 @@ def _decode_pair(intent: Mapping[str, object]) -> ConflictPairFact | None:
         candidate_space_id=c_space,
         candidate_session_id=c_session,
     )
+
+
+def _derive_expected_child_id(parent_operation_id: str, role: str) -> str | None:
+    """Return the authoritative derived child ID for a role, or None when the
+    role has no proven suffix (fail closed)."""
+    suffix = _CHILD_SUFFIX_BY_ROLE.get(role)
+    if suffix is None:
+        return None
+    try:
+        return bounded_child_operation_id(parent_operation_id, suffix)
+    except ValueError:
+        return None
+
+
+def _verify_child_derivation(
+    parent_operation_id: str, intent: Mapping[str, object], roles: tuple[str, ...]
+) -> str | None:
+    """Prove each named child ID is the deterministic derivation of the parent
+    operation ID and the role's authoritative suffix.
+
+    ``parent_operation_id``, ``role`` and the derived child ID all participate
+    so a child declared for another parent (cross-parent replay) or for an
+    unproven suffix never passes.
+    """
+    children = intent.get("children")
+    if not isinstance(children, dict):
+        return CODE_CHILDREN_DECLARATION_MISSING
+    for role in roles:
+        declaration = children.get(role)
+        if not isinstance(declaration, dict):
+            return CODE_CHILDREN_DECLARATION_INVALID
+        expected = _derive_expected_child_id(parent_operation_id, role)
+        if expected is None:
+            return CODE_CHILD_ID_DERIVATION_UNPROVEN
+        if str(declaration.get("operation_id")) != expected:
+            return CODE_CHILD_ID_DERIVATION_MISMATCH
+    return None
 
 
 def _decode_children(intent: Mapping[str, object]) -> dict[str, ChildDeclaration] | None:
