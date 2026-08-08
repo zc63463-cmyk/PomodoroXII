@@ -62,9 +62,9 @@ def _coordinator(tmp_path: Path):
     _sqlite(space_root / "index.db")
     with closing(sqlite3.connect(active_root / "meta.db")) as connection:
         with connection:
-            connection.execute("CREATE TABLE alembic_version(version_num TEXT NOT NULL)")
+            connection.execute("CREATE TABLE alembic_version_meta(version_num TEXT NOT NULL)")
             connection.execute(
-                "INSERT INTO alembic_version VALUES ('meta_002_active_session_locator')"
+                "INSERT INTO alembic_version_meta VALUES ('meta_002_active_session_locator')"
             )
             connection.execute(
                 "CREATE TABLE spaces(id TEXT PRIMARY KEY, db_path TEXT NOT NULL, notes_dir TEXT NOT NULL)"
@@ -75,9 +75,9 @@ def _coordinator(tmp_path: Path):
             )
     with closing(sqlite3.connect(space_root / "space.db")) as connection:
         with connection:
-            connection.execute("CREATE TABLE alembic_version(version_num TEXT NOT NULL)")
+            connection.execute("CREATE TABLE alembic_version_space(version_num TEXT NOT NULL)")
             connection.execute(
-                "INSERT INTO alembic_version VALUES ('space_011_sync_clients_streaming')"
+                "INSERT INTO alembic_version_space VALUES ('space_011_sync_clients_streaming')"
             )
             connection.execute("ALTER TABLE sample ADD COLUMN updated_at TEXT")
             connection.execute("UPDATE sample SET updated_at='2026-07-14T00:00:00.000Z'")
@@ -270,9 +270,9 @@ async def test_snapshot_enumerates_every_space_from_meta_registry(tmp_path: Path
     (beta_root / "index").mkdir()
     with closing(sqlite3.connect(beta_root / "space.db")) as connection:
         with connection:
-            connection.execute("CREATE TABLE alembic_version(version_num TEXT NOT NULL)")
+            connection.execute("CREATE TABLE alembic_version_space(version_num TEXT NOT NULL)")
             connection.execute(
-                "INSERT INTO alembic_version VALUES ('space_011_sync_clients_streaming')"
+                "INSERT INTO alembic_version_space VALUES ('space_011_sync_clients_streaming')"
             )
     with closing(sqlite3.connect(beta_root / "index.db")) as connection:
         with connection:
