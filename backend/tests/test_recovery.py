@@ -134,6 +134,7 @@ def _coordinator(tmp_path: Path):
             spaces=[space],
             active_coordination_inspector=_ActiveInspector(),
             effort_projection_compiler=_EffortCompiler(),
+            recovery_view_factory=lambda _kind, path: path,
         ),
         leases,
         active_root,
@@ -418,3 +419,15 @@ async def test_verify_recomputes_space_manifest_facts(tmp_path: Path) -> None:
 
     assert not verified.valid
     assert "space_manifest" in verified.failures
+
+
+@pytest.mark.asyncio
+async def test_verify_requires_snapshot_recovery_views(tmp_path: Path) -> None:
+    coordinator, _leases, _active_root = _coordinator(tmp_path)
+    receipt = await coordinator.snapshot(tmp_path / "snapshots")
+    coordinator.recovery_view_factory = None
+
+    verified = await coordinator.verify(receipt.root)
+
+    assert not verified.valid
+    assert "recovery_inspector_unavailable" in verified.failures
