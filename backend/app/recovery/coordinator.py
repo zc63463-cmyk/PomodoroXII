@@ -64,6 +64,13 @@ class RecoveryCoordinator:
                 fsync_file(destination)
                 files.append(SnapshotFile(destination.relative_to(temporary).as_posix(), destination.stat().st_size, sha256_file(destination), kind))
             manifest = self._build_manifest(files, lease)
+            required = {"meta/meta.db"}
+            spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
+            for space in spaces:
+                sid = str(getattr(space, "space_id", getattr(space, "id", "space")))
+                required.update({f"spaces/{sid}/space.db", f"spaces/{sid}/index.db"})
+            if not required.issubset({item.relative_path for item in files}):
+                raise DomainFailure("snapshot_invalid", "snapshot inventory is incomplete")
             payload = canonical_json(manifest)
             (temporary / "manifest.json").write_bytes(payload)
             fsync_file(temporary / "manifest.json")
@@ -171,6 +178,10 @@ class RecoveryCoordinator:
             manifest = parse_manifest(payload)
             if not manifest.files or len({item.relative_path for item in manifest.files}) != len(manifest.files):
                 failures.append("manifest_inventory")
+            if "meta/meta.db" not in {item.relative_path for item in manifest.files}:
+                failures.append("meta_missing")
+            if manifest.catalog_entry_count != 31 or {"task", "session", "taskQuickNote", "sessionQuickNote"} & set(manifest.catalog_entity_types):
+                failures.append("catalog_invalid")
             listed = {validate_relative_path(item.relative_path): item for item in manifest.files}
             for relative, item in listed.items():
                 path = root / relative
@@ -178,6 +189,8 @@ class RecoveryCoordinator:
                     path.resolve().relative_to(root.resolve())
                 except ValueError:
                     failures.append(f"containment:{relative}"); continue
+                if any(parent.is_symlink() for parent in path.parents if parent != root):
+                    failures.append(f"symlink_parent:{relative}"); continue
                 if path.is_symlink() or not path.is_file(): failures.append(f"missing:{relative}"); continue
                 if item.kind.endswith("db"):
                     import sqlite3
