@@ -85,6 +85,7 @@ class RecoveryCoordinator:
         meta_db = getattr(self.meta, "db_path", None) or getattr(self.meta, "path", None) or self.source_root / "meta.db"
         if not Path(meta_db).is_file() or Path(meta_db).is_symlink():
             raise DomainFailure("snapshot_invalid", "meta database is missing or symlinked")
+        self._assert_source_path(meta_db)
         yield meta_db, "meta/meta.db", "meta_db"
         spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
         for space in spaces:
@@ -92,10 +93,22 @@ class RecoveryCoordinator:
             root = Path(getattr(space, "root", getattr(space, "path", self.source_root / "spaces" / sid)))
             db = getattr(space, "db_path", root / "space.db")
             idx = getattr(space, "index_db_path", root / "index.db")
+            validate_relative_path(f"spaces/{sid}")
+            self._assert_source_path(db)
+            self._assert_source_path(idx)
             if not Path(db).is_file() or Path(db).is_symlink(): raise DomainFailure("snapshot_invalid", f"space database missing: {sid}")
             if not Path(idx).is_file() or Path(idx).is_symlink(): raise DomainFailure("snapshot_invalid", f"index database missing: {sid}")
             yield db, f"spaces/{sid}/space.db", "space_db"
             yield idx, f"spaces/{sid}/index.db", "index_db"
+
+    def _assert_source_path(self, source: Path) -> None:
+        path = Path(source).expanduser()
+        if path.is_symlink() or not path.is_file():
+            raise DomainFailure("snapshot_invalid", f"invalid source path: {path}")
+        try:
+            path.resolve().relative_to(self.active_root)
+        except ValueError as exc:
+            raise DomainFailure("snapshot_invalid", f"source escapes active root: {path}") from exc
 
     def _asset_sources(self):
         spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
@@ -118,12 +131,30 @@ class RecoveryCoordinator:
 
     def _build_manifest(self, files, lease) -> SnapshotManifest:
         catalog_hash = str(getattr(self.catalog, "hash", "0" * 64))
+        if len(catalog_hash) != 64 or any(c not in "0123456789abcdef" for c in catalog_hash):
+            raise DomainFailure("snapshot_invalid", "catalog hash is invalid")
         types = tuple(sorted(getattr(spec, "effective_sync_entity_type", getattr(spec, "name", "")) for spec in (self.catalog.list() if self.catalog and hasattr(self.catalog, "list") else ())))
         if len(types) != 31 or {"task", "session", "taskQuickNote", "sessionQuickNote"} & set(types):
             raise DomainFailure("snapshot_invalid", "catalog is not the S5 catalog")
         entry_count = 31
-        meta = MetaSnapshot(str(getattr(self.meta, "schema_head", "meta_002_active_session_locator")), {"classification": "empty", "result": "clean_or_recoverable"}, {"result": "verified"})
-        return SnapshotManifest(1, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), int(getattr(lease, "fence", 0)), catalog_hash, entry_count, types, meta, (), tuple(sorted(files, key=lambda item: item.relative_path)))
+        coordination = self._inspect(self.meta, "active_session_coordination", {"classification": "empty", "result": "clean_or_recoverable"})
+        effort = self._inspect(self.meta, "effort_projection", {"result": "verified"})
+        spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
+        space_records = tuple(sorted((SpaceSnapshot(
+            str(getattr(space, "space_id", getattr(space, "id", "space"))),
+            str(getattr(space, "space_head", "")),
+            int(getattr(space, "index_schema_version", getattr(self.index_schema, "version", 0))),
+            str(getattr(space, "sync_waterline", "")),
+            dict(getattr(space, "entity_counts", {})),
+            dict(getattr(space, "note_hashes", {})),
+        ) for space in spaces), key=lambda item: item.space_id))
+        meta = MetaSnapshot(str(getattr(self.meta, "schema_head", "meta_002_active_session_locator")), coordination, effort)
+        return SnapshotManifest(1, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), int(getattr(lease, "fence", 0)), catalog_hash, entry_count, types, meta, space_records, tuple(sorted(files, key=lambda item: item.relative_path)))
+
+    @staticmethod
+    def _inspect(owner, name: str, default):
+        value = getattr(owner, name, default)
+        return value() if callable(value) else value
 
     def verify(self, snapshot: PublishedSnapshotReceipt | Path) -> VerificationResult:
         root = snapshot.root if isinstance(snapshot, PublishedSnapshotReceipt) else Path(snapshot)
@@ -138,10 +169,21 @@ class RecoveryCoordinator:
             if (root / "manifest.json").read_bytes() != canonical_json(parse_manifest(payload)):
                 failures.append("manifest_noncanonical")
             manifest = parse_manifest(payload)
+            if not manifest.files or len({item.relative_path for item in manifest.files}) != len(manifest.files):
+                failures.append("manifest_inventory")
             listed = {validate_relative_path(item.relative_path): item for item in manifest.files}
             for relative, item in listed.items():
                 path = root / relative
+                try:
+                    path.resolve().relative_to(root.resolve())
+                except ValueError:
+                    failures.append(f"containment:{relative}"); continue
                 if path.is_symlink() or not path.is_file(): failures.append(f"missing:{relative}"); continue
+                if item.kind.endswith("db"):
+                    import sqlite3
+                    with sqlite3.connect(path) as connection:
+                        if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                            failures.append(f"integrity:{relative}")
                 if path.stat().st_size != item.size or sha256_file(path) != item.sha256: failures.append(f"file:{relative}")
             for path in root.rglob("*"):
                 if path.is_file() and path.name not in {"manifest.json", "manifest.sha256"} and path.relative_to(root).as_posix() not in listed:
