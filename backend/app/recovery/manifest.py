@@ -69,9 +69,47 @@ def parse_manifest(payload: bytes | str) -> SnapshotManifest:
     raw = json.loads(payload)
     if not isinstance(raw, dict):
         raise ValueError("manifest must be an object")
+    if set(raw) != {
+        "schema_version",
+        "created_at",
+        "source_fence",
+        "catalog_hash",
+        "catalog_entry_count",
+        "catalog_entity_types",
+        "meta",
+        "spaces",
+        "files",
+    }:
+        raise ValueError("manifest keys are invalid")
     if isinstance(payload, bytes) and canonical_json_from_raw(raw) != payload:
         raise ValueError("manifest is not canonical")
     meta = raw["meta"]
+    if not isinstance(meta, dict) or set(meta) != {
+        "schema_head",
+        "active_session_coordination",
+        "effort_projection",
+    }:
+        raise ValueError("Meta manifest keys are invalid")
+    if not isinstance(raw["spaces"], list) or not isinstance(raw["files"], list):
+        raise ValueError("manifest collections are invalid")
+    for item in raw["spaces"]:
+        if not isinstance(item, dict) or set(item) != {
+            "space_id",
+            "space_head",
+            "index_schema_version",
+            "sync_waterline",
+            "entity_counts",
+            "note_hashes",
+        }:
+            raise ValueError("Space manifest keys are invalid")
+    for item in raw["files"]:
+        if not isinstance(item, dict) or set(item) != {
+            "relative_path",
+            "size",
+            "sha256",
+            "kind",
+        }:
+            raise ValueError("file manifest keys are invalid")
     return SnapshotManifest(
         schema_version=raw["schema_version"],
         created_at=raw["created_at"],

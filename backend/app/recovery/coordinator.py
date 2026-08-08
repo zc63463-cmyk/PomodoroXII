@@ -61,12 +61,10 @@ class RecoveryCoordinator:
 
     async def snapshot(self, target: Path) -> PublishedSnapshotReceipt:
         target = Path(target).expanduser()
-        if target.is_symlink():
-            raise DomainFailure("snapshot_invalid", "target may not be a symlink")
+        self._reject_symlink_path(target)
         target = target.resolve()
         if self.active_root == target or self.active_root in target.parents:
             raise DomainFailure("snapshot_invalid", "target is inside active root")
-        target.mkdir(parents=True, exist_ok=True)
         if self.lease_coordinator is None:
             raise DomainFailure("snapshot_invalid", "global exclusive lease is required")
         from app.runtime.leases import LeaseMode
@@ -75,6 +73,7 @@ class RecoveryCoordinator:
             LeaseMode.EXCLUSIVE, "recovery snapshot", 60.0
         )
         try:
+            target.mkdir(parents=True, exist_ok=True)
             return await self._snapshot_under_lease(target, lease)
         finally:
             await lease.release()
@@ -130,9 +129,9 @@ class RecoveryCoordinator:
             fsync_directory(temporary)
             self.failpoint("fsync")
             lease.assert_fence("global")
-            final = (
-                target
-                / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{manifest.catalog_hash[:12]}"
+            final = target / (
+                f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+                f"{manifest.catalog_hash[:12]}-{uuid.uuid4().hex[:12]}"
             )
             os.replace(temporary, final)
             self.failpoint("atomic_publish")
@@ -228,6 +227,13 @@ class RecoveryCoordinator:
         if any(parent.is_symlink() for parent in path.parents if parent != self.active_root.parent):
             raise DomainFailure("snapshot_invalid", f"symlinked source ancestor: {path}")
 
+    @staticmethod
+    def _reject_symlink_path(path: Path) -> None:
+        candidate = Path(path).absolute()
+        for item in (candidate, *candidate.parents):
+            if item.exists() and item.is_symlink():
+                raise DomainFailure("snapshot_invalid", f"symlinked path is forbidden: {item}")
+
     def _asset_sources(self, spaces):
         for space in spaces:
             sid = space.space_id
@@ -271,17 +277,32 @@ class RecoveryCoordinator:
             "inspect_read_only",
         )
         if coordination is None:
-            coordination = self._inspect(self.meta, "active_session_coordination", None)
+            raise DomainFailure("snapshot_invalid", "active coordination inspector is unavailable")
         coordination = self._normalize_receipt(coordination)
         if coordination.get("result") != "clean_or_recoverable":
             raise DomainFailure("active_session_recovery_required")
-        effort = await self._inspect_async(
-            self.effort_projection_compiler,
-            self.spaces,
-            "verify_all",
-        )
+        effort = None
+        if self.effort_projection_compiler is not None:
+            injected = (
+                tuple(self.spaces.values())
+                if isinstance(self.spaces, dict)
+                else tuple(self.spaces or ())
+            )
+            if not injected:
+                raise DomainFailure(
+                    "snapshot_invalid", "effort verification scopes are unavailable"
+                )
+            mismatches: list[object] = []
+            for scope in injected:
+                result = await self._inspect_async(
+                    self.effort_projection_compiler,
+                    scope,
+                    "verify_all",
+                )
+                mismatches.extend(result or ())
+            effort = tuple(mismatches)
         if effort is None:
-            effort = self._inspect(self.meta, "effort_projection", None)
+            raise DomainFailure("snapshot_invalid", "effort projection verifier is unavailable")
         if isinstance(effort, tuple):
             if effort:
                 raise DomainFailure("snapshot_invalid", "effort projection drift")
