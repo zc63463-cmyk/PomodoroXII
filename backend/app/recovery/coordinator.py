@@ -1,5 +1,6 @@
 """Coordinate a complete snapshot under one global exclusive lease."""
 
+import inspect
 import os
 import shutil
 import uuid
@@ -35,6 +36,8 @@ class RecoveryCoordinator:
         meta=None,
         spaces=None,
         index_schema=None,
+        active_coordination_inspector=None,
+        effort_projection_compiler=None,
         **_unused,
     ) -> None:
         self.lease_coordinator = lease_coordinator
@@ -44,9 +47,14 @@ class RecoveryCoordinator:
         self.meta = meta
         self.spaces = spaces
         self.index_schema = index_schema
+        self.active_coordination_inspector = active_coordination_inspector
+        self.effort_projection_compiler = effort_projection_compiler
 
     async def snapshot(self, target: Path) -> PublishedSnapshotReceipt:
-        target = Path(target).expanduser().resolve()
+        target = Path(target).expanduser()
+        if target.is_symlink():
+            raise DomainFailure("snapshot_invalid", "target may not be a symlink")
+        target = target.resolve()
         if self.active_root == target or self.active_root in target.parents:
             raise DomainFailure("snapshot_invalid", "target is inside active root")
         target.mkdir(parents=True, exist_ok=True)
@@ -91,7 +99,7 @@ class RecoveryCoordinator:
                         kind,
                     )
                 )
-            manifest = self._build_manifest(files, lease)
+            manifest = await self._build_manifest(files, lease)
             required = {"meta/meta.db"}
             spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
             for space in spaces:
@@ -179,7 +187,7 @@ class RecoveryCoordinator:
                         ) from exc
                     yield source, f"spaces/{sid}/{relative.as_posix()}", kind
 
-    def _build_manifest(self, files, lease) -> SnapshotManifest:
+    async def _build_manifest(self, files, lease) -> SnapshotManifest:
         catalog_hash = str(getattr(self.catalog, "hash", "0" * 64))
         if len(catalog_hash) != 64 or any(c not in "0123456789abcdef" for c in catalog_hash):
             raise DomainFailure("snapshot_invalid", "catalog hash is invalid")
@@ -196,12 +204,26 @@ class RecoveryCoordinator:
         ):
             raise DomainFailure("snapshot_invalid", "catalog is not the S5 catalog")
         entry_count = 31
-        coordination = self._inspect(
+        coordination = await self._inspect_async(
+            self.active_coordination_inspector,
             self.meta,
-            "active_session_coordination",
-            {"classification": "empty", "result": "clean_or_recoverable"},
+            "inspect_read_only",
+            self.meta,
         )
-        effort = self._inspect(self.meta, "effort_projection", {"result": "verified"})
+        if coordination is None:
+            coordination = self._inspect(
+                self.meta,
+                "active_session_coordination",
+                {"classification": "empty", "result": "clean_or_recoverable"},
+            )
+        effort = await self._inspect_async(
+            self.effort_projection_compiler,
+            self.spaces,
+            "verify_all",
+            self.spaces,
+        )
+        if effort is None:
+            effort = self._inspect(self.meta, "effort_projection", {"result": "verified"})
         spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
         space_records = tuple(
             sorted(
@@ -246,6 +268,18 @@ class RecoveryCoordinator:
     def _inspect(owner, name: str, default):
         value = getattr(owner, name, default)
         return value() if callable(value) else value
+
+    @staticmethod
+    async def _inspect_async(owner, argument, method_name: str, fallback):
+        if owner is None:
+            return None
+        method = getattr(owner, method_name, None)
+        if method is None:
+            return None
+        value = method(argument)
+        if inspect.isawaitable(value):
+            value = await value
+        return value
 
     def verify(self, snapshot: PublishedSnapshotReceipt | Path) -> VerificationResult:
         root = snapshot.root if isinstance(snapshot, PublishedSnapshotReceipt) else Path(snapshot)
