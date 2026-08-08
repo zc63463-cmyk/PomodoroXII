@@ -10,7 +10,7 @@
     "audit:security": "npm audit --audit-level=moderate",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
-    "generate:api": "openapi-typescript http://localhost:8000/openapi.json -o src/types/api-generated.ts",
+    "generate:api": "uv run --project ../backend python ../backend/scripts/export_openapi.py --output openapi.json && openapi-typescript openapi.json -o src/types/api-generated.ts",
     "test": "vitest run"
   },
   "dependencies": {
