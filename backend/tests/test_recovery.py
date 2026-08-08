@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,7 +60,35 @@ def _coordinator(tmp_path: Path):
     _sqlite(active_root / "meta.db")
     _sqlite(space_root / "space.db")
     _sqlite(space_root / "index.db")
+    with closing(sqlite3.connect(active_root / "meta.db")) as connection:
+        with connection:
+            connection.execute("CREATE TABLE alembic_version(version_num TEXT NOT NULL)")
+            connection.execute(
+                "INSERT INTO alembic_version VALUES ('meta_002_active_session_locator')"
+            )
+            connection.execute(
+                "CREATE TABLE spaces(id TEXT PRIMARY KEY, db_path TEXT NOT NULL, notes_dir TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO spaces VALUES (?, ?, ?)",
+                ("alpha", str(space_root / "space.db"), str(space_root / "notes")),
+            )
+    with closing(sqlite3.connect(space_root / "space.db")) as connection:
+        with connection:
+            connection.execute("CREATE TABLE alembic_version(version_num TEXT NOT NULL)")
+            connection.execute(
+                "INSERT INTO alembic_version VALUES ('space_011_sync_clients_streaming')"
+            )
+            connection.execute("ALTER TABLE sample ADD COLUMN updated_at TEXT")
+            connection.execute("UPDATE sample SET updated_at='2026-07-14T00:00:00.000Z'")
+    with closing(sqlite3.connect(space_root / "index.db")) as connection:
+        with connection:
+            connection.execute(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.execute("INSERT INTO schema_meta VALUES ('version', '2')")
     (space_root / "notes").mkdir()
+    (space_root / "index").mkdir()
     (space_root / "notes" / "note-a.md").write_text("note", encoding="utf-8")
     leases = _Leases()
     meta = SimpleNamespace(
@@ -76,11 +105,6 @@ def _coordinator(tmp_path: Path):
         root=space_root,
         db_path=space_root / "space.db",
         index_db_path=space_root / "index.db",
-        space_head="space_011_sync_clients_streaming",
-        index_schema_version=1,
-        sync_waterline="waterline-a",
-        entity_counts={"workItem": 1},
-        note_hashes={"note-a": "b" * 64},
     )
     return (
         RecoveryCoordinator(
@@ -145,8 +169,10 @@ async def test_snapshot_covers_complete_inventory_and_uses_one_fence(tmp_path: P
         "spaces/alpha/space.db",
     }
     assert receipt.manifest.catalog_entry_count == 31
-    assert receipt.manifest.spaces[0].sync_waterline == "waterline-a"
-    assert coordinator.verify(receipt).valid
+    assert receipt.manifest.spaces[0].space_head == "space_011_sync_clients_streaming"
+    assert receipt.manifest.spaces[0].index_schema_version == 2
+    assert receipt.manifest.spaces[0].sync_waterline == "2026-07-14T00:00:00.000Z"
+    assert (await coordinator.verify(receipt)).valid
     assert len(leases.calls) == 1
     assert leases.calls[0][2] == 60.0
     assert leases.lease.owner_checks == 1
@@ -181,7 +207,9 @@ async def test_snapshot_includes_committed_wal_rows(tmp_path: Path) -> None:
     source = active_root / "spaces" / "alpha" / "space.db"
     connection = sqlite3.connect(source)
     connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("INSERT INTO sample VALUES ('wal-only')")
+    connection.execute(
+        "INSERT INTO sample(value, updated_at) VALUES ('wal-only', '2026-07-15T00:00:00.000Z')"
+    )
     connection.commit()
     try:
         receipt = await coordinator.snapshot(tmp_path / "snapshots")
@@ -226,7 +254,137 @@ async def test_verify_rejects_file_tampering(tmp_path: Path) -> None:
         "tampered", encoding="utf-8"
     )
 
-    verified = coordinator.verify(receipt.root)
+    verified = await coordinator.verify(receipt.root)
 
     assert not verified.valid
     assert "file:spaces/alpha/notes/note-a.md" in verified.failures
+
+
+@pytest.mark.asyncio
+async def test_snapshot_enumerates_every_space_from_meta_registry(tmp_path: Path) -> None:
+    coordinator, _leases, active_root = _coordinator(tmp_path)
+    beta_root = active_root / "spaces" / "beta"
+    _sqlite(beta_root / "space.db")
+    _sqlite(beta_root / "index.db")
+    (beta_root / "notes").mkdir()
+    (beta_root / "index").mkdir()
+    with closing(sqlite3.connect(beta_root / "space.db")) as connection:
+        with connection:
+            connection.execute("CREATE TABLE alembic_version(version_num TEXT NOT NULL)")
+            connection.execute(
+                "INSERT INTO alembic_version VALUES ('space_011_sync_clients_streaming')"
+            )
+    with closing(sqlite3.connect(beta_root / "index.db")) as connection:
+        with connection:
+            connection.execute(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.execute("INSERT INTO schema_meta VALUES ('version', '2')")
+    with closing(sqlite3.connect(active_root / "meta.db")) as connection:
+        with connection:
+            connection.execute(
+                "INSERT INTO spaces VALUES (?, ?, ?)",
+                ("beta", str(beta_root / "space.db"), str(beta_root / "notes")),
+            )
+    coordinator.spaces = None
+
+    receipt = await coordinator.snapshot(tmp_path / "snapshots")
+
+    assert tuple(space.space_id for space in receipt.manifest.spaces) == ("alpha", "beta")
+    assert "spaces/beta/space.db" in {item.relative_path for item in receipt.manifest.files}
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_missing_notes_directory(tmp_path: Path) -> None:
+    coordinator, _leases, active_root = _coordinator(tmp_path)
+    notes = active_root / "spaces" / "alpha" / "notes"
+    (notes / "note-a.md").unlink()
+    notes.rmdir()
+
+    with pytest.raises(Exception, match="invalid asset directory"):
+        await coordinator.snapshot(tmp_path / "snapshots")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_under_lease_rejects_missing_fence(tmp_path: Path) -> None:
+    coordinator, _leases, _active_root = _coordinator(tmp_path)
+    target = tmp_path / "snapshots"
+    target.mkdir()
+
+    with pytest.raises(Exception, match="global exclusive lease"):
+        await coordinator._snapshot_under_lease(target, None)
+
+    assert not list(target.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_unrecoverable_coordination(tmp_path: Path) -> None:
+    coordinator, _leases, _active_root = _coordinator(tmp_path)
+    coordinator.meta.active_session_coordination = {
+        "classification": "manual_intervention",
+        "result": "invalid",
+    }
+
+    with pytest.raises(Exception) as raised:
+        await coordinator.snapshot(tmp_path / "snapshots")
+
+    assert raised.value.record.code == "active_session_recovery_required"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_effort_projection_drift(tmp_path: Path) -> None:
+    coordinator, _leases, _active_root = _coordinator(tmp_path)
+    coordinator.meta.effort_projection = {"result": "drift"}
+
+    with pytest.raises(Exception) as raised:
+        await coordinator.snapshot(tmp_path / "snapshots")
+
+    assert raised.value.record.code == "snapshot_invalid"
+
+
+@pytest.mark.parametrize(
+    "stage",
+    (
+        "database_copy:meta/meta.db",
+        "asset_copy:spaces/alpha/notes/note-a.md",
+        "manifest_write",
+        "fsync",
+        "atomic_publish",
+    ),
+)
+@pytest.mark.asyncio
+async def test_publication_failure_leaves_no_complete_snapshot(tmp_path: Path, stage: str) -> None:
+    coordinator, _leases, _active_root = _coordinator(tmp_path)
+
+    def failpoint(name: str) -> None:
+        if name == stage:
+            raise OSError(f"injected {stage}")
+
+    coordinator.failpoint = failpoint
+    target = tmp_path / "snapshots"
+
+    with pytest.raises(OSError, match="injected"):
+        await coordinator.snapshot(target)
+
+    assert not list(target.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_verify_recomputes_space_manifest_facts(tmp_path: Path) -> None:
+    from app.recovery.manifest import canonical_json
+    from app.recovery.sqlite_copy import sha256_file
+
+    coordinator, _leases, _active_root = _coordinator(tmp_path)
+    receipt = await coordinator.snapshot(tmp_path / "snapshots")
+    altered_space = replace(receipt.manifest.spaces[0], entity_counts={"sample": 999})
+    altered = replace(receipt.manifest, spaces=(altered_space,))
+    manifest_path = receipt.root / "manifest.json"
+    manifest_path.write_bytes(canonical_json(altered))
+    (receipt.root / "manifest.sha256").write_text(
+        sha256_file(manifest_path) + "\n", encoding="ascii"
+    )
+
+    verified = await coordinator.verify(receipt.root)
+
+    assert not verified.valid
+    assert "space_manifest" in verified.failures
