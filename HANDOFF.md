@@ -1,20 +1,24 @@
 # TS2 ActiveSession Recovery Authority Contract — 交回报告
 
-最终状态：**READY FOR S5 INJECTION**（剩余 contract gaps 见第 10 节，均 fail closed）
+最终状态：**READY FOR S5 INTEGRATION PATCH**（剩余 contract gaps 见第 10 节，均 fail closed）
 
 ## 1. 真实基线 SHA
 
 - 基线（S5 Task 1 基线，干净无污染）：`a26b997`（= S4 integration final）
-- 本次分支提交：
+- 提交前 HEAD（`git rev-parse HEAD`）：`89ba1e5e5f1c45deb3a1d95c407bfa9d2c8a5da4`
+- 本次分支提交（按时间序）：
   - `395ecd1` docs(recovery): record TS2 active-session authority investigation
   - `cdd5641` feat(recovery): add TS2 active-session recovery authority contract
-- 主 worktree（只读，未写入）：`E:\DevTemp\pomodoroxii-boundaries\s5-next`，未创建分支/提交
+  - `fcfd3e8` docs(recovery): finalize TS2 authority handoff report
+  - `89ba1e5` fix(recovery): close active session authority proof gaps
+  - 本轮：`fix(recovery): enforce deterministic child operation identity`（最终 SHA 见提交后核对，第 2 节）
+- 主 worktree（只读，未写入）：`E:\DevTemp\pomodoroxii-boundaries\s5-next`，未创建分支/提交，**本轮仍未修改**
 
 ## 2. 分支和 worktree
 
 - worktree：`E:\DevTemp\pomodoroxii-boundaries\ts2-authority-wt`
-- 分支：`codex/ts2-active-session-authority`（已 checkout，HEAD=`cdd5641`）
-- 遗留文件 `backend/fix_editable.py`：保留未动（editable 安装修复脚本，非本任务产物）
+- 分支：`codex/ts2-active-session-authority`（HEAD 见第 1 节提交后核对值）
+- 遗留文件 `backend/fix_editable.py`：保留未动、未提交（editable 安装修复脚本，非本任务产物）
 
 ## 3. Authority 调查结论及文件行号
 
@@ -44,15 +48,16 @@
 
 只读实现：SQLite `mode=ro` URI engine + 真实 ORM select；不伪造 SpaceRuntimeHandle；`view` 兼容 S5 `SimpleNamespace(db_path=...)` 注入形态。
 
-## 5a. S5 集成要求（第二轮审查确认，**非零改动注入**）
+## 5a. S5 集成要求（第二轮确认；第三轮状态更新）
 
-当前 S5 `RecoveryCoordinator` **不能无修改直接注入**本 authority：
+**authority 分支本身完成后，仍需一个单独的 S5 integration patch**（非零改动；本轮未改 S5 worktree）：
 
 - S5 必须为每个涉及的 Space 构造 **live/copied `space_views` 映射**（`SpaceDataView`，`space_id -> {db_path, ...}`），并通过
   `await inspector.inspect_read_only(meta_view, space_views=space_views)` 调用；
-- 未提供某 Space 的 view 时，任何需要该 Space 证据的路径 fail closed（`space_view_missing`）；
-- 因此 S5 侧 `coordinator.py` 需要改造：在 snapshot/verify 阶段为复制品数据库构造 `SpaceDataView`（指向复制品 `space.db`）并传入；当前 S5 内置 `ActiveSessionCoordinationInspector` 只消费 Meta `db_path`，不满足本 authority 的 Space 证据要求；
-- 注入点：`RecoveryCoordinator(active_coordination_inspector=<本 authority 实例>)`，并把 `recovery_view_factory` 产出物映射为 `space_views`。
+- **S5 当前的 `inspect_read_only` 调用只传 `meta_view`**（`s5-next/backend/app/recovery/coordinator.py` 内置 classifier 只消费 Meta `db_path`），不满足本 authority 的 Space 证据要求；
+- S5 侧 `coordinator.py` 需要在 snapshot/verify 阶段为复制品数据库构造 `SpaceDataView`（指向复制品 `space.db`）并传入 `space_views`；
+- 注入点：`RecoveryCoordinator(active_coordination_inspector=<本 authority 实例>)`，并把 `recovery_view_factory` 产出物映射为 `space_views`；
+- S5 Task 2 尚未开始；integration 分支未修改；本轮改动仅限 authority worktree。
 
 ## 5. state/phase/child/session 决策表
 
@@ -66,10 +71,10 @@
 | claiming | claimed | start/pause/resume/update_note/set_current_plan_item/set_completion_draft/add_plan_item/remove_plan_item/heartbeat | 原始 child(envelope==operation_id) terminal-success + Session 非 ended | `recoverable_claiming` / clean |
 | claiming | claimed | end | 原始 child terminal-success + Session ended | `recoverable_releasing` / clean |
 | claiming | claimed | end/其它 | child missing→`child_missing`；unknown→`child_unknown`；pending→`child_pending`；rejected→`child_rejected`；Session 不匹配→`session_*` | recovery_required |
-| claiming | claimed | activate_provisional + pair+children 对象声明 | candidate/active children 均 terminal-success 且 envelope.payload_hash == 声明 hash | `awaiting_resolution` / clean |
+| claiming | claimed | activate_provisional + pair+children 对象声明 | **suffix 未注册 → `child_id_derivation_unproven`**（第三轮：无权威 suffix，named child 一律 fail closed） | recovery_required |
 | claiming | claimed | takeover（无 children 声明） | - | `unproven_combination` |
-| claiming | awaiting_resolution | activate_provisional | pair 有效、locator 锚定 active、两 Session ownership_state=activation_conflict；candidate/active child 均存在 envelope+receipt 且 terminal-success（failed/conflict/unknown/pending/missing receipt/missing envelope → 对应 `child_*` code） | `awaiting_resolution` / clean |
-| claiming | transferred | resolve_activation_conflict | winner/loser children 均 terminal-success 且 envelope.payload_hash == 声明 hash；按 winner_role 选择 winner（active→pair.active_*，candidate→pair.candidate_*）；winner Session 存在、非 ended、ownership=authoritative；loser Session 存在、ended、validity=invalid + reason=activation_conflict_loser | `recoverable_claiming` / clean |
+| claiming | awaiting_resolution | activate_provisional | **suffix 未注册 → `child_id_derivation_unproven`**（派生校验先于 child 证据检查；无权威 suffix 时无法进入 awaiting_resolution 证明集） | recovery_required |
+| claiming | transferred | resolve_activation_conflict | **suffix 未注册 → `child_id_derivation_unproven`**（winner/loser 派生无法证明；resolution 后状态验证逻辑保留，待权威 suffix 注入后启用） | recovery_required |
 | claiming | rejected/prepared | any | - | `unproven_combination` |
 | releasing | space_committed | end | matching Session ended | `recoverable_releasing` / clean |
 | releasing | space_committed | end | Session 非 ended | `session_unexpected_nonterminal` |
@@ -78,7 +83,7 @@
 
 ## 6. 每个 damage case 的测试
 
-`backend/tests/test_recovery_authority.py`（68 测试：42 初始 + 26 第二轮审查修复；真实 SQLite + 真实只读 ORM 路径）：
+`backend/tests/test_recovery_authority.py`（74 测试：42 初始 + 26 第二轮审查修复 + 6 第三轮确定性派生；真实 SQLite + 真实只读 ORM 路径）：
 
 - empty：`test_empty_clean`
 - active completed：`test_active_completed_matching_nonterminal_session` / ended / missing session
@@ -122,6 +127,13 @@
 - exact child payload identity：`test_original_child_payload_hash_mismatch_fails_closed`（envelope.hash ≠ operation.hash → `child_payload_hash_mismatch`）、`test_named_child_payload_hash_mismatch_fails_closed`（envelope.hash ≠ children 声明 → `child_payload_hash_mismatch`）、`test_string_only_children_declaration_fails_closed`（旧字符串格式 → `children_declaration_invalid`）
 - relation chain：`test_relation_single_level_chain_passes` / `test_relation_multi_level_chain_passes`（合法链通过）、`test_relation_chain_does_not_bind_child_to_parent_operation_id`（回归：child.operation_id ≠ parent 时链仍通过）、`test_relation_multi_node_cycle_fails_closed`（`relation_cycle`）、`test_relation_child_space_mismatch_fails_closed` / `test_relation_child_session_mismatch_fails_closed`（`relation_invalid`）、`test_relation_chain_beyond_depth_fails_closed`（`relation_invalid`）
 
+### 6b. 第三轮确定性 child ID 派生的新增测试（6 个）
+
+- 注册表守卫：`test_child_suffix_registry_has_no_proven_roles`（`_CHILD_SUFFIX_BY_ROLE == {}`，防无依据添加）
+- 机制：`test_derive_expected_child_id_unregistered_returns_none`（四 role 均 None）、`test_verify_child_derivation_unproven_for_every_role`（派生校验对四 role 返回 `child_id_derivation_unproven`）
+- 入口级（完整 `inspect_read_only`）：`test_named_child_forged_success_fails_closed_at_entry`（伪造 terminal-success envelope+receipt、child ID 无法证明派生 → `child_id_derivation_unproven`）、`test_named_child_cross_parent_replay_rejected`（另一 parent 派生的 child ID → 拒绝）、`test_named_child_arbitrary_operation_id_rejected`（任意合法字符串 ID → 拒绝）
+- 原 18 个 named-child 测试（awaiting_resolution 矩阵 / transferred 矩阵 / conflict-child / duplicate / payload-mismatch / resolution-rejected）断言统一改为 `child_id_derivation_unproven`（派生校验先于 child 证据层；original-child 证据层覆盖保留在 start/end claimed 路径）
+
 ## 7. 所有门禁真实输出（含耗时）
 
 | 门禁 | 命令 | 结果 | 耗时 |
@@ -140,6 +152,11 @@
 | 第二轮：compileall | `python -m compileall -q backend/app/focus_session/recovery_authority.py` | OK | - |
 | 第二轮：diff check | `git diff --check a26b997..HEAD` | OK | - |
 | 第二轮：ActiveSession 迁移回归 | `pytest -q tests/test_active_session_locator_migration.py` | 4 passed | 4.67s |
+| 第三轮：authority 测试 | `python -m pytest -q backend/tests/test_recovery_authority.py -p no:cacheprovider` | **74 passed** | 50.78s |
+| 第三轮：ActiveSession 迁移回归 | `python -m pytest -q backend/tests/test_active_session_locator_migration.py -p no:cacheprovider` | 4 passed | 4.47s |
+| 第三轮：Ruff | `python -m ruff check backend/app/focus_session/recovery_authority.py backend/tests/test_recovery_authority.py` | All checks passed | - |
+| 第三轮：compileall | `python -m compileall -q backend/app/focus_session/recovery_authority.py` | OK | - |
+| 第三轮：diff check | `git diff --check a26b997..HEAD`（提交后复核）+ 工作树 `git diff --check` | OK | - |
 
 ## 8. git diff --name-only（相对基线 a26b997）
 
@@ -164,3 +181,4 @@ docs/superpowers/plans/2026-07-15-task-space-session-ts2-authority-investigation
 5. `transferred` phase 仅 `resolve_activation_conflict` 上下文有定义（计划 L3047/L308-314）；winner 非 ended + ownership=authoritative、loser ended + invalid(activation_conflict_loser) 为权威 resolution 后状态；S5 `_STATE_PHASE_RULES`（`s5-next/backend/app/recovery/coordinator.py:100-104`）未包含它——S5 注入本 authority 后以本 authority 为准。
 6. `claiming + rejected` 恢复动作在计划 L3041-3042 有定义，但不在本 authority 受支持证明集合内 → fail closed（决策表 L3036-3054 的 rejected 分支留给 S5 协调恢复实现，本 authority 不替代 TS2 状态机）。
 7. **S5 集成前置**：S5 必须构造 live/copied `space_views` 映射并通过 `inspect_read_only(meta_view, space_views=...)` 注入（见第 5a 节），当前 S5 coordinator 需改造，不能零改动注入。
+8. **（第三轮）named child suffix 无权威定义**：TS2 计划 L31 强制每个 conflict/resolution child 用 `bounded_child_operation_id(parent_id, suffix)` 派生，但从未命名 `candidate`/`active`/`winner`/`loser` 的 suffix 字符串；仓库唯一有权威的 suffix 是业务 receipt/command/batch suffix（`receipt:*`、`command:*`、batch index），不属于 ActiveSession child role。因此 `_CHILD_SUFFIX_BY_ROLE` 注册表为空，**任何 named child 声明 → `child_id_derivation_unproven`（recovery_required）**；awaiting_resolution / transferred / claimed-conflict 全部 fail closed，直到 TS2/TS0 提供可引用的 suffix 定义。权威依据：`docs/.../ts2-focus-session.md` L31；生产 suffix 用例：`focus_session/commands.py:149,154`、`command_reconciler.py:277`、`mutation/unit_of_work.py:1898`（均非 conflict/resolution role）。
