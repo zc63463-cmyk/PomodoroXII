@@ -64,7 +64,7 @@ describe('Sync v2 pull loop', () => {
         .resolves.toMatchObject({ pages: 1, dirtyConflicts: [] })
     })
 
-    expect(calls).toEqual(['/api/v1/sync/v2/pull', '/api/v1/sync/v2/ack'])
+    expect(calls).toEqual(['/sync/v2/pull', '/sync/v2/ack'])
     await expect(loadSyncV2Meta(db)).resolves.toMatchObject({
       cursor: 'cursor-next-0001', pendingAck: null, requiresFullRecovery: false,
     })

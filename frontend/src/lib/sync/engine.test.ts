@@ -105,8 +105,8 @@ describe('RealSyncEngine Sync v2 orchestration', () => {
     await engine.sync()
 
     expect(calls).toEqual([
-      '/api/v1/sync/v2/recover', '/api/v1/sync/v2/ack',
-      '/api/v1/sync/v2/pull', '/api/v1/sync/v2/ack',
+      '/sync/v2/recover', '/sync/v2/ack',
+      '/sync/v2/pull', '/sync/v2/ack',
     ])
     expect(engine.getStatus()).toBe('idle')
     expect(engine.getLastSyncedAt()).not.toBeNull()
@@ -126,7 +126,7 @@ describe('RealSyncEngine Sync v2 orchestration', () => {
 
     await engine.sync()
 
-    expect(calls).toEqual(['/api/v1/sync/v2/pull', '/api/v1/sync/v2/ack'])
+    expect(calls).toEqual(['/sync/v2/pull', '/sync/v2/ack'])
     engine.destroy()
   })
 
@@ -145,7 +145,7 @@ describe('RealSyncEngine Sync v2 orchestration', () => {
 
     await engine.sync()
 
-    expect(calls).toEqual(['/api/v1/sync/v2/pull', '/api/v1/sync/v2/ack'])
+    expect(calls).toEqual(['/sync/v2/pull', '/sync/v2/ack'])
     expect(completed).toBe(0)
   })
 
@@ -200,9 +200,9 @@ describe('RealSyncEngine Sync v2 orchestration', () => {
     await engine.sync()
 
     expect(calls).toEqual([
-      '/api/v1/sync/v2/recover', '/api/v1/sync/v2/ack',
-      '/api/v1/sync/v2/pull', '/api/v1/sync/v2/ack',
-      '/api/v1/sync/v2/operations/query', '/api/v1/sync/v2/push',
+      '/sync/v2/recover', '/sync/v2/ack',
+      '/sync/v2/pull', '/sync/v2/ack',
+      '/sync/v2/operations/query', '/sync/v2/push',
     ])
     expect(await db.outbox.get(1)).toBeUndefined()
     engine.destroy()
