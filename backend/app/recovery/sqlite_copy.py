@@ -26,6 +26,14 @@ def sha256_file(path: Path) -> str:
 
 
 def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        # Windows cannot open a directory with ``os.open``. Reuse the runtime
+        # durability primitive, which opens a non-reparse-point handle and
+        # calls FlushFileBuffers.
+        from app.runtime.contained_io import flush_owned_directory
+
+        flush_owned_directory(path)
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -39,6 +47,11 @@ def fsync_file(path: Path) -> None:
 
 
 def fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        from app.runtime.durability import fsync_directory as runtime_fsync_directory
+
+        runtime_fsync_directory(path)
+        return
     _fsync_directory(path)
 
 
