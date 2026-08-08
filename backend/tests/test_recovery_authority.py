@@ -152,6 +152,8 @@ def _insert_session(
     space_id: str,
     ended: bool = False,
     ownership_state: str = "authoritative",
+    validity: str = "valid",
+    validity_reason: str | None = None,
     started_at: str = "2026-07-15T08:00:00.000Z",
 ) -> None:
     conn.execute(
@@ -164,7 +166,7 @@ def _insert_session(
         (
             session_id, started_at, started_at, 1, 1, started_at,
             started_at if ended else None, None, 1500, 1500, 0, 0, 1500,
-            "completed" if ended else None, "valid", None, None, None, "",
+            "completed" if ended else None, validity, validity_reason, None, None, "",
             "not_required", ownership_state,
         ),
     )
@@ -176,13 +178,14 @@ def _insert_envelope(
     command_id: str,
     space_id: str,
     session_id: str,
+    payload_hash: str,
     created_at: str = "2026-07-15T08:00:00.000Z",
 ) -> None:
     conn.execute(
         "INSERT INTO session_command_envelopes VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
             command_id, space_id, session_id, 1, "wi-l2", 1, "complete", 1,
-            "0" * 64, created_at,
+            payload_hash, created_at,
         ),
     )
 
@@ -369,7 +372,8 @@ async def test_claiming_claimed_start_child_success_recoverable(env: Env) -> Non
         _insert_operation(conn, operation_id=op, kind="start", phase="claimed", intent=intent)
     with sqlite3.connect(env.spaces["space-a"]) as conn:
         _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
-        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1")
+        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1",
+                         payload_hash=_payload_hash_for(intent))
         _insert_receipt(conn, command_id=op, state="succeeded")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
@@ -392,7 +396,8 @@ async def test_claiming_claimed_end_child_success_ended_recoverable(env: Env) ->
         _insert_operation(conn, operation_id=op, kind="end", phase="claimed", intent=intent)
     with sqlite3.connect(env.spaces["space-a"]) as conn:
         _insert_session(conn, session_id="fs-1", space_id="space-a", ended=True)
-        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1")
+        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1",
+                         payload_hash=_payload_hash_for(intent))
         _insert_receipt(conn, command_id=op, state="succeeded")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERABLE_RELEASING
@@ -453,7 +458,12 @@ async def _install_conflict_pair(
     pair = pair_override or _pair(active_space, active_session, candidate_space, candidate_session)
     candidate_child = bounded_child_operation_id(operation_id, "candidate")
     active_child = bounded_child_operation_id(operation_id, "active")
-    children = {"candidate": candidate_child, "active": active_child}
+    candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
+    active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
+    children = {
+        "candidate": {"operation_id": candidate_child, "payload_hash": candidate_hash},
+        "active": {"operation_id": active_child, "payload_hash": active_hash},
+    }
     intent = _make_intent(
         operation_id=operation_id, kind="activate_provisional",
         space_id=active_space, session_id=active_session, epoch=1,
@@ -468,12 +478,14 @@ async def _install_conflict_pair(
     with sqlite3.connect(env.spaces[active_space]) as conn:
         _insert_session(conn, session_id=active_session, space_id=active_space,
                         ended=False, ownership_state="activation_conflict")
-        _insert_envelope(conn, command_id=active_child, space_id=active_space, session_id=active_session)
+        _insert_envelope(conn, command_id=active_child, space_id=active_space,
+                         session_id=active_session, payload_hash=active_hash)
         _insert_receipt(conn, command_id=active_child, state=active_state)
     with sqlite3.connect(env.spaces[candidate_space]) as conn:
         _insert_session(conn, session_id=candidate_session, space_id=candidate_space,
                         ended=False, ownership_state="activation_conflict")
-        _insert_envelope(conn, command_id=candidate_child, space_id=candidate_space, session_id=candidate_session)
+        _insert_envelope(conn, command_id=candidate_child, space_id=candidate_space,
+                         session_id=candidate_session, payload_hash=candidate_hash)
         _insert_receipt(conn, command_id=candidate_child, state=candidate_state)
     return intent
 
@@ -505,7 +517,12 @@ async def test_claiming_transferred_resolution_children_success(env: Env) -> Non
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
     winner_child = bounded_child_operation_id(op, "winner")
     loser_child = bounded_child_operation_id(op, "loser")
-    children = {"winner": winner_child, "loser": loser_child}
+    winner_hash = canonical_payload_hash({"role": "winner", "command_id": winner_child})
+    loser_hash = canonical_payload_hash({"role": "loser", "command_id": loser_child})
+    children = {
+        "winner": {"operation_id": winner_child, "payload_hash": winner_hash},
+        "loser": {"operation_id": loser_child, "payload_hash": loser_hash},
+    }
     intent = _make_intent(
         operation_id=op, kind="resolve_activation_conflict",
         space_id="space-a", session_id="fs-1", epoch=2,
@@ -517,21 +534,30 @@ async def test_claiming_transferred_resolution_children_success(env: Env) -> Non
                         operation_id=op, state="claiming", epoch=2)
         _insert_operation(conn, operation_id=op, kind="resolve_activation_conflict",
                           phase="transferred", intent=intent)
-    # winner = candidate (space-b/fs-2); loser = active (space-a/fs-1)
+    # winner = candidate (space-b/fs-2, authoritative, still running);
+    # loser = active (space-a/fs-1, ended interrupted and marked invalid).
     with sqlite3.connect(env.spaces["space-b"]) as conn:
         _insert_session(conn, session_id="fs-2", space_id="space-b", ended=False)
-        _insert_envelope(conn, command_id=winner_child, space_id="space-b", session_id="fs-2")
+        _insert_envelope(conn, command_id=winner_child, space_id="space-b",
+                         session_id="fs-2", payload_hash=winner_hash)
         _insert_receipt(conn, command_id=winner_child, state="succeeded")
     with sqlite3.connect(env.spaces["space-a"]) as conn:
         _insert_session(conn, session_id="fs-1", space_id="space-a", ended=True,
-                        ownership_state="activation_conflict")
-        _insert_envelope(conn, command_id=loser_child, space_id="space-a", session_id="fs-1")
+                        ownership_state="activation_conflict", validity="invalid",
+                        validity_reason="activation_conflict_loser")
+        _insert_envelope(conn, command_id=loser_child, space_id="space-a",
+                         session_id="fs-1", payload_hash=loser_hash)
         _insert_receipt(conn, command_id=loser_child, state="succeeded")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
     assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
     assert len(decision.child_outcomes) == 2
     assert all(outcome.terminal_success for outcome in decision.child_outcomes)
+    assert len(decision.session_facts) == 2
+    assert decision.session_facts[0].session_id == "fs-2"
+    assert decision.session_facts[0].ended is False
+    assert decision.session_facts[1].session_id == "fs-1"
+    assert decision.session_facts[1].ended is True
 
 
 # --------------------------------------------------------------------------- #
@@ -593,7 +619,8 @@ async def test_unknown_child_fails_closed(env: Env) -> None:
         _insert_operation(conn, operation_id=op, kind="start", phase="claimed", intent=intent)
     with sqlite3.connect(env.spaces["space-a"]) as conn:
         _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
-        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1")
+        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1",
+                         payload_hash=_payload_hash_for(intent))
         _insert_receipt(conn, command_id=op, state="unknown")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
@@ -612,7 +639,8 @@ async def test_pending_child_fails_closed(env: Env) -> None:
         _insert_operation(conn, operation_id=op, kind="start", phase="claimed", intent=intent)
     with sqlite3.connect(env.spaces["space-a"]) as conn:
         _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
-        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1")
+        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1",
+                         payload_hash=_payload_hash_for(intent))
         _insert_receipt(conn, command_id=op, state="pending")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
@@ -630,7 +658,8 @@ async def test_terminal_rejected_child_fails_closed(env: Env) -> None:
         _insert_operation(conn, operation_id=op, kind="start", phase="claimed", intent=intent)
     with sqlite3.connect(env.spaces["space-a"]) as conn:
         _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
-        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1")
+        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1",
+                         payload_hash=_payload_hash_for(intent))
         _insert_receipt(conn, command_id=op, state="failed")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
@@ -666,7 +695,8 @@ async def test_child_space_mismatch_fails_closed(env: Env) -> None:
     with sqlite3.connect(env.spaces["space-a"]) as conn:
         _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
         # envelope claims a different space
-        _insert_envelope(conn, command_id=op, space_id="space-b", session_id="fs-1")
+        _insert_envelope(conn, command_id=op, space_id="space-b", session_id="fs-1",
+                         payload_hash=_payload_hash_for(intent))
         _insert_receipt(conn, command_id=op, state="succeeded")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
@@ -685,7 +715,8 @@ async def test_child_session_mismatch_fails_closed(env: Env) -> None:
     with sqlite3.connect(env.spaces["space-a"]) as conn:
         _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
         # envelope claims a different session
-        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-other")
+        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-other",
+                         payload_hash=_payload_hash_for(intent))
         _insert_receipt(conn, command_id=op, state="succeeded")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
@@ -769,12 +800,17 @@ async def test_active_lease_expired_fails_closed(env: Env) -> None:
 async def test_duplicate_conflicting_child_fails_closed(env: Env) -> None:
     op = "op-dupe"
     shared = bounded_child_operation_id(op, "candidate")
+    shared_hash = canonical_payload_hash({"role": "candidate", "command_id": shared})
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
     intent = _make_intent(
         operation_id=op, kind="activate_provisional",
         space_id="space-a", session_id="fs-1", epoch=1,
         business={"cached_at": "2026-07-15T07:59:00.000Z"},
-        pair=pair, children={"candidate": shared, "active": shared},
+        pair=pair,
+        children={
+            "candidate": {"operation_id": shared, "payload_hash": shared_hash},
+            "active": {"operation_id": shared, "payload_hash": shared_hash},
+        },
     )
     with sqlite3.connect(env.meta_db) as conn:
         _insert_locator(conn, space_id="space-a", session_id="fs-1",
@@ -958,12 +994,17 @@ async def test_resolution_rejected_child_fails_closed(env: Env) -> None:
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
     winner_child = bounded_child_operation_id(op, "winner")
     loser_child = bounded_child_operation_id(op, "loser")
+    winner_hash = canonical_payload_hash({"role": "winner", "command_id": winner_child})
+    loser_hash = canonical_payload_hash({"role": "loser", "command_id": loser_child})
+    children = {
+        "winner": {"operation_id": winner_child, "payload_hash": winner_hash},
+        "loser": {"operation_id": loser_child, "payload_hash": loser_hash},
+    }
     intent = _make_intent(
         operation_id=op, kind="resolve_activation_conflict",
         space_id="space-a", session_id="fs-1", epoch=2,
         business={"decision_at": "2026-07-15T09:00:00.000Z"},
-        pair=pair, children={"winner": winner_child, "loser": loser_child},
-        winner_role="candidate",
+        pair=pair, children=children, winner_role="candidate",
     )
     with sqlite3.connect(env.meta_db) as conn:
         _insert_locator(conn, space_id="space-a", session_id="fs-1",
@@ -972,11 +1013,13 @@ async def test_resolution_rejected_child_fails_closed(env: Env) -> None:
                           phase="transferred", intent=intent)
     with sqlite3.connect(env.spaces["space-b"]) as conn:
         _insert_session(conn, session_id="fs-2", space_id="space-b", ended=False)
-        _insert_envelope(conn, command_id=winner_child, space_id="space-b", session_id="fs-2")
+        _insert_envelope(conn, command_id=winner_child, space_id="space-b",
+                         session_id="fs-2", payload_hash=winner_hash)
         _insert_receipt(conn, command_id=winner_child, state="conflict")
     with sqlite3.connect(env.spaces["space-a"]) as conn:
         _insert_session(conn, session_id="fs-1", space_id="space-a", ended=True)
-        _insert_envelope(conn, command_id=loser_child, space_id="space-a", session_id="fs-1")
+        _insert_envelope(conn, command_id=loser_child, space_id="space-a",
+                         session_id="fs-1", payload_hash=loser_hash)
         _insert_receipt(conn, command_id=loser_child, state="succeeded")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
@@ -1067,3 +1110,528 @@ async def test_focus_session_query_loads_from_readonly_copy(env: Env) -> None:
     assert loaded["session"]["id"] == "fs-1"
     assert loaded["session"]["spaceId"] == "space-a"
     await engine.dispose()
+
+# --------------------------------------------------------------------------- #
+# Review round 2: awaiting_resolution child evidence matrix (problem 1)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "candidate_state,active_state,expected_code",
+    (
+        ("failed", "succeeded", "child_rejected"),
+        ("conflict", "succeeded", "child_rejected"),
+        ("succeeded", "failed", "child_rejected"),
+        ("unknown", "succeeded", "child_unknown"),
+        ("succeeded", "pending", "child_pending"),
+        ("pending", "succeeded", "child_pending"),
+    ),
+)
+async def test_awaiting_resolution_child_outcome_fails_closed(
+    env: Env, candidate_state: str, active_state: str, expected_code: str
+) -> None:
+    await _install_conflict_pair(
+        env, phase="awaiting_resolution",
+        candidate_state=candidate_state, active_state=active_state,
+    )
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.result == RESULT_NOT_CLEAN
+    assert decision.failure_code == expected_code
+
+
+async def test_awaiting_resolution_missing_child_receipt_fails_closed(env: Env) -> None:
+    op = "op-noreceipt"
+    pair = _pair("space-a", "fs-1", "space-b", "fs-2")
+    candidate_child = bounded_child_operation_id(op, "candidate")
+    active_child = bounded_child_operation_id(op, "active")
+    candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
+    active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
+    children = {
+        "candidate": {"operation_id": candidate_child, "payload_hash": candidate_hash},
+        "active": {"operation_id": active_child, "payload_hash": active_hash},
+    }
+    intent = _make_intent(
+        operation_id=op, kind="activate_provisional",
+        space_id="space-a", session_id="fs-1", epoch=1,
+        business={"cached_at": "2026-07-15T07:59:00.000Z"},
+        pair=pair, children=children,
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1",
+                        operation_id=op, state="claiming")
+        _insert_operation(conn, operation_id=op, kind="activate_provisional",
+                          phase="awaiting_resolution", intent=intent)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a",
+                        ended=False, ownership_state="activation_conflict")
+        _insert_envelope(conn, command_id=active_child, space_id="space-a",
+                         session_id="fs-1", payload_hash=active_hash)
+        _insert_receipt(conn, command_id=active_child, state="succeeded")
+    with sqlite3.connect(env.spaces["space-b"]) as conn:
+        _insert_session(conn, session_id="fs-2", space_id="space-b",
+                        ended=False, ownership_state="activation_conflict")
+        _insert_envelope(conn, command_id=candidate_child, space_id="space-b",
+                         session_id="fs-2", payload_hash=candidate_hash)
+        # no receipt for the candidate child
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "child_missing"
+
+
+async def test_awaiting_resolution_missing_child_envelope_fails_closed(env: Env) -> None:
+    op = "op-noenvelope"
+    pair = _pair("space-a", "fs-1", "space-b", "fs-2")
+    candidate_child = bounded_child_operation_id(op, "candidate")
+    active_child = bounded_child_operation_id(op, "active")
+    candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
+    active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
+    children = {
+        "candidate": {"operation_id": candidate_child, "payload_hash": candidate_hash},
+        "active": {"operation_id": active_child, "payload_hash": active_hash},
+    }
+    intent = _make_intent(
+        operation_id=op, kind="activate_provisional",
+        space_id="space-a", session_id="fs-1", epoch=1,
+        business={"cached_at": "2026-07-15T07:59:00.000Z"},
+        pair=pair, children=children,
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1",
+                        operation_id=op, state="claiming")
+        _insert_operation(conn, operation_id=op, kind="activate_provisional",
+                          phase="awaiting_resolution", intent=intent)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a",
+                        ended=False, ownership_state="activation_conflict")
+        _insert_envelope(conn, command_id=active_child, space_id="space-a",
+                         session_id="fs-1", payload_hash=active_hash)
+        _insert_receipt(conn, command_id=active_child, state="succeeded")
+    with sqlite3.connect(env.spaces["space-b"]) as conn:
+        _insert_session(conn, session_id="fs-2", space_id="space-b",
+                        ended=False, ownership_state="activation_conflict")
+        # no envelope at all for the candidate child
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "child_missing"
+
+
+# --------------------------------------------------------------------------- #
+# Review round 2: transferred winner/loser matrix (problem 2)
+# --------------------------------------------------------------------------- #
+
+
+async def _install_resolution(
+    env: Env,
+    *,
+    winner_role: str = "candidate",
+    winner_kwargs: dict[str, object] | None = None,
+    loser_kwargs: dict[str, object] | None = None,
+) -> dict[str, object]:
+    op = "op-resolve"
+    pair = _pair("space-a", "fs-1", "space-b", "fs-2")
+    winner_child = bounded_child_operation_id(op, "winner")
+    loser_child = bounded_child_operation_id(op, "loser")
+    winner_hash = canonical_payload_hash({"role": "winner", "command_id": winner_child})
+    loser_hash = canonical_payload_hash({"role": "loser", "command_id": loser_child})
+    children = {
+        "winner": {"operation_id": winner_child, "payload_hash": winner_hash},
+        "loser": {"operation_id": loser_child, "payload_hash": loser_hash},
+    }
+    intent = _make_intent(
+        operation_id=op, kind="resolve_activation_conflict",
+        space_id="space-a", session_id="fs-1", epoch=2,
+        business={"decision_at": "2026-07-15T09:00:00.000Z"},
+        pair=pair, children=children, winner_role=winner_role,
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1",
+                        operation_id=op, state="claiming", epoch=2)
+        _insert_operation(conn, operation_id=op, kind="resolve_activation_conflict",
+                          phase="transferred", intent=intent)
+    if winner_role == "candidate":
+        winner_space, winner_session = "space-b", "fs-2"
+        loser_space, loser_session = "space-a", "fs-1"
+    else:
+        winner_space, winner_session = "space-a", "fs-1"
+        loser_space, loser_session = "space-b", "fs-2"
+    wkwargs = dict(winner_kwargs or {})
+    lkwargs = dict(loser_kwargs or {})
+    with sqlite3.connect(env.spaces[winner_space]) as conn:
+        if not wkwargs.pop("missing", False):
+            _insert_session(conn, session_id=winner_session, space_id=winner_space, **wkwargs)
+        _insert_envelope(conn, command_id=winner_child, space_id=winner_space,
+                         session_id=winner_session, payload_hash=winner_hash)
+        _insert_receipt(conn, command_id=winner_child, state="succeeded")
+    with sqlite3.connect(env.spaces[loser_space]) as conn:
+        if not lkwargs.pop("missing", False):
+            _insert_session(conn, session_id=loser_session, space_id=loser_space, **lkwargs)
+        _insert_envelope(conn, command_id=loser_child, space_id=loser_space,
+                         session_id=loser_session, payload_hash=loser_hash)
+        _insert_receipt(conn, command_id=loser_child, state="succeeded")
+    return intent
+
+
+def _resolution_loser_kwargs() -> dict[str, object]:
+    return {
+        "ended": True,
+        "ownership_state": "activation_conflict",
+        "validity": "invalid",
+        "validity_reason": "activation_conflict_loser",
+    }
+
+
+async def test_transferred_candidate_winner_clean(env: Env) -> None:
+    await _install_resolution(
+        env, winner_role="candidate",
+        winner_kwargs={"ended": False},
+        loser_kwargs=_resolution_loser_kwargs(),
+    )
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
+    winner = [f for f in decision.session_facts if f.session_id == "fs-2"][0]
+    loser = [f for f in decision.session_facts if f.session_id == "fs-1"][0]
+    assert winner.ended is False and winner.ownership_state == "authoritative"
+    assert loser.ended is True and loser.validity == "invalid"
+    assert loser.validity_reason == "activation_conflict_loser"
+
+
+async def test_transferred_active_winner_clean(env: Env) -> None:
+    await _install_resolution(
+        env, winner_role="active",
+        winner_kwargs={"ended": False},
+        loser_kwargs=_resolution_loser_kwargs(),
+    )
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
+    winner = [f for f in decision.session_facts if f.session_id == "fs-1"][0]
+    loser = [f for f in decision.session_facts if f.session_id == "fs-2"][0]
+    assert winner.ended is False and winner.ownership_state == "authoritative"
+    assert loser.ended is True and loser.validity == "invalid"
+
+
+async def test_transferred_winner_missing_fails_closed(env: Env) -> None:
+    await _install_resolution(
+        env, winner_role="candidate",
+        winner_kwargs={"missing": True},
+        loser_kwargs=_resolution_loser_kwargs(),
+    )
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "session_missing"
+
+
+async def test_transferred_winner_ended_fails_closed(env: Env) -> None:
+    await _install_resolution(
+        env, winner_role="candidate",
+        winner_kwargs={"ended": True},
+        loser_kwargs=_resolution_loser_kwargs(),
+    )
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "session_unexpected_terminal"
+
+
+async def test_transferred_winner_ownership_invalid_fails_closed(env: Env) -> None:
+    await _install_resolution(
+        env, winner_role="candidate",
+        winner_kwargs={"ended": False, "ownership_state": "activation_conflict"},
+        loser_kwargs=_resolution_loser_kwargs(),
+    )
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "session_ownership_invalid"
+
+
+async def test_transferred_loser_not_ended_fails_closed(env: Env) -> None:
+    await _install_resolution(
+        env, winner_role="candidate",
+        winner_kwargs={"ended": False},
+        loser_kwargs={
+            "ended": False,
+            "ownership_state": "activation_conflict",
+            "validity": "invalid",
+            "validity_reason": "activation_conflict_loser",
+        },
+    )
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "session_unexpected_nonterminal"
+
+
+async def test_transferred_loser_not_marked_invalid_fails_closed(env: Env) -> None:
+    await _install_resolution(
+        env, winner_role="candidate",
+        winner_kwargs={"ended": False},
+        loser_kwargs={"ended": True, "ownership_state": "activation_conflict"},
+    )
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "session_invalid_marker_mismatch"
+
+
+async def test_transferred_loser_missing_fails_closed(env: Env) -> None:
+    await _install_resolution(
+        env, winner_role="candidate",
+        winner_kwargs={"ended": False},
+        loser_kwargs={"missing": True},
+    )
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "session_missing"
+
+
+# --------------------------------------------------------------------------- #
+# Review round 2: exact child payload identity (problem 3)
+# --------------------------------------------------------------------------- #
+
+
+async def test_original_child_payload_hash_mismatch_fails_closed(env: Env) -> None:
+    op = "op-hash"
+    intent = _make_intent(
+        operation_id=op, kind="start", space_id="space-a", session_id="fs-1",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1",
+                        operation_id=op, state="claiming")
+        _insert_operation(conn, operation_id=op, kind="start", phase="claimed", intent=intent)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
+        _insert_envelope(conn, command_id=op, space_id="space-a", session_id="fs-1",
+                         payload_hash="1" * 64)
+        _insert_receipt(conn, command_id=op, state="succeeded")
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "child_payload_hash_mismatch"
+
+
+async def test_named_child_payload_hash_mismatch_fails_closed(env: Env) -> None:
+    op = "op-hash2"
+    pair = _pair("space-a", "fs-1", "space-b", "fs-2")
+    candidate_child = bounded_child_operation_id(op, "candidate")
+    active_child = bounded_child_operation_id(op, "active")
+    candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
+    active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
+    children = {
+        "candidate": {"operation_id": candidate_child, "payload_hash": candidate_hash},
+        "active": {"operation_id": active_child, "payload_hash": active_hash},
+    }
+    intent = _make_intent(
+        operation_id=op, kind="activate_provisional",
+        space_id="space-a", session_id="fs-1", epoch=1,
+        business={"cached_at": "2026-07-15T07:59:00.000Z"},
+        pair=pair, children=children,
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1",
+                        operation_id=op, state="claiming")
+        _insert_operation(conn, operation_id=op, kind="activate_provisional",
+                          phase="awaiting_resolution", intent=intent)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a",
+                        ended=False, ownership_state="activation_conflict")
+        _insert_envelope(conn, command_id=active_child, space_id="space-a",
+                         session_id="fs-1", payload_hash=active_hash)
+        _insert_receipt(conn, command_id=active_child, state="succeeded")
+    with sqlite3.connect(env.spaces["space-b"]) as conn:
+        _insert_session(conn, session_id="fs-2", space_id="space-b",
+                        ended=False, ownership_state="activation_conflict")
+        _insert_envelope(conn, command_id=candidate_child, space_id="space-b",
+                         session_id="fs-2", payload_hash="2" * 64)
+        _insert_receipt(conn, command_id=candidate_child, state="succeeded")
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "child_payload_hash_mismatch"
+
+
+async def test_string_only_children_declaration_fails_closed(env: Env) -> None:
+    op = "op-legacy"
+    pair = _pair("space-a", "fs-1", "space-b", "fs-2")
+    intent = _make_intent(
+        operation_id=op, kind="activate_provisional",
+        space_id="space-a", session_id="fs-1", epoch=1,
+        business={"cached_at": "2026-07-15T07:59:00.000Z"},
+        pair=pair,
+        children={
+            "candidate": bounded_child_operation_id(op, "candidate"),
+            "active": bounded_child_operation_id(op, "active"),
+        },
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1",
+                        operation_id=op, state="claiming")
+        _insert_operation(conn, operation_id=op, kind="activate_provisional",
+                          phase="claimed", intent=intent)
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "children_declaration_invalid"
+
+
+# --------------------------------------------------------------------------- #
+# Review round 2: relation chain (problem 4)
+# --------------------------------------------------------------------------- #
+
+
+def _insert_chain_operation(
+    conn: sqlite3.Connection, *, operation_id: str, related: str | None
+) -> None:
+    intent = _make_intent(
+        operation_id=operation_id, kind="start", space_id="space-a",
+        session_id="fs-1", epoch=1,
+        business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    _insert_operation(conn, operation_id=operation_id, kind="start",
+                      phase="completed", intent=intent, related=related)
+
+
+async def test_relation_single_level_chain_passes(env: Env) -> None:
+    op = "op-root"
+    intent = _make_intent(
+        operation_id=op, kind="start", space_id="space-a", session_id="fs-1",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1", operation_id=op)
+        _insert_operation(conn, operation_id=op, kind="start", phase="completed",
+                          intent=intent, related="op-child-1")
+        _insert_chain_operation(conn, operation_id="op-child-1", related=None)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_ACTIVE_CONSISTENT
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
+
+
+async def test_relation_multi_level_chain_passes(env: Env) -> None:
+    op = "op-root"
+    intent = _make_intent(
+        operation_id=op, kind="start", space_id="space-a", session_id="fs-1",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1", operation_id=op)
+        _insert_operation(conn, operation_id=op, kind="start", phase="completed",
+                          intent=intent, related="op-c1")
+        _insert_chain_operation(conn, operation_id="op-c1", related="op-c2")
+        _insert_chain_operation(conn, operation_id="op-c2", related=None)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_ACTIVE_CONSISTENT
+    assert decision.failure_code is None
+
+
+async def test_relation_multi_node_cycle_fails_closed(env: Env) -> None:
+    op = "op-root"
+    intent = _make_intent(
+        operation_id=op, kind="start", space_id="space-a", session_id="fs-1",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1", operation_id=op)
+        _insert_operation(conn, operation_id=op, kind="start", phase="completed",
+                          intent=intent, related="op-c1")
+        _insert_chain_operation(conn, operation_id="op-c1", related=op)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "relation_cycle"
+
+
+async def test_relation_child_space_mismatch_fails_closed(env: Env) -> None:
+    op = "op-root"
+    intent = _make_intent(
+        operation_id=op, kind="start", space_id="space-a", session_id="fs-1",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    child_intent = _make_intent(
+        operation_id="op-c1", kind="start", space_id="space-b", session_id="fs-1",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1", operation_id=op)
+        _insert_operation(conn, operation_id=op, kind="start", phase="completed",
+                          intent=intent, related="op-c1")
+        _insert_operation(conn, operation_id="op-c1", kind="start", phase="completed",
+                          intent=child_intent)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "relation_invalid"
+
+
+async def test_relation_child_session_mismatch_fails_closed(env: Env) -> None:
+    op = "op-root"
+    intent = _make_intent(
+        operation_id=op, kind="start", space_id="space-a", session_id="fs-1",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    child_intent = _make_intent(
+        operation_id="op-c1", kind="start", space_id="space-a", session_id="fs-other",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1", operation_id=op)
+        _insert_operation(conn, operation_id=op, kind="start", phase="completed",
+                          intent=intent, related="op-c1")
+        _insert_operation(conn, operation_id="op-c1", kind="start", phase="completed",
+                          intent=child_intent)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "relation_invalid"
+
+
+async def test_relation_chain_beyond_depth_fails_closed(env: Env) -> None:
+    op = "op-0"
+    intent = _make_intent(
+        operation_id=op, kind="start", space_id="space-a", session_id="fs-1",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1", operation_id=op)
+        _insert_operation(conn, operation_id=op, kind="start", phase="completed",
+                          intent=intent, related="op-1")
+        for index in range(1, 10):
+            _insert_chain_operation(
+                conn, operation_id=f"op-{index}",
+                related=None if index == 9 else f"op-{index + 1}",
+            )
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code == "relation_invalid"
+
+
+# --------------------------------------------------------------------------- #
+# Review round 2: legacy relation binding must not compare child to parent id
+# --------------------------------------------------------------------------- #
+
+
+async def test_relation_chain_does_not_bind_child_to_parent_operation_id(env: Env) -> None:
+    """The chain link must never require child.operation_id == parent id."""
+    op = "op-root"
+    intent = _make_intent(
+        operation_id=op, kind="start", space_id="space-a", session_id="fs-1",
+        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+    )
+    with sqlite3.connect(env.meta_db) as conn:
+        _insert_locator(conn, space_id="space-a", session_id="fs-1", operation_id=op)
+        _insert_operation(conn, operation_id=op, kind="start", phase="completed",
+                          intent=intent, related="op-child-x")
+        _insert_chain_operation(conn, operation_id="op-child-x", related=None)
+    with sqlite3.connect(env.spaces["space-a"]) as conn:
+        _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
+    decision = await _inspect(env)
+    assert decision.classification == CLASSIFICATION_ACTIVE_CONSISTENT
+    assert decision.failure_code is None
