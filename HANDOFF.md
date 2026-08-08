@@ -37,12 +37,22 @@
 - `ActiveSessionRecoveryView`（只读 Meta 数据库视图，`meta_db_path`）
 - `LocatorIdentity` / `OperationIdentity`（locator/operation 身份，不含原始 intent 或用户内容）
 - `SpaceChildOutcome`（角色、child id、envelope 存在性、receipt state、terminal-success/rejected/unknown/pending）
-- `SessionRecoveryFact`（space/session、存在性、ended、ownership_state）
+- `SessionRecoveryFact`（space/session、存在性、ended、ownership_state、validity、validity_reason）
 - `ConflictPairFact`（active/candidate 复合身份）
 - `ActiveSessionRecoveryDecision`（frozen，含 classification/result/locator/operation/child_outcomes/session_facts/conflict_pair/failure_code/reason；`to_wire()`/`to_canonical_json()` 确定性序列化）
 - `ActiveSessionCoordinationInspector`：`async def inspect_read_only(view, *, space_views: Mapping[str, SpaceDataView] | None = None) -> ActiveSessionRecoveryDecision`
 
 只读实现：SQLite `mode=ro` URI engine + 真实 ORM select；不伪造 SpaceRuntimeHandle；`view` 兼容 S5 `SimpleNamespace(db_path=...)` 注入形态。
+
+## 5a. S5 集成要求（第二轮审查确认，**非零改动注入**）
+
+当前 S5 `RecoveryCoordinator` **不能无修改直接注入**本 authority：
+
+- S5 必须为每个涉及的 Space 构造 **live/copied `space_views` 映射**（`SpaceDataView`，`space_id -> {db_path, ...}`），并通过
+  `await inspector.inspect_read_only(meta_view, space_views=space_views)` 调用；
+- 未提供某 Space 的 view 时，任何需要该 Space 证据的路径 fail closed（`space_view_missing`）；
+- 因此 S5 侧 `coordinator.py` 需要改造：在 snapshot/verify 阶段为复制品数据库构造 `SpaceDataView`（指向复制品 `space.db`）并传入；当前 S5 内置 `ActiveSessionCoordinationInspector` 只消费 Meta `db_path`，不满足本 authority 的 Space 证据要求；
+- 注入点：`RecoveryCoordinator(active_coordination_inspector=<本 authority 实例>)`，并把 `recovery_view_factory` 产出物映射为 `space_views`。
 
 ## 5. state/phase/child/session 决策表
 
@@ -56,10 +66,10 @@
 | claiming | claimed | start/pause/resume/update_note/set_current_plan_item/set_completion_draft/add_plan_item/remove_plan_item/heartbeat | 原始 child(envelope==operation_id) terminal-success + Session 非 ended | `recoverable_claiming` / clean |
 | claiming | claimed | end | 原始 child terminal-success + Session ended | `recoverable_releasing` / clean |
 | claiming | claimed | end/其它 | child missing→`child_missing`；unknown→`child_unknown`；pending→`child_pending`；rejected→`child_rejected`；Session 不匹配→`session_*` | recovery_required |
-| claiming | claimed | activate_provisional + pair+children 声明 | candidate/active children 均 terminal-success | `awaiting_resolution` / clean |
+| claiming | claimed | activate_provisional + pair+children 对象声明 | candidate/active children 均 terminal-success 且 envelope.payload_hash == 声明 hash | `awaiting_resolution` / clean |
 | claiming | claimed | takeover（无 children 声明） | - | `unproven_combination` |
-| claiming | awaiting_resolution | activate_provisional | pair 有效、locator 锚定 active、两 Session ownership_state=activation_conflict | `awaiting_resolution` / clean |
-| claiming | transferred | resolve_activation_conflict | winner/loser children 均 terminal-success | `recoverable_claiming` / clean |
+| claiming | awaiting_resolution | activate_provisional | pair 有效、locator 锚定 active、两 Session ownership_state=activation_conflict；candidate/active child 均存在 envelope+receipt 且 terminal-success（failed/conflict/unknown/pending/missing receipt/missing envelope → 对应 `child_*` code） | `awaiting_resolution` / clean |
+| claiming | transferred | resolve_activation_conflict | winner/loser children 均 terminal-success 且 envelope.payload_hash == 声明 hash；按 winner_role 选择 winner（active→pair.active_*，candidate→pair.candidate_*）；winner Session 存在、非 ended、ownership=authoritative；loser Session 存在、ended、validity=invalid + reason=activation_conflict_loser | `recoverable_claiming` / clean |
 | claiming | rejected/prepared | any | - | `unproven_combination` |
 | releasing | space_committed | end | matching Session ended | `recoverable_releasing` / clean |
 | releasing | space_committed | end | Session 非 ended | `session_unexpected_nonterminal` |
@@ -68,7 +78,7 @@
 
 ## 6. 每个 damage case 的测试
 
-`backend/tests/test_recovery_authority.py`（新增 42 测试，真实 SQLite + 真实只读 ORM 路径）：
+`backend/tests/test_recovery_authority.py`（68 测试：42 初始 + 26 第二轮审查修复；真实 SQLite + 真实只读 ORM 路径）：
 
 - empty：`test_empty_clean`
 - active completed：`test_active_completed_matching_nonterminal_session` / ended / missing session
@@ -105,6 +115,13 @@
 
 每个损坏场景断言：classification=`recovery_required`、result=`not_clean`、无未处理异常。
 
+### 6a. 第二轮审查修复的新增测试（26 个）
+
+- awaiting_resolution child outcome 矩阵：`test_awaiting_resolution_child_outcome_fails_closed`（参数化 failed/conflict/unknown/pending 6 组合 → `child_rejected`/`child_unknown`/`child_pending`）、`test_awaiting_resolution_missing_child_receipt_fails_closed` / `test_awaiting_resolution_missing_child_envelope_fails_closed`（→ `child_missing`）
+- transferred winner/loser 矩阵：`test_transferred_candidate_winner_clean` / `test_transferred_active_winner_clean`（正常）；`test_transferred_winner_missing_fails_closed`（`session_missing`）、`test_transferred_winner_ended_fails_closed`（`session_unexpected_terminal`）、`test_transferred_winner_ownership_invalid_fails_closed`（`session_ownership_invalid`）、`test_transferred_loser_not_ended_fails_closed`（`session_unexpected_nonterminal`）、`test_transferred_loser_not_marked_invalid_fails_closed`（`session_invalid_marker_mismatch`）、`test_transferred_loser_missing_fails_closed`（`session_missing`）
+- exact child payload identity：`test_original_child_payload_hash_mismatch_fails_closed`（envelope.hash ≠ operation.hash → `child_payload_hash_mismatch`）、`test_named_child_payload_hash_mismatch_fails_closed`（envelope.hash ≠ children 声明 → `child_payload_hash_mismatch`）、`test_string_only_children_declaration_fails_closed`（旧字符串格式 → `children_declaration_invalid`）
+- relation chain：`test_relation_single_level_chain_passes` / `test_relation_multi_level_chain_passes`（合法链通过）、`test_relation_chain_does_not_bind_child_to_parent_operation_id`（回归：child.operation_id ≠ parent 时链仍通过）、`test_relation_multi_node_cycle_fails_closed`（`relation_cycle`）、`test_relation_child_space_mismatch_fails_closed` / `test_relation_child_session_mismatch_fails_closed`（`relation_invalid`）、`test_relation_chain_beyond_depth_fails_closed`（`relation_invalid`）
+
 ## 7. 所有门禁真实输出（含耗时）
 
 | 门禁 | 命令 | 结果 | 耗时 |
@@ -118,6 +135,11 @@
 | Type checking | 仓库无 mypy/pyright 配置；以 `python -m compileall -q app/focus_session tests/test_recovery_authority.py` 编译门禁 | COMPILEALL OK | - |
 | git diff --check | `git diff --check` | DIFF-CHECK OK | - |
 | full collect | `pytest --collect-only -q` | 2270 tests collected | 3.71s |
+| 第二轮：authority 测试 | `pytest -q backend/tests/test_recovery_authority.py -p no:cacheprovider` | **68 passed** | 48.10s |
+| 第二轮：Ruff | `python -m ruff check backend/app/focus_session/recovery_authority.py backend/tests/test_recovery_authority.py` | All checks passed | - |
+| 第二轮：compileall | `python -m compileall -q backend/app/focus_session/recovery_authority.py` | OK | - |
+| 第二轮：diff check | `git diff --check a26b997..HEAD` | OK | - |
+| 第二轮：ActiveSession 迁移回归 | `pytest -q tests/test_active_session_locator_migration.py` | 4 passed | 4.67s |
 
 ## 8. git diff --name-only（相对基线 a26b997）
 
@@ -136,8 +158,9 @@ docs/superpowers/plans/2026-07-15-task-space-session-ts2-authority-investigation
 ## 10. 剩余 contract gap（全部 fail closed，不影响注入）
 
 1. `intent_json` closed schema 无 TS2 生产实现（S5 侧 `_make_intent` 假定形态与本 authority 定义兼容但不一致；本 authority 定义 identity 键 + `pair`/`children` 声明并文档化）。
-2. `related_operation_id` 语义无权威实现（`meta.py:102` 仅建列；S5 假定 parent→child 链；本 authority 仅做结构校验，不解读语义）。
-3. takeover/conflict/resolution child 的 bounded suffix 命名无权威定义 → 要求 intent `children` 声明，缺失 fail closed。
+2. `related_operation_id` 语义无权威实现（`meta.py:102` 仅建列；S5 假定 parent→child 链；本 authority 仅做结构校验：存在性、acyclic、Space/Session 一致、深度 ≤8，不解读语义）。
+3. conflict/resolution child 的 exact payload hash 必须由 intent `children` 对象声明提供（`{"operation_id": ..., "payload_hash": ...}`）；字符串格式声明无法证明 payload identity → `children_declaration_invalid`（第二轮收紧；authority 不发明 hash）。
 4. `ActiveSessionCoordinator` 无生产写方（`contracts.py:175-180` 仅 Protocol）。
-5. `transferred` phase 仅 `resolve_activation_conflict` 上下文有定义（计划 L3047）；S5 `_STATE_PHASE_RULES`（`s5-next/backend/app/recovery/coordinator.py:100-104`）未包含它——S5 注入本 authority 后以本 authority 为准。
+5. `transferred` phase 仅 `resolve_activation_conflict` 上下文有定义（计划 L3047/L308-314）；winner 非 ended + ownership=authoritative、loser ended + invalid(activation_conflict_loser) 为权威 resolution 后状态；S5 `_STATE_PHASE_RULES`（`s5-next/backend/app/recovery/coordinator.py:100-104`）未包含它——S5 注入本 authority 后以本 authority 为准。
 6. `claiming + rejected` 恢复动作在计划 L3041-3042 有定义，但不在本 authority 受支持证明集合内 → fail closed（决策表 L3036-3054 的 rejected 分支留给 S5 协调恢复实现，本 authority 不替代 TS2 状态机）。
+7. **S5 集成前置**：S5 必须构造 live/copied `space_views` 映射并通过 `inspect_read_only(meta_view, space_views=...)` 注入（见第 5a 节），当前 S5 coordinator 需改造，不能零改动注入。

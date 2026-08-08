@@ -179,8 +179,12 @@ CODE_CHILD_UNKNOWN = "child_unknown"
 CODE_CHILD_PENDING = "child_pending"
 CODE_CHILD_REJECTED = "child_rejected"
 CODE_CHILD_IDENTITY_MISMATCH = "child_identity_mismatch"
+CODE_CHILD_PAYLOAD_HASH_MISMATCH = "child_payload_hash_mismatch"
 CODE_CHILDREN_DECLARATION_MISSING = "children_declaration_missing"
+CODE_CHILDREN_DECLARATION_INVALID = "children_declaration_invalid"
 CODE_CHILDREN_DECLARATION_CONFLICT = "children_declaration_conflict"
+CODE_SESSION_OWNERSHIP_INVALID = "session_ownership_invalid"
+CODE_SESSION_INVALID_MARKER = "session_invalid_marker_mismatch"
 CODE_UNPROVEN_COMBINATION = "unproven_combination"
 CODE_INTERNAL = "authority_internal_error"
 
@@ -242,6 +246,21 @@ class SessionRecoveryFact:
     session_present: bool
     ended: bool | None
     ownership_state: str | None
+    validity: str | None = None
+    validity_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChildDeclaration:
+    """One named Space child declared by an intent ``children`` entry.
+
+    The declaration carries the exact operation ID *and* the payload hash the
+    envelope must match; a string-only declaration (no payload hash) cannot be
+    proven and is rejected (``children_declaration_invalid``).
+    """
+
+    operation_id: str
+    payload_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,7 +421,7 @@ class ActiveSessionCoordinationInspector:
             if locator["state"] == "active" and self._lease_expired(str(locator["lease_expires_at"])):
                 return _fail(CODE_LEASE_EXPIRED, "active session lease has expired")
             relation_problem = await _verify_relation_chain(
-                engine, operation, str(locator["space_id"])
+                engine, operation, str(locator["space_id"]), str(locator["session_id"])
             )
             if relation_problem is not None:
                 return _fail(relation_problem, _relation_reason(relation_problem))
@@ -515,23 +534,39 @@ class ActiveSessionCoordinationInspector:
         kind = str(operation["kind"])
         if kind == "activate_provisional":
             children = _decode_children(intent)
-            pair = _decode_pair(intent)
-            if children is not None and pair is not None and {"candidate", "active"} <= set(children):
-                outcomes = await self._verify_named_children(
-                    accessor, locator, intent, ("candidate", "active"),
+            if children is None:
+                if "children" in intent:
+                    return _fail(
+                        CODE_CHILDREN_DECLARATION_INVALID,
+                        "children declaration has no provable payload identity",
+                        locator_identity, operation_identity,
+                    )
+                return _fail(
+                    CODE_CHILDREN_DECLARATION_MISSING,
+                    "activate_provisional requires a children declaration",
+                    locator_identity, operation_identity,
                 )
-                if isinstance(outcomes, str):
-                    return _fail(outcomes, f"conflict child cannot be proven ({outcomes})", locator_identity, operation_identity)
-                if not all(outcome.terminal_success for outcome in outcomes):
-                    return _fail(CODE_CHILD_REJECTED, "conflict children are not all terminal-success", locator_identity, operation_identity, outcomes)
-                return _decision(
-                    CLASSIFICATION_AWAITING_RESOLUTION,
-                    RESULT_CLEAN_OR_RECOVERABLE,
-                    locator=locator_identity,
-                    operation=operation_identity,
-                    child_outcomes=outcomes,
-                    conflict_pair=_decode_pair(intent),
+            if not {"candidate", "active"} <= set(children):
+                return _fail(
+                    CODE_CHILDREN_DECLARATION_MISSING,
+                    "activate_provisional requires candidate and active children",
+                    locator_identity, operation_identity,
                 )
+            outcomes = await self._verify_named_children(
+                accessor, locator, intent, ("candidate", "active"),
+            )
+            if isinstance(outcomes, str):
+                return _fail(outcomes, f"conflict child cannot be proven ({outcomes})", locator_identity, operation_identity)
+            if not all(outcome.terminal_success for outcome in outcomes):
+                return _fail(CODE_CHILD_REJECTED, "conflict children are not all terminal-success", locator_identity, operation_identity, outcomes)
+            return _decision(
+                CLASSIFICATION_AWAITING_RESOLUTION,
+                RESULT_CLEAN_OR_RECOVERABLE,
+                locator=locator_identity,
+                operation=operation_identity,
+                child_outcomes=outcomes,
+                conflict_pair=_decode_pair(intent),
+            )
         if kind == "resolve_activation_conflict":
             return _fail(CODE_UNPROVEN_COMBINATION, "resolution requires the transferred phase", locator_identity, operation_identity)
         if kind not in _SIMPLE_ORIGINAL_CHILD_KINDS:
@@ -595,6 +630,37 @@ class ActiveSessionCoordinationInspector:
         )
         if isinstance(outcomes, str):
             return _fail(outcomes, f"conflict child cannot be proven ({outcomes})", locator_identity, operation_identity)
+        for outcome in outcomes:
+            if not outcome.envelope_present:
+                return _fail(
+                    CODE_CHILD_MISSING,
+                    f"conflict child {outcome.child_operation_id!r} has no envelope",
+                    locator_identity, operation_identity, outcomes,
+                )
+            if outcome.unknown:
+                return _fail(
+                    CODE_CHILD_UNKNOWN,
+                    f"conflict child {outcome.child_operation_id!r} outcome is unknown",
+                    locator_identity, operation_identity, outcomes,
+                )
+            if outcome.pending:
+                return _fail(
+                    CODE_CHILD_PENDING,
+                    f"conflict child {outcome.child_operation_id!r} outcome is pending",
+                    locator_identity, operation_identity, outcomes,
+                )
+            if outcome.terminal_rejected:
+                return _fail(
+                    CODE_CHILD_REJECTED,
+                    f"conflict child {outcome.child_operation_id!r} is terminal-rejected",
+                    locator_identity, operation_identity, outcomes,
+                )
+            if not outcome.terminal_success:
+                return _fail(
+                    CODE_CHILD_MISSING,
+                    f"conflict child {outcome.child_operation_id!r} has no terminal-success receipt",
+                    locator_identity, operation_identity, outcomes,
+                )
         facts = await self._load_pair_sessions(accessor, pair)
         if isinstance(facts, str):
             return _fail(facts, f"conflict Session cannot be proven ({facts})", locator_identity, operation_identity)
@@ -630,18 +696,45 @@ class ActiveSessionCoordinationInspector:
         )
         if isinstance(outcomes, str):
             return _fail(outcomes, f"resolution child cannot be proven ({outcomes})", locator_identity, operation_identity)
-        if not all(outcome.terminal_success for outcome in outcomes):
-            return _fail(CODE_CHILD_REJECTED, "resolution children are not all terminal-success", locator_identity, operation_identity, outcomes)
-        winner_fact = await self._load_session_fact_for(accessor, pair.active_space_id, pair.active_session_id)
+        for outcome in outcomes:
+            if not outcome.terminal_success:
+                return _fail(
+                    CODE_CHILD_REJECTED,
+                    f"resolution child {outcome.child_operation_id!r} is not terminal-success",
+                    locator_identity, operation_identity, outcomes,
+                )
+        winner_space, winner_session = _child_identity_for_role(pair, "winner", intent)
+        loser_space, loser_session = _child_identity_for_role(pair, "loser", intent)
+        if winner_space is None or loser_space is None:
+            return _fail(CODE_CONFLICT_PAIR_INVALID, "resolution pair cannot name winner/loser", locator_identity, operation_identity)
+        winner_fact = await self._load_session_fact_for(accessor, winner_space, winner_session)
         if isinstance(winner_fact, str):
             return _fail(winner_fact, f"winner Session cannot be proven ({winner_fact})", locator_identity, operation_identity)
+        loser_fact = await self._load_session_fact_for(accessor, loser_space, loser_session)
+        if isinstance(loser_fact, str):
+            return _fail(loser_fact, f"loser Session cannot be proven ({loser_fact})", locator_identity, operation_identity)
+        # Resolution outcome proof (TS2 plan lines 308-314, 3047): the winner
+        # keeps running as the sole authoritative Session and the loser is
+        # ended interrupted and marked invalid with the typed reason.
+        if not winner_fact.session_present:
+            return _fail(CODE_SESSION_MISSING, "winner Session is missing", locator_identity, operation_identity, outcomes)
+        if winner_fact.ended:
+            return _fail(CODE_SESSION_UNEXPECTED_TERMINAL, "winner Session has already ended", locator_identity, operation_identity, outcomes)
+        if winner_fact.ownership_state != "authoritative":
+            return _fail(CODE_SESSION_OWNERSHIP_INVALID, "winner Session ownership is not authoritative", locator_identity, operation_identity, outcomes)
+        if not loser_fact.session_present:
+            return _fail(CODE_SESSION_MISSING, "loser Session is missing", locator_identity, operation_identity, outcomes)
+        if not loser_fact.ended:
+            return _fail(CODE_SESSION_UNEXPECTED_NONTERMINAL, "loser Session has not ended", locator_identity, operation_identity, outcomes)
+        if loser_fact.validity != "invalid" or loser_fact.validity_reason != "activation_conflict_loser":
+            return _fail(CODE_SESSION_INVALID_MARKER, "loser Session is not marked invalid (activation_conflict_loser)", locator_identity, operation_identity, outcomes)
         return _decision(
             CLASSIFICATION_RECOVERABLE_CLAIMING,
             RESULT_CLEAN_OR_RECOVERABLE,
             locator=locator_identity,
             operation=operation_identity,
             child_outcomes=outcomes,
-            session_facts=(winner_fact,) if winner_fact.session_present else (),
+            session_facts=(winner_fact, loser_fact),
             conflict_pair=pair,
         )
 
@@ -671,7 +764,15 @@ class ActiveSessionCoordinationInspector:
             return CODE_SPACE_UNREADABLE
         if row is None:
             return SessionRecoveryFact(space_id, session_id, False, None, None)
-        return SessionRecoveryFact(space_id, session_id, True, row.ended_at is not None, row.ownership_state)
+        return SessionRecoveryFact(
+            space_id,
+            session_id,
+            True,
+            row.ended_at is not None,
+            row.ownership_state,
+            row.validity,
+            row.validity_reason,
+        )
 
     async def _load_pair_sessions(
         self, accessor: "_SpaceAccessor", pair: ConflictPairFact
@@ -698,6 +799,7 @@ class ActiveSessionCoordinationInspector:
             space_id=str(locator["space_id"]),
             session_id=str(locator["session_id"]),
             child_id=str(operation["operation_id"]),
+            payload_hash=str(operation["payload_hash"]),
         )
 
     async def _verify_named_children(
@@ -709,10 +811,12 @@ class ActiveSessionCoordinationInspector:
     ) -> tuple[SpaceChildOutcome, ...] | str:
         children = _decode_children(intent)
         if children is None:
+            if "children" in intent:
+                return CODE_CHILDREN_DECLARATION_INVALID
             return CODE_CHILDREN_DECLARATION_MISSING
         if not set(roles) <= set(children):
             return CODE_CHILDREN_DECLARATION_MISSING
-        child_ids = [children[role] for role in roles]
+        child_ids = [children[role].operation_id for role in roles]
         if len(set(child_ids)) != len(child_ids):
             return CODE_CHILDREN_DECLARATION_CONFLICT
         pair = _decode_pair(intent)
@@ -723,9 +827,10 @@ class ActiveSessionCoordinationInspector:
             space_id, session_id = _child_identity_for_role(pair, role, intent)
             if space_id is None:
                 return CODE_CONFLICT_PAIR_INVALID
+            declaration = children[role]
             outcome = await self._verify_child(
                 accessor, role=role, space_id=space_id, session_id=session_id,
-                child_id=children[role],
+                child_id=declaration.operation_id, payload_hash=declaration.payload_hash,
             )
             if isinstance(outcome, str):
                 return outcome
@@ -740,6 +845,7 @@ class ActiveSessionCoordinationInspector:
         space_id: str,
         session_id: str,
         child_id: str,
+        payload_hash: str,
     ) -> SpaceChildOutcome | str:
         if not accessor.has(space_id):
             return CODE_SPACE_VIEW_MISSING
@@ -756,6 +862,8 @@ class ActiveSessionCoordinationInspector:
             return SpaceChildOutcome(role, space_id, session_id, child_id, False, None, False, False, False, False)
         if envelope.space_id != space_id or envelope.session_id != session_id:
             return CODE_CHILD_IDENTITY_MISMATCH
+        if str(envelope.payload_hash) != payload_hash:
+            return CODE_CHILD_PAYLOAD_HASH_MISMATCH
         if receipt is None:
             return SpaceChildOutcome(role, space_id, session_id, child_id, True, None, False, False, False, False)
         state = str(receipt.state)
@@ -892,9 +1000,21 @@ def _validated_locator(row: dict[str, object]) -> dict[str, object] | None:
 def _validated_operation(
     row: dict[str, object], locator: dict[str, object]
 ) -> dict[str, object] | None:
-    if not _require_operation_id(row.get("operation_id")):
+    if _validated_operation_shape(row) is None:
         return None
     if str(row.get("operation_id")) != str(locator.get("operation_id")):
+        return None
+    return dict(row)
+
+
+def _validated_operation_shape(row: dict[str, object]) -> dict[str, object] | None:
+    """Structurally validate an operation row on its own.
+
+    ``operation_id`` binding to the locator is a separate concern
+    (``_validated_operation``); relation-chain links must pass this shape check
+    without requiring ``child.operation_id == parent.operation_id``.
+    """
+    if not _require_operation_id(row.get("operation_id")):
         return None
     kind = row.get("kind")
     if not isinstance(kind, str) or kind not in _KNOWN_KINDS:
@@ -968,11 +1088,16 @@ def _verify_intent(
 
 
 async def _verify_relation_chain(
-    engine: AsyncEngine, operation: dict[str, object], space_id: str
+    engine: AsyncEngine, operation: dict[str, object], space_id: str, session_id: str
 ) -> str | None:
     """Structurally validate ``related_operation_id`` links without guessing
     their semantics: each link must exist, be well formed, acyclic, and agree
-    on Space identity within a bounded depth."""
+    on Space/Session identity within a bounded depth.
+
+    Each related row is validated with ``_validated_operation_shape`` only —
+    the ``operation_id == locator.operation_id`` binding is a separate
+    concern owned by the inspect entry point, never applied to chain links.
+    """
     seen = {str(operation["operation_id"])}
     current = operation
     for _ in range(_MAX_RELATION_CHAIN_DEPTH):
@@ -985,11 +1110,11 @@ async def _verify_relation_chain(
         child = await _operation_row(engine, related)
         if child is None:
             return CODE_RELATION_MISSING
-        child = _validated_operation(_row_to_dict(child), current)
-        if child is None:
+        child_row = _row_to_dict(child)
+        if _validated_operation_shape(child_row) is None:
             return CODE_RELATION_INVALID
         try:
-            child_intent = json.loads(str(child["intent_json"]))
+            child_intent = json.loads(str(child_row["intent_json"]))
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
             return CODE_RELATION_INVALID
         if not isinstance(child_intent, dict):
@@ -997,12 +1122,12 @@ async def _verify_relation_chain(
         epoch = child_intent.get("ownership_epoch")
         if type(epoch) is not int or epoch <= 0:
             return CODE_RELATION_INVALID
-        if not isinstance(child_intent.get("space_id"), str) or not isinstance(child_intent.get("session_id"), str):
-            return CODE_RELATION_INVALID
         if child_intent.get("space_id") != space_id:
             return CODE_RELATION_INVALID
+        if child_intent.get("session_id") != session_id:
+            return CODE_RELATION_INVALID
         seen.add(related)
-        current = child
+        current = child_row
     return CODE_RELATION_INVALID
 
 
@@ -1036,17 +1161,28 @@ def _decode_pair(intent: Mapping[str, object]) -> ConflictPairFact | None:
     )
 
 
-def _decode_children(intent: Mapping[str, object]) -> dict[str, str] | None:
+def _decode_children(intent: Mapping[str, object]) -> dict[str, ChildDeclaration] | None:
+    """Decode the intent ``children`` declaration.
+
+    Each entry must be an object ``{"operation_id": ..., "payload_hash": ...}``
+    so the authority can prove the exact envelope payload identity.  A
+    string-only declaration (no payload hash) has no provable source and is
+    treated as invalid (the caller maps it to ``children_declaration_invalid``).
+    """
     raw = intent.get("children")
     if raw is None:
         return None
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or not raw:
         return None
-    children: dict[str, str] = {}
-    for role, child_id in raw.items():
-        if role not in _CHILD_ROLES or not isinstance(child_id, str) or not child_id:
+    children: dict[str, ChildDeclaration] = {}
+    for role, value in raw.items():
+        if role not in _CHILD_ROLES or not isinstance(value, dict):
             return None
-        children[role] = child_id
+        operation_id = value.get("operation_id")
+        payload_hash = value.get("payload_hash")
+        if not _require_operation_id(operation_id) or not _require_payload_hash(payload_hash):
+            return None
+        children[role] = ChildDeclaration(str(operation_id), str(payload_hash))
     return children
 
 
