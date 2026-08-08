@@ -4,6 +4,7 @@ import inspect
 import os
 import shutil
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -325,7 +326,7 @@ class RecoveryCoordinator:
                 if item.kind.endswith("db"):
                     import sqlite3
 
-                    with sqlite3.connect(path) as connection:
+                    with closing(sqlite3.connect(path)) as connection:
                         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                             failures.append(f"integrity:{relative}")
                 if path.stat().st_size != item.size or sha256_file(path) != item.sha256:
