@@ -1,9 +1,9 @@
 """Immutable recovery snapshot contracts."""
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping
-import re
 
 
 @dataclass(frozen=True, slots=True)
