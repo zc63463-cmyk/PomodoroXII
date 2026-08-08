@@ -1,10 +1,10 @@
 """SQLite online-backup helpers."""
 
-from dataclasses import dataclass
 import hashlib
-from pathlib import Path
 import os
 import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
 
 
 class SnapshotIntegrityError(RuntimeError):

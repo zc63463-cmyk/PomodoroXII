@@ -1,9 +1,8 @@
 """Canonical manifest serialization and validation."""
 
-from dataclasses import asdict
 import json
+from dataclasses import asdict
 from pathlib import Path, PurePosixPath
-import re
 
 from .contracts import MetaSnapshot, SnapshotFile, SnapshotManifest, SpaceSnapshot
 from .sqlite_copy import sha256_file
@@ -47,7 +46,12 @@ def manifest_dict(manifest: SnapshotManifest) -> dict[str, object]:
 
 
 def canonical_json(manifest: SnapshotManifest) -> bytes:
-    return (json.dumps(manifest_dict(manifest), sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    return (
+        json.dumps(
+            manifest_dict(manifest), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 def write_manifest(root: Path, manifest: SnapshotManifest) -> str:
@@ -69,14 +73,34 @@ def parse_manifest(payload: bytes | str) -> SnapshotManifest:
         raise ValueError("manifest is not canonical")
     meta = raw["meta"]
     return SnapshotManifest(
-        schema_version=raw["schema_version"], created_at=raw["created_at"], source_fence=raw["source_fence"],
-        catalog_hash=raw["catalog_hash"], catalog_entry_count=raw["catalog_entry_count"],
+        schema_version=raw["schema_version"],
+        created_at=raw["created_at"],
+        source_fence=raw["source_fence"],
+        catalog_hash=raw["catalog_hash"],
+        catalog_entry_count=raw["catalog_entry_count"],
         catalog_entity_types=tuple(raw["catalog_entity_types"]),
-        meta=MetaSnapshot(meta["schema_head"], meta["active_session_coordination"], meta["effort_projection"]),
-        spaces=tuple(SpaceSnapshot(item["space_id"], item["space_head"], item["index_schema_version"], item["sync_waterline"], item["entity_counts"], item["note_hashes"]) for item in raw["spaces"]),
-        files=tuple(SnapshotFile(item["relative_path"], item["size"], item["sha256"], item["kind"]) for item in raw["files"]),
+        meta=MetaSnapshot(
+            meta["schema_head"], meta["active_session_coordination"], meta["effort_projection"]
+        ),
+        spaces=tuple(
+            SpaceSnapshot(
+                item["space_id"],
+                item["space_head"],
+                item["index_schema_version"],
+                item["sync_waterline"],
+                item["entity_counts"],
+                item["note_hashes"],
+            )
+            for item in raw["spaces"]
+        ),
+        files=tuple(
+            SnapshotFile(item["relative_path"], item["size"], item["sha256"], item["kind"])
+            for item in raw["files"]
+        ),
     )
 
 
 def canonical_json_from_raw(raw: dict[str, object]) -> bytes:
-    return (json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    return (
+        json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+    ).encode("utf-8")
