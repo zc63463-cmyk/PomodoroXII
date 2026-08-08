@@ -44,6 +44,25 @@ class _Catalog:
         ]
 
 
+class _ActiveInspector:
+    def __init__(self) -> None:
+        self.receipt = {
+            "classification": "empty",
+            "result": "clean_or_recoverable",
+        }
+
+    async def inspect_read_only(self, _meta):
+        return self.receipt
+
+
+class _EffortCompiler:
+    def __init__(self) -> None:
+        self.mismatches: tuple[object, ...] = ()
+
+    async def verify_all(self, _scope):
+        return self.mismatches
+
+
 def _sqlite(path: Path, value: str = "seed") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path)) as connection:
@@ -113,6 +132,8 @@ def _coordinator(tmp_path: Path):
             catalog=_Catalog(),
             meta=meta,
             spaces=[space],
+            active_coordination_inspector=_ActiveInspector(),
+            effort_projection_compiler=_EffortCompiler(),
         ),
         leases,
         active_root,
@@ -286,7 +307,7 @@ async def test_snapshot_enumerates_every_space_from_meta_registry(tmp_path: Path
                 "INSERT INTO spaces VALUES (?, ?, ?)",
                 ("beta", str(beta_root / "space.db"), str(beta_root / "notes")),
             )
-    coordinator.spaces = None
+    coordinator.spaces = [*coordinator.spaces, SimpleNamespace(space_id="beta")]
 
     receipt = await coordinator.snapshot(tmp_path / "snapshots")
 
@@ -320,7 +341,7 @@ async def test_snapshot_under_lease_rejects_missing_fence(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_snapshot_rejects_unrecoverable_coordination(tmp_path: Path) -> None:
     coordinator, _leases, _active_root = _coordinator(tmp_path)
-    coordinator.meta.active_session_coordination = {
+    coordinator.active_coordination_inspector.receipt = {
         "classification": "manual_intervention",
         "result": "invalid",
     }
@@ -334,12 +355,21 @@ async def test_snapshot_rejects_unrecoverable_coordination(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_snapshot_rejects_effort_projection_drift(tmp_path: Path) -> None:
     coordinator, _leases, _active_root = _coordinator(tmp_path)
-    coordinator.meta.effort_projection = {"result": "drift"}
+    coordinator.effort_projection_compiler.mismatches = ("drift",)
 
     with pytest.raises(Exception) as raised:
         await coordinator.snapshot(tmp_path / "snapshots")
 
     assert raised.value.record.code == "snapshot_invalid"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_missing_recovery_inspectors(tmp_path: Path) -> None:
+    coordinator, _leases, _active_root = _coordinator(tmp_path)
+    coordinator.active_coordination_inspector = None
+
+    with pytest.raises(Exception, match="inspector is unavailable"):
+        await coordinator.snapshot(tmp_path / "snapshots")
 
 
 @pytest.mark.parametrize(
