@@ -34,7 +34,7 @@ class RecoveryCoordinator:
             raise DomainFailure("snapshot_invalid", "target is inside active root")
         target.mkdir(parents=True, exist_ok=True)
         if self.lease_coordinator is None:
-            return await self._snapshot_under_lease(target, None)
+            raise DomainFailure("snapshot_invalid", "global exclusive lease is required")
         from app.runtime.leases import LeaseMode
         lease = await self.lease_coordinator.acquire_global(LeaseMode.EXCLUSIVE, "recovery snapshot", 60.0)
         try:
@@ -83,24 +83,45 @@ class RecoveryCoordinator:
 
     def _database_sources(self):
         meta_db = getattr(self.meta, "db_path", None) or getattr(self.meta, "path", None) or self.source_root / "meta.db"
-        if Path(meta_db).exists():
-            yield meta_db, "meta/meta.db", "meta_db"
+        if not Path(meta_db).is_file() or Path(meta_db).is_symlink():
+            raise DomainFailure("snapshot_invalid", "meta database is missing or symlinked")
+        yield meta_db, "meta/meta.db", "meta_db"
         spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
         for space in spaces:
             sid = str(getattr(space, "space_id", getattr(space, "id", "space")))
             root = Path(getattr(space, "root", getattr(space, "path", self.source_root / "spaces" / sid)))
             db = getattr(space, "db_path", root / "space.db")
             idx = getattr(space, "index_db_path", root / "index.db")
-            if Path(db).exists(): yield db, f"spaces/{sid}/space.db", "space_db"
-            if Path(idx).exists(): yield idx, f"spaces/{sid}/index.db", "index_db"
+            if not Path(db).is_file() or Path(db).is_symlink(): raise DomainFailure("snapshot_invalid", f"space database missing: {sid}")
+            if not Path(idx).is_file() or Path(idx).is_symlink(): raise DomainFailure("snapshot_invalid", f"index database missing: {sid}")
+            yield db, f"spaces/{sid}/space.db", "space_db"
+            yield idx, f"spaces/{sid}/index.db", "index_db"
 
     def _asset_sources(self):
-        return ()
+        spaces = self.spaces.values() if isinstance(self.spaces, dict) else (self.spaces or ())
+        for space in spaces:
+            sid = str(getattr(space, "space_id", getattr(space, "id", "space")))
+            root = Path(getattr(space, "root", getattr(space, "path", self.source_root / "spaces" / sid))).resolve()
+            for base, kind in ((root / "notes", "note"), (root / "index", "index_asset")):
+                if not base.exists():
+                    continue
+                if base.is_symlink() or not base.is_dir():
+                    raise DomainFailure("snapshot_invalid", f"invalid asset directory: {base}")
+                for source in base.rglob("*"):
+                    if source.is_symlink() or not source.is_file():
+                        raise DomainFailure("snapshot_invalid", f"invalid asset: {source}")
+                    try:
+                        relative = source.resolve().relative_to(root)
+                    except ValueError as exc:
+                        raise DomainFailure("snapshot_invalid", "asset escapes source root") from exc
+                    yield source, f"spaces/{sid}/{relative.as_posix()}", kind
 
     def _build_manifest(self, files, lease) -> SnapshotManifest:
         catalog_hash = str(getattr(self.catalog, "hash", "0" * 64))
         types = tuple(sorted(getattr(spec, "effective_sync_entity_type", getattr(spec, "name", "")) for spec in (self.catalog.list() if self.catalog and hasattr(self.catalog, "list") else ())))
-        entry_count = 31 if len(types) != 31 else len(types)
+        if len(types) != 31 or {"task", "session", "taskQuickNote", "sessionQuickNote"} & set(types):
+            raise DomainFailure("snapshot_invalid", "catalog is not the S5 catalog")
+        entry_count = 31
         meta = MetaSnapshot(str(getattr(self.meta, "schema_head", "meta_002_active_session_locator")), {"classification": "empty", "result": "clean_or_recoverable"}, {"result": "verified"})
         return SnapshotManifest(1, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), int(getattr(lease, "fence", 0)), catalog_hash, entry_count, types, meta, (), tuple(sorted(files, key=lambda item: item.relative_path)))
 
@@ -114,6 +135,8 @@ class RecoveryCoordinator:
             digest = sha256_file(root / "manifest.json")
             expected = (root / "manifest.sha256").read_text(encoding="ascii").strip()
             if digest != expected: failures.append("manifest_sha256")
+            if (root / "manifest.json").read_bytes() != canonical_json(parse_manifest(payload)):
+                failures.append("manifest_noncanonical")
             manifest = parse_manifest(payload)
             listed = {validate_relative_path(item.relative_path): item for item in manifest.files}
             for relative, item in listed.items():
@@ -123,7 +146,7 @@ class RecoveryCoordinator:
             for path in root.rglob("*"):
                 if path.is_file() and path.name not in {"manifest.json", "manifest.sha256"} and path.relative_to(root).as_posix() not in listed:
                     failures.append(f"unlisted:{path.relative_to(root).as_posix()}")
-            if isinstance(snapshot, PublishedSnapshotReceipt) and digest != snapshot.manifest_sha256: failures.append("receipt_digest")
+            if isinstance(snapshot, PublishedSnapshotReceipt) and (digest != snapshot.manifest_sha256 or manifest != snapshot.manifest): failures.append("receipt_manifest")
         except Exception as exc:
             failures.append(type(exc).__name__)
         if failures or manifest is None:
