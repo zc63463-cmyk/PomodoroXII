@@ -200,7 +200,7 @@ describe('Sync v2 public boundary', () => {
     const sourceRoot = join(process.cwd(), 'src')
     const offenders = productionSyncSources(sourceRoot).filter((path) =>
       !path.endsWith(join('lib', 'sync', 'transport.ts'))
-      && readFileSync(path, 'utf8').includes('/api/v1/sync/v2/'),
+      && readFileSync(path, 'utf8').includes('/sync/v2/'),
     )
     expect(offenders.map((path) => relative(sourceRoot, path))).toEqual([])
   })
