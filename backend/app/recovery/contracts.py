@@ -3,7 +3,12 @@
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, Mapping
+
+
+def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    return MappingProxyType(dict(sorted(value.items())))
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +16,12 @@ class MetaSnapshot:
     schema_head: str
     active_session_coordination: object
     effort_projection: object
+
+    def __post_init__(self) -> None:
+        for name in ("active_session_coordination", "effort_projection"):
+            value = getattr(self, name)
+            if isinstance(value, Mapping):
+                object.__setattr__(self, name, _freeze_mapping(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +44,10 @@ class SpaceSnapshot:
     sync_waterline: str
     entity_counts: Mapping[str, int]
     note_hashes: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "entity_counts", _freeze_mapping(self.entity_counts))
+        object.__setattr__(self, "note_hashes", _freeze_mapping(self.note_hashes))
 
 
 @dataclass(frozen=True, slots=True)

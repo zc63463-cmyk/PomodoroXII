@@ -1,7 +1,7 @@
 """Canonical manifest serialization and validation."""
 
 import json
-from dataclasses import asdict
+from dataclasses import fields, is_dataclass
 from pathlib import Path, PurePosixPath
 
 from .contracts import MetaSnapshot, SnapshotFile, SnapshotManifest, SpaceSnapshot
@@ -19,8 +19,8 @@ def validate_relative_path(path: str | Path) -> str:
 
 
 def _obj(value: object) -> object:
-    if hasattr(value, "__dataclass_fields__"):
-        return {key: _obj(item) for key, item in asdict(value).items()}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _obj(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, MappingProxyType):
         return dict(value)
     if isinstance(value, dict):
