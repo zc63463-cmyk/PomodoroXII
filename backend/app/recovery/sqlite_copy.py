@@ -26,14 +26,11 @@ def sha256_file(path: Path) -> str:
 
 
 def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
     try:
-        descriptor = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    except OSError:
-        pass
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def fsync_file(path: Path) -> None:
