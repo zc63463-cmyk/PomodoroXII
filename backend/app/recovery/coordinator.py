@@ -42,6 +42,7 @@ class RecoveryCoordinator:
         index_schema=None,
         active_coordination_inspector=None,
         effort_projection_compiler=None,
+        recovery_view_factory=None,
         failpoint=None,
         **_unused,
     ) -> None:
@@ -57,6 +58,7 @@ class RecoveryCoordinator:
         self.index_schema = index_schema
         self.active_coordination_inspector = active_coordination_inspector
         self.effort_projection_compiler = effort_projection_compiler
+        self.recovery_view_factory = recovery_view_factory
         self.failpoint = failpoint or (lambda _name: None)
 
     async def snapshot(self, target: Path) -> PublishedSnapshotReceipt:
@@ -526,6 +528,7 @@ class RecoveryCoordinator:
                 registered_ids = self._registered_ids_from_snapshot(root / "meta" / "meta.db")
                 if registered_ids != tuple(space.space_id for space in manifest.spaces):
                     failures.append("space_registry")
+                await self._verify_recovery_inspections(root, manifest, failures)
             except DomainFailure as exc:
                 failures.append(exc.record.code)
             if isinstance(snapshot, PublishedSnapshotReceipt) and (
@@ -557,3 +560,36 @@ class RecoveryCoordinator:
                     "snapshot_invalid", "Meta Space registry is unavailable"
                 ) from exc
         return tuple(str(row[0]) for row in rows)
+
+    async def _verify_recovery_inspections(
+        self,
+        root: Path,
+        manifest: SnapshotManifest,
+        failures: list[str],
+    ) -> None:
+        if (
+            self.recovery_view_factory is None
+            or self.active_coordination_inspector is None
+            or self.effort_projection_compiler is None
+        ):
+            failures.append("recovery_inspector_unavailable")
+            return
+        meta_view = self.recovery_view_factory("meta", root / "meta" / "meta.db")
+        coordination = await self._inspect_async(
+            self.active_coordination_inspector,
+            meta_view,
+            "inspect_read_only",
+        )
+        if self._normalize_receipt(coordination) != dict(manifest.meta.active_session_coordination):
+            failures.append("active_session_coordination")
+        mismatches: list[object] = []
+        for space in manifest.spaces:
+            view = self.recovery_view_factory("space", root / "spaces" / space.space_id)
+            result = await self._inspect_async(
+                self.effort_projection_compiler,
+                view,
+                "verify_all",
+            )
+            mismatches.extend(result or ())
+        if mismatches:
+            failures.append("effort_projection")
