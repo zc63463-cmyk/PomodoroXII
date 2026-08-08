@@ -122,6 +122,7 @@ class RecoveryCoordinator:
             if not required.issubset({item.relative_path for item in files}):
                 raise DomainFailure("snapshot_invalid", "snapshot inventory is incomplete")
             payload = canonical_json(manifest)
+            published_manifest = parse_manifest(payload)
             (temporary / "manifest.json").write_bytes(payload)
             fsync_file(temporary / "manifest.json")
             digest = sha256_file(temporary / "manifest.json")
@@ -131,18 +132,22 @@ class RecoveryCoordinator:
             fsync_directory(temporary)
             self.failpoint("fsync")
             lease.assert_fence("global")
-            final = target / (
-                f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
-                f"{manifest.catalog_hash[:12]}-{uuid.uuid4().hex[:12]}"
+            final = (
+                target
+                / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{manifest.catalog_hash[:12]}"
             )
+            if final.exists():
+                raise DomainFailure("snapshot_invalid", "snapshot publication already exists")
             os.replace(temporary, final)
             self.failpoint("atomic_publish")
             fsync_directory(target)
-            return PublishedSnapshotReceipt(final.resolve(), manifest, digest)
+            return PublishedSnapshotReceipt(final.resolve(), published_manifest, digest)
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)
             if final is not None:
                 shutil.rmtree(final, ignore_errors=True)
+                if target.is_dir():
+                    fsync_directory(target)
             raise
 
     def _meta_db_path(self) -> Path:
@@ -509,6 +514,9 @@ class RecoveryCoordinator:
                 if path.stat().st_size != item.size or sha256_file(path) != item.sha256:
                     failures.append(f"file:{relative}")
             for path in root.rglob("*"):
+                if path.is_symlink():
+                    failures.append(f"symlink:{path.relative_to(root).as_posix()}")
+                    continue
                 if (
                     path.is_file()
                     and path.name not in {"manifest.json", "manifest.sha256"}
