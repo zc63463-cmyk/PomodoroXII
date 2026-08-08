@@ -11,13 +11,13 @@
   - `cdd5641` feat(recovery): add TS2 active-session recovery authority contract
   - `fcfd3e8` docs(recovery): finalize TS2 authority handoff report
   - `89ba1e5` fix(recovery): close active session authority proof gaps
-  - 本轮：`fix(recovery): enforce deterministic child operation identity`（最终 SHA 见提交后核对，第 2 节）
+  - 本轮：`dfcee09` fix(recovery): enforce deterministic child operation identity（提交后 `git rev-parse HEAD` 核对）
 - 主 worktree（只读，未写入）：`E:\DevTemp\pomodoroxii-boundaries\s5-next`，未创建分支/提交，**本轮仍未修改**
 
 ## 2. 分支和 worktree
 
 - worktree：`E:\DevTemp\pomodoroxii-boundaries\ts2-authority-wt`
-- 分支：`codex/ts2-active-session-authority`（HEAD 见第 1 节提交后核对值）
+- 分支：`codex/ts2-active-session-authority`（HEAD=`dfcee09`，提交后 `git rev-parse HEAD` 核对）
 - 遗留文件 `backend/fix_editable.py`：保留未动、未提交（editable 安装修复脚本，非本任务产物）
 
 ## 3. Authority 调查结论及文件行号
