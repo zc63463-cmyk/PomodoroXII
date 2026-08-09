@@ -317,7 +317,7 @@ async def test_resolve_activation_conflict_freezes_winner_loser(env) -> None:
     }
     command = _command(
         op, kind="resolve_activation_conflict", space_id="space-a",
-        session_id="fs-1", epoch=2, payload=payload,
+        session_id="fs-1", epoch=1, payload=payload,
     )
     await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
     operation = await _read_operation(engine, op)
