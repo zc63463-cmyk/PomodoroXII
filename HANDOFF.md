@@ -1,8 +1,12 @@
 # TS2 ActiveSession child-ID production contract — 交回报告
 
-最终状态：**READY FOR S5 INTEGRATION PATCH**
-（第 10 节记录本分支生产 REST / 路由挂载 / 聚合响应 / 跨 Space handle / durable receipt 全部完成；
-剩余为权威环境复核项：start 的 project/work_item 数据链与 resolve 真实 UoW 矩阵、HTTP-runtime 层）
+最终状态：**BLOCKED BY MISSING CONFLICT LOSER END CONTRACT**
+（第 10 节记录本轮完成：master-scoped runtime opener、真实 HTTP 精确 2xx、start 真实 UoW 数据链、
+envelope/receipt 决策表、cleanup fail-open 修复、child executor 旁路移除；
+BLOCKED 原因：resolve 的 loser child（end）在真实 policy
+`_compile_clock_transition._require_locator_claim` 被拒 —— child operation_id ≠ locator
+operation_id，且 `_reject_activation_conflict` 拒绝 conflict Session 的 end；
+policy.py 不在本任务允许修改列表，transferred 成功矩阵无法达成）
 
 ## 1. 真实基线、提交与 HEAD
 
@@ -18,7 +22,8 @@
   - `7ed6f8c` fix(focus-session): complete activate pair and aggregate response contract
   - `52c83ae` fix(focus-session): require durable child receipts and close multi-space handles
   - `bcdbf88` test(focus-session): cover production HTTP, real UoW and authority parity
-- 最终 HEAD（`git rev-parse HEAD`）：`bcdbf88973bdc00fb52bd6d223800ad09b2eb945`
+- 本分支提交（续，master-scoped / 真实 HTTP / resolve UoW 轮次）：见第 10 节提交列表
+- 最终 HEAD（`git rev-parse HEAD`）：见交回报告（提交后由 `git rev-parse HEAD` 提供，文档不声称包含自身 SHA）
 
 ## 2. 调查结论（writer 缺失确认）
 
@@ -139,46 +144,74 @@ routes 10 + mounting 5 + uow_integration 2 + handle_lifecycle 4，104.30s）。
 - S5 集成仍需单独 patch：构造 copied/live `space_views` 并经
   `inspect_read_only(meta_view, space_views=...)` 注入（authority 分支 5a 节）。
 
-## 10. 生产 REST / 路由挂载 / 聚合响应 / durable receipt 轮次（HEAD bcdbf88）
+## 10. master-scoped / 真实 HTTP / resolve UoW 轮次
 
-本轮完成（代码位置 + 测试名称）：
+### 完成
 
-- **生产路由挂载**：`routes/v1/__init__.py` `build_v1_router()` 挂载
-  `/api/v1/active-session`（14 个端点）；`active_session.py` 删除"生产未挂载"过时文档；
-  `create_app().openapi()` 验证 14 路径 + master 允许 / space / anonymous 拒绝。
-  测试：`test_active_session_mounting.py`（5 passed）。
-- **Activate pair wire schema**：`ActivateProvisionalPayload` 新增不可变
-  `ConflictPairIdentity`（active/candidate Space+Session，CommandId 字符集、两侧互异、
-  与 request anchor 一致校验）；`_map_activate_payload` 完整传递 pair。
-  测试：`test_http_activate_valid_pair_no_longer_422`（200 非 422）/ missing pair /
-  identical sides / anchor mismatch / invalid identity（全 422）。
-- **聚合响应**：coordinator 注入真实 `FocusSessionQuery`；`start`/`locate`/`pause`/`resume`/
-  `takeover`/note/plan/`end`/`resolve` 全部经 `_load_session_aggregate`（真实 query.load，
-  不伪造时间戳/默认数据；Session 缺失 fail-closed）；activate 返回真实双 Space aggregate
-  （`ActivationConflictResponse`）。修复 `_locator_view` 缺 ownerDeviceId/ownerTabId 的
-  wire bug。
-- **跨 Space handle 生命周期**：`get_active_session_coordinator` 改为 async generator，
-  request 级收集 cross-space handles，finally 全路径 `aclose()`（成功/child 失败/
-  CancelledError/provider 异常）；primary 由 `get_space_runtime_handle` 关闭、不重复。
-  测试：`test_active_session_handle_lifecycle.py`（4 passed）。
-- **durable child receipts**：`_execute_children` 生产分支 = 幂等复用（terminal-success
-  receipt 跳过）→ `_record_child_envelope`（真实 Session context work item，缺失
-  fail-closed）→ 真实 `uow.execute`（mutation）→ `_record_child_receipt`
-  （record_receipt mutation，payload command_id 保留为 child_id）→ 校验 receipt
-  terminal-success 才推进 phase。`child_executor` 仅 TEST-ONLY（必须返回 receipt state）。
-- **真实 UoW 集成**：`test_active_session_uow_integration.py`（2 passed）——真实
-  MutationUnitOfWork（CATALOG/compiler/interpreter/journal/recovery + 真实 SQLite Space）：
-  activate children 真实落 envelope/mutation/receipt → awaiting_resolution →
-  authority `inspect_read_only` 读回 **awaiting_resolution GREEN**（parity）；candidate
-  Session 缺失 → 真实 policy 拒绝 → phase 保持 claimed。
-- **Authority parity**：`test_authority_reads_coordinator_written_intent`——coordinator 写
-  intent + 真实 SQLite child 证据 → 完整 `inspect_read_only` 入口读回 awaiting_resolution。
-  同时修复 payload_hash 契约：coordinator 落库 hash 改为 authority 可重算的
-  `_contract_payload_hash`（业务子集，排除 pair/children）。
+- **master/space token 互斥解除（P0）**：`get_active_session_coordinator` 移除
+  `Depends(get_space_runtime_handle)`，改为 `Depends(require_master_token)` +
+  `get_mutation_uow`；provider 不再要求 space token（代码证据：
+  `contract_dependencies.get_active_session_coordinator` 依赖树无
+  `get_space_context`）。Space identity 由 coordinator 从 payload / Meta locator /
+  persisted pair 解析。
+- **master-authorized internal Space opener**：request 级单一 global lease
+  （`runtime.leases.acquire_global(SHARED, "active-session", 5)`）+ 每 Space
+  `AuthorizedSpaceScope.resolve(principal, space_id, "write")`（Meta registry 注册/
+  删除/路径 containment 校验，不拼接路径）+ `runtime.open_resolved(..., owns_global_lease=False)`；
+  同 Space 复用 handle；多 Space 稳定 ID 顺序；finally 先关 handle 再释放 global lease（LAST）。
+  修复 `asyncio.shield` 造成 lease Task 归属错误 + 重复 acquire_global 的 lease-order 违约。
+- **真实 HTTP 精确 2xx**（`test_active_session_http_integration.py` 7 passed，无 provider
+  override、真实 lifespan/bootstrap、真实 UoW）：
+  master start **201**（含 session aggregate，字段来自真实 Space DB）/ locate **200** /
+  空库 locate **404** / space token **403** / anonymous **403** / 未注册 Space **404**
+  （规范 AppError）/ duplicate 同 command+hash **201 幂等重放**。
+- **start 真实 UoW 数据链**：真实 API 创建 Space → project → depth-1 root work item →
+  depth-2 level2 work item → master start → coordinator 经真实
+  `MutationUnitOfWork.execute` 创建 FocusSession（policy `_compile_start` 校验
+  project/work_item 树）+ Meta claiming intent 正确时机持久化 + 返回真实
+  `FocusSessionQuery` aggregate。start 幂等重放（同 command_id + 同 payload_hash 返回
+  原状态；不同 hash 稳定冲突）。
+- **activate pair 矩阵**（`test_active_session_routes.py` 6 passed，真实 provider）：
+  合法 pair **200**（ActivationConflictResponse，真实双 Space aggregate）/ 缺 pair /
+  相同两侧 / anchor mismatch / 非法 identity 全 **422**；Idempotency-Key mismatch 4xx。
+- **envelope/receipt 决策表**：`ChildExecutionDecision`（execute / already_succeeded /
+  terminal_rejected / original_unknown / recovery_required）；执行前查 envelope+receipt：
+  envelope 缺失插一次 / 已存在校验 identity+hash+replay+target（mismatch 稳定冲突，
+  绝不重复 INSERT）；receipt succeeded 跳过 / failed|conflict|abandoned fail closed /
+  pending|unknown|missing 先 `_query_child_original`（mutation journal terminal batch）
+  再决定，仍 unknown → recovery_required；receipt 只基于真实 UoW outcome（rejected →
+  failed/conflict receipt；CancelledError/其它 → unknown receipt）。
+- **coordinator 全部 handle 访问包 mutation lease**（真实 runtime 的 engine 仅在 lease 内
+  激活）；`_execute_children` 每 child 一个 mutation lease（UoW 复用同 lease）。
+- **cleanup fail-open 修复**：`_close_opened_handles` 尝试关闭全部 handle（一个失败不阻断
+  其它）、收集 failures、无主异常（含 GeneratorExit/aclose）时传播稳定
+  `ActiveSessionCoordinationError`、有业务异常时保留主异常并记录 log。
+- **child executor 旁路移除（方案 A）**：`ProductionActiveSessionCoordinator.__init__`
+  不再接受任何 child callback；coordinator 测试全部改用真实 MutationUnitOfWork。
+- **authority parity**：`test_authority_reads_coordinator_written_intent`（真实 UoW 证据 →
+  `inspect_read_only` 读回 awaiting_resolution GREEN）+ uow_integration 2 测试同。
 
-### 本轮边界
+### BLOCKED 项（resolve 成功矩阵）
 
-- S5 worktree（`E:/DevTemp/pomodoroxii-boundaries/s5-next`）**未修改**；未进入 S5 Task 2；
-  未修改 integration 分支；`backend/app/recovery/**` 未触碰（authority 共享 contract 导入
-  仅限本分支 `recovery_authority.py`）。
-- 最终状态：**READY FOR S5 INTEGRATION PATCH**（权威环境复核项见第 8 节）。
+- **`test_resolve_activation_conflict_freezes_winner_loser`（coordinator 测试，真实 UoW）**：
+  winner child（resolve_activation_conflict）真实成功（receipt succeeded）；**loser child
+  （end）被真实 policy 拒绝**：`_compile_clock_transition` 首行
+  `_require_locator_claim(context, request, require_owner=True)` 要求 child operation_id
+  == locator.operation_id（child 是确定性派生 ID，恒不匹配）→ `stale_session_owner`；
+  且 `_reject_activation_conflict` 拒绝 conflict Session 的 end。Meta phase 保持
+  `claimed`（不 transferred）。**policy.py 不在本任务允许修改列表** —— loser 终结需要
+  policy 新增 conflict-loser end 语义（豁免 locator claim / 允许 conflict→ended），
+  属 S5 integration patch 或后续轮次。
+
+### 门禁真实输出
+
+- focused 八件套：**119 passed**（373.94s）
+- 回归：migration+contracts+hash **59 passed + 2 skipped**（30.90s）/
+  policy **49 passed**（单跑 83.61s；批量时 1 个 setup 迁移文件锁竞态，环境性）/
+  mutation_recovery **53 passed**
+- Ruff（focus_session + routes/v1 + deps.py + 7 测试文件）：**All checks passed!**
+- compileall（focus_session + routes/v1 + deps.py）：**OK**
+- OpenAPI（test_openapi_contract.py）：**44 passed**
+- collect-only：**2347 tests collected**
+- git diff --check：**OK**
+- S5 worktree 未修改；未进入 S5 Task 2；`backend/fix_editable.py` 保留未提交。
