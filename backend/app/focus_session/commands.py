@@ -47,6 +47,7 @@ HASH_GUARD_FIELDS = (
     "ownership_epoch",
     "expected_ownership_epoch",
     "cached_ownership_epoch",
+    "resolution_proof",
 )
 RECEIPT_RESERVATION_STATES = (
     "not_needed", "pending", "succeeded", "failed", "conflict", "unknown",
