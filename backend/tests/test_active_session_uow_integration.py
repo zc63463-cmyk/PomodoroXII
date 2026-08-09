@@ -308,6 +308,14 @@ def _real_handle(db_path: str, space_id: str, root: Path) -> SimpleNamespace:
         assert (purpose, timeout_seconds) == ("mutation", 5)
         yield space_lease
 
+    @asynccontextmanager
+    async def mutation_lease(purpose: str, timeout_seconds: int):
+        if space_lease is not None:
+            yield space_lease
+        else:
+            async with exclusive_space_resources(purpose, timeout_seconds) as lease:
+                yield lease
+
     handle = SimpleNamespace(
         scope=SimpleNamespace(space_id=space_id),
         file_system=_DiskProjection(root / f"projection-{space_id}"),
@@ -319,6 +327,7 @@ def _real_handle(db_path: str, space_id: str, root: Path) -> SimpleNamespace:
         _engine=engine,
         _stages=stage_store,
         exclusive_space_resources=exclusive_space_resources,
+        mutation_lease=mutation_lease,
     )
     return handle
 
