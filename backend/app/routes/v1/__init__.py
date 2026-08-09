@@ -20,6 +20,7 @@ def build_v1_router() -> APIRouter:
     )
 
     # Sub-routers (alphabetically sorted; mounted in groups below).
+    from app.routes.v1.active_session import router as active_session_router
     from app.routes.v1.auth import router as auth_router
     from app.routes.v1.folders import router as folders_router
     from app.routes.v1.habits import router as habits_router
@@ -67,6 +68,11 @@ def build_v1_router() -> APIRouter:
     router.include_router(work_items_router, prefix="/work-items", tags=["work-items"])
     router.include_router(
         work_item_notes_router, prefix="/work-items", tags=["work-item-notes"]
+    )
+
+    # Global ActiveSession coordination (master token required).
+    router.include_router(
+        active_session_router, prefix="/active-session", tags=["active-session"]
     )
 
     return router
