@@ -178,32 +178,38 @@ class ProductionActiveSessionCoordinator:
             locator = await session.get(ActiveSessionLocator, "active")
             if locator is not None:
                 raise ActiveSessionCoordinationError("an ActiveSession is already claimed")
-            session.add(
-                ActiveSessionLocator(
-                    singleton_key="active",
-                    space_id=command.space_id,
-                    session_id=command.session_id,
-                    operation_id=operation_id,
-                    state="claiming",
-                    owner_device_id=str(command.payload.get("owner_device_id", "")),
-                    owner_tab_id=str(command.payload.get("owner_tab_id", "")),
-                    ownership_epoch=command.ownership_epoch or 1,
-                    lease_expires_at=_lease_expiry(now),
-                    updated_at=now,
+            try:
+                session.add(
+                    ActiveSessionLocator(
+                        singleton_key="active",
+                        space_id=command.space_id,
+                        session_id=command.session_id,
+                        operation_id=operation_id,
+                        state="claiming",
+                        owner_device_id=str(command.payload.get("owner_device_id", "")),
+                        owner_tab_id=str(command.payload.get("owner_tab_id", "")),
+                        ownership_epoch=command.ownership_epoch or 1,
+                        lease_expires_at=_lease_expiry(now),
+                        updated_at=now,
+                    )
                 )
-            )
-            session.add(
-                ActiveSessionOperation(
-                    operation_id=operation_id,
-                    kind="start",
-                    payload_hash=payload_hash,
-                    intent_json=canonical_json_bytes(intent).decode("ascii"),
-                    phase="claimed",
-                    created_at=now,
-                    updated_at=now,
+                session.add(
+                    ActiveSessionOperation(
+                        operation_id=operation_id,
+                        kind="start",
+                        payload_hash=payload_hash,
+                        intent_json=canonical_json_bytes(intent).decode("ascii"),
+                        phase="claimed",
+                        created_at=now,
+                        updated_at=now,
+                    )
                 )
-            )
-            await session.commit()
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                raise ActiveSessionCoordinationError(
+                    "concurrent claimant won the singleton ActiveSession slot"
+                ) from exc
         return ActiveSessionView(value={"locator": self._locator_view(
             ActiveSessionLocator(
                 singleton_key="active", space_id=command.space_id,
@@ -309,8 +315,15 @@ class ProductionActiveSessionCoordinator:
     async def resolve_activation_conflict(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
-        """Persist the resolution intent (winner/loser IDs + hashes) before any
-        child executes, then run winner -> loser children to ``transferred``."""
+        """Crash-safe resolution: persist the resolution intent in the
+        provable *prepared* phase (``claimed`` — the Meta schema has no
+        resolution-specific enum), run winner -> loser children, and only when
+        both receipts are terminal-success CAS the operation to
+        ``transferred`` in a separate Meta transaction (TS2 plan L3047-3048).
+        A failure at any child leaves the operation ``claimed`` with all
+        evidence preserved."""
+        from sqlalchemy import text as sa_text
+
         operation_id = self._require_operation_id(command.command_id)
         pair = _conflict_pair(command.payload)
         winner_role = command.payload.get("winner_role")
@@ -344,13 +357,35 @@ class ProductionActiveSessionCoordinator:
                 raise ActiveSessionCoordinationError(
                     "resolve_activation_conflict requires a claiming locator"
                 )
+            if locator.operation_id != str(command.payload.get("related_operation_id", locator.operation_id)):
+                raise ActiveSessionCoordinationError(
+                    "resolution must bind the original conflict operation"
+                )
+            if (
+                locator.space_id != pair["active"]["space_id"]
+                or locator.session_id != pair["active"]["session_id"]
+            ):
+                raise ActiveSessionCoordinationError(
+                    "resolution pair does not match the locator anchor"
+                )
+            if command.ownership_epoch is not None and (
+                locator.ownership_epoch != command.ownership_epoch
+            ):
+                raise ActiveSessionCoordinationError("resolution epoch does not match the locator")
+            original = await session.get(ActiveSessionOperation, locator.operation_id)
+            if original is None or original.kind != "activate_provisional":
+                raise ActiveSessionCoordinationError(
+                    "resolution requires the original activate_provisional operation"
+                )
+            # 1) prepared phase: reuse the provable ``claimed`` enum (no
+            #    resolution-specific phase exists in the Meta schema).
             session.add(
                 ActiveSessionOperation(
                     operation_id=operation_id,
                     kind="resolve_activation_conflict",
                     payload_hash=self._require_payload_hash(command.payload_hash),
                     intent_json=canonical_json_bytes(intent).decode("ascii"),
-                    phase="transferred",
+                    phase="claimed",
                     related_operation_id=locator.operation_id,
                     created_at=now,
                     updated_at=now,
@@ -361,34 +396,73 @@ class ProductionActiveSessionCoordinator:
         child_payloads[ActiveSessionChildRole.WINNER]["session_id"] = winner_side["session_id"]
         child_payloads[ActiveSessionChildRole.LOSER]["space_id"] = loser_side["space_id"]
         child_payloads[ActiveSessionChildRole.LOSER]["session_id"] = loser_side["session_id"]
+        # 2) execute winner then loser; any failure leaves the operation claimed
         await self._execute_children(
             pair, operation_id, children, child_payloads
         )
-        return ActiveSessionView(value={"locator": self._locator_view(
-            ActiveSessionLocator(
-                singleton_key="active", space_id=pair["active"]["space_id"],
-                session_id=pair["active"]["session_id"], operation_id=operation_id,
-                state="claiming",
-                owner_device_id=str(command.payload.get("owner_device_id", "")),
-                owner_tab_id=str(command.payload.get("owner_tab_id", "")),
-                ownership_epoch=command.ownership_epoch or 1,
-                lease_expires_at=_lease_expiry(now), updated_at=now,
+        # 3) CAS: claimed -> transferred only after both children succeeded
+        async with self._meta_session_factory() as session:
+            result = await session.execute(
+                sa_text(
+                    "UPDATE active_session_operations SET phase='transferred', "
+                    "updated_at=:now WHERE operation_id=:oid AND phase='claimed' "
+                    "AND related_operation_id=:related"
+                ),
+                {
+                    "now": _canonical_utc_now(self._clock),
+                    "oid": operation_id,
+                    "related": locator.operation_id,
+                },
             )
-        )})
+            await session.commit()
+            if result.rowcount != 1:
+                raise ActiveSessionCoordinationError(
+                    "resolution CAS failed: operation was not in claimed phase"
+                )
+            operation = await session.get(ActiveSessionOperation, operation_id)
+        return ActiveSessionView(value={
+            "locator": self._locator_view(locator),
+            "operation": self._operation_view(operation),
+        })
 
     async def end(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
+        from sqlalchemy import text as sa_text
+
         operation_id = self._require_operation_id(command.command_id)
         now = _canonical_utc_now(self._clock)
         intent = self._intent(operation_id, "end", command, business=dict(command.payload))
         async with self._meta_session_factory() as session:
+            # database-level CAS: only the owning locator may enter releasing
+            result = await session.execute(
+                sa_text(
+                    "UPDATE active_session_locator SET state='releasing', "
+                    "updated_at=:now "
+                    "WHERE singleton_key='active' AND operation_id=:oid "
+                    "AND state IN ('active','claiming')"
+                ),
+                {"now": now, "oid": operation_id},
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                raise ActiveSessionCoordinationError(
+                    "end requires the owning active/claiming locator"
+                )
             locator = await session.get(ActiveSessionLocator, "active")
-            if locator is None:
-                raise ActiveSessionCoordinationError("end requires an active locator")
-            if locator.state == "active":
-                locator.state = "releasing"
-                locator.updated_at = now
+            if (
+                command.ownership_epoch is not None
+                and locator is not None
+                and locator.ownership_epoch != command.ownership_epoch
+            ):
+                await session.rollback()
+                raise ActiveSessionCoordinationError(
+                    "end ownership epoch does not match the locator"
+                )
+            existing = await session.get(ActiveSessionOperation, operation_id)
+            if existing is not None:
+                await session.commit()
+                return ActiveSessionView(value={"locator": self._locator_view(locator)})
             session.add(
                 ActiveSessionOperation(
                     operation_id=operation_id,
@@ -400,7 +474,13 @@ class ProductionActiveSessionCoordinator:
                     updated_at=now,
                 )
             )
-            await session.commit()
+            try:
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                raise ActiveSessionCoordinationError(
+                    f"duplicate end operation {operation_id!r} with a different payload"
+                ) from exc
         return ActiveSessionView(value={"locator": self._locator_view(locator)})
 
     async def heartbeat(
@@ -455,29 +535,64 @@ class ProductionActiveSessionCoordinator:
     async def _touch(
         self, command: ActiveSessionCommand, kind: str
     ) -> ActiveSessionView:
+        from sqlalchemy import text as sa_text
+
         operation_id = self._require_operation_id(command.command_id)
+        payload_hash = self._require_payload_hash(command.payload_hash)
         now = _canonical_utc_now(self._clock)
         intent = self._intent(operation_id, kind, command, business=dict(command.payload))
         async with self._meta_session_factory() as session:
-            locator = await session.get(ActiveSessionLocator, "active")
-            if locator is None or locator.operation_id != operation_id:
+            # database-level CAS: only the owning, live locator may advance
+            result = await session.execute(
+                sa_text(
+                    "UPDATE active_session_locator SET updated_at=:now, "
+                    "lease_expires_at=:lease "
+                    "WHERE singleton_key='active' AND operation_id=:oid"
+                ),
+                {
+                    "now": now,
+                    "lease": _lease_expiry(now),
+                    "oid": operation_id,
+                },
+            )
+            if result.rowcount != 1:
+                await session.rollback()
                 raise ActiveSessionCoordinationError(
                     f"{kind} requires the owning locator of this operation"
                 )
-            locator.updated_at = now
-            locator.lease_expires_at = _lease_expiry(now)
+            locator = await session.get(ActiveSessionLocator, "active")
+            if (
+                command.ownership_epoch is not None
+                and locator is not None
+                and locator.ownership_epoch != command.ownership_epoch
+            ):
+                await session.rollback()
+                raise ActiveSessionCoordinationError(
+                    f"{kind} ownership epoch does not match the locator"
+                )
+            existing = await session.get(ActiveSessionOperation, operation_id)
+            if existing is not None:
+                # idempotent replay of the same command returns the prior row
+                await session.commit()
+                return ActiveSessionView(value={"locator": self._locator_view(locator)})
             session.add(
                 ActiveSessionOperation(
                     operation_id=operation_id,
                     kind=kind,
-                    payload_hash=self._require_payload_hash(command.payload_hash),
+                    payload_hash=payload_hash,
                     intent_json=canonical_json_bytes(intent).decode("ascii"),
                     phase="completed",
                     created_at=now,
                     updated_at=now,
                 )
             )
-            await session.commit()
+            try:
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                raise ActiveSessionCoordinationError(
+                    f"duplicate operation {operation_id!r} with a different payload"
+                ) from exc
             return ActiveSessionView(value={"locator": self._locator_view(locator)})
 
     async def _execute_children(

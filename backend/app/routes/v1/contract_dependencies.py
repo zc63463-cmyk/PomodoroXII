@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 
-from app.deps import get_mutation_uow
+from app.deps import get_mutation_uow, get_space_runtime_handle
 from app.errors import AppError, IdempotencyConflictError, ValidationError, to_wire_json
 from app.mutation.types import validate_operation_id
+from app.runtime.space import SpaceRuntimeHandle
 from app.schemas.task_space import TaskSpaceAcceptedResponse
 from app.task_space.contracts import TaskSpaceAccepted, TaskSpaceRejected
 from app.task_space.module import DefaultTaskSpaceCommandModule
@@ -59,9 +60,56 @@ def get_focus_session_module(
     return DefaultFocusSessionModule(uow=uow, query=query, reconciler=reconciler)
 
 
-def get_active_session_coordinator() -> "ActiveSessionCoordinator":
-    """Return the installed ActiveSessionCoordinator or fail closed."""
-    raise RuntimeError("ActiveSessionCoordinator provider is not installed")
+def get_active_session_coordinator(
+    request: Request,
+    uow=Depends(get_mutation_uow),
+    handle: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+) -> "ActiveSessionCoordinator":
+    """Construct the production ActiveSessionCoordinator over the real Meta
+    session factory, the real MutationUnitOfWork and real Space handles.
+
+    Construction failures are never swallowed: a missing Meta factory, UoW or
+    runtime surfaces as a dependency error instead of a silent fallback.
+    """
+    from app.db.meta_session import get_meta_session_factory
+    from app.focus_session.coordinator import (
+        ActiveSessionCoordinationError,
+        ProductionActiveSessionCoordinator,
+    )
+
+    meta_factory = get_meta_session_factory()
+    if meta_factory is None:
+        raise RuntimeError("Meta session factory is not installed")
+    runtime = getattr(request.app.state, "runtime", None)
+    if runtime is None:
+        raise RuntimeError("SpaceRuntime is not installed")
+    if uow is None:
+        raise RuntimeError("MutationUnitOfWork is not installed")
+
+    async def space_handle_provider(space_id: str) -> SpaceRuntimeHandle:
+        if str(getattr(handle.scope, "space_id", "")) == space_id:
+            return handle
+        # A conflict pair spans two Spaces: open the other Space's handle
+        # through the runtime under the request's global lease so the UoW can
+        # execute the second Space's child, exactly like the primary Space.
+        try:
+            other = await runtime.open_resolved(
+                await runtime.resolve_scope(space_id),
+                "mutation",
+                handle.global_lease,
+                owns_global_lease=False,
+            )
+        except Exception as exc:
+            raise ActiveSessionCoordinationError(
+                f"cannot open Space handle for {space_id!r}: {type(exc).__name__}"
+            ) from exc
+        return other
+
+    return ProductionActiveSessionCoordinator(
+        meta_session_factory=meta_factory,
+        uow=uow,
+        space_handle_provider=space_handle_provider,
+    )
 
 
 def require_idempotency_key(command_id: str, header_value: str | None) -> None:
