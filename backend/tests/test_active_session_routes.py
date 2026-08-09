@@ -1,374 +1,41 @@
-"""Real FastAPI integration tests for the ActiveSession production wiring.
+"""Real-provider HTTP contract tests for the ActiveSession wire layer.
 
-The app is a real ``FastAPI`` instance mounting the contract router; the
-``get_active_session_coordinator`` dependency is overridden with a real
-``ProductionActiveSessionCoordinator`` built on a real migrated Meta database
-and a real-SQLite Space child channel.  These tests prove the provider no
-longer raises "provider is not installed", that Meta rows are durably written
-through HTTP, and that wire errors and idempotency-key validation still work.
+Every request goes through the *real* ``create_app()`` lifespan and the *real*
+``get_active_session_coordinator`` provider (no dependency overrides).  These
+tests focus on the activate-provisional pair wire matrix and idempotency-key
+binding; the start/locate/auth success paths live in
+``test_active_session_http_integration.py``.
 """
 
 from __future__ import annotations
 
-import json
-import shutil
 import sqlite3
-from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.db.migrations import run_migrations
-from app.db.session import create_engine, create_session_factory
-from app.focus_session.commands import active_business_payload
-from app.focus_session.coordinator import ProductionActiveSessionCoordinator
 from app.mutation.types import canonical_payload_hash
-from app.routes.v1.active_session import router as active_session_router
+
+NOW = "2026-07-15T08:00:00.000Z"
 
 
-def _payload_hash(kind: str, payload: dict[str, object]) -> str:
-    return canonical_payload_hash(active_business_payload(kind, payload))
+def _start_hash(payload: dict[str, object]) -> str:
+    from app.focus_session.commands import active_business_payload
+
+    return canonical_payload_hash(active_business_payload("start", payload))
 
 
-class _SpaceWriter:
-    """Real-SQLite durable child executor: writes the envelope/receipt and the
-    FocusSession aggregate rows, then returns the durable receipt state
-    ``succeeded`` (the coordinator only advances on terminal-success)."""
+def _activate_hash(payload: dict[str, object]) -> str:
+    from app.focus_session.commands import active_business_payload
 
-    def __init__(self, space_paths: dict[str, Path]) -> None:
-        self.space_paths = space_paths
-
-    async def __call__(self, space_id: str, child_id: str, command) -> Any:
-        from app.focus_session.contracts import CommandReceiptState
-
-        with sqlite3.connect(self.space_paths[space_id]) as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO focus_sessions "
-                "(id, session_revision, started_at, planned_seconds, gross_seconds, "
-                "paused_seconds, break_seconds, focused_seconds, validity, review_state, "
-                "ownership_state, session_note, version, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    command.session_id, 1, "2026-07-15T08:00:00.000Z", 1500, 0, 0, 0, 0,
-                    "pending", "not_required", "activation_conflict", "", 1,
-                    "2026-07-15T08:00:00.000Z", "2026-07-15T08:00:00.000Z",
-                ),
-            )
-            conn.execute(
-                "INSERT OR IGNORE INTO session_attribution_revisions "
-                "(id, session_id, revision, project_id, level2_work_item_id, reason, "
-                "corrected_from_revision, effective, version, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    f"attr-{command.session_id}-1", command.session_id, 1,
-                    "project-1", "wi-l2", None, None, 1, 1,
-                    "2026-07-15T08:00:00.000Z", "2026-07-15T08:00:00.000Z",
-                ),
-            )
-            conn.execute(
-                "INSERT INTO session_command_envelopes VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    command.command_id, command.space_id, command.session_id, 1,
-                    "wi-l2", 1, "complete", 1, command.payload_hash,
-                    "2026-07-15T08:00:00.000Z",
-                ),
-            )
-            conn.execute(
-                "INSERT INTO session_command_receipts VALUES (?,?,?,?,?,?,?)",
-                (command.command_id, "succeeded", None, 0, None, None,
-                 "2026-07-15T08:01:00.000Z"),
-            )
-            conn.commit()
-        return CommandReceiptState.SUCCEEDED
-
-
-@pytest.fixture(scope="session")
-def route_template(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
-    root = tmp_path_factory.mktemp("routes-template")
-    meta = root / "meta.db"
-    space_a = root / "space-a.db"
-    space_b = root / "space-b.db"
-    run_migrations("meta", meta)
-    run_migrations("space", space_a)
-    run_migrations("space", space_b)
-    return {"meta": meta, "space-a": space_a, "space-b": space_b}
-
-
-@pytest.fixture
-def app_fixture(
-    tmp_path: Path, route_template: dict[str, Path]
-) -> tuple[FastAPI, dict[str, Path], AsyncEngine]:
-    meta = tmp_path / "meta.db"
-    space_a = tmp_path / "space-a.db"
-    space_b = tmp_path / "space-b.db"
-    for source, target in (
-        (route_template["meta"], meta),
-        (route_template["space-a"], space_a),
-        (route_template["space-b"], space_b),
-    ):
-        shutil.copy2(source, target)
-    paths = {"meta": meta, "space-a": space_a, "space-b": space_b}
-    engine = create_engine(f"sqlite+aiosqlite:///{meta}")
-    factory = create_session_factory(engine)
-    writer = _SpaceWriter({"space-a": space_a, "space-b": space_b})
-    from types import SimpleNamespace
-
-    from app.focus_session.query import FocusSessionQuery
-
-    space_handles: dict[str, Any] = {}
-    for space_id in ("space-a", "space-b"):
-        space_engine = create_engine(f"sqlite+aiosqlite:///{paths[space_id]}")
-        space_handles[space_id] = SimpleNamespace(
-            scope=SimpleNamespace(space_id=space_id),
-            session_factory=create_session_factory(space_engine),
-            closed=False,
-            _engine=space_engine,
-        )
-
-    async def space_handle_provider(space_id: str) -> Any:
-        return space_handles[space_id]
-
-    coordinator = ProductionActiveSessionCoordinator(
-        meta_session_factory=factory,
-        uow=None,  # type: ignore[arg-type] - child channel is the injected executor
-        space_handle_provider=space_handle_provider,
-        session_query=FocusSessionQuery(),
-        clock=lambda: "2026-07-15T08:00:00.000Z",
-        child_executor=writer,
-    )
-
-    app = FastAPI()
-    # conftest reloads app.deps per test; reload the router modules too so the
-    # route dependencies bind the same objects the overrides key on.
-    import importlib
-
-    import app.routes.v1.active_session as active_session_module
-    import app.routes.v1.contract_dependencies as contract_dependencies_module
-
-    importlib.reload(contract_dependencies_module)
-    importlib.reload(active_session_module)
-    app.include_router(active_session_module.router, prefix="/active-session")
-
-    from app.deps import require_master_token
-
-    app.dependency_overrides[
-        contract_dependencies_module.get_active_session_coordinator
-    ] = lambda: coordinator
-    app.dependency_overrides[require_master_token] = lambda: {
-        "type": "master", "sub": "master-1", "space_id": "space-a", "epoch": 0,
-    }
-    return app, paths, engine
-
-
-@pytest.fixture
-def client(app_fixture: tuple[FastAPI, dict[str, Path], AsyncEngine]):
-    app, _paths, _engine = app_fixture
-    with TestClient(app) as test_client:
-        yield test_client
-
-
-def _start_body() -> dict[str, Any]:
-    snake_payload = {
-        "level2_work_item_id": "wi-l2",
-        "level3_work_item_ids": [],
-        "planned_seconds": 1500,
-        "started_at": "2026-07-15T08:00:00.000Z",
-        "owner_device_id": "device-1",
-        "owner_tab_id": "tab-1",
-        "expected_work_item_versions": {"wi-l2": 1},
-    }
-    return {
-        "commandId": "op-start",
-        "spaceId": "space-a",
-        "sessionId": "fs-1",
-        "ownershipEpoch": None,
-        "payloadHash": _payload_hash("start", snake_payload),
-        "payload": {
-            "level2WorkItemId": "wi-l2",
-            "level3WorkItemIds": [],
-            "plannedSeconds": 1500,
-            "startedAt": "2026-07-15T08:00:00.000Z",
-            "ownerDeviceId": "device-1",
-            "ownerTabId": "tab-1",
-            "expectedWorkItemVersions": {"wi-l2": 1},
-        },
-    }
-
-
-async def _read_meta(engine: AsyncEngine, table: str, operation_id: str) -> dict[str, Any]:
-    from sqlalchemy import text as sa_text
-
-    async with engine.connect() as connection:
-        if table == "locator":
-            row = await connection.execute(
-                sa_text("SELECT * FROM active_session_locator WHERE singleton_key='active'")
-            )
-            result = row.fetchone()
-            return dict(result._mapping) if result is not None else {}
-        row = await connection.execute(
-            sa_text(
-                "SELECT intent_json, phase, kind FROM active_session_operations "
-                "WHERE operation_id=:oid"
-            ),
-            {"oid": operation_id},
-        )
-        result = row.fetchone()
-    if result is None:
-        return {}
-    return {
-        "intent_json": str(result[0]),
-        "phase": str(result[1]),
-        "kind": str(result[2]),
-    }
-
-
-def test_locate_does_not_raise_provider_not_installed(
-    client, app_fixture: tuple[FastAPI, dict[str, Path], AsyncEngine]
-) -> None:
-    from app.deps import require_master_token
-    from app.routes.v1.contract_dependencies import get_active_session_coordinator
-
-    assert require_master_token in client.app.dependency_overrides, client.app.dependency_overrides
-    assert get_active_session_coordinator in client.app.dependency_overrides
-    response = client.get("/active-session")
-    # no locator yet -> the real provider was wired and answered 404 (not
-    # "provider is not installed")
-    assert response.status_code == 404
-    assert "provider" not in response.text.lower()
-
-
-def test_http_start_persists_locator(
-    client, app_fixture: tuple[FastAPI, dict[str, Path], AsyncEngine]
-) -> None:
-    """start writes the Meta locator durably; the wire session aggregate is a
-    runtime concern (BLOCKED note in HANDOFF), so we verify the durable row
-    through the coordinator's own persistence instead of the response body."""
-    import asyncio
-
-    _app, _paths, engine = app_fixture
-    try:
-        response = client.post("/active-session/start", json=_start_body())
-        # either the full success path (runtime aggregate) or a validation
-        # stop at the session-aggregate layer — never "provider is not installed"
-        assert response.status_code in (201, 422, 500), response.text
-        assert "provider is not installed" not in response.text
-    except Exception as exc:
-        assert "provider is not installed" not in str(exc)
-    locator_row = asyncio.run(_read_meta(engine, "locator", "op-start"))
-    if locator_row:
-        assert locator_row["operation_id"] == "op-start"
-        assert locator_row["state"] == "claiming"
-    asyncio.run(engine.dispose())
-
-
-def test_http_activate_provisional_persists_frozen_intent(
-    client, app_fixture: tuple[FastAPI, dict[str, Path], AsyncEngine]
-) -> None:
-    import asyncio
-
-    _app, _paths, engine = app_fixture
-    pair = {
-        "active": {"space_id": "space-a", "session_id": "fs-1"},
-        "candidate": {"space_id": "space-b", "session_id": "fs-2"},
-    }
-    snake_payload = {
-        "pair": pair,
-        "cached_at": "2026-07-15T07:59:00.000Z",
-        "cached_ownership_epoch": 1,
-        "owner_device_id": "device-1",
-        "owner_tab_id": "tab-1",
-        "snapshot": {},
-        "expected_work_item_versions": {},
-    }
-    body = {
-        "commandId": "op-conflict",
-        "spaceId": "space-a",
-        "sessionId": "fs-1",
-        "ownershipEpoch": None,
-        "payloadHash": _payload_hash("activate_provisional", snake_payload),
-        "payload": {
-            "pair": {
-                "active": {"spaceId": "space-a", "sessionId": "fs-1"},
-                "candidate": {"spaceId": "space-b", "sessionId": "fs-2"},
-            },
-            "cachedAt": "2026-07-15T07:59:00.000Z",
-            "cachedOwnershipEpoch": 1,
-            "ownerDeviceId": "device-1",
-            "ownerTabId": "tab-1",
-            "snapshot": {},
-            "expectedWorkItemVersions": {},
-        },
-    }
-    response = client.post("/active-session/activate-provisional", json=body)
-    # Contract gap: ActivateProvisionalPayload has no pair field, so the wire
-    # schema rejects the conflict pair today (see HANDOFF). The provider must
-    # still be wired — never "provider is not installed".
-    assert response.status_code in (200, 422), response.text
-    assert "provider is not installed" not in response.text
-    operation = asyncio.run(_read_meta(engine, "operation", "op-conflict"))
-    if operation:
-        intent = json.loads(operation["intent_json"])
-        assert "candidate" in intent["children"]
-        assert "active" in intent["children"]
-        assert intent["children"]["candidate"]["operation_id"].startswith("childp:")
-        assert len(intent["children"]["candidate"]["payload_hash"]) == 64
-    asyncio.run(engine.dispose())
-
-
-def test_http_idempotency_key_mismatch_rejected(client) -> None:
-    from app.errors import IdempotencyConflictError, ValidationError
-
-    body = _start_body()
-    try:
-        response = client.post(
-            "/active-session/start", json=body, headers={"Idempotency-Key": "other-op"}
-        )
-        assert response.status_code in (400, 422)
-        assert "provider" not in response.text.lower()
-    except (IdempotencyConflictError, ValidationError):
-        # fail-closed conflict/validation surfaced as an exception
-        pass
-
-
-def test_http_duplicate_start_fails_closed(client) -> None:
-    """A second start with the same operation ID must fail closed (idempotent
-    replay rejected / concurrent claimant), never silently overwrite."""
-    from pydantic import ValidationError as PydanticValidationError
-
-    from app.errors import IdempotencyConflictError, ValidationError
-    from app.focus_session.coordinator import ActiveSessionCoordinationError
-
-    body = _start_body()
-    try:
-        first = client.post("/active-session/start", json=body)
-        # 201 = full success; 422 = response validation stop; 500 = the Space
-        # UoW path fails closed in this light-weight wiring env (real UoW
-        # covered by the runtime integration tests) — never "not installed".
-        assert first.status_code in (201, 422, 500), first.text
-    except (
-        IdempotencyConflictError,
-        ActiveSessionCoordinationError,
-        ValidationError,
-        PydanticValidationError,
-    ):
-        # fail-closed conflict/validation/UoW surfaced in the test client
-        pass
-    try:
-        second = client.post("/active-session/start", json=body)
-        assert second.status_code >= 400
-    except (IdempotencyConflictError, ActiveSessionCoordinationError, ValidationError, PydanticValidationError):
-        # fail-closed conflict/validation surfaced as an exception in the test client
-        pass
+    return canonical_payload_hash(active_business_payload("activate_provisional", payload))
 
 
 def _activate_snapshot() -> dict[str, Any]:
     return {
         "session": {
             "sessionRevision": 1,
-            "startedAt": "2026-07-15T08:00:00.000Z",
+            "startedAt": NOW,
             "plannedSeconds": 1500,
             "grossSeconds": 0,
             "pausedSeconds": 0,
@@ -386,26 +53,38 @@ def _activate_snapshot() -> dict[str, Any]:
             "level2TitleSnapshot": "WorkItem",
             "level2StatusDefinitionIdSnapshot": "complete",
             "level2VersionSnapshot": 1,
-            "linkedAt": "2026-07-15T08:00:00.000Z",
+            "linkedAt": NOW,
             "linkMethod": "explicit",
         },
         "plan": [],
     }
 
 
-def _activate_body(
-    pair: dict[str, Any], *, session_id: str = "fs-1"
-) -> dict[str, Any]:
+def _activate_body(pair: dict[str, Any], *, session_id: str = "fs-1") -> dict[str, Any]:
     snake_payload = {
         "pair": {
             "active": {"space_id": pair["active"]["spaceId"], "session_id": pair["active"]["sessionId"]},
             "candidate": {"space_id": pair["candidate"]["spaceId"], "session_id": pair["candidate"]["sessionId"]},
         },
-        "cached_at": "2026-07-15T08:00:00.000Z",
+        "cached_at": NOW,
         "cached_ownership_epoch": 1,
         "owner_device_id": "device-1",
         "owner_tab_id": "tab-1",
-        "snapshot": _activate_snapshot(),
+        "snapshot": {
+            "session": {
+                "session_revision": 1, "started_at": NOW, "planned_seconds": 1500,
+                "gross_seconds": 0, "paused_seconds": 0, "break_seconds": 0,
+                "focused_seconds": 0, "validity": "pending", "review_state": "not_required",
+                "ownership_state": "local_provisional", "session_note": "",
+            },
+            "context": {
+                "project_id": "project-1", "project_title_snapshot": "Project",
+                "level2_work_item_id": "wi-l2", "level2_title_snapshot": "WorkItem",
+                "level2_status_definition_id_snapshot": "complete",
+                "level2_version_snapshot": 1, "linked_at": NOW, "link_method": "explicit",
+            },
+            "plan": [],
+        },
         "expected_work_item_versions": {"wi-l2": 1},
     }
     return {
@@ -413,10 +92,10 @@ def _activate_body(
         "spaceId": pair["active"]["spaceId"],
         "sessionId": session_id,
         "ownershipEpoch": None,
-        "payloadHash": _payload_hash("activate_provisional", snake_payload),
+        "payloadHash": _activate_hash(snake_payload),
         "payload": {
             "pair": pair,
-            "cachedAt": "2026-07-15T08:00:00.000Z",
+            "cachedAt": NOW,
             "cachedOwnershipEpoch": 1,
             "ownerDeviceId": "device-1",
             "ownerTabId": "tab-1",
@@ -425,57 +104,251 @@ def _activate_body(
         },
     }
 
-def test_http_activate_valid_pair_no_longer_422(client) -> None:
-    """A complete legal conflict pair (plus a valid provisional snapshot) is
-    accepted by the wire schema — the pair field is now part of the contract,
-    so activate-provisional must not be rejected with 422 for the pair."""
-    pair = {
-        "active": {"spaceId": "space-a", "sessionId": "fs-1"},
-        "candidate": {"spaceId": "space-b", "sessionId": "fs-2"},
-    }
-    response = client.post(
-        "/active-session/activate-provisional", json=_activate_body(pair)
+
+async def _master_token(client) -> str:
+    resp = await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
+    assert resp.status_code in (200, 201), resp.text
+    resp = await client.post("/api/v1/auth/login", json={"password": "test-password-123"})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["access_token"]
+
+
+async def _create_space(client, master_headers: dict[str, str], name: str) -> dict[str, str]:
+    resp = await client.post("/api/v1/spaces", json={"name": name}, headers=master_headers)
+    assert resp.status_code == 201, resp.text
+    space = resp.json()
+    resp = await client.post(
+        f"/api/v1/spaces/{space['id']}/token", headers=master_headers
     )
-    # 200 = full conflict response; 500 = response-aggregate validation stop;
-    # 422 would mean the pair/schema contract is still incomplete — fail.
-    assert response.status_code in (200, 500), response.text
-    assert response.status_code != 422, response.text
-    assert "provider is not installed" not in response.text
+    assert resp.status_code == 200, resp.text
+    return {"id": space["id"], "headers": {"Authorization": f"Bearer {resp.json()['space_token']}"}}
 
 
-def test_http_activate_missing_pair_rejected(client) -> None:
+async def _create_project(client, space_headers: dict[str, str], *, space_id: str, key: str) -> str:
+    body = {
+        "commandId": f"op-proj-{key}",
+        "spaceId": space_id,
+        "payloadHash": canonical_payload_hash({"key": key, "name": f"Project {key}"}),
+        "key": key,
+        "name": f"Project {key}",
+    }
+    resp = await client.post("/api/v1/projects", json=body, headers=space_headers)
+    assert resp.status_code in (200, 201), resp.text
+    data = resp.json()
+    return data.get("entityId") or data.get("entity_id") or data.get("id")
+
+
+async def _create_work_item(client, space_headers: dict[str, str], project_id: str, *, space_id: str) -> str:
+    # depth-1 root under the project
+    root_body = {
+        "commandId": f"op-wi-root-{space_id}",
+        "spaceId": space_id,
+        "payloadHash": canonical_payload_hash({"title": "Root", "description": None,
+                                                "parent_id": None, "type_definition_id": None,
+                                                "status_definition_id": None, "priority": None}),
+        "projectId": project_id,
+        "title": "Root",
+        "parentId": None,
+        "typeDefinitionId": None,
+        "statusDefinitionId": None,
+        "priority": None,
+    }
+    resp = await client.post("/api/v1/work-items", json=root_body, headers=space_headers)
+    assert resp.status_code in (200, 201), resp.text
+    root_id = resp.json().get("entityId") or resp.json().get("entity_id") or resp.json().get("id")
+
+    # depth-2 level2 whose parent is the root
+    level2_payload = {
+        "title": "Level2", "description": None, "parent_id": root_id,
+        "type_definition_id": None, "status_definition_id": None, "priority": None,
+    }
+    body = {
+        "commandId": "op-wi-l2",
+        "spaceId": space_id,
+        "payloadHash": canonical_payload_hash(level2_payload),
+        "projectId": project_id,
+        "title": "Level2",
+        "parentId": root_id,
+        "typeDefinitionId": None,
+        "statusDefinitionId": None,
+        "priority": None,
+    }
+    resp = await client.post("/api/v1/work-items", json=body, headers=space_headers)
+    assert resp.status_code in (200, 201), resp.text
+    data = resp.json()
+    return data.get("entityId") or data.get("entity_id") or data.get("id")
+
+
+async def _provision(
+    client, master_headers: dict[str, str], name: str, key: str,
+) -> tuple[dict[str, str], str]:
+    space = await _create_space(client, master_headers, name)
+    project_id = await _create_project(client, space["headers"], space_id=space["id"], key=key)
+    wi_id = await _create_work_item(client, space["headers"], project_id, space_id=space["id"])
+    return space, wi_id
+
+
+def _seed_second_session(space_id: str, session_id: str) -> None:
+    """Seed the candidate Session row (a provisional session on another Space)
+    directly in the real Space SQLite DB — the realistic shape of a
+    provisional candidate on another device."""
+    from app.settings import settings
+
+    db_path = settings.space_db_path(space_id)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO focus_sessions "
+            "(id, session_revision, started_at, planned_seconds, gross_seconds, "
+            "paused_seconds, break_seconds, focused_seconds, validity, review_state, "
+            "ownership_state, session_note, version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, 1, NOW, 1500, 0, 0, 0, 0, "pending", "not_required",
+             "activation_conflict", "", 1, NOW, NOW),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO session_task_contexts "
+            "(id, session_id, project_id, level2_work_item_id, title_snapshot, "
+            "structure_snapshot, linked_at, link_method, version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (f"ctx-{session_id}", session_id, "project-1", "wi-l2", "WorkItem",
+             '{"project":{"id":"project-1","name":"Project"},"level2":{"id":"wi-l2",'
+             '"title":"WorkItem","parent_id":null,"status_definition_id":"complete",'
+             '"version":1,"effort_estimate_lower_seconds":null,'
+             '"effort_estimate_upper_seconds":null},"plan":{}}',
+             NOW, "manual", 1, NOW, NOW),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO session_attribution_revisions "
+            "(id, session_id, revision, project_id, level2_work_item_id, reason, "
+            "corrected_from_revision, effective, version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (f"attr-{session_id}-1", session_id, 1, "project-1", "wi-l2",
+             None, None, 1, 1, NOW, NOW),
+        )
+        conn.commit()
+
+
+async def _setup_conflict(client, master_headers: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """space-a carries the active provisional Session (fs-1), space-b the
+    candidate provisional Session (fs-2).  activate-provisional claims the
+    global slot itself — no start precedes it."""
+    space_a, _wi_a = await _provision(client, master_headers, "Pair A", "PAA")
+    space_b, _wi_b = await _provision(client, master_headers, "Pair B", "PAB")
+    _seed_second_session(space_a["id"], "fs-1")
+    _seed_second_session(space_b["id"], "fs-2")
+    return space_a, space_b
+
+
+@pytest.mark.asyncio
+async def test_activate_valid_pair_returns_exact_200(client) -> None:
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space_a, space_b = await _setup_conflict(client, master_headers)
+    pair = {
+        "active": {"spaceId": space_a["id"], "sessionId": "fs-1"},
+        "candidate": {"spaceId": space_b["id"], "sessionId": "fs-2"},
+    }
+    resp = await client.post(
+        "/api/v1/active-session/activate-provisional",
+        json=_activate_body(pair),
+        headers=master_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["kind"] == "activation_conflict"
+    assert data["active"]["session"]["session"]["id"] == "fs-1"
+    assert data["candidate"]["session"]["session"]["id"] == "fs-2"
+
+
+@pytest.mark.asyncio
+async def test_activate_missing_pair_rejected(client) -> None:
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space_a, space_b = await _setup_conflict(client, master_headers)
     body = _activate_body({
-        "active": {"spaceId": "space-a", "sessionId": "fs-1"},
-        "candidate": {"spaceId": "space-b", "sessionId": "fs-2"},
+        "active": {"spaceId": space_a["id"], "sessionId": "fs-1"},
+        "candidate": {"spaceId": space_b["id"], "sessionId": "fs-2"},
     })
     del body["payload"]["pair"]
-    response = client.post("/active-session/activate-provisional", json=body)
-    assert response.status_code == 422
+    resp = await client.post(
+        "/api/v1/active-session/activate-provisional", json=body, headers=master_headers
+    )
+    assert resp.status_code == 422
 
 
-def test_http_activate_identical_pair_sides_rejected(client) -> None:
+@pytest.mark.asyncio
+async def test_activate_identical_pair_sides_rejected(client) -> None:
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space_a, _space_b = await _setup_conflict(client, master_headers)
     body = _activate_body({
-        "active": {"spaceId": "space-a", "sessionId": "fs-1"},
-        "candidate": {"spaceId": "space-a", "sessionId": "fs-1"},
+        "active": {"spaceId": space_a["id"], "sessionId": "fs-1"},
+        "candidate": {"spaceId": space_a["id"], "sessionId": "fs-1"},
     })
-    response = client.post("/active-session/activate-provisional", json=body)
-    assert response.status_code == 422
+    resp = await client.post(
+        "/api/v1/active-session/activate-provisional", json=body, headers=master_headers
+    )
+    assert resp.status_code == 422
 
 
-def test_http_activate_anchor_mismatch_rejected(client) -> None:
-    """The active side must anchor to the request Space/Session identity."""
+@pytest.mark.asyncio
+async def test_activate_anchor_mismatch_rejected(client) -> None:
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space_a, space_b = await _setup_conflict(client, master_headers)
     body = _activate_body({
         "active": {"spaceId": "space-other", "sessionId": "fs-other"},
-        "candidate": {"spaceId": "space-b", "sessionId": "fs-2"},
+        "candidate": {"spaceId": space_b["id"], "sessionId": "fs-2"},
     })
-    response = client.post("/active-session/activate-provisional", json=body)
-    assert response.status_code == 422
+    resp = await client.post(
+        "/api/v1/active-session/activate-provisional", json=body, headers=master_headers
+    )
+    assert resp.status_code == 422
 
 
-def test_http_activate_invalid_identity_rejected(client) -> None:
+@pytest.mark.asyncio
+async def test_activate_invalid_identity_rejected(client) -> None:
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space_a, _space_b = await _setup_conflict(client, master_headers)
     body = _activate_body({
-        "active": {"spaceId": "space-a", "sessionId": "fs-1"},
+        "active": {"spaceId": space_a["id"], "sessionId": "fs-1"},
         "candidate": {"spaceId": "not a valid id!", "sessionId": "fs-2"},
     })
-    response = client.post("/active-session/activate-provisional", json=body)
-    assert response.status_code == 422
+    resp = await client.post(
+        "/api/v1/active-session/activate-provisional", json=body, headers=master_headers
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_mismatch_rejected(client) -> None:
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    await _provision(client, master_headers, "Idem Space", "IDM")
+    body = {
+        "commandId": "op-start",
+        "spaceId": "space-a",
+        "sessionId": "fs-1",
+        "ownershipEpoch": None,
+        "payloadHash": _start_hash(
+            {
+                "level2_work_item_id": "wi-l2", "level3_work_item_ids": [],
+                "planned_seconds": 1500, "started_at": NOW,
+                "owner_device_id": "device-1", "owner_tab_id": "tab-1",
+                "expected_work_item_versions": {"wi-l2": 1},
+            }
+        ),
+        "payload": {
+            "level2WorkItemId": "wi-l2", "level3WorkItemIds": [],
+            "plannedSeconds": 1500, "startedAt": NOW,
+            "ownerDeviceId": "device-1", "ownerTabId": "tab-1",
+            "expectedWorkItemVersions": {"wi-l2": 1},
+        },
+    }
+    resp = await client.post(
+        "/api/v1/active-session/start",
+        json=body,
+        headers={**master_headers, "Idempotency-Key": "op-other"},
+    )
+    assert resp.status_code in (400, 409, 422), resp.text
