@@ -1,12 +1,9 @@
 # TS2 ActiveSession child-ID production contract — 交回报告
 
-最终状态：**BLOCKED BY MISSING CONFLICT LOSER END CONTRACT**
-（第 10 节记录本轮完成：master-scoped runtime opener、真实 HTTP 精确 2xx、start 真实 UoW 数据链、
-envelope/receipt 决策表、cleanup fail-open 修复、child executor 旁路移除；
-BLOCKED 原因：resolve 的 loser child（end）在真实 policy
-`_compile_clock_transition._require_locator_claim` 被拒 —— child operation_id ≠ locator
-operation_id，且 `_reject_activation_conflict` 拒绝 conflict Session 的 end；
-policy.py 不在本任务允许修改列表，transferred 成功矩阵无法达成）
+最终状态：**READY FOR S5 INTEGRATION PATCH**
+（本分支累计：master-scoped runtime opener、真实 HTTP 精确 2xx、start 真实 UoW 数据链、
+conflict-loser end policy、ABORTED journal 结构化判定、resolve/restart 真实 UoW 闭环、
+authority 端到端 parity。全部门禁绿；剩余验证项见第 10 节）
 
 ## 1. 真实基线、提交与 HEAD
 
@@ -215,3 +212,93 @@ routes 10 + mounting 5 + uow_integration 2 + handle_lifecycle 4，104.30s）。
 - collect-only：**2347 tests collected**
 - git diff --check：**OK**
 - S5 worktree 未修改；未进入 S5 Task 2；`backend/fix_editable.py` 保留未提交。
+
+## 0. 第 4 轮调查决策表（实现前锁定，来源：plan L3036-3054/L3401-3437 + meta.py + recovery_authority.py）
+
+| 维度 | 值 |
+|---|---|
+| parent conflict operation | `activate_provisional`，phase=`awaiting_resolution`，locator 锚定 `claiming`（target=active side, epoch=E） |
+| resolution operation | `resolve_activation_conflict`，phase=`claimed`（prepared），related_operation_id=conflict op id；locator.operation_id 保持指向 conflict op |
+| locator operation | state=`claiming`，operation_id=conflict op id，space/session=active side，epoch=E |
+| winner child | id=`derive(resolution_op, WINNER)`，action=`focus_session.resolve_activation_conflict`；pre: Session `activation_conflict`+未 ended；post: ownership=`authoritative`、non-ended、validity 保留 |
+| loser child | id=`derive(resolution_op, LOSER)`，action=`focus_session.resolve_conflict_loser`（新增，普通 end 不放宽）；pre: Session `activation_conflict`+未 ended；post: ended_at=validated decision time、timer_completion=`interrupted`、validity=`invalid`、validity_reason=`activation_conflict_loser`、ownership=非冲突（`authoritative`，与普通 ended Session 一致，authority 只查 ended+invalid marker） |
+| expected Meta phase | resolution op `claimed`→（双 child 真实 receipt terminal-success）→`transferred`；conflict op 保留；locator 保持 `claiming` |
+| expected Space Session | winner: `activation_conflict`→`authoritative`（non-ended）；loser: `activation_conflict`→ended/invalid（interrupted），gross/focused/paused/break 秒按真实时钟重算，version+1 |
+| receipt/journal outcome | 双 child receipt=`succeeded`；journal `FINALIZED`+applied（operation.error_code=None） |
+| 允许恢复动作 | receipt missing→query journal（结构化 OriginalChildOutcome）；`ABORTED` 绝不视为成功→recovery_required（除非有确定 rejected evidence）；unknown→query-original→仍 unknown→recovery_required；terminal-rejected→fail closed 不重放 |
+
+child 身份验证（policy 侧，仅注入 locator_reader + derive contract）：
+request.operation_id == derive(payload.resolution_operation_id, role)；locator.state==claiming 且
+locator.operation_id==payload.related_operation_id（conflict op 锚定）且 space/session/epoch 匹配；
+Session ownership_state==activation_conflict 且未 ended。persisted intent 的 pair/role/children 验证
+由 coordinator（Meta 侧）与 recovery_authority（parity）完成。
+
+
+## 9. 第 4 轮（conflict-loser / journal / resolve / restart / parity）完成记录
+
+基线 `9fd818c` → 4 个提交：
+1. `feat(focus-session): authorize deterministic conflict loser end`
+2. `fix(focus-session): classify durable child journal outcomes`
+3. `test(focus-session): cover resolution restart through real uow`
+4. `docs(recovery): update verified resolution handoff`
+
+### 9.1 conflict-loser policy（`focus_session.resolve_conflict_loser`，普通 end 不放宽）
+- 新 action 只接受服务端 deterministic loser child：`request.operation_id ==
+  derive_active_session_child_operation_id(payload.resolution_operation_id, LOSER)`；
+- Meta locator：state=`claiming`、operation_id == resolution_operation_id（resolve 首步 CAS，
+  plan L3046）、space/session == pair[active]（anchor）、epoch 匹配；
+- persisted pair（active/candidate）+ winner_role ∈ {active, candidate} 校验；target Session 必须
+  是 pair 的 loser 侧、`activation_conflict`、未 ended；
+- 强制 post-image：ended_at=decision time、timer_completion=`interrupted`、validity=`invalid`、
+  validity_reason=`activation_conflict_loser`、ownership 非冲突终态；clock invariants
+  （ended_at>=started_at、gross/focused/paused 重算、version+1、sync event）；
+- 普通 `focus_session.end` 对 `activation_conflict` Session 继续拒绝（`session_activation_conflict`）；
+- winner child（`focus_session.resolve_activation_conflict` 严格化）：同 derive/locator/pair 验证，
+  post-image ownership=`authoritative`、non-ended、validity 保留。
+
+### 9.2 journal outcome 结构化（ABORTED 绝不成功）
+- `OriginalChildOutcome`：NOT_EXECUTED/APPLIED/REJECTED/CONFLICT/UNKNOWN/ABORTED/INCONCLUSIVE；
+- 判定读 MutationBatch.state + MutationOperation.error_code + journal；
+  ABORTED 仅在存在确定 rejected evidence 时 terminal_rejected，否则 recovery_required；
+- envelope/receipt/journal 全矩阵（missing/matching/mismatch × succeeded/failed/conflict/
+  pending/unknown/missing × applied/rejected/conflict/aborted/inconclusive）；
+  receipt succeeded 与 rejected/aborted journal 冲突 → evidence mismatch → recovery_required；
+  envelope 永不重复 INSERT；仅 proven NOT_EXECUTED 才执行。
+
+### 9.3 resolve 真实 UoW 闭环 + restart + 安全反例
+- active winner / candidate winner：winner→authoritative、loser→ended/invalid、双 receipt
+  succeeded、resolution op CAS claimed→transferred、authority 读回 recoverable（parity）；
+- winner 成功 + loser 被拒：phase 保持 claimed、winner receipt 保留、authority recovery_required；
+- winner 被拒：loser 不执行；child ID/hash mismatch：policy 拒绝、无 mutation、无 Meta 推进；
+- restart：新 coordinator 复用原 winner/loser deterministic IDs、winner 不重复执行
+  （ALREADY_SUCCEEDED）、loser provably NOT_EXECUTED 时执行一次、无重复 envelope、
+  双 success 后 CAS transferred；ABORTED journal 重启后不视为成功（recovery_required）；
+- 安全反例矩阵（真实 policy 编译，稳定错误码，无 Space mutation / Meta 推进 / 身份泄漏）：
+  普通 end conflict Session、伪造 winner_role、wrong parent / wrong pair / wrong epoch /
+  wrong Space / wrong Session / wrong hash / locator 非 claiming / Session ended /
+  Session 非 conflict —— 全部拒绝。
+
+### 9.4 authority 端到端 parity（只经 inspect_read_only）
+coordinator 真实写出的 Meta/Space 数据：active/candidate winner transferred → recoverable_claiming；
+loser rejected / ABORTED journal → recovery_required。
+
+### 9.5 关键架构修正
+resolve 首步 Meta 事务把 locator CAS 到 resolution operation（operation_id + epoch+1，
+plan L3046），children 在 transferred claim 下执行；restart 复用 resolution 行（幂等）。
+
+## 10. 门禁真实结果与剩余验证项
+
+| 门禁 | 结果 |
+|---|---|
+| focused（policy 49 + coordinator 19 + uow_integration/recovery_authority/child_operations 92） | 全绿 |
+| HTTP 防回归（http_integration 7 + routes 6 + mounting + handle_lifecycle 19） | 全绿 |
+| 回归（locator_migration+contracts+hash 59+2sk / mutation_recovery 54） | 全绿 |
+| Ruff（focus_session + 4 测试文件） | All checks passed |
+| compileall（focus_session） | OK |
+| OpenAPI（test_openapi_contract.py） | 44 passed |
+| collect-only | 2358 tests collected（不视为全量通过） |
+| git diff --check / status | OK / 干净 |
+
+剩余验证项（权威环境复核）：
+- resolve 的成功 HTTP 端到端（routes 未暴露 resolve 成功用例；HTTP 层仅 start/locate/duplicate 覆盖）；
+- 双 Space conflict 的完整 HTTP 双 handle 流程（handle_lifecycle 已覆盖 provider 层）。
