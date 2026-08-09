@@ -45,9 +45,15 @@ from app.focus_session.commands import (
 from app.focus_session.contracts import (
     ActiveSessionCommand,
     ActiveSessionView,
+    CommandReceiptState,
     FocusSessionCommand,
 )
+from app.focus_session.query import FocusSessionQuery
+from app.models.focus_session import FocusSession
+from app.models.session_command import SessionCommandReceipt
 from app.mutation.types import (
+    MutationRequest,
+    bounded_child_operation_id,
     canonical_json_bytes,
     canonical_payload_hash,
     validate_operation_id,
@@ -133,17 +139,180 @@ class ProductionActiveSessionCoordinator:
         meta_session_factory: "async_sessionmaker",
         uow: "MutationUnitOfWork",
         space_handle_provider: Callable[[str], Awaitable["SpaceRuntimeHandle"]],
+        session_query: FocusSessionQuery,
         clock: Callable[[], str] = utc_now_iso_ms,
-        execute_child: Callable[[str, str, FocusSessionCommand], Awaitable[None]] | None = None,
+        child_executor: Callable[
+            [str, str, FocusSessionCommand], Awaitable[CommandReceiptState]
+        ] | None = None,
     ) -> None:
         self._meta_session_factory = meta_session_factory
         self._uow = uow
         self._space_handle_provider = space_handle_provider
+        self._session_query = session_query
         self._clock = clock
-        # Overridable Space child channel: the production wiring uses the UoW
-        # (see ``_execute_children``); tests inject a real-SQLite executor that
-        # persists the same envelope/receipt evidence the UoW would write.
-        self._execute_child = execute_child
+        # TEST-ONLY child channel.  Production wiring MUST NOT pass it: the
+        # default path executes children through the real MutationUnitOfWork
+        # and then verifies the durable Space receipt.  Tests inject a
+        # real-SQLite adapter that persists the same envelope/receipt evidence
+        # and MUST return the receipt state — a fire-and-forget callback that
+        # merely does not raise can never advance an operation.
+        self._child_executor = child_executor
+
+    # ------------------------------------------------------------------ #
+    # View assembly helpers
+    # ------------------------------------------------------------------ #
+
+    def _contract_payload_hash(self, payload: Mapping[str, object]) -> str:
+        """Canonical hash over the intent *business* subset — identity keys and
+        the ``pair``/``children`` declarations are not business, matching the
+        recovery authority's ``_verify_intent`` contract.  The wire
+        ``command.payload_hash`` may hash the full payload; the durable
+        operation hash must match what the authority can recompute."""
+        business = {
+            key: value for key, value in payload.items() if key not in ("pair", "children")
+        }
+        return canonical_payload_hash(business)
+
+    async def _load_session_aggregate(
+        self, handle: "SpaceRuntimeHandle", session_id: str
+    ) -> dict[str, object]:
+        """Load the real FocusSession aggregate or fail closed (never fake a
+        createdAt/updatedAt or a fabricated session dict)."""
+        aggregate = await self._session_query.load(handle, session_id)
+        if aggregate.get("session") is None:
+            raise ActiveSessionCoordinationError(
+                f"ActiveSession references a nonexistent FocusSession: {session_id!r}"
+            )
+        return aggregate
+
+    async def _read_child_receipt(
+        self, handle: "SpaceRuntimeHandle", child_id: str
+    ) -> CommandReceiptState | None:
+        """Read the durable Space receipt the UoW just wrote."""
+        async with handle.session_factory() as session:
+            receipt = await session.get(SessionCommandReceipt, child_id)
+        return None if receipt is None else receipt.state
+
+    async def _record_child_envelope(
+        self,
+        handle: "SpaceRuntimeHandle",
+        child_id: str,
+        child_command: FocusSessionCommand,
+    ) -> None:
+        """Persist the child command envelope before the mutation runs.
+
+        The recovery authority only accepts child evidence as an envelope +
+        receipt pair.  The envelope's ``work_item_id``/``session_revision``
+        come from the real Session context rows in the Space DB — never a
+        fabricated work item — and a missing context fails closed.
+        """
+        from sqlalchemy import select
+
+        from app.models.focus_session import SessionTaskContext
+        from app.models.session_command import SessionCommandEnvelope
+
+        async with handle.session_factory() as session:
+            context = (
+                await session.execute(
+                    select(SessionTaskContext).where(
+                        SessionTaskContext.session_id == child_command.session_id
+                    )
+                )
+            ).scalar_one_or_none()
+            session_row = await session.get(FocusSession, child_command.session_id)
+        if context is None or session_row is None:
+            raise ActiveSessionCoordinationError(
+                f"cannot record child envelope {child_id!r}: "
+                "session context is missing (no real work item identity)"
+            )
+        async with handle.session_factory() as session:
+            session.add(
+                SessionCommandEnvelope(
+                    command_id=child_id,
+                    space_id=child_command.space_id,
+                    session_id=child_command.session_id,
+                    session_revision=session_row.session_revision,
+                    work_item_id=context.level2_work_item_id,
+                    expected_version=1,
+                    target_transition="complete",
+                    replay_safe=True,
+                    payload_hash=child_command.payload_hash,
+                    created_at=_canonical_utc_now(self._clock),
+                )
+            )
+            await session.commit()
+
+    async def _record_child_receipt(
+        self,
+        handle: "SpaceRuntimeHandle",
+        child_id: str,
+        child_command: FocusSessionCommand,
+    ) -> None:
+        """Persist the durable succeeded receipt through the same
+        ``focus_session.record_receipt`` mutation channel the reconciler uses
+        (the recovery authority only accepts envelope + terminal receipt)."""
+
+        receipt_payload: dict[str, object] = {
+            "space_id": child_command.space_id,
+            "session_id": child_command.session_id,
+            "command_id": child_id,
+            "state": "succeeded",
+            "error_code": None,
+            "retryable": False,
+            "details": None,
+            "result": None,
+            "updated_at": _canonical_utc_now(self._clock),
+            "expected_coordination": {
+                "kind": "replay_claimed", "root_command_id": child_id,
+            },
+        }
+        receipt_operation_id = bounded_child_operation_id(
+            child_id, "receipt:succeeded"
+        )
+        receipt_command = FocusSessionCommand(
+            command_id=receipt_operation_id,
+            space_id=child_command.space_id,
+            session_id=child_command.session_id,
+            ownership_epoch=None,
+            payload_hash=self._child_hash("record_receipt", receipt_payload),
+            payload=receipt_payload,
+        )
+        # NOTE: build_focus_request() overrides payload["command_id"] with the
+        # operation id, but _compile_receipt_row resolves the *target envelope*
+        # from payload["command_id"] — so we build the request directly from
+        # the payload, keeping command_id == child_id (the envelope we wrote).
+        request = MutationRequest.from_payload(
+            name="focus_session.record_receipt",
+            entity_type="focus_session",
+            entity_id=child_command.session_id,
+            payload={
+                **dict(receipt_payload),
+                "action": "record_receipt",
+                "space_id": child_command.space_id,
+                "session_id": child_command.session_id,
+                "ownership_epoch": None,
+                "payload_hash": receipt_command.payload_hash,
+            },
+            expected_version=None,
+        )
+        try:
+            await self._uow.execute(handle, request, receipt_operation_id)
+        except Exception as exc:
+            _details = getattr(getattr(exc, "rejection", None), "details", None)
+            raise ActiveSessionCoordinationError(
+                f"record_receipt for child {child_id!r} failed: {type(exc).__name__} "
+                f"{_details!r}"
+            ) from exc
+
+    async def _locator_aggregate_view(
+        self, locator: ActiveSessionLocator
+    ) -> dict[str, object]:
+        """Locator view + the real Session aggregate (never fabricated)."""
+        handle = await self._space_handle_provider(locator.space_id)
+        session_aggregate = await self._load_session_aggregate(
+            handle, locator.session_id
+        )
+        return {"locator": self._locator_view(locator), "session": session_aggregate}
 
     # ------------------------------------------------------------------ #
     # Public Protocol surface
@@ -157,11 +326,17 @@ class ProductionActiveSessionCoordinator:
             operation = await session.get(
                 ActiveSessionOperation, locator.operation_id
             )
+        # Load the real aggregate; a locator pointing at a missing Session is a
+        # broken state and fails closed instead of returning fabricated data.
+        handle = await self._space_handle_provider(locator.space_id)
+        session_aggregate = await self._load_session_aggregate(
+            handle, locator.session_id
+        )
         return ActiveSessionView(value={"locator": self._locator_view(locator)} | (
             {"operation": self._operation_view(operation)}
             if operation is not None
             else {}
-        ))
+        ) | {"session": session_aggregate})
 
     async def start(
         self, principal: "Principal", command: ActiveSessionCommand
@@ -210,6 +385,33 @@ class ProductionActiveSessionCoordinator:
                 raise ActiveSessionCoordinationError(
                     "concurrent claimant won the singleton ActiveSession slot"
                 ) from exc
+        # Real Space write: create the FocusSession under the claiming locator
+        # (or reuse an already-persisted Session on restart) so the response
+        # aggregate reflects durable Space data, never a fabricated dict.
+        handle = await self._space_handle_provider(command.space_id)
+        async with handle.session_factory() as session:
+            existing_session = await session.get(FocusSession, command.session_id)
+        if existing_session is None:
+            start_request = build_focus_request(
+                "start",
+                FocusSessionCommand(
+                    command_id=operation_id,
+                    space_id=command.space_id,
+                    session_id=command.session_id,
+                    ownership_epoch=command.ownership_epoch or 1,
+                    payload_hash=payload_hash,
+                    payload=dict(command.payload),
+                ),
+            )
+            try:
+                await self._uow.execute(handle, start_request, operation_id)
+            except Exception as exc:
+                raise ActiveSessionCoordinationError(
+                    f"start mutation failed: {type(exc).__name__}"
+                ) from exc
+        session_aggregate = await self._load_session_aggregate(
+            handle, command.session_id
+        )
         return ActiveSessionView(value={"locator": self._locator_view(
             ActiveSessionLocator(
                 singleton_key="active", space_id=command.space_id,
@@ -220,7 +422,20 @@ class ProductionActiveSessionCoordinator:
                 ownership_epoch=command.ownership_epoch or 1,
                 lease_expires_at=_lease_expiry(now), updated_at=now,
             )
-        )})
+        )} | {
+            "operation": self._operation_view(
+                ActiveSessionOperation(
+                    operation_id=operation_id,
+                    kind="start",
+                    payload_hash=payload_hash,
+                    intent_json=canonical_json_bytes(intent).decode("ascii"),
+                    phase="claimed",
+                    created_at=now,
+                    updated_at=now,
+                )
+            ),
+            "session": session_aggregate,
+        })
 
     async def activate_provisional(
         self, principal: "Principal", command: ActiveSessionCommand
@@ -243,6 +458,7 @@ class ProductionActiveSessionCoordinator:
             "mark_activation_conflict", child_payloads[ActiveSessionChildRole.ACTIVE]
         )
         business = dict(command.payload)
+        contract_hash = self._contract_payload_hash(command.payload)
         children = {
             "candidate": {"operation_id": candidate_id, "payload_hash": candidate_hash},
             "active": {"operation_id": active_id, "payload_hash": active_hash},
@@ -250,6 +466,7 @@ class ProductionActiveSessionCoordinator:
         intent = self._intent(
             operation_id, "activate_provisional", command,
             business=business, pair=pair, children=children,
+            payload_hash=contract_hash,
         )
         now = _canonical_utc_now(self._clock)
         async with self._meta_session_factory() as session:
@@ -280,7 +497,7 @@ class ProductionActiveSessionCoordinator:
                 ActiveSessionOperation(
                     operation_id=operation_id,
                     kind="activate_provisional",
-                    payload_hash=self._require_payload_hash(command.payload_hash),
+                    payload_hash=contract_hash,
                     intent_json=canonical_json_bytes(intent).decode("ascii"),
                     phase="claimed",
                     created_at=now,
@@ -300,17 +517,38 @@ class ProductionActiveSessionCoordinator:
             operation.phase = "awaiting_resolution"
             operation.updated_at = _canonical_utc_now(self._clock)
             await session.commit()
-        return ActiveSessionView(value={"locator": self._locator_view(
-            ActiveSessionLocator(
-                singleton_key="active", space_id=pair["active"]["space_id"],
-                session_id=pair["active"]["session_id"], operation_id=operation_id,
-                state="claiming",
-                owner_device_id=str(command.payload.get("owner_device_id", "")),
-                owner_tab_id=str(command.payload.get("owner_tab_id", "")),
-                ownership_epoch=command.ownership_epoch or 1,
-                lease_expires_at=_lease_expiry(now), updated_at=now,
-            )
-        )})
+        # Assemble the conflict response from the *real* Session aggregates of
+        # both Spaces (locator-only dicts are never forced into the wire model).
+        active_handle = await self._space_handle_provider(pair["active"]["space_id"])
+        candidate_handle = await self._space_handle_provider(pair["candidate"]["space_id"])
+        active_aggregate = await self._load_session_aggregate(
+            active_handle, pair["active"]["session_id"]
+        )
+        candidate_aggregate = await self._load_session_aggregate(
+            candidate_handle, pair["candidate"]["session_id"]
+        )
+        active_locator = ActiveSessionLocator(
+            singleton_key="active", space_id=pair["active"]["space_id"],
+            session_id=pair["active"]["session_id"], operation_id=operation_id,
+            state="claiming",
+            owner_device_id=str(command.payload.get("owner_device_id", "")),
+            owner_tab_id=str(command.payload.get("owner_tab_id", "")),
+            ownership_epoch=command.ownership_epoch or 1,
+            lease_expires_at=_lease_expiry(now), updated_at=now,
+        )
+        return ActiveSessionView(value={
+            "kind": "activation_conflict",
+            "active": {
+                **self._locator_view(active_locator),
+                "operation": self._operation_view(operation),
+                "session": active_aggregate,
+            },
+            "candidate": {
+                "space_id": pair["candidate"]["space_id"],
+                "session_id": pair["candidate"]["session_id"],
+                "session": candidate_aggregate,
+            },
+        })
 
     async def resolve_activation_conflict(
         self, principal: "Principal", command: ActiveSessionCommand
@@ -346,9 +584,11 @@ class ProductionActiveSessionCoordinator:
             "winner": {"operation_id": winner_id, "payload_hash": winner_hash},
             "loser": {"operation_id": loser_id, "payload_hash": loser_hash},
         }
+        contract_hash = self._contract_payload_hash(command.payload)
         intent = self._intent(
             operation_id, "resolve_activation_conflict", command,
             business=dict(command.payload), pair=pair, children=children,
+            payload_hash=contract_hash,
         )
         now = _canonical_utc_now(self._clock)
         async with self._meta_session_factory() as session:
@@ -383,7 +623,7 @@ class ProductionActiveSessionCoordinator:
                 ActiveSessionOperation(
                     operation_id=operation_id,
                     kind="resolve_activation_conflict",
-                    payload_hash=self._require_payload_hash(command.payload_hash),
+                    payload_hash=contract_hash,
                     intent_json=canonical_json_bytes(intent).decode("ascii"),
                     phase="claimed",
                     related_operation_id=locator.operation_id,
@@ -420,9 +660,16 @@ class ProductionActiveSessionCoordinator:
                     "resolution CAS failed: operation was not in claimed phase"
                 )
             operation = await session.get(ActiveSessionOperation, operation_id)
+        # The response aggregate is the *real* winner-Session state, read back
+        # through the shared query — never a hand-built dict.
+        winner_handle = await self._space_handle_provider(winner_side["space_id"])
+        session_aggregate = await self._load_session_aggregate(
+            winner_handle, winner_side["session_id"]
+        )
         return ActiveSessionView(value={
             "locator": self._locator_view(locator),
             "operation": self._operation_view(operation),
+            "session": session_aggregate,
         })
 
     async def end(
@@ -462,7 +709,9 @@ class ProductionActiveSessionCoordinator:
             existing = await session.get(ActiveSessionOperation, operation_id)
             if existing is not None:
                 await session.commit()
-                return ActiveSessionView(value={"locator": self._locator_view(locator)})
+                return ActiveSessionView(
+                    value=await self._end_session_view(locator)
+                )
             session.add(
                 ActiveSessionOperation(
                     operation_id=operation_id,
@@ -481,7 +730,18 @@ class ProductionActiveSessionCoordinator:
                 raise ActiveSessionCoordinationError(
                     f"duplicate end operation {operation_id!r} with a different payload"
                 ) from exc
-        return ActiveSessionView(value={"locator": self._locator_view(locator)})
+        return ActiveSessionView(value=await self._end_session_view(locator))
+
+    async def _end_session_view(
+        self, locator: ActiveSessionLocator
+    ) -> dict[str, object]:
+        """End response contract: the real Session aggregate and a null locator
+        (the wire model drops locator details after release)."""
+        handle = await self._space_handle_provider(locator.space_id)
+        session_aggregate = await self._load_session_aggregate(
+            handle, locator.session_id
+        )
+        return {"locator": None, "session": session_aggregate}
 
     async def heartbeat(
         self, principal: "Principal", command: ActiveSessionCommand
@@ -491,49 +751,53 @@ class ProductionActiveSessionCoordinator:
     async def pause(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
-        return await self._touch(command, "pause")
+        return await self._touch(command, "pause", include_session=True)
 
     async def resume(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
-        return await self._touch(command, "resume")
+        return await self._touch(command, "resume", include_session=True)
 
     async def takeover(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
-        return await self._touch(command, "takeover")
+        return await self._touch(command, "takeover", include_session=True)
 
     async def update_note(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
-        return await self._touch(command, "update_note")
+        return await self._touch(command, "update_note", include_session=True)
 
     async def set_current_plan_item(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
-        return await self._touch(command, "set_current_plan_item")
+        return await self._touch(command, "set_current_plan_item", include_session=True)
 
     async def set_completion_draft(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
-        return await self._touch(command, "set_completion_draft")
+        return await self._touch(command, "set_completion_draft", include_session=True)
 
     async def add_plan_item(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
-        return await self._touch(command, "add_plan_item")
+        return await self._touch(command, "add_plan_item", include_session=True)
 
     async def remove_plan_item(
         self, principal: "Principal", command: ActiveSessionCommand
     ) -> ActiveSessionView:
-        return await self._touch(command, "remove_plan_item")
+        return await self._touch(command, "remove_plan_item", include_session=True)
 
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
 
     async def _touch(
-        self, command: ActiveSessionCommand, kind: str
+        self,
+        command: ActiveSessionCommand,
+        kind: str,
+        *,
+        include_session: bool = False,
     ) -> ActiveSessionView:
         from sqlalchemy import text as sa_text
 
@@ -574,6 +838,10 @@ class ProductionActiveSessionCoordinator:
             if existing is not None:
                 # idempotent replay of the same command returns the prior row
                 await session.commit()
+                if include_session:
+                    return ActiveSessionView(
+                        value=await self._locator_aggregate_view(locator)
+                    )
                 return ActiveSessionView(value={"locator": self._locator_view(locator)})
             session.add(
                 ActiveSessionOperation(
@@ -593,6 +861,10 @@ class ProductionActiveSessionCoordinator:
                 raise ActiveSessionCoordinationError(
                     f"duplicate operation {operation_id!r} with a different payload"
                 ) from exc
+            if include_session:
+                return ActiveSessionView(
+                    value=await self._locator_aggregate_view(locator)
+                )
             return ActiveSessionView(value={"locator": self._locator_view(locator)})
 
     async def _execute_children(
@@ -618,19 +890,44 @@ class ProductionActiveSessionCoordinator:
                 payload_hash=child_hash,
                 payload=payload,
             )
-            if self._execute_child is not None:
-                await self._execute_child(
+            if self._child_executor is not None:
+                state = await self._child_executor(
                     str(payload.get("space_id")), child_id, child_command
                 )
+                if state != CommandReceiptState.SUCCEEDED:
+                    raise ActiveSessionCoordinationError(
+                        f"{action} child {child_id!r} receipt is not terminal-success: "
+                        f"{state.value}"
+                    )
                 continue
             request = build_focus_request(action, child_command)
             handle = await self._space_handle_provider(str(payload.get("space_id")))
+            # Retry discipline: a durable terminal-success receipt means this
+            # child already ran; never re-execute (or re-derive) it.
+            existing_state = await self._read_child_receipt(handle, child_id)
+            if existing_state == CommandReceiptState.SUCCEEDED:
+                continue
+            # The child evidence contract is envelope + receipt: persist the
+            # envelope (real work-item identity from the Session context)
+            # before the mutation so the authority can verify it.
+            await self._record_child_envelope(handle, child_id, child_command)
+            _check = await self._read_child_receipt(handle, child_id)  # noqa: F841
             try:
                 await self._uow.execute(handle, request, child_id)
             except Exception as exc:
                 raise ActiveSessionCoordinationError(
                     f"{action} child {child_id!r} failed: {type(exc).__name__}"
                 ) from exc
+            # The mutation alone is not proof: persist the durable succeeded
+            # receipt (the same record_receipt channel the reconciler uses),
+            # then verify it before any phase advances.
+            await self._record_child_receipt(handle, child_id, child_command)
+            state = await self._read_child_receipt(handle, child_id)
+            if state != CommandReceiptState.SUCCEEDED:
+                raise ActiveSessionCoordinationError(
+                    f"{action} child {child_id!r} receipt is not terminal-success: "
+                    f"{state.value if state is not None else 'missing'}"
+                )
 
     def _conflict_child_payloads(
         self, command: ActiveSessionCommand, pair: Mapping[str, Mapping[str, str]]
@@ -694,13 +991,14 @@ class ProductionActiveSessionCoordinator:
         business: Mapping[str, object],
         pair: Mapping[str, Mapping[str, str]] | None = None,
         children: Mapping[str, Mapping[str, str]] | None = None,
+        payload_hash: str | None = None,
     ) -> dict[str, object]:
         intent: dict[str, object] = {
             "command_id": operation_id,
             "space_id": command.space_id or "",
             "session_id": command.session_id,
             "ownership_epoch": command.ownership_epoch or 1,
-            "payload_hash": command.payload_hash,
+            "payload_hash": payload_hash or command.payload_hash,
             "kind": kind,
         }
         for key, value in business.items():
@@ -732,6 +1030,8 @@ class ProductionActiveSessionCoordinator:
             "sessionId": locator.session_id,
             "operationId": locator.operation_id,
             "state": locator.state,
+            "ownerDeviceId": locator.owner_device_id,
+            "ownerTabId": locator.owner_tab_id,
             "ownershipEpoch": locator.ownership_epoch,
             "leaseExpiresAt": locator.lease_expires_at,
             "updatedAt": locator.updated_at,
