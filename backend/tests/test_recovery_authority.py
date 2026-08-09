@@ -19,6 +19,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.db.migrations import run_migrations
+from app.focus_session.child_operations import (
+    ActiveSessionChildRole,
+    derive_active_session_child_operation_id,
+)
+from app.focus_session.commands import focus_business_payload
 from app.focus_session.recovery_authority import (
     CLASSIFICATION_ACTIVE_CONSISTENT,
     CLASSIFICATION_AWAITING_RESOLUTION,
@@ -456,10 +461,26 @@ async def _install_conflict_pair(
     pair_override: dict[str, object] | None = None,
 ) -> dict[str, object]:
     pair = pair_override or _pair(active_space, active_session, candidate_space, candidate_session)
-    candidate_child = bounded_child_operation_id(operation_id, "candidate")
-    active_child = bounded_child_operation_id(operation_id, "active")
-    candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
-    active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
+    candidate_child = derive_active_session_child_operation_id(
+        operation_id, ActiveSessionChildRole.CANDIDATE
+    )
+    active_child = derive_active_session_child_operation_id(
+        operation_id, ActiveSessionChildRole.ACTIVE
+    )
+    candidate_payload = {
+        "decision": "preserve", "expected_ownership_epoch": 1,
+        "space_id": candidate_space, "session_id": candidate_session,
+    }
+    active_payload = {
+        "decision": "preserve", "expected_ownership_epoch": 1,
+        "space_id": active_space, "session_id": active_session,
+    }
+    candidate_hash = canonical_payload_hash(
+        focus_business_payload("mark_activation_conflict", candidate_payload)
+    )
+    active_hash = canonical_payload_hash(
+        focus_business_payload("mark_activation_conflict", active_payload)
+    )
     children = {
         "candidate": {"operation_id": candidate_child, "payload_hash": candidate_hash},
         "active": {"operation_id": active_child, "payload_hash": active_hash},
@@ -493,20 +514,20 @@ async def _install_conflict_pair(
 async def test_claiming_awaiting_resolution_valid_pair(env: Env) -> None:
     await _install_conflict_pair(env, phase="awaiting_resolution")
     decision = await _inspect(env)
-    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
-    assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.classification == CLASSIFICATION_AWAITING_RESOLUTION
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
 async def test_claiming_claimed_conflict_children_all_success(env: Env) -> None:
     await _install_conflict_pair(env, phase="claimed")
     decision = await _inspect(env)
-    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
-    assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.classification == CLASSIFICATION_AWAITING_RESOLUTION
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
 async def test_claiming_transferred_resolution_children_success(env: Env) -> None:
     op = "op-resolve"
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
-    winner_child = bounded_child_operation_id(op, "winner")
-    loser_child = bounded_child_operation_id(op, "loser")
+    winner_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    loser_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
     winner_hash = canonical_payload_hash({"role": "winner", "command_id": winner_child})
     loser_hash = canonical_payload_hash({"role": "loser", "command_id": loser_child})
     children = {
@@ -539,9 +560,12 @@ async def test_claiming_transferred_resolution_children_success(env: Env) -> Non
                          session_id="fs-1", payload_hash=loser_hash)
         _insert_receipt(conn, command_id=loser_child, state="succeeded")
     decision = await _inspect(env)
-    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
-    assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
+    assert len(decision.child_outcomes) == 2
+    assert all(outcome.terminal_success for outcome in decision.child_outcomes)
+    assert len(decision.session_facts) == 2
 # --------------------------------------------------------------------------- #
 # Damage cases (all must fail closed without exceptions)
 # --------------------------------------------------------------------------- #
@@ -719,8 +743,8 @@ async def test_conflict_bad_pair_fails_closed(env: Env) -> None:
 async def test_conflict_pair_missing_fails_closed(env: Env) -> None:
     op = "op-nopair"
     children = {
-        "candidate": bounded_child_operation_id(op, "candidate"),
-        "active": bounded_child_operation_id(op, "active"),
+        "candidate": derive_active_session_child_operation_id(op, ActiveSessionChildRole.CANDIDATE),
+        "active": derive_active_session_child_operation_id(op, ActiveSessionChildRole.ACTIVE),
     }
     intent = _make_intent(
         operation_id=op, kind="activate_provisional",
@@ -743,7 +767,7 @@ async def test_conflict_child_not_all_success_fails_closed(env: Env) -> None:
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "child_rejected"
 async def test_takeover_claim_without_children_declaration_fails_closed(env: Env) -> None:
     op = "op-takeover"
     intent = _make_intent(
@@ -780,7 +804,7 @@ async def test_active_lease_expired_fails_closed(env: Env) -> None:
 
 async def test_duplicate_conflicting_child_fails_closed(env: Env) -> None:
     op = "op-dupe"
-    shared = bounded_child_operation_id(op, "candidate")
+    shared = derive_active_session_child_operation_id(op, ActiveSessionChildRole.CANDIDATE)
     shared_hash = canonical_payload_hash({"role": "candidate", "command_id": shared})
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
     intent = _make_intent(
@@ -801,7 +825,7 @@ async def test_duplicate_conflicting_child_fails_closed(env: Env) -> None:
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "children_declaration_conflict"
 async def test_relation_self_cycle_fails_closed(env: Env) -> None:
     op = "op-cycle"
     intent = _make_intent(
@@ -972,8 +996,8 @@ async def test_active_without_space_view_fails_closed(env: Env) -> None:
 async def test_resolution_rejected_child_fails_closed(env: Env) -> None:
     op = "op-resolve-rejected"
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
-    winner_child = bounded_child_operation_id(op, "winner")
-    loser_child = bounded_child_operation_id(op, "loser")
+    winner_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    loser_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
     winner_hash = canonical_payload_hash({"role": "winner", "command_id": winner_child})
     loser_hash = canonical_payload_hash({"role": "loser", "command_id": loser_child})
     children = {
@@ -1004,7 +1028,7 @@ async def test_resolution_rejected_child_fails_closed(env: Env) -> None:
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "child_rejected"
 # --------------------------------------------------------------------------- #
 # Cross-cutting guarantees
 # --------------------------------------------------------------------------- #
@@ -1116,12 +1140,12 @@ async def test_awaiting_resolution_child_outcome_fails_closed(
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == expected_code
 async def test_awaiting_resolution_missing_child_receipt_fails_closed(env: Env) -> None:
     op = "op-noreceipt"
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
-    candidate_child = bounded_child_operation_id(op, "candidate")
-    active_child = bounded_child_operation_id(op, "active")
+    candidate_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.CANDIDATE)
+    active_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.ACTIVE)
     candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
     active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
     children = {
@@ -1154,12 +1178,12 @@ async def test_awaiting_resolution_missing_child_receipt_fails_closed(env: Env) 
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "child_missing"
 async def test_awaiting_resolution_missing_child_envelope_fails_closed(env: Env) -> None:
     op = "op-noenvelope"
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
-    candidate_child = bounded_child_operation_id(op, "candidate")
-    active_child = bounded_child_operation_id(op, "active")
+    candidate_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.CANDIDATE)
+    active_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.ACTIVE)
     candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
     active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
     children = {
@@ -1190,7 +1214,7 @@ async def test_awaiting_resolution_missing_child_envelope_fails_closed(env: Env)
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "child_missing"
 # --------------------------------------------------------------------------- #
 # Review round 2: transferred winner/loser matrix (problem 2)
 # --------------------------------------------------------------------------- #
@@ -1205,8 +1229,8 @@ async def _install_resolution(
 ) -> dict[str, object]:
     op = "op-resolve"
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
-    winner_child = bounded_child_operation_id(op, "winner")
-    loser_child = bounded_child_operation_id(op, "loser")
+    winner_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    loser_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
     winner_hash = canonical_payload_hash({"role": "winner", "command_id": winner_child})
     loser_hash = canonical_payload_hash({"role": "loser", "command_id": loser_child})
     children = {
@@ -1263,9 +1287,12 @@ async def test_transferred_candidate_winner_clean(env: Env) -> None:
         loser_kwargs=_resolution_loser_kwargs(),
     )
     decision = await _inspect(env)
-    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
-    assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
+    assert len(decision.child_outcomes) == 2
+    assert all(outcome.terminal_success for outcome in decision.child_outcomes)
+    assert len(decision.session_facts) == 2
 async def test_transferred_active_winner_clean(env: Env) -> None:
     await _install_resolution(
         env, winner_role="active",
@@ -1273,9 +1300,12 @@ async def test_transferred_active_winner_clean(env: Env) -> None:
         loser_kwargs=_resolution_loser_kwargs(),
     )
     decision = await _inspect(env)
-    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
-    assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
+    assert len(decision.child_outcomes) == 2
+    assert all(outcome.terminal_success for outcome in decision.child_outcomes)
+    assert len(decision.session_facts) == 2
 async def test_transferred_winner_missing_fails_closed(env: Env) -> None:
     await _install_resolution(
         env, winner_role="candidate",
@@ -1285,7 +1315,7 @@ async def test_transferred_winner_missing_fails_closed(env: Env) -> None:
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "session_missing"
 async def test_transferred_winner_ended_fails_closed(env: Env) -> None:
     await _install_resolution(
         env, winner_role="candidate",
@@ -1295,7 +1325,7 @@ async def test_transferred_winner_ended_fails_closed(env: Env) -> None:
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "session_unexpected_terminal"
 async def test_transferred_winner_ownership_invalid_fails_closed(env: Env) -> None:
     await _install_resolution(
         env, winner_role="candidate",
@@ -1305,7 +1335,7 @@ async def test_transferred_winner_ownership_invalid_fails_closed(env: Env) -> No
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "session_ownership_invalid"
 async def test_transferred_loser_not_ended_fails_closed(env: Env) -> None:
     await _install_resolution(
         env, winner_role="candidate",
@@ -1320,7 +1350,7 @@ async def test_transferred_loser_not_ended_fails_closed(env: Env) -> None:
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "session_unexpected_nonterminal"
 async def test_transferred_loser_not_marked_invalid_fails_closed(env: Env) -> None:
     await _install_resolution(
         env, winner_role="candidate",
@@ -1330,7 +1360,7 @@ async def test_transferred_loser_not_marked_invalid_fails_closed(env: Env) -> No
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "session_invalid_marker_mismatch"
 async def test_transferred_loser_missing_fails_closed(env: Env) -> None:
     await _install_resolution(
         env, winner_role="candidate",
@@ -1340,7 +1370,7 @@ async def test_transferred_loser_missing_fails_closed(env: Env) -> None:
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "session_missing"
 # --------------------------------------------------------------------------- #
 # Review round 2: exact child payload identity (problem 3)
 # --------------------------------------------------------------------------- #
@@ -1369,8 +1399,8 @@ async def test_original_child_payload_hash_mismatch_fails_closed(env: Env) -> No
 async def test_named_child_payload_hash_mismatch_fails_closed(env: Env) -> None:
     op = "op-hash2"
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
-    candidate_child = bounded_child_operation_id(op, "candidate")
-    active_child = bounded_child_operation_id(op, "active")
+    candidate_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.CANDIDATE)
+    active_child = derive_active_session_child_operation_id(op, ActiveSessionChildRole.ACTIVE)
     candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
     active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
     children = {
@@ -1403,7 +1433,7 @@ async def test_named_child_payload_hash_mismatch_fails_closed(env: Env) -> None:
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "child_payload_hash_mismatch"
 async def test_string_only_children_declaration_fails_closed(env: Env) -> None:
     op = "op-legacy"
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
@@ -1413,8 +1443,8 @@ async def test_string_only_children_declaration_fails_closed(env: Env) -> None:
         business={"cached_at": "2026-07-15T07:59:00.000Z"},
         pair=pair,
         children={
-            "candidate": bounded_child_operation_id(op, "candidate"),
-            "active": bounded_child_operation_id(op, "active"),
+            "candidate": derive_active_session_child_operation_id(op, ActiveSessionChildRole.CANDIDATE),
+            "active": derive_active_session_child_operation_id(op, ActiveSessionChildRole.ACTIVE),
         },
     )
     with sqlite3.connect(env.meta_db) as conn:
@@ -1573,69 +1603,63 @@ async def test_relation_chain_beyond_depth_fails_closed(env: Env) -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def test_relation_chain_does_not_bind_child_to_parent_operation_id(env: Env) -> None:
-    """The chain link must never require child.operation_id == parent id."""
-    op = "op-root"
-    intent = _make_intent(
-        operation_id=op, kind="start", space_id="space-a", session_id="fs-1",
-        epoch=1, business={"planned_seconds": 1500, "owner_device_id": "device-1"},
+async def test_verify_child_derivation_uses_shared_contract() -> None:
+    """The authority derivation check passes exactly the IDs produced by the
+    shared public contract and rejects every other ID (mismatch)."""
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
     )
-    with sqlite3.connect(env.meta_db) as conn:
-        _insert_locator(conn, space_id="space-a", session_id="fs-1", operation_id=op)
-        _insert_operation(conn, operation_id=op, kind="start", phase="completed",
-                          intent=intent, related="op-child-x")
-        _insert_chain_operation(conn, operation_id="op-child-x", related=None)
-    with sqlite3.connect(env.spaces["space-a"]) as conn:
-        _insert_session(conn, session_id="fs-1", space_id="space-a", ended=False)
-    decision = await _inspect(env)
-    assert decision.classification == CLASSIFICATION_ACTIVE_CONSISTENT
-    assert decision.failure_code is None
-
-
-# --------------------------------------------------------------------------- #
-# Review round 3: deterministic child operation identity (problem 1)
-# --------------------------------------------------------------------------- #
-
-
-async def test_child_suffix_registry_has_no_proven_roles() -> None:
-    """The authoritative suffix registry is EMPTY: no TS2/TS0 contract names
-    the candidate/active/winner/loser suffixes, so no named child may pass.
-    Adding an entry without a citable authority must fail this guard."""
-    from app.focus_session.recovery_authority import _CHILD_SUFFIX_BY_ROLE
-
-    assert _CHILD_SUFFIX_BY_ROLE == {}
-
-
-async def test_derive_expected_child_id_unregistered_returns_none() -> None:
-    from app.focus_session.recovery_authority import _derive_expected_child_id
-
-    for role in ("candidate", "active", "winner", "loser"):
-        assert _derive_expected_child_id("op-parent", role) is None
-
-
-async def test_verify_child_derivation_unproven_for_every_role() -> None:
     from app.focus_session.recovery_authority import _verify_child_derivation
 
+    parent = "op-parent"
     intent: dict[str, object] = {
         "children": {
-            "candidate": {"operation_id": "childp:9:op-parent:candidate", "payload_hash": "a" * 64},
-            "active": {"operation_id": "childp:9:op-parent:active", "payload_hash": "a" * 64},
-            "winner": {"operation_id": "childp:9:op-parent:winner", "payload_hash": "a" * 64},
-            "loser": {"operation_id": "childp:9:op-parent:loser", "payload_hash": "a" * 64},
+            "candidate": {
+                "operation_id": derive_active_session_child_operation_id(
+                    parent, ActiveSessionChildRole.CANDIDATE
+                ),
+                "payload_hash": "a" * 64,
+            },
+            "active": {
+                "operation_id": derive_active_session_child_operation_id(
+                    parent, ActiveSessionChildRole.ACTIVE
+                ),
+                "payload_hash": "a" * 64,
+            },
+            "winner": {
+                "operation_id": derive_active_session_child_operation_id(
+                    parent, ActiveSessionChildRole.WINNER
+                ),
+                "payload_hash": "a" * 64,
+            },
+            "loser": {
+                "operation_id": derive_active_session_child_operation_id(
+                    parent, ActiveSessionChildRole.LOSER
+                ),
+                "payload_hash": "a" * 64,
+            },
         }
     }
-    assert _verify_child_derivation("op-parent", intent, ("candidate", "active")) == "child_id_derivation_unproven"
-    assert _verify_child_derivation("op-parent", intent, ("winner", "loser")) == "child_id_derivation_unproven"
+    assert _verify_child_derivation(parent, intent, ("candidate", "active")) is None
+    assert _verify_child_derivation(parent, intent, ("winner", "loser")) is None
+    # a well-formed but non-derived ID fails with the mismatch code
+    intent["children"]["candidate"]["operation_id"] = "childp:9:op-parent:other"
+    assert (
+        _verify_child_derivation(parent, intent, ("candidate", "active"))
+        == "child_id_derivation_mismatch"
+    )
 
 
 async def test_named_child_forged_success_fails_closed_at_entry(env: Env) -> None:
     """Entry-level: forged terminal-success envelopes+receipts whose child IDs
-    cannot be proven as deterministic derivations of the parent operation are
-    rejected by the full inspect_read_only flow."""
+    are NOT the deterministic derivations of the parent operation are rejected
+    by the full inspect_read_only flow (child_id_derivation_mismatch)."""
     op = "op-provisional"
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
-    candidate_child = bounded_child_operation_id(op, "candidate")
-    active_child = bounded_child_operation_id(op, "active")
+    # forged: plausible-looking but non-derived IDs
+    candidate_child = "childp:9:op-provisional:conflict:forged"
+    active_child = "childp:9:op-provisional:conflict:forged-2"
     candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
     active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
     children = {
@@ -1668,7 +1692,7 @@ async def test_named_child_forged_success_fails_closed_at_entry(env: Env) -> Non
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
     assert decision.result == RESULT_NOT_CLEAN
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "child_id_derivation_mismatch"
 
 
 async def test_named_child_cross_parent_replay_rejected(env: Env) -> None:
@@ -1677,8 +1701,8 @@ async def test_named_child_cross_parent_replay_rejected(env: Env) -> None:
     op = "op-provisional"
     other_parent = "op-other-parent"
     pair = _pair("space-a", "fs-1", "space-b", "fs-2")
-    candidate_child = bounded_child_operation_id(other_parent, "candidate")
-    active_child = bounded_child_operation_id(other_parent, "active")
+    candidate_child = derive_active_session_child_operation_id(other_parent, ActiveSessionChildRole.CANDIDATE)
+    active_child = derive_active_session_child_operation_id(other_parent, ActiveSessionChildRole.ACTIVE)
     candidate_hash = canonical_payload_hash({"role": "candidate", "command_id": candidate_child})
     active_hash = canonical_payload_hash({"role": "active", "command_id": active_child})
     children = {
@@ -1710,7 +1734,7 @@ async def test_named_child_cross_parent_replay_rejected(env: Env) -> None:
         _insert_receipt(conn, command_id=candidate_child, state="succeeded")
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "child_id_derivation_mismatch"
 
 
 async def test_named_child_arbitrary_operation_id_rejected(env: Env) -> None:
@@ -1735,4 +1759,4 @@ async def test_named_child_arbitrary_operation_id_rejected(env: Env) -> None:
                           phase="awaiting_resolution", intent=intent)
     decision = await _inspect(env)
     assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
-    assert decision.failure_code == "child_id_derivation_unproven"
+    assert decision.failure_code == "child_id_derivation_mismatch"

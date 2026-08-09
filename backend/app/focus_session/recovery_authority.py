@@ -69,11 +69,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.db.models.meta import ActiveSessionLocator, ActiveSessionOperation
 from app.db.session import create_engine, create_session_factory
 from app.errors import to_wire_json
+from app.focus_session.child_operations import (
+    ActiveSessionChildRole,
+    derive_active_session_child_operation_id,
+)
 from app.focus_session.contracts import CommandReceiptState
 from app.models.focus_session import FocusSession
 from app.models.session_command import SessionCommandEnvelope, SessionCommandReceipt
 from app.mutation.types import (
-    bounded_child_operation_id,
     canonical_json_bytes,
     canonical_payload_hash,
 )
@@ -147,20 +150,11 @@ _IDENTITY_KEYS = frozenset(
 _NON_BUSINESS_KEYS = frozenset({"pair", "children"})
 _INTENT_EXCLUDED_KEYS = _IDENTITY_KEYS | _NON_BUSINESS_KEYS
 _CHILD_ROLES = frozenset({"candidate", "active", "winner", "loser"})
-# Authoritative child-suffix registry: role -> suffix passed to
-# ``bounded_child_operation_id(parent_operation_id, suffix)``.
-#
-# Evidence review (round 3): the TS2 plan mandates that every conflict/
-# resolution child be derived via ``bounded_child_operation_id`` (plan
-# line 31) but NEVER names the suffix strings for ``candidate``/``active``/
-# ``winner``/``loser``; the only production suffixes with authority are the
-# business receipt/command/batch suffixes (``receipt:*``, ``command:*``,
-# batch indexes) which are not ActiveSession child roles.  Until TS2/TS0
-# defines them, the registry is EMPTY and every named-child declaration
-# fails closed with ``child_id_derivation_unproven``.  A future TS2
-# authority must populate this map with citable contract lines before any
-# named child can pass.
-_CHILD_SUFFIX_BY_ROLE: dict[str, str] = {}
+# Child suffixes live in the shared public contract
+# (``app.focus_session.child_operations``) used by both the production
+# ``ProductionActiveSessionCoordinator`` writer and this read-only authority:
+# candidate/active -> ``conflict:*``, winner/loser -> ``resolution:*``.
+# Never copy the suffix map here — import the derivation function.
 _CANONICAL_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$")
 _OPERATION_ID_RE = re.compile(r"[\x21-\x7e]{1,128}")
 _PAYLOAD_HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -831,14 +825,14 @@ class ActiveSessionCoordinationInspector:
             if "children" in intent:
                 return CODE_CHILDREN_DECLARATION_INVALID
             return CODE_CHILDREN_DECLARATION_MISSING
-        derivation = _verify_child_derivation(str(locator["operation_id"]), intent, roles)
-        if derivation is not None:
-            return derivation
         if not set(roles) <= set(children):
             return CODE_CHILDREN_DECLARATION_MISSING
         child_ids = [children[role].operation_id for role in roles]
         if len(set(child_ids)) != len(child_ids):
             return CODE_CHILDREN_DECLARATION_CONFLICT
+        derivation = _verify_child_derivation(str(locator["operation_id"]), intent, roles)
+        if derivation is not None:
+            return derivation
         pair = _decode_pair(intent)
         if pair is None:
             return CODE_CONFLICT_PAIR_MISSING
@@ -1181,27 +1175,16 @@ def _decode_pair(intent: Mapping[str, object]) -> ConflictPairFact | None:
     )
 
 
-def _derive_expected_child_id(parent_operation_id: str, role: str) -> str | None:
-    """Return the authoritative derived child ID for a role, or None when the
-    role has no proven suffix (fail closed)."""
-    suffix = _CHILD_SUFFIX_BY_ROLE.get(role)
-    if suffix is None:
-        return None
-    try:
-        return bounded_child_operation_id(parent_operation_id, suffix)
-    except ValueError:
-        return None
-
-
 def _verify_child_derivation(
     parent_operation_id: str, intent: Mapping[str, object], roles: tuple[str, ...]
 ) -> str | None:
     """Prove each named child ID is the deterministic derivation of the parent
-    operation ID and the role's authoritative suffix.
+    operation ID and the role's authoritative suffix from the *shared public
+    contract* (``app.focus_session.child_operations``).
 
     ``parent_operation_id``, ``role`` and the derived child ID all participate
-    so a child declared for another parent (cross-parent replay) or for an
-    unproven suffix never passes.
+    so a child declared for another parent (cross-parent replay), an unknown
+    role, or a role/suffix mismatch never passes.
     """
     children = intent.get("children")
     if not isinstance(children, dict):
@@ -1210,8 +1193,12 @@ def _verify_child_derivation(
         declaration = children.get(role)
         if not isinstance(declaration, dict):
             return CODE_CHILDREN_DECLARATION_INVALID
-        expected = _derive_expected_child_id(parent_operation_id, role)
-        if expected is None:
+        try:
+            enum_role = ActiveSessionChildRole(role)
+            expected = derive_active_session_child_operation_id(
+                parent_operation_id, enum_role
+            )
+        except ValueError:
             return CODE_CHILD_ID_DERIVATION_UNPROVEN
         if str(declaration.get("operation_id")) != expected:
             return CODE_CHILD_ID_DERIVATION_MISMATCH
