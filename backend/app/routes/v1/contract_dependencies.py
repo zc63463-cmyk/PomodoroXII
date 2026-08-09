@@ -1,6 +1,7 @@
 """Typed module providers and shared Task Space adapter guards."""
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from fastapi import Depends, HTTPException, Request
@@ -60,22 +61,28 @@ def get_focus_session_module(
     return DefaultFocusSessionModule(uow=uow, query=query, reconciler=reconciler)
 
 
-def get_active_session_coordinator(
+async def get_active_session_coordinator(
     request: Request,
     uow=Depends(get_mutation_uow),
     handle: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
-) -> "ActiveSessionCoordinator":
+) -> AsyncIterator["ActiveSessionCoordinator"]:
     """Construct the production ActiveSessionCoordinator over the real Meta
     session factory, the real MutationUnitOfWork and real Space handles.
 
-    Construction failures are never swallowed: a missing Meta factory, UoW or
-    runtime surfaces as a dependency error instead of a silent fallback.
+    Every cross-space handle opened through the runtime is owned by this
+    request-scoped provider and closed on *all* exit paths (success, child
+    failure, cancellation, provider exception).  The primary request handle is
+    owned and closed by ``get_space_runtime_handle`` and is never closed here
+    twice.  Construction failures are never swallowed: a missing Meta factory,
+    UoW or runtime surfaces as a dependency error instead of a silent
+    fallback.
     """
     from app.db.meta_session import get_meta_session_factory
     from app.focus_session.coordinator import (
         ActiveSessionCoordinationError,
         ProductionActiveSessionCoordinator,
     )
+    from app.focus_session.query import FocusSessionQuery
 
     meta_factory = get_meta_session_factory()
     if meta_factory is None:
@@ -85,6 +92,8 @@ def get_active_session_coordinator(
         raise RuntimeError("SpaceRuntime is not installed")
     if uow is None:
         raise RuntimeError("MutationUnitOfWork is not installed")
+
+    opened: list[SpaceRuntimeHandle] = []
 
     async def space_handle_provider(space_id: str) -> SpaceRuntimeHandle:
         if str(getattr(handle.scope, "space_id", "")) == space_id:
@@ -103,13 +112,26 @@ def get_active_session_coordinator(
             raise ActiveSessionCoordinationError(
                 f"cannot open Space handle for {space_id!r}: {type(exc).__name__}"
             ) from exc
+        opened.append(other)
         return other
 
-    return ProductionActiveSessionCoordinator(
+    coordinator = ProductionActiveSessionCoordinator(
         meta_session_factory=meta_factory,
         uow=uow,
         space_handle_provider=space_handle_provider,
+        session_query=FocusSessionQuery(),
     )
+    try:
+        yield coordinator
+    finally:
+        # Close every cross-space handle this request opened; the primary
+        # handle is closed by get_space_runtime_handle's own finally block.
+        for opened_handle in opened:
+            try:
+                await opened_handle.aclose()
+            except Exception:
+                pass
+        opened.clear()
 
 
 def require_idempotency_key(command_id: str, header_value: str | None) -> None:
