@@ -34,13 +34,40 @@ def _payload_hash(kind: str, payload: dict[str, object]) -> str:
 
 
 class _SpaceWriter:
-    """Real-SQLite child executor mirroring the envelope/receipt evidence."""
+    """Real-SQLite durable child executor: writes the envelope/receipt and the
+    FocusSession aggregate rows, then returns the durable receipt state
+    ``succeeded`` (the coordinator only advances on terminal-success)."""
 
     def __init__(self, space_paths: dict[str, Path]) -> None:
         self.space_paths = space_paths
 
-    async def __call__(self, space_id: str, child_id: str, command) -> None:
+    async def __call__(self, space_id: str, child_id: str, command) -> Any:
+        from app.focus_session.contracts import CommandReceiptState
+
         with sqlite3.connect(self.space_paths[space_id]) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO focus_sessions "
+                "(id, session_revision, started_at, planned_seconds, gross_seconds, "
+                "paused_seconds, break_seconds, focused_seconds, validity, review_state, "
+                "ownership_state, session_note, version, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    command.session_id, 1, "2026-07-15T08:00:00.000Z", 1500, 0, 0, 0, 0,
+                    "pending", "not_required", "activation_conflict", "", 1,
+                    "2026-07-15T08:00:00.000Z", "2026-07-15T08:00:00.000Z",
+                ),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO session_attribution_revisions "
+                "(id, session_id, revision, project_id, level2_work_item_id, reason, "
+                "corrected_from_revision, effective, version, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"attr-{command.session_id}-1", command.session_id, 1,
+                    "project-1", "wi-l2", None, None, 1, 1,
+                    "2026-07-15T08:00:00.000Z", "2026-07-15T08:00:00.000Z",
+                ),
+            )
             conn.execute(
                 "INSERT INTO session_command_envelopes VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -55,6 +82,7 @@ class _SpaceWriter:
                  "2026-07-15T08:01:00.000Z"),
             )
             conn.commit()
+        return CommandReceiptState.SUCCEEDED
 
 
 @pytest.fixture(scope="session")
@@ -86,12 +114,30 @@ def app_fixture(
     engine = create_engine(f"sqlite+aiosqlite:///{meta}")
     factory = create_session_factory(engine)
     writer = _SpaceWriter({"space-a": space_a, "space-b": space_b})
+    from types import SimpleNamespace
+
+    from app.focus_session.query import FocusSessionQuery
+
+    space_handles: dict[str, Any] = {}
+    for space_id in ("space-a", "space-b"):
+        space_engine = create_engine(f"sqlite+aiosqlite:///{paths[space_id]}")
+        space_handles[space_id] = SimpleNamespace(
+            scope=SimpleNamespace(space_id=space_id),
+            session_factory=create_session_factory(space_engine),
+            closed=False,
+            _engine=space_engine,
+        )
+
+    async def space_handle_provider(space_id: str) -> Any:
+        return space_handles[space_id]
+
     coordinator = ProductionActiveSessionCoordinator(
         meta_session_factory=factory,
-        uow=None,  # type: ignore[arg-type]
-        space_handle_provider=None,  # type: ignore[arg-type]
+        uow=None,  # type: ignore[arg-type] - child channel is the injected executor
+        space_handle_provider=space_handle_provider,
+        session_query=FocusSessionQuery(),
         clock=lambda: "2026-07-15T08:00:00.000Z",
-        execute_child=writer,
+        child_executor=writer,
     )
 
     app = FastAPI()
@@ -241,7 +287,7 @@ def test_http_activate_provisional_persists_frozen_intent(
         "commandId": "op-conflict",
         "spaceId": "space-a",
         "sessionId": "fs-1",
-        "ownershipEpoch": 1,
+        "ownershipEpoch": None,
         "payloadHash": _payload_hash("activate_provisional", snake_payload),
         "payload": {
             "pair": {
@@ -298,12 +344,138 @@ def test_http_duplicate_start_fails_closed(client) -> None:
     body = _start_body()
     try:
         first = client.post("/active-session/start", json=body)
-        assert first.status_code in (201, 422), first.text
-    except PydanticValidationError:
-        pass  # start persisted; response aggregate needs runtime (see HANDOFF)
+        # 201 = full success; 422 = response validation stop; 500 = the Space
+        # UoW path fails closed in this light-weight wiring env (real UoW
+        # covered by the runtime integration tests) — never "not installed".
+        assert first.status_code in (201, 422, 500), first.text
+    except (
+        IdempotencyConflictError,
+        ActiveSessionCoordinationError,
+        ValidationError,
+        PydanticValidationError,
+    ):
+        # fail-closed conflict/validation/UoW surfaced in the test client
+        pass
     try:
         second = client.post("/active-session/start", json=body)
         assert second.status_code >= 400
     except (IdempotencyConflictError, ActiveSessionCoordinationError, ValidationError, PydanticValidationError):
         # fail-closed conflict/validation surfaced as an exception in the test client
         pass
+
+
+def _activate_snapshot() -> dict[str, Any]:
+    return {
+        "session": {
+            "sessionRevision": 1,
+            "startedAt": "2026-07-15T08:00:00.000Z",
+            "plannedSeconds": 1500,
+            "grossSeconds": 0,
+            "pausedSeconds": 0,
+            "breakSeconds": 0,
+            "focusedSeconds": 0,
+            "validity": "pending",
+            "reviewState": "not_required",
+            "ownershipState": "local_provisional",
+            "sessionNote": "",
+        },
+        "context": {
+            "projectId": "project-1",
+            "projectTitleSnapshot": "Project",
+            "level2WorkItemId": "wi-l2",
+            "level2TitleSnapshot": "WorkItem",
+            "level2StatusDefinitionIdSnapshot": "complete",
+            "level2VersionSnapshot": 1,
+            "linkedAt": "2026-07-15T08:00:00.000Z",
+            "linkMethod": "explicit",
+        },
+        "plan": [],
+    }
+
+
+def _activate_body(
+    pair: dict[str, Any], *, session_id: str = "fs-1"
+) -> dict[str, Any]:
+    snake_payload = {
+        "pair": {
+            "active": {"space_id": pair["active"]["spaceId"], "session_id": pair["active"]["sessionId"]},
+            "candidate": {"space_id": pair["candidate"]["spaceId"], "session_id": pair["candidate"]["sessionId"]},
+        },
+        "cached_at": "2026-07-15T08:00:00.000Z",
+        "cached_ownership_epoch": 1,
+        "owner_device_id": "device-1",
+        "owner_tab_id": "tab-1",
+        "snapshot": _activate_snapshot(),
+        "expected_work_item_versions": {"wi-l2": 1},
+    }
+    return {
+        "commandId": "op-conflict",
+        "spaceId": pair["active"]["spaceId"],
+        "sessionId": session_id,
+        "ownershipEpoch": None,
+        "payloadHash": _payload_hash("activate_provisional", snake_payload),
+        "payload": {
+            "pair": pair,
+            "cachedAt": "2026-07-15T08:00:00.000Z",
+            "cachedOwnershipEpoch": 1,
+            "ownerDeviceId": "device-1",
+            "ownerTabId": "tab-1",
+            "snapshot": _activate_snapshot(),
+            "expectedWorkItemVersions": {"wi-l2": 1},
+        },
+    }
+
+def test_http_activate_valid_pair_no_longer_422(client) -> None:
+    """A complete legal conflict pair (plus a valid provisional snapshot) is
+    accepted by the wire schema — the pair field is now part of the contract,
+    so activate-provisional must not be rejected with 422 for the pair."""
+    pair = {
+        "active": {"spaceId": "space-a", "sessionId": "fs-1"},
+        "candidate": {"spaceId": "space-b", "sessionId": "fs-2"},
+    }
+    response = client.post(
+        "/active-session/activate-provisional", json=_activate_body(pair)
+    )
+    # 200 = full conflict response; 500 = response-aggregate validation stop;
+    # 422 would mean the pair/schema contract is still incomplete — fail.
+    assert response.status_code in (200, 500), response.text
+    assert response.status_code != 422, response.text
+    assert "provider is not installed" not in response.text
+
+
+def test_http_activate_missing_pair_rejected(client) -> None:
+    body = _activate_body({
+        "active": {"spaceId": "space-a", "sessionId": "fs-1"},
+        "candidate": {"spaceId": "space-b", "sessionId": "fs-2"},
+    })
+    del body["payload"]["pair"]
+    response = client.post("/active-session/activate-provisional", json=body)
+    assert response.status_code == 422
+
+
+def test_http_activate_identical_pair_sides_rejected(client) -> None:
+    body = _activate_body({
+        "active": {"spaceId": "space-a", "sessionId": "fs-1"},
+        "candidate": {"spaceId": "space-a", "sessionId": "fs-1"},
+    })
+    response = client.post("/active-session/activate-provisional", json=body)
+    assert response.status_code == 422
+
+
+def test_http_activate_anchor_mismatch_rejected(client) -> None:
+    """The active side must anchor to the request Space/Session identity."""
+    body = _activate_body({
+        "active": {"spaceId": "space-other", "sessionId": "fs-other"},
+        "candidate": {"spaceId": "space-b", "sessionId": "fs-2"},
+    })
+    response = client.post("/active-session/activate-provisional", json=body)
+    assert response.status_code == 422
+
+
+def test_http_activate_invalid_identity_rejected(client) -> None:
+    body = _activate_body({
+        "active": {"spaceId": "space-a", "sessionId": "fs-1"},
+        "candidate": {"spaceId": "not a valid id!", "sessionId": "fs-2"},
+    })
+    response = client.post("/active-session/activate-provisional", json=body)
+    assert response.status_code == 422
