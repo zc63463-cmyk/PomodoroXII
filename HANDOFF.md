@@ -13,7 +13,7 @@ activate wire schema 缺 pair 字段；真实 MutationUnitOfWork 全链路未接
   - `1d800fa` feat(focus-session): define deterministic active session child ids
   - `6b516ff` feat(focus-session): persist conflict recovery child intent
   - `0315a28` fix(recovery): verify production active session child identity
-- 最终 HEAD（`git rev-parse HEAD`）：`0315a2872c56933c6bb193e289e27697b769b060`
+- 最终 HEAD（`git rev-parse HEAD`）：`0315a2872c56933c6bb193e289e27697b769b060`（wiring/CAS 轮次后：`a2a8d2aebdb3df59ea526fc52de24f134d6ceb34`）
 
 ## 2. 调查结论（writer 缺失确认）
 
