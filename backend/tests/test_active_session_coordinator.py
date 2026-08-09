@@ -918,38 +918,60 @@ async def test_resolve_restart_reuses_winner_loser_ids(env, tmp_path) -> None:
     await _dispose_all(engine2, handles2)
 
 
+def _loser_proof(**overrides: object) -> dict[str, object]:
+    """A well-formed frozen resolution proof for the test locator state
+    (op-resolve claimed, epoch E+1=2, pair space-a/fs-1 + space-b/fs-2,
+    winner=candidate)."""
+    proof: dict[str, object] = {
+        "resolution_operation_id": "op-resolve",
+        "conflict_operation_id": "op-conflict",
+        "phase": "claimed",
+        "locator_state": "claiming",
+        "locator_operation_id": "op-resolve",
+        "locator_space_id": "space-a",
+        "locator_session_id": "fs-1",
+        "ownership_epoch": 2,
+        "pair": {
+            "active": {"space_id": "space-a", "session_id": "fs-1"},
+            "candidate": {"space_id": "space-b", "session_id": "fs-2"},
+        },
+        "winner_role": "candidate",
+        "winner_child_operation_id": derive_active_session_child_operation_id(
+            "op-resolve", ActiveSessionChildRole.WINNER
+        ),
+        "winner_child_payload_hash": "w" * 64,
+        "loser_child_operation_id": derive_active_session_child_operation_id(
+            "op-resolve", ActiveSessionChildRole.LOSER
+        ),
+        "loser_child_payload_hash": "l" * 64,
+        "intent_hash": "0" * 64,
+    }
+    proof.update(overrides)
+    return proof
+
+
 async def _loser_request(
     *,
     op_id: str,
     session_id: str,
-    resolution_operation_id: str = "op-resolve",
-    related_operation_id: str = "op-conflict",
-    winner_role: str = "candidate",
-    pair_override: dict[str, dict[str, str]] | None = None,
     space_id: str = "space-a",
-    epoch: object | None = None,
+    proof: dict[str, object] | None = None,
+    proof_missing: bool = False,
+    child_hash: str | None = None,
     extra: dict[str, object] | None = None,
 ):
     from app.mutation.types import MutationRequest
-
-    pair = pair_override or {
-        "active": {"space_id": "space-a", "session_id": "fs-1"},
-        "candidate": {"space_id": "space-b", "session_id": "fs-2"},
-    }
     from app.services.time import utc_now_iso_ms
 
     payload: dict[str, object] = {
         "space_id": space_id,
         "session_id": session_id,
-        "resolution_operation_id": resolution_operation_id,
-        "related_operation_id": related_operation_id,
-        "winner_role": winner_role,
         "occurred_at": utc_now_iso_ms(),
-        "pair": pair,
         **(extra or {}),
     }
-    if epoch is not None:
-        payload["ownership_epoch"] = epoch
+    if not proof_missing:
+        payload["resolution_proof"] = proof if proof is not None else _loser_proof()
+    payload["payload_hash"] = child_hash if child_hash is not None else "l" * 64
     return MutationRequest.from_payload(
         name="focus_session.resolve_conflict_loser",
         entity_type="focus_session",
@@ -979,12 +1001,8 @@ async def _compile_rejected(
 
 
 async def test_resolution_child_identity_attacks(env, tmp_path) -> None:
-    """Every tampered identity axis fails closed in the real policy with a
-    stable rejection code; nothing is executed and no journal row appears."""
-    from app.focus_session.child_operations import (
-        ActiveSessionChildRole,
-        derive_active_session_child_operation_id,
-    )
+    """Every tampered proof/identity axis fails closed in the real policy with
+    a stable rejection; nothing is executed and no journal row appears."""
     from app.mutation.types import MutationRuleViolation
 
     coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
@@ -995,8 +1013,7 @@ async def test_resolution_child_identity_attacks(env, tmp_path) -> None:
     loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
 
     # The real coordinator CASes the locator onto the resolution operation
-    # before any child runs; simulate that so the compile-time children see
-    # the transferred claim (TS2 plan L3046).
+    # before any child runs; simulate that (TS2 plan L3046).
     from sqlalchemy import text as sa_text
 
     async with engine.begin() as connection:
@@ -1008,7 +1025,7 @@ async def test_resolution_child_identity_attacks(env, tmp_path) -> None:
             {"op": op},
         )
 
-    # control: the honest loser child compiles cleanly
+    # control: the honest proof-carrying loser child compiles cleanly
     async with handle_a.session_factory() as session:
         from app.mutation.unit_of_work import AuthorityOverlay
 
@@ -1022,66 +1039,112 @@ async def test_resolution_child_identity_attacks(env, tmp_path) -> None:
             loser_id,
         )
 
-    # wrong parent: operation id derived from a different resolution op
+    # proof missing -> resolution_proof_required (version_conflict)
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1", proof_missing=True),
+        loser_id,
+    )
+    assert code == "version_conflict"
+    # proof malformed (extra/missing field) -> resolution_proof_invalid
+    bad_proof = dict(_loser_proof())
+    del bad_proof["winner_role"]
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1", proof=bad_proof),
+        loser_id,
+    )
+    assert code == "version_conflict"
+    # wrong resolution operation anchor: op id derives from a different parent
     code = await _compile_rejected(
         uow, handle_a,
         await _loser_request(op_id=loser_id, session_id="fs-1"),
         derive_active_session_child_operation_id("op-other", ActiveSessionChildRole.LOSER),
     )
     assert code == "version_conflict"
-    # wrong resolution operation anchor: the op id derives from a different
-    # parent and the locator anchors op-resolve, not op-wrong
-    code = await _compile_rejected(
-        uow, handle_a,
-        await _loser_request(op_id=loser_id, session_id="fs-1", resolution_operation_id="op-wrong"),
-        derive_active_session_child_operation_id("op-wrong", ActiveSessionChildRole.LOSER),
-    )
-    assert code == "stale_session_owner"
-    # wrong pair: active side does not match the locator anchor
+    # resolution == conflict anchor -> resolution_anchor
     code = await _compile_rejected(
         uow, handle_a,
         await _loser_request(
             op_id=loser_id, session_id="fs-1",
-            pair_override={
-                "active": {"space_id": "space-x", "session_id": "fs-x"},
-                "candidate": {"space_id": "space-b", "session_id": "fs-2"},
-            },
+            proof=_loser_proof(conflict_operation_id="op-resolve"),
+        ),
+        loser_id,
+    )
+    assert code == "version_conflict"
+    # wrong phase -> resolution_phase
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(
+            op_id=loser_id, session_id="fs-1",
+            proof=_loser_proof(phase="transferred"),
+        ),
+        loser_id,
+    )
+    assert code == "version_conflict"
+    # proof locator diverges from the persisted locator -> stale_session_owner
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(
+            op_id=loser_id, session_id="fs-1",
+            proof=_loser_proof(locator_operation_id="op-other"),
         ),
         loser_id,
     )
     assert code == "stale_session_owner"
-    # wrong epoch
+    # wrong epoch in proof -> stale_session_owner
     code = await _compile_rejected(
         uow, handle_a,
-        await _loser_request(op_id=loser_id, session_id="fs-1", epoch=999),
+        await _loser_request(
+            op_id=loser_id, session_id="fs-1",
+            proof=_loser_proof(ownership_epoch=999),
+        ),
         loser_id,
     )
     assert code == "stale_session_owner"
-    # wrong Space (not the handle's scope)
+    # wrong pair (active side diverges from locator) -> stale_session_owner
     code = await _compile_rejected(
         uow, handle_a,
-        await _loser_request(op_id=loser_id, session_id="fs-1", space_id="space-x"),
+        await _loser_request(
+            op_id=loser_id, session_id="fs-1",
+            proof=_loser_proof(
+                pair={
+                    "active": {"space_id": "space-x", "session_id": "fs-x"},
+                    "candidate": {"space_id": "space-b", "session_id": "fs-2"},
+                }
+            ),
+        ),
         loser_id,
     )
-    assert code == "space_scope_mismatch"
-    # wrong Session (not the loser side of the pair)
+    assert code == "stale_session_owner"
+    # invalid winner_role -> invalid_winner_role
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(
+            op_id=loser_id, session_id="fs-1",
+            proof=_loser_proof(winner_role="loser"),
+        ),
+        loser_id,
+    )
+    assert code == "version_conflict"
+    # wrong target Session (not the pair loser side) -> identity mismatch
     code = await _compile_rejected(
         uow, handle_a,
         await _loser_request(op_id=loser_id, session_id="fs-2"),
         loser_id,
     )
     assert code == "version_conflict"
-    # caller-declared loser flag / invalid winner role
+    # wrong Space (not the handle scope) -> space_scope_mismatch
     code = await _compile_rejected(
         uow, handle_a,
-        await _loser_request(op_id=loser_id, session_id="fs-1", winner_role="loser"),
+        await _loser_request(op_id=loser_id, session_id="fs-1", space_id="space-x"),
         loser_id,
     )
-    assert code == "version_conflict"
-    # missing resolution operation anchor
+    assert code == "space_scope_mismatch"
+    # child hash mismatch vs the proof declaration
     code = await _compile_rejected(
         uow, handle_a,
-        await _loser_request(op_id=loser_id, session_id="fs-1", resolution_operation_id=""),
+        await _loser_request(op_id=loser_id, session_id="fs-1", child_hash="x" * 64),
         loser_id,
     )
     assert code == "version_conflict"
@@ -1093,10 +1156,6 @@ async def test_resolution_state_attacks(env, tmp_path) -> None:
     Session, and an ordinary end on a conflict Session all fail closed."""
     from sqlalchemy import text as sa_text
 
-    from app.focus_session.child_operations import (
-        ActiveSessionChildRole,
-        derive_active_session_child_operation_id,
-    )
     from app.models.focus_session import FocusSession
     from app.mutation.types import MutationRequest
 
@@ -1106,8 +1165,6 @@ async def test_resolution_state_attacks(env, tmp_path) -> None:
     uow = _real_uow()
     handle_a = handles["space-a"]
     loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
-
-    from sqlalchemy import text as sa_text
 
     async with engine.begin() as connection:
         await connection.execute(
@@ -1159,7 +1216,6 @@ async def test_resolution_state_attacks(env, tmp_path) -> None:
         fs1.ownership_state = "activation_conflict"
         _fs1_version = fs1.version
         await session.commit()
-    from app.mutation.types import MutationRequest
     from app.services.time import utc_now_iso_ms
 
     end_request = MutationRequest.from_payload(

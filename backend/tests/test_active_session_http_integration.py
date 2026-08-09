@@ -153,6 +153,438 @@ async def _create_work_item(
 
 
 @pytest.mark.asyncio
+def _activate_body(pair: dict[str, Any], *, session_id: str = "fs-1") -> dict[str, Any]:
+    from app.focus_session.commands import active_business_payload
+
+    snake_payload = {
+        "pair": {
+            "active": {"space_id": pair["active"]["spaceId"], "session_id": pair["active"]["sessionId"]},
+            "candidate": {"space_id": pair["candidate"]["spaceId"], "session_id": pair["candidate"]["sessionId"]},
+        },
+        "cached_at": NOW,
+        "cached_ownership_epoch": 1,
+        "owner_device_id": "device-1",
+        "owner_tab_id": "tab-1",
+        "snapshot": {
+            "session": {
+                "session_revision": 1, "started_at": NOW, "planned_seconds": 1500,
+                "gross_seconds": 0, "paused_seconds": 0, "break_seconds": 0,
+                "focused_seconds": 0, "validity": "pending", "review_state": "not_required",
+                "ownership_state": "local_provisional", "session_note": "",
+            },
+            "context": {
+                "project_id": "project-1", "project_title_snapshot": "Project",
+                "level2_work_item_id": "wi-l2", "level2_title_snapshot": "WorkItem",
+                "level2_status_definition_id_snapshot": "complete",
+                "level2_version_snapshot": 1, "linked_at": NOW, "link_method": "explicit",
+            },
+            "plan": [],
+        },
+        "expected_work_item_versions": {"wi-l2": 1},
+    }
+    business = active_business_payload("activate_provisional", snake_payload)
+    return {
+        "commandId": "op-conflict",
+        "spaceId": pair["active"]["spaceId"],
+        "sessionId": session_id,
+        "ownershipEpoch": None,
+        "payloadHash": canonical_payload_hash(business),
+        "payload": {
+            "pair": {
+                "active": {"spaceId": pair["active"]["spaceId"], "sessionId": pair["active"]["sessionId"]},
+                "candidate": {"spaceId": pair["candidate"]["spaceId"], "sessionId": pair["candidate"]["sessionId"]},
+            },
+            "cachedAt": NOW,
+            "cachedOwnershipEpoch": 1,
+            "ownerDeviceId": "device-1",
+            "ownerTabId": "tab-1",
+            "snapshot": {
+                "session": {
+                    "sessionRevision": 1, "startedAt": NOW, "plannedSeconds": 1500,
+                    "grossSeconds": 0, "pausedSeconds": 0, "breakSeconds": 0,
+                    "focusedSeconds": 0, "validity": "pending", "reviewState": "not_required",
+                    "ownershipState": "local_provisional", "sessionNote": "",
+                },
+                "context": {
+                    "projectId": "project-1", "projectTitleSnapshot": "Project",
+                    "level2WorkItemId": "wi-l2", "level2TitleSnapshot": "WorkItem",
+                    "level2StatusDefinitionIdSnapshot": "complete",
+                    "level2VersionSnapshot": 1, "linkedAt": NOW, "linkMethod": "explicit",
+                },
+                "plan": [],
+            },
+            "expectedWorkItemVersions": {"wi-l2": 1},
+        },
+    }
+
+
+def _resolve_hash(payload: dict[str, Any]) -> str:
+    from app.focus_session.commands import active_business_payload
+
+    return canonical_payload_hash(active_business_payload("resolve_activation_conflict", payload))
+
+
+def _resolve_body(
+    *,
+    command_id: str = "op-resolve",
+    session_id: str = "fs-1",
+    winner_role: str = "candidate",
+    decision_at: str = NOW,
+    ownership_epoch: int = 1,
+) -> dict[str, Any]:
+    payload = {
+        "winner_role": winner_role,
+        "decision_at": decision_at,
+        "validity_correction": {
+            "loser_validity": "invalid",
+            "loser_validity_reason": "activation_conflict_loser",
+        },
+    }
+    return {
+        "commandId": command_id,
+        "sessionId": session_id,
+        "ownershipEpoch": ownership_epoch,
+        "payloadHash": _resolve_hash(payload),
+        "payload": {
+            "winnerRole": winner_role,
+            "decisionAt": decision_at,
+            "validityCorrection": {
+                "loserValidity": "invalid",
+                "loserValidityReason": "activation_conflict_loser",
+            },
+        },
+    }
+
+
+def _seed_second_session(space_id: str, session_id: str) -> None:
+    import sqlite3
+
+    from app.settings import settings
+
+    with sqlite3.connect(str(settings.space_db_path(space_id))) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO focus_sessions "
+            "(id, session_revision, started_at, planned_seconds, gross_seconds, "
+            "paused_seconds, break_seconds, focused_seconds, validity, review_state, "
+            "ownership_state, session_note, version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, 1, NOW, 1500, 0, 0, 0, 0, "pending", "not_required",
+             "activation_conflict", "", 1, NOW, NOW),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO session_task_contexts "
+            "(id, session_id, project_id, level2_work_item_id, title_snapshot, "
+            "structure_snapshot, linked_at, link_method, version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (f"ctx-{session_id}", session_id, "project-1", "wi-l2", "WorkItem",
+             '{"project":{"id":"project-1","name":"Project"},"level2":{"id":"wi-l2",'
+             '"title":"WorkItem","parent_id":null,"status_definition_id":"complete",'
+             '"version":1,"effort_estimate_lower_seconds":null,'
+             '"effort_estimate_upper_seconds":null},"plan":{}}',
+             NOW, "manual", 1, NOW, NOW),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO session_attribution_revisions "
+            "(id, session_id, revision, project_id, level2_work_item_id, reason, "
+            "corrected_from_revision, effective, version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (f"attr-{session_id}-1", session_id, 1, "project-1", "wi-l2",
+             None, None, 1, 1, NOW, NOW),
+        )
+        conn.commit()
+
+
+async def _provision_space(
+    client, master_headers: dict[str, str], name: str, key: str,
+) -> dict[str, str]:
+    space = await _create_space(client, master_headers, name)
+    project_id = await _create_project(
+        client, space["headers"], key=key, space_id=space["id"]
+    )
+    await _create_work_item(client, space["headers"], project_id, space_id=space["id"])
+    return space
+
+
+async def _setup_conflict(
+    client, master_headers: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    space_a = await _provision_space(client, master_headers, "Resolve A", "RSA")
+    space_b = await _provision_space(client, master_headers, "Resolve B", "RSB")
+    _seed_second_session(space_a["id"], "fs-1")
+    _seed_second_session(space_b["id"], "fs-2")
+    pair = {
+        "active": {"spaceId": space_a["id"], "sessionId": "fs-1"},
+        "candidate": {"spaceId": space_b["id"], "sessionId": "fs-2"},
+    }
+    from tests.test_active_session_routes import (
+        _activate_body as _routes_activate_body,
+    )
+
+    resp = await client.post(
+        "/api/v1/active-session/activate-provisional",
+        json=_routes_activate_body(pair),
+        headers=master_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["kind"] == "activation_conflict"
+    return space_a, space_b
+
+
+def _read_session(space_id: str, session_id: str) -> dict[str, Any]:
+    import sqlite3
+
+    from app.settings import settings
+
+    with sqlite3.connect(str(settings.space_db_path(space_id))) as conn:
+        row = conn.execute(
+            "SELECT ownership_state, ended_at, timer_completion, validity, "
+            "validity_reason, version FROM focus_sessions WHERE id=?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return {}
+    return {
+        "ownership_state": row[0], "ended_at": row[1], "timer_completion": row[2],
+        "validity": row[3], "validity_reason": row[4], "version": row[5],
+    }
+
+
+def _read_receipt(space_id: str, child_id: str) -> str | None:
+    import sqlite3
+
+    from app.settings import settings
+
+    with sqlite3.connect(str(settings.space_db_path(space_id))) as conn:
+        row = conn.execute(
+            "SELECT state FROM session_command_receipts WHERE command_id=?",
+            (child_id,),
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def _read_operation_phase(operation_id: str) -> str | None:
+    import sqlite3
+
+    from app.settings import settings
+
+    with sqlite3.connect(str(settings.meta_db_path)) as conn:
+        row = conn.execute(
+            "SELECT phase FROM active_session_operations WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
+async def _inspect_http_authority(space_ids: tuple[str, ...]) -> dict[str, Any]:
+    from app.focus_session.recovery_authority import (
+        ActiveSessionCoordinationInspector,
+        ActiveSessionRecoveryView,
+    )
+    from app.knowledge.consistency import SpaceDataView
+    from app.settings import settings
+
+    inspector = ActiveSessionCoordinationInspector()
+    decision = await inspector.inspect_read_only(
+        ActiveSessionRecoveryView(settings.meta_db_path),
+        space_views={
+            space_id: SpaceDataView(
+                space_id, settings.space_db_path(space_id),
+                settings.space_notes_dir(space_id),
+                settings.spaces_data_dir / space_id / "index.db", "0" * 64,
+            )
+            for space_id in space_ids
+        },
+    )
+    return {"classification": decision.classification, "failure_code": decision.failure_code}
+
+
+async def test_resolve_candidate_winner_returns_200(client) -> None:
+    """Real HTTP resolution, candidate winner: exact 200, winner authoritative,
+    loser ended interrupted + invalid, Meta transferred, both receipts
+    succeeded, authority recoverable."""
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.services.time import utc_now_iso_ms
+
+    master_headers = {"Authorization": f"Bearer {await _master_token(client)}"}
+    space_a, space_b = await _setup_conflict(client, master_headers)
+    body = _resolve_body(decision_at=utc_now_iso_ms())
+    resp = await client.post(
+        "/api/v1/active-session/resolve-activation-conflict",
+        json=body,
+        headers=master_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    # response session is the candidate winner
+    session = data["session"]["session"]
+    assert session["id"] == "fs-2"
+    assert session["ownershipState"] == "authoritative"
+    assert session.get("endedAt") is None
+    # Meta phase transferred
+    assert _read_operation_phase("op-resolve") == "transferred"
+    # winner authoritative / non-ended, loser ended invalid in the real DBs
+    winner = _read_session(space_b["id"], "fs-2")
+    assert winner["ownership_state"] == "authoritative"
+    assert winner["ended_at"] is None
+    loser = _read_session(space_a["id"], "fs-1")
+    assert loser["ended_at"] is not None
+    assert loser["timer_completion"] == "interrupted"
+    assert loser["validity"] == "invalid"
+    assert loser["validity_reason"] == "activation_conflict_loser"
+    # both receipts succeeded
+    winner_id = derive_active_session_child_operation_id("op-resolve", ActiveSessionChildRole.WINNER)
+    loser_id = derive_active_session_child_operation_id("op-resolve", ActiveSessionChildRole.LOSER)
+    assert _read_receipt(space_b["id"], winner_id) == "succeeded"
+    assert _read_receipt(space_a["id"], loser_id) == "succeeded"
+    # authority reads the coordinator-written evidence as recoverable
+    authority = await _inspect_http_authority((space_a["id"], space_b["id"]))
+    assert authority["classification"] == "recoverable_claiming", authority
+
+
+async def test_resolve_active_winner_returns_200(client) -> None:
+    """Real HTTP resolution, active winner (identity inversion)."""
+    from app.services.time import utc_now_iso_ms
+
+    master_headers = {"Authorization": f"Bearer {await _master_token(client)}"}
+    space_a, space_b = await _setup_conflict(client, master_headers)
+    body = _resolve_body(winner_role="active", decision_at=utc_now_iso_ms())
+    resp = await client.post(
+        "/api/v1/active-session/resolve-activation-conflict",
+        json=body,
+        headers=master_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    session = data["session"]["session"]
+    assert session["id"] == "fs-1"
+    assert session["ownershipState"] == "authoritative"
+    assert _read_operation_phase("op-resolve") == "transferred"
+    winner = _read_session(space_a["id"], "fs-1")
+    assert winner["ownership_state"] == "authoritative"
+    assert winner["ended_at"] is None
+    loser = _read_session(space_b["id"], "fs-2")
+    assert loser["ended_at"] is not None
+    assert loser["validity_reason"] == "activation_conflict_loser"
+
+
+async def test_resolve_concurrent_single_winner(client) -> None:
+    """Two different resolve commands racing for the same conflict: exactly one
+    returns 200, the other fails with a stable CAS conflict (409/5xx), no
+    orphan operation row, and the locator epoch advances only once."""
+    from app.services.time import utc_now_iso_ms
+
+    master_headers = {"Authorization": f"Bearer {await _master_token(client)}"}
+    space_a, space_b = await _setup_conflict(client, master_headers)
+    import asyncio
+
+    async def _post(command_id: str):
+        body = _resolve_body(command_id=command_id, decision_at=utc_now_iso_ms())
+        return await client.post(
+            "/api/v1/active-session/resolve-activation-conflict",
+            json=body,
+            headers=master_headers,
+        )
+
+    resp_a, resp_b = await asyncio.gather(_post("op-resolve-a"), _post("op-resolve-b"))
+    statuses = sorted([resp_a.status_code, resp_b.status_code])
+    assert statuses[0] == 200, (resp_a.text[:200], resp_b.text[:200])
+    assert statuses[1] in {409, 422, 500}, (resp_a.text[:200], resp_b.text[:200])
+    # exactly one resolution operation reaches transferred; no orphan rows
+    import sqlite3
+
+    from app.settings import settings
+
+    with sqlite3.connect(str(settings.meta_db_path)) as conn:
+        phases = conn.execute(
+            "SELECT operation_id, phase FROM active_session_operations "
+            "WHERE kind='resolve_activation_conflict'"
+        ).fetchall()
+    transferred = [op for op, phase in phases if phase == "transferred"]
+    assert len(transferred) == 1, phases
+    assert len(phases) == 1, phases  # the loser command never persisted a row
+
+
+async def test_resolve_replay_same_and_different_hash(client) -> None:
+    """Replay with the same command/hash returns the same 200; a different
+    payload hash under the same command id is a stable conflict; replay never
+    duplicates child envelopes."""
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.services.time import utc_now_iso_ms
+
+    master_headers = {"Authorization": f"Bearer {await _master_token(client)}"}
+    space_a, space_b = await _setup_conflict(client, master_headers)
+    decision_at = utc_now_iso_ms()
+    body = _resolve_body(decision_at=decision_at)
+    first = await client.post(
+        "/api/v1/active-session/resolve-activation-conflict",
+        json=body,
+        headers=master_headers,
+    )
+    assert first.status_code == 200, first.text
+    replay = await client.post(
+        "/api/v1/active-session/resolve-activation-conflict",
+        json=body,
+        headers=master_headers,
+    )
+    assert replay.status_code == 200, replay.text
+    # different payload hash under the same command id -> stable conflict
+    changed = _resolve_body(decision_at=utc_now_iso_ms())
+    changed["payloadHash"] = "0" * 64
+    resp = await client.post(
+        "/api/v1/active-session/resolve-activation-conflict",
+        json=changed,
+        headers=master_headers,
+    )
+    assert resp.status_code in {409, 422, 500}, resp.text
+    # child envelopes are never duplicated across the replay
+    import sqlite3
+
+    from app.settings import settings
+
+    winner_id = derive_active_session_child_operation_id("op-resolve", ActiveSessionChildRole.WINNER)
+    with sqlite3.connect(str(settings.space_db_path(space_b["id"]))) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM session_command_envelopes WHERE command_id=?",
+            (winner_id,),
+        ).fetchone()[0]
+    assert count == 1, count
+
+
+async def test_resolve_loser_failure_never_returns_200(client) -> None:
+    """If the loser child cannot run, the HTTP resolve never returns 200: the
+    Meta phase stays claimed and the authority requires recovery."""
+    from app.services.time import utc_now_iso_ms
+
+    master_headers = {"Authorization": f"Bearer {await _master_token(client)}"}
+    space_a, space_b = await _setup_conflict(client, master_headers)
+    # break the loser Session's conflict state before resolving
+    import sqlite3
+
+    from app.settings import settings
+
+    with sqlite3.connect(str(settings.space_db_path(space_a["id"]))) as conn:
+        conn.execute(
+            "UPDATE focus_sessions SET ownership_state='authoritative' WHERE id='fs-1'"
+        )
+        conn.commit()
+    body = _resolve_body(decision_at=utc_now_iso_ms())
+    resp = await client.post(
+        "/api/v1/active-session/resolve-activation-conflict",
+        json=body,
+        headers=master_headers,
+    )
+    assert resp.status_code != 200, resp.text
+    assert _read_operation_phase("op-resolve") != "transferred"
+    authority = await _inspect_http_authority((space_a["id"], space_b["id"]))
+    assert authority["classification"] == "recovery_required", authority
+
+
 async def test_master_start_returns_exact_201_with_real_aggregate(client) -> None:
     master_token = await _master_token(client)
     master_headers = {"Authorization": f"Bearer {master_token}"}
