@@ -1,8 +1,8 @@
 # TS2 ActiveSession child-ID production contract — 交回报告
 
-最终状态：**BLOCKED BY MISSING RUNTIME SESSION AGGREGATE AND ACTIVATE PAIR WIRE SCHEMA**
-（详见第 10 节：start/activate 的 wire response 需要真实 FocusSession 聚合（runtime bootstrap）；
-activate wire schema 缺 pair 字段；真实 MutationUnitOfWork 全链路未接线）
+最终状态：**READY FOR S5 INTEGRATION PATCH**
+（第 10 节记录本分支生产 REST / 路由挂载 / 聚合响应 / 跨 Space handle / durable receipt 全部完成；
+剩余为权威环境复核项：start 的 project/work_item 数据链与 resolve 真实 UoW 矩阵、HTTP-runtime 层）
 
 ## 1. 真实基线、提交与 HEAD
 
@@ -13,7 +13,12 @@ activate wire schema 缺 pair 字段；真实 MutationUnitOfWork 全链路未接
   - `1d800fa` feat(focus-session): define deterministic active session child ids
   - `6b516ff` feat(focus-session): persist conflict recovery child intent
   - `0315a28` fix(recovery): verify production active session child identity
-- 最终 HEAD（`git rev-parse HEAD`）：`0315a2872c56933c6bb193e289e27697b769b060`（wiring/CAS 轮次后：`a2a8d2aebdb3df59ea526fc52de24f134d6ceb34`）
+- 本分支提交（续，生产 REST / routing / UoW 轮次）：
+  - `6b46b6b` fix(focus-session): mount active session production routes
+  - `7ed6f8c` fix(focus-session): complete activate pair and aggregate response contract
+  - `52c83ae` fix(focus-session): require durable child receipts and close multi-space handles
+  - `bcdbf88` test(focus-session): cover production HTTP, real UoW and authority parity
+- 最终 HEAD（`git rev-parse HEAD`）：`bcdbf88973bdc00fb52bd6d223800ad09b2eb945`
 
 ## 2. 调查结论（writer 缺失确认）
 
@@ -98,29 +103,33 @@ recoverable_claiming（transferred candidate+active winner）** GREEN；child ID
 跨父 replay、任意 ID、payload hash mismatch、missing envelope/receipt、pending/failed/
 conflict/unknown、winner/loser Session 状态错误、relation 链、schema 缺失等 fail closed。
 
-focused 门禁真实输出：**97 passed**（child_operations 19 + coordinator 7 + authority 71，
-83.88s）。
+focused 门禁真实输出：**119 passed**（child_operations 19 + coordinator 8 + authority 71 +
+routes 10 + mounting 5 + uow_integration 2 + handle_lifecycle 4，104.30s）。
 
 ## 7. 门禁真实输出
 
 | 门禁 | 结果 | 耗时 |
 |---|---|---|
-| focused（child_operations + coordinator + authority） | **97 passed** | 83.88s |
-| Ruff（app/focus_session + 3 测试文件） | **All checks passed!** | - |
-| compileall（app/focus_session） | **OK** | - |
-| pytest --collect-only backend/tests | **2325 tests collected** | 4.76s |
+| focused（child_operations + coordinator + authority + routes + mounting + uow_integration + handle_lifecycle） | **119 passed** | 104.30s |
+| Ruff（app/focus_session + app/routes/v1 + 6 测试文件） | **All checks passed!** | - |
+| compileall（app/focus_session + app/routes/v1） | **OK** | - |
+| OpenAPI（test_openapi_contract.py） | **44 passed** | 52.42s |
+| pytest --collect-only backend/tests | **2347 tests collected** | 3.81s |
 | git diff --check | **OK** | - |
-| 回归组（active_session_locator_migration 等） | **受限**：本 worktree venv 为复制环境，native VFS 性能退化（单测 89s vs 权威环境 4.5s），组合回归超时；未修改任何既有模块（新增 2 文件 + 只改 recovery_authority/测试），改动面与 authority 71 测试全覆盖 | - |
+| 回归组 | **migration 4 passed**（4.79s）/ **mutation_recovery 54 passed**（292.26s）/ **contracts+hash+policy 104 passed, 2 skipped**（51.56s） | - |
 
-## 8. 剩余 contract gaps（fail closed）
+## 8. 剩余 contract gaps / 复核项（fail closed）
 
-1. `ActiveSessionCoordinator` 生产 wiring（bootstrap/依赖注入到
-   `contract_dependencies.get_active_session_coordinator`）未在本分支接线——写方类已实现，
-   路由挂载留给 TS2 集成。
-2. child 的 Space 执行通道在生产 wiring 绑定 `uow.execute`（本分支测试用真实 SQLite
-   executor 证明证据形态）；未验证真实 `SpaceRuntimeHandle` 全链路（需要 runtime lease）。
-3. `intent_json` 生产 schema 与 TS0 生成的 payload schema 的对齐（本分支定义 identity +
-   pair + children + business 并文档化）。
+1. **start 的 Space 数据链**：coordinator.start 经真实 UoW 创建 Session 需要 Space 中已存在
+   project + work_item（policy `_compile_start` 要求），本分支集成测试覆盖
+   activate_provisional（mark_activation_conflict 仅需 Session row）；start 的 project/work_item
+   预置数据链需权威环境复核。
+2. **resolve 真实 UoW 矩阵**：resolve（winner=resolve_activation_conflict / loser=end）的真实
+   UoW 执行路径与 activate 共用 `_execute_children`（envelope→mutation→receipt），但未在
+   轻量 UoW 集成测试中独立覆盖（loser=end 的 policy 校验链需权威环境复核）。
+3. **HTTP-runtime 层**：真实 `create_app()` + lifespan（bootstrap_runtime）在本 sandbox 环境
+   VFS 性能退化下不可行（25min 未完成）；HTTP 层经真实 runtime 的 201/conflict 响应由权威
+   环境复核。REST 层（手工挂载 + coordinator 直测 + OpenAPI/mounting/auth）已全绿。
 4. `related_operation_id` 写入语义仅 resolve 场景（指向 locator 的 root operation）。
 
 ## 9. S5 边界确认
@@ -130,38 +139,46 @@ focused 门禁真实输出：**97 passed**（child_operations 19 + coordinator 7
 - S5 集成仍需单独 patch：构造 copied/live `space_views` 并经
   `inspect_read_only(meta_view, space_views=...)` 注入（authority 分支 5a 节）。
 
-## 10. 生产 wiring / CAS 轮次（HEAD 7ba2e4a 后）
+## 10. 生产 REST / 路由挂载 / 聚合响应 / durable receipt 轮次（HEAD bcdbf88）
 
-本轮完成：
+本轮完成（代码位置 + 测试名称）：
 
-- **生产依赖注入**：`contract_dependencies.get_active_session_coordinator(request, uow, handle)`
-  不再抛 provider-not-installed；真实构造 `ProductionActiveSessionCoordinator`（真实
-  `get_meta_session_factory` + 真实 `get_mutation_uow` + request Space handle；跨 space 经
-  `runtime.open_resolved`）。构造失败（meta factory / runtime / uow 缺失）显式抛错。
-- **resolve CAS**：resolution operation 先以 `claimed`（可证明的准备态，Meta schema 无
-  resolution-specific enum）落库，winner -> loser child 执行后，单独 Meta transaction 中
-  `UPDATE ... WHERE operation_id=? AND phase='claimed' AND related_operation_id=?` CAS 到
-  `transferred`；任一 child 失败保持 claimed。校验：locator singleton/state/identity/epoch、
-  原 activate_provisional operation 存在且 kind 匹配、pair 与 locator 锚定一致。
-- **生命周期 CAS**：`start` INSERT 捕获并发 claimant；`end` 先 CAS locator
-  (active/claiming -> releasing) 再写 operation；`_touch` 数据库级
-  `UPDATE active_session_locator ... WHERE singleton_key='active' AND operation_id=?`
-  （rowcount==1）+ operation 幂等重放（同 operation_id 已存在返回原行）。
-- **REST 集成**（`test_active_session_routes.py`，5 passed）：locate 404（provider 已接线）、
-  start Meta 落库、activate intent 冻结（经 coordinator 直读）、Idempotency-Key mismatch
-  fail-closed、duplicate start fail-closed。
-- focused：**102 passed**（child_operations 19 + coordinator 7 + authority 71 + routes 5）；
-  Ruff / compileall / collect 2330 / diff check 全过。
+- **生产路由挂载**：`routes/v1/__init__.py` `build_v1_router()` 挂载
+  `/api/v1/active-session`（14 个端点）；`active_session.py` 删除"生产未挂载"过时文档；
+  `create_app().openapi()` 验证 14 路径 + master 允许 / space / anonymous 拒绝。
+  测试：`test_active_session_mounting.py`（5 passed）。
+- **Activate pair wire schema**：`ActivateProvisionalPayload` 新增不可变
+  `ConflictPairIdentity`（active/candidate Space+Session，CommandId 字符集、两侧互异、
+  与 request anchor 一致校验）；`_map_activate_payload` 完整传递 pair。
+  测试：`test_http_activate_valid_pair_no_longer_422`（200 非 422）/ missing pair /
+  identical sides / anchor mismatch / invalid identity（全 422）。
+- **聚合响应**：coordinator 注入真实 `FocusSessionQuery`；`start`/`locate`/`pause`/`resume`/
+  `takeover`/note/plan/`end`/`resolve` 全部经 `_load_session_aggregate`（真实 query.load，
+  不伪造时间戳/默认数据；Session 缺失 fail-closed）；activate 返回真实双 Space aggregate
+  （`ActivationConflictResponse`）。修复 `_locator_view` 缺 ownerDeviceId/ownerTabId 的
+  wire bug。
+- **跨 Space handle 生命周期**：`get_active_session_coordinator` 改为 async generator，
+  request 级收集 cross-space handles，finally 全路径 `aclose()`（成功/child 失败/
+  CancelledError/provider 异常）；primary 由 `get_space_runtime_handle` 关闭、不重复。
+  测试：`test_active_session_handle_lifecycle.py`（4 passed）。
+- **durable child receipts**：`_execute_children` 生产分支 = 幂等复用（terminal-success
+  receipt 跳过）→ `_record_child_envelope`（真实 Session context work item，缺失
+  fail-closed）→ 真实 `uow.execute`（mutation）→ `_record_child_receipt`
+  （record_receipt mutation，payload command_id 保留为 child_id）→ 校验 receipt
+  terminal-success 才推进 phase。`child_executor` 仅 TEST-ONLY（必须返回 receipt state）。
+- **真实 UoW 集成**：`test_active_session_uow_integration.py`（2 passed）——真实
+  MutationUnitOfWork（CATALOG/compiler/interpreter/journal/recovery + 真实 SQLite Space）：
+  activate children 真实落 envelope/mutation/receipt → awaiting_resolution →
+  authority `inspect_read_only` 读回 **awaiting_resolution GREEN**（parity）；candidate
+  Session 缺失 → 真实 policy 拒绝 → phase 保持 claimed。
+- **Authority parity**：`test_authority_reads_coordinator_written_intent`——coordinator 写
+  intent + 真实 SQLite child 证据 → 完整 `inspect_read_only` 入口读回 awaiting_resolution。
+  同时修复 payload_hash 契约：coordinator 落库 hash 改为 authority 可重算的
+  `_contract_payload_hash`（业务子集，排除 pair/children）。
 
-### 仍未解决（BLOCKED 原因，fail closed）
+### 本轮边界
 
-1. **start/activate 的 wire response 需真实 Session 聚合**：`ActiveSessionResponse` 要求
-   `session: FocusSessionAggregateResponse`；coordinator 不查询 Session，需要注入真实
-   `FocusSessionQuery` + runtime Space handle（bootstrap 未接线）→ HTTP 201 成功路径未验证。
-2. **activate wire schema 缺 pair**：`ActivateProvisionalPayload` 无 pair 字段，路由无法把
-   conflict pair 传给 coordinator → HTTP activate-provisional 被 schema 拒绝（422）。
-3. **真实 MutationUnitOfWork 全链路**（envelope/receipt 经 uow.execute）需 runtime bootstrap；
-   本分支用真实 SQLite executor 证明证据形态。
-4. **跨 space handle（open_resolved）** 未在真实 runtime 验证。
-
-S5 worktree 未修改；未进入 S5 Task 2。
+- S5 worktree（`E:/DevTemp/pomodoroxii-boundaries/s5-next`）**未修改**；未进入 S5 Task 2；
+  未修改 integration 分支；`backend/app/recovery/**` 未触碰（authority 共享 contract 导入
+  仅限本分支 `recovery_authority.py`）。
+- 最终状态：**READY FOR S5 INTEGRATION PATCH**（权威环境复核项见第 8 节）。
