@@ -20,6 +20,7 @@ from pydantic import TypeAdapter
 from app.auth.authority import Principal
 from app.deps import require_master_token
 from app.focus_session.contracts import ActiveSessionCommand
+from app.focus_session.coordinator import ActiveSessionCoordinationError
 from app.routes.v1.contract_dependencies import (
     get_active_session_coordinator,
     require_idempotency_key,
@@ -580,7 +581,12 @@ async def resolve_activation_conflict(
     command = _make_command(
         body, space_id=None, payload=_map_resolution_payload(body.payload)
     )
-    view = await coordinator.resolve_activation_conflict(
-        _master_principal(claims), command
-    )
+    try:
+        view = await coordinator.resolve_activation_conflict(
+            _master_principal(claims), command
+        )
+    except ActiveSessionCoordinationError as exc:
+        # A lost CAS / idempotency conflict is a stable client-visible 409,
+        # never a bare 500.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
