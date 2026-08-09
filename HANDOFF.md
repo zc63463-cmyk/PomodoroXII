@@ -1,6 +1,8 @@
 # TS2 ActiveSession child-ID production contract — 交回报告
 
-最终状态：**READY FOR S5 INTEGRATION PATCH**
+最终状态：**BLOCKED BY MISSING RUNTIME SESSION AGGREGATE AND ACTIVATE PAIR WIRE SCHEMA**
+（详见第 10 节：start/activate 的 wire response 需要真实 FocusSession 聚合（runtime bootstrap）；
+activate wire schema 缺 pair 字段；真实 MutationUnitOfWork 全链路未接线）
 
 ## 1. 真实基线、提交与 HEAD
 
@@ -127,3 +129,39 @@ focused 门禁真实输出：**97 passed**（child_operations 19 + coordinator 7
 - 未进入 S5 Task 2；未修改 integration 分支；`backend/app/recovery/**` 未触碰。
 - S5 集成仍需单独 patch：构造 copied/live `space_views` 并经
   `inspect_read_only(meta_view, space_views=...)` 注入（authority 分支 5a 节）。
+
+## 10. 生产 wiring / CAS 轮次（HEAD 7ba2e4a 后）
+
+本轮完成：
+
+- **生产依赖注入**：`contract_dependencies.get_active_session_coordinator(request, uow, handle)`
+  不再抛 provider-not-installed；真实构造 `ProductionActiveSessionCoordinator`（真实
+  `get_meta_session_factory` + 真实 `get_mutation_uow` + request Space handle；跨 space 经
+  `runtime.open_resolved`）。构造失败（meta factory / runtime / uow 缺失）显式抛错。
+- **resolve CAS**：resolution operation 先以 `claimed`（可证明的准备态，Meta schema 无
+  resolution-specific enum）落库，winner -> loser child 执行后，单独 Meta transaction 中
+  `UPDATE ... WHERE operation_id=? AND phase='claimed' AND related_operation_id=?` CAS 到
+  `transferred`；任一 child 失败保持 claimed。校验：locator singleton/state/identity/epoch、
+  原 activate_provisional operation 存在且 kind 匹配、pair 与 locator 锚定一致。
+- **生命周期 CAS**：`start` INSERT 捕获并发 claimant；`end` 先 CAS locator
+  (active/claiming -> releasing) 再写 operation；`_touch` 数据库级
+  `UPDATE active_session_locator ... WHERE singleton_key='active' AND operation_id=?`
+  （rowcount==1）+ operation 幂等重放（同 operation_id 已存在返回原行）。
+- **REST 集成**（`test_active_session_routes.py`，5 passed）：locate 404（provider 已接线）、
+  start Meta 落库、activate intent 冻结（经 coordinator 直读）、Idempotency-Key mismatch
+  fail-closed、duplicate start fail-closed。
+- focused：**102 passed**（child_operations 19 + coordinator 7 + authority 71 + routes 5）；
+  Ruff / compileall / collect 2330 / diff check 全过。
+
+### 仍未解决（BLOCKED 原因，fail closed）
+
+1. **start/activate 的 wire response 需真实 Session 聚合**：`ActiveSessionResponse` 要求
+   `session: FocusSessionAggregateResponse`；coordinator 不查询 Session，需要注入真实
+   `FocusSessionQuery` + runtime Space handle（bootstrap 未接线）→ HTTP 201 成功路径未验证。
+2. **activate wire schema 缺 pair**：`ActivateProvisionalPayload` 无 pair 字段，路由无法把
+   conflict pair 传给 coordinator → HTTP activate-provisional 被 schema 拒绝（422）。
+3. **真实 MutationUnitOfWork 全链路**（envelope/receipt 经 uow.execute）需 runtime bootstrap；
+   本分支用真实 SQLite executor 证明证据形态。
+4. **跨 space handle（open_resolved）** 未在真实 runtime 验证。
+
+S5 worktree 未修改；未进入 S5 Task 2。
