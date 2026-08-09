@@ -113,11 +113,31 @@ class ProvisionalFocusSessionSnapshot(WireModel):
     plan: list[ProvisionalPlanItemSnapshot]
 
 
+class ConflictSideIdentity(WireModel):
+    space_id: CommandId
+    session_id: CommandId
+
+
+class ConflictPairIdentity(WireModel):
+    active: ConflictSideIdentity
+    candidate: ConflictSideIdentity
+
+    @model_validator(mode="after")
+    def validate_distinct(self) -> Self:
+        if (
+            self.active.space_id == self.candidate.space_id
+            and self.active.session_id == self.candidate.session_id
+        ):
+            raise ValueError("conflict pair sides must not be identical")
+        return self
+
+
 class ActivateProvisionalPayload(WireModel):
     cached_at: CanonicalUtc
     cached_ownership_epoch: int | None = Field(default=None, gt=0)
     owner_device_id: str = Field(min_length=1, max_length=64)
     owner_tab_id: str = Field(min_length=1, max_length=64)
+    pair: ConflictPairIdentity
     snapshot: ProvisionalFocusSessionSnapshot
     expected_work_item_versions: dict[str, int]
 
