@@ -218,7 +218,7 @@ routes 10 + mounting 5 + uow_integration 2 + handle_lifecycle 4，104.30s）。
 | 维度 | 值 |
 |---|---|
 | parent conflict operation | `activate_provisional`，phase=`awaiting_resolution`，locator 锚定 `claiming`（target=active side, epoch=E） |
-| resolution operation | `resolve_activation_conflict`，phase=`claimed`（prepared），related_operation_id=conflict op id；locator.operation_id 保持指向 conflict op |
+| resolution operation | `resolve_activation_conflict`，phase=`claimed`（prepared），related_operation_id=conflict op id；resolve 首步把 locator 单条条件 UPDATE CAS 到 resolution op（epoch E→E+1），children 在 transferred claim 下执行 |
 | locator operation | state=`claiming`，operation_id=conflict op id，space/session=active side，epoch=E |
 | winner child | id=`derive(resolution_op, WINNER)`，action=`focus_session.resolve_activation_conflict`；pre: Session `activation_conflict`+未 ended；post: ownership=`authoritative`、non-ended、validity 保留 |
 | loser child | id=`derive(resolution_op, LOSER)`，action=`focus_session.resolve_conflict_loser`（新增，普通 end 不放宽）；pre: Session `activation_conflict`+未 ended；post: ended_at=validated decision time、timer_completion=`interrupted`、validity=`invalid`、validity_reason=`activation_conflict_loser`、ownership=非冲突（`authoritative`，与普通 ended Session 一致，authority 只查 ended+invalid marker） |
@@ -302,3 +302,79 @@ plan L3046），children 在 transferred claim 下执行；restart 复用 resolu
 剩余验证项（权威环境复核）：
 - resolve 的成功 HTTP 端到端（routes 未暴露 resolve 成功用例；HTTP 层仅 start/locate/duplicate 覆盖）；
 - 双 Space conflict 的完整 HTTP 双 handle 流程（handle_lifecycle 已覆盖 provider 层）。
+
+
+## 10. 第 5 轮（ResolutionCoordinationProof / 数据库 CAS / journal 联合 / HTTP resolve 200）完成记录
+
+基线 `4d883ed` → 5 个提交：
+1. `fix(focus-session): bind resolution children to persisted meta proof`
+2. `fix(focus-session): cas resolution locator ownership`
+3. `fix(focus-session): reconcile batch and operation journal outcomes`
+4. `test(focus-session): cover production http resolution`
+5. `docs(recovery): finalize verified resolution contract`
+
+### 10.1 frozen ResolutionCoordinationProof（contracts.py）
+`ResolutionCoordinationProof` + `FrozenConflictPair` + `FrozenSpaceSessionId`（frozen/slots）：
+resolution/conflict op id、phase、locator 全字段、ownership_epoch、pair、winner_role、
+winner/loser child id+payload_hash、intent_hash。coordinator 在 Meta transaction 后从
+**刚持久化**的 locator + resolution operation + canonical intent_json 重读构造
+（`_read_resolution_proof`，绝不使用未落库 caller dict）。proof 经 child payload 的
+`resolution_proof` 内部字段携带（加入 `HASH_GUARD_FIELDS`，不参与 business hash），
+不进公共 REST schema；replay 保持完全相同。
+
+### 10.2 Space policy 只信 proof（policy.py `_verify_resolution_child`）
+proof 缺失/损坏 → `version_conflict resolution_proof_required/invalid`；phase 校验；
+derive(resolution_operation_id, role) 链；locator 与 proof 逐字段一致
+（state/operation/space/session/epoch，注入 reader 读，policy 不打开 Meta DB）；
+pair 的 active 侧必须等于 locator anchor；request target 必须是 proof pair 对应
+winner/loser 侧；request payload_hash == proof 声明的 child hash；Session
+`activation_conflict` + 未 ended。caller 自证 pair/role/parent 一律不被信任。
+
+### 10.3 数据库 locator CAS（coordinator.py）
+单条 `UPDATE active_session_locator SET operation_id=:rid, ownership_epoch=:next,
+updated_at=:now WHERE singleton_key='active' AND state='claiming' AND
+operation_id=:conflict_id AND ownership_epoch=:expected_epoch AND space_id=:sid AND
+session_id=:ssid`；`rowcount == 1` 成功；`rowcount == 0` 时仅当 locator 已精确指向
+同一 resolution op + next epoch（幂等 restart）才继续，否则稳定 CAS conflict；
+operation insert 与 CAS 同 transaction，CAS 失败 rollback 无孤立 resolution 行；
+尾部 transferred CAS 对已 transferred 幂等（replay 200）。
+
+### 10.4 journal 联合判定（coordinator.py `_query_child_original`）
+同时读 MutationBatch.state/result_json + MutationOperation.state/result_json/error_code：
+APPLIED 需 batch+operation 双 FINALIZED 且 error_code None 且 result_json 不含本 child
+rejected；ABORTED（任一行）绝不 APPLIED（有 rejected evidence → terminal_rejected，
+否则 recovery_required）；COMPENSATED → INCONCLUSIVE（不直接 NOT_EXECUTED）；
+operation FINALIZED 但 batch 未完成 → INCONCLUSIVE；receipt/journal 三方矩阵生效。
+
+### 10.5 真实 HTTP resolve 200（http_integration，生产 provider/lifespan）
+- candidate winner 200：session=candidate（fs-2）authoritative non-ended；loser ended
+  interrupted + invalid(activation_conflict_loser)；Meta phase transferred；双 receipt
+  succeeded；authority inspect_read_only → recoverable_claiming；
+- active winner 200（身份反转）；
+- 并发两 command：一 200、另一稳定 409（路由把 ActiveSessionCoordinationError 映射
+  HTTPException 409，不裸 500）、无孤立 operation、epoch 只递增一次；
+- 重放：同 command+hash → 200（transferred 幂等，envelope 不重复）；不同 hash → 409；
+- loser failure → 非 200、phase 保持 claimed、authority recovery_required。
+
+### 10.6 安全反例（真实 policy 编译）
+proof 缺失/伪造/损坏、wrong parent（derive 链）、resolution==conflict、wrong phase、
+proof locator 与持久化不一致、wrong epoch、wrong pair、invalid winner_role、wrong
+target session、wrong Space、child hash mismatch、locator 非 claiming、Session
+ended/非 conflict、普通 end conflict Session —— 全部稳定 code，无 Space mutation、
+无 Meta 推进、不泄漏另一侧身份。
+
+## 11. 门禁真实结果（第 5 轮）
+
+| 门禁 | 结果 |
+|---|---|
+| focused（policy 49 + coordinator 19 + uow_integration 2 + http_integration 12 + recovery_authority） | **153 passed** |
+| HTTP 防回归（routes + mounting + handle_lifecycle） | **12 passed** |
+| 回归（locator_migration + contracts + hash + mutation_recovery） | **113 passed + 2 skipped** |
+| Ruff（focus_session + mutation + active_session.py + 5 测试文件） | All checks passed |
+| compileall（focus_session + mutation） | OK |
+| OpenAPI（test_openapi_contract.py） | 44 passed |
+| collect-only | 2363 tests collected（不视为全量通过） |
+| git diff --check / status | OK / 干净 |
+
+剩余验证项（权威环境复核）：双 Space conflict 的完整 HTTP 双 handle 流程已由
+handle_lifecycle 覆盖 provider 层；activate/start 的 HTTP 数据链已有既有测试。
