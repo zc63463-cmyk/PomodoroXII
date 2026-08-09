@@ -353,6 +353,8 @@ def env(
 
 async def _coordinator(
     env: dict[str, Path], tmp_path: Path | None = None,
+    *,
+    clock=_clock,
 ) -> tuple[ProductionActiveSessionCoordinator, AsyncEngine, dict[str, _TestSpaceHandle], dict[str, Path]]:
     from app.focus_session.query import FocusSessionQuery
 
@@ -368,12 +370,19 @@ async def _coordinator(
     async def space_handle_provider(space_id: str):
         return handles[space_id]
 
+    # The real policy locator reader (deps.build_mutation_compiler) reads the
+    # singleton Meta factory; install the test engine's factory so the
+    # resolution children can verify the Meta locator through the real reader.
+    import app.db.meta_session as _meta_module
+
+    _meta_module._meta_session_factory = factory
+
     coordinator = ProductionActiveSessionCoordinator(
         meta_session_factory=factory,
         uow=_real_uow(),
         space_handle_provider=space_handle_provider,
         session_query=FocusSessionQuery(),
-        clock=_clock,
+        clock=clock,
     )
     return coordinator, engine, handles, paths
 
@@ -407,6 +416,17 @@ async def _dispose_all(engine: AsyncEngine, handles: dict[str, Any]) -> None:
     await engine.dispose()
     for _handle in handles.values():
         await _handle.aclose()
+
+
+@pytest.fixture(autouse=True)
+def _reset_meta_session_factory() -> None:
+    """Reset the singleton Meta factory after every test so one test's engine
+    never leaks into the next (the real locator reader depends on it)."""
+    yield
+    import app.db.meta_session as _meta_module
+
+    _meta_module._meta_session_factory = None
+    _meta_module._meta_engine = None
 
 
 async def test_activate_provisional_intent_frozen_before_any_child(
@@ -562,16 +582,729 @@ async def test_restart_reuses_frozen_child_ids(env, tmp_path) -> None:
 
 
 async def test_resolve_activation_conflict_freezes_winner_loser(env, tmp_path) -> None:
-    """Winner child runs through the real UoW and leaves a succeeded receipt;
-    the loser child (end on an activation_conflict Session) is rejected by the
-    real policy locator claim — the Meta phase never advances to transferred.
-    This is the honest, real-UoW evidence of the unresolved loser-end contract.
-    """
+    """Resolution through the real UoW: winner becomes authoritative, loser is
+    ended interrupted + invalid (activation_conflict_loser), both receipts are
+    terminal-success, and the Meta operation CASes to ``transferred``."""
     from sqlalchemy import select
 
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.models.focus_session import FocusSession
+    from app.models.session_command import SessionCommandReceipt
+    from app.services.time import utc_now_iso_ms
+
+    coordinator, engine, handles, paths = await _coordinator(
+        env, tmp_path, clock=utc_now_iso_ms
+    )
+    _seed_focus_session(str(paths["space-a"]), "fs-1")
+    _seed_focus_session(str(paths["space-b"]), "fs-2")
+    conflict_op = "op-conflict"
+    conflict_command = _command(
+        conflict_op, kind="activate_provisional", space_id="space-a", session_id="fs-1",
+        epoch=1, payload=_pair_payload(("space-a", "fs-1"), ("space-b", "fs-2")),
+    )
+    await coordinator.activate_provisional(None, conflict_command)  # type: ignore[arg-type]
+    from app.services.time import utc_now_iso_ms
+
+    op = "op-resolve"
+    payload = {
+        **_pair_payload(("space-a", "fs-1"), ("space-b", "fs-2")),
+        "winner_role": "candidate",
+        "decision_at": utc_now_iso_ms(),
+        "validity_correction": {
+            "loser_validity": "invalid",
+            "loser_validity_reason": "activation_conflict_loser",
+        },
+    }
+    command = _command(
+        op, kind="resolve_activation_conflict", space_id="space-a",
+        session_id="fs-1", epoch=1, payload=payload,
+    )
+    view = await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    operation = await _read_operation(engine, op)
+    assert operation["kind"] == "resolve_activation_conflict"
+    assert operation["phase"] == "transferred"
+    intent = json.loads(operation["intent_json"])
+    winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
+    assert intent["children"]["winner"]["operation_id"] == winner_id
+    assert intent["children"]["loser"]["operation_id"] == loser_id
+    # winner (candidate side = space-b / fs-2): authoritative, non-ended
+    async with handles["space-b"].session_factory() as session:
+        receipt = await session.get(SessionCommandReceipt, winner_id)
+        assert receipt is not None and receipt.state == "succeeded"
+        winner = await session.get(FocusSession, "fs-2")
+        assert winner is not None
+        assert winner.ownership_state == "authoritative"
+        assert winner.ended_at is None
+        assert winner.validity == "pending"
+    # loser (active side = space-a / fs-1): ended interrupted + invalid marker
+    async with handles["space-a"].session_factory() as session:
+        loser_receipt = await session.get(SessionCommandReceipt, loser_id)
+        assert loser_receipt is not None and loser_receipt.state == "succeeded"
+        loser = await session.get(FocusSession, "fs-1")
+        assert loser is not None
+        assert loser.ended_at is not None
+        assert loser.timer_completion == "interrupted"
+        assert loser.validity == "invalid"
+        assert loser.validity_reason == "activation_conflict_loser"
+        assert loser.ownership_state != "activation_conflict"
+    assert view.value["operation"]["phase"] == "transferred"
+    await _dispose_all(engine, handles)
+
+
+async def _resolve_setup(env, tmp_path):
+    """Shared real-UoW resolve scaffold: two conflict Sessions, activated.
+
+    Returns (coordinator, engine, handles, paths, conflict_op, op, command).
+    """
+    from app.services.time import utc_now_iso_ms
+
+    coordinator, engine, handles, paths = await _coordinator(
+        env, tmp_path, clock=utc_now_iso_ms
+    )
+    _seed_focus_session(str(paths["space-a"]), "fs-1")
+    _seed_focus_session(str(paths["space-b"]), "fs-2")
+    conflict_op = "op-conflict"
+    conflict_command = _command(
+        conflict_op, kind="activate_provisional", space_id="space-a", session_id="fs-1",
+        epoch=1, payload=_pair_payload(("space-a", "fs-1"), ("space-b", "fs-2")),
+    )
+    await coordinator.activate_provisional(None, conflict_command)  # type: ignore[arg-type]
+    from app.services.time import utc_now_iso_ms
+
+    op = "op-resolve"
+    payload = {
+        **_pair_payload(("space-a", "fs-1"), ("space-b", "fs-2")),
+        "winner_role": "candidate",
+        "decision_at": utc_now_iso_ms(),
+        "validity_correction": {
+            "loser_validity": "invalid",
+            "loser_validity_reason": "activation_conflict_loser",
+        },
+    }
+    command = _command(
+        op, kind="resolve_activation_conflict", space_id="space-a",
+        session_id="fs-1", epoch=1, payload=payload,
+    )
+    return coordinator, engine, handles, paths, conflict_op, op, command
+
+
+async def test_resolve_active_winner_real_uow(env, tmp_path) -> None:
+    """Active-side winner: fs-1 (the locator anchor) wins and becomes
+    authoritative; the candidate fs-2 is ended invalid.  Both receipts are
+    terminal-success and the Meta operation reaches ``transferred``."""
+    from sqlalchemy import select
+
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.models.focus_session import FocusSession
+    from app.models.session_command import SessionCommandReceipt
+    from app.services.time import utc_now_iso_ms
+
+    coordinator, engine, handles, paths = await _coordinator(
+        env, tmp_path, clock=utc_now_iso_ms
+    )
+    _seed_focus_session(str(paths["space-a"]), "fs-1")
+    _seed_focus_session(str(paths["space-b"]), "fs-2")
+    conflict_op = "op-conflict"
+    conflict_command = _command(
+        conflict_op, kind="activate_provisional", space_id="space-a", session_id="fs-1",
+        epoch=1, payload=_pair_payload(("space-a", "fs-1"), ("space-b", "fs-2")),
+    )
+    await coordinator.activate_provisional(None, conflict_command)  # type: ignore[arg-type]
+    from app.services.time import utc_now_iso_ms
+
+    op = "op-resolve"
+    payload = {
+        **_pair_payload(("space-a", "fs-1"), ("space-b", "fs-2")),
+        "winner_role": "active",
+        "decision_at": utc_now_iso_ms(),
+        "validity_correction": {
+            "loser_validity": "invalid",
+            "loser_validity_reason": "activation_conflict_loser",
+        },
+    }
+    command = _command(
+        op, kind="resolve_activation_conflict", space_id="space-a",
+        session_id="fs-1", epoch=1, payload=payload,
+    )
+    await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    operation = await _read_operation(engine, op)
+    assert operation["phase"] == "transferred"
+    winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
+    # winner = active side (space-a / fs-1): authoritative, non-ended
+    async with handles["space-a"].session_factory() as session:
+        receipt = await session.get(SessionCommandReceipt, winner_id)
+        assert receipt is not None and receipt.state == "succeeded"
+        winner = await session.get(FocusSession, "fs-1")
+        assert winner.ownership_state == "authoritative"
+        assert winner.ended_at is None
+    # loser = candidate side (space-b / fs-2): ended interrupted + invalid
+    async with handles["space-b"].session_factory() as session:
+        loser_receipt = await session.get(SessionCommandReceipt, loser_id)
+        assert loser_receipt is not None and loser_receipt.state == "succeeded"
+        loser = await session.get(FocusSession, "fs-2")
+        assert loser.ended_at is not None
+        assert loser.timer_completion == "interrupted"
+        assert loser.validity == "invalid"
+        assert loser.validity_reason == "activation_conflict_loser"
+    await _dispose_all(engine, handles)
+
+
+async def test_resolve_winner_success_loser_rejected_keeps_claimed(env, tmp_path) -> None:
+    """Winner succeeds; the loser child is rejected by the real policy
+    (its Session is no longer in the conflict) — the Meta phase stays
+    ``claimed``, the winner receipt is preserved and nothing transfers."""
+    from sqlalchemy import select
+
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.models.focus_session import FocusSession
     from app.models.session_command import SessionCommandReceipt
 
-    coordinator, engine, handles, paths = await _coordinator(env, tmp_path)
+    coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
+        env, tmp_path
+    )
+    # Break the loser's conflict state before resolving: the real policy then
+    # rejects the loser child with not_activation_conflict.
+    async with handles["space-a"].session_factory() as session:
+        loser = await session.get(FocusSession, "fs-1")
+        loser.ownership_state = "authoritative"
+        await session.commit()
+    with pytest.raises(ActiveSessionCoordinationError):
+        await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    operation = await _read_operation(engine, op)
+    assert operation["phase"] == "claimed"  # never transferred
+    winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
+    async with handles["space-b"].session_factory() as session:
+        winner_receipt = await session.get(SessionCommandReceipt, winner_id)
+        assert winner_receipt is not None and winner_receipt.state == "succeeded"
+    async with handles["space-a"].session_factory() as session:
+        loser_receipt = await session.get(SessionCommandReceipt, loser_id)
+        assert loser_receipt is not None and loser_receipt.state == "conflict"
+    await _dispose_all(engine, handles)
+
+
+async def test_resolve_winner_rejected_loser_never_runs(env, tmp_path) -> None:
+    """A rejected winner child stops the resolution before the loser: the
+    loser child is never executed and the phase stays ``claimed``."""
+    from sqlalchemy import select
+
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.models.focus_session import FocusSession
+    from app.models.session_command import SessionCommandReceipt
+
+    coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
+        env, tmp_path
+    )
+    # Break the winner's conflict state: the real policy rejects the winner.
+    async with handles["space-b"].session_factory() as session:
+        winner = await session.get(FocusSession, "fs-2")
+        winner.ownership_state = "authoritative"
+        await session.commit()
+    with pytest.raises(ActiveSessionCoordinationError):
+        await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    operation = await _read_operation(engine, op)
+    assert operation["phase"] == "claimed"
+    winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
+    async with handles["space-b"].session_factory() as session:
+        winner_receipt = await session.get(SessionCommandReceipt, winner_id)
+        assert winner_receipt is not None and winner_receipt.state == "conflict"
+    async with handles["space-a"].session_factory() as session:
+        loser_receipt = await session.get(SessionCommandReceipt, loser_id)
+        assert loser_receipt is None  # loser never ran
+    await _dispose_all(engine, handles)
+
+
+async def test_resolve_restart_reuses_winner_loser_ids(env, tmp_path) -> None:
+    """A crashed resolution restarts on a fresh coordinator: the succeeded
+    winner child is reused (never re-executed), the loser reuses its original
+    deterministic ID, no duplicate envelope is written, and after both
+    receipts are terminal-success the operation CASes to ``transferred``."""
+    from sqlalchemy import select
+
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.models.session_command import SessionCommandEnvelope, SessionCommandReceipt
+
+    coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
+        env, tmp_path
+    )
+    winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
+    # First run: the loser Session loses its task context -> the envelope
+    # write fails closed before the loser mutation -> the coordinator aborts
+    # (simulating a crash between winner success and loser execution).  The
+    # winner receipt is durable; the loser has no envelope/receipt/journal.
+    async with handles["space-a"].session_factory() as session:
+        from sqlalchemy import text as sa_text
+
+        await session.execute(
+            sa_text("DELETE FROM session_task_contexts WHERE session_id='fs-1'")
+        )
+        await session.commit()
+    with pytest.raises(ActiveSessionCoordinationError):
+        await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    operation = await _read_operation(engine, op)
+    assert operation["phase"] == "claimed"
+    # Restore the loser's context, then destroy the first instance completely.
+    async with handles["space-a"].session_factory() as session:
+        from sqlalchemy import text as sa_text
+
+        await session.execute(
+            sa_text(
+                "INSERT OR IGNORE INTO session_task_contexts "
+                "(id, session_id, project_id, level2_work_item_id, title_snapshot, "
+                "structure_snapshot, linked_at, link_method, version, created_at, updated_at) "
+                "VALUES ('ctx-fs-1','fs-1','project-1','wi-l2','WorkItem',"
+                ":_snapshot, '2026-07-15T08:00:00.000Z','manual',1,"
+                "'2026-07-15T08:00:00.000Z','2026-07-15T08:00:00.000Z')"
+            ),
+            {"_snapshot": "{}"},
+        )
+        await session.commit()
+    await _dispose_all(engine, handles)
+    # Fresh coordinator over the same Meta/Space DBs.
+    from app.services.time import utc_now_iso_ms
+
+    coordinator2, engine2, handles2, _paths2 = await _coordinator(
+        env, tmp_path, clock=utc_now_iso_ms
+    )
+    view = await coordinator2.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    operation = await _read_operation(engine2, op)
+    assert operation["phase"] == "transferred"
+    intent = json.loads(operation["intent_json"])
+    assert intent["children"]["winner"]["operation_id"] == winner_id
+    assert intent["children"]["loser"]["operation_id"] == loser_id
+    # exactly one envelope per child (no duplicate inserts across restarts)
+    async with handles2["space-b"].session_factory() as session:
+        envelopes = (
+            await session.execute(
+                select(SessionCommandEnvelope).where(
+                    SessionCommandEnvelope.command_id == winner_id
+                )
+            )
+        ).scalars().all()
+        assert len(envelopes) == 1
+        winner_receipt = await session.get(SessionCommandReceipt, winner_id)
+        assert winner_receipt is not None and winner_receipt.state == "succeeded"
+    async with handles2["space-a"].session_factory() as session:
+        loser_envelopes = (
+            await session.execute(
+                select(SessionCommandEnvelope).where(
+                    SessionCommandEnvelope.command_id == loser_id
+                )
+            )
+        ).scalars().all()
+        assert len(loser_envelopes) == 1
+        loser_receipt = await session.get(SessionCommandReceipt, loser_id)
+        assert loser_receipt is not None and loser_receipt.state == "succeeded"
+    assert view.value["operation"]["phase"] == "transferred"
+    await _dispose_all(engine2, handles2)
+
+
+async def _loser_request(
+    *,
+    op_id: str,
+    session_id: str,
+    resolution_operation_id: str = "op-resolve",
+    related_operation_id: str = "op-conflict",
+    winner_role: str = "candidate",
+    pair_override: dict[str, dict[str, str]] | None = None,
+    space_id: str = "space-a",
+    epoch: object | None = None,
+    extra: dict[str, object] | None = None,
+):
+    from app.mutation.types import MutationRequest
+
+    pair = pair_override or {
+        "active": {"space_id": "space-a", "session_id": "fs-1"},
+        "candidate": {"space_id": "space-b", "session_id": "fs-2"},
+    }
+    from app.services.time import utc_now_iso_ms
+
+    payload: dict[str, object] = {
+        "space_id": space_id,
+        "session_id": session_id,
+        "resolution_operation_id": resolution_operation_id,
+        "related_operation_id": related_operation_id,
+        "winner_role": winner_role,
+        "occurred_at": utc_now_iso_ms(),
+        "pair": pair,
+        **(extra or {}),
+    }
+    if epoch is not None:
+        payload["ownership_epoch"] = epoch
+    return MutationRequest.from_payload(
+        name="focus_session.resolve_conflict_loser",
+        entity_type="focus_session",
+        entity_id=session_id,
+        payload=payload,
+        expected_version=None,
+    )
+
+
+async def _compile_rejected(
+    uow, handle, request, op_id: str,
+) -> str:
+    """Compile one request through the real policy; return the stable
+    rejection code (or raise if it unexpectedly compiles)."""
+    from app.mutation.types import MutationRuleViolation
+    from app.mutation.unit_of_work import AuthorityOverlay
+
+    async with handle.session_factory() as session:
+        overlay = await AuthorityOverlay.from_locked_authorities(
+            handle, session, uow.catalog
+        )
+        with pytest.raises(MutationRuleViolation) as exc_info:
+            await uow.compiler.compile_against_overlay(
+                handle, request, overlay, op_id
+            )
+        return exc_info.value.code
+
+
+async def test_resolution_child_identity_attacks(env, tmp_path) -> None:
+    """Every tampered identity axis fails closed in the real policy with a
+    stable rejection code; nothing is executed and no journal row appears."""
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.mutation.types import MutationRuleViolation
+
+    coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
+        env, tmp_path
+    )
+    uow = _real_uow()
+    handle_a = handles["space-a"]
+    loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
+
+    # The real coordinator CASes the locator onto the resolution operation
+    # before any child runs; simulate that so the compile-time children see
+    # the transferred claim (TS2 plan L3046).
+    from sqlalchemy import text as sa_text
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa_text(
+                "UPDATE active_session_locator SET operation_id=:op, "
+                "ownership_epoch=ownership_epoch+1 WHERE singleton_key='active'"
+            ),
+            {"op": op},
+        )
+
+    # control: the honest loser child compiles cleanly
+    async with handle_a.session_factory() as session:
+        from app.mutation.unit_of_work import AuthorityOverlay
+
+        overlay = await AuthorityOverlay.from_locked_authorities(
+            handle_a, session, uow.catalog
+        )
+        await uow.compiler.compile_against_overlay(
+            handle_a,
+            await _loser_request(op_id=loser_id, session_id="fs-1"),
+            overlay,
+            loser_id,
+        )
+
+    # wrong parent: operation id derived from a different resolution op
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1"),
+        derive_active_session_child_operation_id("op-other", ActiveSessionChildRole.LOSER),
+    )
+    assert code == "version_conflict"
+    # wrong resolution operation anchor: the op id derives from a different
+    # parent and the locator anchors op-resolve, not op-wrong
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1", resolution_operation_id="op-wrong"),
+        derive_active_session_child_operation_id("op-wrong", ActiveSessionChildRole.LOSER),
+    )
+    assert code == "stale_session_owner"
+    # wrong pair: active side does not match the locator anchor
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(
+            op_id=loser_id, session_id="fs-1",
+            pair_override={
+                "active": {"space_id": "space-x", "session_id": "fs-x"},
+                "candidate": {"space_id": "space-b", "session_id": "fs-2"},
+            },
+        ),
+        loser_id,
+    )
+    assert code == "stale_session_owner"
+    # wrong epoch
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1", epoch=999),
+        loser_id,
+    )
+    assert code == "stale_session_owner"
+    # wrong Space (not the handle's scope)
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1", space_id="space-x"),
+        loser_id,
+    )
+    assert code == "space_scope_mismatch"
+    # wrong Session (not the loser side of the pair)
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-2"),
+        loser_id,
+    )
+    assert code == "version_conflict"
+    # caller-declared loser flag / invalid winner role
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1", winner_role="loser"),
+        loser_id,
+    )
+    assert code == "version_conflict"
+    # missing resolution operation anchor
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1", resolution_operation_id=""),
+        loser_id,
+    )
+    assert code == "version_conflict"
+    await _dispose_all(engine, handles)
+
+
+async def test_resolution_state_attacks(env, tmp_path) -> None:
+    """State-level attacks: locator not claiming, ended Session, non-conflict
+    Session, and an ordinary end on a conflict Session all fail closed."""
+    from sqlalchemy import text as sa_text
+
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.models.focus_session import FocusSession
+    from app.mutation.types import MutationRequest
+
+    coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
+        env, tmp_path
+    )
+    uow = _real_uow()
+    handle_a = handles["space-a"]
+    loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
+
+    from sqlalchemy import text as sa_text
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa_text(
+                "UPDATE active_session_locator SET operation_id=:op, "
+                "ownership_epoch=ownership_epoch+1 WHERE singleton_key='active'"
+            ),
+            {"op": op},
+        )
+
+    # locator not claiming -> stale_session_owner (locator lives in Meta)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa_text("UPDATE active_session_locator SET state='active' WHERE singleton_key='active'")
+        )
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1"), loser_id,
+    )
+    assert code == "stale_session_owner"
+    # restore claiming, then end fs-1 manually -> terminal_session
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa_text("UPDATE active_session_locator SET state='claiming' WHERE singleton_key='active'")
+        )
+    async with handles["space-a"].session_factory() as session:
+        fs1 = await session.get(FocusSession, "fs-1")
+        fs1.ended_at = "2026-07-15T09:00:00.000Z"
+        await session.commit()
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1"), loser_id,
+    )
+    assert code == "version_conflict"
+    # non-conflict Session -> not_activation_conflict
+    async with handles["space-a"].session_factory() as session:
+        fs1 = await session.get(FocusSession, "fs-1")
+        fs1.ended_at = None
+        fs1.ownership_state = "authoritative"
+        await session.commit()
+    code = await _compile_rejected(
+        uow, handle_a,
+        await _loser_request(op_id=loser_id, session_id="fs-1"), loser_id,
+    )
+    assert code == "version_conflict"
+    # ordinary end on a conflict Session stays rejected (no widening)
+    async with handles["space-a"].session_factory() as session:
+        fs1 = await session.get(FocusSession, "fs-1")
+        fs1.ownership_state = "activation_conflict"
+        _fs1_version = fs1.version
+        await session.commit()
+    from app.mutation.types import MutationRequest
+    from app.services.time import utc_now_iso_ms
+
+    end_request = MutationRequest.from_payload(
+        name="focus_session.end",
+        entity_type="focus_session",
+        entity_id="fs-1",
+        payload={
+            "space_id": "space-a",
+            "session_id": "fs-1",
+            "occurred_at": utc_now_iso_ms(),
+            "timer_completion": "interrupted",
+            "validity": "invalid",
+            "validity_reason": "activation_conflict_loser",
+        },
+        expected_version=_fs1_version,
+    )
+    code = await _compile_rejected(
+        uow, handle_a, end_request, op
+    )
+    assert code == "session_activation_conflict"
+    await _dispose_all(engine, handles)
+
+
+async def test_aborted_journal_never_counts_as_success(env, tmp_path) -> None:
+    """A child whose journal batch is ABORTED is never classified as success:
+    the decision is RECOVERY_REQUIRED and the resolution never transfers."""
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.focus_session.contracts import FocusSessionCommand
+    from app.focus_session.coordinator import ChildExecutionDecision
+    from app.models.mutation import MutationBatch, MutationOperation
+    from app.models.session_command import SessionCommandEnvelope
+
+    coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
+        env, tmp_path
+    )
+    winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    payload_hash = "a" * 64
+    child_command = FocusSessionCommand(
+        command_id=winner_id,
+        space_id="space-b",
+        session_id="fs-2",
+        ownership_epoch=None,
+        payload_hash=payload_hash,
+        payload={"space_id": "space-b", "session_id": "fs-2"},
+    )
+    async with handles["space-b"].session_factory() as session:
+        session.add(
+            SessionCommandEnvelope(
+                command_id=winner_id, space_id="space-b", session_id="fs-2",
+                session_revision=1, work_item_id="wi-l2", expected_version=1,
+                target_transition="complete", replay_safe=True,
+                payload_hash=payload_hash, created_at="2026-07-15T08:00:00.000Z",
+            )
+        )
+        batch_id = f"batch-{winner_id}"
+        session.add(
+            MutationBatch(
+                batch_id=batch_id, command_hash="0" * 64,
+                state="ABORTED", accepted_count=1,
+            )
+        )
+        session.add(
+            MutationOperation(
+                operation_id=winner_id, batch_id=batch_id, sequence=0,
+                command_hash="0" * 64, command_json="{}",
+                expected_versions_json="{}", projection_set_json="{}",
+                state="ABORTED",
+            )
+        )
+        await session.commit()
+    decision, exists = await coordinator._child_execution_decision(  # noqa: SLF001
+        handles["space-b"], winner_id, child_command
+    )
+    assert decision is ChildExecutionDecision.RECOVERY_REQUIRED
+    assert exists is True
+    # the full resolution therefore aborts: never transferred
+    with pytest.raises(ActiveSessionCoordinationError):
+        await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    operation = await _read_operation(engine, op)
+    assert operation["phase"] == "claimed"
+    await _dispose_all(engine, handles)
+
+
+async def _inspect_decision(paths: dict[str, Path]):
+    from app.focus_session.recovery_authority import (
+        ActiveSessionCoordinationInspector,
+        ActiveSessionRecoveryView,
+    )
+    from app.knowledge.consistency import SpaceDataView
+
+    inspector = ActiveSessionCoordinationInspector()
+    return await inspector.inspect_read_only(
+        ActiveSessionRecoveryView(paths["meta"]),
+        space_views={
+            "space-a": SpaceDataView(
+                "space-a", paths["space-a"],
+                paths["space-a"].parent / "notes-a",
+                paths["space-a"].parent / "index-a.db", "0" * 64,
+            ),
+            "space-b": SpaceDataView(
+                "space-b", paths["space-b"],
+                paths["space-b"].parent / "notes-b",
+                paths["space-b"].parent / "index-b.db", "0" * 64,
+            ),
+        },
+    )
+
+
+async def test_authority_parity_transferred_candidate_winner(env, tmp_path) -> None:
+    """The recovery authority reads the real coordinator-written data after a
+    successful resolution: transferred candidate winner -> recoverable."""
+    from app.focus_session.recovery_authority import (
+        CLASSIFICATION_RECOVERABLE_CLAIMING,
+        RESULT_CLEAN_OR_RECOVERABLE,
+    )
+
+    coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
+        env, tmp_path
+    )
+    await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    await _dispose_all(engine, handles)
+    decision = await _inspect_decision(paths)
+    print("CAND_PARITY:", decision.classification, decision.failure_code)
+    assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
+    assert len(decision.child_outcomes) == 2
+    assert all(outcome.terminal_success for outcome in decision.child_outcomes)
+    assert len(decision.session_facts) == 2
+
+
+async def test_authority_parity_transferred_active_winner(env, tmp_path) -> None:
+    """Transferred active winner -> recoverable (identity inversion)."""
+    from app.focus_session.recovery_authority import (
+        CLASSIFICATION_RECOVERABLE_CLAIMING,
+        RESULT_CLEAN_OR_RECOVERABLE,
+    )
+    from app.services.time import utc_now_iso_ms
+
+    coordinator, engine, handles, paths = await _coordinator(
+        env, tmp_path, clock=utc_now_iso_ms
+    )
     _seed_focus_session(str(paths["space-a"]), "fs-1")
     _seed_focus_session(str(paths["space-b"]), "fs-2")
     conflict_op = "op-conflict"
@@ -583,8 +1316,8 @@ async def test_resolve_activation_conflict_freezes_winner_loser(env, tmp_path) -
     op = "op-resolve"
     payload = {
         **_pair_payload(("space-a", "fs-1"), ("space-b", "fs-2")),
-        "winner_role": "candidate",
-        "decision_at": NOW,
+        "winner_role": "active",
+        "decision_at": utc_now_iso_ms(),
         "validity_correction": {
             "loser_validity": "invalid",
             "loser_validity_reason": "activation_conflict_loser",
@@ -594,25 +1327,89 @@ async def test_resolve_activation_conflict_freezes_winner_loser(env, tmp_path) -
         op, kind="resolve_activation_conflict", space_id="space-a",
         session_id="fs-1", epoch=1, payload=payload,
     )
+    await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    await _dispose_all(engine, handles)
+    decision = await _inspect_decision(paths)
+    print("ACTIVE_PARITY:", decision.classification, decision.failure_code)
+    assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
+    assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
+    assert decision.failure_code is None
+
+
+async def test_authority_parity_loser_rejected_requires_recovery(env, tmp_path) -> None:
+    """Winner succeeded but the loser was rejected: the operation stays
+    claimed and the authority reports recovery_required."""
+    from app.focus_session.recovery_authority import (
+        CLASSIFICATION_RECOVERY_REQUIRED,
+    )
+    from app.models.focus_session import FocusSession
+
+    coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
+        env, tmp_path
+    )
+    async with handles["space-a"].session_factory() as session:
+        loser = await session.get(FocusSession, "fs-1")
+        loser.ownership_state = "authoritative"
+        await session.commit()
     with pytest.raises(ActiveSessionCoordinationError):
         await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
-    operation = await _read_operation(engine, op)
-    assert operation["kind"] == "resolve_activation_conflict"
-    assert operation["phase"] == "claimed"  # never transferred
-    intent = json.loads(operation["intent_json"])
-    winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
-    loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
-    assert intent["children"]["winner"]["operation_id"] == winner_id
-    assert intent["children"]["loser"]["operation_id"] == loser_id
-    # winner ran first through the real UoW and left a succeeded receipt
-    async with handles["space-b"].session_factory() as session:
-        receipt = await session.get(SessionCommandReceipt, winner_id)
-        assert receipt is not None and receipt.state == "succeeded"
-    # loser was rejected by the real policy (locator claim / conflict read-only)
-    async with handles["space-a"].session_factory() as session:
-        loser_receipt = await session.get(SessionCommandReceipt, loser_id)
-        assert loser_receipt is None or loser_receipt.state != "succeeded"
     await _dispose_all(engine, handles)
+    decision = await _inspect_decision(paths)
+    print("ABORTED_PARITY:", decision.classification, decision.failure_code)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code is not None
+
+
+async def test_authority_parity_aborted_journal_requires_recovery(env, tmp_path) -> None:
+    """An ABORTED child journal is never success: the authority reads the
+    mismatch and requires recovery."""
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.focus_session.recovery_authority import (
+        CLASSIFICATION_RECOVERY_REQUIRED,
+    )
+    from app.models.mutation import MutationBatch, MutationOperation
+    from app.models.session_command import SessionCommandEnvelope
+
+    coordinator, engine, handles, paths, _co, op, command = await _resolve_setup(
+        env, tmp_path
+    )
+    winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
+    payload_hash = "b" * 64
+    async with handles["space-b"].session_factory() as session:
+        session.add(
+            SessionCommandEnvelope(
+                command_id=winner_id, space_id="space-b", session_id="fs-2",
+                session_revision=1, work_item_id="wi-l2", expected_version=1,
+                target_transition="complete", replay_safe=True,
+                payload_hash=payload_hash, created_at="2026-07-15T08:00:00.000Z",
+            )
+        )
+        batch_id = f"batch-{winner_id}"
+        session.add(
+            MutationBatch(
+                batch_id=batch_id, command_hash="0" * 64,
+                state="ABORTED", accepted_count=1,
+            )
+        )
+        session.add(
+            MutationOperation(
+                operation_id=winner_id, batch_id=batch_id, sequence=0,
+                command_hash="0" * 64, command_json="{}",
+                expected_versions_json="{}", projection_set_json="{}",
+                state="ABORTED",
+            )
+        )
+        await session.commit()
+    with pytest.raises(ActiveSessionCoordinationError):
+        await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    await _dispose_all(engine, handles)
+    decision = await _inspect_decision(paths)
+    print("ABORTED_PARITY:", decision.classification, decision.failure_code)
+    assert decision.classification == CLASSIFICATION_RECOVERY_REQUIRED
+    assert decision.failure_code is not None
 
 
 async def test_locate_reflects_durable_state(env, tmp_path) -> None:
