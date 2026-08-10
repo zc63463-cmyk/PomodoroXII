@@ -657,10 +657,8 @@ class ProductionActiveSessionCoordinator:
 
         operation_id = self._require_operation_id(command.command_id)
         # The wire resolve payload names only winnerRole/decisionAt/
-        # validityCorrection (plan L3039): the conflict pair is loaded from
+        # validityCorrection (plan L3420): the conflict pair is loaded from
         # the persisted conflict operation intent, never from the payload.
-        # A payload-supplied pair is tolerated only when it is byte-identical
-        # to the persisted one (direct coordinator callers may pre-freeze it).
         pair = _conflict_pair(command.payload) if command.payload.get("pair") else None
         winner_role = command.payload.get("winner_role")
         if winner_role not in ("active", "candidate"):
@@ -672,13 +670,67 @@ class ProductionActiveSessionCoordinator:
             operation_id, ActiveSessionChildRole.LOSER
         )
         now = _canonical_utc_now(self._clock)
-        # 1) Read the persisted conflict anchor (read-only) BEFORE building
-        #    the children so we know the conflict operation and the pre-CAS
-        #    epoch.  A restart finds the locator already anchored to this
-        #    resolution operation and reuses the persisted row.
+        # 1) Read the persisted conflict anchor (read-only).  A restart finds
+        #    the locator already anchored to this resolution operation (winner
+        #    target); a completed resolution is idempotently replayed.
         async with self._meta_session_factory() as session:
             locator = await session.get(ActiveSessionLocator, "active")
-            if locator is None or locator.state != "claiming":
+            if locator is None:
+                raise ActiveSessionCoordinationError(
+                    "resolve_activation_conflict requires a persisted locator"
+                )
+            if locator.state == "active":
+                existing_res = await session.get(ActiveSessionOperation, operation_id)
+                if (
+                    existing_res is None
+                    or existing_res.kind != "resolve_activation_conflict"
+                    or existing_res.phase != "completed"
+                    or locator.operation_id != operation_id
+                ):
+                    raise ActiveSessionCoordinationError(
+                        "locator is active under a different resolution operation"
+                    )
+                if (
+                    existing_res.payload_hash
+                    != self._contract_payload_hash(command.payload)
+                ):
+                    raise ActiveSessionCoordinationError(
+                        "resolution replay payload hash does not match the "
+                        "completed operation (idempotency conflict)"
+                    )
+                # fully completed: idempotent replay, return the active shape
+                related_operation_id = existing_res.related_operation_id or ""
+                conflict_operation = await session.get(
+                    ActiveSessionOperation, related_operation_id
+                )
+                if conflict_operation is None:
+                    raise ActiveSessionCoordinationError(
+                        "resolution conflict operation is missing"
+                    )
+                import json as _json
+
+                conflict_intent = _json.loads(str(conflict_operation.intent_json))
+                pair = _conflict_pair(conflict_intent)
+                winner_role = str(existing_res and _json.loads(
+                    str(existing_res.intent_json)
+                ).get("winner_role") or "")
+                if winner_role not in ("active", "candidate"):
+                    raise ActiveSessionCoordinationError(
+                        "completed resolution intent does not name a winner"
+                    )
+                winner_side = pair[winner_role]
+                loser_side = pair["active"] if winner_role == "candidate" else pair["candidate"]
+                winner_handle = await self._space_handle_provider(winner_side["space_id"])
+                session_aggregate = await self._with_mutation_lease(
+                    winner_handle,
+                    lambda h: self._load_session_aggregate(h, winner_side["session_id"]),
+                )
+                return ActiveSessionView(value={
+                    "locator": self._locator_view(locator),
+                    "operation": self._operation_view(existing_res),
+                    "session": session_aggregate,
+                })
+            if locator.state != "claiming":
                 raise ActiveSessionCoordinationError(
                     "resolve_activation_conflict requires a claiming locator"
                 )
@@ -736,13 +788,6 @@ class ProductionActiveSessionCoordinator:
                 raise ActiveSessionCoordinationError(
                     "resolution pair does not match the persisted conflict intent"
                 )
-            if (
-                locator.space_id != pair["active"]["space_id"]
-                or locator.session_id != pair["active"]["session_id"]
-            ):
-                raise ActiveSessionCoordinationError(
-                    "resolution pair does not match the locator anchor"
-                )
             resolution_epoch = (
                 expected_epoch + 1 if not is_restart else expected_epoch
             )
@@ -766,17 +811,17 @@ class ProductionActiveSessionCoordinator:
             payload_hash=contract_hash,
         )
         intent["ownership_epoch"] = resolution_epoch
-        # The wire resolve command carries no space_id (plan L3039: resolved
-        # from Meta); freeze the locator anchor (the pair's active side) so
-        # the recovery authority's intent<->locator check agrees.
-        intent["space_id"] = pair["active"]["space_id"]
-        intent["session_id"] = pair["active"]["session_id"]
+        # The wire resolve command carries no space_id; freeze the *winner*
+        # target (the locator CASes onto it, plan L3420) so the recovery
+        # authority's intent<->locator check agrees after completion.
+        intent["space_id"] = winner_side["space_id"]
+        intent["session_id"] = winner_side["session_id"]
         # 2) One Meta transaction: insert/verify the resolution operation and
-        #    CAS the locator with a single conditional UPDATE (rowcount == 1).
-        #    On rowcount == 0 the locator must already point at this exact
-        #    resolution operation at the next epoch (idempotent restart);
-        #    anything else is a stable CAS conflict and rolls the new
-        #    operation row back.
+        #    CAS the locator onto the WINNER target at epoch E+1 with a single
+        #    conditional UPDATE (rowcount == 1).  On rowcount == 0 the locator
+        #    must already point at this exact resolution operation, winner
+        #    target, next epoch (idempotent restart); anything else is a
+        #    stable CAS conflict and rolls the new operation row back.
         async with self._meta_session_factory() as session:
             existing = await session.get(ActiveSessionOperation, operation_id)
             if existing is None:
@@ -797,6 +842,7 @@ class ProductionActiveSessionCoordinator:
                         sa_text(
                             "UPDATE active_session_locator "
                             "SET operation_id=:rid, ownership_epoch=:next_epoch, "
+                            "space_id=:winner_space_id, session_id=:winner_session_id, "
                             "updated_at=:now "
                             "WHERE singleton_key='active' AND state='claiming' "
                             "AND operation_id=:conflict_id "
@@ -812,17 +858,21 @@ class ProductionActiveSessionCoordinator:
                             "expected_epoch": expected_epoch,
                             "active_space_id": pair["active"]["space_id"],
                             "active_session_id": pair["active"]["session_id"],
+                            "winner_space_id": winner_side["space_id"],
+                            "winner_session_id": winner_side["session_id"],
                         },
                     )
                     if result.rowcount != 1:
                         # Idempotent restart: the locator already points at
-                        # this resolution operation at the next epoch.
+                        # this resolution operation, winner target, next epoch.
                         fresh = await session.get(ActiveSessionLocator, "active")
                         if (
                             fresh is not None
                             and fresh.operation_id == operation_id
                             and fresh.ownership_epoch == resolution_epoch
                             and fresh.state == "claiming"
+                            and fresh.space_id == winner_side["space_id"]
+                            and fresh.session_id == winner_side["session_id"]
                         ):
                             await session.rollback()
                         else:
@@ -834,24 +884,16 @@ class ProductionActiveSessionCoordinator:
                 existing.kind != "resolve_activation_conflict"
                 or existing.payload_hash != contract_hash
                 or existing.related_operation_id != related_operation_id
-                or existing.phase not in {"claimed", "prepared", "transferred"}
+                or existing.phase not in {"claimed", "prepared", "transferred", "completed"}
             ):
                 raise ActiveSessionCoordinationError(
                     "resolution operation conflicts with the persisted row "
                     "(idempotency conflict)"
                 )
             await session.commit()
-        # 3) Re-read the freshly persisted Meta rows and build the frozen
-        #    ResolutionCoordinationProof the Space policy will verify.
-        proof = await self._read_resolution_proof(
-            operation_id=operation_id,
-            related_operation_id=related_operation_id,
-            intent_hash=contract_hash,
-            winner_id=winner_id,
-            winner_hash=winner_hash,
-            loser_id=loser_id,
-            loser_hash=loser_hash,
-        )
+        # 3) Rebuild the frozen proof entirely from the freshly persisted Meta
+        #    rows (locator + resolution operation + canonical intent_json).
+        proof = await self._read_resolution_proof(operation_id=operation_id)
         for role in (ActiveSessionChildRole.WINNER, ActiveSessionChildRole.LOSER):
             child_payloads[role]["resolution_proof"] = proof.to_dict()
         child_payloads[ActiveSessionChildRole.WINNER]["space_id"] = winner_side["space_id"]
@@ -862,11 +904,11 @@ class ProductionActiveSessionCoordinator:
         await self._execute_children(
             pair, operation_id, children, child_payloads
         )
-        # 3) CAS: claimed -> transferred only after both children succeeded.
-        #    A replay of an already-transferred resolution is idempotent: the
-        #    row is already terminal, so we read it back instead of failing.
+        # 4.5) CAS claimed -> transferred (the authority recovery midpoint):
+        #      a crash here leaves locator claiming + resolution transferred +
+        #      both receipts success, which a restart finishes below.
         async with self._meta_session_factory() as session:
-            result = await session.execute(
+            transfer_result = await session.execute(
                 sa_text(
                     "UPDATE active_session_operations SET phase='transferred', "
                     "updated_at=:now WHERE operation_id=:oid AND phase='claimed' "
@@ -879,14 +921,84 @@ class ProductionActiveSessionCoordinator:
                 },
             )
             await session.commit()
-            if result.rowcount != 1:
-                operation = await session.get(ActiveSessionOperation, operation_id)
-                if operation is None or operation.phase != "transferred":
+            if transfer_result.rowcount != 1:
+                operation_row = await session.get(ActiveSessionOperation, operation_id)
+                if (
+                    operation_row is None
+                    or operation_row.phase not in {"transferred", "completed"}
+                ):
                     raise ActiveSessionCoordinationError(
-                        "resolution CAS failed: operation was not in claimed phase"
+                        "resolution transfer CAS failed: operation was not "
+                        "in claimed phase"
                     )
-            else:
-                operation = await session.get(ActiveSessionOperation, operation_id)
+        # 5) One Meta transaction completes the resolution: locator
+        #    claiming -> active (winner target preserved), resolution operation
+        #    -> completed, old conflict operation -> completed (resolved by
+        #    this resolution).  Every step is a conditional CAS with rowcount
+        #    check; any failure rolls the whole transaction back.
+        async with self._meta_session_factory() as session:
+            locator_result = await session.execute(
+                sa_text(
+                    "UPDATE active_session_locator "
+                    "SET state='active', lease_expires_at=:lease, updated_at=:now "
+                    "WHERE singleton_key='active' AND state='claiming' "
+                    "AND operation_id=:rid AND ownership_epoch=:epoch "
+                    "AND space_id=:winner_space_id AND session_id=:winner_session_id"
+                ),
+                {
+                    "now": _canonical_utc_now(self._clock),
+                    "lease": _lease_expiry(_canonical_utc_now(self._clock)),
+                    "rid": operation_id,
+                    "epoch": resolution_epoch,
+                    "winner_space_id": winner_side["space_id"],
+                    "winner_session_id": winner_side["session_id"],
+                },
+            )
+            resolution_result = await session.execute(
+                sa_text(
+                    "UPDATE active_session_operations SET phase='completed', "
+                    "updated_at=:now WHERE operation_id=:oid AND phase='transferred' "
+                    "AND related_operation_id=:related"
+                ),
+                {
+                    "now": _canonical_utc_now(self._clock),
+                    "oid": operation_id,
+                    "related": related_operation_id,
+                },
+            )
+            conflict_result = await session.execute(
+                sa_text(
+                    "UPDATE active_session_operations SET phase='completed', "
+                    "result_descriptor_json=:descriptor, updated_at=:now "
+                    "WHERE operation_id=:cid AND phase='awaiting_resolution'"
+                ),
+                {
+                    "now": _canonical_utc_now(self._clock),
+                    "cid": related_operation_id,
+                    "descriptor": canonical_json_bytes(
+                        {"resolved_by": operation_id}
+                    ).decode("ascii"),
+                },
+            )
+            await session.commit()
+            if (
+                locator_result.rowcount != 1
+                or resolution_result.rowcount != 1
+                or conflict_result.rowcount != 1
+            ):
+                raise ActiveSessionCoordinationError(
+                    "resolution completion CAS failed (locator="
+                    f"{locator_result.rowcount}, resolution="
+                    f"{resolution_result.rowcount}, conflict="
+                    f"{conflict_result.rowcount})"
+                )
+            # 6) The 200 response re-reads the completed locator/operation.
+            locator = await session.get(ActiveSessionLocator, "active")
+            operation = await session.get(ActiveSessionOperation, operation_id)
+        if locator is None or operation is None:
+            raise ActiveSessionCoordinationError(
+                "resolution completion rows disappeared after commit"
+            )
         # The response aggregate is the *real* winner-Session state, read back
         # through the shared query — never a hand-built dict.
         winner_handle = await self._space_handle_provider(winner_side["space_id"])
@@ -1105,7 +1217,13 @@ class ProductionActiveSessionCoordinator:
         ``ABORTED``/``COMPENSATED`` are never success.  Receipt vs journal
         cross-checks happen in the caller's decision table.
         """
-        from app.models.mutation import MutationBatch, MutationOperation
+        from sqlalchemy import select as _sa_select
+
+        from app.models.mutation import (
+            MutationBatch,
+            MutationOperation,
+            MutationStep,
+        )
         from app.mutation.types import MutationState
 
         async with handle.session_factory() as session:
@@ -1113,6 +1231,16 @@ class ProductionActiveSessionCoordinator:
             if operation is None:
                 return OriginalChildOutcome.NOT_EXECUTED
             batch = await session.get(MutationBatch, operation.batch_id)
+            if batch is not None:
+                steps = (
+                    await session.execute(
+                        _sa_select(MutationStep).where(
+                            MutationStep.operation_id == child_id
+                        )
+                    )
+                ).scalars().all()
+            else:
+                steps = ()
         if batch is None:
             return OriginalChildOutcome.INCONCLUSIVE
         batch_state = batch.state
@@ -1154,6 +1282,9 @@ class ProductionActiveSessionCoordinator:
                         return OriginalChildOutcome.INCONCLUSIVE
                     if child_id in rejected_ids:
                         return OriginalChildOutcome.INCONCLUSIVE
+                # Every mutation step must carry durable APPLIED evidence.
+                if steps and any(str(step.state) != "APPLIED" for step in steps):
+                    return OriginalChildOutcome.INCONCLUSIVE
                 return OriginalChildOutcome.APPLIED
             if _is_conflict_error_code(str(error_code)):
                 return OriginalChildOutcome.CONFLICT
@@ -1412,22 +1543,23 @@ class ProductionActiveSessionCoordinator:
         }
 
     async def _read_resolution_proof(
-        self,
-        *,
-        operation_id: str,
-        related_operation_id: str,
-        intent_hash: str,
-        winner_id: str,
-        winner_hash: str,
-        loser_id: str,
-        loser_hash: str,
+        self, *, operation_id: str
     ) -> ResolutionCoordinationProof:
-        """Build the frozen resolution proof from the *freshly persisted*
-        Meta rows (locator + resolution operation + canonical intent_json).
+        """Rebuild the frozen proof *entirely* from the persisted Meta rows.
 
-        Every field is re-read from durable storage after the Meta
-        transaction committed -- never from the pre-commit caller dicts -- so
-        the proof is exactly what the recovery authority will re-derive.
+        Only the resolution operation id is accepted; nothing is filled in
+        from caller arguments.  The locator, resolution operation and its
+        canonical intent_json are re-read from the database, and every proof
+        field is derived/cross-checked against them:
+
+        - related conflict id / payload hash / intent hash from the
+          operation row;
+        - pair, winner_role, epoch, winner/loser child ids and payload hashes
+          from the persisted canonical intent (child ids re-derived through
+          the shared derivation contract).
+
+        Any mismatch between the intent children, operation payload hash or
+        related_operation_id fails closed.
         """
         import json as _json
 
@@ -1442,6 +1574,11 @@ class ProductionActiveSessionCoordinator:
             raise ActiveSessionCoordinationError(
                 "resolution proof requires a persisted resolution operation"
             )
+        related_operation_id = str(operation.related_operation_id or "")
+        if not related_operation_id:
+            raise ActiveSessionCoordinationError(
+                "resolution proof conflict anchor is missing"
+            )
         intent = _json.loads(str(operation.intent_json))
         raw_pair = intent.get("pair")
         winner_role = str(intent.get("winner_role") or "")
@@ -1455,6 +1592,41 @@ class ProductionActiveSessionCoordinator:
             raise ActiveSessionCoordinationError(
                 f"resolution proof pair is invalid: {exc}"
             ) from exc
+        # Re-derive the child ids through the shared contract.
+        winner_id = derive_active_session_child_operation_id(
+            operation_id, ActiveSessionChildRole.WINNER
+        )
+        loser_id = derive_active_session_child_operation_id(
+            operation_id, ActiveSessionChildRole.LOSER
+        )
+        children = intent.get("children")
+        if not isinstance(children, dict) or not isinstance(
+            children.get("winner"), dict
+        ) or not isinstance(children.get("loser"), dict):
+            raise ActiveSessionCoordinationError(
+                "resolution proof intent does not name both children"
+            )
+        winner_hash = str(children["winner"].get("payload_hash") or "")
+        loser_hash = str(children["loser"].get("payload_hash") or "")
+        # Cross-check the persisted intent against the operation row.
+        if str(intent.get("payload_hash") or "") != str(operation.payload_hash):
+            raise ActiveSessionCoordinationError(
+                "resolution intent payload hash does not match the operation"
+            )
+        if str(children["winner"].get("operation_id") or "") != winner_id:
+            raise ActiveSessionCoordinationError(
+                "resolution intent winner child id does not match the derivation"
+            )
+        if str(children["loser"].get("operation_id") or "") != loser_id:
+            raise ActiveSessionCoordinationError(
+                "resolution intent loser child id does not match the derivation"
+            )
+        if str(intent.get("space_id") or "") != str(locator.space_id) or str(
+            intent.get("session_id") or ""
+        ) != str(locator.session_id):
+            raise ActiveSessionCoordinationError(
+                "resolution intent anchor does not match the locator target"
+            )
         return ResolutionCoordinationProof(
             resolution_operation_id=operation_id,
             conflict_operation_id=related_operation_id,
@@ -1470,7 +1642,7 @@ class ProductionActiveSessionCoordinator:
             winner_child_payload_hash=winner_hash,
             loser_child_operation_id=loser_id,
             loser_child_payload_hash=loser_hash,
-            intent_hash=intent_hash,
+            intent_hash=str(operation.payload_hash),
         )
 
     @staticmethod

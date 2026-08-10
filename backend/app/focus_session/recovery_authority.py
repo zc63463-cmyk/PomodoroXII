@@ -1114,6 +1114,11 @@ async def _verify_relation_chain(
     """
     seen = {str(operation["operation_id"])}
     current = operation
+    # A resolution operation is the recovery root that *changes* the locator
+    # target to the winner side (plan L3420): its first hop back to the
+    # conflict operation is intentionally a different identity, so the
+    # Space/Session agreement check starts at the conflict link, not the root.
+    root_is_resolution = str(operation.get("kind")) == "resolve_activation_conflict"
     for _ in range(_MAX_RELATION_CHAIN_DEPTH):
         related = current.get("related_operation_id")
         if related is None:
@@ -1136,6 +1141,12 @@ async def _verify_relation_chain(
         epoch = child_intent.get("ownership_epoch")
         if type(epoch) is not int or epoch <= 0:
             return CODE_RELATION_INVALID
+        if root_is_resolution:
+            # The conflict link anchors the *original* active side; from here
+            # deeper links must keep agreeing with that identity.
+            root_is_resolution = False
+            space_id = str(child_intent.get("space_id") or "")
+            session_id = str(child_intent.get("session_id") or "")
         if child_intent.get("space_id") != space_id:
             return CODE_RELATION_INVALID
         if child_intent.get("session_id") != session_id:
