@@ -5,12 +5,13 @@ the ActiveSessionCoordinator.  Start and provisional activation
 pass their validated ``space_id`` to the Coordinator; every later
 action resolves ``space_id`` from Meta or persisted conflict state.
 
-The router is intentionally not mounted in the production v1 app
-during TS0; TS1/TS2 mount it after replacing the provider
-dependencies.
+Mounted in the production v1 app under ``/api/v1/active-session``
+(``app.routes.v1.build_v1_router``); every route requires the master
+principal and an optional Idempotency-Key bound to ``command_id``.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -18,7 +19,12 @@ from pydantic import TypeAdapter
 
 from app.auth.authority import Principal
 from app.deps import require_master_token
+from app.errors import AppError
 from app.focus_session.contracts import ActiveSessionCommand
+from app.focus_session.coordinator import (
+    ActiveSessionCoordinationError,
+    ActiveSessionRecoveryRequiredError,
+)
 from app.routes.v1.contract_dependencies import (
     get_active_session_coordinator,
     require_idempotency_key,
@@ -61,8 +67,35 @@ router = APIRouter()
 _ACTIVE_OPERATION_RESPONSE = TypeAdapter(ActiveSessionOperationResponse)
 
 
+def _flatten_session_response(value: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the coordinator view contract into the wire model: locator
+    fields are spread at the top level next to the real ``session`` aggregate;
+    the ``operation`` detail is intentionally dropped (not part of
+    ``ActiveSessionResponse``)."""
+    locator = dict(value["locator"])
+    session = value["session"]
+    kind = value.get("kind")
+    result = {**locator, "session": session}
+    if kind is not None:
+        result["kind"] = kind
+    return result
+
+
 def _map_active_operation_response(value: Any) -> ActiveSessionOperationResponse:
-    return _ACTIVE_OPERATION_RESPONSE.validate_python(dict(value))
+    if isinstance(value, Mapping) and value.get("kind") == "activation_conflict":
+        # The coordinator's conflict view spreads the locator fields at the
+        # top level of ``active`` (no nested ``locator`` key).
+        active = dict(value["active"])
+        active.pop("operation", None)
+        conflict = {
+            "kind": "activation_conflict",
+            "active": active,
+            "candidate": dict(value["candidate"]),
+        }
+        return _ACTIVE_OPERATION_RESPONSE.validate_python(conflict)
+    return _ACTIVE_OPERATION_RESPONSE.validate_python(
+        _flatten_session_response(dict(value))
+    )
 
 
 def _master_principal(value: Principal | dict[str, Any]) -> Principal:
@@ -161,6 +194,16 @@ def _map_activate_payload(payload: ActivateProvisionalPayload) -> dict[str, obje
         "cached_ownership_epoch": payload.cached_ownership_epoch,
         "owner_device_id": payload.owner_device_id,
         "owner_tab_id": payload.owner_tab_id,
+        "pair": {
+            "active": {
+                "space_id": payload.pair.active.space_id,
+                "session_id": payload.pair.active.session_id,
+            },
+            "candidate": {
+                "space_id": payload.pair.candidate.space_id,
+                "session_id": payload.pair.candidate.session_id,
+            },
+        },
         "snapshot": {
             "session": _map_session_snapshot(payload.snapshot.session),
             "context": _map_context_snapshot(payload.snapshot.context),
@@ -168,6 +211,22 @@ def _map_activate_payload(payload: ActivateProvisionalPayload) -> dict[str, obje
         },
         "expected_work_item_versions": dict(payload.expected_work_item_versions),
     }
+
+
+def _validate_activate_anchor(
+    body: ActivateProvisionalRequest,
+    payload: ActivateProvisionalPayload,
+) -> None:
+    """The active side of the conflict pair must anchor to the request's own
+    Space/Session identity; the caller cannot fabricate an arbitrary anchor."""
+    if (
+        payload.pair.active.space_id != body.space_id
+        or payload.pair.active.session_id != body.session_id
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="conflict pair active anchor must match the request Space/Session",
+        )
 
 
 def _map_heartbeat_payload(payload: HeartbeatPayload) -> dict[str, object]:
@@ -304,7 +363,7 @@ async def start(
         body, space_id=body.space_id, payload=_map_start_payload(body.payload)
     )
     view = await coordinator.start(_master_principal(claims), command)
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 @router.post(
@@ -320,6 +379,7 @@ async def activate_provisional(
 ) -> ActiveSessionOperationResponse:
     """Activate a provisional session as the global active session."""
     require_idempotency_key(body.command_id, idempotency_key)
+    _validate_activate_anchor(body, body.payload)
     command = _make_command(
         body, space_id=body.space_id, payload=_map_activate_payload(body.payload)
     )
@@ -361,7 +421,7 @@ async def pause(
         body, space_id=None, payload=_map_owned_clock_payload(body.payload)
     )
     view = await coordinator.pause(_master_principal(claims), command)
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 @router.post("/resume", response_model=ActiveSessionResponse, response_model_exclude_none=True)
@@ -377,7 +437,7 @@ async def resume(
         body, space_id=None, payload=_map_owned_clock_payload(body.payload)
     )
     view = await coordinator.resume(_master_principal(claims), command)
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 @router.post("/takeover", response_model=ActiveSessionResponse, response_model_exclude_none=True)
@@ -391,7 +451,7 @@ async def takeover(
     require_idempotency_key(body.command_id, idempotency_key)
     command = _make_command(body, space_id=None, payload=_map_takeover_payload(body.payload))
     view = await coordinator.takeover(_master_principal(claims), command)
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 @router.post("/end", response_model=EndActiveSessionResponse)
@@ -405,7 +465,10 @@ async def end(
     require_idempotency_key(body.command_id, idempotency_key)
     command = _make_command(body, space_id=None, payload=_map_end_payload(body.payload))
     view = await coordinator.end(_master_principal(claims), command)
-    return EndActiveSessionResponse.model_validate(dict(view.value))
+    flattened = _flatten_session_response(view.value)
+    return EndActiveSessionResponse.model_validate(
+        {"session": flattened["session"], "locator": None}
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -424,7 +487,7 @@ async def update_note(
     require_idempotency_key(body.command_id, idempotency_key)
     command = _make_command(body, space_id=None, payload=_map_note_payload(body.payload))
     view = await coordinator.update_note(_master_principal(claims), command)
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 # --------------------------------------------------------------------------- #
@@ -449,7 +512,7 @@ async def set_current_plan_item(
         body, space_id=None, payload=_map_current_plan_payload(body.payload)
     )
     view = await coordinator.set_current_plan_item(_master_principal(claims), command)
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 @router.post(
@@ -469,7 +532,7 @@ async def set_completion_draft(
         body, space_id=None, payload=_map_completion_payload(body.payload)
     )
     view = await coordinator.set_completion_draft(_master_principal(claims), command)
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 @router.post("/plan/add", response_model=ActiveSessionResponse, response_model_exclude_none=True)
@@ -483,7 +546,7 @@ async def add_plan_item(
     require_idempotency_key(body.command_id, idempotency_key)
     command = _make_command(body, space_id=None, payload=_map_add_plan_payload(body.payload))
     view = await coordinator.add_plan_item(_master_principal(claims), command)
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 @router.post(
@@ -503,7 +566,7 @@ async def remove_plan_item(
         body, space_id=None, payload=_map_remove_plan_payload(body.payload)
     )
     view = await coordinator.remove_plan_item(_master_principal(claims), command)
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 # --------------------------------------------------------------------------- #
@@ -527,7 +590,23 @@ async def resolve_activation_conflict(
     command = _make_command(
         body, space_id=None, payload=_map_resolution_payload(body.payload)
     )
-    view = await coordinator.resolve_activation_conflict(
-        _master_principal(claims), command
-    )
-    return ActiveSessionResponse.model_validate(dict(view.value))
+    try:
+        view = await coordinator.resolve_activation_conflict(
+            _master_principal(claims), command
+        )
+    except ActiveSessionRecoveryRequiredError as exc:
+        raise AppError(
+            code="active_session_recovery_required",
+            details={"reason": "resolution_child_evidence"},
+        ) from exc
+    except ActiveSessionCoordinationError as exc:
+        # A lost CAS / idempotency conflict is a stable client-visible 409,
+        # never a bare 500.
+        message = str(exc)
+        if "idempotency" in message.lower() or "cas" in message.lower():
+            raise AppError(
+                code="idempotency_conflict",
+                details={"reason": "resolution_conflict"},
+            ) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
