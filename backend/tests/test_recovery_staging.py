@@ -8,6 +8,7 @@ read-only ``verify`` flow.  No fake authority is ever forced clean.
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import uuid
 from contextlib import closing
@@ -16,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.recovery.contracts import StagedRestore
+from app.recovery.contracts import StagedRestore, VerificationResult
 from app.recovery.manifest import canonical_json
 from app.recovery.sqlite_copy import sha256_file
 from tests.test_recovery import (
@@ -106,7 +107,8 @@ async def test_restore_verified_snapshot_succeeds(tmp_path: Path) -> None:
     assert staged.root.is_dir()
     assert staged.root.is_absolute()
     assert staged.root.name.startswith(_expected_staging_name(active_root))
-    assert (staged.root / "meta" / "meta.db").is_file()
+    assert (staged.root / "meta.db").is_file()
+    assert not (staged.root / "meta" / "meta.db").exists()
     assert (staged.root / "spaces" / "alpha" / "space.db").is_file()
     assert (staged.root / "spaces" / "alpha" / "index.db").is_file()
     assert (staged.root / NOTE_RELATIVE).is_file()
@@ -161,14 +163,14 @@ async def test_restore_maps_meta_db_to_staging_meta_db(tmp_path: Path) -> None:
     coordinator, _leases, active_root, _engines, _fps = _recovery_env(tmp_path)
     receipt, staged = await _restore(coordinator, tmp_path)
 
-    staged_meta = staged.root / "meta" / "meta.db"
+    staged_meta = staged.root / "meta.db"
     assert staged_meta.is_file()
     with closing(sqlite3.connect(staged_meta)) as connection:
         head = connection.execute(
             "SELECT version_num FROM alembic_version_meta"
         ).fetchone()[0]
     assert head == receipt.manifest.meta.schema_head
-    assert staged.root / "meta" / "meta.db" == staged.root / "meta" / "meta.db"
+    assert staged_meta == staged.root / "meta.db"
 
 
 @pytest.mark.asyncio
@@ -178,10 +180,13 @@ async def test_restore_completes_all_spaces_notes_indexes(tmp_path: Path) -> Non
 
     manifest = receipt.manifest
     for item in manifest.files:
-        target = staged.root / item.relative_path
+        target = staged.root / (
+            "meta.db" if item.relative_path == "meta/meta.db" else item.relative_path
+        )
         assert target.is_file(), f"missing {item.relative_path}"
         assert target.stat().st_size == item.size, f"size {item.relative_path}"
-        assert sha256_file(target) == item.sha256, f"hash {item.relative_path}"
+        if item.kind not in {"meta_db", "space_db", "index_db"}:
+            assert sha256_file(target) == item.sha256, f"hash {item.relative_path}"
     with closing(sqlite3.connect(staged.root / "spaces" / "alpha" / "space.db")) as connection:
         row = connection.execute(
             "SELECT value FROM sample ORDER BY value LIMIT 1"
@@ -207,6 +212,44 @@ async def test_staged_restore_fields_from_real_evidence(tmp_path: Path) -> None:
     assert staged.source_fence == receipt.manifest.source_fence
     assert staged.source_fence == leases.lease.fence
     assert staged.manifest is receipt.manifest or staged.manifest == receipt.manifest
+
+
+@pytest.mark.asyncio
+async def test_staged_restore_rejects_invalid_or_mismatched_verification(
+    tmp_path: Path,
+) -> None:
+    coordinator, _leases, _active_root, _engines, _fps = _recovery_env(tmp_path)
+    _receipt, staged = await _restore(coordinator, tmp_path)
+    invalid = VerificationResult(
+        valid=False,
+        manifest_sha256=staged.manifest_sha256,
+        manifest=staged.manifest,
+        checked_files=0,
+        checked_spaces=0,
+        failures=("forced",),
+    )
+    with pytest.raises(ValueError, match="valid matching verification"):
+        StagedRestore(
+            snapshot_root=staged.snapshot_root,
+            root=staged.root,
+            target_active_root=staged.target_active_root,
+            manifest_sha256=staged.manifest_sha256,
+            staged_tree_sha256=staged.staged_tree_sha256,
+            catalog_hash=staged.catalog_hash,
+            source_fence=staged.source_fence,
+            manifest=staged.manifest,
+            verification=invalid,
+        )
+
+    with pytest.raises(ValueError, match="tuple"):
+        VerificationResult(
+            valid=False,
+            manifest_sha256=staged.manifest_sha256,
+            manifest=staged.manifest,
+            checked_files=0,
+            checked_spaces=0,
+            failures=["mutable"],  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.asyncio
@@ -270,7 +313,7 @@ async def test_restore_calls_all_six_read_only_authorities_on_staging(
     receipt = await _make_receipt(coordinator, tmp_path)
     staged = await coordinator.restore_to_staging(receipt)
 
-    assert ("meta", staged.root / "meta" / "meta.db") in recording_migration.calls
+    assert ("meta", staged.root / "meta.db") in recording_migration.calls
     assert (
         "space",
         staged.root / "spaces" / "alpha" / "space.db",
@@ -283,7 +326,7 @@ async def test_restore_calls_all_six_read_only_authorities_on_staging(
     assert len(recording_mutation.calls) >= 1
     assert len(recording_active.calls) >= 1
     meta_view, space_views = recording_active.calls[-1]
-    assert meta_view.db_path == staged.root / "meta" / "meta.db"
+    assert meta_view.db_path == staged.root / "meta.db"
     # ActiveSession MUST consume the copied Space views, never the live ones.
     assert set(space_views) == {"alpha"}
     assert space_views["alpha"].db_path == (
@@ -307,7 +350,7 @@ async def test_restore_empty_active_session_coordination_succeeds(
     )
 
     decision = await TS2Authority().inspect_read_only(
-        SimpleNamespace(db_path=staged.root / "meta" / "meta.db"),
+        SimpleNamespace(db_path=staged.root / "meta.db"),
         space_views={
             "alpha": SimpleNamespace(
                 space_id="alpha",
@@ -386,7 +429,7 @@ async def test_restore_nonempty_active_state_passes_real_ts2_authority(
     )
 
     decision = await TS2Authority().inspect_read_only(
-        SimpleNamespace(db_path=staged.root / "meta" / "meta.db"),
+        SimpleNamespace(db_path=staged.root / "meta.db"),
         space_views={
             "alpha": SimpleNamespace(
                 space_id="alpha",
@@ -416,6 +459,91 @@ async def test_restore_absent_snapshot_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(Exception) as excinfo:
         await coordinator.restore_to_staging(tmp_path / "no-such-snapshot")
     assert _domain_code(excinfo.value) == "restore_source_invalid"
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_snapshot_inside_live_root(tmp_path: Path) -> None:
+    coordinator, _leases, active_root, _engines, _fps = _recovery_env(tmp_path)
+    receipt = await _make_receipt(coordinator, tmp_path)
+    embedded = active_root / "embedded-snapshot"
+    shutil.copytree(receipt.root, embedded)
+
+    with pytest.raises(Exception) as excinfo:
+        await coordinator.restore_to_staging(embedded)
+
+    assert _domain_code(excinfo.value) == "restore_source_invalid"
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_source_changed_after_verify(tmp_path: Path) -> None:
+    coordinator, _leases, _active_root, _engines, _fps = _recovery_env(tmp_path)
+    receipt = await _make_receipt(coordinator, tmp_path)
+
+    def _mutate_after_verify(name: str) -> None:
+        if name == "restore_input_checked":
+            (receipt.root / NOTE_RELATIVE).write_text("changed", encoding="utf-8")
+
+    coordinator.failpoint = _mutate_after_verify
+    with pytest.raises(Exception) as excinfo:
+        await coordinator.restore_to_staging(receipt)
+
+    assert _domain_code(excinfo.value) == "restore_inventory_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_snapshot_registered_for_other_active_root(
+    tmp_path: Path,
+) -> None:
+    coordinator, _leases, _active_root, _engines, _fps = _recovery_env(tmp_path)
+    receipt = await _make_receipt(coordinator, tmp_path)
+    coordinator.active_root = (tmp_path / "different-active").resolve()
+
+    with pytest.raises(Exception) as excinfo:
+        await coordinator.restore_to_staging(receipt)
+
+    assert _domain_code(excinfo.value) == "restore_relocation_required"
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_sidecar_present_after_verification(tmp_path: Path) -> None:
+    coordinator, _leases, active_root, _engines, _fps = _recovery_env(tmp_path)
+    receipt = await _make_receipt(coordinator, tmp_path)
+
+    def _write_sidecar(name: str) -> None:
+        if name == "staged_verify_done":
+            staging = _latest_staging(active_root)
+            assert staging is not None
+            (staging / "meta.db-wal").write_bytes(b"unexpected")
+
+    coordinator.failpoint = _write_sidecar
+    with pytest.raises(Exception) as excinfo:
+        await coordinator.restore_to_staging(receipt)
+
+    assert _domain_code(excinfo.value) == "restore_verification_failed"
+    assert _latest_staging(active_root) is None
+
+
+@pytest.mark.asyncio
+async def test_restore_preserves_primary_and_reports_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator, _leases, _active_root, _engines, _fps = _recovery_env(tmp_path)
+    receipt = await _make_receipt(coordinator, tmp_path)
+
+    def _fail_after_allocate(name: str) -> None:
+        if name == "staged_copy:meta/meta.db":
+            raise RuntimeError("primary restore failure")
+
+    def _cleanup_fails(_path: Path) -> None:
+        raise OSError("cleanup locked")
+
+    coordinator.failpoint = _fail_after_allocate
+    monkeypatch.setattr("app.recovery.coordinator.shutil.rmtree", _cleanup_fails)
+
+    with pytest.raises(RuntimeError, match="primary restore failure") as excinfo:
+        await coordinator.restore_to_staging(receipt)
+
+    assert any("staging cleanup failed" in note for note in excinfo.value.__notes__)
 
 
 @pytest.mark.asyncio
@@ -630,7 +758,7 @@ async def test_restore_migration_drift_fails_closed(tmp_path: Path) -> None:
     def _drift(name: str) -> None:
         failpoints.append(name)
         if name == "staged_verify_start":
-            staged_meta = _latest_staging(active_root) / "meta" / "meta.db"
+            staged_meta = _latest_staging(active_root) / "meta.db"
             with closing(sqlite3.connect(staged_meta)) as connection:
                 with connection:
                     connection.execute(
@@ -726,7 +854,7 @@ async def test_restore_active_session_recovery_required_fails_closed(
     def _drift(name: str) -> None:
         failpoints.append(name)
         if name == "staged_verify_start":
-            staged_meta = _latest_staging(active_root) / "meta" / "meta.db"
+            staged_meta = _latest_staging(active_root) / "meta.db"
             with closing(sqlite3.connect(staged_meta)) as connection:
                 with connection:
                     _insert_locator(

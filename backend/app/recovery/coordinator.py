@@ -1455,7 +1455,7 @@ class RecoveryCoordinator:
         if not root.is_dir():
             raise DomainFailure("restore_source_invalid", f"snapshot does not exist: {root}")
         self._reject_symlink_path(root)
-        if root == self.active_root or root in self.active_root.parents:
+        if root == self.active_root or self.active_root in root.parents:
             raise DomainFailure("restore_source_invalid", "snapshot is inside active root")
 
         verified = await self.verify(snapshot)
@@ -1527,10 +1527,15 @@ class RecoveryCoordinator:
                 manifest=manifest,
                 verification=verified,
             )
-        except Exception:
-            # Cleanup may itself fail (Windows file locks); the primary
-            # exception must never be masked by cleanup errors.
-            shutil.rmtree(staging, ignore_errors=True)
+        except Exception as primary:
+            # Preserve the primary failure while making a cleanup failure
+            # observable to operators and tests.
+            try:
+                shutil.rmtree(staging)
+            except OSError as cleanup_error:
+                primary.add_note(
+                    f"staging cleanup failed for {staging}: {cleanup_error}"
+                )
             raise
 
     def _allocate_staging_root(self) -> Path:
@@ -1595,14 +1600,54 @@ class RecoveryCoordinator:
                 raise DomainFailure(
                     "restore_inventory_mismatch", f"source is not a regular file: {relative}"
                 )
-            destination = staging / relative
+            before_size = source.stat().st_size
+            before_hash = sha256_file(source)
+            if before_size != item.size or before_hash != item.sha256:
+                raise DomainFailure(
+                    "restore_inventory_mismatch",
+                    f"source changed after verification: {relative}",
+                )
+            destination = staging / self._staged_relative_path(relative)
             destination.parent.mkdir(parents=True, exist_ok=True)
             if item.kind.endswith("db"):
                 backup_sqlite(source, destination)
+                self._prepare_staged_database(destination)
             else:
                 shutil.copyfile(source, destination)
                 fsync_file(destination)
+            if source.stat().st_size != before_size or sha256_file(source) != before_hash:
+                raise DomainFailure(
+                    "restore_inventory_mismatch",
+                    f"source changed while copying: {relative}",
+                )
             self.failpoint(f"staged_copy:{relative}")
+
+    @staticmethod
+    def _prepare_staged_database(path: Path) -> None:
+        """Finish staging writes before the read-only verification boundary.
+
+        Snapshot databases may persist WAL mode. A read-only SQLite open can
+        then create ``-shm`` beside the database. Staging switches to DELETE
+        journal mode before the first tree hash so every subsequent authority
+        must leave the inventory byte-for-byte unchanged.
+        """
+        try:
+            with closing(sqlite3.connect(path)) as connection:
+                mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()
+                if mode is None or str(mode[0]).lower() != "delete":
+                    raise sqlite3.DatabaseError("journal mode did not become DELETE")
+        except sqlite3.DatabaseError as exc:
+            raise DomainFailure(
+                "restore_inventory_mismatch",
+                f"staged database journal mode cannot be normalized: {path.name}",
+            ) from exc
+        fsync_file(path)
+
+    @staticmethod
+    def _staged_relative_path(manifest_relative: str) -> str:
+        if manifest_relative == "meta/meta.db":
+            return "meta.db"
+        return manifest_relative
 
     @staticmethod
     def _fsync_tree(root: Path) -> None:
@@ -1616,10 +1661,6 @@ class RecoveryCoordinator:
             if not path.is_file():
                 if path.is_dir():
                     directories.append(path)
-                continue
-            relative = path.relative_to(root).as_posix()
-            # SQLite WAL sidecars mirror the database and need no fsync.
-            if relative.endswith(("-shm", "-wal", "-journal")):
                 continue
             fsync_file(path)
         for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
@@ -1637,7 +1678,10 @@ class RecoveryCoordinator:
         different staging paths produce the same digest, and any content or
         path change changes the digest.
         """
-        kinds = {item.relative_path: item.kind for item in manifest.files}
+        kinds = {
+            cls._staged_relative_path(item.relative_path): item.kind
+            for item in manifest.files
+        }
         entries: list[dict[str, object]] = []
         for path in root.rglob("*"):
             if not path.is_file():
@@ -1647,12 +1691,6 @@ class RecoveryCoordinator:
                     "restore_invalid", f"staging contains a symlink: {path}"
                 )
             relative = path.relative_to(root).as_posix()
-            # SQLite WAL sidecar files (-shm/-wal/-journal) mirror the
-            # database bytes and may be (re)created by a read-only SQLite
-            # connection during verification; they are not manifest-declared
-            # content and never enter the deterministic digest.
-            if relative.endswith(("-shm", "-wal", "-journal")):
-                continue
             kind = kinds.get(relative)
             if kind is None:
                 raise DomainFailure(
@@ -1711,6 +1749,7 @@ class RecoveryCoordinator:
                 "recovery_inspector_unavailable:" + ",".join(missing),
                 "staged verification is missing authorities",
             )
+        self._verify_staged_registry_paths(staging, manifest, target_active_root)
         await self._verify_staged_migration(staging, manifest)
         await self._verify_staged_index(staging, manifest)
         await self._verify_staged_knowledge(staging, manifest)
@@ -1718,11 +1757,46 @@ class RecoveryCoordinator:
         await self._verify_staged_active_session(staging, manifest)
         await self._verify_staged_effort(staging, manifest)
 
+    @staticmethod
+    def _verify_staged_registry_paths(
+        staging: Path,
+        manifest: SnapshotManifest,
+        target_active_root: Path,
+    ) -> None:
+        expected_ids = {space.space_id for space in manifest.spaces}
+        uri = f"{(staging / 'meta.db').resolve().as_uri()}?mode=ro"
+        try:
+            with closing(sqlite3.connect(uri, uri=True)) as connection:
+                rows = connection.execute(
+                    "SELECT id, db_path, notes_dir FROM spaces ORDER BY id"
+                ).fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise DomainFailure(
+                "restore_verification_failed", "staged Meta Space registry is unreadable"
+            ) from exc
+        if {str(row[0]) for row in rows} != expected_ids:
+            raise DomainFailure(
+                "restore_verification_failed", "staged Meta Space registry is incomplete"
+            )
+        target = target_active_root.resolve()
+        for space_id, db_path, notes_dir in rows:
+            expected_root = target / "spaces" / str(space_id)
+            if (
+                Path(str(db_path)).expanduser().resolve()
+                != (expected_root / "space.db").resolve()
+                or Path(str(notes_dir)).expanduser().resolve()
+                != (expected_root / "notes").resolve()
+            ):
+                raise DomainFailure(
+                    "restore_relocation_required",
+                    f"Space {space_id!r} is registered for a different active root",
+                )
+
     async def _verify_staged_migration(
         self, staging: Path, manifest: SnapshotManifest
     ) -> None:
         meta_status = await self.migration_coordinator.verify(
-            "meta", staging / "meta" / "meta.db"
+            "meta", staging / "meta.db"
         )
         if meta_status is None:
             raise DomainFailure(
@@ -1822,7 +1896,7 @@ class RecoveryCoordinator:
     ) -> None:
         from app.knowledge.consistency import SpaceDataView
 
-        meta_view = self.recovery_view_factory("meta", staging / "meta" / "meta.db")
+        meta_view = self.recovery_view_factory("meta", staging / "meta.db")
         space_views = {
             space.space_id: SpaceDataView(
                 space_id=space.space_id,
