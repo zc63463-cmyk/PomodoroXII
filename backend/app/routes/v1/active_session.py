@@ -79,6 +79,8 @@ def _flatten_session_response(value: dict[str, Any]) -> dict[str, Any]:
 
 def _map_active_operation_response(value: Any) -> ActiveSessionOperationResponse:
     if isinstance(value, Mapping) and value.get("kind") == "activation_conflict":
+        # The coordinator's conflict view spreads the locator fields at the
+        # top level of ``active`` (no nested ``locator`` key).
         active = dict(value["active"])
         active.pop("operation", None)
         conflict = {
@@ -459,7 +461,10 @@ async def end(
     require_idempotency_key(body.command_id, idempotency_key)
     command = _make_command(body, space_id=None, payload=_map_end_payload(body.payload))
     view = await coordinator.end(_master_principal(claims), command)
-    return EndActiveSessionResponse.model_validate(_flatten_session_response(view.value))
+    flattened = _flatten_session_response(view.value)
+    return EndActiveSessionResponse.model_validate(
+        {"session": flattened["session"], "locator": None}
+    )
 
 
 # --------------------------------------------------------------------------- #
