@@ -378,3 +378,58 @@ ended/非 conflict、普通 end conflict Session —— 全部稳定 code，无 
 
 剩余验证项（权威环境复核）：双 Space conflict 的完整 HTTP 双 handle 流程已由
 handle_lifecycle 覆盖 provider 层；activate/start 的 HTTP 数据链已有既有测试。
+
+
+## 11. 第 6 轮（完整 Meta resolution 状态机 / proof 全持久化 / journal step / HTTP 精确）完成记录
+
+基线 `a95d95c` → 提交（见交回报告）；S5 未改、未进 Task 2。
+
+### 11.1 完整 Meta resolution 状态机（plan L3420-3439）
+- **首次 CAS**（一个 Meta 事务，条件 SQL + rowcount==1）：
+  locator `claiming(conflict, active target, E) -> claiming(resolution, winner target, E+1)`；
+  candidate winner 时真实更新 `space_id/session_id` 到 winner 侧：
+  `UPDATE active_session_locator SET operation_id=:rid, ownership_epoch=:next,
+  space_id=:winner_space_id, session_id=:winner_session_id, updated_at=:now
+  WHERE singleton_key='active' AND state='claiming' AND operation_id=:conflict_id
+  AND ownership_epoch=:expected AND space_id=:active_space AND session_id=:active_session`；
+  rowcount==0 时仅幂等 restart（locator 已指向同 resolution op + winner target + E+1）继续，否则稳定 CAS conflict（路由映射 409），operation insert 与 CAS 同事务失败 rollback。
+- **transferred 中间态 CAS**：children 双 success 后 `UPDATE ... SET phase='transferred' WHERE phase='claimed'`（权威恢复中点，幂等）。
+- **完成事务**（一个 Meta transaction，全部条件 CAS + rowcount，任一失败 rollback 无孤立行）：
+  - locator `claiming -> active`（保持 winner space/session，WHERE 含 winner target + E+1）；
+  - resolution operation `transferred -> completed`；
+  - old conflict operation `awaiting_resolution -> completed`，`result_descriptor_json={"resolved_by": resolution_op}`。
+- **200 响应**：完成事务后重读的 locator（active + winner target + E+1）+ operation（completed）+ 真实 winner aggregate。
+- **幂等恢复**：locator active + op completed 重入 → 校验 payload hash 一致返回 200；transferred 中间态（claiming + transferred + 双 receipt success）重入 → 决策表 ALREADY → 完成事务 → active。
+
+### 11.2 proof 完全从持久化 Meta 重建
+`_read_resolution_proof(operation_id)` 只接受 resolution operation ID；重读 locator + resolution operation + canonical intent_json；导出并交叉验证：related conflict ID、payload_hash/intent_hash、pair、winnerRole、epoch、winner/loser child ID（derive 重算）与 payload hash（intent children）；intent children、operation payload_hash、related_operation_id、anchor 不一致全部 fail closed；不允许调用参数补齐任何权威字段。
+
+### 11.3 journal + receipt 联合证明（含 MutationStep）
+APPLIED 需 batch+operation 双 FINALIZED + error_code None + result_json 不含本 child rejected + 全部 MutationStep.state==APPLIED；ABORTED（任一）绝不 APPLIED；COMPENSATED→INCONCLUSIVE；op FINALIZED 但 batch 未完成→INCONCLUSIVE；Meta 完成只在双独立 terminal-success receipts 匹配 intent/op ID/hash 后。
+
+### 11.4 精确 HTTP（生产 provider/lifespan，无 override）
+- candidate/active winner 精确 200：响应顶层 locator=active + winner target + resolution op + E+1；resolution completed、conflict completed（resolved_by）；双 receipt succeeded；authority active_consistent；
+- 并发：精确一 200 一 409、无孤立 resolution op、epoch 只增一次；
+- 重放：同 command+hash 精确 200（envelope 不重复）；同 command 不同 hash 精确 409；
+- loser rejected/unknown：明确稳定错误码（路由 409 映射，不 500）；
+- crash/restart：transferred 中间态回滚后重放 → 恢复完成 active（envelope 不重复、authority active_consistent）；
+- proof intent/child/hash 篡改全部 fail closed（安全反例矩阵）。
+
+### 11.5 门禁真实结果
+| 门禁 | 结果 |
+|---|---|
+| focused（policy 49 + coordinator 19 + uow_integration 2 + http_integration 13 + recovery_authority） | 141 + 13 全绿 |
+| HTTP 防回归（routes + mounting + handle_lifecycle） | 12 passed |
+| 回归（locator_migration + contracts + hash + mutation_recovery） | 113 passed + 2 skipped |
+| Ruff（focus_session + mutation + active_session.py + 9 测试文件） | All checks passed |
+| compileall（focus_session + mutation） | OK |
+| OpenAPI（test_openapi_contract.py） | 44 passed |
+| backend 全量分片（4 片并行 + 关键串行确认） | 分片 2 全绿 820；分片 1/3/4 修复项串行确认全绿（见下） |
+| collect-only | 2364 collected（不视为全量通过） |
+| git diff --check / status | OK / 干净（提交后确认） |
+
+全量分片既有/环境失败（非本任务引入，已确认）：
+- `test_space_path_containment` 2 例：Windows 路径 resolve/symlink 语义（既有文件，本轮未改）；
+- `test_sync_protocol_boundaries::test_backend_authority_gate_covers_sync_route_and_all_outbox_reads`：审计脚本按行扫描
+  `recovery_authority.py:957` 的既有 `PRAGMA table_info`（baseline a95d95c 同位置存在），全量首次暴露；
+- 并行分片中的 `MigrationSafetyError`（Windows 临时文件锁）串行重跑通过。
