@@ -8,9 +8,10 @@ from .contracts import (
     SpaceSnapshot,
     VerificationResult,
 )
-from .coordinator import RecoveryCoordinator
+from .coordinator import ActiveSessionCoordinationInspector, RecoveryCoordinator
 
 __all__ = [
+    "ActiveSessionCoordinationInspector",
     "MetaSnapshot",
     "PublishedSnapshotReceipt",
     "RecoveryCoordinator",
