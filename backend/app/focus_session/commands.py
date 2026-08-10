@@ -26,8 +26,8 @@ ACTIONS = frozenset({
     "correct_attribution", "set_current_plan_item",
     "set_completion_draft", "add_plan_item", "remove_plan_item",
     "activate_provisional", "mark_activation_conflict",
-    "resolve_activation_conflict", "claim_owner", "record_receipt",
-    "rebuild_effort_projection",
+    "resolve_activation_conflict", "resolve_conflict_loser",
+    "claim_owner", "record_receipt", "rebuild_effort_projection",
 })
 
 
@@ -47,6 +47,7 @@ HASH_GUARD_FIELDS = (
     "ownership_epoch",
     "expected_ownership_epoch",
     "cached_ownership_epoch",
+    "resolution_proof",
 )
 RECEIPT_RESERVATION_STATES = (
     "not_needed", "pending", "succeeded", "failed", "conflict", "unknown",

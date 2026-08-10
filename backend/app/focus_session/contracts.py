@@ -226,3 +226,161 @@ class ActiveSessionCoordinator(Protocol):
     async def resolve_activation_conflict(
         self, principal: Principal, command: ActiveSessionCommand
     ) -> ActiveSessionView: ...
+
+
+# --------------------------------------------------------------------------- #
+# Frozen resolution coordination proof (internal service evidence)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenSpaceSessionId:
+    """Immutable composite (space_id, session_id) identity."""
+
+    space_id: str
+    session_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenConflictPair:
+    """Immutable conflict pair frozen from the persisted resolution intent."""
+
+    active: FrozenSpaceSessionId
+    candidate: FrozenSpaceSessionId
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "active": {
+                "space_id": self.active.space_id,
+                "session_id": self.active.session_id,
+            },
+            "candidate": {
+                "space_id": self.candidate.space_id,
+                "session_id": self.candidate.session_id,
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> "FrozenConflictPair":
+        if not isinstance(value, Mapping):
+            raise ValueError("conflict pair must be a mapping")
+        active = value.get("active")
+        candidate = value.get("candidate")
+        if not isinstance(active, Mapping) or not isinstance(candidate, Mapping):
+            raise ValueError("conflict pair must name active and candidate")
+        pair = cls(
+            FrozenSpaceSessionId(
+                str(active.get("space_id") or ""),
+                str(active.get("session_id") or ""),
+            ),
+            FrozenSpaceSessionId(
+                str(candidate.get("space_id") or ""),
+                str(candidate.get("session_id") or ""),
+            ),
+        )
+        if not pair.active.space_id or not pair.active.session_id:
+            raise ValueError("conflict pair active identity is incomplete")
+        if not pair.candidate.space_id or not pair.candidate.session_id:
+            raise ValueError("conflict pair candidate identity is incomplete")
+        if pair.active == pair.candidate:
+            raise ValueError("conflict pair sides must be distinct")
+        return pair
+
+    def side(self, role: str) -> FrozenSpaceSessionId:
+        if role == "active":
+            return self.active
+        if role == "candidate":
+            return self.candidate
+        raise ValueError(f"unknown pair role: {role!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionCoordinationProof:
+    """Deeply immutable Meta authority proof for one resolution child.
+
+    Built by the ActiveSessionCoordinator *after* the Meta transaction from
+    the freshly persisted locator, resolution operation and canonical intent.
+    It is carried inside the Space child MutationRequest as internal service
+    evidence (``payload["resolution_proof"]``, excluded from the business
+    payload hash).  The Space policy verifies the proof against the injected
+    locator reader and the shared child derivation contract -- it never opens
+    the Meta database itself.
+    """
+
+    resolution_operation_id: str
+    conflict_operation_id: str
+    phase: str
+    locator_state: str
+    locator_operation_id: str
+    locator_space_id: str
+    locator_session_id: str
+    ownership_epoch: int
+    pair: FrozenConflictPair
+    winner_role: str
+    winner_child_operation_id: str
+    winner_child_payload_hash: str
+    loser_child_operation_id: str
+    loser_child_payload_hash: str
+    intent_hash: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "resolution_operation_id": self.resolution_operation_id,
+            "conflict_operation_id": self.conflict_operation_id,
+            "phase": self.phase,
+            "locator_state": self.locator_state,
+            "locator_operation_id": self.locator_operation_id,
+            "locator_space_id": self.locator_space_id,
+            "locator_session_id": self.locator_session_id,
+            "ownership_epoch": self.ownership_epoch,
+            "pair": self.pair.to_dict(),
+            "winner_role": self.winner_role,
+            "winner_child_operation_id": self.winner_child_operation_id,
+            "winner_child_payload_hash": self.winner_child_payload_hash,
+            "loser_child_operation_id": self.loser_child_operation_id,
+            "loser_child_payload_hash": self.loser_child_payload_hash,
+            "intent_hash": self.intent_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ResolutionCoordinationProof":
+        if not isinstance(value, Mapping):
+            raise ValueError("resolution proof must be a mapping")
+        required = {
+            "resolution_operation_id", "conflict_operation_id", "phase",
+            "locator_state", "locator_operation_id", "locator_space_id",
+            "locator_session_id", "ownership_epoch", "pair", "winner_role",
+            "winner_child_operation_id", "winner_child_payload_hash",
+            "loser_child_operation_id", "loser_child_payload_hash", "intent_hash",
+        }
+        if set(value) != required:
+            raise ValueError("resolution proof fields do not match the frozen contract")
+        for name in (
+            "resolution_operation_id", "conflict_operation_id", "phase",
+            "locator_state", "locator_operation_id", "locator_space_id",
+            "locator_session_id", "winner_role", "winner_child_operation_id",
+            "winner_child_payload_hash", "loser_child_operation_id",
+            "loser_child_payload_hash", "intent_hash",
+        ):
+            if not isinstance(value[name], str) or not value[name]:
+                raise ValueError(f"resolution proof {name} must be a nonempty string")
+        epoch = value["ownership_epoch"]
+        if type(epoch) is not int or epoch <= 0:
+            raise ValueError("resolution proof ownership_epoch must be a positive int")
+        return cls(
+            resolution_operation_id=str(value["resolution_operation_id"]),
+            conflict_operation_id=str(value["conflict_operation_id"]),
+            phase=str(value["phase"]),
+            locator_state=str(value["locator_state"]),
+            locator_operation_id=str(value["locator_operation_id"]),
+            locator_space_id=str(value["locator_space_id"]),
+            locator_session_id=str(value["locator_session_id"]),
+            ownership_epoch=epoch,
+            pair=FrozenConflictPair.from_dict(value["pair"]),
+            winner_role=str(value["winner_role"]),
+            winner_child_operation_id=str(value["winner_child_operation_id"]),
+            winner_child_payload_hash=str(value["winner_child_payload_hash"]),
+            loser_child_operation_id=str(value["loser_child_operation_id"]),
+            loser_child_payload_hash=str(value["loser_child_payload_hash"]),
+            intent_hash=str(value["intent_hash"]),
+        )

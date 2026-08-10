@@ -14,6 +14,10 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from types import MappingProxyType
 
+from app.focus_session.child_operations import (
+    ActiveSessionChildRole,
+    derive_active_session_child_operation_id,
+)
 from app.focus_session.contracts import CommandReceiptState
 from app.focus_session.effort_projection import EffortProjectionCompiler
 from app.focus_session.receipts import decode_reconcile_coordination
@@ -357,6 +361,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             "focus_session.activate_provisional": self._compile_activation,
             "focus_session.mark_activation_conflict": self._compile_conflict,
             "focus_session.resolve_activation_conflict": self._compile_resolution,
+            "focus_session.resolve_conflict_loser": self._compile_resolution_loser,
             "focus_session.claim_owner": self._compile_owner_claim,
             "focus_session.record_receipt": self._compile_receipt,
             "focus_session.rebuild_effort_projection": self._compile_rebuild_effort,
@@ -1310,19 +1315,228 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
     async def _compile_resolution(
         self, context: MutationCompileContext, request: MutationRequest,
     ) -> MutationCommand:
-        winner = request.payload.get("winner_role")
-        state = "authoritative" if winner in {"active", "candidate"} else "activation_conflict"
-        session_id = str(request.payload.get("session_id", request.entity_id))
-        current = context.authority.row("focus_session", session_id)
+        """Winner child of a persisted resolution.
+
+        The winner is the deterministic ``resolution:winner`` child of the
+        resolution operation.  The identity gate proves the child derivation
+        against the frozen ResolutionCoordinationProof, the still-claiming
+        Meta locator, and a non-ended ``activation_conflict`` Session.  The
+        post-image flips ownership to ``authoritative`` and keeps the Session
+        running; validity stays at its authoritative-allowed value.  No
+        caller-declared winner flag is accepted: the role comes from the
+        persisted proof only.
+        """
+        await self._verify_resolution_child(
+            context, request, role=ActiveSessionChildRole.WINNER
+        )
+        return await self._compile_field_update(
+            context, request, {"ownership_state": "authoritative"},
+        )
+
+    async def _compile_resolution_loser(
+        self, context: MutationCompileContext, request: MutationRequest,
+    ) -> MutationCommand:
+        """Loser child of a persisted resolution (server-authored only).
+
+        A distinct action so that the ordinary ``focus_session.end`` path stays
+        closed for ``activation_conflict`` Sessions.  The identity gate proves
+        the deterministic ``resolution:loser`` child derivation, the
+        still-claiming locator anchored to the original conflict operation,
+        and a non-ended ``activation_conflict`` Session.  The post-image is
+        forced -- the caller cannot supply timer/validity/ownership fields: the
+        loser ends ``interrupted``, is marked ``invalid`` with the typed
+        ``activation_conflict_loser`` reason, and leaves the conflict
+        ownership.  Clock invariants (ended_at >= started_at, valid duration
+        counters, version +1, sync event) are recomputed by the shared
+        transition helper.
+        """
+        current = await self._verify_resolution_child(
+            context, request, role=ActiveSessionChildRole.LOSER
+        )
+        occurred_at = str(request.payload.get("occurred_at") or "")
+        if not occurred_at:
+            raise _MutationRuleViolation(
+                "version_conflict", {"reason": "loser_occurred_at_required"}
+            )
+        forced = {
+            "timer_completion": "interrupted",
+            "validity": "invalid",
+            "validity_reason": "activation_conflict_loser",
+        }
+        for field, value in forced.items():
+            if field in request.payload and request.payload[field] != value:
+                raise _MutationRuleViolation(
+                    "work_item_structure_changed",
+                    {"reason": "loser_post_image_mismatch", "field": field},
+                )
+        if "ended_at" in request.payload and request.payload["ended_at"] != occurred_at:
+            raise _MutationRuleViolation(
+                "work_item_structure_changed",
+                {"reason": "loser_post_image_mismatch", "field": "ended_at"},
+            )
+        after = dict(
+            _clock_transition_after(current, "end", occurred_at, dict(forced))
+        )
+        # Non-conflict terminal ownership: the loser is an ended Session, the
+        # same ownership value an ordinary ended Session keeps.  The recovery
+        # authority verifies the loser by ended + invalid marker only.
+        after["ownership_state"] = "authoritative"
+        after["version"] = int(current.get("version", 1)) + 1
+        frozen_after = require_frozen_object(after)
+        _require_canonical_timestamp(after.get("started_at"))
+        _require_canonical_timestamp(after.get("updated_at"))
+        _validate_duration_row(after)
+        db_plan = _update_plan(context.catalog, "focus_session", current, frozen_after)
+        sync_event = _update_sync("focus_session", frozen_after, occurred_at)
+        return context.command(
+            request=request,
+            db_plans=(db_plan,),
+            sync_events=(sync_event,),
+            value=require_frozen_object({"updated": True, "entityType": "focus_session"}),
+        )
+
+    async def _verify_resolution_child(
+        self,
+        context: MutationCompileContext,
+        request: MutationRequest,
+        *,
+        role: ActiveSessionChildRole,
+    ) -> Mapping[str, object]:
+        """Fail-closed identity gate for resolution children.
+
+        Trusts only the frozen :class:`ResolutionCoordinationProof` carried as
+        internal service evidence (``payload["resolution_proof"]``).  The
+        proof is built by the coordinator from the freshly persisted Meta
+        rows; the policy verifies it against the injected locator reader and
+        the shared child derivation contract -- it never opens the Meta
+        database and never accepts a caller-supplied pair/role/parent.
+
+        Proves all of:
+
+        - the proof is a well-formed frozen contract with a legal phase and
+          distinct resolution/conflict operation ids;
+        - the request operation is the deterministic child of the proof's
+          resolution operation for ``role``;
+        - the persisted locator matches the proof field-for-field
+          (state/operation/space/session/epoch);
+        - the proof's pair names the locator's active side and the request
+          target is the exact side this role owns;
+        - the request payload hash equals the proof's declared child hash;
+        - the target Session is a non-ended ``activation_conflict`` row.
+
+        Any missing/inconsistent proof fails closed with a stable code and
+        never leaks the other side's identity.
+        """
+        from app.focus_session.contracts import (
+            FrozenSpaceSessionId,
+            ResolutionCoordinationProof,
+        )
+
+        context.require_space(str(request.payload.get("space_id", "")))
+        raw_proof = request.payload.get("resolution_proof")
+        if raw_proof is None:
+            raise _MutationRuleViolation(
+                "version_conflict", {"reason": "resolution_proof_required"}
+            )
+        try:
+            proof = ResolutionCoordinationProof.from_dict(raw_proof)
+        except ValueError as exc:
+            raise _MutationRuleViolation(
+                "version_conflict", {"reason": "resolution_proof_invalid"}
+            ) from exc
+        if proof.phase not in {"claimed", "prepared"}:
+            raise _MutationRuleViolation(
+                "version_conflict", {"reason": "resolution_phase"}
+            )
+        if proof.resolution_operation_id == proof.conflict_operation_id:
+            raise _MutationRuleViolation(
+                "version_conflict", {"reason": "resolution_anchor"}
+            )
+        expected_child = derive_active_session_child_operation_id(
+            proof.resolution_operation_id, role
+        )
+        if context.operation_id != expected_child:
+            raise _MutationRuleViolation(
+                "version_conflict",
+                {
+                    "sessionId": request.entity_id,
+                    "reason": "resolution_child_identity_mismatch",
+                    "role": role.value,
+                },
+            )
+        # The persisted locator must match the proof field-for-field.
+        locator = await self._read_locator(context, request)
+        if (
+            locator is None
+            or self._locator_value(locator, "state") != proof.locator_state
+            or self._locator_value(locator, "operation_id") != proof.locator_operation_id
+            or self._locator_value(locator, "space_id") != proof.locator_space_id
+            or self._locator_value(locator, "session_id") != proof.locator_session_id
+            or self._locator_value(locator, "ownership_epoch") != proof.ownership_epoch
+            or proof.locator_operation_id != proof.resolution_operation_id
+        ):
+            raise _MutationRuleViolation(
+                "stale_session_owner",
+                {"sessionId": request.entity_id, "operationId": proof.resolution_operation_id},
+            )
+        if proof.winner_role not in ("active", "candidate"):
+            raise _MutationRuleViolation(
+                "version_conflict", {"reason": "invalid_winner_role"}
+            )
+        pair = proof.pair
+        # The locator CASes onto the *winner* target (plan L3420): for a
+        # candidate winner the locator really points at the candidate side.
+        if pair.side(proof.winner_role) != FrozenSpaceSessionId(
+            proof.locator_space_id, proof.locator_session_id
+        ):
+            raise _MutationRuleViolation(
+                "stale_session_owner",
+                {"sessionId": request.entity_id, "reason": "resolution_pair_anchor"},
+            )
+        # The request target must be the exact side this role owns.
+        if role is ActiveSessionChildRole.WINNER:
+            expected_side = pair.side(proof.winner_role)
+        else:
+            expected_side = pair.side(
+                "active" if proof.winner_role == "candidate" else "candidate"
+            )
+        if (
+            request.payload.get("space_id") != expected_side.space_id
+            or request.payload.get("session_id", request.entity_id) != expected_side.session_id
+        ):
+            raise _MutationRuleViolation(
+                "version_conflict",
+                {
+                    "sessionId": request.entity_id,
+                    "reason": "resolution_child_identity_mismatch",
+                    "role": role.value,
+                },
+            )
+        # The child payload hash must equal the proof's frozen declaration.
+        declared_hash = (
+            proof.winner_child_payload_hash
+            if role is ActiveSessionChildRole.WINNER
+            else proof.loser_child_payload_hash
+        )
+        if str(request.payload.get("payload_hash") or "") != declared_hash:
+            raise _MutationRuleViolation(
+                "version_conflict",
+                {"sessionId": request.entity_id, "reason": "resolution_child_hash_mismatch"},
+            )
+        current = context.authority.row("focus_session", request.entity_id)
         if current is None:
-            raise _MutationRuleViolation("not_found", {"entityId": session_id})
+            raise _MutationRuleViolation("not_found", {"entityId": request.entity_id})
         if current.get("ownership_state") != "activation_conflict":
             raise _MutationRuleViolation(
-                "version_conflict", {"sessionId": session_id, "reason": "not_activation_conflict"}
+                "version_conflict",
+                {"sessionId": request.entity_id, "reason": "not_activation_conflict"},
             )
-        return await self._compile_field_update(
-            context, request, {"ownership_state": state},
-        )
+        if current.get("ended_at") is not None:
+            raise _MutationRuleViolation(
+                "version_conflict", {"sessionId": request.entity_id, "reason": "terminal_session"}
+            )
+        return current
+
 
     async def _compile_owner_claim(
         self, context: MutationCompileContext, request: MutationRequest,
