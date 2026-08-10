@@ -3,12 +3,46 @@
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import Literal, Mapping
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _SNAPSHOT_KINDS = frozenset({"meta_db", "space_db", "index_db", "note", "index_asset"})
 _FORBIDDEN_IDENTIFIER_CHARS = frozenset("/\\:\x00")
+
+
+class _FrozenDict(dict):
+    """Immutable dict subclass that stays JSON-serializable.
+
+    ``MappingProxyType`` is not JSON-serializable by the standard library and
+    the manifest serializer only shallow-copies it, so nested frozen mappings
+    break canonical serialization.  A dict subclass keeps ``json.dumps`` and
+    ``isinstance(value, dict)`` working while blocking mutation at the Python
+    level (the same guard-the-well-meaning-developer level as mappingproxy).
+    """
+
+    def __setitem__(self, key, value):  # type: ignore[override]
+        raise TypeError("frozen mapping is immutable")
+
+    def __delitem__(self, key) -> None:  # type: ignore[override]
+        raise TypeError("frozen mapping is immutable")
+
+    def clear(self) -> None:
+        raise TypeError("frozen mapping is immutable")
+
+    def pop(self, *args, **kwargs):
+        raise TypeError("frozen mapping is immutable")
+
+    def popitem(self):
+        raise TypeError("frozen mapping is immutable")
+
+    def setdefault(self, *args, **kwargs):
+        raise TypeError("frozen mapping is immutable")
+
+    def update(self, *args, **kwargs):  # type: ignore[override]
+        raise TypeError("frozen mapping is immutable")
+
+    def __ior__(self, other):
+        raise TypeError("frozen mapping is immutable")
 
 
 def _expected_kind_for_path(relative_path: str) -> str | None:
@@ -33,18 +67,18 @@ def _expected_kind_for_path(relative_path: str) -> str | None:
 def _deep_freeze(value: object) -> object:
     """Recursively freeze mappings and sequences.
 
-    ``MappingProxyType`` only guards the outermost mapping; nested dicts and
-    lists remain mutable unless every level is frozen.  This helper walks the
-    whole structure so no part of a published contract can be changed after
-    construction.  Mappings are sorted by stringified key so equal receipts
-    always compare equal regardless of insertion order.
+    Every level of a published contract is frozen so no part can be changed
+    after construction.  Mappings become ``_FrozenDict`` (an immutable dict
+    subclass) so the canonical serializer can still encode them.  Mappings are
+    sorted by stringified key so equal receipts always compare equal
+    regardless of insertion order.
     """
     if isinstance(value, Mapping):
         frozen = {
             str(key): _deep_freeze(item)
             for key, item in sorted(value.items(), key=lambda entry: str(entry[0]))
         }
-        return MappingProxyType(frozen)
+        return _FrozenDict(frozen)
     if isinstance(value, (tuple, list)):
         return tuple(_deep_freeze(item) for item in value)
     if isinstance(value, (set, frozenset)):
@@ -230,3 +264,54 @@ class VerificationResult:
             raise ValueError("valid verification requires a manifest and zero failures")
         if not self.valid and not self.failures:
             raise ValueError("invalid verification requires at least one failure")
+
+
+@dataclass(frozen=True, slots=True)
+class StagedRestore:
+    """Immutable receipt of a verified restore into a unique staging root.
+
+    Every value is derived from the verified manifest, the real staged tree,
+    and coordinator configuration.  No caller-supplied hash, catalog, or fence
+    is ever trusted: ``restore_to_staging`` re-verifies the snapshot from disk
+    and recomputes ``staged_tree_sha256`` over the actual staged files before
+    this receipt is constructed.  All paths are normalized absolute paths,
+    hashes are 64-char lowercase hex, and ``source_fence`` is a non-bool
+    positive integer.
+    """
+
+    snapshot_root: Path
+    root: Path
+    target_active_root: Path
+    manifest_sha256: str
+    staged_tree_sha256: str
+    catalog_hash: str
+    source_fence: int
+    manifest: SnapshotManifest
+    verification: VerificationResult
+
+    def __post_init__(self) -> None:
+        for name in ("snapshot_root", "root", "target_active_root"):
+            path = Path(getattr(self, name)).expanduser().resolve()
+            object.__setattr__(self, name, path)
+        if not self.root.is_dir():
+            raise ValueError("staged root must be an existing directory")
+        for name in ("manifest_sha256", "staged_tree_sha256", "catalog_hash"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+                raise ValueError(f"{name} must be a 64-char lowercase hex digest")
+        object.__setattr__(
+            self,
+            "source_fence",
+            _validated_int(self.source_fence, "source fence", minimum=1),
+        )
+        if not isinstance(self.manifest, SnapshotManifest):
+            raise ValueError("staged restore requires a SnapshotManifest")
+        if not isinstance(self.verification, VerificationResult):
+            raise ValueError("staged restore requires a VerificationResult")
+        if self.manifest_sha256 != self.verification.manifest_sha256:
+            raise ValueError("staged restore manifest hash disagrees with verification")
+        if (
+            self.catalog_hash != self.manifest.catalog_hash
+            or self.source_fence != self.manifest.source_fence
+        ):
+            raise ValueError("staged restore catalog/fence disagree with the manifest")
