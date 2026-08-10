@@ -72,11 +72,19 @@ if TYPE_CHECKING:
     from app.mutation.unit_of_work import MutationUnitOfWork
     from app.runtime.space import SpaceRuntimeHandle
 
-__all__ = ["ActiveSessionCoordinationError", "ProductionActiveSessionCoordinator"]
+__all__ = [
+    "ActiveSessionCoordinationError",
+    "ActiveSessionRecoveryRequiredError",
+    "ProductionActiveSessionCoordinator",
+]
 
 
 class ActiveSessionCoordinationError(RuntimeError):
     """Fail-closed coordination error raised by the production writer."""
+
+
+class ActiveSessionRecoveryRequiredError(ActiveSessionCoordinationError):
+    """Durable evidence is ambiguous and requires request-time recovery."""
 
 
 # Child action per role (single, documented mapping shared by the writer).
@@ -162,6 +170,7 @@ class ChildExecutionDecision(StrEnum):
 
     EXECUTE = "execute"
     ALREADY_SUCCEEDED = "already_succeeded"
+    RESTORE_SUCCEEDED_RECEIPT = "restore_succeeded_receipt"
     TERMINAL_REJECTED = "terminal_rejected"
     ORIGINAL_UNKNOWN = "original_unknown"
     RECOVERY_REQUIRED = "recovery_required"
@@ -305,6 +314,7 @@ class ProductionActiveSessionCoordinator:
         *,
         state: str = "succeeded",
         error_code: str | None = None,
+        repair: bool = False,
     ) -> None:
         """Persist a receipt strictly from the real UoW outcome through the
         same ``focus_session.record_receipt`` mutation channel the reconciler
@@ -327,7 +337,7 @@ class ProductionActiveSessionCoordinator:
             },
         }
         receipt_operation_id = bounded_child_operation_id(
-            child_id, f"receipt:{state}"
+            child_id, f"receipt{'-repair' if repair else ''}:{state}"
         )
         receipt_command = FocusSessionCommand(
             command_id=receipt_operation_id,
@@ -725,11 +735,36 @@ class ProductionActiveSessionCoordinator:
                     winner_handle,
                     lambda h: self._load_session_aggregate(h, winner_side["session_id"]),
                 )
-                return ActiveSessionView(value={
+                replay_value = {
                     "locator": self._locator_view(locator),
                     "operation": self._operation_view(existing_res),
                     "session": session_aggregate,
-                })
+                    "kind": "authoritative",
+                }
+                try:
+                    descriptor = json.loads(
+                        str(existing_res.result_descriptor_json)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise ActiveSessionRecoveryRequiredError(
+                        "completed resolution result descriptor is invalid"
+                    ) from exc
+                replay_wire = {
+                    **replay_value["locator"],
+                    "session": session_aggregate,
+                    "kind": "authoritative",
+                }
+                if (
+                    not isinstance(descriptor, dict)
+                    or descriptor.get("kind") != "authoritative"
+                    or descriptor.get("responseHash")
+                    != canonical_payload_hash(replay_wire)
+                ):
+                    raise ActiveSessionRecoveryRequiredError(
+                        "completed resolution result descriptor does not match "
+                        "the reconstructed response"
+                    )
+                return ActiveSessionView(value=replay_value)
             if locator.state != "claiming":
                 raise ActiveSessionCoordinationError(
                     "resolve_activation_conflict requires a claiming locator"
@@ -931,6 +966,53 @@ class ProductionActiveSessionCoordinator:
                         "resolution transfer CAS failed: operation was not "
                         "in claimed phase"
                     )
+        # Freeze the exact successful response before the atomic Meta finish.
+        # The descriptor stores only the locator, response hash, and original
+        # Space operation references; it never copies the Session aggregate.
+        winner_handle = await self._space_handle_provider(winner_side["space_id"])
+        session_aggregate = await self._with_mutation_lease(
+            winner_handle,
+            lambda h: self._load_session_aggregate(h, winner_side["session_id"]),
+        )
+        completion_now = _canonical_utc_now(self._clock)
+        completion_lease = _lease_expiry(completion_now)
+        final_locator = {
+            "spaceId": winner_side["space_id"],
+            "sessionId": winner_side["session_id"],
+            "operationId": operation_id,
+            "state": "active",
+            "ownerDeviceId": locator.owner_device_id,
+            "ownerTabId": locator.owner_tab_id,
+            "ownershipEpoch": resolution_epoch,
+            "leaseExpiresAt": completion_lease,
+            "updatedAt": completion_now,
+        }
+        response_wire = {
+            **final_locator,
+            "session": session_aggregate,
+            "kind": "authoritative",
+        }
+        result_descriptor = {
+            "kind": "authoritative",
+            "locator": final_locator,
+            "responseHash": canonical_payload_hash(response_wire),
+            "spaceResults": [
+                {
+                    "role": "winner",
+                    "spaceId": winner_side["space_id"],
+                    "sessionId": winner_side["session_id"],
+                    "operationId": winner_id,
+                    "payloadHash": winner_hash,
+                },
+                {
+                    "role": "loser",
+                    "spaceId": loser_side["space_id"],
+                    "sessionId": loser_side["session_id"],
+                    "operationId": loser_id,
+                    "payloadHash": loser_hash,
+                },
+            ],
+        }
         # 5) One Meta transaction completes the resolution: locator
         #    claiming -> active (winner target preserved), resolution operation
         #    -> completed, old conflict operation -> completed (resolved by
@@ -946,8 +1028,8 @@ class ProductionActiveSessionCoordinator:
                     "AND space_id=:winner_space_id AND session_id=:winner_session_id"
                 ),
                 {
-                    "now": _canonical_utc_now(self._clock),
-                    "lease": _lease_expiry(_canonical_utc_now(self._clock)),
+                    "now": completion_now,
+                    "lease": completion_lease,
                     "rid": operation_id,
                     "epoch": resolution_epoch,
                     "winner_space_id": winner_side["space_id"],
@@ -957,13 +1039,17 @@ class ProductionActiveSessionCoordinator:
             resolution_result = await session.execute(
                 sa_text(
                     "UPDATE active_session_operations SET phase='completed', "
-                    "updated_at=:now WHERE operation_id=:oid AND phase='transferred' "
+                    "result_descriptor_json=:descriptor, updated_at=:now "
+                    "WHERE operation_id=:oid AND phase='transferred' "
                     "AND related_operation_id=:related"
                 ),
                 {
-                    "now": _canonical_utc_now(self._clock),
+                    "now": completion_now,
                     "oid": operation_id,
                     "related": related_operation_id,
+                    "descriptor": canonical_json_bytes(result_descriptor).decode(
+                        "ascii"
+                    ),
                 },
             )
             conflict_result = await session.execute(
@@ -973,25 +1059,26 @@ class ProductionActiveSessionCoordinator:
                     "WHERE operation_id=:cid AND phase='awaiting_resolution'"
                 ),
                 {
-                    "now": _canonical_utc_now(self._clock),
+                    "now": completion_now,
                     "cid": related_operation_id,
                     "descriptor": canonical_json_bytes(
                         {"resolved_by": operation_id}
                     ).decode("ascii"),
                 },
             )
-            await session.commit()
             if (
                 locator_result.rowcount != 1
                 or resolution_result.rowcount != 1
                 or conflict_result.rowcount != 1
             ):
+                await session.rollback()
                 raise ActiveSessionCoordinationError(
                     "resolution completion CAS failed (locator="
                     f"{locator_result.rowcount}, resolution="
                     f"{resolution_result.rowcount}, conflict="
                     f"{conflict_result.rowcount})"
                 )
+            await session.commit()
             # 6) The 200 response re-reads the completed locator/operation.
             locator = await session.get(ActiveSessionLocator, "active")
             operation = await session.get(ActiveSessionOperation, operation_id)
@@ -999,17 +1086,11 @@ class ProductionActiveSessionCoordinator:
             raise ActiveSessionCoordinationError(
                 "resolution completion rows disappeared after commit"
             )
-        # The response aggregate is the *real* winner-Session state, read back
-        # through the shared query — never a hand-built dict.
-        winner_handle = await self._space_handle_provider(winner_side["space_id"])
-        session_aggregate = await self._with_mutation_lease(
-            winner_handle,
-            lambda h: self._load_session_aggregate(h, winner_side["session_id"]),
-        )
         return ActiveSessionView(value={
             "locator": self._locator_view(locator),
             "operation": self._operation_view(operation),
             "session": session_aggregate,
+            "kind": "authoritative",
         })
 
     async def end(
@@ -1224,7 +1305,7 @@ class ProductionActiveSessionCoordinator:
             MutationOperation,
             MutationStep,
         )
-        from app.mutation.types import MutationState
+        from app.mutation.types import MutationState, StepState
 
         async with handle.session_factory() as session:
             operation = await session.get(MutationOperation, child_id)
@@ -1267,23 +1348,35 @@ class ProductionActiveSessionCoordinator:
             and op_state == MutationState.FINALIZED
         ):
             if error_code is None:
-                # result_json must not list *this child* as rejected.
-                result_json = batch.result_json
-                if result_json:
-                    try:
-                        import json as _json2
+                try:
+                    import json as _json2
 
-                        decoded = _json2.loads(result_json)
-                        rejected_ids = {
-                            str(item.get("operation_id") or "")
-                            for item in decoded.get("rejected", [])
-                        }
-                    except (ValueError, TypeError, AttributeError):
+                    batch_result = _json2.loads(str(batch.result_json))
+                    operation_result = _json2.loads(str(operation.result_json))
+                    if not isinstance(batch_result, dict) or not isinstance(
+                        operation_result, dict
+                    ):
                         return OriginalChildOutcome.INCONCLUSIVE
-                    if child_id in rejected_ids:
-                        return OriginalChildOutcome.INCONCLUSIVE
-                # Every mutation step must carry durable APPLIED evidence.
-                if steps and any(str(step.state) != "APPLIED" for step in steps):
+                    applied_ids = {
+                        str(item.get("operation_id") or "")
+                        for item in batch_result.get("applied", [])
+                        if isinstance(item, dict)
+                    }
+                    rejected_ids = {
+                        str(item.get("operation_id") or "")
+                        for item in batch_result.get("rejected", [])
+                        if isinstance(item, dict)
+                    }
+                except (ValueError, TypeError, AttributeError):
+                    return OriginalChildOutcome.INCONCLUSIVE
+                if child_id not in applied_ids or child_id in rejected_ids:
+                    return OriginalChildOutcome.INCONCLUSIVE
+                if any(
+                    step.state != StepState.APPLIED
+                    or step.after_hash is None
+                    or step.applied_hash != step.after_hash
+                    for step in steps
+                ):
                     return OriginalChildOutcome.INCONCLUSIVE
                 return OriginalChildOutcome.APPLIED
             if _is_conflict_error_code(str(error_code)):
@@ -1345,7 +1438,7 @@ class ProductionActiveSessionCoordinator:
         if receipt is None:
             original = await self._query_child_original(handle, child_id)
             if original is OriginalChildOutcome.APPLIED:
-                return ChildExecutionDecision.ALREADY_SUCCEEDED, True
+                return ChildExecutionDecision.RESTORE_SUCCEEDED_RECEIPT, True
             if original in {
                 OriginalChildOutcome.REJECTED,
                 OriginalChildOutcome.CONFLICT,
@@ -1379,9 +1472,7 @@ class ProductionActiveSessionCoordinator:
         if original is OriginalChildOutcome.APPLIED:
             if state == CommandReceiptState.SUCCEEDED:
                 return ChildExecutionDecision.ALREADY_SUCCEEDED, True
-            # pending/unknown receipt over an applied journal: read succeeded,
-            # never re-execute.
-            return ChildExecutionDecision.ALREADY_SUCCEEDED, True
+            return ChildExecutionDecision.RESTORE_SUCCEEDED_RECEIPT, True
         if original in {
             OriginalChildOutcome.REJECTED,
             OriginalChildOutcome.CONFLICT,
@@ -1433,13 +1524,24 @@ class ProductionActiveSessionCoordinator:
                 )
                 if decision is ChildExecutionDecision.ALREADY_SUCCEEDED:
                     continue
+                if decision is ChildExecutionDecision.RESTORE_SUCCEEDED_RECEIPT:
+                    await self._record_child_receipt(
+                        handle, child_id, child_command, state="succeeded", repair=True
+                    )
+                    state = await self._read_child_receipt(handle, child_id)
+                    if state != CommandReceiptState.SUCCEEDED:
+                        raise ActiveSessionRecoveryRequiredError(
+                            f"{action} child {child_id!r} has no durable "
+                            "terminal-success receipt"
+                        )
+                    continue
                 if decision is ChildExecutionDecision.TERMINAL_REJECTED:
-                    raise ActiveSessionCoordinationError(
+                    raise ActiveSessionRecoveryRequiredError(
                         f"{action} child {child_id!r} is terminal-rejected; "
                         "never replayed (recovery required)"
                     )
                 if decision is ChildExecutionDecision.RECOVERY_REQUIRED:
-                    raise ActiveSessionCoordinationError(
+                    raise ActiveSessionRecoveryRequiredError(
                         f"{action} child {child_id!r} has ambiguous durable "
                         "evidence; recovery required"
                     )
@@ -1455,7 +1557,7 @@ class ProductionActiveSessionCoordinator:
                         state=_rejection_receipt_state(exc),
                         error_code=str(exc.rejection.code),
                     )
-                    raise ActiveSessionCoordinationError(
+                    raise ActiveSessionRecoveryRequiredError(
                         f"{action} child {child_id!r} rejected: "
                         f"{exc.rejection.code}"
                     ) from exc
@@ -1468,7 +1570,7 @@ class ProductionActiveSessionCoordinator:
                     await self._record_child_receipt(
                         handle, child_id, child_command, state="unknown"
                     )
-                    raise ActiveSessionCoordinationError(
+                    raise ActiveSessionRecoveryRequiredError(
                         f"{action} child {child_id!r} failed: {type(exc).__name__}"
                     ) from exc
                 # Receipts are written strictly from the real UoW outcome;
@@ -1478,10 +1580,27 @@ class ProductionActiveSessionCoordinator:
                 )
                 state = await self._read_child_receipt(handle, child_id)
                 if state != CommandReceiptState.SUCCEEDED:
-                    raise ActiveSessionCoordinationError(
+                    raise ActiveSessionRecoveryRequiredError(
                         f"{action} child {child_id!r} receipt is not terminal-success: "
                         f"{state.value if state is not None else 'missing'}"
                     )
+
+        # Meta may advance only after an independent second read proves every
+        # named child has a durable terminal-success receipt.
+        for role in _CHILD_ORDER:
+            key = role.value
+            if key not in children:
+                continue
+            payload = child_payloads[role]
+            child_id = children[key]["operation_id"]
+            handle = await self._space_handle_provider(str(payload.get("space_id")))
+            async with handle.mutation_lease("active-session-receipt-proof", 5):
+                state = await self._read_child_receipt(handle, child_id)
+            if state != CommandReceiptState.SUCCEEDED:
+                raise ActiveSessionRecoveryRequiredError(
+                    f"{_CHILD_ACTION_BY_ROLE[role]} child {child_id!r} "
+                    "does not have an independently verified terminal-success receipt"
+                )
 
     def _conflict_child_payloads(
         self, command: ActiveSessionCommand, pair: Mapping[str, Mapping[str, str]]

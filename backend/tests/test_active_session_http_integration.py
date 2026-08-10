@@ -488,6 +488,7 @@ async def test_resolve_candidate_winner_returns_200(client) -> None:
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
+    assert data["kind"] == "authoritative"
     # response session is the candidate winner
     session = data["session"]["session"]
     assert session["id"] == "fs-2"
@@ -574,7 +575,7 @@ async def test_resolve_concurrent_single_winner(client) -> None:
     resp_a, resp_b = await asyncio.gather(_post("op-resolve-a"), _post("op-resolve-b"))
     statuses = sorted([resp_a.status_code, resp_b.status_code])
     assert statuses[0] == 200, (resp_a.text[:200], resp_b.text[:200])
-    assert statuses[1] in {409, 422, 500}, (resp_a.text[:200], resp_b.text[:200])
+    assert statuses[1] == 409, (resp_a.text[:200], resp_b.text[:200])
     # exactly one resolution operation reaches completed; no orphan rows
     import sqlite3
 
@@ -618,13 +619,13 @@ async def test_resolve_replay_same_and_different_hash(client) -> None:
     assert replay.status_code == 200, replay.text
     # different payload hash under the same command id -> stable conflict
     changed = _resolve_body(decision_at=utc_now_iso_ms())
-    changed["payloadHash"] = "0" * 64
     resp = await client.post(
         "/api/v1/active-session/resolve-activation-conflict",
         json=changed,
         headers=master_headers,
     )
-    assert resp.status_code in {409, 422, 500}, resp.text
+    assert resp.status_code == 409, resp.text
+    assert resp.headers["X-PomodoroXII-Error-Code"] == "idempotency_conflict"
     # child envelopes are never duplicated across the replay
     import sqlite3
 
@@ -662,7 +663,10 @@ async def test_resolve_loser_failure_never_returns_200(client) -> None:
         json=body,
         headers=master_headers,
     )
-    assert resp.status_code != 200, resp.text
+    assert resp.status_code == 503, resp.text
+    assert resp.headers["X-PomodoroXII-Error-Code"] == (
+        "active_session_recovery_required"
+    )
     assert _read_operation_phase("op-resolve") not in {"completed", "transferred"}
     authority = await _inspect_http_authority((space_a["id"], space_b["id"]))
     assert authority["classification"] == "recovery_required", authority
