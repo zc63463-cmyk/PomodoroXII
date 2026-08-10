@@ -260,6 +260,10 @@ class VerificationResult:
     failures: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.failures, tuple) or any(
+            not isinstance(failure, str) or not failure for failure in self.failures
+        ):
+            raise ValueError("verification failures must be a tuple of non-empty strings")
         if self.valid and (self.manifest is None or self.failures):
             raise ValueError("valid verification requires a manifest and zero failures")
         if not self.valid and not self.failures:
@@ -308,6 +312,12 @@ class StagedRestore:
             raise ValueError("staged restore requires a SnapshotManifest")
         if not isinstance(self.verification, VerificationResult):
             raise ValueError("staged restore requires a VerificationResult")
+        if (
+            self.verification.valid is not True
+            or self.verification.failures
+            or self.verification.manifest != self.manifest
+        ):
+            raise ValueError("staged restore requires a valid matching verification")
         if self.manifest_sha256 != self.verification.manifest_sha256:
             raise ValueError("staged restore manifest hash disagrees with verification")
         if (
