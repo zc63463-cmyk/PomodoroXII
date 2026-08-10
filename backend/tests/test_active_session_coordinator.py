@@ -393,8 +393,8 @@ async def _read_operation(engine: AsyncEngine, operation_id: str) -> dict[str, o
     async with engine.connect() as connection:
         row = await connection.execute(
             sa_text(
-                "SELECT intent_json, phase, kind FROM active_session_operations "
-                "WHERE operation_id=:oid"
+                "SELECT intent_json, phase, kind, result_descriptor_json "
+                "FROM active_session_operations WHERE operation_id=:oid"
             ),
             {"oid": operation_id},
         )
@@ -404,6 +404,7 @@ async def _read_operation(engine: AsyncEngine, operation_id: str) -> dict[str, o
         "intent_json": str(result[0]),
         "phase": str(result[1]),
         "kind": str(result[2]),
+        "result_descriptor_json": result[3],
     }
 
 
@@ -625,12 +626,36 @@ async def test_resolve_activation_conflict_freezes_winner_loser(env, tmp_path) -
     view = await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
     operation = await _read_operation(engine, op)
     assert operation["kind"] == "resolve_activation_conflict"
-    assert operation["phase"] == "transferred"
+    assert operation["phase"] == "completed"
     intent = json.loads(operation["intent_json"])
     winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
     loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
     assert intent["children"]["winner"]["operation_id"] == winner_id
     assert intent["children"]["loser"]["operation_id"] == loser_id
+    # locator finished active on the *winner* target (candidate side) at E+1
+    from sqlalchemy import text as sa_text
+
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(
+                sa_text(
+                    "SELECT state, operation_id, space_id, session_id, "
+                    "ownership_epoch FROM active_session_locator "
+                    "WHERE singleton_key='active'"
+                )
+            )
+        ).one()
+    assert row.state == "active"
+    assert row.operation_id == op
+    assert row.space_id == "space-b"
+    assert row.session_id == "fs-2"
+    assert row.ownership_epoch == 2
+    # old conflict operation completed and records resolved_by
+    from sqlalchemy import text as sa_text
+
+    conflict = await _read_operation(engine, "op-conflict")
+    assert conflict["phase"] == "completed"
+    assert json.loads(conflict["result_descriptor_json"])["resolved_by"] == op
     # winner (candidate side = space-b / fs-2): authoritative, non-ended
     async with handles["space-b"].session_factory() as session:
         receipt = await session.get(SessionCommandReceipt, winner_id)
@@ -651,7 +676,9 @@ async def test_resolve_activation_conflict_freezes_winner_loser(env, tmp_path) -
         assert loser.validity == "invalid"
         assert loser.validity_reason == "activation_conflict_loser"
         assert loser.ownership_state != "activation_conflict"
-    assert view.value["operation"]["phase"] == "transferred"
+    assert view.value["operation"]["phase"] == "completed"
+    assert view.value["locator"]["state"] == "active"
+    assert view.value["locator"]["operationId"] == op
     await _dispose_all(engine, handles)
 
 
@@ -735,7 +762,7 @@ async def test_resolve_active_winner_real_uow(env, tmp_path) -> None:
     )
     await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
     operation = await _read_operation(engine, op)
-    assert operation["phase"] == "transferred"
+    assert operation["phase"] == "completed"
     winner_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.WINNER)
     loser_id = derive_active_session_child_operation_id(op, ActiveSessionChildRole.LOSER)
     # winner = active side (space-a / fs-1): authoritative, non-ended
@@ -745,6 +772,24 @@ async def test_resolve_active_winner_real_uow(env, tmp_path) -> None:
         winner = await session.get(FocusSession, "fs-1")
         assert winner.ownership_state == "authoritative"
         assert winner.ended_at is None
+    # locator finished active on the winner (active side) at E+1
+    from sqlalchemy import text as sa_text
+
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(
+                sa_text(
+                    "SELECT state, operation_id, space_id, session_id, "
+                    "ownership_epoch FROM active_session_locator "
+                    "WHERE singleton_key='active'"
+                )
+            )
+        ).one()
+    assert row.state == "active"
+    assert row.operation_id == op
+    assert row.space_id == "space-a"
+    assert row.session_id == "fs-1"
+    assert row.ownership_epoch == 2
     # loser = candidate side (space-b / fs-2): ended interrupted + invalid
     async with handles["space-b"].session_factory() as session:
         loser_receipt = await session.get(SessionCommandReceipt, loser_id)
@@ -887,7 +932,7 @@ async def test_resolve_restart_reuses_winner_loser_ids(env, tmp_path) -> None:
     )
     view = await coordinator2.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
     operation = await _read_operation(engine2, op)
-    assert operation["phase"] == "transferred"
+    assert operation["phase"] == "completed"
     intent = json.loads(operation["intent_json"])
     assert intent["children"]["winner"]["operation_id"] == winner_id
     assert intent["children"]["loser"]["operation_id"] == loser_id
@@ -914,7 +959,8 @@ async def test_resolve_restart_reuses_winner_loser_ids(env, tmp_path) -> None:
         assert len(loser_envelopes) == 1
         loser_receipt = await session.get(SessionCommandReceipt, loser_id)
         assert loser_receipt is not None and loser_receipt.state == "succeeded"
-    assert view.value["operation"]["phase"] == "transferred"
+    assert view.value["operation"]["phase"] == "completed"
+    assert view.value["locator"]["state"] == "active"
     await _dispose_all(engine2, handles2)
 
 
@@ -928,8 +974,8 @@ def _loser_proof(**overrides: object) -> dict[str, object]:
         "phase": "claimed",
         "locator_state": "claiming",
         "locator_operation_id": "op-resolve",
-        "locator_space_id": "space-a",
-        "locator_session_id": "fs-1",
+        "locator_space_id": "space-b",
+        "locator_session_id": "fs-2",
         "ownership_epoch": 2,
         "pair": {
             "active": {"space_id": "space-a", "session_id": "fs-1"},
@@ -1020,7 +1066,8 @@ async def test_resolution_child_identity_attacks(env, tmp_path) -> None:
         await connection.execute(
             sa_text(
                 "UPDATE active_session_locator SET operation_id=:op, "
-                "ownership_epoch=ownership_epoch+1 WHERE singleton_key='active'"
+                "ownership_epoch=ownership_epoch+1, "
+                "space_id='space-b', session_id='fs-2' WHERE singleton_key='active'"
             ),
             {"op": op},
         )
@@ -1102,15 +1149,16 @@ async def test_resolution_child_identity_attacks(env, tmp_path) -> None:
         loser_id,
     )
     assert code == "stale_session_owner"
-    # wrong pair (active side diverges from locator) -> stale_session_owner
+    # wrong pair: the winner side diverges from the locator target
+    # -> stale_session_owner (the locator anchors pair[winner_role])
     code = await _compile_rejected(
         uow, handle_a,
         await _loser_request(
             op_id=loser_id, session_id="fs-1",
             proof=_loser_proof(
                 pair={
-                    "active": {"space_id": "space-x", "session_id": "fs-x"},
-                    "candidate": {"space_id": "space-b", "session_id": "fs-2"},
+                    "active": {"space_id": "space-a", "session_id": "fs-1"},
+                    "candidate": {"space_id": "space-x", "session_id": "fs-x"},
                 }
             ),
         ),
@@ -1170,7 +1218,8 @@ async def test_resolution_state_attacks(env, tmp_path) -> None:
         await connection.execute(
             sa_text(
                 "UPDATE active_session_locator SET operation_id=:op, "
-                "ownership_epoch=ownership_epoch+1 WHERE singleton_key='active'"
+                "ownership_epoch=ownership_epoch+1, "
+                "space_id='space-b', session_id='fs-2' WHERE singleton_key='active'"
             ),
             {"op": op},
         )
@@ -1185,10 +1234,14 @@ async def test_resolution_state_attacks(env, tmp_path) -> None:
         await _loser_request(op_id=loser_id, session_id="fs-1"), loser_id,
     )
     assert code == "stale_session_owner"
-    # restore claiming, then end fs-1 manually -> terminal_session
+    # restore claiming (winner target), then end fs-1 manually -> terminal_session
     async with engine.begin() as connection:
         await connection.execute(
-            sa_text("UPDATE active_session_locator SET state='claiming' WHERE singleton_key='active'")
+            sa_text(
+                "UPDATE active_session_locator SET state='claiming', "
+                "operation_id='op-resolve', space_id='space-b', "
+                "session_id='fs-2' WHERE singleton_key='active'"
+            )
         )
     async with handles["space-a"].session_factory() as session:
         fs1 = await session.get(FocusSession, "fs-1")
@@ -1210,30 +1263,32 @@ async def test_resolution_state_attacks(env, tmp_path) -> None:
         await _loser_request(op_id=loser_id, session_id="fs-1"), loser_id,
     )
     assert code == "version_conflict"
-    # ordinary end on a conflict Session stays rejected (no widening)
-    async with handles["space-a"].session_factory() as session:
-        fs1 = await session.get(FocusSession, "fs-1")
-        fs1.ownership_state = "activation_conflict"
-        _fs1_version = fs1.version
+    # ordinary end on a conflict Session stays rejected (no widening): the
+    # locator now points at the winner target (space-b / fs-2), so the end
+    # must target that Session to pass the claim and hit the conflict guard.
+    async with handles["space-b"].session_factory() as session:
+        fs2 = await session.get(FocusSession, "fs-2")
+        _fs2_version = fs2.version
         await session.commit()
     from app.services.time import utc_now_iso_ms
 
+    handle_b = handles["space-b"]
     end_request = MutationRequest.from_payload(
         name="focus_session.end",
         entity_type="focus_session",
-        entity_id="fs-1",
+        entity_id="fs-2",
         payload={
-            "space_id": "space-a",
-            "session_id": "fs-1",
+            "space_id": "space-b",
+            "session_id": "fs-2",
             "occurred_at": utc_now_iso_ms(),
             "timer_completion": "interrupted",
             "validity": "invalid",
             "validity_reason": "activation_conflict_loser",
         },
-        expected_version=_fs1_version,
+        expected_version=_fs2_version,
     )
     code = await _compile_rejected(
-        uow, handle_a, end_request, op
+        uow, handle_b, end_request, op
     )
     assert code == "session_activation_conflict"
     await _dispose_all(engine, handles)
@@ -1329,9 +1384,9 @@ async def _inspect_decision(paths: dict[str, Path]):
 
 async def test_authority_parity_transferred_candidate_winner(env, tmp_path) -> None:
     """The recovery authority reads the real coordinator-written data after a
-    successful resolution: transferred candidate winner -> recoverable."""
+    successful resolution: completed candidate winner -> active_consistent."""
     from app.focus_session.recovery_authority import (
-        CLASSIFICATION_RECOVERABLE_CLAIMING,
+        CLASSIFICATION_ACTIVE_CONSISTENT,
         RESULT_CLEAN_OR_RECOVERABLE,
     )
 
@@ -1342,18 +1397,20 @@ async def test_authority_parity_transferred_candidate_winner(env, tmp_path) -> N
     await _dispose_all(engine, handles)
     decision = await _inspect_decision(paths)
     print("CAND_PARITY:", decision.classification, decision.failure_code)
-    assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
+    assert decision.classification == CLASSIFICATION_ACTIVE_CONSISTENT
     assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
     assert decision.failure_code is None
-    assert len(decision.child_outcomes) == 2
-    assert all(outcome.terminal_success for outcome in decision.child_outcomes)
-    assert len(decision.session_facts) == 2
+    # the active classification proves exactly the winner Session fact
+    assert len(decision.session_facts) == 1
+    assert decision.session_facts[0].session_id == "fs-2"
+    assert decision.session_facts[0].ended is False
+    assert decision.session_facts[0].ownership_state == "authoritative"
 
 
 async def test_authority_parity_transferred_active_winner(env, tmp_path) -> None:
-    """Transferred active winner -> recoverable (identity inversion)."""
+    """Completed active winner -> active_consistent (identity inversion)."""
     from app.focus_session.recovery_authority import (
-        CLASSIFICATION_RECOVERABLE_CLAIMING,
+        CLASSIFICATION_ACTIVE_CONSISTENT,
         RESULT_CLEAN_OR_RECOVERABLE,
     )
     from app.services.time import utc_now_iso_ms
@@ -1387,7 +1444,7 @@ async def test_authority_parity_transferred_active_winner(env, tmp_path) -> None
     await _dispose_all(engine, handles)
     decision = await _inspect_decision(paths)
     print("ACTIVE_PARITY:", decision.classification, decision.failure_code)
-    assert decision.classification == CLASSIFICATION_RECOVERABLE_CLAIMING
+    assert decision.classification == CLASSIFICATION_ACTIVE_CONSISTENT
     assert decision.result == RESULT_CLEAN_OR_RECOVERABLE
     assert decision.failure_code is None
 

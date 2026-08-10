@@ -398,10 +398,80 @@ async def _inspect_http_authority(space_ids: tuple[str, ...]) -> dict[str, Any]:
     return {"classification": decision.classification, "failure_code": decision.failure_code}
 
 
+async def test_resolve_restart_from_transferred_recovers_active(client) -> None:
+    """A crash after both children succeeded but before the completion
+    transaction leaves the transferred midpoint (locator claiming + resolution
+    transferred).  Replaying the identical resolve command on a fresh request
+    recovers to active: resolution completed, conflict resolved, locator
+    active on the winner target, no duplicate child envelopes, authority
+    active_consistent."""
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.services.time import utc_now_iso_ms
+
+    master_headers = {"Authorization": f"Bearer {await _master_token(client)}"}
+    space_a, space_b = await _setup_conflict(client, master_headers)
+    decision_at = utc_now_iso_ms()
+    body = _resolve_body(decision_at=decision_at)
+    first = await client.post(
+        "/api/v1/active-session/resolve-activation-conflict",
+        json=body,
+        headers=master_headers,
+    )
+    assert first.status_code == 200, first.text
+    # Simulate a crash at the transferred midpoint: roll the Meta rows back
+    # (locator claiming on the winner target, resolution transferred, conflict
+    # awaiting_resolution) while the two receipts stay durable.
+    import sqlite3
+
+    from app.settings import settings
+
+    with sqlite3.connect(str(settings.meta_db_path)) as conn:
+        conn.execute(
+            "UPDATE active_session_locator SET state='claiming' "
+            "WHERE singleton_key='active'"
+        )
+        conn.execute(
+            "UPDATE active_session_operations SET phase='transferred' "
+            "WHERE operation_id='op-resolve'"
+        )
+        conn.execute(
+            "UPDATE active_session_operations SET phase='awaiting_resolution' "
+            "WHERE operation_id='op-conflict'"
+        )
+        conn.commit()
+    replay = await client.post(
+        "/api/v1/active-session/resolve-activation-conflict",
+        json=body,
+        headers=master_headers,
+    )
+    assert replay.status_code == 200, replay.text
+    data = replay.json()
+    assert _read_operation_phase("op-resolve") == "completed"
+    assert _read_operation_phase("op-conflict") == "completed"
+    assert data["state"] == "active"
+    assert data["operationId"] == "op-resolve"
+    assert data["spaceId"] == space_b["id"]
+    assert data["sessionId"] == "fs-2"
+    assert data["ownershipEpoch"] == 2
+    # child envelopes are never duplicated by the recovery replay
+    winner_id = derive_active_session_child_operation_id("op-resolve", ActiveSessionChildRole.WINNER)
+    with sqlite3.connect(str(settings.space_db_path(space_b["id"]))) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM session_command_envelopes WHERE command_id=?",
+            (winner_id,),
+        ).fetchone()[0]
+    assert count == 1, count
+    authority = await _inspect_http_authority((space_a["id"], space_b["id"]))
+    assert authority["classification"] == "active_consistent", authority
+
+
 async def test_resolve_candidate_winner_returns_200(client) -> None:
     """Real HTTP resolution, candidate winner: exact 200, winner authoritative,
-    loser ended interrupted + invalid, Meta transferred, both receipts
-    succeeded, authority recoverable."""
+    loser ended interrupted + invalid, Meta completed, locator active on the
+    winner target at E+1, both receipts succeeded, authority active_consistent."""
     from app.focus_session.child_operations import (
         ActiveSessionChildRole,
         derive_active_session_child_operation_id,
@@ -423,8 +493,16 @@ async def test_resolve_candidate_winner_returns_200(client) -> None:
     assert session["id"] == "fs-2"
     assert session["ownershipState"] == "authoritative"
     assert session.get("endedAt") is None
-    # Meta phase transferred
-    assert _read_operation_phase("op-resolve") == "transferred"
+    # Meta phase completed; old conflict operation completed (resolved by)
+    assert _read_operation_phase("op-resolve") == "completed"
+    assert _read_operation_phase("op-conflict") == "completed"
+    # response locator (spread at the top level) is active on the winner
+    # target at E+1
+    assert data["state"] == "active"
+    assert data["operationId"] == "op-resolve"
+    assert data["spaceId"] == space_b["id"]
+    assert data["sessionId"] == "fs-2"
+    assert data["ownershipEpoch"] == 2
     # winner authoritative / non-ended, loser ended invalid in the real DBs
     winner = _read_session(space_b["id"], "fs-2")
     assert winner["ownership_state"] == "authoritative"
@@ -441,7 +519,7 @@ async def test_resolve_candidate_winner_returns_200(client) -> None:
     assert _read_receipt(space_a["id"], loser_id) == "succeeded"
     # authority reads the coordinator-written evidence as recoverable
     authority = await _inspect_http_authority((space_a["id"], space_b["id"]))
-    assert authority["classification"] == "recoverable_claiming", authority
+    assert authority["classification"] == "active_consistent", authority
 
 
 async def test_resolve_active_winner_returns_200(client) -> None:
@@ -461,7 +539,12 @@ async def test_resolve_active_winner_returns_200(client) -> None:
     session = data["session"]["session"]
     assert session["id"] == "fs-1"
     assert session["ownershipState"] == "authoritative"
-    assert _read_operation_phase("op-resolve") == "transferred"
+    assert _read_operation_phase("op-resolve") == "completed"
+    assert data["state"] == "active"
+    assert data["operationId"] == "op-resolve"
+    assert data["spaceId"] == space_a["id"]
+    assert data["sessionId"] == "fs-1"
+    assert data["ownershipEpoch"] == 2
     winner = _read_session(space_a["id"], "fs-1")
     assert winner["ownership_state"] == "authoritative"
     assert winner["ended_at"] is None
@@ -492,7 +575,7 @@ async def test_resolve_concurrent_single_winner(client) -> None:
     statuses = sorted([resp_a.status_code, resp_b.status_code])
     assert statuses[0] == 200, (resp_a.text[:200], resp_b.text[:200])
     assert statuses[1] in {409, 422, 500}, (resp_a.text[:200], resp_b.text[:200])
-    # exactly one resolution operation reaches transferred; no orphan rows
+    # exactly one resolution operation reaches completed; no orphan rows
     import sqlite3
 
     from app.settings import settings
@@ -502,8 +585,8 @@ async def test_resolve_concurrent_single_winner(client) -> None:
             "SELECT operation_id, phase FROM active_session_operations "
             "WHERE kind='resolve_activation_conflict'"
         ).fetchall()
-    transferred = [op for op, phase in phases if phase == "transferred"]
-    assert len(transferred) == 1, phases
+    completed = [op for op, phase in phases if phase == "completed"]
+    assert len(completed) == 1, phases
     assert len(phases) == 1, phases  # the loser command never persisted a row
 
 
@@ -580,7 +663,7 @@ async def test_resolve_loser_failure_never_returns_200(client) -> None:
         headers=master_headers,
     )
     assert resp.status_code != 200, resp.text
-    assert _read_operation_phase("op-resolve") != "transferred"
+    assert _read_operation_phase("op-resolve") not in {"completed", "transferred"}
     authority = await _inspect_http_authority((space_a["id"], space_b["id"]))
     assert authority["classification"] == "recovery_required", authority
 
