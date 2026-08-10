@@ -656,6 +656,13 @@ async def test_resolve_activation_conflict_freezes_winner_loser(env, tmp_path) -
     conflict = await _read_operation(engine, "op-conflict")
     assert conflict["phase"] == "completed"
     assert json.loads(conflict["result_descriptor_json"])["resolved_by"] == op
+    descriptor = json.loads(operation["result_descriptor_json"])
+    assert descriptor["kind"] == "authoritative"
+    assert descriptor["locator"]["state"] == "active"
+    assert descriptor["locator"]["operationId"] == op
+    assert descriptor["locator"]["spaceId"] == "space-b"
+    assert descriptor["locator"]["sessionId"] == "fs-2"
+    assert len(descriptor["responseHash"]) == 64
     # winner (candidate side = space-b / fs-2): authoritative, non-ended
     async with handles["space-b"].session_factory() as session:
         receipt = await session.get(SessionCommandReceipt, winner_id)
@@ -679,6 +686,7 @@ async def test_resolve_activation_conflict_freezes_winner_loser(env, tmp_path) -
     assert view.value["operation"]["phase"] == "completed"
     assert view.value["locator"]["state"] == "active"
     assert view.value["locator"]["operationId"] == op
+    assert view.value["kind"] == "authoritative"
     await _dispose_all(engine, handles)
 
 
@@ -717,6 +725,148 @@ async def _resolve_setup(env, tmp_path):
         session_id="fs-1", epoch=1, payload=payload,
     )
     return coordinator, engine, handles, paths, conflict_op, op, command
+
+
+async def test_resolution_completion_cas_failure_rolls_back_every_meta_row(
+    env, tmp_path
+) -> None:
+    """A failed conflict-operation CAS must roll back the locator and
+    resolution-operation updates from the same completion transaction."""
+    from sqlalchemy import text as sa_text
+
+    coordinator, engine, handles, _paths, conflict_op, op, command = (
+        await _resolve_setup(env, tmp_path)
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa_text(
+                "CREATE TRIGGER force_conflict_completion_cas_miss "
+                "AFTER UPDATE OF phase ON active_session_operations "
+                "WHEN NEW.operation_id='op-resolve' AND NEW.phase='transferred' "
+                "BEGIN UPDATE active_session_operations SET phase='claimed' "
+                "WHERE operation_id='op-conflict'; END"
+            )
+        )
+
+    with pytest.raises(
+        ActiveSessionCoordinationError, match="resolution completion CAS failed"
+    ):
+        await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+
+    async with engine.connect() as connection:
+        locator = (
+            await connection.execute(
+                sa_text(
+                    "SELECT state, operation_id FROM active_session_locator "
+                    "WHERE singleton_key='active'"
+                )
+            )
+        ).one()
+    resolution = await _read_operation(engine, op)
+    conflict = await _read_operation(engine, conflict_op)
+    assert locator.state == "claiming"
+    assert locator.operation_id == op
+    assert resolution["phase"] == "transferred"
+    assert resolution["result_descriptor_json"] is None
+    assert conflict["phase"] == "claimed"
+    assert conflict["result_descriptor_json"] is None
+    await _dispose_all(engine, handles)
+
+
+async def test_resolution_replay_restores_missing_succeeded_receipt(env, tmp_path) -> None:
+    """A finalized child journal repairs, but never replaces, a missing receipt."""
+    from sqlalchemy import text as sa_text
+
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.models.session_command import SessionCommandReceipt
+
+    coordinator, engine, handles, _paths, conflict_op, op, command = (
+        await _resolve_setup(env, tmp_path)
+    )
+    await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    loser_id = derive_active_session_child_operation_id(
+        op, ActiveSessionChildRole.LOSER
+    )
+    async with handles["space-a"].session_factory() as session:
+        receipt = await session.get(SessionCommandReceipt, loser_id)
+        assert receipt is not None
+        await session.delete(receipt)
+        await session.commit()
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa_text(
+                "UPDATE active_session_locator SET state='claiming' "
+                "WHERE singleton_key='active'"
+            )
+        )
+        await connection.execute(
+            sa_text(
+                "UPDATE active_session_operations SET phase='transferred', "
+                "result_descriptor_json=NULL WHERE operation_id=:op"
+            ),
+            {"op": op},
+        )
+        await connection.execute(
+            sa_text(
+                "UPDATE active_session_operations SET phase='awaiting_resolution', "
+                "result_descriptor_json=NULL WHERE operation_id=:conflict"
+            ),
+            {"conflict": conflict_op},
+        )
+
+    view = await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+
+    resolution = await _read_operation(engine, op)
+    assert resolution["phase"] == "completed"
+    assert view.value["locator"]["state"] == "active"
+    async with handles["space-a"].session_factory() as session:
+        repaired = await session.get(SessionCommandReceipt, loser_id)
+    assert repaired is not None
+    assert repaired.state == "succeeded"
+    await _dispose_all(engine, handles)
+
+
+async def test_child_journal_requires_applied_step_hashes(env, tmp_path) -> None:
+    """FINALIZED rows are not APPLIED proof when a step hash mismatches."""
+    from sqlalchemy import text as sa_text
+
+    from app.focus_session.child_operations import (
+        ActiveSessionChildRole,
+        derive_active_session_child_operation_id,
+    )
+    from app.focus_session.coordinator import OriginalChildOutcome
+
+    coordinator, engine, handles, _paths, _conflict_op, op, command = (
+        await _resolve_setup(env, tmp_path)
+    )
+    await coordinator.resolve_activation_conflict(None, command)  # type: ignore[arg-type]
+    winner_id = derive_active_session_child_operation_id(
+        op, ActiveSessionChildRole.WINNER
+    )
+    async with handles["space-b"].session_factory() as session:
+        await session.execute(
+            sa_text(
+                "INSERT INTO mutation_steps "
+                "(operation_id, ordinal, name, store, target, before_hash, "
+                "after_hash, applied_hash, state) "
+                "VALUES (:operation_id, 99, 'db', 'db', 'focus_sessions', "
+                "NULL, :after_hash, :applied_hash, 'APPLIED')"
+            ),
+            {
+                "operation_id": winner_id,
+                "after_hash": "e" * 64,
+                "applied_hash": "f" * 64,
+            },
+        )
+        await session.commit()
+    outcome = await coordinator._query_child_original(  # noqa: SLF001
+        handles["space-b"], winner_id
+    )
+    assert outcome is OriginalChildOutcome.INCONCLUSIVE
+    await _dispose_all(engine, handles)
 
 
 async def test_resolve_active_winner_real_uow(env, tmp_path) -> None:
