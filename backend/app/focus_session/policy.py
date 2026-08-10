@@ -1484,7 +1484,9 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 "version_conflict", {"reason": "invalid_winner_role"}
             )
         pair = proof.pair
-        if pair.active != FrozenSpaceSessionId(
+        # The locator CASes onto the *winner* target (plan L3420): for a
+        # candidate winner the locator really points at the candidate side.
+        if pair.side(proof.winner_role) != FrozenSpaceSessionId(
             proof.locator_space_id, proof.locator_session_id
         ):
             raise _MutationRuleViolation(
