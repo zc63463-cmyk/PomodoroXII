@@ -6,9 +6,58 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, Mapping
 
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_SNAPSHOT_KINDS = frozenset({"meta_db", "space_db", "index_db", "note", "index_asset"})
+_FORBIDDEN_IDENTIFIER_CHARS = frozenset("/\\:\x00")
 
-def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
-    return MappingProxyType(dict(sorted(value.items())))
+
+def _expected_kind_for_path(relative_path: str) -> str | None:
+    """Map a canonical manifest path to the only kind that may claim it.
+
+    ``None`` means the path is not owned by any registered location (it is
+    rejected by inventory reconstruction instead).
+    """
+    if relative_path == "meta/meta.db":
+        return "meta_db"
+    if re.fullmatch(r"spaces/[^/]+/space\.db", relative_path):
+        return "space_db"
+    if re.fullmatch(r"spaces/[^/]+/index\.db", relative_path):
+        return "index_db"
+    if re.fullmatch(r"spaces/[^/]+/notes/.+", relative_path):
+        return "note"
+    if re.fullmatch(r"spaces/[^/]+/index/.+", relative_path):
+        return "index_asset"
+    return None
+
+
+def _deep_freeze(value: object) -> object:
+    """Recursively freeze mappings and sequences.
+
+    ``MappingProxyType`` only guards the outermost mapping; nested dicts and
+    lists remain mutable unless every level is frozen.  This helper walks the
+    whole structure so no part of a published contract can be changed after
+    construction.  Mappings are sorted by stringified key so equal receipts
+    always compare equal regardless of insertion order.
+    """
+    if isinstance(value, Mapping):
+        frozen = {
+            str(key): _deep_freeze(item)
+            for key, item in sorted(value.items(), key=lambda entry: str(entry[0]))
+        }
+        return MappingProxyType(frozen)
+    if isinstance(value, (tuple, list)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_deep_freeze(item) for item in value)
+    return value
+
+
+def _validated_int(value: object, name: str, *, minimum: int = 0) -> int:
+    if type(value) is not int:  # ``bool`` is an ``int`` subclass and must be rejected.
+        raise ValueError(f"{name} must be an integer")
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,10 +67,13 @@ class MetaSnapshot:
     effort_projection: object
 
     def __post_init__(self) -> None:
+        if not isinstance(self.schema_head, str) or not self.schema_head:
+            raise ValueError("Meta schema head is invalid")
         for name in ("active_session_coordination", "effort_projection"):
             value = getattr(self, name)
-            if isinstance(value, Mapping):
-                object.__setattr__(self, name, _freeze_mapping(value))
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{name} must be a mapping")
+            object.__setattr__(self, name, _deep_freeze(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +84,15 @@ class SnapshotFile:
     kind: Literal["meta_db", "space_db", "index_db", "note", "index_asset"]
 
     def __post_init__(self) -> None:
-        if self.size < 0 or not re.fullmatch(r"[0-9a-f]{64}", self.sha256):
+        if (
+            not isinstance(self.relative_path, str)
+            or not self.relative_path
+            or type(self.size) is not int
+            or self.size < 0
+            or not isinstance(self.sha256, str)
+            or _SHA256_RE.fullmatch(self.sha256) is None
+            or self.kind not in _SNAPSHOT_KINDS
+        ):
             raise ValueError("snapshot file metadata is invalid")
 
 
@@ -46,8 +106,47 @@ class SpaceSnapshot:
     note_hashes: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "entity_counts", _freeze_mapping(self.entity_counts))
-        object.__setattr__(self, "note_hashes", _freeze_mapping(self.note_hashes))
+        if (
+            not isinstance(self.space_id, str)
+            or not self.space_id
+            or _FORBIDDEN_IDENTIFIER_CHARS.intersection(self.space_id)
+            or self.space_id in {".", ".."}
+        ):
+            raise ValueError("Space id is invalid")
+        if not isinstance(self.space_head, str) or not self.space_head:
+            raise ValueError("Space head is invalid")
+        object.__setattr__(
+            self, "index_schema_version", _validated_int(self.index_schema_version, "index schema version")
+        )
+        if not isinstance(self.sync_waterline, str):
+            raise ValueError("sync waterline must be a string")
+        object.__setattr__(
+            self,
+            "entity_counts",
+            _deep_freeze(_validated_count_mapping(self.entity_counts, int, "entity count")),
+        )
+        object.__setattr__(
+            self,
+            "note_hashes",
+            _deep_freeze(_validated_count_mapping(self.note_hashes, str, "note hash")),
+        )
+
+
+def _validated_count_mapping(
+    value: object, item_type: type, label: str
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Space snapshot requires a mapping")
+    result: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"{label} key must be a non-empty string")
+        if item_type is int:
+            _validated_int(item, f"{label} value")
+        elif not isinstance(item, str):
+            raise ValueError(f"{label} value must be a string")
+        result[key] = item
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +162,43 @@ class SnapshotManifest:
     files: tuple[SnapshotFile, ...]
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or self.catalog_entry_count != 31:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != 1
+            or type(self.catalog_entry_count) is not int
+            or self.catalog_entry_count != 31
+        ):
             raise ValueError("unsupported snapshot manifest")
-        if self.source_fence < 0 or not re.fullmatch(r"[0-9a-f]{64}", self.catalog_hash):
+        object.__setattr__(self, "source_fence", _validated_int(self.source_fence, "source fence"))
+        if (
+            not isinstance(self.created_at, str)
+            or not self.created_at
+            or not isinstance(self.catalog_hash, str)
+            or _SHA256_RE.fullmatch(self.catalog_hash) is None
+        ):
             raise ValueError("snapshot manifest metadata is invalid")
+        if not isinstance(self.catalog_entity_types, tuple) or any(
+            not isinstance(item, str) or not item for item in self.catalog_entity_types
+        ):
+            raise ValueError("catalog entity types are invalid")
+        if not isinstance(self.spaces, tuple) or any(
+            not isinstance(item, SpaceSnapshot) for item in self.spaces
+        ):
+            raise ValueError("spaces must be a tuple of Space snapshots")
+        if not isinstance(self.files, tuple) or any(
+            not isinstance(item, SnapshotFile) for item in self.files
+        ):
+            raise ValueError("files must be a tuple of file snapshots")
+        if len({item.space_id for item in self.spaces}) != len(self.spaces):
+            raise ValueError("duplicate Space ids")
+        if len({item.relative_path for item in self.files}) != len(self.files):
+            raise ValueError("duplicate file paths")
+        for item in self.files:
+            expected_kind = _expected_kind_for_path(item.relative_path)
+            if expected_kind is not None and item.kind != expected_kind:
+                raise ValueError(
+                    f"file kind does not match its path: {item.relative_path}"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +210,9 @@ class PublishedSnapshotReceipt:
     def __post_init__(self) -> None:
         if not self.root.is_absolute() or not self.root.is_dir():
             raise ValueError("published snapshot root must be an existing absolute directory")
-        if not re.fullmatch(r"[0-9a-f]{64}", self.manifest_sha256):
+        if not isinstance(self.manifest_sha256, str) or _SHA256_RE.fullmatch(
+            self.manifest_sha256
+        ) is None:
             raise ValueError("published manifest SHA-256 is invalid")
 
 
