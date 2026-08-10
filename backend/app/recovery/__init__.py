@@ -6,17 +6,24 @@ from .contracts import (
     SnapshotFile,
     SnapshotManifest,
     SpaceSnapshot,
+    StagedRestore,
     VerificationResult,
 )
-from .coordinator import ActiveSessionCoordinationInspector, RecoveryCoordinator
+from .coordinator import (
+    ActiveSessionCoordinationInspector,
+    DomainFailure,
+    RecoveryCoordinator,
+)
 
 __all__ = [
     "ActiveSessionCoordinationInspector",
+    "DomainFailure",
     "MetaSnapshot",
     "PublishedSnapshotReceipt",
     "RecoveryCoordinator",
     "SnapshotFile",
     "SnapshotManifest",
     "SpaceSnapshot",
+    "StagedRestore",
     "VerificationResult",
 ]

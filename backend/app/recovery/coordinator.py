@@ -1,5 +1,6 @@
 """Coordinate a complete snapshot under one global exclusive lease."""
 
+import hashlib
 import hmac
 import inspect
 import json
@@ -24,6 +25,7 @@ from .contracts import (
     SnapshotFile,
     SnapshotManifest,
     SpaceSnapshot,
+    StagedRestore,
     VerificationResult,
 )
 from .manifest import canonical_json, parse_manifest, validate_relative_path
@@ -34,6 +36,20 @@ class DomainFailure(RuntimeError):
     def __init__(self, code: str, message: str = "") -> None:
         self.record = type("FailureRecord", (), {"code": code})()
         super().__init__(message or code)
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    """Detect symlinks and Windows reparse points (including junctions).
+
+    ``Path.is_symlink()`` misses Windows directory junctions, so a resolved
+    path that differs from its absolute form is also treated as a link.
+    """
+    if path.is_symlink():
+        return True
+    try:
+        return path.resolve() != path.absolute()
+    except OSError:
+        return True
 
 
 _SINGLETON_KEY = "active"
@@ -818,7 +834,7 @@ class RecoveryCoordinator:
     def _reject_symlink_path(path: Path) -> None:
         candidate = Path(path).absolute()
         for item in (candidate, *candidate.parents):
-            if item.exists() and item.is_symlink():
+            if _is_link_or_reparse(item):
                 raise DomainFailure("snapshot_invalid", f"symlinked path is forbidden: {item}")
 
     def _asset_sources(self, spaces):
@@ -1270,7 +1286,19 @@ class RecoveryCoordinator:
             "inspect_read_only",
             space_views=space_views,
         )
-        receipt = self._normalize_receipt(coordination)
+        try:
+            receipt = self._normalize_receipt(coordination)
+        except DomainFailure as exc:
+            if exc.record.code == "snapshot_invalid":
+                # None or structurally invalid receipts mean the authority
+                # is not usable, not that the evidence is bad.
+                failures.append("recovery_inspector_unavailable:active_session_authority")
+            else:
+                failures.append(exc.record.code)
+            return
+        except Exception:
+            failures.append("recovery_inspector_unavailable:active_session_authority")
+            return
         if receipt.get("result") != "clean_or_recoverable":
             failures.append("active_session_recovery_required")
         if self._freeze_for_comparison(receipt) != manifest.meta.active_session_coordination:
@@ -1393,3 +1421,473 @@ class RecoveryCoordinator:
         if value is None or not isinstance(getattr(value, "clean", None), bool):
             raise DomainFailure("snapshot_invalid", "mutation recovery inspection is invalid")
         return value
+
+    # ------------------------------------------------------------------ #
+    # S5 Task 2 Step 1: restore a verified snapshot into a unique staging
+    # root, then re-run every read-only authority against the staged copy.
+    # ------------------------------------------------------------------ #
+
+    async def restore_to_staging(
+        self, snapshot: Path | PublishedSnapshotReceipt
+    ) -> StagedRestore:
+        """Restore a published, verified snapshot into a unique staging root.
+
+        The source snapshot is re-verified from disk (a caller-supplied
+        ``PublishedSnapshotReceipt`` is never trusted in memory).  Files are
+        copied only from the manifest inventory; SQLite databases use the
+        online backup API and ordinary assets are copied as regular files.
+        After the copy every read-only authority is re-run against the staged
+        tree, and the staged-tree digest must be identical before and after
+        verification (any write during verification is rejected).
+        """
+        if not isinstance(snapshot, PublishedSnapshotReceipt):
+            if not isinstance(snapshot, Path):
+                raise DomainFailure(
+                    "restore_invalid",
+                    "restore_to_staging requires a Path or PublishedSnapshotReceipt",
+                )
+        root = (
+            snapshot.root
+            if isinstance(snapshot, PublishedSnapshotReceipt)
+            else Path(snapshot).expanduser()
+        )
+        root = root.resolve()
+        if not root.is_dir():
+            raise DomainFailure("restore_source_invalid", f"snapshot does not exist: {root}")
+        self._reject_symlink_path(root)
+        if root == self.active_root or root in self.active_root.parents:
+            raise DomainFailure("restore_source_invalid", "snapshot is inside active root")
+
+        verified = await self.verify(snapshot)
+        manifest = verified.manifest
+        if (
+            verified.valid is not True
+            or manifest is None
+            or verified.failures
+            or verified.manifest_sha256 != getattr(snapshot, "manifest_sha256", verified.manifest_sha256)
+        ):
+            # A missing/None authority surfaces as a verification failure;
+            # keep its stable code instead of masking it as source-invalid.
+            for failure in verified.failures:
+                if failure.startswith("recovery_inspector_unavailable:"):
+                    normalized = failure.replace(
+                        "active_coordination_inspector", "active_session_authority"
+                    )
+                    raise DomainFailure(
+                        normalized, f"snapshot verification failed: {normalized}"
+                    )
+            reason = ", ".join(verified.failures) or "verified manifest is missing"
+            raise DomainFailure("restore_source_invalid", f"snapshot verification failed: {reason}")
+        if type(manifest.source_fence) is not int or manifest.source_fence < 1:
+            raise DomainFailure(
+                "restore_source_invalid",
+                "snapshot source fence is not a positive integer",
+            )
+        if manifest.catalog_hash != getattr(self.catalog, "hash", manifest.catalog_hash):
+            raise DomainFailure(
+                "restore_source_invalid",
+                "snapshot catalog hash does not match coordinator configuration",
+            )
+        self.failpoint("restore_input_checked")
+
+        staging = self._allocate_staging_root()
+        try:
+            self._copy_manifest_inventory(root, staging, manifest)
+            self.failpoint("staged_copy_done")
+            self._fsync_tree(staging)
+            before = self.hash_staged_tree(staging, manifest)
+            self.failpoint("staged_verify_start")
+            await self._inspect_staged_root_read_only(
+                staging,
+                manifest,
+                target_active_root=self.active_root,
+            )
+            self.failpoint("staged_verify_done")
+            try:
+                after = self.hash_staged_tree(staging, manifest)
+            except DomainFailure as exc:
+                raise DomainFailure(
+                    "restore_verification_failed",
+                    f"staged verification modified the staged tree: {exc}",
+                ) from exc
+            if before != after:
+                raise DomainFailure(
+                    "restore_verification_failed",
+                    "staged verification modified the staged tree",
+                )
+            self.failpoint("staged_hash")
+            return StagedRestore(
+                snapshot_root=root,
+                root=staging,
+                target_active_root=self.active_root,
+                manifest_sha256=verified.manifest_sha256,
+                staged_tree_sha256=after,
+                catalog_hash=manifest.catalog_hash,
+                source_fence=manifest.source_fence,
+                manifest=manifest,
+                verification=verified,
+            )
+        except Exception:
+            # Cleanup may itself fail (Windows file locks); the primary
+            # exception must never be masked by cleanup errors.
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+
+    def _allocate_staging_root(self) -> Path:
+        """Allocate a unique, previously non-existing staging directory.
+
+        The staging root lives in the same parent directory as the target
+        active root so a later cutover can atomically rename on one
+        filesystem.  The recommended shape is
+        ``.<active-name>.restore-<uuid>.staging``.
+        """
+        parent = self.active_root.parent
+        if _is_link_or_reparse(parent):
+            raise DomainFailure(
+                "restore_target_invalid",
+                "staging parent is a symlink or reparse point",
+            )
+        for _ in range(8):
+            name = f".{self.active_root.name}.restore-{uuid.uuid4().hex}.staging"
+            candidate = parent / name
+            for item in (candidate, *candidate.parents):
+                if _is_link_or_reparse(item):
+                    raise DomainFailure(
+                        "restore_target_invalid",
+                        f"symlinked or reparse staging path is forbidden: {item}",
+                    )
+            if candidate.exists():
+                continue
+            try:
+                candidate.mkdir(parents=False)
+            except FileExistsError as exc:
+                raise DomainFailure(
+                    "restore_target_invalid", f"staging name conflict: {candidate}"
+                ) from exc
+            self.failpoint("staging_allocated")
+            return candidate
+        raise DomainFailure(
+            "restore_target_invalid", "could not allocate a unique staging directory"
+        )
+
+    def _copy_manifest_inventory(
+        self, snapshot_root: Path, staging: Path, manifest: SnapshotManifest
+    ) -> None:
+        """Copy only manifest-declared files into the staging root.
+
+        The inventory comes exclusively from the manifest; directory
+        enumeration never adds undeclared files.  SQLite databases use the
+        online backup API, ordinary assets are copied only when they are
+        regular files, and every file is fsynced after writing.
+        """
+        seen: set[str] = set()
+        for item in manifest.files:
+            relative = validate_relative_path(item.relative_path)
+            if relative in seen:
+                raise DomainFailure("restore_inventory_mismatch", f"duplicate path: {relative}")
+            seen.add(relative)
+            source = snapshot_root / relative
+            if any(parent.is_symlink() for parent in source.parents if parent != snapshot_root):
+                raise DomainFailure(
+                    "restore_inventory_mismatch", f"symlinked ancestor: {relative}"
+                )
+            if source.is_symlink() or not source.is_file():
+                raise DomainFailure(
+                    "restore_inventory_mismatch", f"source is not a regular file: {relative}"
+                )
+            destination = staging / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if item.kind.endswith("db"):
+                backup_sqlite(source, destination)
+            else:
+                shutil.copyfile(source, destination)
+                fsync_file(destination)
+            self.failpoint(f"staged_copy:{relative}")
+
+    @staticmethod
+    def _fsync_tree(root: Path) -> None:
+        """fsync every regular file and every directory in the staged tree."""
+        directories: list[Path] = []
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink():
+                raise DomainFailure(
+                    "restore_invalid", f"staging contains a symlink: {path}"
+                )
+            if not path.is_file():
+                if path.is_dir():
+                    directories.append(path)
+                continue
+            relative = path.relative_to(root).as_posix()
+            # SQLite WAL sidecars mirror the database and need no fsync.
+            if relative.endswith(("-shm", "-wal", "-journal")):
+                continue
+            fsync_file(path)
+        for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+            fsync_directory(directory)
+        fsync_directory(root)
+
+    @classmethod
+    def hash_staged_tree(cls, root: Path, manifest: SnapshotManifest) -> str:
+        """Deterministic digest of the staged tree.
+
+        Covers every canonical relative path, kind, size, and SHA-256.  Paths
+        sort by UTF-8 bytes; the payload is canonical JSON bytes hashed with
+        SHA-256.  Absolute paths, timestamps, machine names, and the random
+        staging name never enter the digest, so identical content restores to
+        different staging paths produce the same digest, and any content or
+        path change changes the digest.
+        """
+        kinds = {item.relative_path: item.kind for item in manifest.files}
+        entries: list[dict[str, object]] = []
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.is_symlink():
+                raise DomainFailure(
+                    "restore_invalid", f"staging contains a symlink: {path}"
+                )
+            relative = path.relative_to(root).as_posix()
+            # SQLite WAL sidecar files (-shm/-wal/-journal) mirror the
+            # database bytes and may be (re)created by a read-only SQLite
+            # connection during verification; they are not manifest-declared
+            # content and never enter the deterministic digest.
+            if relative.endswith(("-shm", "-wal", "-journal")):
+                continue
+            kind = kinds.get(relative)
+            if kind is None:
+                raise DomainFailure(
+                    "restore_inventory_mismatch", f"staged file is not manifest-declared: {relative}"
+                )
+            entries.append(
+                {
+                    "path": relative,
+                    "kind": kind,
+                    "size": path.stat().st_size,
+                    "sha256": sha256_file(path),
+                }
+            )
+        entries.sort(key=lambda entry: entry["path"].encode("utf-8"))
+        payload = (
+            json.dumps(
+                {"files": entries},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    async def _inspect_staged_root_read_only(
+        self,
+        staging: Path,
+        manifest: SnapshotManifest,
+        *,
+        target_active_root: Path,
+    ) -> None:
+        """Re-run every read-only recovery authority against the staged copy.
+
+        Strictly read-only: no ``SpaceRuntime.open``, no migration upgrade,
+        no index rebuild, no journal repair, no active-session recovery, no
+        effort write-back, and no file creation.  Any missing authority,
+        ``None`` result, unexpected exception, or structural mismatch fails
+        closed.  The active-session authority must consume the copied Space
+        views (never the live ones).
+        """
+        missing = tuple(
+            name
+            for name, owner in (
+                ("active_coordination_inspector", self.active_coordination_inspector),
+                ("effort_projection_compiler", self.effort_projection_compiler),
+                ("migration_coordinator", self.migration_coordinator),
+                ("index_schema", self.index_schema),
+                ("knowledge_checker", self.knowledge_checker),
+                ("mutation_recovery_inspector", self.mutation_recovery_inspector),
+            )
+            if owner is None
+        )
+        if missing:
+            raise DomainFailure(
+                "recovery_inspector_unavailable:" + ",".join(missing),
+                "staged verification is missing authorities",
+            )
+        await self._verify_staged_migration(staging, manifest)
+        await self._verify_staged_index(staging, manifest)
+        await self._verify_staged_knowledge(staging, manifest)
+        await self._verify_staged_mutation(staging, manifest)
+        await self._verify_staged_active_session(staging, manifest)
+        await self._verify_staged_effort(staging, manifest)
+
+    async def _verify_staged_migration(
+        self, staging: Path, manifest: SnapshotManifest
+    ) -> None:
+        meta_status = await self.migration_coordinator.verify(
+            "meta", staging / "meta" / "meta.db"
+        )
+        if meta_status is None:
+            raise DomainFailure(
+                "recovery_inspector_unavailable:migration_coordinator",
+                "migration verification returned no result",
+            )
+        if not getattr(meta_status, "at_head", False) or not getattr(
+            meta_status, "integrity_ok", False
+        ):
+            raise DomainFailure("restore_verification_failed", "staged Meta migration drift")
+        if getattr(meta_status, "head", None) != manifest.meta.schema_head:
+            raise DomainFailure("restore_verification_failed", "staged Meta schema head drift")
+        for space in manifest.spaces:
+            status = await self.migration_coordinator.verify(
+                "space", staging / "spaces" / space.space_id / "space.db"
+            )
+            if status is None:
+                raise DomainFailure(
+                    "recovery_inspector_unavailable:migration_coordinator",
+                    "migration verification returned no result",
+                )
+            if not getattr(status, "at_head", False) or not getattr(
+                status, "integrity_ok", False
+            ):
+                raise DomainFailure(
+                    "restore_verification_failed",
+                    f"staged Space migration drift: {space.space_id}",
+                )
+            if getattr(status, "head", None) != space.space_head:
+                raise DomainFailure(
+                    "restore_verification_failed",
+                    f"staged Space schema head drift: {space.space_id}",
+                )
+
+    async def _verify_staged_index(
+        self, staging: Path, manifest: SnapshotManifest
+    ) -> None:
+        verify = getattr(self.index_schema, "verify", None)
+        if verify is None:
+            raise DomainFailure(
+                "recovery_inspector_unavailable:index_schema",
+                "index schema verifier interface is missing",
+            )
+        for space in manifest.spaces:
+            result = verify(staging / "spaces" / space.space_id / "index.db")
+            if inspect.isawaitable(result):
+                result = await result
+            if result is None:
+                raise DomainFailure(
+                    "recovery_inspector_unavailable:index_schema",
+                    "index schema verification returned no result",
+                )
+            if not getattr(result, "valid", False) or getattr(
+                result, "version", None
+            ) != space.index_schema_version:
+                raise DomainFailure(
+                    "restore_verification_failed",
+                    f"staged index schema drift: {space.space_id}",
+                )
+
+    async def _verify_staged_knowledge(
+        self, staging: Path, manifest: SnapshotManifest
+    ) -> None:
+        from app.knowledge.consistency import SpaceDataView
+
+        for space in manifest.spaces:
+            view = SpaceDataView(
+                space_id=space.space_id,
+                db_path=staging / "spaces" / space.space_id / "space.db",
+                notes_dir=staging / "spaces" / space.space_id,
+                index_db=staging / "spaces" / space.space_id / "index.db",
+                catalog_hash=manifest.catalog_hash,
+            )
+            report = await self.knowledge_checker.verify(view)
+            if report is None or not getattr(report, "valid", False):
+                raise DomainFailure(
+                    "restore_verification_failed",
+                    f"staged knowledge inconsistency: {space.space_id}",
+                )
+
+    async def _verify_staged_mutation(
+        self, staging: Path, manifest: SnapshotManifest
+    ) -> None:
+        for space in manifest.spaces:
+            view = self.recovery_view_factory(
+                "space", staging / "spaces" / space.space_id
+            )
+            inspection = await self._inspect_recovery(view)
+            if inspection is None or not getattr(inspection, "clean", False):
+                raise DomainFailure(
+                    "restore_verification_failed",
+                    f"staged mutation journal is not clean: {space.space_id}",
+                )
+
+    async def _verify_staged_active_session(
+        self, staging: Path, manifest: SnapshotManifest
+    ) -> None:
+        from app.knowledge.consistency import SpaceDataView
+
+        meta_view = self.recovery_view_factory("meta", staging / "meta" / "meta.db")
+        space_views = {
+            space.space_id: SpaceDataView(
+                space_id=space.space_id,
+                db_path=staging / "spaces" / space.space_id / "space.db",
+                notes_dir=staging / "spaces" / space.space_id,
+                index_db=staging / "spaces" / space.space_id / "index.db",
+                catalog_hash=manifest.catalog_hash,
+            )
+            for space in manifest.spaces
+        }
+        try:
+            coordination = await self._inspect_async(
+                self.active_coordination_inspector,
+                meta_view,
+                "inspect_read_only",
+                space_views=space_views,
+            )
+        except DomainFailure as exc:
+            if exc.record.code == "active_session_recovery_required":
+                raise
+            raise DomainFailure(
+                "active_session_recovery_required", str(exc)
+            ) from exc
+        except Exception as exc:
+            raise DomainFailure(
+                "recovery_inspector_unavailable:active_session_authority",
+                f"active session authority failed: {exc}",
+            ) from exc
+        if coordination is None:
+            raise DomainFailure(
+                "recovery_inspector_unavailable:active_session_authority",
+                "active session authority returned no decision",
+            )
+        try:
+            receipt = self._normalize_receipt(coordination)
+        except DomainFailure as exc:
+            raise DomainFailure(
+                "recovery_inspector_unavailable:active_session_authority",
+                f"active session authority receipt is invalid: {exc}",
+            ) from exc
+        if receipt.get("result") != "clean_or_recoverable":
+            raise DomainFailure(
+                "active_session_recovery_required",
+                receipt.get("reason") or "staged active session requires recovery",
+            )
+
+    async def _verify_staged_effort(
+        self, staging: Path, manifest: SnapshotManifest
+    ) -> None:
+        mismatches: list[object] = []
+        for space in manifest.spaces:
+            view = self.recovery_view_factory("space", staging / "spaces" / space.space_id)
+            result = await self._inspect_async(
+                self.effort_projection_compiler,
+                view,
+                "verify_all",
+            )
+            if result is None:
+                raise DomainFailure(
+                    "recovery_inspector_unavailable:effort_projection_compiler",
+                    "effort projection verification returned no result",
+                )
+            mismatches.extend(result)
+        if mismatches:
+            raise DomainFailure(
+                "restore_verification_failed",
+                "staged effort projection drift",
+            )
