@@ -17,21 +17,21 @@ from types import SimpleNamespace
 import pytest
 
 from app.recovery.contracts import StagedRestore
+from app.recovery.manifest import canonical_json
+from app.recovery.sqlite_copy import sha256_file
 from tests.test_recovery import (
-    CONTENT_HASH,
     BODY,
+    CONTENT_HASH,
     NOTE_RELATIVE,
-    _Leases,
     _coordinator,
     _insert_locator,
     _insert_operation,
+    _Leases,
     _make_intent,
     _make_meta_db,
     _republish_manifest,
     _view_factory,
 )
-from app.recovery.manifest import canonical_json
-from app.recovery.sqlite_copy import sha256_file
 
 _ENGINES: list[object] = []
 
@@ -289,7 +289,7 @@ async def test_restore_calls_all_six_read_only_authorities_on_staging(
     assert space_views["alpha"].db_path == (
         staged.root / "spaces" / "alpha" / "space.db"
     )
-    assert not (active_root / "spaces" / "alpha" / "space.db") in (
+    assert (active_root / "spaces" / "alpha" / "space.db") not in (
         space_views["alpha"].db_path,
     )
     assert len(recording_effort.calls) >= 1
