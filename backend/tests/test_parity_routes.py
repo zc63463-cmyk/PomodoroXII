@@ -16,6 +16,7 @@ from app.routes.v1 import build_v1_router
 # belong to this explicit non-entity set as well.
 EXPECTED_NON_ENTITY_PREFIXES = {
     "/auth",
+    "/active-session",
     "/meta",
     "/projects",
     "/trash",

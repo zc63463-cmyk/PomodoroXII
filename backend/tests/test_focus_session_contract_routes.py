@@ -130,7 +130,15 @@ def _locator_value(session_id: str) -> dict[str, Any]:
 
 
 def _active_value(session_id: str) -> dict[str, Any]:
-    return {**_locator_value(session_id), "session": _focus_value(session_id)}
+    return {
+        "locator": _locator_value(session_id),
+        "operation": {
+            "operationId": "operation-a",
+            "kind": "start",
+            "phase": "completed",
+        },
+        "session": _focus_value(session_id),
+    }
 
 
 class FakeFocusSessionModule:
@@ -224,9 +232,7 @@ class FakeActiveSessionCoordinator:
 
     async def end(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("end", principal, command))
-        return ActiveSessionView(
-            value={"session": _focus_value(command.session_id), "locator": None}
-        )
+        return ActiveSessionView(value=_active_value(command.session_id))
 
     async def update_note(self, principal: Any, command: ActiveSessionCommand) -> ActiveSessionView:
         self.calls.append(("update_note", principal, command))
@@ -321,6 +327,10 @@ _HEX64 = "a" * 64
 _PROVISIONAL_PAYLOAD: dict[str, Any] = {
     "cachedAt": "2026-07-15T08:05:00Z",
     "cachedOwnershipEpoch": None,
+    "pair": {
+        "active": {"spaceId": "space-a", "sessionId": "session-a"},
+        "candidate": {"spaceId": "space-b", "sessionId": "session-b"},
+    },
     "ownerDeviceId": "device-a",
     "ownerTabId": "tab-a",
     "snapshot": {
@@ -608,6 +618,8 @@ def test_active_session_mutations_delegate_one_generic_command(
         ownership_epoch=ownership_epoch,
     )
     resp = master_client.request(http_method, f"/api/v1/active-session/{path}", json=body)
+    if resp.status_code != status_code:
+        print("GENERIC_DBG:", path, resp.status_code, resp.text[:400])
     assert resp.status_code == status_code
     called_method, principal, command = fake_active_session_coordinator.calls[-1]
     assert called_method == coordinator_method
@@ -834,7 +846,10 @@ def test_active_locate_serializes_activation_conflict_union(
         return ActiveSessionView(
             value={
                 "kind": "activation_conflict",
-                "active": _active_value("active-session"),
+                "active": {
+                    **_locator_value("active-session"),
+                    "session": _focus_value("active-session"),
+                },
                 "candidate": {
                     "spaceId": "space-b",
                     "sessionId": "candidate-session",
@@ -901,12 +916,16 @@ def test_focus_session_provider_not_installed_raises() -> None:
         client.get("/api/v1/focus-sessions/session-a")
 
 
-def test_active_session_provider_not_installed_raises() -> None:
-    """Without provider override, the dependency must raise RuntimeError."""
+def test_active_session_requires_master_authentication() -> None:
+    """The active session router is master-scoped: an anonymous request is
+    rejected by authentication before any provider work happens.  The bare
+    router app has no error handler, so the AuthenticationError propagates."""
+    from app.errors import AuthenticationError
+
     app = FastAPI()
     app.include_router(active_session_router, prefix="/api/v1/active-session")
     client = TestClient(app, raise_server_exceptions=True)
-    with pytest.raises(RuntimeError, match="provider is not installed"):
+    with pytest.raises(AuthenticationError):
         client.get("/api/v1/active-session")
 
 
@@ -933,5 +952,7 @@ def test_focus_session_contract_routers_not_mounted_in_production_v1() -> None:
                 pass
     assert "/api/v1/focus-sessions" not in paths
     assert "/api/v1/focus-sessions/{session_id}" not in paths
-    assert "/api/v1/active-session" not in paths
-    assert "/api/v1/active-session/start" not in paths
+    # The production v1 router DOES mount the master-scoped ActiveSession
+    # controller (TS2 production contract).
+    assert "/api/v1/active-session" in paths
+    assert "/api/v1/active-session/start" in paths

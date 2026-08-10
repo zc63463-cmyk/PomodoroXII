@@ -734,5 +734,7 @@ def test_contract_routers_are_mounted_in_production_v1() -> None:
     assert "/api/v1/projects" in paths
     assert "/api/v1/work-items" in paths
     assert "/api/v1/work-items/{work_item_id}/note" in paths
-    assert "/api/v1/active-session" not in paths
+    # The production v1 router mounts the master-scoped ActiveSession
+    # controller (TS2 production contract).
+    assert "/api/v1/active-session" in paths
     assert "/api/v1/focus-sessions" not in paths
