@@ -311,22 +311,42 @@ async def _resolve_authorized_scope(session, space_id: str):
     )
 
 
+def _is_reparse_or_link(path: Path) -> bool:
+    """True when path is a symlink or a Windows reparse point (junction)."""
+    if path.is_symlink():
+        return True
+    try:
+        return os.path.realpath(os.fspath(path)) != os.path.abspath(os.fspath(path))
+    except OSError:
+        return True
+
+
 def _create_directory_link(link: Path, target: Path) -> None:
+    """Create a real directory link (symlink, or junction on Windows).
+
+    Raises OSError when the host silently degrades the link to a plain
+    directory, so callers never proceed on a fake link.
+    """
     try:
         os.symlink(target, link, target_is_directory=True)
-        return
     except OSError as symlink_error:
         if os.name != "nt":
             raise symlink_error
-    result = subprocess.run(
-        ["cmd", "/c", "mklink", "/J", os.fspath(link), os.fspath(target)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if result.returncode != 0:
-        raise OSError(result.stderr or result.stdout or "junction creation failed")
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", os.fspath(link), os.fspath(target)],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            raise OSError(stderr or "junction creation failed")
+    if not _is_reparse_or_link(link):
+        try:
+            os.rmdir(link) if link.is_dir() else link.unlink()
+        except OSError:
+            pass
+        raise OSError("link creation silently degraded to a plain directory")
 
 
 def _walk_private_values(value: object) -> tuple[object, ...]:
@@ -581,6 +601,12 @@ async def test_existing_link_component_is_rejected_without_following(
     linked = settings.spaces_data_dir / "spc_link"
     try:
         os.symlink(outside, linked, target_is_directory=True)
+        if not os.path.islink(linked):
+            os.rmdir(linked)
+            pytest.skip(
+                "host silently degraded the directory link to a plain directory "
+                "(symlink capability missing)"
+            )
     except OSError as exc:
         pytest.skip(f"host cannot create a directory link: {exc}")
 
