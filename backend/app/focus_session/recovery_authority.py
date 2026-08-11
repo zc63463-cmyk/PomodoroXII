@@ -951,18 +951,24 @@ async def _schema_problems(engine: AsyncEngine) -> str | None:
             for name in ("active_session_locator", "active_session_operations"):
                 if name not in table_names:
                     return f"{name} table is missing"
-                columns = {
-                    str(row[1])
-                    for row in await connection.execute(
-                        sa_text(f'PRAGMA table_info("{name}")')
-                    )
-                }
-                expected = (
-                    _LOCATOR_COLUMNS if name == "active_session_locator" else _OPERATION_COLUMNS
+            columns = {
+                str(row[1])
+                for row in await connection.execute(
+                    sa_text('PRAGMA table_info("active_session_locator")')
                 )
-                missing = expected - columns
-                if missing:
-                    return f"{name} is missing columns: {sorted(missing)}"
+            }
+            missing = _LOCATOR_COLUMNS - columns
+            if missing:
+                return f"active_session_locator is missing columns: {sorted(missing)}"
+            columns = {
+                str(row[1])
+                for row in await connection.execute(
+                    sa_text('PRAGMA table_info("active_session_operations")')
+                )
+            }
+            missing = _OPERATION_COLUMNS - columns
+            if missing:
+                return f"active_session_operations is missing columns: {sorted(missing)}"
             return None
     except Exception as exc:  # noqa: BLE001 - unreadable/absent Meta DB fails closed
         return f"meta database is unreadable: {type(exc).__name__}"
