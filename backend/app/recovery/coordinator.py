@@ -36,6 +36,16 @@ class DomainFailure(RuntimeError):
         super().__init__(message or code)
 
 
+# Old Task/Session catalog type names that S5 must keep rejecting.  They are
+# negative evidence only: snapshot/verify consume this closed set to prove the
+# catalog is not a legacy catalog.  The production-reference gate allows this
+# definition and rejections that reference it; any other use of these names
+# remains forbidden.
+FORBIDDEN_LEGACY_CATALOG_TYPES = frozenset(
+    {"task", "session", "taskQuickNote", "sessionQuickNote"}
+)
+
+
 def _is_link_or_reparse(path: Path) -> bool:
     """Detect symlinks and Windows reparse points (including junctions).
 
@@ -355,7 +365,7 @@ class RecoveryCoordinator:
                 )
             )
         )
-        if len(types) != 31 or {"task", "session", "taskQuickNote", "sessionQuickNote"} & set(
+        if len(types) != 31 or FORBIDDEN_LEGACY_CATALOG_TYPES & set(
             types
         ):
             raise DomainFailure("snapshot_invalid", "catalog is not the S5 catalog")
@@ -594,12 +604,9 @@ class RecoveryCoordinator:
             failures.append("manifest_inventory")
         if "meta/meta.db" not in {item.relative_path for item in manifest.files}:
             failures.append("meta_missing")
-        if manifest.catalog_entry_count != 31 or {
-            "task",
-            "session",
-            "taskQuickNote",
-            "sessionQuickNote",
-        } & set(manifest.catalog_entity_types):
+        if manifest.catalog_entry_count != 31 or FORBIDDEN_LEGACY_CATALOG_TYPES & set(
+            manifest.catalog_entity_types
+        ):
             failures.append("catalog_invalid")
         expected_inventory = self._expected_inventory(root, manifest)
         listed_paths = {item.relative_path for item in manifest.files}
