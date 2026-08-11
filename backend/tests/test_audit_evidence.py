@@ -296,6 +296,12 @@ def test_bundle_resolver_rejects_symlink_escape(tmp_path: Path) -> None:
     link = root / "linked.json"
     try:
         link.symlink_to(outside)
+        if not link.is_symlink():
+            link.unlink()
+            pytest.skip(
+                "host silently degraded the symlink to a regular file "
+                "(symlink capability missing)"
+            )
     except OSError:
         pytest.skip("host cannot create test symlinks")
     with pytest.raises(ValueError, match="symlink|escapes"):
