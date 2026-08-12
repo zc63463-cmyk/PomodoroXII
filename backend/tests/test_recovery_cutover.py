@@ -846,7 +846,7 @@ async def test_cutover_rejects_staging_equal_active(tmp_path: Path) -> None:
 async def test_cutover_rejects_missing_active_root(tmp_path: Path) -> None:
     coordinator, leases, active_root, _engines, _fps = _env(tmp_path)
     staged = await _staged(coordinator)
-    shutil.rmtree(active_root)
+    _hard_delete(active_root)
     with pytest.raises(DomainFailure) as raised:
         await coordinator.cutover(staged)
     assert raised.value.record.code == "cutover_invalid"
@@ -916,7 +916,7 @@ async def test_cutover_rejects_cross_volume(tmp_path: Path) -> None:
         assert raised.value.record.code == "cutover_cross_volume"
         assert not _rollback_globs(active_root)
     finally:
-        shutil.rmtree(cross_root, ignore_errors=True)
+        _hard_delete(cross_root)
 
 
 # --------------------------------------------------------------------------- #
