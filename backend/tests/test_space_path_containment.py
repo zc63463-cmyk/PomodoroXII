@@ -315,10 +315,17 @@ def _is_reparse_or_link(path: Path) -> bool:
     """True when path is a symlink or a Windows reparse point (junction)."""
     if path.is_symlink():
         return True
+    if os.name == "nt":
+        try:
+            attributes = path.lstat().st_file_attributes
+        except (AttributeError, OSError):
+            return False
+        return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
     try:
-        return os.path.realpath(os.fspath(path)) != os.path.abspath(os.fspath(path))
+        path.lstat()
     except OSError:
-        return True
+        return False
+    return False
 
 
 def _create_directory_link(link: Path, target: Path) -> None:
@@ -347,6 +354,22 @@ def _create_directory_link(link: Path, target: Path) -> None:
         except OSError:
             pass
         raise OSError("link creation silently degraded to a plain directory")
+
+
+def test_link_probe_does_not_treat_plain_leaf_under_linked_ancestor_as_link(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    linked_ancestor = tmp_path / "linked-ancestor"
+    try:
+        _create_directory_link(linked_ancestor, target)
+    except OSError as exc:
+        pytest.skip(f"host cannot create a directory link or junction: {exc}")
+    plain_leaf = linked_ancestor / "plain-leaf"
+    plain_leaf.mkdir()
+
+    assert _is_reparse_or_link(plain_leaf) is False
 
 
 def _walk_private_values(value: object) -> tuple[object, ...]:
