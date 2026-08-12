@@ -291,9 +291,10 @@ def test_task_space_fixture_uses_constructor_policy_injection(
 ) -> None:
     parameter = inspect.signature(mutation_fixture_factory).parameters["policies"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    tests_root = Path(__file__).resolve().parent
     fixture_sources = "\n".join(
-        Path(path).read_text(encoding="utf-8")
-        for path in ("tests/conftest.py", "tests/task_space_fixture.py")
+        (tests_root / path).read_text(encoding="utf-8")
+        for path in ("conftest.py", "task_space_fixture.py")
     )
     assert "mutation_fixture.clock" not in fixture_sources
     assert ".register_domain_policy(" not in fixture_sources
