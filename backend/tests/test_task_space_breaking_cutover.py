@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import importlib
 import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -189,8 +190,11 @@ def _scan_for_legacy_references(app_dir: Path) -> list[str]:
     violations: list[str] = []
     for py_file in app_dir.rglob("*.py"):
         try:
-            text = py_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            with tokenize.open(py_file) as source:
+                text = source.read()
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            rel = py_file.relative_to(app_dir.parent)
+            violations.append(f"{rel}: source is unreadable or undecodable")
             continue
         try:
             relative = py_file.relative_to(app_dir).as_posix()
@@ -420,6 +424,43 @@ def test_scan_rejects_forbidden_set_definition_outside_recovery_coordinator(
         },
     )
     assert violations
+
+
+def test_scan_reads_pep263_encoded_source_instead_of_skipping_it(
+    tmp_path: Path,
+) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    source = app_dir / "latin1.py"
+    source.write_bytes(
+        '# coding: latin-1\nROUTE = "/api/v1/tasks"  # caf\xe9\n'.encode("latin-1")
+    )
+
+    violations = _scan_for_legacy_references(app_dir)
+
+    assert any("latin1.py:2:" in item for item in violations)
+
+
+def test_scan_reports_unreadable_source_as_a_violation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    source = app_dir / "unreadable.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    original_open = tokenize.open
+
+    def fail_for_source(path):
+        if Path(path) == source:
+            raise OSError("denied")
+        return original_open(path)
+
+    monkeypatch.setattr(tokenize, "open", fail_for_source)
+
+    assert _scan_for_legacy_references(app_dir) == [
+        "app\\unreadable.py: source is unreadable or undecodable"
+    ]
 
 
 def test_legacy_models_not_importable():
