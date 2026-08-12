@@ -600,15 +600,9 @@ async def test_existing_link_component_is_rejected_without_following(
     outside.mkdir()
     linked = settings.spaces_data_dir / "spc_link"
     try:
-        os.symlink(outside, linked, target_is_directory=True)
-        if not os.path.islink(linked):
-            os.rmdir(linked)
-            pytest.skip(
-                "host silently degraded the directory link to a plain directory "
-                "(symlink capability missing)"
-            )
+        _create_directory_link(linked, outside)
     except OSError as exc:
-        pytest.skip(f"host cannot create a directory link: {exc}")
+        pytest.skip(f"host cannot create a directory link or junction: {exc}")
 
     async for session in get_meta_session():
         session.add(

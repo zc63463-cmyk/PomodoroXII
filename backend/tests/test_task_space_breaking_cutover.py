@@ -134,84 +134,55 @@ def test_legacy_registry_names_raise_keyerror():
 # The recovery coordinator keeps a closed, immutable set of the four old
 # catalog type names purely as negative rejection evidence.  The scanner must
 # distinguish "this is a rejection of a legacy catalog" from "production code
-# references the legacy name".  We therefore allow, via AST semantics only:
-#   - the definition of FORBIDDEN_LEGACY_CATALOG_TYPES itself;
-#   - expressions that reference it and are structurally rejection-shaped
-#     (set intersection, set difference, membership, subset/disjoint calls,
-#     or equality/ordering comparisons).
+# references the legacy name".  Only the four string nodes in the exact,
+# closed constant definition are exempt.  References to the constant do not
+# contain forbidden literals and need no broader expression-level exemption.
 # Any other occurrence of a legacy name anywhere under app/ is a violation.
-_NEGATIVE_NAMES = frozenset(
-    {
-        "FORBIDDEN_LEGACY_CATALOG_TYPES",
-    }
-)
-_NEGATIVE_CALL_NAMES = frozenset(
-    {
-        "issubset",
-        "isdisjoint",
-        "intersection",
-        "difference",
-        "symmetric_difference",
-    }
+_NEGATIVE_DEFINITION_PATH = Path("recovery/coordinator.py")
+_NEGATIVE_DEFINITION_NAME = "FORBIDDEN_LEGACY_CATALOG_TYPES"
+_NEGATIVE_DEFINITION_VALUES = frozenset(
+    {"task", "session", "taskQuickNote", "sessionQuickNote"}
 )
 
 
-def _is_negative_expression(node: ast.AST) -> bool:
-    """True when the node is a structural rejection of its subjects."""
-    if isinstance(node, ast.BinOp):
-        return isinstance(
-            node.op,
-            (
-                ast.BitAnd,
-                ast.BitOr,
-                ast.Sub,
-                ast.Lt,
-                ast.LtE,
-                ast.Gt,
-                ast.GtE,
-                ast.Eq,
-                ast.NotEq,
-            ),
-        )
-    if isinstance(node, ast.Compare):
-        return all(isinstance(op, (ast.In, ast.NotIn, ast.Eq, ast.NotEq)) for op in node.ops)
-    if isinstance(node, ast.Call):
-        func = node.func
-        name = func.id if isinstance(func, ast.Name) else (
-            func.attr if isinstance(func, ast.Attribute) else ""
-        )
-        return name in _NEGATIVE_CALL_NAMES
-    return False
-
-
-def _negative_rejection_lines(source: str) -> set[int]:
-    """Line numbers allowed as closed negative rejection evidence."""
+def _negative_definition_spans(source: str) -> set[tuple[int, int, int]]:
+    """Return exact source spans for the closed constant's string nodes."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return set()
-    allowed: set[int] = set()
-
-    def span(node: ast.AST) -> set[int]:
-        return set(range(node.lineno, (getattr(node, "end_lineno", None) or node.lineno) + 1))
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id in _NEGATIVE_NAMES
-            for target in node.targets
-        ):
-            allowed |= span(node)
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.BinOp, ast.Compare, ast.Call)):
-            continue
-        if not any(
-            isinstance(child, ast.Name) and child.id in _NEGATIVE_NAMES
-            for child in ast.walk(node)
-        ):
-            continue
-        if _is_negative_expression(node):
-            allowed |= span(node)
-    return allowed
+    definitions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == _NEGATIVE_DEFINITION_NAME
+    ]
+    if len(definitions) != 1:
+        return set()
+    value = definitions[0].value
+    if not (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "frozenset"
+        and len(value.args) == 1
+        and not value.keywords
+        and isinstance(value.args[0], ast.Set)
+    ):
+        return set()
+    elements = value.args[0].elts
+    if len(elements) != len(_NEGATIVE_DEFINITION_VALUES) or {
+        element.value
+        for element in elements
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    } != _NEGATIVE_DEFINITION_VALUES:
+        return set()
+    return {
+        (element.lineno, element.col_offset, element.end_col_offset)
+        for element in elements
+        if isinstance(element, ast.Constant) and element.end_col_offset is not None
+    }
 
 
 def _scan_for_legacy_references(app_dir: Path) -> list[str]:
@@ -221,7 +192,15 @@ def _scan_for_legacy_references(app_dir: Path) -> list[str]:
             text = py_file.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        allowed_lines = _negative_rejection_lines(text)
+        try:
+            relative = py_file.relative_to(app_dir).as_posix()
+        except ValueError:
+            relative = ""
+        allowed_spans = (
+            _negative_definition_spans(text)
+            if relative == _NEGATIVE_DEFINITION_PATH.as_posix()
+            else set()
+        )
         for line_no, line in enumerate(text.splitlines(), start=1):
             matches = [
                 match
@@ -230,7 +209,17 @@ def _scan_for_legacy_references(app_dir: Path) -> list[str]:
             ]
             if not matches:
                 continue
-            if line_no in allowed_lines:
+            matches = [
+                match
+                for match in matches
+                if not any(
+                    line_no == allowed_line
+                    and allowed_start <= match.start()
+                    and match.end() <= allowed_end
+                    for allowed_line, allowed_start, allowed_end in allowed_spans
+                )
+            ]
+            if not matches:
                 continue
             rel = py_file.relative_to(app_dir.parent)
             violations.append(f"{rel}:{line_no}: {line.strip()}")
@@ -248,8 +237,9 @@ def test_production_code_has_no_legacy_references():
       - taskQuickNote / sessionQuickNote wire keys
 
     The only exception is closed negative rejection evidence: the
-    ``FORBIDDEN_LEGACY_CATALOG_TYPES`` definition in the recovery coordinator
-    and expressions that use it to reject/intersect/invalidate a catalog.
+    four-value ``FORBIDDEN_LEGACY_CATALOG_TYPES`` definition in the recovery
+    coordinator.  Its consumers reference the constant without repeating the
+    forbidden literals.
     """
     app_dir = Path(__file__).resolve().parents[1] / "app"
     violations = _scan_for_legacy_references(app_dir)
@@ -371,6 +361,65 @@ def test_scan_rejects_fifth_unlisted_legacy_string(tmp_path: Path) -> None:
         },
     )
     assert any("coordinator.py:5:" in item for item in violations)
+
+
+@pytest.mark.parametrize(
+    "positive_use",
+    (
+        'EXPORTED = FORBIDDEN_LEGACY_CATALOG_TYPES | {"taskQuickNote"}\n',
+        'ENABLED = FORBIDDEN_LEGACY_CATALOG_TYPES == {"taskQuickNote"}\n',
+        'EXPORTED = FORBIDDEN_LEGACY_CATALOG_TYPES.intersection({"taskQuickNote"})\n',
+        'if FORBIDDEN_LEGACY_CATALOG_TYPES & {"taskQuickNote"}:\n'
+        '    publish()\n',
+    ),
+)
+def test_scan_rejects_positive_use_of_forbidden_catalog_set(
+    tmp_path: Path,
+    positive_use: str,
+) -> None:
+    violations = _scan_dir(
+        tmp_path,
+        {
+            "recovery/coordinator.py": (
+                'FORBIDDEN_LEGACY_CATALOG_TYPES = frozenset(\n'
+                '    {"task", "session", "taskQuickNote", "sessionQuickNote"}\n'
+                ')\n'
+                + positive_use
+            )
+        },
+    )
+    assert violations
+
+
+def test_scan_rejects_extra_literal_on_forbidden_set_definition_line(
+    tmp_path: Path,
+) -> None:
+    violations = _scan_dir(
+        tmp_path,
+        {
+            "recovery/coordinator.py": (
+                'FORBIDDEN_LEGACY_CATALOG_TYPES = frozenset({"task", "session", '
+                '"taskQuickNote", "sessionQuickNote"}); ROUTE = "/api/v1/tasks"\n'
+            )
+        },
+    )
+    assert any("coordinator.py:1:" in item for item in violations)
+
+
+def test_scan_rejects_forbidden_set_definition_outside_recovery_coordinator(
+    tmp_path: Path,
+) -> None:
+    violations = _scan_dir(
+        tmp_path,
+        {
+            "export.py": (
+                'FORBIDDEN_LEGACY_CATALOG_TYPES = frozenset(\n'
+                '    {"task", "session", "taskQuickNote", "sessionQuickNote"}\n'
+                ')\n'
+            )
+        },
+    )
+    assert violations
 
 
 def test_legacy_models_not_importable():
