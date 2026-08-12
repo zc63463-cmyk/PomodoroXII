@@ -1,6 +1,7 @@
 """Coordinated, verifiable full snapshots."""
 
 from .contracts import (
+    CutoverResult,
     MetaSnapshot,
     PublishedSnapshotReceipt,
     SnapshotFile,
@@ -17,6 +18,7 @@ from .coordinator import (
 
 __all__ = [
     "ActiveSessionCoordinationInspector",
+    "CutoverResult",
     "DomainFailure",
     "MetaSnapshot",
     "PublishedSnapshotReceipt",

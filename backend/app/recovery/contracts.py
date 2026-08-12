@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, Mapping
 
@@ -325,3 +326,99 @@ class StagedRestore:
             or self.source_fence != self.manifest.source_fence
         ):
             raise ValueError("staged restore catalog/fence disagree with the manifest")
+
+
+def _validated_utc_timestamp(value: object) -> str:
+    """Require the repository's canonical UTC timestamp form.
+
+    Snapshots and publications use ``datetime.now(timezone.utc).isoformat()``
+    with the UTC offset normalized to a trailing ``Z``.  Any other spelling
+    (local time, ``+08:00`` offset, missing ``Z``) is rejected so receipts are
+    comparable and never ambiguous.
+    """
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError("published_at must be a canonical UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ValueError("published_at is not a canonical UTC timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError("published_at must be UTC")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class CutoverResult:
+    """Immutable receipt of a successful fenced rollback-preserving cutover.
+
+    Constructed only from verified facts: the staged receipt re-verified under
+    both fences, the real rename results, and the read-only verification of the
+    published active root.  Every value is validated at construction so a
+    caller cannot fabricate a "success" that is unrelated to a real
+    publication.  ``success`` is kept for the plan-locked contract shape and is
+    always ``True`` on the success path (failures raise ``DomainFailure`` after
+    preserving or reversing state, so there is no partially populated
+    ``success=False`` receipt).
+    """
+
+    success: bool
+    active_root: Path
+    rollback_root: Path
+    source_manifest_sha256: str
+    staged_tree_sha256: str
+    catalog_hash: str
+    process_fence: int
+    global_fence: int
+    published_at: str
+    verification: VerificationResult
+    verified_spaces: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.success) is not bool:
+            raise ValueError("success must be a bool")
+        for name in ("active_root", "rollback_root"):
+            path = Path(getattr(self, name))
+            if not path.is_absolute():
+                raise ValueError(f"{name} must be an absolute path")
+            canonical = path.resolve()
+            if canonical != path:
+                raise ValueError(f"{name} must be a canonical path")
+            object.__setattr__(self, name, canonical)
+            if not canonical.is_dir():
+                raise ValueError(f"{name} must be an existing directory")
+        if self.active_root == self.rollback_root:
+            raise ValueError("active root and rollback root must differ")
+        if self.active_root.parent != self.rollback_root.parent:
+            raise ValueError("rollback root must share the active root parent")
+        for name in ("source_manifest_sha256", "staged_tree_sha256", "catalog_hash"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+                raise ValueError(f"{name} must be a 64-char lowercase hex digest")
+        object.__setattr__(
+            self,
+            "process_fence",
+            _validated_int(self.process_fence, "process fence", minimum=1),
+        )
+        object.__setattr__(
+            self,
+            "global_fence",
+            _validated_int(self.global_fence, "global fence", minimum=1),
+        )
+        object.__setattr__(self, "published_at", _validated_utc_timestamp(self.published_at))
+        if not isinstance(self.verification, VerificationResult):
+            raise ValueError("cutover requires a VerificationResult")
+        if self.verification.valid is not True or self.verification.failures:
+            raise ValueError("cutover requires a valid verification")
+        manifest = self.verification.manifest
+        if manifest is None:
+            raise ValueError("cutover verification requires a manifest")
+        if self.verification.manifest_sha256 != self.source_manifest_sha256:
+            raise ValueError("cutover source manifest hash disagrees with verification")
+        if self.catalog_hash != manifest.catalog_hash:
+            raise ValueError("cutover catalog hash disagrees with verification manifest")
+        if not isinstance(self.verified_spaces, tuple) or any(
+            not isinstance(item, str) or not item for item in self.verified_spaces
+        ):
+            raise ValueError("verified spaces must be a tuple of non-empty strings")
+        if tuple(item.space_id for item in manifest.spaces) != self.verified_spaces:
+            raise ValueError("verified spaces disagree with the verification manifest")
