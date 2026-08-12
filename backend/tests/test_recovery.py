@@ -40,11 +40,12 @@ async def _dispose_all_engines() -> None:
 
 
 class _Lease:
-    fence = 7
-
-    def __init__(self) -> None:
+    def __init__(self, fence: int = 7) -> None:
+        self.fence = fence
         self.owner_checks = 0
         self.fence_checks = 0
+        self.released = False
+        self.release_error: BaseException | None = None
 
     def assert_active_owner(self, **_kwargs) -> None:
         self.owner_checks += 1
@@ -53,16 +54,38 @@ class _Lease:
         self.fence_checks += 1
 
     async def release(self) -> None:
-        return None
+        if self.release_error is not None:
+            raise self.release_error
+        self.released = True
 
 
 class _Leases:
     def __init__(self) -> None:
         self.calls: list[tuple[object, str, float]] = []
-        self.lease = _Lease()
+        self.order: list[str] = []
+        self.owner = _Lease(fence=11)
+        self.lease = _Lease(fence=7)
+        self.owner_timeout = False
+        self.global_timeout = False
+
+    async def acquire_process_owner(self, purpose: str, timeout_seconds: float):
+        from app.runtime import LeaseTimeoutError
+
+        self.calls.append(("owner", purpose, timeout_seconds))
+        self.order.append("acquire_process_owner")
+        if self.owner_timeout:
+            raise LeaseTimeoutError(f"process owner busy: {purpose}")
+        self.owner.released = False
+        return self.owner
 
     async def acquire_global(self, mode, purpose: str, timeout_seconds: float):
+        from app.runtime import LeaseTimeoutError
+
         self.calls.append((mode, purpose, timeout_seconds))
+        self.order.append("acquire_global")
+        if self.global_timeout:
+            raise LeaseTimeoutError(f"global lease timeout: {purpose}")
+        self.lease.released = False
         return self.lease
 
 
