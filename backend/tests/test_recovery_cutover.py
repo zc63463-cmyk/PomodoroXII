@@ -1411,6 +1411,12 @@ async def test_preexisting_publication_lock_link_is_rejected(tmp_path: Path) -> 
         lock_path.symlink_to(target)
     except OSError:
         pytest.skip("host cannot create a file symlink")
+    if not lock_path.is_symlink():
+        # Windows hosts without SeCreateSymbolicLinkPrivilege silently create a
+        # regular file copy instead of a symlink.  The pre-existing symlink
+        # rejection contract is exercised on hosts that create real symlinks
+        # (Linux CI); a degraded regular file is not the contract under test.
+        pytest.skip("host silently degraded symlink creation to a regular file")
 
     with pytest.raises(DomainFailure) as raised:
         await coordinator.cutover(staged)
