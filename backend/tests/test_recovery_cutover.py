@@ -234,8 +234,15 @@ def _contract_result(tmp_path: Path, coordinator, *, manifest=None, **overrides)
     parent.mkdir(exist_ok=True)
     active = parent / "active"
     rollback = parent / "rollback"
+    rollback_snapshot = parent / "rollback-snapshot"
     active.mkdir(exist_ok=True)
     rollback.mkdir(exist_ok=True)
+    rollback_snapshot.mkdir(exist_ok=True)
+    (rollback_snapshot / "manifest.json").write_bytes(b"rollback-manifest\n")
+    rollback_digest = sha256_file(rollback_snapshot / "manifest.json")
+    (rollback_snapshot / "manifest.sha256").write_text(
+        rollback_digest + "\n", encoding="ascii"
+    )
     verification = overrides.pop("verification", None)
     if verification is None:
         verification = VerificationResult(
@@ -250,6 +257,8 @@ def _contract_result(tmp_path: Path, coordinator, *, manifest=None, **overrides)
         "success": True,
         "active_root": active,
         "rollback_root": rollback,
+        "rollback_snapshot_root": rollback_snapshot,
+        "rollback_manifest_sha256": rollback_digest,
         "source_manifest_sha256": "d" * 64,
         "staged_tree_sha256": "e" * 64,
         "catalog_hash": manifest.catalog_hash,
@@ -415,6 +424,23 @@ def test_cutover_result_rejects_success_missing_or_nonbool(tmp_path: Path) -> No
         _contract_result(tmp_path, coordinator, manifest=manifest, success=1)  # type: ignore[arg-type]
 
 
+def test_cutover_result_rejects_false_success(tmp_path: Path) -> None:
+    coordinator, _leases, _active_root, _engines, _fps = _env(tmp_path)
+    manifest = parse_manifest(canonical_json_from_raw(_manifest_payload(coordinator)))
+    with pytest.raises(ValueError, match="successful publication"):
+        _contract_result(tmp_path, coordinator, manifest=manifest, success=False)
+
+
+def test_cutover_result_rejects_tampered_rollback_snapshot(tmp_path: Path) -> None:
+    coordinator, _leases, _active_root, _engines, _fps = _env(tmp_path)
+    result = _contract_result(tmp_path, coordinator)
+    (result.rollback_snapshot_root / "manifest.json").write_text(
+        "tampered", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="rollback snapshot manifest"):
+        replace(result, published_at="2026-08-12T09:30:01.000Z")
+
+
 def test_cutover_result_verified_spaces_must_match_manifest(tmp_path: Path) -> None:
     coordinator, _leases, _active, _engines = _coordinator(tmp_path)
     manifest = _contract_manifest(coordinator)
@@ -510,6 +536,80 @@ async def test_fences_active_during_reverify(tmp_path: Path) -> None:
     assert int(checks["owner_checked"]) >= 1
     assert int(checks["global_checked"]) >= 1
     assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_cutover_creates_rollback_snapshot_under_existing_global_lease(
+    tmp_path: Path, monkeypatch
+) -> None:
+    coordinator, leases, _active_root, _engines, _fps = _env(tmp_path)
+    staged = await _staged(coordinator)
+    calls: list[object] = []
+    original = coordinator._snapshot_under_lease
+
+    async def _record(target: Path, lease):
+        calls.append(lease)
+        return await original(target, lease)
+
+    monkeypatch.setattr(coordinator, "_snapshot_under_lease", _record)
+    result = await coordinator.cutover(staged)
+
+    assert calls == [leases.lease]
+    assert result.rollback_snapshot_root.is_dir()
+    assert (result.rollback_snapshot_root / "manifest.json").is_file()
+    assert result.rollback_manifest_sha256 == sha256_file(
+        result.rollback_snapshot_root / "manifest.json"
+    )
+    rollback_verification = await coordinator.verify(result.rollback_snapshot_root)
+    assert rollback_verification.valid is True
+
+
+@pytest.mark.asyncio
+async def test_reversal_rejects_old_root_inventory_drift(tmp_path: Path) -> None:
+    coordinator, _leases, active_root, _engines, _fps = _env(tmp_path)
+    staged = await _staged(coordinator)
+
+    def _inject(name: str) -> None:
+        if name == "cutover_after_active_to_rollback":
+            rollback = _rollback_globs(active_root)[0]
+            (rollback / "rogue.txt").write_text("drift", encoding="utf-8")
+            raise RuntimeError("failpoint:rollback-drift")
+
+    coordinator.failpoint = _inject
+    with pytest.raises(RuntimeError, match="rollback-drift") as raised:
+        await coordinator.cutover(staged)
+
+    notes = "".join(getattr(raised.value, "__notes__", None) or ())
+    assert "reversal failed" in notes
+    assert "rollback proof" in notes
+
+
+@pytest.mark.asyncio
+async def test_reversal_verifies_old_root_with_rollback_snapshot_proof(
+    tmp_path: Path, monkeypatch
+) -> None:
+    coordinator, _leases, active_root, _engines, _fps = _env(tmp_path)
+    staged = await _staged(coordinator)
+    seen: list[object] = []
+    original = coordinator._verify_reversed_active
+
+    async def _record(root: Path, proof):
+        seen.append(proof)
+        return await original(root, proof)
+
+    monkeypatch.setattr(coordinator, "_verify_reversed_active", _record)
+    coordinator.failpoint = _raise_injector(
+        {"cutover_after_staging_to_active"}, RuntimeError("failpoint:after-publish")
+    )
+
+    with pytest.raises(RuntimeError, match="after-publish"):
+        await coordinator.cutover(staged)
+
+    assert len(seen) == 1
+    proof = seen[0]
+    assert proof.snapshot.manifest != staged.manifest
+    assert isinstance(proof.active_tree_sha256, str)
+    assert len(proof.active_tree_sha256) == 64
 
 
 @pytest.mark.asyncio
@@ -1301,6 +1401,52 @@ async def test_rename_no_overwrite_semantics(tmp_path: Path, monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_preexisting_publication_lock_link_is_rejected(tmp_path: Path) -> None:
+    coordinator, _leases, active_root, _engines, _fps = _env(tmp_path)
+    staged = await _staged(coordinator)
+    target = active_root.parent / "external-publication-lock"
+    target.write_text("external", encoding="utf-8")
+    lock_path = _publication_lock_path(active_root)
+    try:
+        lock_path.symlink_to(target)
+    except OSError:
+        pytest.skip("host cannot create a file symlink")
+
+    with pytest.raises(DomainFailure) as raised:
+        await coordinator.cutover(staged)
+    assert raised.value.record.code == "cutover_invalid"
+    assert target.read_text(encoding="utf-8") == "external"
+
+
+def test_delete_journal_check_uses_read_only_uri(tmp_path: Path, monkeypatch) -> None:
+    coordinator, _leases, _active_root, _engines, _fps = _env(tmp_path)
+    root = tmp_path / "staging"
+    root.mkdir()
+    (root / "meta.db").write_bytes(b"sqlite")
+    manifest = parse_manifest(canonical_json_from_raw(_manifest_payload(coordinator)))
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    class _Connection:
+        def execute(self, _statement: str):
+            return SimpleNamespace(fetchone=lambda: ("delete",))
+
+        def close(self) -> None:
+            pass
+
+    def _connect(database, **kwargs):
+        calls.append((database, kwargs))
+        return _Connection()
+
+    monkeypatch.setattr("app.recovery.coordinator.sqlite3.connect", _connect)
+    coordinator._assert_delete_journal(root, manifest)
+
+    assert calls
+    for database, kwargs in calls:
+        assert kwargs == {"uri": True}
+        assert str(database).endswith("?mode=ro")
+
+
+@pytest.mark.asyncio
 async def test_open_sqlite_handle_rename_failure_is_not_misreported(
     tmp_path: Path,
 ) -> None:
@@ -1342,8 +1488,12 @@ async def test_parent_fsync_failure_reverses(tmp_path: Path, monkeypatch) -> Non
     staged = await _staged(coordinator)
     old_active = _tree_sha256(active_root)
 
+    real_fsync_directory = recovery_coordinator.fsync_directory
+
     def _boom(path: Path) -> None:
-        raise OSError("injected fsync failure")
+        if path == active_root.parent:
+            raise OSError("injected fsync failure")
+        real_fsync_directory(path)
 
     monkeypatch.setattr(recovery_coordinator, "fsync_directory", _boom)
     with pytest.raises(DomainFailure) as raised:

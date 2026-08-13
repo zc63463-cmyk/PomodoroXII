@@ -1,25 +1,23 @@
 """Coordinate a complete snapshot under one global exclusive lease."""
 
+import ctypes
 import hashlib
 import inspect
 import json
 import os
 import shutil
 import sqlite3
+import sys
 import uuid
 from contextlib import closing
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
-from filelock import FileLock
-from filelock import Timeout as FileLockTimeout
-
 from app.focus_session.recovery_authority import (
     ActiveSessionCoordinationInspector as TS2ActiveSessionCoordinationInspector,
 )
-from app.runtime import run_joined_thread
 
 from .contracts import (
     CutoverResult,
@@ -33,6 +31,24 @@ from .contracts import (
 )
 from .manifest import canonical_json, parse_manifest, validate_relative_path
 from .sqlite_copy import backup_sqlite, fsync_directory, fsync_file, sha256_file
+
+
+@dataclass(frozen=True, slots=True)
+class _RollbackProof:
+    snapshot: PublishedSnapshotReceipt
+    active_tree_sha256: str
+
+
+@dataclass(slots=True)
+class _PublicationLock:
+    path: Path
+    released: bool = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        self.path.rmdir()
+        self.released = True
 
 
 class DomainFailure(RuntimeError):
@@ -1464,6 +1480,7 @@ class RecoveryCoordinator:
                 "staged effort projection drift",
             )
 
+
     # ------------------------------------------------------------------ #
     # S5 Task 2 Step 2: fenced rollback-preserving cutover.
     #
@@ -1496,17 +1513,8 @@ class RecoveryCoordinator:
         primary: BaseException | None = None
         try:
             owner = await self._acquire_cutover_owner()
-            try:
-                global_lease = await self._acquire_cutover_global()
-            except BaseException:
-                await owner.release()
-                raise
-            try:
-                publication_lock = await self._acquire_publication_lock()
-            except BaseException:
-                await global_lease.release()
-                await owner.release()
-                raise
+            global_lease = await self._acquire_cutover_global()
+            publication_lock = await self._acquire_publication_lock()
             return await self._cutover_under_fences(
                 staged_restore, owner, global_lease, publication_lock
             )
@@ -1635,36 +1643,68 @@ class RecoveryCoordinator:
             raise DomainFailure(
                 "cutover_invalid", "active parent is a symlink or reparse point"
             )
-        lock = FileLock(
-            str(parent / f".{self.active_root.name}.publication.lock"),
-            thread_local=False,
-        )
+        lock_path = parent / f".{self.active_root.name}.publication.lock"
+        if _is_link_or_reparse(lock_path):
+            raise DomainFailure(
+                "cutover_invalid", "publication lock is a symlink or reparse point"
+            )
         try:
-            await run_joined_thread(lambda: lock.acquire(timeout=60.0))
-        except FileLockTimeout as exc:
+            lock_path.mkdir()
+        except FileExistsError as exc:
             raise DomainFailure(
                 "lease_timeout", "parent publication lock is busy"
             ) from exc
-        return lock
+        return _PublicationLock(lock_path)
 
     @staticmethod
     def _rename_no_overwrite(source: Path, destination: Path) -> None:
         """Rename without overwrite; I/O failures become a stable DomainFailure.
 
-        ``Path.rename`` maps to ``os.rename``: atomic on the same volume,
-        never overwriting on Windows, and POSIX-safe because the destination is
-        verified absent first.  Any filesystem failure (an open SQLite handle,
-        a locked directory, a cross-volume target) raises
+        Uses a platform atomic no-replace primitive: ``MoveFileExW`` without
+        ``MOVEFILE_REPLACE_EXISTING`` on Windows and
+        ``renameat2(RENAME_NOREPLACE)`` on Linux. Other platforms fail closed.
+        Any filesystem failure (an open SQLite handle, a locked directory, a
+        cross-volume target) raises
         ``cutover_publication_failed`` and flows through the same reversal path
         as any other publication failure.
         """
-        if destination.exists():
-            raise DomainFailure(
-                "cutover_invalid", f"rename target already exists: {destination}"
-            )
         try:
-            source.rename(destination)
+            if os.name == "nt":
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                move_file = kernel32.MoveFileExW
+                move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+                move_file.restype = ctypes.c_int
+                if not move_file(str(source), str(destination), 0):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            elif sys.platform.startswith("linux"):
+                libc = ctypes.CDLL(None, use_errno=True)
+                renameat2 = getattr(libc, "renameat2", None)
+                if renameat2 is None:
+                    raise OSError("renameat2 is unavailable")
+                renameat2.argtypes = [
+                    ctypes.c_int,
+                    ctypes.c_char_p,
+                    ctypes.c_int,
+                    ctypes.c_char_p,
+                    ctypes.c_uint,
+                ]
+                renameat2.restype = ctypes.c_int
+                if renameat2(
+                    -100,
+                    os.fsencode(source),
+                    -100,
+                    os.fsencode(destination),
+                    1,
+                ) != 0:
+                    error = ctypes.get_errno()
+                    raise OSError(error, os.strerror(error), str(destination))
+            else:
+                raise OSError("atomic no-replace rename is unsupported on this platform")
         except OSError as exc:
+            if destination.exists():
+                raise DomainFailure(
+                    "cutover_invalid", f"rename target already exists: {destination}"
+                ) from exc
             raise DomainFailure(
                 "cutover_publication_failed", f"filesystem rename failed: {exc}"
             ) from exc
@@ -1676,6 +1716,7 @@ class RecoveryCoordinator:
         self._assert_cutover_fences(owner, global_lease)
         rollback_root = self._allocate_rollback_root()
         await self._verify_staged_for_cutover(staged_restore)
+        rollback_proof = await self._create_rollback_proof(global_lease)
         self._assert_cutover_fences(owner, global_lease)
 
         state = "PREPARED"
@@ -1706,7 +1747,12 @@ class RecoveryCoordinator:
             state = "PUBLISHED_VERIFIED"
             self.failpoint("cutover_after_published_verify")
             return self._build_cutover_result(
-                staged_restore, rollback_root, owner, global_lease, verification
+                staged_restore,
+                rollback_root,
+                rollback_proof,
+                owner,
+                global_lease,
+                verification,
             )
         except BaseException as primary:
             if state == "PREPARED":
@@ -1719,7 +1765,7 @@ class RecoveryCoordinator:
                     self.active_root,
                     rollback_root,
                     staged_restore.root,
-                    manifest,
+                    rollback_proof,
                 )
                 if rejected_root is not None:
                     primary.add_note(
@@ -1728,6 +1774,52 @@ class RecoveryCoordinator:
             except BaseException as reversal_error:
                 primary.add_note(f"cutover reversal failed: {reversal_error}")
             raise
+
+    async def _create_rollback_proof(self, global_lease) -> _RollbackProof:
+        target_parent = (
+            self.active_root.parent / f".{self.active_root.name}.rollback-snapshots"
+        )
+        if _is_link_or_reparse(target_parent):
+            raise DomainFailure(
+                "cutover_invalid", "rollback snapshot target is a symlink or reparse point"
+            )
+        target_parent.mkdir(exist_ok=True)
+        target = target_parent / uuid.uuid4().hex
+        target.mkdir()
+        try:
+            snapshot = await self._snapshot_under_lease(target, global_lease)
+            verification = await self.verify(snapshot)
+            if verification.valid is not True or verification.manifest != snapshot.manifest:
+                raise DomainFailure(
+                    "cutover_verification_failed", "rollback snapshot verification failed"
+                )
+            active_tree_sha256 = self._hash_active_tree(self.active_root)
+        except BaseException as primary:
+            try:
+                shutil.rmtree(target)
+            except OSError as cleanup_error:
+                primary.add_note(
+                    f"cutover rollback snapshot cleanup failed: {cleanup_error}"
+                )
+            raise
+        return _RollbackProof(snapshot=snapshot, active_tree_sha256=active_tree_sha256)
+
+    @staticmethod
+    def _hash_active_tree(root: Path) -> str:
+        entries: list[str] = []
+        for path in sorted(root.rglob("*")):
+            if _is_link_or_reparse(path):
+                raise DomainFailure(
+                    "cutover_verification_failed",
+                    f"active rollback inventory contains a link: {path}",
+                )
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            entries.append(
+                f"{relative}:{path.stat().st_size}:{sha256_file(path)}"
+            )
+        return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
 
     def _assert_cutover_fences(self, owner, global_lease) -> None:
         from app.runtime import LeaseMode
@@ -1841,7 +1933,8 @@ class RecoveryCoordinator:
                 continue
             path = root / RecoveryCoordinator._staged_relative_path(item.relative_path)
             try:
-                with closing(sqlite3.connect(path)) as connection:
+                uri = f"{path.resolve().as_uri()}?mode=ro"
+                with closing(sqlite3.connect(uri, uri=True)) as connection:
                     mode = connection.execute("PRAGMA journal_mode").fetchone()
             except sqlite3.DatabaseError as exc:
                 raise DomainFailure(
@@ -1901,7 +1994,7 @@ class RecoveryCoordinator:
         active_root: Path,
         rollback_root: Path,
         staging: Path,
-        manifest: SnapshotManifest,
+        rollback_proof: _RollbackProof,
     ) -> Path | None:
         """Reverse a partially published cutover under the held fences.
 
@@ -1935,12 +2028,17 @@ class RecoveryCoordinator:
         fsync_directory(active_root.parent)
         self.failpoint("cutover_after_reverse_fsync")
         self.failpoint("cutover_before_rollback_verify")
-        await self._verify_reversed_active(active_root, manifest)
+        await self._verify_reversed_active(active_root, rollback_proof)
         return rejected_root
 
-    async def _verify_reversed_active(self, root: Path, manifest: SnapshotManifest) -> None:
+    async def _verify_reversed_active(self, root: Path, proof: _RollbackProof) -> None:
         """Read-only verification of the restored old active root."""
         try:
+            manifest = proof.snapshot.manifest
+            if self._hash_active_tree(root) != proof.active_tree_sha256:
+                raise DomainFailure(
+                    "cutover_rollback_failed", "restored active tree differs from rollback proof"
+                )
             await self._inspect_staged_root_read_only(
                 root, manifest, target_active_root=self.active_root
             )
@@ -1959,6 +2057,7 @@ class RecoveryCoordinator:
         self,
         staged_restore: StagedRestore,
         rollback_root: Path,
+        rollback_proof: _RollbackProof,
         owner,
         global_lease,
         verification: VerificationResult,
@@ -1967,6 +2066,8 @@ class RecoveryCoordinator:
             success=True,
             active_root=self.active_root,
             rollback_root=rollback_root,
+            rollback_snapshot_root=rollback_proof.snapshot.root,
+            rollback_manifest_sha256=rollback_proof.snapshot.manifest_sha256,
             source_manifest_sha256=staged_restore.manifest_sha256,
             staged_tree_sha256=staged_restore.staged_tree_sha256,
             catalog_hash=staged_restore.catalog_hash,
