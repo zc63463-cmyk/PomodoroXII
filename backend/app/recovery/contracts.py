@@ -1,5 +1,6 @@
 """Immutable recovery snapshot contracts."""
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -364,6 +365,8 @@ class CutoverResult:
     success: bool
     active_root: Path
     rollback_root: Path
+    rollback_snapshot_root: Path
+    rollback_manifest_sha256: str
     source_manifest_sha256: str
     staged_tree_sha256: str
     catalog_hash: str
@@ -376,7 +379,9 @@ class CutoverResult:
     def __post_init__(self) -> None:
         if type(self.success) is not bool:
             raise ValueError("success must be a bool")
-        for name in ("active_root", "rollback_root"):
+        if self.success is not True:
+            raise ValueError("cutover result must represent a successful publication")
+        for name in ("active_root", "rollback_root", "rollback_snapshot_root"):
             path = Path(getattr(self, name))
             if not path.is_absolute():
                 raise ValueError(f"{name} must be an absolute path")
@@ -390,10 +395,36 @@ class CutoverResult:
             raise ValueError("active root and rollback root must differ")
         if self.active_root.parent != self.rollback_root.parent:
             raise ValueError("rollback root must share the active root parent")
-        for name in ("source_manifest_sha256", "staged_tree_sha256", "catalog_hash"):
+        if self.rollback_snapshot_root in (
+            self.active_root,
+            self.rollback_root,
+        ):
+            raise ValueError("rollback snapshot root must be distinct")
+        for name in (
+            "source_manifest_sha256",
+            "staged_tree_sha256",
+            "catalog_hash",
+            "rollback_manifest_sha256",
+        ):
             value = getattr(self, name)
             if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
                 raise ValueError(f"{name} must be a 64-char lowercase hex digest")
+        rollback_manifest = self.rollback_snapshot_root / "manifest.json"
+        rollback_digest_file = self.rollback_snapshot_root / "manifest.sha256"
+        try:
+            actual_rollback_digest = hashlib.sha256(
+                rollback_manifest.read_bytes()
+            ).hexdigest()
+            recorded_rollback_digest = rollback_digest_file.read_text(
+                encoding="ascii"
+            ).strip()
+        except OSError as exc:
+            raise ValueError("rollback snapshot manifest is unavailable") from exc
+        if (
+            actual_rollback_digest != self.rollback_manifest_sha256
+            or recorded_rollback_digest != self.rollback_manifest_sha256
+        ):
+            raise ValueError("rollback snapshot manifest digest is invalid")
         object.__setattr__(
             self,
             "process_fence",
