@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import hashlib
 import json
 import sqlite3
@@ -374,7 +375,17 @@ def _make_index_db(path: Path, *, with_note: bool = True) -> None:
     from app.file_system.schema import init_database
 
     init_database(path)
+    # ``init_database`` switches the index store to WAL and leaves its own
+    # connection open (``with sqlite3.connect(...)`` commits but never closes).
+    # On Windows a WAL shared-memory handle keeps ``index.db`` locked until
+    # garbage collection - there is no explicit API to release it - which
+    # blocks every later read-only authority open and cutover renames
+    # (WinError 5).  Releasing it is only possible via GC; the fixture then
+    # normalizes to DELETE journal mode (the same boundary restore applies to
+    # staged databases) so no WAL handle can outlive the test.
+    gc.collect()
     with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA journal_mode=DELETE")
         with connection:
             connection.execute(
                 "UPDATE schema_meta SET value=? WHERE key='version'",
@@ -491,6 +502,29 @@ def _coordinator(tmp_path: Path, *, real_authorities: bool = True):
 async def _dispose(engines: list[object]) -> None:
     for engine in engines:
         await engine.dispose()
+
+
+def test_index_fixture_releases_handle_without_gc_wait() -> None:
+    """The index fixture must not leave a WAL handle that blocks renames.
+
+    Regression: ``init_database`` leaves its own sqlite3 connection open and
+    the index store in WAL mode.  On Windows a WAL shared-memory handle keeps
+    ``index.db`` locked until garbage collection, so renaming the database
+    right after fixture creation failed with WinError 5 - the same handle leak
+    that intermittently broke cutover renames (the failure node drifted with
+    GC timing).  The fixture now normalizes to DELETE journal mode and the
+    database must be immediately movable.
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    root = Path(_tempfile.mkdtemp(prefix="pxii-index-reg-", dir="E:/DevTemp"))
+    try:
+        index = root / "index.db"
+        _make_index_db(index)
+        index.rename(root / "index-moved.db")
+    finally:
+        _shutil.rmtree(root, ignore_errors=True)
 
 
 def test_verification_result_requires_manifest_when_valid() -> None:
