@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Callable
 
 from app.ops.signals import OperationalSignals
 
+from .coordinator import _is_link_or_reparse
+
 if TYPE_CHECKING:
     from .local_service import LocalRecoveryService
 
@@ -149,12 +151,14 @@ class RecoveryScheduler:
         """
         verified: list[_VerifiedSnapshot] = []
         invalid: list[Path] = []
+        if _is_link_or_reparse(self.target):
+            logger.warning("retention target is a link or reparse point: %s", self.target)
+            return []
         for path in sorted(self.target.iterdir()) if self.target.is_dir() else ():
-            if not path.is_dir():
-                continue
-            manifest = self._read_verified_manifest(path)
+            manifest = await self._verified_retention_candidate(path)
             if manifest is None:
-                invalid.append(path)
+                if path.is_dir() or _is_link_or_reparse(path):
+                    invalid.append(path)
                 continue
             verified.append(manifest)
         if invalid:
@@ -174,6 +178,33 @@ class RecoveryScheduler:
                 continue
             removed.append(item.path)
         return removed
+
+    async def _verified_retention_candidate(self, path: Path) -> _VerifiedSnapshot | None:
+        """Return a candidate only after containment and full authority proof."""
+        if _is_link_or_reparse(path) or not path.is_dir():
+            return None
+        try:
+            path.resolve().relative_to(self.target.resolve())
+        except ValueError:
+            return None
+        local = self._read_verified_manifest(path)
+        if local is None:
+            return None
+        try:
+            verification = await self.service.coordinator.verify(path)
+        except BaseException as exc:  # noqa: BLE001 - preserve for manual review
+            logger.warning("retention could not verify %s: %s", path, exc)
+            return None
+        manifest = getattr(verification, "manifest", None)
+        if (
+            getattr(verification, "valid", None) is not True
+            or getattr(verification, "failures", None)
+            or manifest is None
+            or getattr(verification, "manifest_sha256", None) != local.manifest_sha256
+            or getattr(manifest, "created_at", None) != local.created_at
+        ):
+            return None
+        return local
 
     def _read_verified_manifest(self, path: Path) -> _VerifiedSnapshot | None:
         """Read one snapshot manifest defensively; ``None`` means unverifiable.
@@ -201,8 +232,13 @@ class RecoveryScheduler:
             return None
         return _VerifiedSnapshot(path, created_at, recorded)
 
-    @staticmethod
-    def _remove_snapshot_dir(path: Path) -> None:
+    def _remove_snapshot_dir(self, path: Path) -> None:
         import shutil
 
+        if _is_link_or_reparse(path):
+            raise OSError("refusing to delete a link or reparse point")
+        try:
+            path.resolve().relative_to(self.target.resolve())
+        except ValueError as exc:
+            raise OSError("refusing to delete outside the retention target") from exc
         shutil.rmtree(path)

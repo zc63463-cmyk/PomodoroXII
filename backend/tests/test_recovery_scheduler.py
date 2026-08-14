@@ -306,6 +306,18 @@ def _scheduler_for_retention(
     from app.recovery.scheduler import RecoveryScheduler
 
     coordinator, _leases, active_root, engines = _coordinator(tmp_path)
+
+    async def verify(path: Path):
+        payload = (Path(path) / "manifest.json").read_bytes()
+        manifest = json.loads(payload)
+        return SimpleNamespace(
+            valid=True,
+            failures=(),
+            manifest=SimpleNamespace(created_at=manifest["created_at"]),
+            manifest_sha256=hashlib.sha256(payload).hexdigest(),
+        )
+
+    coordinator.verify = verify  # type: ignore[method-assign]
     service = SimpleNamespace(coordinator=coordinator)
     signals = OperationalSignals()
     scheduler = RecoveryScheduler(
@@ -383,3 +395,56 @@ async def test_retention_never_deletes_paths_outside_target(tmp_path: Path) -> N
 
     assert (outside / "snap-outside").is_dir()
     assert all("outside" not in str(path) for path in removed)
+
+
+@pytest.mark.asyncio
+async def test_retention_preserves_hash_consistent_snapshot_rejected_by_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler, coordinator = _scheduler_for_retention(tmp_path, retention_count=1)
+    target = tmp_path / "backup-target"
+    rejected = _publish_snapshot_dir(
+        target, "rejected", coordinator, created_at="2026-08-01T00:00:00.000Z"
+    )
+    _publish_snapshot_dir(
+        target, "accepted", coordinator, created_at="2026-08-02T00:00:00.000Z"
+    )
+
+    async def verify(path):
+        is_rejected = Path(path).name == "rejected"
+        payload = (Path(path) / "manifest.json").read_bytes()
+        manifest = json.loads(payload)
+        return SimpleNamespace(
+            valid=not is_rejected,
+            failures=("manifest_inventory",) if is_rejected else (),
+            manifest=SimpleNamespace(created_at=manifest["created_at"]),
+            manifest_sha256=hashlib.sha256(payload).hexdigest(),
+        )
+
+    monkeypatch.setattr(coordinator, "verify", verify)
+    await scheduler._retain()
+
+    assert rejected.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_retention_never_considers_symlinked_snapshot_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler, coordinator = _scheduler_for_retention(tmp_path, retention_count=0)
+    target = tmp_path / "backup-target"
+    outside = _publish_snapshot_dir(
+        tmp_path / "outside", "snapshot", coordinator, created_at="2026-08-01T00:00:00.000Z"
+    )
+    target.mkdir()
+    link = target / "linked-snapshot"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink capability unavailable: {exc}")
+
+    removed: list[Path] = []
+    monkeypatch.setattr(scheduler, "_remove_snapshot_dir", removed.append)
+    await scheduler._retain()
+
+    assert removed == []
