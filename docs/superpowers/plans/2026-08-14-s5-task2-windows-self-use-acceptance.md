@@ -53,6 +53,36 @@ development gate plus:
 No agent may run this rehearsal against a user data root without an explicitly
 named target and confirmation from the user.
 
+## Local Operator Entry Point
+
+The offline operator is `backend/scripts/rehearse_recovery.py`. It does not
+mount an HTTP route or boot the application runtime. Run it with the target
+worktree's Python environment.
+
+Verify an existing snapshot without writing to the active data root:
+
+```powershell
+python backend/scripts/rehearse_recovery.py verify-snapshot `
+  --data-root E:\path\to\disposable-copy `
+  --snapshot E:\path\to\published-snapshot
+```
+
+Run a rehearsal only against a disposable copy. The confirmation value must
+exactly repeat `--data-root`, and `--confirm-cutover` is a separate opt-in for
+the publication step:
+
+```powershell
+python backend/scripts/rehearse_recovery.py rehearse `
+  --data-root E:\path\to\disposable-copy `
+  --snapshot-dir E:\path\to\rehearsal-snapshots `
+  --confirm-disposable-root E:\path\to\disposable-copy `
+  --confirm-cutover
+```
+
+The command emits one canonical JSON receipt. Record its `snapshot_root`,
+`active_root`, `rollback_root`, and `rollback_snapshot_root`. It must never be
+pointed at the user's normal active root; make a filesystem copy first.
+
 ## Deferred Release Work
 
 The following are valuable but do not block Windows self-use enablement:
