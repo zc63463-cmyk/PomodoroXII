@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 import textwrap
@@ -138,15 +139,45 @@ PERSISTENT_CLEANUP_HELPER = textwrap.dedent(
 )
 
 
+def _runtime_child_environment() -> dict[str, str]:
+    """Run cross-process assertions against this worktree's runtime code.
+
+    The shared Windows virtualenv has an editable-import hook that can point
+    ``app`` at a sibling worktree.  ``-S`` avoids that hook, while this explicit
+    path set preserves the third-party packages needed by the child process.
+    """
+    backend_root = Path(__file__).resolve().parents[1]
+    paths = [str(backend_root)]
+    for entry in sys.path:
+        if not entry:
+            continue
+        candidate = Path(entry)
+        if candidate.name != "site-packages":
+            continue
+        paths.append(str(candidate))
+        for child in ("win32", "win32/lib", "pythonwin", "pywin32_system32"):
+            nested = candidate / child
+            if nested.is_dir():
+                paths.append(str(nested))
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(paths))
+    return environment
+
+
+def _runtime_child_command(script: str, *arguments: object) -> list[str]:
+    return [sys.executable, "-S", "-c", script, *(str(value) for value in arguments)]
+
+
 def start_lock_holder(
     root: Path, kind: str, mode: str = "exclusive", space_id: str = "unused"
 ) -> subprocess.Popen[str]:
     process = subprocess.Popen(
-        [sys.executable, "-c", LOCK_HELPER, str(root), kind, mode, space_id],
+        _runtime_child_command(LOCK_HELPER, root, kind, mode, space_id),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_runtime_child_environment(),
     )
     assert process.stdout is not None
     assert process.stdout.readline().strip() == "LOCKED"
@@ -716,18 +747,13 @@ async def test_cross_process_writer_turnstile_blocks_late_reader(
 
     def start(role: str) -> subprocess.Popen[str]:
         return subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                FAIRNESS_HELPER,
-                str(tmp_path),
-                scope,
-                role,
-                str(markers),
-            ],
+            _runtime_child_command(
+                FAIRNESS_HELPER, tmp_path, scope, role, markers
+            ),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=_runtime_child_environment(),
         )
 
     writer = start("writer")
@@ -918,11 +944,12 @@ async def test_acquire_cleanup_persistent_failure_blocks_readiness_and_parent_re
     tmp_path: Path,
 ) -> None:
     child = subprocess.Popen(
-        [sys.executable, "-c", PERSISTENT_CLEANUP_HELPER, str(tmp_path)],
+        _runtime_child_command(PERSISTENT_CLEANUP_HELPER, tmp_path),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_runtime_child_environment(),
     )
     assert child.stdout is not None
     assert child.stdout.readline().strip() == "PROCESS_EXIT_REQUIRED"

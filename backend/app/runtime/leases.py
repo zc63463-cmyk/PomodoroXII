@@ -473,10 +473,18 @@ class RuntimeLeaseCoordinator:
         self,
         data_root: Path,
         *,
+        coordination_root: Path | None = None,
         failpoint: Callable[[str], None] | None = None,
     ) -> None:
         self._root = Path(data_root).expanduser().resolve()
-        self._runtime_dir = self._root / ".runtime"
+        # Coordination state must be stable while recovery cutover renames the
+        # data root. Keep the default alongside the mutable root; callers that
+        # need a distinct layout may still pass an explicit coordination root.
+        self._runtime_dir = (
+            self._root.parent / f".{self._root.name}.runtime"
+            if coordination_root is None
+            else Path(coordination_root).expanduser().resolve()
+        )
         self._lock_dir = self._runtime_dir / "locks"
         self._fence_dir = self._runtime_dir / "fences"
         self._runtime_dir.mkdir(parents=True, exist_ok=True)

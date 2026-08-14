@@ -1,8 +1,9 @@
 import asyncio
-import gc
 import hashlib
 import json
+import os
 import sqlite3
+import subprocess
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
@@ -13,18 +14,45 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.recovery import DomainFailure
 from app.recovery.manifest import canonical_json
 
 BODY = "note body"
 CONTENT_HASH = hashlib.sha256(BODY.encode("utf-8")).hexdigest()
 NOTE_RELATIVE = "spaces/alpha/notes/n_alpha-note-a.md"
 
-_EXPECTED_INDEX_TABLES = frozenset(
-    {"notes", "folders", "note_paths", "note_versions", "note_links", "schema_meta", "sync_audit_log"}
-)
-_EXPECTED_INDEX_FTS = frozenset(
-    {"notes_fts", "notes_fts_insert", "notes_fts_update", "notes_fts_delete"}
-)
+
+def _make_directory_link(link: Path, target: Path) -> None:
+    """Create a real directory link for source-tree containment tests."""
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise OSError(result.stderr or b"junction creation failed")
+        return
+    link.symlink_to(target, target_is_directory=True)
+
+
+def test_reparse_detection_does_not_resolve_the_path(tmp_path: Path, monkeypatch) -> None:
+    """Junction detection must inspect metadata without traversing the target."""
+    from app.recovery.coordinator import _is_link_or_reparse
+
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "junction"
+    try:
+        _make_directory_link(link, target)
+    except OSError as exc:
+        pytest.skip(f"host cannot create a directory link: {exc}")
+
+    def _unexpected_resolve(self, *args, **kwargs):
+        raise AssertionError(f"link detection resolved {self}")
+
+    monkeypatch.setattr(Path, "resolve", _unexpected_resolve)
+    assert _is_link_or_reparse(link) is True
 
 # Every SQLAlchemy engine opened by the read-only view factory is registered
 # here so the autouse fixture can dispose them after each test.  NullPool also
@@ -111,46 +139,6 @@ class _EffortCompiler:
             ).scalars().first()
         self.seen_samples.append(str(value))
         return self.mismatches
-
-
-class _PublicIndexVerifier:
-    """Public read-only ``verify(path)`` adapter over a copied ``index.db``.
-
-    RecoveryCoordinator only consumes the S5-locked public
-    ``verify(path) -> IndexSchemaStatus`` interface.  This adapter performs a
-    real structural check with a read-only sqlite3 connection and never touches
-    runtime VFS internals, so it stands in for the production adapter that an
-    operator would inject (mirroring ``IndexStoreSchema``'s contract).
-    """
-
-    def __init__(self, version: int = 2) -> None:
-        self.version = version
-        self.calls: list[Path] = []
-
-    async def verify(self, path: Path):
-        self.calls.append(Path(path))
-        uri = f"{Path(path).resolve().as_uri()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as connection:
-            objects = {
-                name: kind for name, kind in connection.execute("SELECT name, type FROM sqlite_master")
-            }
-            version_row = (
-                connection.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-                if "schema_meta" in objects
-                else None
-            )
-        version = int(version_row[0]) if version_row else 0
-        missing_tables = tuple(sorted(_EXPECTED_INDEX_TABLES - set(objects)))
-        missing_fts = tuple(sorted(_EXPECTED_INDEX_FTS - set(objects)))
-        valid = version == self.version and not missing_tables and not missing_fts
-        return SimpleNamespace(
-            version=version,
-            valid=valid,
-            missing_tables=missing_tables,
-            missing_indexes=(),
-            missing_fts_objects=missing_fts,
-            failure_code=None if valid else "index_schema_invalid",
-        )
 
 
 class _RecordingMigration:
@@ -375,15 +363,6 @@ def _make_index_db(path: Path, *, with_note: bool = True) -> None:
     from app.file_system.schema import init_database
 
     init_database(path)
-    # ``init_database`` switches the index store to WAL and leaves its own
-    # connection open (``with sqlite3.connect(...)`` commits but never closes).
-    # On Windows a WAL shared-memory handle keeps ``index.db`` locked until
-    # garbage collection - there is no explicit API to release it - which
-    # blocks every later read-only authority open and cutover renames
-    # (WinError 5).  Releasing it is only possible via GC; the fixture then
-    # normalizes to DELETE journal mode (the same boundary restore applies to
-    # staged databases) so no WAL handle can outlive the test.
-    gc.collect()
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("PRAGMA journal_mode=DELETE")
         with connection:
@@ -454,6 +433,7 @@ def _view_factory(engines: list[object]):
 
 def _coordinator(tmp_path: Path, *, real_authorities: bool = True):
     from app.db.migrations import MigrationCoordinator
+    from app.file_system.index_schema import IndexStoreSchema
     from app.knowledge.consistency import KnowledgeConsistencyChecker
     from app.mutation.recovery import MutationRecovery
     from app.recovery import RecoveryCoordinator
@@ -488,7 +468,7 @@ def _coordinator(tmp_path: Path, *, real_authorities: bool = True):
         effort_projection_compiler=_EffortCompiler(),
         recovery_view_factory=_view_factory(engines),
         migration_coordinator=MigrationCoordinator() if real_authorities else None,
-        index_schema=_PublicIndexVerifier() if real_authorities else None,
+        index_schema=IndexStoreSchema() if real_authorities else None,
         knowledge_checker=KnowledgeConsistencyChecker() if real_authorities else None,
         mutation_recovery_inspector=(
             MutationRecovery(catalog=None, interpreter=None, projection_executor=None)
@@ -502,29 +482,6 @@ def _coordinator(tmp_path: Path, *, real_authorities: bool = True):
 async def _dispose(engines: list[object]) -> None:
     for engine in engines:
         await engine.dispose()
-
-
-def test_index_fixture_releases_handle_without_gc_wait() -> None:
-    """The index fixture must not leave a WAL handle that blocks renames.
-
-    Regression: ``init_database`` leaves its own sqlite3 connection open and
-    the index store in WAL mode.  On Windows a WAL shared-memory handle keeps
-    ``index.db`` locked until garbage collection, so renaming the database
-    right after fixture creation failed with WinError 5 - the same handle leak
-    that intermittently broke cutover renames (the failure node drifted with
-    GC timing).  The fixture now normalizes to DELETE journal mode and the
-    database must be immediately movable.
-    """
-    import shutil as _shutil
-    import tempfile as _tempfile
-
-    root = Path(_tempfile.mkdtemp(prefix="pxii-index-reg-", dir="E:/DevTemp"))
-    try:
-        index = root / "index.db"
-        _make_index_db(index)
-        index.rename(root / "index-moved.db")
-    finally:
-        _shutil.rmtree(root, ignore_errors=True)
 
 
 def test_verification_result_requires_manifest_when_valid() -> None:
@@ -641,12 +598,12 @@ async def test_copy_failure_leaves_no_complete_snapshot(tmp_path: Path, monkeypa
     original = recovery_coordinator.backup_sqlite
     calls = 0
 
-    def fail_after_first(source: Path, destination: Path):
+    def fail_after_first(source: Path, destination: Path, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("injected copy failure")
-        return original(source, destination)
+        return original(source, destination, **kwargs)
 
     monkeypatch.setattr(recovery_coordinator, "backup_sqlite", fail_after_first)
     target = tmp_path / "snapshots"
@@ -1320,6 +1277,52 @@ async def test_snapshot_rejects_symlinked_asset(tmp_path: Path, monkeypatch) -> 
 
     with pytest.raises(Exception, match="invalid asset"):
         await coordinator.snapshot(tmp_path / "snapshots")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_source_notes_directory_link(tmp_path: Path) -> None:
+    """A source-side junction must not be traversed even when it stays in-root."""
+    coordinator, _leases, active_root, _engines = _coordinator(tmp_path)
+    notes = active_root / "spaces" / "alpha" / "notes"
+    redirected = notes.with_name("notes-private")
+    notes.rename(redirected)
+    try:
+        _make_directory_link(notes, redirected)
+    except OSError as exc:
+        redirected.rename(notes)
+        pytest.skip(f"host cannot create a directory link: {exc}")
+
+    with pytest.raises(DomainFailure) as raised:
+        await coordinator.snapshot(tmp_path / "snapshots")
+    assert raised.value.record.code == "snapshot_invalid"
+    assert "noncanonical Notes path: alpha" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rejects_registry_reparse_alias_for_canonical_paths(
+    tmp_path: Path,
+) -> None:
+    """Registry path proof must not accept a junction that resolves in-root."""
+    coordinator, _leases, active_root, _engines = _coordinator(tmp_path)
+    alias = tmp_path / "active-alias"
+    try:
+        _make_directory_link(alias, active_root)
+    except OSError as exc:
+        pytest.skip(f"host cannot create a directory link: {exc}")
+    with closing(sqlite3.connect(active_root / "meta.db")) as connection:
+        with connection:
+            connection.execute(
+                "UPDATE spaces SET db_path=?, notes_dir=? WHERE id='alpha'",
+                (
+                    str(alias / "spaces" / "alpha" / "space.db"),
+                    str(alias / "spaces" / "alpha" / "notes"),
+                ),
+            )
+
+    with pytest.raises(DomainFailure) as raised:
+        await coordinator.snapshot(tmp_path / "snapshots")
+
+    assert raised.value.record.code == "snapshot_invalid"
 
 
 @pytest.mark.asyncio

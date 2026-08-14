@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -52,3 +54,20 @@ def test_missing_bound_store_never_creates_companion(tmp_path: Path) -> None:
     with pytest.raises(Exception):
         _bind_existing_target(tmp_path / "missing.db", create_authority=False)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_verify_path_is_public_and_read_only(tmp_path: Path, index_target) -> None:
+    schema = IndexStoreSchema()
+    assert schema.upgrade_open(index_target, create_if_missing=False).valid
+    db_path = tmp_path / "index.db"
+    with closing(sqlite3.connect(db_path)) as connection:
+        assert connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+
+    assert not (tmp_path / "index.db-wal").exists()
+    assert not (tmp_path / "index.db-shm").exists()
+
+    status = schema.verify(db_path)
+
+    assert status.valid
+    assert not (tmp_path / "index.db-wal").exists()
+    assert not (tmp_path / "index.db-shm").exists()

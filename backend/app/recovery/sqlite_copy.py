@@ -3,6 +3,7 @@
 import hashlib
 import os
 import sqlite3
+import stat
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,26 @@ from pathlib import Path
 
 class SnapshotIntegrityError(RuntimeError):
     pass
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    """Detect symlinks and Windows reparse points (including junctions).
+
+    Uses ``lstat`` only; ``resolve`` would traverse a junction before the
+    caller gets a chance to reject it.
+    """
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(status.st_mode):
+        return True
+    if os.name == "nt":
+        attributes = getattr(status, "st_file_attributes", 0)
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,13 +77,31 @@ def fsync_directory(path: Path) -> None:
     _fsync_directory(path)
 
 
-def backup_sqlite(source: Path, destination: Path) -> SqliteBackupResult:
+def backup_sqlite(
+    source: Path,
+    destination: Path,
+    *,
+    read_only_source: bool = False,
+    immutable_source: bool = False,
+) -> SqliteBackupResult:
     source = Path(source)
     destination = Path(destination)
-    if source.is_symlink() or not source.is_file():
+    if _is_link_or_reparse(source) or not source.is_file():
         raise SnapshotIntegrityError(f"invalid sqlite source: {source}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(source)) as src, closing(sqlite3.connect(destination)) as dst:
+    source_database: str | Path = source
+    source_options: dict[str, object] = {}
+    if read_only_source:
+        suffix = "?mode=ro&immutable=1" if immutable_source else "?mode=ro"
+        # ``resolve()`` after the link check: a junction would otherwise be
+        # followed before the caller could reject it.
+        source_database = f"{source.resolve().as_uri()}{suffix}"
+        source_options["uri"] = True
+    with closing(sqlite3.connect(source_database, **source_options)) as src, closing(
+        sqlite3.connect(destination)
+    ) as dst:
+        if read_only_source:
+            src.execute("PRAGMA query_only=ON")
         with dst:
             src.backup(dst, pages=256, sleep=0.01)
             integrity = dst.execute("PRAGMA integrity_check").fetchone()[0]
