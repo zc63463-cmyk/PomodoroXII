@@ -23,6 +23,7 @@ from app.registry import CATALOG
 from app.runtime.leases import RuntimeLeaseCoordinator
 
 from .coordinator import RecoveryCoordinator
+from .relocation import DataRootRelocator
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,3 +89,7 @@ class LocalRecoveryService:
         for engine in self._engines.values():
             await engine.dispose()
         self._engines.clear()
+
+    async def relocate(self, target_root: Path):
+        """Relocate this offline root through the explicit recovery boundary."""
+        return await DataRootRelocator(self.coordinator).relocate(target_root)

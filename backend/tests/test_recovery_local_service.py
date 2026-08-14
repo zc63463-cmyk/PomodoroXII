@@ -168,3 +168,78 @@ def test_rehearsal_cli_emits_receipt_after_explicit_confirmations(
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["status"] == "cutover_complete"
     assert receipt["rollback_root"] == str(rollback_root)
+
+
+def test_relocation_cli_requires_both_root_confirmations_before_service_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    operator = _operator_module()
+    constructed = False
+
+    class UnexpectedService:
+        def __init__(self, _root: Path) -> None:
+            nonlocal constructed
+            constructed = True
+
+    monkeypatch.setattr(operator, "LocalRecoveryService", UnexpectedService)
+    source = tmp_path / "disposable-source"
+    target = tmp_path / "disposable-target"
+    result = operator.main(
+        [
+            "relocate",
+            "--data-root", str(source),
+            "--target-root", str(target),
+            "--confirm-disposable-root", str(source),
+            "--confirm-relocation-target", str(tmp_path / "other-target"),
+            "--confirm-relocate",
+        ]
+    )
+
+    assert result == 2
+    assert constructed is False
+    assert "--confirm-relocation-target" in capsys.readouterr().err
+
+
+def test_relocation_cli_emits_target_and_rollback_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    operator = _operator_module()
+    source = tmp_path / "disposable-source"
+    target = tmp_path / "disposable-target"
+    rollback_snapshot = tmp_path / "snapshots" / "rollback"
+    for directory in (source, target, rollback_snapshot):
+        directory.mkdir(parents=True)
+
+    class Service:
+        def __init__(self, root: Path) -> None:
+            assert root == source.absolute()
+
+        async def relocate(self, target_root: Path):
+            assert target_root == target.absolute()
+            return SimpleNamespace(
+                source_root=source,
+                target_root=target,
+                rollback_snapshot_root=rollback_snapshot,
+                rollback_manifest_sha256="a" * 64,
+                staged_tree_sha256="b" * 64,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(operator, "LocalRecoveryService", Service)
+    result = operator.main(
+        [
+            "relocate",
+            "--data-root", str(source),
+            "--target-root", str(target),
+            "--confirm-disposable-root", str(source),
+            "--confirm-relocation-target", str(target),
+            "--confirm-relocate",
+        ]
+    )
+
+    assert result == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "relocation_complete"
+    assert receipt["target_root"] == str(target)
