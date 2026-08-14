@@ -463,3 +463,45 @@ class CutoverResult:
             raise ValueError("verified spaces must be a tuple of non-empty strings")
         if tuple(item.space_id for item in manifest.spaces) != self.verified_spaces:
             raise ValueError("verified spaces disagree with the verification manifest")
+
+
+@dataclass(frozen=True, slots=True)
+class RelocationResult:
+    """Immutable evidence for an explicit offline data-root relocation.
+
+    The source root is deliberately retained.  It is both the operator's
+    rollback root and proof that relocation never overwrites a live store.
+    """
+
+    success: bool
+    source_root: Path
+    target_root: Path
+    rollback_snapshot_root: Path
+    rollback_manifest_sha256: str
+    staged_tree_sha256: str
+    catalog_hash: str
+    source_fence: int
+    process_owner_fence: int
+    global_fence: int
+    verified_spaces: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.success is not True:
+            raise ValueError("relocation result must represent a successful publication")
+        for name in ("source_root", "target_root", "rollback_snapshot_root"):
+            path = Path(getattr(self, name)).expanduser().absolute()
+            if not path.is_dir():
+                raise ValueError(f"{name} must be an existing directory")
+            object.__setattr__(self, name, path)
+        if self.source_root == self.target_root:
+            raise ValueError("source and target roots must differ")
+        for name in ("rollback_manifest_sha256", "staged_tree_sha256", "catalog_hash"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+                raise ValueError(f"{name} must be a 64-char lowercase hex digest")
+        for name in ("source_fence", "process_owner_fence", "global_fence"):
+            object.__setattr__(self, name, _validated_int(getattr(self, name), name, minimum=1))
+        if not isinstance(self.verified_spaces, tuple) or any(
+            not isinstance(space_id, str) or not space_id for space_id in self.verified_spaces
+        ):
+            raise ValueError("verified spaces must be a tuple of non-empty strings")
