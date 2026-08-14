@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from app.recovery import DomainFailure, StagedRestore
-from app.recovery.manifest import canonical_json_from_raw, parse_manifest
 from app.recovery.local_service import LocalRecoveryService
+from app.recovery.manifest import canonical_json_from_raw, parse_manifest
 
 COMMANDS: dict[str, str] = {
     "snapshot": "run_snapshot",

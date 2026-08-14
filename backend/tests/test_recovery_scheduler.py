@@ -234,8 +234,8 @@ async def test_scheduler_initial_snapshot_required_before_readiness(
 async def test_scheduler_initial_snapshot_failure_aborts_startup(
     tmp_path: Path,
 ) -> None:
-    from app.recovery import DomainFailure
     from app.ops.signals import OperationalSignals
+    from app.recovery import DomainFailure
     from app.recovery.local_service import LocalRecoveryService
     from app.recovery.scheduler import RecoveryScheduler
 
