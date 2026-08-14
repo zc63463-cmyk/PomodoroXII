@@ -39,6 +39,13 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow the irreversible publication step against the confirmed disposable root",
     )
+
+    relocate = commands.add_parser("relocate", help="publish a verified disposable root at a new target")
+    relocate.add_argument("--data-root", required=True, type=Path)
+    relocate.add_argument("--target-root", required=True, type=Path)
+    relocate.add_argument("--confirm-disposable-root", required=True)
+    relocate.add_argument("--confirm-relocation-target", required=True)
+    relocate.add_argument("--confirm-relocate", action="store_true")
     return parser
 
 
@@ -55,6 +62,15 @@ def _require_rehearsal_confirmation(args: argparse.Namespace) -> None:
         raise ValueError("rehearse requires --confirm-cutover")
 
 
+def _require_relocation_confirmation(args: argparse.Namespace) -> None:
+    if args.confirm_disposable_root != str(args.data_root):
+        raise ValueError("--confirm-disposable-root must exactly match --data-root")
+    if args.confirm_relocation_target != str(args.target_root):
+        raise ValueError("--confirm-relocation-target must exactly match --target-root")
+    if not args.confirm_relocate:
+        raise ValueError("relocate requires --confirm-relocate")
+
+
 def _verification_receipt(snapshot: Path, result) -> dict[str, object]:
     return {
         "status": "verified" if result.valid else "invalid",
@@ -67,6 +83,8 @@ def _verification_receipt(snapshot: Path, result) -> dict[str, object]:
 async def _run(args: argparse.Namespace) -> dict[str, object]:
     if args.command == "rehearse":
         _require_rehearsal_confirmation(args)
+    if args.command == "relocate":
+        _require_relocation_confirmation(args)
 
     service = LocalRecoveryService(_absolute(args.data_root))
     try:
@@ -74,6 +92,17 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             snapshot = _absolute(args.snapshot)
             result = await service.coordinator.verify(snapshot)
             return _verification_receipt(snapshot, result)
+
+        if args.command == "relocate":
+            result = await service.relocate(_absolute(args.target_root))
+            return {
+                "status": "relocation_complete",
+                "source_root": str(result.source_root),
+                "target_root": str(result.target_root),
+                "rollback_snapshot_root": str(result.rollback_snapshot_root),
+                "rollback_manifest_sha256": result.rollback_manifest_sha256,
+                "staged_tree_sha256": result.staged_tree_sha256,
+            }
 
         snapshot = await service.coordinator.snapshot(_absolute(args.snapshot_dir))
         staged = await service.coordinator.restore_to_staging(snapshot)

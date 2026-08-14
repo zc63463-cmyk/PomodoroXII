@@ -4,8 +4,9 @@
 
 This addendum supersedes the cross-platform release requirements for S5 Task 2
 phase two. It applies only to a single-user Windows installation with one local
-active data root. It does not authorize Task 3 relocation or a production
-cross-platform release claim.
+active data root. The local Task 3 relocation command is restricted to a
+supervised disposable-copy rehearsal; it does not authorize production
+relocation or a cross-platform release claim.
 
 The threat model covers normal application failures, accidental interruption,
 and stale local state. It does not make Linux-specific behavior, hostile local
@@ -82,6 +83,19 @@ python backend/scripts/rehearse_recovery.py rehearse `
 The command emits one canonical JSON receipt. Record its `snapshot_root`,
 `active_root`, `rollback_root`, and `rollback_snapshot_root`. It must never be
 pointed at the user's normal active root; make a filesystem copy first.
+
+Relocation has a separate target confirmation and publishes only the copied
+root at a new, previously absent target. It preserves the source copy and
+emits a rollback-snapshot location:
+
+```powershell
+python backend/scripts/rehearse_recovery.py relocate `
+  --data-root E:\path\to\disposable-source `
+  --target-root E:\path\to\disposable-target `
+  --confirm-disposable-root E:\path\to\disposable-source `
+  --confirm-relocation-target E:\path\to\disposable-target `
+  --confirm-relocate
+```
 
 ## Deferred Release Work
 
