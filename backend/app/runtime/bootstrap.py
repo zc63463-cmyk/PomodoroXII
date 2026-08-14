@@ -558,7 +558,15 @@ async def _shutdown_owned(
 async def bootstrap_runtime(purpose: str) -> AsyncIterator[RuntimeServices]:
     from app.settings import settings
 
-    raw_leases = RuntimeLeaseCoordinator(settings.data_root)
+    # Recovery cutover renames ``settings.data_root`` itself. Keep the runtime
+    # process/global coordination files in a stable sibling so live lock
+    # handles never prevent that atomic rename and retain the same identity
+    # after ``active -> rollback`` and ``staging -> active``.
+    data_root = settings.data_root.expanduser().resolve()
+    raw_leases = RuntimeLeaseCoordinator(
+        data_root,
+        coordination_root=data_root.parent / f".{data_root.name}.runtime",
+    )
     gate = _RuntimeAdmissionGate()
     leases = _AdmissionLeaseCoordinator(raw_leases, gate)
     engines = SpaceEngineManager()

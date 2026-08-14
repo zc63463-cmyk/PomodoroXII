@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import sqlite3
 from pathlib import Path
 
@@ -45,3 +46,21 @@ class TestInitDatabase:
             ).fetchone()
         assert row is not None
         assert int(row[0]) == 1
+
+    def test_closes_wal_handles_before_returning(self, tmp_path: Path):
+        """A newly initialized WAL database must be immediately movable.
+
+        ``sqlite3.Connection.__exit__`` commits but does not close. This
+        regression keeps GC disabled so the test fails if ``init_database``
+        relies on finalization to release the Windows ``-shm`` handle.
+        """
+        db_path = tmp_path / "movable.db"
+        moved = tmp_path / "moved.db"
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            init_database(db_path)
+            db_path.rename(moved)
+        finally:
+            if was_enabled:
+                gc.enable()

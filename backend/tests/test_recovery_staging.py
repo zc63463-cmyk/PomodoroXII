@@ -28,6 +28,7 @@ from tests.test_recovery import (
     _insert_locator,
     _insert_operation,
     _Leases,
+    _make_directory_link,
     _make_intent,
     _make_meta_db,
     _republish_manifest,
@@ -230,6 +231,7 @@ async def test_staged_restore_rejects_invalid_or_mismatched_verification(
     )
     with pytest.raises(ValueError, match="valid matching verification"):
         StagedRestore(
+            proof_id=staged.proof_id,
             snapshot_root=staged.snapshot_root,
             root=staged.root,
             target_active_root=staged.target_active_root,
@@ -659,6 +661,29 @@ async def test_restore_snapshot_symlink_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(Exception) as excinfo:
         await coordinator.restore_to_staging(receipt)
     assert _domain_code(excinfo.value) == "restore_source_invalid"
+
+
+@pytest.mark.asyncio
+async def test_verify_and_restore_reject_snapshot_directory_junction(tmp_path: Path) -> None:
+    """Both snapshot verification and staging copy reject an untraversed junction."""
+    coordinator, _leases, _active_root, _engines, _fps = _recovery_env(tmp_path)
+    receipt = await _make_receipt(coordinator, tmp_path)
+    notes = receipt.root / "spaces" / "alpha" / "notes"
+    redirected = notes.with_name("notes-private")
+    notes.rename(redirected)
+    try:
+        _make_directory_link(notes, redirected)
+    except OSError as exc:
+        redirected.rename(notes)
+        pytest.skip(f"host cannot create a directory link: {exc}")
+
+    verified = await coordinator.verify(receipt.root)
+    assert verified.valid is False
+    assert any(failure.startswith("symlink:") for failure in verified.failures)
+
+    with pytest.raises(Exception) as raised:
+        await coordinator.restore_to_staging(receipt)
+    assert _domain_code(raised.value) == "restore_source_invalid"
 
 
 @pytest.mark.asyncio

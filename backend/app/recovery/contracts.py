@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal, Mapping
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_STAGING_PROOF_ID_RE = re.compile(r"[0-9a-f]{32}")
 _SNAPSHOT_KINDS = frozenset({"meta_db", "space_db", "index_db", "note", "index_asset"})
 _FORBIDDEN_IDENTIFIER_CHARS = frozenset("/\\:\x00")
 
@@ -285,6 +286,7 @@ class StagedRestore:
     positive integer.
     """
 
+    proof_id: str
     snapshot_root: Path
     root: Path
     target_active_root: Path
@@ -296,8 +298,16 @@ class StagedRestore:
     verification: VerificationResult
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.proof_id, str)
+            or _STAGING_PROOF_ID_RE.fullmatch(self.proof_id) is None
+        ):
+            raise ValueError("staged restore proof id is invalid")
         for name in ("snapshot_root", "root", "target_active_root"):
-            path = Path(getattr(self, name)).expanduser().resolve()
+            # Keep the lexical absolute pathname. Resolving here would follow a
+            # junction supplied by a caller and erase the evidence needed by
+            # RecoveryCoordinator to reject it before publication.
+            path = Path(getattr(self, name)).expanduser().absolute()
             object.__setattr__(self, name, path)
         if not self.root.is_dir():
             raise ValueError("staged root must be an existing directory")
