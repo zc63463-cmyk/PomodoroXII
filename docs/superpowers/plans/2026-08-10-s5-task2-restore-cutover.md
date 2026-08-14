@@ -1,5 +1,10 @@
 # S5 Task 2 Restore Cutover Implementation Plan
 
+> **Windows self-use amendment:** For S5 Task 2 phase two, follow
+> [2026-08-14-s5-task2-windows-self-use-acceptance.md](2026-08-14-s5-task2-windows-self-use-acceptance.md).
+> Its Windows single-user gates supersede this plan's cross-platform exit gate.
+> Task 3 relocation remains out of scope.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Restore a verified snapshot into isolated staging, publish it through a fenced rollback-preserving cutover, and provide explicit data-root relocation without overwriting a live root.
