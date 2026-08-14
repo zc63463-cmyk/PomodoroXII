@@ -20,6 +20,7 @@ dependencies = [
     "python-slugify>=8.0.4",
     "fastmcp>=3.0",
     "rfc8785==0.1.4",
+    "prometheus-client>=0.22",
 ]
 
 [project.optional-dependencies]

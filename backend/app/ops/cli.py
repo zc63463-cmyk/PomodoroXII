@@ -21,6 +21,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Sequence
 
+from app.errors import AppError
 from app.recovery import DomainFailure, StagedRestore
 from app.recovery.local_service import LocalRecoveryService
 from app.recovery.manifest import canonical_json_from_raw, parse_manifest
@@ -73,6 +74,17 @@ def build_parser() -> argparse.ArgumentParser:
     relocate.add_argument("--confirm-disposable-root", required=True)
     relocate.add_argument("--confirm-relocation-target", required=True)
     relocate.add_argument("--confirm-relocate", action="store_true")
+
+    credentials = commands.add_parser(
+        "credentials", help="manage the digest-only operations credential", parents=[common]
+    )
+    cred_sub = credentials.add_subparsers(dest="credential_command", required=True)
+    cred_issue = cred_sub.add_parser("issue", parents=[common], help="issue a new operations token")
+    cred_issue.add_argument("--data-root", required=True, type=Path, help="active data root")
+    cred_rotate = cred_sub.add_parser("rotate", parents=[common], help="rotate the operations token")
+    cred_rotate.add_argument("--data-root", required=True, type=Path, help="active data root")
+    cred_revoke = cred_sub.add_parser("revoke", parents=[common], help="revoke the operations token")
+    cred_revoke.add_argument("--data-root", required=True, type=Path, help="active data root")
     return parser
 
 
@@ -255,6 +267,122 @@ _RUNNERS: dict[str, Callable] = {
 
 
 # --------------------------------------------------------------------------- #
+# Credential commands (issue / rotate / revoke)
+# --------------------------------------------------------------------------- #
+
+
+async def _open_meta_session(data_root: Path):
+    """Open one AsyncSession against the canonical Meta database."""
+    from app.db.session import create_engine, create_session_factory
+
+    meta_db = _absolute(data_root) / "meta.db"
+    engine = create_engine(f"sqlite+aiosqlite:///{meta_db.as_posix()}")
+    factory = create_session_factory(engine)
+    try:
+        async with factory() as session:
+            yield session
+    finally:
+        await engine.dispose()
+
+
+async def _run_credential(command: str, data_root: Path) -> dict[str, object]:
+    """Run one credential lifecycle command via OperationsCredentialStore."""
+    from app.errors import AuthorizationError, ConflictError
+    from app.ops.credentials import OperationsCredentialStore
+
+    async for session in _open_meta_session(data_root):
+        store = OperationsCredentialStore(session)
+        if command == "issue":
+            try:
+                issued = await store.issue()
+            except ConflictError:
+                raise
+        elif command == "rotate":
+            issued = await store.rotate()
+        elif command == "revoke":
+            try:
+                await store.revoke()
+            except AuthorizationError:
+                raise
+            return {"revoked": True}
+        else:  # pragma: no cover - argparse prevents this
+            raise _CliArgumentError(f"unknown credential command: {command}")
+        return {
+            "scope": issued.principal.scope,
+            "epoch": issued.principal.epoch,
+            "token": issued.token,
+        }
+    raise _CliArgumentError("meta session did not open")
+
+
+def _emit_credential(command: str, result: dict[str, object], *, json_mode: bool) -> None:
+    """Emit a credential result; the raw token appears once on stdout only.
+
+    In JSON mode the token is stripped so the receipt is non-sensitive.  In
+    plain mode only the raw token is printed (exactly once) for issue/rotate;
+    revoke prints a plain ok.  The token never reaches stderr or logs.
+    """
+    if json_mode:
+        safe = {key: value for key, value in result.items() if key != "token"}
+        _emit({"ok": True, "command": f"credentials-{command}", "result": safe}, json_mode=True)
+        return
+    token = result.get("token")
+    if isinstance(token, str) and token:
+        print(token, file=sys.stdout)
+        return
+    print("ok: True", file=sys.stdout)
+
+
+def _run_credentials_cli(args: argparse.Namespace, *, json_mode: bool) -> int:
+    """Handle ``app.ops credentials <command>`` with canonical exit codes."""
+    command = args.credential_command
+    try:
+        result = asyncio.run(_run_credential(command, _absolute(args.data_root)))
+    except DomainFailure as exc:
+        _emit(
+            {
+                "ok": False,
+                "command": f"credentials-{command}",
+                "error": {"code": exc.record.code, "message": str(exc)},
+            },
+            json_mode=json_mode,
+        )
+        return 2
+    except (_CliArgumentError, ValueError) as exc:
+        _emit(
+            {
+                "ok": False,
+                "command": f"credentials-{command}",
+                "error": {"code": "argument_error", "message": str(exc)},
+            },
+            json_mode=json_mode,
+        )
+        return 2
+    except AppError as exc:  # ConflictError / AuthorizationError etc.
+        _emit(
+            {
+                "ok": False,
+                "command": f"credentials-{command}",
+                "error": {"code": exc.code, "message": str(exc)},
+            },
+            json_mode=json_mode,
+        )
+        return 2
+    except BaseException as exc:  # noqa: BLE001 - CLI boundary converts to JSON
+        _emit(
+            {
+                "ok": False,
+                "command": f"credentials-{command}",
+                "error": {"code": "internal_error", "message": str(exc)},
+            },
+            json_mode=json_mode,
+        )
+        return 1
+    _emit_credential(command, result, json_mode=json_mode)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
 
@@ -288,6 +416,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return 2
     command = getattr(args, "command", None)
+    if command == "credentials":
+        return _run_credentials_cli(args, json_mode=json_mode)
     try:
         _reject_force(args)
         # Confirmation checks run before any service is constructed or any

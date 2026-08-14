@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -9,7 +10,43 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from app.logging import request_id_var
+from app.ops.routes import HTTP_LATENCY, HTTP_REQUESTS
 from app.settings import settings
+
+
+def _route_template(request: Request) -> str:
+    """Return the matched route template, or ``unmatched`` for 404s.
+
+    Starlette stores the matched route on the request scope after routing;
+    the path parameter placeholders (``{space_id}`` etc.) are the template,
+    never the raw request path.  This keeps the label cardinality bounded.
+    """
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    return template if isinstance(template, str) and template else "unmatched"
+
+
+class RequestMetricsMiddleware(BaseHTTPMiddleware):
+    """Record bounded HTTP request metrics (method/route/status_class).
+
+    The route label is the matched template (or ``unmatched``), never the raw
+    URI, and no identity values (space ids, request ids, tokens) appear in any
+    label.  ``/api/metrics`` itself is observed like any other route.
+    """
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        start = time.perf_counter()
+        response = await call_next(request)
+        labels = (
+            request.method,
+            _route_template(request),
+            f"{response.status_code // 100}xx",
+        )
+        HTTP_REQUESTS.labels(*labels).inc()
+        HTTP_LATENCY.labels(*labels).observe(time.perf_counter() - start)
+        return response
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
