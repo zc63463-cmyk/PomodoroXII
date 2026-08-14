@@ -4,6 +4,7 @@ from .contracts import (
     CutoverResult,
     MetaSnapshot,
     PublishedSnapshotReceipt,
+    RelocationResult,
     SnapshotFile,
     SnapshotManifest,
     SpaceSnapshot,
@@ -15,13 +16,16 @@ from .coordinator import (
     DomainFailure,
     RecoveryCoordinator,
 )
+from .relocation import DataRootRelocator
 
 __all__ = [
     "ActiveSessionCoordinationInspector",
     "CutoverResult",
+    "DataRootRelocator",
     "DomainFailure",
     "MetaSnapshot",
     "PublishedSnapshotReceipt",
+    "RelocationResult",
     "RecoveryCoordinator",
     "SnapshotFile",
     "SnapshotManifest",
