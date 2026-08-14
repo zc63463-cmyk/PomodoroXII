@@ -15,7 +15,10 @@ from app.deps import require_master_token
 from app.errors import register_exception_handlers
 from app.logging import setup_logging
 from app.middleware import RequestIdMiddleware, SecurityHeadersMiddleware
+from app.ops.signals import OperationalSignals
 from app.rate_limit import RateLimitMiddleware
+from app.recovery.local_service import LocalRecoveryService
+from app.recovery.scheduler import RecoveryScheduler
 from app.schemas.common import ErrorResponse, HealthResponse
 from app.settings import settings
 
@@ -30,19 +33,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("PomodoroXII API starting up (env=%s)", settings.environment)
 
     # --- Startup ---
-    from app.file_system.backup import require_legacy_backup_disabled
-
-    require_legacy_backup_disabled(enabled=settings.backup_enabled)
-
     from app.runtime.bootstrap import bootstrap_runtime
 
+    scheduler: RecoveryScheduler | None = None
+    recovery_service: LocalRecoveryService | None = None
     try:
         async with bootstrap_runtime("fastapi") as services:
             app.state.runtime_services = services
             app.state.runtime = services.runtime
             app.state.runtime_executor = services.executor
+            app.state.operational_signals = OperationalSignals()
             services.executor.gate.assert_ready()
             services.runtime.assert_ready()
+            if settings.backup_enabled:
+                if settings.backup_target_dir is None:
+                    raise RuntimeError(
+                        "POMODOROXII_BACKUP_TARGET_DIR is required when backup is enabled"
+                    )
+                recovery_service = LocalRecoveryService(settings.data_root)
+                scheduler = RecoveryScheduler(
+                    recovery_service,
+                    target=settings.backup_target_dir,
+                    signals=app.state.operational_signals,
+                    interval_hours=settings.backup_interval_hours,
+                    retention_count=settings.backup_retention_count,
+                )
+                # The required initial snapshot must succeed before readiness;
+                # a failure aborts startup instead of logging and continuing.
+                await scheduler.start()
             app.state.ready = True
             logger.info("PomodoroXII API ready.")
             yield
@@ -51,12 +69,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     finally:
         app.state.ready = False
+        if scheduler is not None:
+            # Shutdown order: cancel + await the scheduler task before closing
+            # the resources it holds.
+            await scheduler.close()
+        if recovery_service is not None:
+            await recovery_service.aclose()
         if hasattr(app.state, "runtime"):
             delattr(app.state, "runtime")
         if hasattr(app.state, "runtime_services"):
             delattr(app.state, "runtime_services")
         if hasattr(app.state, "runtime_executor"):
             delattr(app.state, "runtime_executor")
+        if hasattr(app.state, "operational_signals"):
+            delattr(app.state, "operational_signals")
 
     # --- Shutdown ---
     logger.info("PomodoroXII API shutting down.")

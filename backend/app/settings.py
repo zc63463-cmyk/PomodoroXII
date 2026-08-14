@@ -50,7 +50,15 @@ class Settings(BaseSettings):
     sync_canonical_batch_max_bytes: PositiveInt = 10 * 1024 * 1024
     debug: bool = False
     environment: str = "development"
-    backup_enabled: bool = False
+    # --- Required scheduled full recovery --------------------------------
+    # A production start must complete and verify one full snapshot before
+    # readiness.  The backup target must be an explicit external directory;
+    # the scheduler never infers a second Meta/Space root and never creates a
+    # target inside the active data root.
+    backup_enabled: bool = True
+    backup_target_dir: Path | None = None
+    backup_interval_hours: PositiveInt = 24
+    backup_retention_count: PositiveInt = 30
 
     model_config = SettingsConfigDict(
         env_prefix="POMODOROXII_",
@@ -144,6 +152,33 @@ class Settings(BaseSettings):
             raise ValueError(
                 "request_body_max_bytes must cover canonical batch plus fixed framing headroom"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_backup_target(self) -> Self:
+        """Fail closed unless backup configuration is unambiguous.
+
+        Production with scheduled recovery enabled must name an explicit
+        external backup target.  Any configured target must resolve outside
+        the active data root so retention can never reach live data.
+        """
+        if self.environment == "production" and self.backup_enabled:
+            if self.backup_target_dir is None:
+                raise ValueError(
+                    "POMODOROXII_BACKUP_TARGET_DIR is required in production "
+                    "when POMODOROXII_BACKUP_ENABLED is true"
+                )
+        if self.backup_target_dir is not None:
+            target = self.backup_target_dir.expanduser().resolve()
+            root = self.data_root.expanduser().resolve()
+            if target == root or root in target.parents:
+                raise ValueError(
+                    "POMODOROXII_BACKUP_TARGET_DIR must be outside the active data root"
+                )
+            if target in root.parents:
+                raise ValueError(
+                    "POMODOROXII_BACKUP_TARGET_DIR must not contain the active data root"
+                )
         return self
 
     @property

@@ -1,8 +1,14 @@
 """Local-only operator entry point for verified recovery rehearsals.
 
-This intentionally has no HTTP route and does not bootstrap the application
-runtime.  It is for a supervised disposable-copy rehearsal on one Windows
-machine, never for unattended recovery of a user's live data root.
+Thin compatibility wrapper over the canonical recovery operator
+(``app.ops.cli``).  It keeps the historical ``verify-snapshot`` /
+``rehearse`` command spellings for the Windows-local rehearsal workflow, but
+reuses the canonical confirmation protocol and error-code conventions (2 =
+DomainFailure / argument / confirmation, 1 = unexpected internal error, 0 =
+success) from ``app.ops.cli``.  All recovery algorithms are executed by the
+same ``LocalRecoveryService`` / ``RecoveryCoordinator`` / ``DataRootRelocator``
+compositions; nothing is re-implemented here and there is no second command
+vocabulary for the same operation.
 """
 
 from __future__ import annotations
@@ -19,18 +25,23 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
+import app.ops.cli as ops_cli
 from app.recovery.local_service import LocalRecoveryService
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run local recovery checks or a disposable rehearsal.")
+    parser = argparse.ArgumentParser(
+        description="Run local recovery checks or a disposable rehearsal."
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     verify = commands.add_parser("verify-snapshot", help="read-only snapshot verification")
     verify.add_argument("--data-root", required=True, type=Path)
     verify.add_argument("--snapshot", required=True, type=Path)
 
-    rehearse = commands.add_parser("rehearse", help="snapshot, stage, and cut over a disposable data copy")
+    rehearse = commands.add_parser(
+        "rehearse", help="snapshot, stage, and cut over a disposable data copy"
+    )
     rehearse.add_argument("--data-root", required=True, type=Path)
     rehearse.add_argument("--snapshot-dir", required=True, type=Path)
     rehearse.add_argument("--confirm-disposable-root", required=True)
@@ -40,7 +51,9 @@ def _parser() -> argparse.ArgumentParser:
         help="allow the irreversible publication step against the confirmed disposable root",
     )
 
-    relocate = commands.add_parser("relocate", help="publish a verified disposable root at a new target")
+    relocate = commands.add_parser(
+        "relocate", help="publish a verified disposable root at a new target"
+    )
     relocate.add_argument("--data-root", required=True, type=Path)
     relocate.add_argument("--target-root", required=True, type=Path)
     relocate.add_argument("--confirm-disposable-root", required=True)
@@ -51,24 +64,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def _absolute(path: Path) -> Path:
     return Path(path).expanduser().absolute()
-
-
-def _require_rehearsal_confirmation(args: argparse.Namespace) -> None:
-    # Compare the spelling first.  It makes a copied command line unable to
-    # target a different root through a relative-path or environment expansion.
-    if args.confirm_disposable_root != str(args.data_root):
-        raise ValueError("--confirm-disposable-root must exactly match --data-root")
-    if not args.confirm_cutover:
-        raise ValueError("rehearse requires --confirm-cutover")
-
-
-def _require_relocation_confirmation(args: argparse.Namespace) -> None:
-    if args.confirm_disposable_root != str(args.data_root):
-        raise ValueError("--confirm-disposable-root must exactly match --data-root")
-    if args.confirm_relocation_target != str(args.target_root):
-        raise ValueError("--confirm-relocation-target must exactly match --target-root")
-    if not args.confirm_relocate:
-        raise ValueError("relocate requires --confirm-relocate")
 
 
 def _verification_receipt(snapshot: Path, result) -> dict[str, object]:
@@ -82,9 +77,30 @@ def _verification_receipt(snapshot: Path, result) -> dict[str, object]:
 
 async def _run(args: argparse.Namespace) -> dict[str, object]:
     if args.command == "rehearse":
-        _require_rehearsal_confirmation(args)
+        # Canonical confirmation rule from app.ops.cli; a mismatch is a
+        # zero-touch rejection before any service is constructed.
+        ops_cli._require_cutover_confirmation(
+            argparse.Namespace(
+                command="cutover",
+                json=False,
+                data_root=args.data_root,
+                receipt=None,
+                confirm_disposable_root=args.confirm_disposable_root,
+                confirm_cutover=args.confirm_cutover,
+            )
+        )
     if args.command == "relocate":
-        _require_relocation_confirmation(args)
+        ops_cli._require_relocation_confirmation(
+            argparse.Namespace(
+                command="relocate",
+                json=False,
+                data_root=args.data_root,
+                target_root=args.target_root,
+                confirm_disposable_root=args.confirm_disposable_root,
+                confirm_relocation_target=args.confirm_relocation_target,
+                confirm_relocate=args.confirm_relocate,
+            )
+        )
 
     service = LocalRecoveryService(_absolute(args.data_root))
     try:
@@ -125,10 +141,15 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         receipt = asyncio.run(_run(args))
-    except ValueError as exc:
+    except ops_cli._CliArgumentError as exc:
         print(f"recovery rehearsal rejected: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:
+        from app.recovery import DomainFailure
+
+        if isinstance(exc, DomainFailure):
+            print(f"recovery operation failed: {exc}", file=sys.stderr)
+            return 2
         print(f"recovery operation failed: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(receipt, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
