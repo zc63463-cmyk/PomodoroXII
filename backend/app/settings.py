@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     backup_target_dir: Path | None = None
     backup_interval_hours: PositiveInt = 24
     backup_retention_count: PositiveInt = 30
+    # --- Structured logging ------------------------------------------------
+    # Optional JSONL file sink.  When set, logs are mirrored to this file with
+    # redaction; the parent directory must already exist (never auto-created).
+    structured_log_path: Path | None = None
 
     model_config = SettingsConfigDict(
         env_prefix="POMODOROXII_",

@@ -14,6 +14,20 @@ from httpx import ASGITransport
 from pydantic import ValidationError
 
 
+@pytest.fixture(autouse=True)
+def _disable_backup_for_client_tests(_isolate_env, monkeypatch) -> None:
+    """Keep client/lifespan tests free of the required recovery scheduler.
+
+    Task 3 made ``backup_enabled`` default to true with a mandatory external
+    target; the shared conftest ``client`` fixture enters the lifespan, which
+    would fail without a target.  These hardening tests do not exercise the
+    scheduler, so it is disabled here without changing production defaults.
+    """
+    import app.settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "backup_enabled", False)
+
+
 async def _request(app, *, body_frames, headers=()):
     messages = iter(
         [
@@ -510,13 +524,26 @@ async def test_metrics_auth_and_prometheus_contract(client):
     )
     assert issued.status_code == 200
     space_token = issued.json()["space_token"]
-    forbidden = await client.get(
-        "/api/metrics", headers={"authorization": f"Bearer {space_token}"}
-    )
-    assert forbidden.status_code == 403
+
+    # Master and space JWTs must never read metrics (403).
+    for token in (master_token, space_token):
+        forbidden = await client.get(
+            "/api/metrics", headers={"authorization": f"Bearer {token}"}
+        )
+        assert forbidden.status_code == 403
+
+    # Only the digest-only operations credential can read metrics.
+    from app.db.meta_session import get_meta_session
+    from app.ops.credentials import OperationsCredentialStore
+
+    async for session in get_meta_session():
+        store = OperationsCredentialStore(session)
+        issued_ops = await store.issue()
+        ops_token = issued_ops.token
+        break
 
     success = await client.get(
-        "/api/metrics", headers={"authorization": f"Bearer {master_token}"}
+        "/api/metrics", headers={"authorization": f"Bearer {ops_token}"}
     )
     assert success.status_code == 200
     assert success.headers["content-type"].startswith("text/plain; version=0.0.4")
