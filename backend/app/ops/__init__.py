@@ -6,6 +6,12 @@ with credentials, readiness routes, metrics and SLO signals.
 
 from __future__ import annotations
 
+from .credentials import IssuedCredential, OperationsCredentialStore, OperationsPrincipal
 from .signals import OperationalSignals
 
-__all__ = ["OperationalSignals"]
+__all__ = [
+    "IssuedCredential",
+    "OperationsCredentialStore",
+    "OperationsPrincipal",
+    "OperationalSignals",
+]
