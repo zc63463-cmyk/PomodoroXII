@@ -1,6 +1,7 @@
 """Immutable recovery snapshot contracts."""
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -11,6 +12,23 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _STAGING_PROOF_ID_RE = re.compile(r"[0-9a-f]{32}")
 _SNAPSHOT_KINDS = frozenset({"meta_db", "space_db", "index_db", "note", "index_asset"})
 _FORBIDDEN_IDENTIFIER_CHARS = frozenset("/\\:\x00")
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _has_link_or_reparse_ancestor(path: Path) -> bool:
+    """Return whether any existing path segment is a link or reparse point."""
+    current = Path(path).absolute()
+    while True:
+        try:
+            attributes = getattr(current.lstat(), "st_file_attributes", 0)
+        except OSError:
+            return True
+        if current.is_symlink() or attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
 
 
 class _FrozenDict(dict):
@@ -396,10 +414,16 @@ class CutoverResult:
             if not path.is_absolute():
                 raise ValueError(f"{name} must be an absolute path")
             canonical = path.resolve()
-            if canonical != path:
+            if _has_link_or_reparse_ancestor(path):
+                raise ValueError(f"{name} must not contain a link or reparse point")
+            try:
+                same_physical_path = os.path.samefile(path, canonical)
+            except OSError as exc:
+                raise ValueError(f"{name} must be an existing directory") from exc
+            if not same_physical_path:
                 raise ValueError(f"{name} must be a canonical path")
-            object.__setattr__(self, name, canonical)
-            if not canonical.is_dir():
+            object.__setattr__(self, name, path)
+            if not path.is_dir():
                 raise ValueError(f"{name} must be an existing directory")
         if self.active_root == self.rollback_root:
             raise ValueError("active root and rollback root must differ")
