@@ -584,7 +584,7 @@ def test_settings_require_positive_values(field):
         Settings(**{field: 0})
 
 
-def test_readiness_deployment_contracts():
+def test_readiness_and_lite_ci_deployment_contracts():
     root = Path(__file__).resolve().parents[2]
     compose = yaml.safe_load(
         (root / "backend" / "docker-compose.yml").read_text(encoding="utf-8")
@@ -600,26 +600,7 @@ def test_readiness_deployment_contracts():
     triggers = ci.get("on", ci.get(True))
     assert set(triggers["push"]["branches"]) == {"main", "master", "develop"}
     assert set(triggers["pull_request"]["branches"]) == {"main", "master"}
-    steps = ci["jobs"]["build"]["steps"]
-    login = next(step for step in steps if step["name"] == "Log in to GitHub Container Registry")
-    publish = next(step for step in steps if step["name"] == "Push main/master image to GHCR")
-    expected_publish_condition = (
-        "github.event_name == 'push' && "
-        "(github.ref_name == 'main' || github.ref_name == 'master')"
-    )
-    assert login["if"] == expected_publish_condition
-    assert publish["if"] == expected_publish_condition
-    build = next(step for step in steps if step["name"] == "Build image for smoke test")
-    assert build["with"]["push"] is False
-    assert build["with"]["load"] is True
-    smoke = next(step for step in steps if step["name"] == "Smoke-test the image")["run"]
-    assert "POMODOROXII_ENVIRONMENT=production" in smoke
-    assert "POMODOROXII_SECRET_KEY=" in smoke
-    assert "-v pomodoroxii-smoke-data:/app/data" in smoke
-    assert "POMODOROXII_DATABASE_URL=sqlite+aiosqlite:////app/data/meta.db" in smoke
-    assert "POMODOROXII_SPACES_DATA_DIR=/app/data/spaces" in smoke
-    assert "/api/ready" in smoke
-    assert "docker volume rm -f pomodoroxii-smoke-data" in smoke
-    publish_run = publish["run"]
-    assert 'docker push "$IMAGE:${{ github.sha }}"' in publish_run
-    assert 'docker push "$IMAGE:latest"' in publish_run
+    assert set(ci["jobs"]) == {"test"}
+    source = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "docker/" not in source
+    assert "docker push" not in source
