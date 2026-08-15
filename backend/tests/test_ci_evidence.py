@@ -39,22 +39,18 @@ def _step(name: str) -> dict[str, object]:
 
 
 def test_ci_uses_one_run_scoped_artifact_tree() -> None:
-    env = _test_job()["env"]
-    assert isinstance(env, dict)
-    run_scope = "${{ github.run_id }}-${{ github.run_attempt }}"
+    prepare = _step("Prepare run-scoped artifact directories")
+    script = str(prepare["run"])
 
-    assert env["POMODOROXII_CI_RUN_ROOT"] == (
-        f"${{{{ runner.temp }}}}/pomodoroxii-ci/{run_scope}"
-    )
-    assert env["POMODOROXII_CI_RESULTS_DIR"] == (
-        f"${{{{ runner.temp }}}}/pomodoroxii-ci/{run_scope}/results"
-    )
-    assert env["POMODOROXII_TEST_ARTIFACTS_ROOT"] == (
-        f"${{{{ runner.temp }}}}/pomodoroxii-ci/{run_scope}/pomodoroxii-test-artifacts"
-    )
-    assert env["POMODOROXII_STRUCTURED_LOG_PATH"] == (
-        f"${{{{ runner.temp }}}}/pomodoroxii-ci/{run_scope}/results/backend.jsonl"
-    )
+    assert (
+        'Join-Path $env:RUNNER_TEMP "pomodoroxii-ci/$env:GITHUB_RUN_ID-'
+        '$env:GITHUB_RUN_ATTEMPT"'
+    ) in script
+    assert '"POMODOROXII_CI_RUN_ROOT=$root"' in script
+    assert '"POMODOROXII_CI_RESULTS_DIR=$results"' in script
+    assert '"POMODOROXII_TEST_ARTIFACTS_ROOT=$artifacts"' in script
+    assert '"POMODOROXII_STRUCTURED_LOG_PATH=$structuredLog"' in script
+    assert "Add-Content -LiteralPath $env:GITHUB_ENV" in script
 
 
 def test_ci_runs_backend_tests_with_junit_coverage_and_jsonl() -> None:
@@ -63,14 +59,13 @@ def test_ci_runs_backend_tests_with_junit_coverage_and_jsonl() -> None:
     prepare_script = str(prepare["run"])
     run_script = str(run["run"])
 
-    assert 'mkdir -p "$POMODOROXII_CI_RESULTS_DIR"' in prepare_script
-    assert 'mkdir -p "$POMODOROXII_TEST_ARTIFACTS_ROOT"' in prepare_script
-    assert "uv run pytest tests/" in run_script
-    assert "--junitxml=$POMODOROXII_CI_RESULTS_DIR/junit.xml" in run_script
+    assert "New-Item -ItemType Directory -Force -Path $results, $artifacts" in prepare_script
+    assert "& uv run pytest @pytestArgs" in run_script
+    assert "--junitxml=$env:POMODOROXII_CI_RESULTS_DIR/junit.xml" in run_script
     assert "--cov=app" in run_script
     assert "--cov-branch" in run_script
-    assert "--cov-report=xml:$POMODOROXII_CI_RESULTS_DIR/coverage.xml" in run_script
-    assert "2>&1 | tee $POMODOROXII_CI_RESULTS_DIR/pytest.log" in run_script
+    assert "--cov-report=xml:$env:POMODOROXII_CI_RESULTS_DIR/coverage.xml" in run_script
+    assert '2>&1 | Tee-Object -FilePath "$env:POMODOROXII_CI_RESULTS_DIR/pytest.log"' in run_script
 
 
 def test_ci_retains_results_always_and_sandboxes_only_on_failure() -> None:
@@ -84,7 +79,10 @@ def test_ci_retains_results_always_and_sandboxes_only_on_failure() -> None:
     assert results_with["name"] == (
         "backend-test-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
     )
-    assert results_with["path"] == "${{ env.POMODOROXII_CI_RESULTS_DIR }}"
+    assert results_with["path"] == (
+        "${{ runner.temp }}/pomodoroxii-ci/${{ github.run_id }}-"
+        "${{ github.run_attempt }}/results"
+    )
     assert results_with["if-no-files-found"] == "error"
 
     assert failed["if"] == "failure()"
@@ -94,7 +92,10 @@ def test_ci_retains_results_always_and_sandboxes_only_on_failure() -> None:
     assert failed_with["name"] == (
         "backend-failed-sandboxes-${{ github.run_id }}-${{ github.run_attempt }}"
     )
-    assert failed_with["path"] == "${{ env.POMODOROXII_TEST_ARTIFACTS_ROOT }}"
+    assert failed_with["path"] == (
+        "${{ runner.temp }}/pomodoroxii-ci/${{ github.run_id }}-"
+        "${{ github.run_attempt }}/pomodoroxii-test-artifacts"
+    )
     assert failed_with["if-no-files-found"] == "warn"
     assert "pomodoroxii-test-artifacts" not in str(results_with["path"])
 

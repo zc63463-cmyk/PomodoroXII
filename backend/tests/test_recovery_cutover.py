@@ -55,12 +55,14 @@ _CUTOVER_ROOTS: list[Path] = []
 def _dedicated_root() -> Path:
     """Behaviour tests rename directories heavily; pytest tmp_path safe-delete
     (recycle bin unavailable on this host) leaves residual directory handles
-    that make subsequent Windows renames fail.  Behaviour tests therefore run
-    on a dedicated root under E:/DevTemp that the fixture removes itself.
+    that make subsequent Windows renames fail.  Prefer the developer's
+    dedicated root when it exists, otherwise use the host temporary directory.
     """
     import tempfile as _tempfile
 
-    root = Path(_tempfile.mkdtemp(prefix="pxii-cutover-", dir="E:/DevTemp"))
+    preferred_root = Path("E:/DevTemp")
+    directory = preferred_root if preferred_root.is_dir() else None
+    root = Path(_tempfile.mkdtemp(prefix="pxii-cutover-", dir=directory))
     _CUTOVER_ROOTS.append(root)
     return root
 

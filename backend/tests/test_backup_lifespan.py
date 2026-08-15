@@ -143,7 +143,16 @@ async def test_initial_snapshot_failure_aborts_startup(
             return None
 
     class FailingScheduler:
-        def __init__(self, service, target, signals, *, interval_hours, retention_count) -> None:
+        def __init__(
+            self,
+            service,
+            target,
+            signals,
+            *,
+            interval_hours,
+            retention_count,
+            operation_recorder=None,
+        ) -> None:
             self.signals = signals
             self.started = False
 

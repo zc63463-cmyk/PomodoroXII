@@ -239,8 +239,6 @@ async def test_http_metrics_labels_are_low_cardinality(client) -> None:
     # appear as label values.
     assert "not-a-real-space-id-12345" not in block
     assert "definitely-not-a-route" not in block
-    assert "entity_id" not in block
-    assert "request_id" not in block
     assert token not in block
     # Route labels are matched templates (relative sub-router templates are
     # fine) or "unmatched"; the raw URIs this test drove must never appear.
@@ -252,6 +250,16 @@ async def test_http_metrics_labels_are_low_cardinality(client) -> None:
         assert label != "not-a-real-space-id-12345", label
         assert label != "definitely-not-a-route", label
         assert "/api/v1/spaces/not-a-real-space-id-12345" not in label
+
+    samples = [
+        line
+        for line in block.splitlines()
+        if line.startswith("pomodoroxii_http_requests_total{")
+    ]
+    assert samples
+    for sample in samples:
+        names = set(_re.findall(r"[{,]([a-z_]+)=", sample))
+        assert names == {"method", "route", "status_class"}
 
 
 async def test_http_metrics_use_route_template_not_raw_uri(client) -> None:
@@ -607,7 +615,9 @@ def test_data_root_probe_fails_closed_when_probe_cannot_be_removed(
 
 
 def test_slo_latency_query_keeps_histogram_bucket_boundary() -> None:
-    slo = Path("backend/docs/SLO.md").read_text(encoding="utf-8")
+    slo = (Path(__file__).resolve().parents[1] / "docs" / "SLO.md").read_text(
+        encoding="utf-8"
+    )
 
     assert "sum by (le, route, method)" in slo
     assert 'route=~"/api/v1/sync/.*"' in slo
