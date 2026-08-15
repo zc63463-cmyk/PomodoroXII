@@ -17,6 +17,9 @@ def _make_settings(**env_overrides: str | None) -> Settings:
             "sync_cursor_secret",
             "test-sync-cursor-secret-0123456789abcdef",
         )
+        # Secret-policy tests are independent of the scheduler.  The required
+        # external backup target is covered by test_recovery_scheduler.
+        env_overrides.setdefault("backup_enabled", "false")
     old_values: dict[str, str | None] = {}
     for key, value in env_overrides.items():
         env_key = f"POMODOROXII_{key.upper()}"
@@ -113,8 +116,8 @@ class TestCorsOrigins:
         assert len(s.cors_origins) >= 1
 
 
-def test_backup_enabled_defaults_false():
-    assert _make_settings(backup_enabled=None).backup_enabled is False
+def test_backup_enabled_defaults_true():
+    assert _make_settings(backup_enabled=None).backup_enabled is True
 
 
 def test_data_root_drives_canonical_meta_and_spaces_layout(tmp_path):
