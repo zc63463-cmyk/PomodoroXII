@@ -106,6 +106,19 @@ async def test_metrics_operations_token_returns_200_prometheus_contract(client) 
     assert "pomodoroxii_api_up 1" in response.text
 
 
+@pytest.mark.parametrize(
+    ("operation", "outcome"),
+    [("space-123", "success"), ("snapshot", "user-controlled-result")],
+)
+def test_recovery_metric_rejects_unbounded_label_values(
+    operation: str, outcome: str
+) -> None:
+    from app.ops.routes import record_recovery_operation
+
+    with pytest.raises(ValueError, match="unsupported recovery metric label"):
+        record_recovery_operation(operation, outcome)
+
+
 async def test_metrics_revoked_operations_token_returns_403(client) -> None:
     from app.db.meta_session import get_meta_session
     from app.ops.credentials import OperationsCredentialStore
@@ -117,6 +130,83 @@ async def test_metrics_revoked_operations_token_returns_403(client) -> None:
         "/api/metrics", headers={"authorization": f"Bearer {token}"}
     )
     assert response.status_code == 403
+
+
+async def test_metrics_collect_real_fleet_state_without_identity_labels(client) -> None:
+    import sqlite3
+
+    from sqlalchemy import select
+
+    from app.db.meta_session import get_meta_session
+    from app.db.models.meta import Space
+
+    setup = await client.post(
+        "/api/v1/auth/setup", json={"password": "test-password-123"}
+    )
+    assert setup.status_code == 201
+    login = await client.post(
+        "/api/v1/auth/login", json={"password": "test-password-123"}
+    )
+    master_token = login.json()["access_token"]
+    created = await client.post(
+        "/api/v1/spaces",
+        json={"name": "observability-fleet-space"},
+        headers={"authorization": f"Bearer {master_token}"},
+    )
+    assert created.status_code == 201
+    space_id = created.json()["id"]
+
+    async for session in get_meta_session():
+        row = await session.scalar(select(Space).where(Space.id == space_id))
+        assert row is not None
+        space_db = Path(row.db_path)
+        break
+    else:
+        raise AssertionError("meta session never yielded")
+
+    timestamp = "2026-08-15T00:00:00.000Z"
+    with sqlite3.connect(space_db) as connection:
+        connection.execute(
+            "INSERT INTO mutation_batches "
+            "(batch_id,command_hash,state,accepted_count,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("pending-batch", "a" * 64, "INTENT", 0, timestamp, timestamp),
+        )
+        connection.execute(
+            "UPDATE sync_state SET retention_floor=0,current_cursor=3 WHERE id=1"
+        )
+        connection.execute(
+            "INSERT INTO sync_clients "
+            "(client_id,ack_sequence,catalog_hash,registered_at,last_seen_at,expires_at,"
+            "requires_recovery,recovery_generation) VALUES (?,?,?,?,?,?,?,?)",
+            ("client-a", 1, "b" * 64, timestamp, timestamp, timestamp, 0, 0),
+        )
+        for sequence in range(1, 4):
+            connection.execute(
+                "INSERT INTO sync_outbox "
+                "(id,entity_type,entity_id,action,payload,created_at,visible) "
+                "VALUES (?,?,?,?,?,?,1)",
+                (sequence, "note", f"note-{sequence}", "update", "{}", timestamp),
+            )
+
+    token = await _issue_operations_token()
+    response = await client.get(
+        "/api/metrics", headers={"authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 200
+    assert "pomodoroxii_pending_mutations 1.0" in response.text
+    assert "pomodoroxii_sync_lag_events 2.0" in response.text
+    assert "pomodoroxii_degraded_spaces 0.0" in response.text
+    oldest_age = next(
+        float(line.rsplit(" ", 1)[1])
+        for line in response.text.splitlines()
+        if line.startswith("pomodoroxii_pending_mutation_oldest_age_seconds ")
+    )
+    assert oldest_age > 300
+    assert space_id not in _find_metric_block(
+        response.text, "pomodoroxii_pending_mutations"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -189,6 +279,39 @@ async def test_http_metrics_unmatched_route_label_used_for_404(client) -> None:
     assert 'route="unmatched"' in block
 
 
+async def test_http_metrics_count_unhandled_exception_as_5xx() -> None:
+    from starlette.requests import Request
+
+    from app.middleware import RequestMetricsMiddleware
+    from app.ops.routes import HTTP_REQUESTS
+
+    labels = HTTP_REQUESTS.labels("GET", "unmatched", "5xx")
+    before = labels._value.get()
+    middleware = RequestMetricsMiddleware(lambda _scope, _receive, _send: None)
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/boom",
+            "raw_path": b"/boom",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("test", 80),
+        }
+    )
+
+    async def fail(_request):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await middleware.dispatch(request, fail)
+
+    assert labels._value.get() == before + 1
+
+
 def _find_metric_block(text: str, name: str) -> str:
     """Return the HELP..series block for *name*; fail if the metric is absent."""
     lines = text.splitlines()
@@ -221,6 +344,50 @@ async def test_ready_checks_data_root_write_probe(client, monkeypatch) -> None:
         "detail": "Service is not ready",
         "error_type": "service_not_ready",
     }
+
+
+async def test_ready_checks_meta_main_database_write_probe(client, monkeypatch) -> None:
+    import app.main as main_module
+
+    calls = 0
+
+    async def reject_main_write(connection) -> None:
+        nonlocal calls
+        calls += 1
+        raise OSError("meta database is read only")
+
+    monkeypatch.setattr(main_module, "_probe_meta_writable", reject_main_write)
+    response = await client.get("/api/ready")
+
+    assert calls == 1
+    assert response.status_code == 503
+    assert response.json()["error_type"] == "service_not_ready"
+
+
+async def test_meta_write_probe_rejects_real_read_only_database(tmp_path: Path) -> None:
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.main import _probe_meta_writable
+
+    meta_db = tmp_path / "readonly-meta.db"
+    with sqlite3.connect(meta_db) as connection:
+        connection.execute(
+            "CREATE TABLE alembic_version_meta (version_num TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO alembic_version_meta VALUES ('meta_001')")
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///file:{meta_db.as_posix()}?mode=ro&uri=true"
+    )
+    try:
+        async with engine.connect() as connection:
+            with pytest.raises(OperationalError, match="readonly database"):
+                await _probe_meta_writable(connection)
+    finally:
+        await engine.dispose()
 
 
 async def test_ready_failure_redacts_paths_and_internal_detail(
@@ -361,6 +528,18 @@ def test_structured_jsonl_is_parseable_and_redacted(
     logger = logging.getLogger("pomodoroxi.test")
     logger.info("startup complete at %s", "E:/Users/secret-owner/AppData/pxii")
     logger.info("token=%s password=%s", "raw-token-value", "raw-password-value")
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQtb3duZXIifQ.signature-value"
+    logger.info("Authorization: Bearer %s", jwt)
+    logger.info('{"authorization":"Bearer %s"}', jwt)
+    logger.info("headers={'Authorization': 'Bearer %s'}", jwt)
+    request_jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJyZXF1ZXN0LWlkIn0.request-signature"
+    request_token = logging_module.request_id_var.set(
+        f"Authorization: Bearer {request_jwt}"
+    )
+    try:
+        logger.info("request-bound message")
+    finally:
+        logging_module.request_id_var.reset(request_token)
 
     handler = next(
         h
@@ -381,3 +560,60 @@ def test_structured_jsonl_is_parseable_and_redacted(
         assert "AppData" not in text
         assert "raw-token-value" not in text
         assert "raw-password-value" not in text
+        assert jwt not in text
+        assert request_jwt not in text
+
+
+def test_close_structured_logging_removes_and_closes_file_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.logging as logging_module
+    import app.settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module.settings,
+        "structured_log_path",
+        tmp_path / "structured-close.jsonl",
+    )
+    logging_module.setup_logging()
+    root = logging.getLogger()
+    handler = next(
+        h for h in root.handlers if getattr(h, "_pomodoroxii_structured", False)
+    )
+
+    logging_module.close_structured_logging()
+
+    assert handler not in root.handlers
+    assert getattr(handler, "stream", None) is None
+
+
+def test_data_root_probe_fails_closed_when_probe_cannot_be_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.main as main_module
+    import app.settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "data_root", tmp_path)
+    original_unlink = Path.unlink
+
+    def reject_probe_unlink(path: Path, *args, **kwargs) -> None:
+        if path.name.startswith(".readiness_probe_"):
+            raise PermissionError("probe removal denied")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", reject_probe_unlink)
+    with pytest.raises(PermissionError, match="probe removal denied"):
+        main_module._probe_data_root()
+
+
+def test_slo_latency_query_keeps_histogram_bucket_boundary() -> None:
+    slo = Path("backend/docs/SLO.md").read_text(encoding="utf-8")
+
+    assert "sum by (le, route, method)" in slo
+    assert 'route=~"/api/v1/sync/.*"' in slo
+    assert 'route=~"/sync.*"' not in slo
+    assert "status != 'committed'" not in slo
+    assert "pomodoroxii_pending_mutation_oldest_age_seconds" in slo
+    assert "< 300 seconds" in slo
+    assert "< 26 h" in slo
+    assert "older than 24 h" not in slo

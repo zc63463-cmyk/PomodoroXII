@@ -38,7 +38,16 @@ class RequestMetricsMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         start = time.perf_counter()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            HTTP_REQUESTS.labels(
+                request.method, _route_template(request), "5xx"
+            ).inc()
+            HTTP_LATENCY.labels(
+                request.method, _route_template(request), "5xx"
+            ).observe(time.perf_counter() - start)
+            raise
         labels = (
             request.method,
             _route_template(request),
