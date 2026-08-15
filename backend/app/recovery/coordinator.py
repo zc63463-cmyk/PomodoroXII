@@ -1753,11 +1753,19 @@ class RecoveryCoordinator:
             expected_root = target / "spaces" / str(space_id)
             registered_db = Path(str(db_path)).expanduser().absolute()
             registered_notes = Path(str(notes_dir)).expanduser().absolute()
+            try:
+                RecoveryCoordinator._assert_regular_source_ancestor(registered_db, target)
+                RecoveryCoordinator._assert_regular_source_ancestor(registered_notes, target)
+            except DomainFailure as exc:
+                raise DomainFailure(
+                    "restore_relocation_required",
+                    f"Space {space_id!r} is registered for a different active root",
+                ) from exc
             if (
                 _is_link_or_reparse(registered_db)
                 or _is_link_or_reparse(registered_notes)
-                or registered_db != expected_root / "space.db"
-                or registered_notes != expected_root / "notes"
+                or registered_db.resolve() != (expected_root / "space.db").resolve()
+                or registered_notes.resolve() != (expected_root / "notes").resolve()
             ):
                 raise DomainFailure(
                     "restore_relocation_required",

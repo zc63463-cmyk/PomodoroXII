@@ -516,6 +516,10 @@ def test_source_path_accepts_windows_directory_alias(tmp_path: Path, monkeypatch
 
     coordinator._assert_source_path(active_root / "meta.db")
     assert coordinator._registered_spaces()[0].space_id == "alpha"
+    staging = tmp_path / "staging"
+    _make_meta_db(staging / "meta.db", active_root / "spaces" / "alpha")
+    manifest = SimpleNamespace(spaces=(SimpleNamespace(space_id="alpha"),))
+    coordinator._verify_staged_registry_paths(staging, manifest, coordinator.active_root)
 
 
 async def _dispose(engines: list[object]) -> None:
