@@ -390,7 +390,10 @@ def test_baseline_subject_modules_findings_and_scores_are_locked() -> None:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("POMODOROXII_TEST_ARTIFACTS_ROOT"),
+    not (
+        os.environ.get("POMODOROXII_VERIFY_BASELINE_EXTERNAL_EVIDENCE")
+        and os.environ.get("POMODOROXII_TEST_ARTIFACTS_ROOT")
+    ),
     reason="external S0 evidence root is not configured",
 )
 def test_baseline_external_artifacts_verify_when_configured() -> None:

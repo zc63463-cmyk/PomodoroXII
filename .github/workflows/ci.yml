@@ -107,7 +107,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify backend test evidence
-        if: always()
+        if: success()
         run: uv run python scripts/ci/verify_test_artifacts.py "$POMODOROXII_CI_RESULTS_DIR"
 
       - name: Upload backend test evidence
