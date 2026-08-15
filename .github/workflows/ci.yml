@@ -36,6 +36,7 @@ jobs:
     steps:
       - name: Configure checkout line endings
         shell: pwsh
+        working-directory: .
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
