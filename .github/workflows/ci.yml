@@ -40,6 +40,9 @@ jobs:
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
+          $backupTarget = Join-Path $env:RUNNER_TEMP 'pomodoroxii-backups'
+          "POMODOROXII_BACKUP_TARGET_DIR=$backupTarget" | Add-Content -LiteralPath $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force -Path $backupTarget | Out-Null
 
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
