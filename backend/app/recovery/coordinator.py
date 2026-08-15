@@ -376,7 +376,11 @@ class RecoveryCoordinator:
         active_root_input = Path(active_root or self.source_root).expanduser().absolute()
         if _is_link_or_reparse(active_root_input):
             raise DomainFailure("snapshot_invalid", "active root may not be a symlink or reparse point")
-        self.active_root = active_root_input
+        # Keep the original trusted spelling for raw ancestor checks.  On
+        # Windows, ``resolve()`` can legitimately return an equivalent 8.3
+        # path, which must be used for physical containment comparisons.
+        self._active_root_boundary = active_root_input
+        self.active_root = active_root_input.resolve()
         self.catalog = catalog
         self.meta = meta
         self.spaces = spaces
@@ -549,9 +553,31 @@ class RecoveryCoordinator:
             expected_notes = (root / "notes").resolve()
             registered_db = Path(db_path).expanduser().absolute()
             registered_notes = Path(notes_dir).expanduser().absolute()
-            if _is_link_or_reparse(registered_db) or registered_db != expected_db:
+            if _is_link_or_reparse(registered_db):
                 raise DomainFailure("snapshot_invalid", f"noncanonical Space DB path: {space_id}")
-            if _is_link_or_reparse(registered_notes) or registered_notes != expected_notes:
+            if registered_db.exists():
+                try:
+                    self._assert_regular_source_ancestor(
+                        registered_db, self._active_root_boundary
+                    )
+                except DomainFailure as exc:
+                    raise DomainFailure(
+                        "snapshot_invalid", f"noncanonical Space DB path: {space_id}"
+                    ) from exc
+            if registered_db.resolve() != expected_db:
+                raise DomainFailure("snapshot_invalid", f"noncanonical Space DB path: {space_id}")
+            if _is_link_or_reparse(registered_notes):
+                raise DomainFailure("snapshot_invalid", f"noncanonical Notes path: {space_id}")
+            if registered_notes.exists():
+                try:
+                    self._assert_regular_source_ancestor(
+                        registered_notes, self._active_root_boundary
+                    )
+                except DomainFailure as exc:
+                    raise DomainFailure(
+                        "snapshot_invalid", f"noncanonical Notes path: {space_id}"
+                    ) from exc
+            if registered_notes.resolve() != expected_notes:
                 raise DomainFailure("snapshot_invalid", f"noncanonical Notes path: {space_id}")
             spaces.append(
                 SimpleNamespace(
@@ -595,28 +621,35 @@ class RecoveryCoordinator:
             path.resolve().relative_to(self.active_root)
         except ValueError as exc:
             raise DomainFailure("snapshot_invalid", f"source escapes active root: {path}") from exc
-        self._assert_regular_source_ancestor(path, self.active_root)
+        self._assert_regular_source_ancestor(path, self._active_root_boundary)
 
     @staticmethod
     def _assert_regular_source_ancestor(path: Path, root: Path) -> None:
         """Reject every symlink or reparse segment without resolving through it."""
         candidate = Path(path).absolute()
         boundary = Path(root).absolute()
-        try:
-            relative = candidate.relative_to(boundary)
-        except ValueError as exc:
-            raise DomainFailure(
-                "snapshot_invalid", f"source escapes active root: {candidate}"
-            ) from exc
-        current = boundary
-        if _is_link_or_reparse(current):
+        if _is_link_or_reparse(boundary):
             raise DomainFailure("snapshot_invalid", f"symlinked source root: {boundary}")
-        for segment in relative.parts:
-            current = current / segment
+        current = candidate
+        while True:
             if _is_link_or_reparse(current):
                 raise DomainFailure(
                     "snapshot_invalid", f"symlinked source ancestor: {current}"
                 )
+            try:
+                if os.path.samefile(current, boundary):
+                    return
+            except OSError as exc:
+                raise DomainFailure(
+                    "snapshot_invalid", f"source ancestor is unavailable: {current}"
+                ) from exc
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        raise DomainFailure(
+            "snapshot_invalid", f"source escapes active root: {candidate}"
+        )
 
     @staticmethod
     def _reject_symlink_path(path: Path) -> None:
