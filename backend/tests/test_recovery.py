@@ -479,6 +479,45 @@ def _coordinator(tmp_path: Path, *, real_authorities: bool = True):
     return coordinator, leases, active_root, engines
 
 
+def test_source_path_accepts_windows_directory_alias(tmp_path: Path, monkeypatch) -> None:
+    """Containment accepts an equivalent Windows short-name path."""
+    active_root = tmp_path / "active"
+    alias_root = tmp_path / "ACTIVE~1"
+    original_resolve = Path.resolve
+    original_samefile = os.path.samefile
+
+    def _physical(path) -> Path:
+        candidate = Path(path).absolute()
+        try:
+            return active_root / candidate.relative_to(alias_root)
+        except ValueError:
+            return candidate
+
+    def _windows_alias_resolve(path: Path, *args, **kwargs) -> Path:
+        resolved = original_resolve(path, *args, **kwargs)
+        try:
+            relative = resolved.relative_to(active_root)
+        except ValueError:
+            return resolved
+        return alias_root / relative
+
+    def _windows_alias_samefile(left, right) -> bool:
+        return original_samefile(_physical(left), _physical(right))
+
+    from app.recovery import coordinator as recovery_module
+
+    def _open_windows_alias(path: Path) -> sqlite3.Connection:
+        return sqlite3.connect(f"{_physical(path).as_uri()}?mode=ro", uri=True)
+
+    monkeypatch.setattr(Path, "resolve", _windows_alias_resolve)
+    monkeypatch.setattr(os.path, "samefile", _windows_alias_samefile)
+    monkeypatch.setattr(recovery_module, "_open_sqlite_read_only", _open_windows_alias)
+    coordinator, _leases, _active_root, _engines = _coordinator(tmp_path)
+
+    coordinator._assert_source_path(active_root / "meta.db")
+    assert coordinator._registered_spaces()[0].space_id == "alpha"
+
+
 async def _dispose(engines: list[object]) -> None:
     for engine in engines:
         await engine.dispose()
