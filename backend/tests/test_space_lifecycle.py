@@ -211,6 +211,46 @@ async def test_scope_acquires_global_before_registered_meta_resolve() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scope_observation_open_requires_trusted_principal_and_skips_recovery() -> None:
+    from app.auth.authority import Principal
+    from app.errors import AuthorizationError
+    from app.runtime.scope import AuthorizedSpaceScope
+
+    calls: list[tuple[object, ...]] = []
+
+    class Leases:
+        async def acquire_global(self, *_args):
+            calls.append(("global",))
+            return _FakeLease("global")
+
+    async def open_resolved(*args, **kwargs):
+        calls.append(("open_resolved", *args[1:], kwargs["_skip_recovery"]))
+        return "observation-handle"
+
+    runtime = SimpleNamespace(leases=Leases(), open_resolved=open_resolved)
+    scope = AuthorizedSpaceScope(SimpleNamespace(), Path.cwd(), runtime)
+
+    async def resolve(principal, space_id, mode):
+        calls.append(("resolve", principal.token_type, space_id, mode))
+        return "resolved-scope"
+
+    scope.resolve = resolve
+    trusted = Principal("metrics", "trusted_stdio", 1, None)
+
+    assert await scope.open_observation(trusted, "space-a") == "observation-handle"
+    assert calls[0] == ("global",)
+    assert calls[1] == ("resolve", "trusted_stdio", "space-a", "read")
+    assert calls[2][0] == "open_resolved"
+    assert calls[2][1] == "read"
+    assert calls[2][-1] is True
+
+    calls.clear()
+    with pytest.raises(AuthorizationError):
+        await scope.open_observation(Principal("user", "master", 1, None), "space-a")
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_mutation_open_defers_space_resources_until_exclusive_guard() -> None:
     from app.runtime.space import SpaceRuntime
 

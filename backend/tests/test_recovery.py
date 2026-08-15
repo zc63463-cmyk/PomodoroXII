@@ -514,6 +514,7 @@ def test_source_path_accepts_windows_directory_alias(tmp_path: Path, monkeypatch
     monkeypatch.setattr(recovery_module, "_open_sqlite_read_only", _open_windows_alias)
     coordinator, _leases, _active_root, _engines = _coordinator(tmp_path)
 
+    assert coordinator.active_root == active_root
     coordinator._assert_source_path(active_root / "meta.db")
     assert coordinator._registered_spaces()[0].space_id == "alpha"
     staging = tmp_path / "staging"

@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, Response, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.authority import Principal
@@ -26,7 +26,6 @@ from app.deps import get_meta_db
 from app.errors import AuthenticationError
 from app.ops.credentials import OperationsCredentialStore, OperationsPrincipal
 from app.runtime.scope import AuthorizedSpaceScope
-from app.runtime.sqlite_vfs import MaintenanceOptions
 from app.schemas.common import ErrorResponse
 
 router = APIRouter()
@@ -170,6 +169,9 @@ async def _update_fleet_gauges(
 
     from app.db.meta_session import get_meta_session_factory
     from app.db.models.meta import Space
+    from app.models.mutation import MutationBatch
+    from app.models.sync_client import SyncClient
+    from app.models.sync_outbox import SyncOutbox
     from app.settings import settings
 
     factory = get_meta_session_factory()
@@ -195,14 +197,19 @@ async def _update_fleet_gauges(
                 if not health.available:
                     degraded_spaces += 1
                     continue
-                async with scope.containment.open_verified() as opens:
-                    with opens.database_target.open_maintenance(
-                        MaintenanceOptions(read_only=True)
-                    ) as connection:
-                        pending_row = connection.execute(
-                            "SELECT COUNT(*),MIN(updated_at) FROM mutation_batches "
-                            "WHERE state NOT IN ('FINALIZED','ABORTED','COMPENSATED')"
-                        ).fetchone()
+                async with await scope_authority.open_observation(trusted, row.id) as handle:
+                    async with handle.session_factory() as session:
+                        pending_row = (
+                            await session.execute(
+                                select(
+                                    func.count(), func.min(MutationBatch.updated_at)
+                                ).where(
+                                    MutationBatch.state.not_in(
+                                        ("FINALIZED", "ABORTED", "COMPENSATED")
+                                    )
+                                )
+                            )
+                        ).one()
                         local_pending = int(pending_row[0])
                         local_oldest_epoch = None
                         if pending_row[1] is not None:
@@ -216,17 +223,22 @@ async def _update_fleet_gauges(
                                 if oldest_pending_epoch is None
                                 else min(oldest_pending_epoch, local_oldest_epoch)
                             )
-                        minimum_ack = connection.execute(
-                            "SELECT MIN(ack_sequence) FROM sync_clients "
-                            "WHERE requires_recovery=0"
-                        ).fetchone()[0]
+                        minimum_ack = await session.scalar(
+                            select(func.min(SyncClient.ack_sequence)).where(
+                                SyncClient.requires_recovery.is_(False)
+                            )
+                        )
                         if minimum_ack is not None:
                             sync_lag_events += int(
-                                connection.execute(
-                                    "SELECT COUNT(*) FROM sync_outbox "
-                                    "WHERE visible=1 AND id>?",
-                                    (int(minimum_ack),),
-                                ).fetchone()[0]
+                                await session.scalar(
+                                    select(func.count())
+                                    .select_from(SyncOutbox)
+                                    .where(
+                                        SyncOutbox.visible.is_(True),
+                                        SyncOutbox.id > int(minimum_ack),
+                                    )
+                                )
+                                or 0
                             )
             except Exception as exc:  # one unavailable Space must not hide fleet metrics
                 degraded_spaces += 1

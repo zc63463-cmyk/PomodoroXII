@@ -287,6 +287,29 @@ class AuthorizedSpaceScope:
         space_id: str,
         mode: AccessMode,
     ) -> SpaceRuntimeHandle:
+        return await self._open(principal, space_id, mode, skip_recovery=False)
+
+    async def open_observation(
+        self, principal: Principal, space_id: str
+    ) -> SpaceRuntimeHandle:
+        """Open a trusted read handle for fleet observation without recovery.
+
+        Metrics must be able to report an unfinished mutation instead of
+        attempting to repair it.  Registry binding, containment verification
+        and shared leases still apply; this bypass is unavailable to requests.
+        """
+        if principal.token_type != "trusted_stdio":
+            raise AuthorizationError("Observation access requires a trusted principal")
+        return await self._open(principal, space_id, "read", skip_recovery=True)
+
+    async def _open(
+        self,
+        principal: Principal,
+        space_id: str,
+        mode: AccessMode,
+        *,
+        skip_recovery: bool,
+    ) -> SpaceRuntimeHandle:
         global_lease = await self.runtime.leases.acquire_global(
             LeaseMode.SHARED, "request", 5
         )
@@ -306,6 +329,7 @@ class AuthorizedSpaceScope:
             "read" if mode == "read" else "mutation",
             global_lease,
             owns_global_lease=True,
+            _skip_recovery=skip_recovery,
         )
 
     async def resolve(

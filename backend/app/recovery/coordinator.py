@@ -376,11 +376,12 @@ class RecoveryCoordinator:
         active_root_input = Path(active_root or self.source_root).expanduser().absolute()
         if _is_link_or_reparse(active_root_input):
             raise DomainFailure("snapshot_invalid", "active root may not be a symlink or reparse point")
-        # Keep the original trusted spelling for raw ancestor checks.  On
-        # Windows, ``resolve()`` can legitimately return an equivalent 8.3
-        # path, which must be used for physical containment comparisons.
+        # Keep the caller's spelling for paths returned to callers and stored
+        # in proofs.  Windows may resolve that same directory to an equivalent
+        # 8.3 name, so containment checks use a separate physical form.
         self._active_root_boundary = active_root_input
-        self.active_root = active_root_input.resolve()
+        self.active_root = active_root_input
+        self._active_root_physical = active_root_input.resolve()
         self.catalog = catalog
         self.meta = meta
         self.spaces = spaces
@@ -618,7 +619,7 @@ class RecoveryCoordinator:
         if _is_link_or_reparse(path) or not path.is_file():
             raise DomainFailure("snapshot_invalid", f"invalid source path: {path}")
         try:
-            path.resolve().relative_to(self.active_root)
+            path.resolve().relative_to(self._active_root_physical)
         except ValueError as exc:
             raise DomainFailure("snapshot_invalid", f"source escapes active root: {path}") from exc
         self._assert_regular_source_ancestor(path, self._active_root_boundary)
@@ -1753,6 +1754,20 @@ class RecoveryCoordinator:
             expected_root = target / "spaces" / str(space_id)
             registered_db = Path(str(db_path)).expanduser().absolute()
             registered_notes = Path(str(notes_dir)).expanduser().absolute()
+            expected_db = expected_root / "space.db"
+            expected_notes = expected_root / "notes"
+            if _is_link_or_reparse(registered_db) or _is_link_or_reparse(registered_notes):
+                raise DomainFailure(
+                    "restore_relocation_required",
+                    f"Space {space_id!r} is registered for a different active root",
+                )
+            if not target.exists():
+                if registered_db != expected_db or registered_notes != expected_notes:
+                    raise DomainFailure(
+                        "restore_relocation_required",
+                        f"Space {space_id!r} is registered for a different active root",
+                    )
+                continue
             try:
                 RecoveryCoordinator._assert_regular_source_ancestor(registered_db, target)
                 RecoveryCoordinator._assert_regular_source_ancestor(registered_notes, target)
@@ -1761,12 +1776,7 @@ class RecoveryCoordinator:
                     "restore_relocation_required",
                     f"Space {space_id!r} is registered for a different active root",
                 ) from exc
-            if (
-                _is_link_or_reparse(registered_db)
-                or _is_link_or_reparse(registered_notes)
-                or registered_db.resolve() != (expected_root / "space.db").resolve()
-                or registered_notes.resolve() != (expected_root / "notes").resolve()
-            ):
+            if registered_db.resolve() != expected_db.resolve() or registered_notes.resolve() != expected_notes.resolve():
                 raise DomainFailure(
                     "restore_relocation_required",
                     f"Space {space_id!r} is registered for a different active root",
