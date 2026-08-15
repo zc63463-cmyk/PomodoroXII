@@ -27,13 +27,8 @@ env:
 jobs:
   test:
     name: Backend tests and evidence
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 60
-    env:
-      POMODOROXII_CI_RUN_ROOT: ${{ github.workspace }}/../.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}
-      POMODOROXII_CI_RESULTS_DIR: ${{ github.workspace }}/../.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}/results
-      POMODOROXII_TEST_ARTIFACTS_ROOT: ${{ github.workspace }}/../.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}/pomodoroxii-test-artifacts
-      POMODOROXII_STRUCTURED_LOG_PATH: ${{ github.workspace }}/../.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}/results/backend.jsonl
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
@@ -62,29 +57,41 @@ jobs:
         run: uv run ruff check app tests scripts
 
       - name: Prepare run-scoped artifact directories
+        shell: pwsh
         run: |
-          mkdir -p "$POMODOROXII_CI_RESULTS_DIR"
-          mkdir -p "$POMODOROXII_TEST_ARTIFACTS_ROOT"
+          $root = Join-Path $env:RUNNER_TEMP "pomodoroxii-ci/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $results = Join-Path $root "results"
+          $artifacts = Join-Path $root "pomodoroxii-test-artifacts"
+          $structuredLog = Join-Path $results "backend.jsonl"
+          "POMODOROXII_CI_RUN_ROOT=$root" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "POMODOROXII_CI_RESULTS_DIR=$results" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "POMODOROXII_TEST_ARTIFACTS_ROOT=$artifacts" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "POMODOROXII_STRUCTURED_LOG_PATH=$structuredLog" | Add-Content -LiteralPath $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force -Path $results, $artifacts | Out-Null
+          $env:POMODOROXII_STRUCTURED_LOG_PATH = $structuredLog
           uv run python -c "import logging; from app.logging import close_structured_logging, setup_logging; setup_logging(); logging.getLogger('pomodoroxii.ci').info('backend CI test run started'); close_structured_logging()"
 
       - name: Run backend tests with evidence
+        shell: pwsh
         env:
           PYTHONDONTWRITEBYTECODE: "1"
           PYTHONUNBUFFERED: "1"
         run: |
-          set -o pipefail
-          uv run pytest tests/ \
-            --no-header \
-            -q \
-            --tb=short \
-            --maxfail=10 \
-            -p no:cacheprovider \
-            --junitxml=$POMODOROXII_CI_RESULTS_DIR/junit.xml \
-            --cov=app \
-            --cov-branch \
-            --cov-report=xml:$POMODOROXII_CI_RESULTS_DIR/coverage.xml \
-            --cov-report=term \
-            2>&1 | tee $POMODOROXII_CI_RESULTS_DIR/pytest.log
+          $pytestArgs = @(
+            'tests/',
+            '--no-header',
+            '-q',
+            '--tb=short',
+            '--maxfail=10',
+            '-p', 'no:cacheprovider',
+            "--junitxml=$env:POMODOROXII_CI_RESULTS_DIR/junit.xml",
+            '--cov=app',
+            '--cov-branch',
+            "--cov-report=xml:$env:POMODOROXII_CI_RESULTS_DIR/coverage.xml",
+            '--cov-report=term'
+          )
+          & uv run pytest @pytestArgs 2>&1 | Tee-Object -FilePath "$env:POMODOROXII_CI_RESULTS_DIR/pytest.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify backend test evidence
         if: always()
@@ -95,7 +102,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backend-test-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.POMODOROXII_CI_RESULTS_DIR }}
+          path: ${{ runner.temp }}/pomodoroxii-ci/${{ github.run_id }}-${{ github.run_attempt }}/results
           if-no-files-found: error
           retention-days: 14
 
@@ -104,10 +111,11 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backend-failed-sandboxes-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.POMODOROXII_TEST_ARTIFACTS_ROOT }}
+          path: ${{ runner.temp }}/pomodoroxii-ci/${{ github.run_id }}-${{ github.run_attempt }}/pomodoroxii-test-artifacts
           if-no-files-found: warn
           retention-days: 7
 
       - name: Clean successful run artifacts
         if: success()
-        run: rm -rf -- "$POMODOROXII_CI_RUN_ROOT"
+        shell: pwsh
+        run: Remove-Item -LiteralPath $env:POMODOROXII_CI_RUN_ROOT -Recurse -Force
