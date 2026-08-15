@@ -12,6 +12,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.body_size_limit import BodySizeLimitMiddleware
 from app.errors import register_exception_handlers
@@ -21,6 +22,7 @@ from app.middleware import (
     RequestMetricsMiddleware,
     SecurityHeadersMiddleware,
 )
+from app.ops.routes import record_recovery_operation
 from app.ops.routes import router as ops_router
 from app.ops.signals import OperationalSignals
 from app.rate_limit import RateLimitMiddleware
@@ -42,14 +44,31 @@ def _probe_data_root() -> None:
     probe = root / f".readiness_probe_{uuid4().hex}"
     fd = os.open(str(probe), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
-        os.write(fd, b"readiness")
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    try:
+        try:
+            os.write(fd, b"readiness")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException as exc:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError as cleanup_exc:
+            exc.add_note(f"readiness probe cleanup failed: {type(cleanup_exc).__name__}")
+        raise
+    else:
         probe.unlink()
-    except OSError:
-        pass
+
+
+async def _probe_meta_writable(connection: AsyncConnection) -> None:
+    """Prove the persistent Meta database accepts writes without committing one."""
+    await connection.exec_driver_sql("SAVEPOINT readiness_meta_write_probe")
+    try:
+        await connection.exec_driver_sql(
+            "UPDATE alembic_version_meta SET version_num = version_num || ''"
+        )
+    finally:
+        await connection.exec_driver_sql("ROLLBACK TO SAVEPOINT readiness_meta_write_probe")
+        await connection.exec_driver_sql("RELEASE SAVEPOINT readiness_meta_write_probe")
 
 
 @asynccontextmanager
@@ -84,6 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     signals=app.state.operational_signals,
                     interval_hours=settings.backup_interval_hours,
                     retention_count=settings.backup_retention_count,
+                    operation_recorder=record_recovery_operation,
                 )
                 # The required initial snapshot must succeed before readiness;
                 # a failure aborts startup instead of logging and continuing.
@@ -174,17 +194,7 @@ def create_app() -> FastAPI:
             async with factory() as session:
                 await session.execute(text("SELECT version_num FROM alembic_version_meta LIMIT 1"))
                 connection = await session.connection()
-                await connection.exec_driver_sql("SAVEPOINT readiness_probe")
-                try:
-                    await connection.exec_driver_sql(
-                        "CREATE TEMP TABLE readiness_write_probe (value INTEGER)"
-                    )
-                    await connection.exec_driver_sql(
-                        "INSERT INTO readiness_write_probe (value) VALUES (1)"
-                    )
-                finally:
-                    await connection.exec_driver_sql("ROLLBACK TO SAVEPOINT readiness_probe")
-                    await connection.exec_driver_sql("RELEASE SAVEPOINT readiness_probe")
+                await _probe_meta_writable(connection)
 
             # Runtime must be initialised and, when scheduled recovery is
             # required, a verified snapshot must already exist.

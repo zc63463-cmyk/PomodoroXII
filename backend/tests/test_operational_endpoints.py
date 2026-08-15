@@ -184,13 +184,12 @@ def test_credentials_revoke_disables_metrics_access(
     assert exit_code == 0
 
     async def _verify() -> None:
+        from app.errors import AuthorizationError
+
         async for session in get_meta_session():
             store = OperationsCredentialStore(session)
-            try:
+            with pytest.raises(AuthorizationError):
                 await store.verify(token)
-                raise AssertionError("token should be revoked")
-            except Exception:
-                pass
             break
 
     asyncio.run(_verify())

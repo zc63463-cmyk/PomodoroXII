@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("pomodoroxi.recovery.scheduler")
 
+OperationRecorder = Callable[[str, str], None]
+
 
 @dataclass(frozen=True, slots=True)
 class _VerifiedSnapshot:
@@ -52,6 +54,7 @@ class RecoveryScheduler:
         interval_hours: int = 24,
         retention_count: int = 30,
         failpoint: Callable[[str], None] | None = None,
+        operation_recorder: OperationRecorder | None = None,
     ) -> None:
         self.service = service
         self.target = Path(target).expanduser().absolute()
@@ -59,6 +62,7 @@ class RecoveryScheduler:
         self.interval_hours = int(interval_hours)
         self.retention_count = int(retention_count)
         self.failpoint = failpoint or (lambda _name: None)
+        self.operation_recorder = operation_recorder
         self.task: asyncio.Task | None = None
         self.readiness = False
 
@@ -107,16 +111,22 @@ class RecoveryScheduler:
         try:
             receipt = await self.service.coordinator.snapshot(self.target)
         except BaseException as exc:
+            self._record_operation("snapshot", self._outcome_for_error(exc))
             await self.signals.snapshot_failed(
                 getattr(exc, "record", None).code
                 if getattr(exc, "record", None) is not None
                 else type(exc).__name__
             )
             raise
+        self._record_operation("snapshot", "success")
         return receipt
 
     async def _verify_snapshot(self, receipt) -> None:
-        verification = await self.service.coordinator.verify(receipt)
+        try:
+            verification = await self.service.coordinator.verify(receipt)
+        except BaseException as exc:
+            self._record_operation("verify", self._outcome_for_error(exc))
+            raise
         if (
             verification.valid is not True
             or verification.failures
@@ -125,6 +135,7 @@ class RecoveryScheduler:
                 receipt, "manifest_sha256", verification.manifest_sha256
             )
         ):
+            self._record_operation("verify", "failure")
             code = (
                 verification.failures[0]
                 if verification.failures
@@ -134,7 +145,21 @@ class RecoveryScheduler:
             from .coordinator import DomainFailure
 
             raise DomainFailure(code, "required initial snapshot verification failed")
+        self._record_operation("verify", "success")
         await self.signals.snapshot_succeeded(verification.manifest_sha256)
+
+    @staticmethod
+    def _outcome_for_error(exc: BaseException) -> str:
+        return "timeout" if isinstance(exc, TimeoutError) else "failure"
+
+    def _record_operation(self, operation: str, outcome: str) -> None:
+        recorder = self.operation_recorder
+        if recorder is None:
+            return
+        try:
+            recorder(operation, outcome)
+        except Exception as exc:  # metrics must never change recovery semantics
+            logger.error("recovery metric recording failed: %s", type(exc).__name__)
 
     # ------------------------------------------------------------------ #
     # Retention

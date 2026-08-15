@@ -29,8 +29,13 @@ _ABS_PATH = re.compile(
     r"(?<![A-Za-z0-9])(?:(?:[A-Za-z]:[\\/])|/)[^\s\"']+"
 )
 # key=value pairs for secrets; value redacted but key preserved.
+_AUTHORIZATION_VALUE = re.compile(
+    r'''(["']?\bauthorization["']?\s*[=:]\s*)'''
+    r'''(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic)\s+)?[^\s,;}]+)''',
+    re.IGNORECASE,
+)
 _SECRET_PAIR = re.compile(
-    r"(\b(?:token|password|secret|api[_-]?key|authorization)\s*[=:]\s*)\S+",
+    r"(\b(?:token|password|secret|api[_-]?key)\s*[=:]\s*)\S+",
     re.IGNORECASE,
 )
 # A base64url 43-char token (operations token shape) anywhere in text.
@@ -43,6 +48,7 @@ def _redact(text: str) -> str:
 
     root = str(settings.data_root.expanduser().resolve()).replace("\\", "/")
     redacted = text.replace(root, "<data_root>")
+    redacted = _AUTHORIZATION_VALUE.sub(lambda m: m.group(1) + "<redacted>", redacted)
     redacted = _SECRET_PAIR.sub(lambda m: m.group(1) + "<redacted>", redacted)
     redacted = _BARE_TOKEN.sub("<redacted>", redacted)
     # Only replace remaining absolute paths (data root handled above).
@@ -79,7 +85,7 @@ class JsonFormatter(logging.Formatter):
         }
         rid = request_id_var.get()
         if rid:
-            payload["request_id"] = rid
+            payload["request_id"] = _redact(rid) if self._redact else rid
         if record.exc_info:
             exc = self.formatException(record.exc_info)
             payload["exc"] = _redact(exc) if self._redact else exc
@@ -87,6 +93,22 @@ class JsonFormatter(logging.Formatter):
 
 
 _structured_handler: logging.Handler | None = None
+
+
+def _detach_and_close(handler: logging.Handler, *, durable: bool) -> None:
+    root = logging.getLogger()
+    root.removeHandler(handler)
+    try:
+        handler.flush()
+        if durable:
+            stream = getattr(handler, "stream", None)
+            if stream is not None and hasattr(stream, "fileno"):
+                try:
+                    os.fsync(stream.fileno())
+                except (OSError, ValueError):
+                    pass
+    finally:
+        handler.close()
 
 
 def setup_logging(level: int | str = logging.INFO) -> None:
@@ -103,7 +125,10 @@ def setup_logging(level: int | str = logging.INFO) -> None:
         if getattr(handler, "_pomodoroxii_json", False) or getattr(
             handler, "_pomodoroxii_structured", False
         ):
-            root.removeHandler(handler)
+            _detach_and_close(
+                handler,
+                durable=bool(getattr(handler, "_pomodoroxii_structured", False)),
+            )
 
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
@@ -136,13 +161,8 @@ def close_structured_logging() -> None:
     handler = _structured_handler
     if handler is None:
         return
+    _structured_handler = None
     try:
-        handler.flush()
-        stream = getattr(handler, "stream", None)
-        if stream is not None and hasattr(stream, "fileno"):
-            try:
-                os.fsync(stream.fileno())
-            except (OSError, ValueError):
-                pass
-    finally:
-        _structured_handler = None
+        _detach_and_close(handler, durable=True)
+    except (OSError, ValueError):
+        pass

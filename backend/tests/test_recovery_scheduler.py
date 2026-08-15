@@ -231,6 +231,69 @@ async def test_scheduler_initial_snapshot_required_before_readiness(
 
 
 @pytest.mark.asyncio
+async def test_scheduler_records_bounded_snapshot_and_verify_outcomes(
+    tmp_path: Path,
+) -> None:
+    from app.ops.signals import OperationalSignals
+    from app.recovery.local_service import LocalRecoveryService
+    from app.recovery.scheduler import RecoveryScheduler
+
+    coordinator, _leases, active_root, engines = _coordinator(tmp_path)
+    await _add_effort_projection_tables(active_root / "spaces" / "alpha" / "space.db")
+    service = LocalRecoveryService(active_root)
+    outcomes: list[tuple[str, str]] = []
+    scheduler = RecoveryScheduler(
+        service,
+        target=tmp_path / "backup-target",
+        signals=OperationalSignals(),
+        operation_recorder=lambda operation, outcome: outcomes.append(
+            (operation, outcome)
+        ),
+    )
+    try:
+        await scheduler.start()
+        assert outcomes == [("snapshot", "success"), ("verify", "success")]
+    finally:
+        await scheduler.close()
+        await service.aclose()
+        for engine in engines:
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_outcome"),
+    [(RuntimeError("failed"), "failure"), (asyncio.TimeoutError(), "timeout")],
+)
+async def test_scheduler_records_snapshot_failure_class(
+    tmp_path: Path, error: BaseException, expected_outcome: str
+) -> None:
+    from app.ops.signals import OperationalSignals
+    from app.recovery.scheduler import RecoveryScheduler
+
+    async def fail_snapshot(_target):
+        raise error
+
+    outcomes: list[tuple[str, str]] = []
+    service = SimpleNamespace(
+        coordinator=SimpleNamespace(snapshot=fail_snapshot, verify=None)
+    )
+    scheduler = RecoveryScheduler(
+        service,
+        target=tmp_path / "backup-target",
+        signals=OperationalSignals(),
+        operation_recorder=lambda operation, outcome: outcomes.append(
+            (operation, outcome)
+        ),
+    )
+
+    with pytest.raises(type(error)):
+        await scheduler.start()
+
+    assert outcomes == [("snapshot", expected_outcome)]
+
+
+@pytest.mark.asyncio
 async def test_scheduler_initial_snapshot_failure_aborts_startup(
     tmp_path: Path,
 ) -> None:
