@@ -391,6 +391,41 @@ def test_cutover_result_is_frozen(tmp_path: Path) -> None:
         result.active_root = tmp_path
 
 
+def test_cutover_result_accepts_windows_directory_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Windows 8.3 alias is physical identity, not a different root."""
+    parent = tmp_path / "cutover-parent"
+    alias_parent = tmp_path / "CUTOVE~1"
+    original_resolve = Path.resolve
+    original_samefile = os.path.samefile
+
+    def physical(path: Path | str) -> Path:
+        candidate = Path(path).absolute()
+        try:
+            return parent / candidate.relative_to(alias_parent)
+        except ValueError:
+            return candidate
+
+    def windows_alias_resolve(path: Path, *args, **kwargs) -> Path:
+        resolved = original_resolve(path, *args, **kwargs)
+        try:
+            return alias_parent / resolved.relative_to(parent)
+        except ValueError:
+            return resolved
+
+    def windows_alias_samefile(left: Path | str, right: Path | str) -> bool:
+        return original_samefile(physical(left), physical(right))
+
+    monkeypatch.setattr(Path, "resolve", windows_alias_resolve)
+    monkeypatch.setattr(os.path, "samefile", windows_alias_samefile)
+    coordinator, _leases, _active, _engines = _coordinator(tmp_path)
+
+    result = _contract_result(tmp_path, coordinator)
+
+    assert result.active_root == parent / "active"
+
+
 def test_cutover_result_deep_fields_immutable(tmp_path: Path) -> None:
     coordinator, _leases, _active, _engines = _coordinator(tmp_path)
     result = _contract_result(tmp_path, coordinator)

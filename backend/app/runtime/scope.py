@@ -324,13 +324,18 @@ class AuthorizedSpaceScope:
                     "scope open and global lease cleanup failed", [primary, cleanup]
                 ) from None
             raise
-        return await self.runtime.open_resolved(
+        arguments = (
             resolved,
             "read" if mode == "read" else "mutation",
             global_lease,
-            owns_global_lease=True,
-            _skip_recovery=skip_recovery,
         )
+        if skip_recovery:
+            return await self.runtime.open_resolved(
+                *arguments,
+                owns_global_lease=True,
+                _skip_recovery=True,
+            )
+        return await self.runtime.open_resolved(*arguments, owns_global_lease=True)
 
     async def resolve(
         self,
