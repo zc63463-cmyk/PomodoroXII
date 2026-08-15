@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -69,6 +70,28 @@ async def test_local_recovery_service_snapshots_and_verifies_disposable_root(
         await service.aclose()
         for engine in engines:
             await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_local_recovery_service_verifies_empty_registered_fleet(
+    tmp_path: Path,
+) -> None:
+    """A migrated Meta registry with zero Spaces is a complete empty fleet."""
+    from app.db.migrations import run_migrations
+    from app.recovery.local_service import LocalRecoveryService
+
+    active_root = tmp_path / "active"
+    (active_root / "spaces").mkdir(parents=True)
+    await asyncio.to_thread(run_migrations, "meta", active_root / "meta.db")
+
+    service = LocalRecoveryService(active_root)
+    try:
+        snapshot = await service.coordinator.snapshot(tmp_path / "snapshots")
+        verification = await service.coordinator.verify(snapshot)
+        assert snapshot.manifest.spaces == ()
+        assert verification.valid is True
+    finally:
+        await service.aclose()
 
 
 @pytest.mark.parametrize(

@@ -690,10 +690,6 @@ class RecoveryCoordinator:
             raise DomainFailure("active_session_recovery_required")
         effort = None
         if self.effort_projection_compiler is not None:
-            if not spaces:
-                raise DomainFailure(
-                    "snapshot_invalid", "effort verification scopes are unavailable"
-                )
             mismatches: list[object] = []
             for space in spaces:
                 view = self.recovery_view_factory("space", space.root)
