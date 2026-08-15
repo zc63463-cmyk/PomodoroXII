@@ -30,10 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      POMODOROXII_CI_RUN_ROOT: ${{ github.workspace }}/.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}
-      POMODOROXII_CI_RESULTS_DIR: ${{ github.workspace }}/.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}/results
-      POMODOROXII_TEST_ARTIFACTS_ROOT: ${{ github.workspace }}/.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}/pomodoroxii-test-artifacts
-      POMODOROXII_STRUCTURED_LOG_PATH: ${{ github.workspace }}/.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}/results/backend.jsonl
+      POMODOROXII_CI_RUN_ROOT: ${{ github.workspace }}/../.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}
+      POMODOROXII_CI_RESULTS_DIR: ${{ github.workspace }}/../.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}/results
+      POMODOROXII_TEST_ARTIFACTS_ROOT: ${{ github.workspace }}/../.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}/pomodoroxii-test-artifacts
+      POMODOROXII_STRUCTURED_LOG_PATH: ${{ github.workspace }}/../.ci-artifacts/${{ github.run_id }}-${{ github.run_attempt }}/results/backend.jsonl
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
