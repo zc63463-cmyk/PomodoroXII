@@ -68,6 +68,17 @@ def test_ci_runs_backend_tests_with_junit_coverage_and_jsonl() -> None:
     assert '2>&1 | Tee-Object -FilePath "$env:POMODOROXII_CI_RESULTS_DIR/pytest.log"' in run_script
 
 
+def test_ci_verifies_results_from_the_exported_environment_variable() -> None:
+    verify = _step("Verify backend test evidence")
+    assert verify["shell"] == "pwsh"
+    verify_script = str(verify["run"])
+    assert verify_script == (
+        'uv run python scripts/ci/verify_test_artifacts.py '
+        '"$env:POMODOROXII_CI_RESULTS_DIR"'
+    )
+    assert '"$POMODOROXII_CI_RESULTS_DIR"' not in verify_script
+
+
 def test_ci_retains_results_always_and_sandboxes_only_on_failure() -> None:
     results = _step("Upload backend test evidence")
     failed = _step("Upload failed test sandboxes")
