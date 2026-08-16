@@ -111,3 +111,23 @@ def backup_sqlite(
     fsync_file(destination)
     fsync_directory(destination.parent)
     return SqliteBackupResult(destination.stat().st_size, sha256_file(destination))
+
+
+def normalize_sqlite_journal_mode(path: Path) -> None:
+    """Make a copied database safe for read-only inventory inspection.
+
+    SQLite's backup API preserves the source journal mode. A copied WAL-mode
+    database can create ``-wal`` and ``-shm`` sidecars when later inspected,
+    which would mutate an already-fingerprinted recovery tree.
+    """
+    try:
+        with closing(sqlite3.connect(path)) as connection:
+            mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()
+            if mode is None or str(mode[0]).lower() != "delete":
+                raise sqlite3.DatabaseError("journal mode did not become DELETE")
+    except sqlite3.DatabaseError as exc:
+        raise SnapshotIntegrityError(
+            f"database journal mode cannot be normalized: {Path(path).name}"
+        ) from exc
+    fsync_file(path)
+    fsync_directory(Path(path).parent)
