@@ -74,10 +74,11 @@ async def test_exists_returns_false_for_unknown_entity(space_session):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_expired_removes_old_tombstones_returns_count(space_session):
-    """cleanup_expired() should remove tombstones older than TTL and return count."""
+async def test_cleanup_expired_requires_client_ack_and_deletes_nothing(space_session):
+    """S1 cannot delete tombstones without a registered-client ACK waterline."""
     from datetime import timedelta
 
+    from app.errors import RetentionAckRequiredError
     from app.models.tombstone import Tombstone
     from app.services.time import utc_now
     from app.services.tombstone import TombstoneService
@@ -90,18 +91,19 @@ async def test_cleanup_expired_removes_old_tombstones_returns_count(space_sessio
     await space_session.flush()
     # Insert a recent one.
     await svc.create("note", uuid.uuid4().hex)
-    # Cleanup with default TTL (90 days).
-    count = await svc.cleanup_expired()
-    assert count == 1
+    with pytest.raises(RetentionAckRequiredError):
+        await svc.cleanup_expired()
+    assert await space_session.get(Tombstone, old_tomb.id) is not None
 
 
 @pytest.mark.asyncio
-async def test_cleanup_expired_keeps_recent_tombstones(space_session):
-    """cleanup_expired() should not remove tombstones within the TTL window."""
+async def test_cleanup_expired_rejects_before_ttl_evaluation(space_session):
+    """Even a harmless-looking TTL cannot bypass the ACK requirement."""
+    from app.errors import RetentionAckRequiredError
     from app.services.tombstone import TombstoneService
 
     svc = TombstoneService(space_session)
     # Insert a recent tombstone.
     await svc.create("task", uuid.uuid4().hex)
-    count = await svc.cleanup_expired()
-    assert count == 0
+    with pytest.raises(RetentionAckRequiredError):
+        await svc.cleanup_expired(ttl_days=-1)

@@ -31,7 +31,7 @@ class TimeBlockService(BaseService):
         total = (
             await self.db.execute(select(func.count()).select_from(q.subquery()))
         ).scalar() or 0
-        q = q.order_by(TimeBlock.start_time.asc(), TimeBlock.sort_order.asc())
+        q = q.order_by(TimeBlock.start_time.asc(), TimeBlock.sort_order.asc(), TimeBlock.id.asc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()

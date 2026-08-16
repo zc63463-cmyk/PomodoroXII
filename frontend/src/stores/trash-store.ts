@@ -12,7 +12,8 @@ import {
   purgeQuickNote,
   restoreQuickNote,
 } from '@/lib/quick-notes/quick-note-repository'
-import { enqueueOutbox } from '@/lib/sync/outbox'
+import { buildOutboxIdentity, enqueueOutbox } from '@/lib/sync/outbox'
+import { withSpaceAuthorityFence } from '@/lib/sync/space-authority-fence'
 import type { CachedFolder, CachedNote, Folder, Note, QuickNote } from '@/types'
 
 interface TrashState {
@@ -202,65 +203,89 @@ export const useTrashStore = create<TrashStore>()(
 )
 
 async function restoreNoteFromTrash(id: string): Promise<void> {
-  await db.transaction('rw', db.notes, db.outbox, async () => {
+  await withSpaceAuthorityFence(db.spaceId, (token) => db.transaction('rw', db.notes, db.outbox, async () => {
     const existing = await db.notes.get(id)
     if (!existing) throw new Error('Note was not found in the local repository')
     if (existing.trashed_at === null) throw new Error('Only trashed notes can be restored')
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const row: CachedNote = {
       ...existing,
       trashed_at: null,
       updated_at: now,
       deletion_state: 'active',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
     await db.notes.put(row)
-    await enqueueOutbox(db, 'note', id, 'update', stripNoteSyncFields(row))
-  })
+    const payload = stripNoteSyncFields(row)
+    await enqueueOutbox(db, db.spaceId, token, 'note', id, 'update', payload,
+      await buildOutboxIdentity(payload, {
+        operationId: crypto.randomUUID(), expectedVersion: baseVersion,
+        transportState: 'ready', createdAt: now,
+      }))
+  }))
 }
 
 async function purgeNoteFromTrash(id: string): Promise<void> {
-  await db.transaction('rw', db.notes, db.outbox, async () => {
+  await withSpaceAuthorityFence(db.spaceId, (token) => db.transaction('rw', db.notes, db.outbox, async () => {
     const existing = await db.notes.get(id)
     if (!existing) throw new Error('Note was not found in the local repository')
     if (existing.trashed_at === null) throw new Error('Only trashed notes can be purged')
 
+    const baseVersion = existing.version ?? 1
     await db.notes.delete(id)
-    await enqueueOutbox(db, 'note', id, 'delete', { id })
-  })
+    const payload = { id }
+    await enqueueOutbox(db, db.spaceId, token, 'note', id, 'delete', payload,
+      await buildOutboxIdentity(payload, {
+        operationId: crypto.randomUUID(), expectedVersion: baseVersion,
+        transportState: 'ready', createdAt: new Date().toISOString(),
+      }))
+  }))
 }
 
 async function restoreFolderFromTrash(id: string): Promise<void> {
-  await db.transaction('rw', db.folders, db.outbox, async () => {
+  await withSpaceAuthorityFence(db.spaceId, (token) => db.transaction('rw', db.folders, db.outbox, async () => {
     const existing = await db.folders.get(id)
     if (!existing) throw new Error('Folder was not found in the local repository')
     if (existing.trashed_at === null) throw new Error('Only trashed folders can be restored')
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const row: CachedFolder = {
       ...existing,
       trashed_at: null,
       updated_at: now,
       deletion_state: 'active',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
     await db.folders.put(row)
-    await enqueueOutbox(db, 'folder', id, 'update', stripFolderSyncFields(row))
-  })
+    const payload = stripFolderSyncFields(row)
+    await enqueueOutbox(db, db.spaceId, token, 'folder', id, 'update', payload,
+      await buildOutboxIdentity(payload, {
+        operationId: crypto.randomUUID(), expectedVersion: baseVersion,
+        transportState: 'ready', createdAt: now,
+      }))
+  }))
 }
 
 async function purgeFolderFromTrash(id: string): Promise<void> {
-  await db.transaction('rw', db.folders, db.outbox, async () => {
+  await withSpaceAuthorityFence(db.spaceId, (token) => db.transaction('rw', db.folders, db.outbox, async () => {
     const existing = await db.folders.get(id)
     if (!existing) throw new Error('Folder was not found in the local repository')
     if (existing.trashed_at === null) throw new Error('Only trashed folders can be purged')
 
+    const baseVersion = existing.version ?? 1
     await db.folders.delete(id)
-    await enqueueOutbox(db, 'folder', id, 'delete', { id })
-  })
+    const payload = { id }
+    await enqueueOutbox(db, db.spaceId, token, 'folder', id, 'delete', payload,
+      await buildOutboxIdentity(payload, {
+        operationId: crypto.randomUUID(), expectedVersion: baseVersion,
+        transportState: 'ready', createdAt: new Date().toISOString(),
+      }))
+  }))
 }
 
 function sortByTrashTime(

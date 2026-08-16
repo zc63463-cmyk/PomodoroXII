@@ -2,11 +2,15 @@
 
 Closes the v4 Phase D gate item: "convert API + memo_comments copy".
 
+Task 8 extension: conversion now delegates to KnowledgeStore when
+store/scope are available (the REST route always provides them),
+routing the entire conversion through the durable mutation pipeline.
+
 Routes:
 - POST /api/v1/quick-notes/{id}/convert -> QuickNoteConvertResponse
 
 Layout:
-- HTTP tests (1-4, 6) use the ``client`` fixture (self-contained helpers).
+- HTTP tests (1-4, 6, 8-10) use the ``client`` fixture (self-contained helpers).
 - Service-layer test (5) uses ``space_session`` + ``tmp_path`` to insert
   MemoComment rows directly and verify the copy logic.
 
@@ -17,14 +21,18 @@ from __future__ import annotations
 
 import pytest
 
+from tests.sync_v2_helpers import recover_sync_v2
+
+pytestmark = pytest.mark.provisioned_space_storage
+
 # --------------------------------------------------------------------------- #
 # HTTP helpers (self-contained per Phase D gate convention)
 # --------------------------------------------------------------------------- #
 
 async def _get_space_client(client):
     """Set up admin password, log in, create a space, issue a space token."""
-    await client.post("/api/v1/auth/setup", json={"password": "test123"})
-    resp = await client.post("/api/v1/auth/login", json={"password": "test123"})
+    await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
+    resp = await client.post("/api/v1/auth/login", json={"password": "test-password-123"})
     master_token = resp.json()["access_token"]
     resp = await client.post(
         "/api/v1/spaces",
@@ -176,7 +184,7 @@ async def test_convert_empty_content_uses_default_title(client):
 
 
 # --------------------------------------------------------------------------- #
-# Service-layer: memo_comments copy verification
+# Service-layer: memo_comments copy verification (legacy path, no store/scope)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
@@ -185,6 +193,9 @@ async def test_convert_copies_memo_comments(space_session, tmp_path):
 
     Originals are preserved (note_id still references the quick note id);
     copies get note_id = new Note.id. migrated_comments_count == N.
+
+    This test uses the legacy path (no store/scope) to verify the
+    service-layer copy logic still works for direct callers.
     """
     from sqlalchemy import select
 
@@ -263,3 +274,134 @@ async def test_convert_trashed_quick_note_raises_validation_error(space_session,
 
     with pytest.raises(ValidationError, match="trash"):
         await qn_svc.convert(qn.id, note_service=note_svc)
+
+
+# --------------------------------------------------------------------------- #
+# Task 8: Durable pipeline integration tests
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_convert_creates_sync_events(client):
+    """Convert via KnowledgeStore creates sync-visible entities for note + quick note.
+
+    Proves the conversion goes through the durable mutation pipeline
+    rather than direct ORM operations: the new note and the archived
+    quick note must both appear in the Sync v2 recovery snapshot.
+    """
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+    qn = await _create_quick_note(
+        client, headers, content="durable convert test", tags=["beta"]
+    )
+    qn_id = qn["id"]
+
+    resp = await client.post(
+        f"/api/v1/quick-notes/{qn_id}/convert", headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    note_id = resp.json()["note_id"]
+
+    # Recovery is the v2 full-state replacement and contains live entity records.
+    records, _waterline = await recover_sync_v2(
+        client, headers, "quick-note-convert-client"
+    )
+    note_rows = [
+        record["payload"]
+        for record in records
+        if record["entity_type"] == "note" and record["entity_id"] == note_id
+    ]
+    assert len(note_rows) > 0, "expected converted note in recovery"
+    assert "durable convert test" in note_rows[0].get("title", "")
+
+    qn_rows = [
+        record["payload"]
+        for record in records
+        if record["entity_type"] == "quickNote" and record["entity_id"] == qn_id
+    ]
+    assert len(qn_rows) > 0, "expected archived quick note in recovery"
+    assert qn_rows[0].get("archivedAt") is not None
+    assert qn_rows[0].get("migratedToNoteId") == note_id
+
+
+@pytest.mark.asyncio
+async def test_convert_with_tags_preserves_tags(client):
+    """Convert preserves tags from the quick note to the new note."""
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+    qn = await _create_quick_note(
+        client, headers, content="tagged content", tags=["alpha", "beta"]
+    )
+    qn_id = qn["id"]
+
+    resp = await client.post(
+        f"/api/v1/quick-notes/{qn_id}/convert", headers=headers
+    )
+    assert resp.status_code == 200
+    note_id = resp.json()["note_id"]
+
+    resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+    note_tags = resp.json().get("tags", [])
+    if isinstance(note_tags, str):
+        import json
+        note_tags = json.loads(note_tags)
+    assert "alpha" in note_tags
+    assert "beta" in note_tags
+
+
+@pytest.mark.asyncio
+async def test_convert_note_content_matches_quick_note(client):
+    """The converted note's content matches the quick note's content exactly."""
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+    original_content = "Line 1\nLine 2\nLine 3 with special chars: <>&\"'"
+    qn = await _create_quick_note(
+        client, headers, content=original_content
+    )
+    qn_id = qn["id"]
+
+    resp = await client.post(
+        f"/api/v1/quick-notes/{qn_id}/convert", headers=headers
+    )
+    assert resp.status_code == 200
+    note_id = resp.json()["note_id"]
+
+    resp = await client.get(f"/api/v1/notes/{note_id}/content", headers=headers)
+    assert resp.status_code == 200
+    assert original_content in resp.text
+
+
+@pytest.mark.asyncio
+async def test_convert_quick_note_in_folder_assigns_note_to_folder(client):
+    """Converting a quick note that lives in a folder creates the note in the same folder."""
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+
+    # Create a folder.
+    resp = await client.post(
+        "/api/v1/folders", json={"name": "QN Folder"}, headers=headers
+    )
+    assert resp.status_code == 201
+    folder_id = resp.json()["id"]
+
+    # Create a quick note in the folder.
+    resp = await client.post(
+        "/api/v1/quick-notes",
+        json={"content": "in folder", "folder_id": folder_id},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    qn_id = resp.json()["id"]
+
+    # Convert.
+    resp = await client.post(
+        f"/api/v1/quick-notes/{qn_id}/convert", headers=headers
+    )
+    assert resp.status_code == 200
+    note_id = resp.json()["note_id"]
+
+    # Note should be in the same folder.
+    resp = await client.get(f"/api/v1/notes/{note_id}", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["folder_id"] == folder_id

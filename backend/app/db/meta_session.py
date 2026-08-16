@@ -11,12 +11,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from pathlib import Path
 
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.db.migrations import run_migrations
 from app.db.session import create_engine, create_session_factory
 from app.settings import settings
 
@@ -28,21 +25,20 @@ _meta_session_factory: async_sessionmaker[AsyncSession] | None = None
 _meta_init_task: asyncio.Task[AsyncEngine] | None = None
 
 
-def _sqlite_path(database_url: str) -> Path:
-    url = make_url(database_url)
-    if not url.drivername.startswith("sqlite"):
-        raise RuntimeError("Meta migrations currently require a local SQLite database URL")
-    if not url.database or url.database == ":memory:":
-        raise RuntimeError("Meta migrations require a file-backed SQLite database")
-    return Path(url.database)
-
-
 async def _initialize_meta_db() -> AsyncEngine:
     global _meta_engine, _meta_session_factory
 
-    await asyncio.to_thread(run_migrations, "meta", _sqlite_path(settings.database_url))
-    _meta_engine = create_engine(settings.database_url, echo=settings.debug)
-    _meta_session_factory = create_session_factory(_meta_engine)
+    if not settings.meta_db_path.is_file():
+        raise RuntimeError("Meta database must be migrated before it is opened")
+    engine = create_engine(settings.database_url, echo=settings.debug)
+    try:
+        async with engine.connect():
+            pass
+    except BaseException:
+        await engine.dispose()
+        raise
+    _meta_engine = engine
+    _meta_session_factory = create_session_factory(engine)
     logger.info("Meta database initialised at %s", settings.database_url)
     return _meta_engine
 

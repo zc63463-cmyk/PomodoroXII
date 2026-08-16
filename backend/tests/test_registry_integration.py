@@ -12,9 +12,9 @@ import pytest
 
 async def _get_master_token(client) -> str:
     """Set up admin password and return a fresh master token."""
-    await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     resp = await client.post(
-        "/api/v1/auth/login", json={"password": "test123"}
+        "/api/v1/auth/login", json={"password": "test-password-123"}
     )
     return resp.json()["access_token"]
 
@@ -66,7 +66,7 @@ async def test_registry_loaded_in_app(client):
     body = resp.json()
     # If builtin.py never ran, entity_count would be 0.
     assert body["registry_loaded"] is True
-    assert body["entity_count"] == 20
+    assert body["entity_count"] == 31
 
 
 @pytest.mark.asyncio
@@ -114,8 +114,7 @@ async def test_meta_api_full_roundtrip(client):
 async def test_meta_api_sync_enabled_and_soft_delete_filters(client):
     """End-to-end: verify sync_enabled + soft_delete flags via the API.
 
-    The 'note' entity must be sync_enabled=True and soft_delete=True,
-    while 'task' must be sync_enabled=True and soft_delete=False.
+    The 'note' entity must be sync_enabled=True and soft_delete=True.
     This guards the Phase C sync dispatch contract.
     """
     token = await _get_master_token(client)
@@ -127,11 +126,3 @@ async def test_meta_api_sync_enabled_and_soft_delete_filters(client):
     note = resp.json()
     assert note["sync_enabled"] is True
     assert note["soft_delete"] is True
-
-    resp = await client.get(
-        "/api/v1/meta/entities/task",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    task = resp.json()
-    assert task["sync_enabled"] is True
-    assert task["soft_delete"] is False  # P1-1 confirmed: Task has no trashed_at

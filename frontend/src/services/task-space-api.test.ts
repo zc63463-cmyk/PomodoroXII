@@ -1,0 +1,94 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { hashCommandPayload } from '@/lib/contracts/payload-hash'
+import { spaceApi } from './api'
+import { taskSpaceApi } from './task-space-api'
+
+vi.mock('./api', () => ({
+  spaceApi: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), put: vi.fn() },
+}))
+
+const accepted = { commandId: 'op-1', entityType: 'project', entityId: 'p-1', version: 1, value: {} }
+const timestamp = '2026-01-01T00:00:00Z'
+
+const projectWire = {
+  id: 'p-1', spaceId: 'space-a', key: 'RM', name: 'Roadmap', description: null,
+  nextWorkItemNumber: 2, rank: 0, archivedAt: null, version: 1,
+  createdAt: timestamp, updatedAt: timestamp,
+}
+
+const workItemWire = {
+  id: 'w-1', spaceId: 'space-a', projectId: 'p-1', displayKey: 'RM-1',
+  title: 'First task', description: null, typeDefinitionId: 'type-1',
+  statusDefinitionId: 'status-1', priority: 'high', parentId: null,
+  childRank: 0, depth: 1, completionWindowStart: null,
+  completionWindowEnd: null, reviewPoint: null, hardDeadline: null,
+  effortEstimateLowerSeconds: null, effortEstimateUpperSeconds: null,
+  effortActualSeconds: 0, confidence: 'medium', completedAt: null,
+  cancelledAt: null, archivedAt: null, markedAsAttention: false, version: 1,
+  createdAt: timestamp, updatedAt: timestamp,
+}
+
+const noteWire = {
+  spaceId: 'space-a', noteId: 'n-1', workItemId: 'w-1',
+  document: { contentVersion: 1, blocks: [] }, version: 1,
+  createdAt: timestamp, updatedAt: timestamp,
+}
+
+describe('taskSpaceApi', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('normalizes project key once for wire and hash', async () => {
+    vi.mocked(spaceApi.post).mockResolvedValue({ data: accepted })
+    await taskSpaceApi.createProject({
+      operationId: 'op-1', spaceId: 'space-a', name: 'Roadmap', key: ' rm ', description: null,
+    })
+    const body = vi.mocked(spaceApi.post).mock.calls[0]![1] as Record<string, unknown>
+    expect(body.key).toBe('RM')
+    expect(body.payloadHash).toBe(await hashCommandPayload({ name: 'Roadmap', key: 'RM', description: null }))
+  })
+
+  it('keeps project identity on the wire but excludes it from Move business hash', async () => {
+    vi.mocked(spaceApi.post).mockResolvedValue({ data: accepted })
+    await taskSpaceApi.moveWorkItem({
+      projectId: 'project-a', workItemId: 'wi-a', operationId: 'move-a', spaceId: 'space-a',
+      expectedVersion: 4, newParentId: 'l2', childRank: 7,
+    })
+    const body = vi.mocked(spaceApi.post).mock.calls[0]![1] as Record<string, unknown>
+    expect(body.projectId).toBe('project-a')
+    expect(body.payloadHash).toBe(await hashCommandPayload({ new_parent_id: 'l2', child_rank: 7 }))
+  })
+
+  it('uses only the three locked WorkItemNote write paths', async () => {
+    vi.mocked(spaceApi.put).mockResolvedValue({ data: accepted })
+    vi.mocked(spaceApi.post).mockResolvedValue({ data: accepted })
+    const document = { contentVersion: 1 as const, blocks: [] }
+    await taskSpaceApi.replaceNote({ operationId: 'replace', spaceId: 'space-a', workItemId: 'wi-1', expectedVersion: 1, document })
+    await taskSpaceApi.appendBlocks({ operationId: 'append', spaceId: 'space-a', workItemId: 'wi-1', expectedVersion: 1, blocks: [] })
+    await taskSpaceApi.toggleChecklistItem({ operationId: 'toggle', spaceId: 'space-a', workItemId: 'wi-1', expectedVersion: 1, blockId: 'b', itemId: 'i', checked: true })
+    expect(vi.mocked(spaceApi.put).mock.calls[0]![0]).toBe('/work-items/wi-1/note')
+    expect(vi.mocked(spaceApi.post).mock.calls.map(([path]) => path)).toEqual([
+      '/work-items/wi-1/note/append-blocks', '/work-items/wi-1/note/toggle-checklist-item',
+    ])
+  })
+
+  it('parses complete camelCase REST read responses at the frontend boundary', async () => {
+    vi.mocked(spaceApi.get)
+      .mockResolvedValueOnce({ data: { items: [projectWire], nextCursor: null } })
+      .mockResolvedValueOnce({ data: projectWire })
+      .mockResolvedValueOnce({ data: { items: [workItemWire], nextCursor: null } })
+      .mockResolvedValueOnce({ data: workItemWire })
+      .mockResolvedValueOnce({ data: noteWire })
+
+    const projects = await taskSpaceApi.listProjects('space-a')
+    expect(projects.items[0]?.nextWorkItemNumber).toBe(2)
+    expect((await taskSpaceApi.getProject('space-a', 'p-1')).spaceId).toBe('space-a')
+
+    const workItems = await taskSpaceApi.listWorkItems('space-a', 'p-1')
+    expect(workItems.items[0]?.displayKey).toBe('RM-1')
+    expect((await taskSpaceApi.getWorkItem('space-a', 'w-1')).depth).toBe(1)
+
+    const note = await taskSpaceApi.getNote('space-a', 'w-1')
+    expect(note.noteId).toBe('n-1')
+    expect(note.document.contentVersion).toBe(1)
+  })
+})

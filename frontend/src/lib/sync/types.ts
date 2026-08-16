@@ -68,19 +68,27 @@ export const syncEngineStub: SyncEngine = {
 
 // ===== S1-1 Sync 基础层类型 =====
 
-/** 14 个 sync-enabled 实体类型（F1 §3.3 / 附录 C） */
-export type SyncEntityType =
-  | 'task' | 'session' | 'note' | 'folder' | 'quickNote'
-  | 'reflection' | 'habit' | 'habitCheckIn' | 'schedule' | 'timeBlock'
-  | 'memoComment' | 'sessionQuickNote' | 'scheduleQuickNote' | 'taskQuickNote'
+export const RETAINED_LWW_SYNC_ENTITY_TYPES = [
+  'note', 'folder', 'quickNote', 'reflection', 'habit', 'habitCheckIn',
+  'schedule', 'timeBlock', 'memoComment', 'scheduleQuickNote',
+] as const
+export type RetainedLwwSyncEntityType =
+  typeof RETAINED_LWW_SYNC_ENTITY_TYPES[number]
+
+export const FINAL_SYNC_ENTITY_TYPES = [
+  ...RETAINED_LWW_SYNC_ENTITY_TYPES,
+  'project', 'statusDefinition', 'typeDefinition', 'label', 'workItemLabel',
+  'workItem', 'workItemNote', 'focusSession', 'sessionTaskContext',
+  'sessionAttributionRevision', 'sessionWorkItemPlan', 'sessionWorkItemOutcome',
+] as const
+export type SyncEntityType = typeof FINAL_SYNC_ENTITY_TYPES[number]
+export const FINAL_SYNC_ENTITY_TYPE_SET = new Set<string>(FINAL_SYNC_ENTITY_TYPES)
 
 /** outbox 动作（与 OutboxEvent.action 一致） */
 export type OutboxAction = 'create' | 'update' | 'delete'
 
 /** entityType(camelCase 单数) → Dexie 表名(plural) — drop_existing 删本地实体用 */
-export const ENTITY_TYPE_TO_TABLE: Record<SyncEntityType, string> = {
-  task: 'tasks',
-  session: 'sessions',
+export const ENTITY_TYPE_TO_TABLE: Record<RetainedLwwSyncEntityType, string> = {
   note: 'notes',
   folder: 'folders',
   quickNote: 'quickNotes',
@@ -90,15 +98,11 @@ export const ENTITY_TYPE_TO_TABLE: Record<SyncEntityType, string> = {
   schedule: 'schedules',
   timeBlock: 'timeBlocks',
   memoComment: 'memoComments',
-  sessionQuickNote: 'sessionQuickNotes',
   scheduleQuickNote: 'scheduleQuickNotes',
-  taskQuickNote: 'taskQuickNotes',
 }
 
 /** pull_key(plural) → Dexie 表名(plural) — 14 组全等映射（供 S1-2 merge 使用） */
 export const PULL_KEY_TO_TABLE: Record<string, string> = {
-  tasks: 'tasks',
-  sessions: 'sessions',
   notes: 'notes',
   folders: 'folders',
   quickNotes: 'quickNotes',
@@ -108,10 +112,44 @@ export const PULL_KEY_TO_TABLE: Record<string, string> = {
   schedules: 'schedules',
   timeBlocks: 'timeBlocks',
   memoComments: 'memoComments',
-  sessionQuickNotes: 'sessionQuickNotes',
   scheduleQuickNotes: 'scheduleQuickNotes',
-  taskQuickNotes: 'taskQuickNotes',
 }
+
+export const TS3_LOCAL_ENTITY_TO_TABLE = {
+  project: 'projects',
+  statusDefinition: 'statusDefinitions',
+  typeDefinition: 'typeDefinitions',
+  label: 'labels',
+  workItemLabel: 'workItemLabels',
+  workItem: 'workItems',
+  workItemNote: 'workItemNotes',
+  focusSession: 'focusSessions',
+  sessionTaskContext: 'sessionTaskContexts',
+  sessionAttributionRevision: 'sessionAttributionRevisions',
+  sessionWorkItemPlan: 'sessionWorkItemPlans',
+  sessionWorkItemOutcome: 'sessionWorkItemOutcomes',
+} as const
+
+export type TS3LocalEntityType = keyof typeof TS3_LOCAL_ENTITY_TO_TABLE
+export const TS3_AWAITING_S4_ENTITY_TYPES = new Set<TS3LocalEntityType>(
+  Object.keys(TS3_LOCAL_ENTITY_TO_TABLE) as TS3LocalEntityType[],
+)
+
+export const FINAL_SYNC_ENTITY_TO_TABLE = {
+  ...ENTITY_TYPE_TO_TABLE,
+  ...TS3_LOCAL_ENTITY_TO_TABLE,
+} as const satisfies Record<SyncEntityType, string>
+
+type MissingFinalSyncType = Exclude<
+  SyncEntityType, keyof typeof FINAL_SYNC_ENTITY_TO_TABLE
+>
+type ExtraFinalSyncType = Exclude<
+  keyof typeof FINAL_SYNC_ENTITY_TO_TABLE, SyncEntityType
+>
+export const FINAL_SYNC_ENTITY_MAP_IS_EXACT:
+  MissingFinalSyncType extends never
+    ? (ExtraFinalSyncType extends never ? true : never)
+    : never = true
 
 /** syncMeta 键名（F1 §2.1，F1-D2 锁定，H2-D 新增 cursor/cursor_version） — 值为 Dexie syncMeta 表的 key */
 export const SYNC_META_KEYS = {
@@ -126,19 +164,6 @@ export const SYNC_META_KEYS = {
 } as const
 
 /** syncMeta 快照（camelCase 字段名，与 SYNC_META_KEYS 的 snake_case 值有映射关系） */
-export interface SyncMetaSnapshot {
-  since: string
-  sinceId: string
-  tombstoneSinceId: string
-  serverTime: string
-  lastFullSync: string
-  lastSyncAt: string
-  /** H2-D: 全局事件账本 cursor（null = 未启用/回退旧协议） */
-  cursor: number | null
-  /** H2-D: cursor 协议版本（2 = 事件账本） */
-  cursorVersion: number | null
-}
-
 /** outbox merge 矩阵动作 */
 export type OutboxMergeAction = 'drop_existing' | 'keep_existing' | 'replace'
 
@@ -151,20 +176,76 @@ export interface OutboxMergeResult {
 
 // ===== S1-2 Sync 协议层类型 =====
 
-import type { components } from '@/types/api-generated'
+import type { components, operations } from '@/types/api-generated'
 
-/** F1-D17: 引擎 HTTP 类型用 api-generated（禁用 legacy @/types 的 SyncPull/PushResponse） */
-export type ApiSyncPullResponse = components['schemas']['SyncPullResponse']
-export type ApiSyncPushResponse = components['schemas']['SyncPushResponse']
-export type ApiSyncEvent = components['schemas']['SyncEvent']
+export type ApiSyncV2Event =
+  operations['push_v2_api_v1_sync_v2_push_post']['requestBody']['content']['application/json']['events'][number]
 
-/** 14 个 pull_key（复数，与 PULL_KEY_TO_TABLE 键的并集子集） */
-export const SYNC_PULL_KEYS = [
-  'tasks', 'sessions', 'notes', 'folders', 'quickNotes', 'reflections',
-  'habits', 'habitCheckIns', 'schedules', 'timeBlocks', 'memoComments',
-  'sessionQuickNotes', 'scheduleQuickNotes', 'taskQuickNotes',
-] as const
-export type SyncPullKey = (typeof SYNC_PULL_KEYS)[number]
+export interface ApiSyncV2PushApplied {
+  operation_id: string
+  entity_type: string
+  entity_id: string
+  version: number
+  resolution: 'remote' | null
+}
+
+export interface ApiSyncV2PushConflict {
+  operation_id: string
+  entity_type: string
+  entity_id: string
+  code: 'version_conflict' | 'tombstone_conflict' | 'cycle_detected'
+  resolution: 'local' | 'tombstone' | 'circular_ref' | 'manual'
+  details: Record<string, unknown>
+}
+
+export interface ApiSyncV2PushError {
+  operation_id: string
+  entity_type: string
+  entity_id: string
+  code: string
+  retryable: boolean
+  details: Record<string, unknown>
+}
+
+export type ApiSyncV2PushResponse = components['schemas']['SyncV2PushResponse']
+
+export interface ApiSyncV2OperationQueryItem {
+  operation_id: string
+  state: 'unknown' | 'pending' | 'terminal' | 'recovery_required'
+  batch_id: string | null
+  result: ApiSyncV2PushResponse | null
+}
+
+export type ApiSyncV2OperationQueryResponse =
+  components['schemas']['SyncV2OperationQueryResponse']
+
+export type ApiSyncV2EventRecord = components['schemas']['SyncV2EventRecord']
+
+export type ApiSyncV2PullResponse = components['schemas']['SyncV2PullResponse']
+
+export type ApiSyncV2RecoveryResponse = components['schemas']['SyncV2RecoveryResponse']
+
+export interface SnapshotEntityRecord {
+  kind: 'entity'
+  entity_type: SyncEntityType
+  entity_id: string
+  version: number
+  updated_at: string
+  payload: Record<string, unknown>
+}
+
+export type ApiSyncV2AckResponse = components['schemas']['SyncV2AckResponse']
+
+export interface ApiSyncV2StatusResponse {
+  catalog_hash: string
+  client_id: string | null
+  registered: boolean
+  requires_recovery: boolean | null
+  recovery_action: 'full_recovery' | null
+  visible_event_count: number
+  active_client_count: number
+  recovery_client_count: number
+}
 
 /** F1-D16 权威 SyncConflict（pre-push dirty 冲突 outboxId = -1，表示尚未 push） */
 export interface SyncConflict {
@@ -174,15 +255,6 @@ export interface SyncConflict {
   localVersion: unknown
   remoteVersion: unknown
   conflictType: 'version' | 'content_hash'
-}
-
-/** push-batch 单批处理结果 */
-export interface HandlePushResult {
-  clearedOutboxIds: number[]
-  conflicts: SyncConflict[]
-  remoteWinCount: number
-  circularRefCount: number
-  retriableErrorCount: number
 }
 
 /** pull-loop 处理结果 */

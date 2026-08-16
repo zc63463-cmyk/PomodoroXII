@@ -14,10 +14,32 @@ from app.registry.entities import EntityCategory
 
 # 例外表：实体 -> 例外原因
 # Junction tables 没有独立 schema（通过父实体管理）
+# Task Space entities have schemas in non-standard modules (task_space.py, etc.)
 SCHEMA_EXCEPTIONS: dict[str, str] = {
-    "session_quick_note": "Junction table, no independent schema",
     "schedule_quick_note": "Junction table, no independent schema",
-    "task_quick_note": "Junction table, no independent schema",
+    "work_item_label": "Junction table, no independent schema",
+    "session_task_context": "FocusSession entity, schema managed via session module",
+    "session_attribution_revision": "FocusSession entity, schema managed via session module",
+    "session_work_item_plan": "FocusSession entity, schema managed via session module",
+    "session_work_item_outcome": "FocusSession entity, schema managed via session module",
+    "project": "Task Space entity, schema in app.schemas.task_space",
+    "status_definition": "Task Space entity, schema in app.schemas.task_space",
+    "type_definition": "Task Space entity, schema in app.schemas.task_space",
+    "label": "Task Space entity, schema in app.schemas.task_space",
+    "work_item": "Task Space entity, schema in app.schemas.task_space",
+    "work_item_note": "Task Space entity, schema in app.schemas.work_item_note",
+    "focus_session": "Task Space entity, schema in app.schemas.focus_session",
+}
+
+# Task Space entity -> (schema module, expected response class or None)
+TASK_SPACE_SCHEMA_MAP: dict[str, tuple[str, str | None]] = {
+    "project": ("app.schemas.task_space", "ProjectResponse"),
+    "work_item": ("app.schemas.task_space", "WorkItemResponse"),
+    "status_definition": ("app.schemas.task_space", "TaskSpaceDefinitionsResponse"),
+    "type_definition": ("app.schemas.task_space", "TaskSpaceDefinitionsResponse"),
+    "label": ("app.schemas.task_space", "TaskSpaceDefinitionsResponse"),
+    "work_item_note": ("app.schemas.work_item_note", None),
+    "focus_session": ("app.schemas.focus_session", "FocusSessionAggregateResponse"),
 }
 
 
@@ -46,4 +68,71 @@ def test_business_entity_has_response_schema(spec_name):
     class_name = "".join(p.capitalize() for p in spec_name.split("_")) + "Response"
     assert hasattr(module, class_name), (
         f"{module.__name__} missing {class_name}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — Task Space entity schema location parity
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("entity_name,expected_module,expected_class", [
+    (name, mod, cls)
+    for name, (mod, cls) in TASK_SPACE_SCHEMA_MAP.items()
+])
+def test_task_space_entity_schema_in_correct_module(
+    entity_name: str, expected_module: str, expected_class: str | None,
+) -> None:
+    """Each Task Space entity must have its schema in the declared module."""
+    module = importlib.import_module(expected_module)
+    if expected_class is not None:
+        assert hasattr(module, expected_class), (
+            f"{expected_module} missing {expected_class} for entity '{entity_name}'"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — OpenAPI independent response type parity gate
+# --------------------------------------------------------------------------- #
+
+#: Response schema names that MUST appear as independent, named schemas in the
+#: OpenAPI ``components.schemas`` — not hidden inside generic wrappers like
+#: ``TaskSpaceViewResponse.value`` (which is ``additionalProperties: true``).
+REQUIRED_OPENAPI_RESPONSE_TYPES = frozenset({
+    "ProjectResponse",
+    "WorkItemResponse",
+    "WorkItemNoteResponse",
+})
+
+
+def test_openapi_exposes_independent_task_space_response_types() -> None:
+    """The OpenAPI schema must expose ``ProjectResponse``, ``WorkItemResponse``,
+    and ``WorkItemNoteResponse`` as independent, named component schemas.
+
+    These types must NOT be replaced by generic wrappers such as
+    ``TaskSpaceViewResponse``, ``TaskSpacePageResponse``, or
+    ``TaskSpaceAcceptedResponse`` with untyped ``value`` fields.
+
+    The backend Task Space routes now reference these models directly:
+    ``GET /{project_id}`` returns ``ProjectResponse``, ``GET /{work_item_id}``
+    returns ``WorkItemResponse``, and ``GET /{work_item_id}/note`` returns
+    ``WorkItemNoteResponse``.  Page responses use typed ``items`` lists
+    (``ProjectPageResponse``, ``WorkItemPageResponse``).
+
+    The frontend ``api-generated.ts`` is generated via
+    ``openapi-typescript`` against the real backend OpenAPI schema.
+    """
+    from app.main import create_app
+
+    app = create_app()
+    schema = app.openapi()
+    component_schemas = set(schema.get("components", {}).get("schemas", {}).keys())
+
+    missing = REQUIRED_OPENAPI_RESPONSE_TYPES - component_schemas
+    assert not missing, (
+        f"OpenAPI is missing independent response type schemas: {sorted(missing)}. "
+        f"The backend routes must reference these models directly instead of "
+        f"using generic TaskSpace wrappers with untyped value fields. "
+        f"This is a production boundary blocker — cannot be fixed within "
+        f"the allowed TS1 Task 7 test-only file scope."
     )

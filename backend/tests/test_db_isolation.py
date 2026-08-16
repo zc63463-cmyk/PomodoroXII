@@ -1,17 +1,17 @@
 """P0-1: DB isolation tests — meta DB and space DB must not share tables.
 
 Verifies that:
-1. Meta DB contains only ``spaces`` + ``meta_settings`` (2 tables).
+1. Meta DB contains only its four application-wide tables.
 2. Space DB excludes meta tables (``spaces``, ``meta_settings`` absent).
-3. Space DB contains all 20 business tables.
+3. Space DB contains all 36 business/infra/setting tables.
 """
 
 import pytest
 
 
 @pytest.mark.asyncio
-async def test_meta_db_has_only_2_tables(_isolate_env):
-    """Meta DB should only contain spaces + meta_settings (+ its version table)."""
+async def test_meta_db_has_only_meta_tables(_isolate_env):
+    """Meta DB should contain only application-wide Meta tables."""
     from sqlalchemy import inspect
 
     from app.db.meta_session import init_meta_db
@@ -22,22 +22,19 @@ async def test_meta_db_has_only_2_tables(_isolate_env):
             lambda sync_conn: inspect(sync_conn).get_table_names()
         )
     business = set(tables) - {"alembic_version_meta"}
-    assert business == {"spaces", "meta_settings"}, (
-        f"Meta DB has extra tables: {business - {'spaces', 'meta_settings'}}"
-    )
+    assert business == {
+        "spaces", "meta_settings", "active_session_locator",
+        "active_session_operations",
+    }
 
 
 @pytest.mark.asyncio
-async def test_space_db_excludes_meta_tables(_isolate_env):
+async def test_space_db_excludes_meta_tables(_isolate_env, space_session):
     """Space DB should not contain spaces or meta_settings tables."""
     from sqlalchemy import inspect
 
-    from app.db.meta_session import init_meta_db
-    from app.space_manager import get_space_engine_manager
-
-    await init_meta_db()
-    manager = get_space_engine_manager()
-    engine = await manager.get_engine("spc_test")
+    engine = space_session.bind
+    assert engine is not None
     async with engine.connect() as conn:
         tables = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_table_names()
@@ -49,33 +46,42 @@ async def test_space_db_excludes_meta_tables(_isolate_env):
 
 
 @pytest.mark.asyncio
-async def test_space_db_has_all_business_tables(_isolate_env):
-    """Space DB should contain all 20 business tables."""
+async def test_space_db_has_all_business_tables(_isolate_env, space_session):
+    """Space DB should contain all legacy, Task Space, and infra tables."""
     from sqlalchemy import inspect
 
-    from app.db.meta_session import init_meta_db
-    from app.space_manager import get_space_engine_manager
-
-    await init_meta_db()
-    manager = get_space_engine_manager()
-    engine = await manager.get_engine("spc_test")
+    engine = space_session.bind
+    assert engine is not None
     async with engine.connect() as conn:
         tables = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_table_names()
         )
 
     expected_business_tables = {
-        "tasks", "sessions", "notes", "folders", "quick_notes",
-        "reflections", "habits", "habit_check_ins", "schedules",
-        "time_blocks", "memo_comments", "session_quick_notes",
-        "schedule_quick_notes", "task_quick_notes", "tombstones",
-        "settings", "sync_outbox", "sync_audit_log",
+        # Legacy business entities (10)
+        "notes", "folders", "quick_notes", "reflections",
+        "habits", "habit_check_ins", "schedules", "time_blocks",
+        "memo_comments", "schedule_quick_notes",
+        # Task Space and FocusSession entities (12)
+        "projects", "status_definitions", "type_definitions", "labels",
+        "work_item_labels", "work_items", "work_item_notes",
+        "focus_sessions", "session_task_contexts",
+        "session_attribution_revisions", "session_work_item_plans",
+        "session_work_item_outcomes",
+        # Sync infrastructure (7)
+        "tombstones", "sync_outbox", "sync_audit_log",
         "sync_state", "sync_snapshots",
+        "sync_clients", "sync_recovery_manifests", "sync_recovery_chunks",
+        "session_command_envelopes", "session_command_receipts",
+        # Setting (1)
+        "settings",
+        # Mutation journal (3)
+        "mutation_batches", "mutation_operations", "mutation_steps",
     }
     actual_business = set(tables) - {"spaces", "meta_settings", "alembic_version_space", "alembic_version_meta"}
     missing = expected_business_tables - actual_business
     assert not missing, f"Space DB missing business tables: {missing}"
-    assert len(actual_business) == 20, (
-        f"Space DB has {len(actual_business)} business tables, expected 20: "
+    assert len(actual_business) == 36, (
+        f"Space DB has {len(actual_business)} business tables, expected 36: "
         f"extra={actual_business - expected_business_tables}"
     )

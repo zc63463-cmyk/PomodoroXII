@@ -1,0 +1,64 @@
+[
+  {
+    "name": "nested-unicode",
+    "event": {
+      "entity_type": "workItemNote",
+      "entity_id": "note-1",
+      "action": "update",
+      "payload": {
+        "document": {
+          "blocks": [
+            {
+              "text": "\u96ea\\nline",
+              "type": "paragraph"
+            }
+          ],
+          "meta": {
+            "z": 1,
+            "a": true
+          }
+        }
+      },
+      "expected_version": 4,
+      "client_updated_at": "2026-08-05T10:00:00.123456Z",
+      "operation_id": "op-vector-1"
+    },
+    "canonicalUtf8": "{\"action\":\"update\",\"client_updated_at\":\"2026-08-05T10:00:00.123456Z\",\"entity_id\":\"note-1\",\"entity_type\":\"workItemNote\",\"expected_version\":4,\"operation_id\":\"op-vector-1\",\"payload\":{\"document\":{\"blocks\":[{\"text\":\"\u96ea\\\\nline\",\"type\":\"paragraph\"}],\"meta\":{\"a\":true,\"z\":1}}}}",
+    "canonicalBytes": 270,
+    "sha256": "e1b42747bbb71be7d004492be3a049ce7f756c8d3f5c3b12c360feed56f7c284"
+  },
+  {
+    "name": "number-edges",
+    "event": {
+      "entity_type": "schedule",
+      "entity_id": "schedule-edges",
+      "action": "create",
+      "payload": {
+        "safe": 9007199254740991,
+        "negativeZero": -0.0,
+        "exponent": 1e+30
+      },
+      "expected_version": null,
+      "client_updated_at": "2026-08-05T10:00:00Z",
+      "operation_id": "op-vector-2"
+    },
+    "canonicalUtf8": "{\"action\":\"create\",\"client_updated_at\":\"2026-08-05T10:00:00Z\",\"entity_id\":\"schedule-edges\",\"entity_type\":\"schedule\",\"expected_version\":null,\"operation_id\":\"op-vector-2\",\"payload\":{\"exponent\":1e+30,\"negativeZero\":0,\"safe\":9007199254740991}}",
+    "canonicalBytes": 239,
+    "sha256": "fb716494157a5866dcc505730dfe3ba3a61f561edf5ce3bd51357e47cb9d60be"
+  },
+  {
+    "name": "empty-payload",
+    "event": {
+      "entity_type": "workItem",
+      "entity_id": "item-empty",
+      "action": "delete",
+      "payload": {},
+      "expected_version": 8,
+      "client_updated_at": "2026-08-05T10:00:00.000Z",
+      "operation_id": "op-vector-3"
+    },
+    "canonicalUtf8": "{\"action\":\"delete\",\"client_updated_at\":\"2026-08-05T10:00:00.000Z\",\"entity_id\":\"item-empty\",\"entity_type\":\"workItem\",\"expected_version\":8,\"operation_id\":\"op-vector-3\",\"payload\":{}}",
+    "canonicalBytes": 179,
+    "sha256": "2e1b5e037ef881d1ca8846527c5f7c1d4c148e63801e01485c81c4862347d57c"
+  }
+]

@@ -9,7 +9,59 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Optional
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Mapping, Optional, Protocol
+
+if TYPE_CHECKING:
+    from app.mutation.types import PersistedMutationCommand
+    from app.runtime.leases import FenceReceipt
+    from app.runtime.space import SpaceRuntimeHandle
+
+
+class FencedProjectionExecutor(Protocol):
+    """Apply persisted projections through the current Space fence only."""
+
+    async def apply_forward(
+        self,
+        scope: "SpaceRuntimeHandle",
+        operation_id: str,
+        command: "PersistedMutationCommand",
+        receipt: "FenceReceipt",
+        *,
+        ordinals: tuple[int, ...] | None = None,
+    ) -> None: ...
+
+    async def restore_before(
+        self,
+        scope: "SpaceRuntimeHandle",
+        operation_id: str,
+        command: "PersistedMutationCommand",
+        receipt: "FenceReceipt",
+        *,
+        ordinals: tuple[int, ...] | None = None,
+    ) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionAuthoritySnapshot:
+    markdown: Mapping[str, bytes]
+    index: Mapping[str, bytes]
+    fts: Mapping[str, bytes]
+
+    def __post_init__(self) -> None:
+        for label in ("markdown", "index", "fts"):
+            source = getattr(self, label)
+            if not isinstance(source, Mapping):
+                raise TypeError(f"{label} authority must be a mapping")
+            copied = dict(source)
+            if not all(
+                isinstance(target, str)
+                and target
+                and isinstance(payload, bytes)
+                for target, payload in copied.items()
+            ):
+                raise TypeError(f"{label} authority must map logical targets to bytes")
+            object.__setattr__(self, label, MappingProxyType(copied))
 
 
 class NoteStatus(StrEnum):
@@ -86,6 +138,10 @@ class FileSystem(ABC):
 
     @abstractmethod
     async def close(self) -> None:
+        ...
+
+    @abstractmethod
+    async def snapshot_projection_authority(self) -> ProjectionAuthoritySnapshot:
         ...
 
     @abstractmethod

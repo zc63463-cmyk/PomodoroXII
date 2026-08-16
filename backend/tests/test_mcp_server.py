@@ -13,6 +13,69 @@ import asyncio
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _explicit_trusted_stdio_context():
+    from app.mcp.auth import trusted_stdio_context
+
+    with trusted_stdio_context():
+        yield
+
+
+@pytest.fixture
+async def mcp_space_session(space_session, monkeypatch):
+    import app.mcp.server as server
+    from app.db.meta_session import get_meta_session
+    from app.db.migrations import MigrationCoordinator
+    from app.db.models.meta import Space
+    from app.file_system.index_schema import IndexStoreSchema
+    from app.runtime.leases import RuntimeLeaseCoordinator
+    from app.runtime.space import SpaceRuntime
+    from app.runtime.sqlite_vfs import _bind_existing_target, _extension_candidates
+    from app.settings import settings
+    from app.space_manager import SpaceEngineManager, dispose_space_engine_manager
+
+    candidates = _extension_candidates()
+    assert candidates, "Task 5 MCP tests require the Windows pxii-vfs extension"
+    monkeypatch.setenv("POMODOROXII_PXII_VFS_EXTENSION", str(candidates[0]))
+    engines = SpaceEngineManager()
+    leases = RuntimeLeaseCoordinator(settings.data_root / ".runtime")
+    index_schema = IndexStoreSchema()
+    runtime = SpaceRuntime(
+        leases=leases,
+        engines=engines,
+        migrations=MigrationCoordinator(leases, engines),
+        index_schema=index_schema,
+    )
+    database = settings.space_db_path("spc_test")
+    notes = settings.space_notes_dir("spc_test")
+    notes.mkdir(parents=True, exist_ok=True)
+    index = database.parent / "index.db"
+    index.touch()
+    index_target = _bind_existing_target(index, create_authority=True)
+    try:
+        index_schema.upgrade_open(index_target, create_if_missing=False)
+    finally:
+        await index_target.aclose()
+    async for meta_db in get_meta_session():
+        meta_db.add(
+            Space(
+                id="spc_test",
+                name="spc_test",
+                db_path=str(database),
+                notes_dir=str(notes),
+            )
+        )
+        await meta_db.commit()
+        break
+    server.install_space_runtime(runtime)
+    try:
+        yield space_session
+    finally:
+        server.install_space_runtime(None)
+        await engines.dispose_all()
+        await dispose_space_engine_manager()
+
 # --------------------------------------------------------------------------- #
 # Server identity
 # --------------------------------------------------------------------------- #
@@ -53,28 +116,7 @@ async def test_list_all_spaces_returns_list():
 
 
 @pytest.mark.asyncio
-async def test_get_stats_overview_returns_dict(space_session):
-    """get_stats_overview should return a dict with period keys."""
-    from app.mcp.server import get_stats_overview
-
-    result = await get_stats_overview("spc_test")
-    assert isinstance(result, dict)
-    # Default periods should be today/week/month/total
-    assert "today" in result or "total" in result
-
-
-@pytest.mark.asyncio
-async def test_get_task_distribution_returns_dict(space_session):
-    """get_task_distribution should return by_status and by_priority."""
-    from app.mcp.server import get_task_distribution
-
-    result = await get_task_distribution("spc_test")
-    assert "by_status" in result
-    assert "by_priority" in result
-
-
-@pytest.mark.asyncio
-async def test_get_habit_summary_returns_dict(space_session):
+async def test_get_habit_summary_returns_dict(mcp_space_session):
     """get_habit_summary should return habits list and period_days."""
     from app.mcp.server import get_habit_summary
 
@@ -85,7 +127,7 @@ async def test_get_habit_summary_returns_dict(space_session):
 
 
 @pytest.mark.asyncio
-async def test_get_note_summary_returns_counts(space_session):
+async def test_get_note_summary_returns_counts(mcp_space_session):
     """get_note_summary should return note/folder counts."""
     from app.mcp.server import get_note_summary
 
@@ -118,8 +160,8 @@ async def test_list_entities_returns_all():
     assert result["total"] > 0
     # Should include core business entities.
     names = [e["name"] for e in result["entities"]]
-    assert "task" in names
-    assert "session" in names
+    assert "work_item" in names
+    assert "focus_session" in names
     assert "note" in names
 
 
@@ -128,35 +170,67 @@ async def test_get_entity_schema_returns_fields():
     """get_entity_schema should return field list for an entity."""
     from app.mcp.server import get_entity_schema
 
-    result = await get_entity_schema("task")
-    assert result["entity_type"] == "task"
+    result = await get_entity_schema("work_item")
+    assert result["entity_type"] == "work_item"
     assert "fields" in result
     assert len(result["fields"]) > 0
     field_names = [f["name"] for f in result["fields"]]
     assert "title" in field_names
-    assert "status" in field_names
+    assert "status_definition_id" in field_names
 
 
 @pytest.mark.asyncio
-async def test_get_sync_status_returns_counts(space_session):
-    """get_sync_status should return entity_counts and tombstone_count."""
-    from app.mcp.server import get_sync_status
+async def test_sync_v2_tool_schemas_replace_the_reduced_legacy_contract():
+    """The MCP surface exposes opaque v2 inputs instead of timestamp Sync."""
+    from app.mcp.server import mcp
 
-    result = await get_sync_status("spc_test")
-    assert "entity_counts" in result
-    assert "tombstone_count" in result
-    assert "server_time" in result
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    pull = tools["sync_pull"].parameters
+    status = tools["get_sync_status"].parameters
+
+    assert set(pull["properties"]) == {"space_id", "client_id", "cursor", "limit"}
+    assert "since" not in pull["properties"]
+    assert pull["properties"]["limit"] == {
+        "default": 500,
+        "maximum": 500,
+        "minimum": 1,
+        "type": "integer",
+    }
+    assert set(status["properties"]) == {"space_id", "client_id"}
 
 
 @pytest.mark.asyncio
-async def test_sync_pull_returns_data(space_session):
-    """sync_pull should return a dict with entity lists and next_since."""
-    from app.mcp.server import sync_pull
+async def test_sync_query_schema_preserves_ordered_bounded_operation_ids():
+    from app.mcp.server import mcp
 
-    result = await sync_pull("spc_test", since="", limit=100)
-    assert "next_since" in result
-    assert "has_more" in result
-    assert "server_time" in result
+    tool = await mcp.get_tool("sync_query_operations")
+    operation_ids = tool.parameters["properties"]["operation_ids"]
+
+    assert operation_ids["minItems"] == 1
+    assert operation_ids["maxItems"] == 500
+    assert operation_ids["uniqueItems"] is True
+    assert operation_ids["items"]["minLength"] == 1
+    assert operation_ids["items"]["maxLength"] == 128
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_schemas_publish_strict_input_and_output_limits():
+    from app.mcp.server import mcp
+    from app.schemas.sync import MAX_JS_SAFE_INTEGER, MAX_RECOVERY_BASE64_CHARS
+
+    push = await mcp.get_tool("sync_push")
+    recover = await mcp.get_tool("sync_recover")
+    event = next(iter(push.parameters["$defs"].values()))
+
+    assert push.parameters["properties"]["events"]["maxItems"] == 500
+    assert event["properties"]["expected_version"]["anyOf"][0]["maximum"] == (
+        MAX_JS_SAFE_INTEGER
+    )
+    assert event["properties"]["client_updated_at"]["pattern"]
+    assert recover.output_schema["properties"]["entity_count"]["maximum"] == 500
+    assert recover.output_schema["properties"]["payload_jsonl_base64"]["maxLength"] == (
+        MAX_RECOVERY_BASE64_CHARS
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -170,8 +244,8 @@ def test_analyze_productivity_prompt_generates_text():
     result = analyze_productivity("spc_test")
     assert isinstance(result, str)
     assert "spc_test" in result
-    assert "get_stats_overview" in result
-    assert "get_focus_trend" in result
+    assert "get_habit_summary" in result
+    assert "get_schedule_summary" in result
 
 
 def test_weekly_review_prompt_generates_text():
@@ -181,7 +255,7 @@ def test_weekly_review_prompt_generates_text():
     result = weekly_review("spc_test")
     assert isinstance(result, str)
     assert "spc_test" in result
-    assert "get_task_distribution" in result
+    assert "get_habit_summary" in result
     assert "get_schedule_summary" in result
 
 
@@ -242,10 +316,13 @@ def test_all_tools_registered_via_fastmcp():
 
     tools = asyncio.run(mcp.list_tools())
     tool_names = {t.name for t in tools}
+    from app.sync.operations import SYNC_OPERATIONS
     from tests.parity_helpers import EXPECTED_MCP_TOOLS
 
-    missing = EXPECTED_MCP_TOOLS - tool_names
-    extra = tool_names - EXPECTED_MCP_TOOLS
+    expected = EXPECTED_MCP_TOOLS | {spec.mcp_tool for spec in SYNC_OPERATIONS}
+
+    missing = expected - tool_names
+    extra = tool_names - expected
     assert not missing, f"Tools missing from FastMCP registry: {missing}"
     assert not extra, f"Unexpected extra tools in FastMCP registry: {extra}"
 
@@ -255,30 +332,7 @@ def test_all_tools_registered_via_fastmcp():
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_get_focus_trend_returns_data(space_session):
-    """get_focus_trend should return trend data with 'data' key."""
-    from app.mcp.server import get_focus_trend
-
-    result = await get_focus_trend("spc_test", days=7)
-    assert isinstance(result, dict)
-    assert "data" in result
-    assert isinstance(result["data"], list)
-
-
-@pytest.mark.asyncio
-async def test_get_daily_detail_returns_data(space_session):
-    """get_daily_detail should return count and duration for a date."""
-    from app.mcp.server import get_daily_detail
-
-    result = await get_daily_detail("spc_test", date="2026-01-01")
-    assert isinstance(result, dict)
-    assert "date" in result
-    assert "count" in result
-    assert "duration" in result
-
-
-@pytest.mark.asyncio
-async def test_get_schedule_summary_returns_data(space_session):
+async def test_get_schedule_summary_returns_data(mcp_space_session):
     """get_schedule_summary should return schedule completion stats."""
     from app.mcp.server import get_schedule_summary
 

@@ -1,6 +1,6 @@
 """Persistent state for sync retention and materialized full snapshots."""
 
-from sqlalchemy import Integer, String, Text
+from sqlalchemy import CheckConstraint, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -9,6 +9,12 @@ from app.services.time import utc_now_iso
 
 class SyncState(Base):
     __tablename__ = "sync_state"
+    __table_args__ = (
+        CheckConstraint(
+            "retention_floor >= 0 AND current_cursor >= retention_floor",
+            name="floor_cursor",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     retention_floor: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

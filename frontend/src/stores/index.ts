@@ -1,14 +1,14 @@
 /**
  * Store registry —有序 reset 注册（F0 §6.3c / 附录 E）.
  *
- * STORE_RESET_ORDER 定义 17 个业务 store 的 reset 顺序（被依赖的先 reset）。
+ * STORE_RESET_ORDER 定义业务 store 的 reset 顺序（被依赖的先 reset）。
  * auth-store / space-store / bootstrap-store 不参与（管理跨空间状态）。
  */
 
 import { useSyncStore } from './sync-store'
 import { useTimerStore } from './timer-store'
-import { useSessionStore } from './session-store'
-import { useTaskStore } from './task-store'
+import { useTaskSpaceStore } from './task-space-store'
+import { useFocusSessionStore } from './focus-session-store'
 import { useNoteStore } from './note-store'
 import { useQuickNoteStore } from './quick-note-store'
 import { useFolderStore } from './folder-store'
@@ -26,8 +26,8 @@ import { useAppStore } from './app-store'
 export const STORE_RESET_ORDER = [
   'sync',
   'timer',
-  'session',
-  'task',
+  'task-space',
+  'focus-session',
   'note',
   'quick-note',
   'folder',
@@ -46,8 +46,8 @@ export const STORE_RESET_ORDER = [
 export const STORE_RESET_FNS: Array<() => void> = [
   () => useSyncStore.getState().reset(),
   () => useTimerStore.getState().reset(),
-  () => useSessionStore.getState().reset(),
-  () => useTaskStore.getState().reset(),
+  () => useTaskSpaceStore.getState().reset(),
+  () => useFocusSessionStore.getState().reset(),
   () => useNoteStore.getState().reset(),
   () => useQuickNoteStore.getState().reset(),
   () => useFolderStore.getState().reset(),

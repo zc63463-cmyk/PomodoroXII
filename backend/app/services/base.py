@@ -58,6 +58,7 @@ class BaseService:
                 entity_id=obj.id,
                 action="create",
                 payload=serialize_entity(obj),
+                visible=True,
             )
         return obj
 
@@ -83,6 +84,7 @@ class BaseService:
         total = (
             await self.db.execute(select(func.count()).select_from(q.subquery()))
         ).scalar() or 0
+        q = q.order_by(self.model.id.asc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()
@@ -131,6 +133,7 @@ class BaseService:
                 entity_id=obj.id,
                 action="update",
                 payload=serialize_entity(obj),
+                visible=True,
             )
         return obj
 
@@ -163,4 +166,5 @@ class BaseService:
                 entity_type=self.entity_type,
                 entity_id=id,
                 action="delete",
+                visible=True,
             )

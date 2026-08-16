@@ -4,23 +4,60 @@
  */
 
 export interface paths {
-    "/api/v1/auth/setup": {
+    "/api/health": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        put?: never;
         /**
-         * Setup Password
-         * @description First-time admin password setup.
-         *
-         *     Stores ``hash_password(password)`` in a ``MetaSetting`` row with
-         *     ``key="admin_password"``.  Returns 409 if a password is already set.
+         * Health Check
+         * @description Health check endpoint for orchestrators / load balancers.
          */
-        post: operations["setup_password_api_v1_auth_setup_post"];
+        get: operations["health_check_api_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Metrics
+         * @description Expose minimal Prometheus metrics to authenticated operators.
+         */
+        get: operations["metrics_api_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readiness Check
+         * @description Verify meta database connectivity without exposing failures.
+         */
+        get: operations["readiness_check_api_ready_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -36,13 +73,42 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Login
-         * @description Verify the admin password and issue a master JWT.
-         *
-         *     Returns 401 if the password is wrong or no password has been set.
-         */
+        /** Login */
         post: operations["login_api_v1_auth_login_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke Tokens */
+        post: operations["revoke_tokens_api_v1_auth_revoke_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Setup Password */
+        post: operations["setup_password_api_v1_auth_setup_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -56,10 +122,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Verify Token
-         * @description Verify the current Bearer token and return its claims.
-         */
+        /** Verify Token */
         get: operations["verify_token_api_v1_auth_verify_get"];
         put?: never;
         post?: never;
@@ -69,7 +132,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/spaces": {
+    "/api/v1/folders": {
         parameters: {
             query?: never;
             header?: never;
@@ -77,23 +140,23 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List Spaces
-         * @description List all registered spaces.
+         * List Folders
+         * @description List non-trashed folders, optionally filtered by parent_id.
          */
-        get: operations["list_spaces_api_v1_spaces_get"];
+        get: operations["list_folders_api_v1_folders_get"];
         put?: never;
         /**
-         * Create Space
-         * @description Create a new space: insert a row, create directories, commit.
+         * Create Folder
+         * @description Create a new folder.
          */
-        post: operations["create_space_api_v1_spaces_post"];
+        post: operations["create_folder_api_v1_folders_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/spaces/{space_id}": {
+    "/api/v1/folders/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -101,42 +164,31 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Space
-         * @description Return a single space by id (404 if not found).
+         * Get Folder
+         * @description Return a single folder by id.
          */
-        get: operations["get_space_api_v1_spaces__space_id__get"];
-        put?: never;
+        get: operations["get_folder_api_v1_folders__id__get"];
+        /**
+         * Update Folder
+         * @description Update an existing folder (partial update).
+         */
+        put: operations["update_folder_api_v1_folders__id__put"];
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/spaces/{space_id}/token": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
         /**
-         * Issue Space Token
-         * @description Issue a space-scoped JWT for the given space.
+         * Delete Folder
+         * @description Soft-delete a folder and all its descendants via cascade.
          *
-         *     The ``user_id`` embedded in the space token is taken from the
-         *     master token's ``sub`` claim.
+         *     System folders cannot be deleted (raises ValidationError).  Notes and
+         *     quick notes inside the subtree are detached (folder_id set to None)
+         *     so they remain visible as "unfiled".
          */
-        post: operations["issue_space_token_api_v1_spaces__space_id__token_post"];
-        delete?: never;
+        delete: operations["delete_folder_api_v1_folders__id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/meta/health": {
+    "/api/v1/habits": {
         parameters: {
             query?: never;
             header?: never;
@@ -144,13 +196,69 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Registry Health
-         * @description Return registry load status, entity count, and per-category counts.
+         * List Habits
+         * @description List all habits ordered by sort_order.
          */
-        get: operations["registry_health_api_v1_meta_health_get"];
+        get: operations["list_habits_api_v1_habits_get"];
         put?: never;
-        post?: never;
+        /**
+         * Create Habit
+         * @description Create a new habit.
+         */
+        post: operations["create_habit_api_v1_habits_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/habits/{habit_id}/check-ins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Check Ins
+         * @description List check-ins for a habit (newest date first).
+         */
+        get: operations["list_check_ins_api_v1_habits__habit_id__check_ins_get"];
+        put?: never;
+        /**
+         * Create Check In
+         * @description Record a check-in for the given habit (path habit_id is authoritative).
+         */
+        post: operations["create_check_in_api_v1_habits__habit_id__check_ins_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/habits/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Habit
+         * @description Return a single habit by id.
+         */
+        get: operations["get_habit_api_v1_habits__id__get"];
+        /**
+         * Update Habit
+         * @description Update an existing habit (partial update).
+         */
+        put: operations["update_habit_api_v1_habits__id__put"];
+        post?: never;
+        /**
+         * Delete Habit
+         * @description Delete a habit.
+         */
+        delete: operations["delete_habit_api_v1_habits__id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -220,7 +328,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tasks": {
+    "/api/v1/meta/health": {
         parameters: {
             query?: never;
             header?: never;
@@ -228,97 +336,13 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List Tasks
-         * @description List tasks with optional status / priority / search filters.
+         * Registry Health
+         * @description Return registry load status, entity count, and per-category counts.
          */
-        get: operations["list_tasks_api_v1_tasks_get"];
+        get: operations["registry_health_api_v1_meta_health_get"];
         put?: never;
-        /**
-         * Create Task
-         * @description Create a new task.
-         */
-        post: operations["create_task_api_v1_tasks_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/tasks/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Task
-         * @description Return a single task by id.
-         */
-        get: operations["get_task_api_v1_tasks__id__get"];
-        /**
-         * Update Task
-         * @description Update an existing task (partial update).
-         */
-        put: operations["update_task_api_v1_tasks__id__put"];
         post?: never;
-        /**
-         * Delete Task
-         * @description Delete a task (idempotent, records a tombstone for sync).
-         */
-        delete: operations["delete_task_api_v1_tasks__id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Sessions
-         * @description List sessions, optionally filtered by type (newest first).
-         */
-        get: operations["list_sessions_api_v1_sessions_get"];
-        put?: never;
-        /**
-         * Create Session
-         * @description Create a new pomodoro session.
-         */
-        post: operations["create_session_api_v1_sessions_post"];
         delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sessions/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Session
-         * @description Return a single session by id.
-         */
-        get: operations["get_session_api_v1_sessions__id__get"];
-        /**
-         * Update Session
-         * @description Update an existing session (partial update).
-         */
-        put: operations["update_session_api_v1_sessions__id__put"];
-        post?: never;
-        /**
-         * Delete Session
-         * @description Delete a session.
-         */
-        delete: operations["delete_session_api_v1_sessions__id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -366,6 +390,46 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Note
+         * @description Return note metadata by id (content is fetched separately).
+         */
+        get: operations["get_note_api_v1_notes__id__get"];
+        /**
+         * Update Note
+         * @deprecated
+         * @description [Deprecated] Update a note via the legacy dispatcher.
+         *
+         *     Prefer ``PATCH /{id}`` for metadata + ``PUT /{id}/content`` for content.
+         *     This route is kept for backward compatibility and will be removed in the
+         *     next major.
+         */
+        put: operations["update_note_api_v1_notes__id__put"];
+        post?: never;
+        /**
+         * Delete Note
+         * @description Soft-delete a note: set trashed_at + move .md to .trash/ (idempotent, no tombstone).
+         */
+        delete: operations["delete_note_api_v1_notes__id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Note Metadata
+         * @description Update note metadata (title/tags/etc) -- does NOT write the .md file.
+         *
+         *     Content-managed fields (content_hash, word_count) are intentionally
+         *     not accepted here; use ``PUT /{id}/content`` to rewrite the body.
+         */
+        patch: operations["update_note_metadata_api_v1_notes__id__patch"];
         trace?: never;
     };
     "/api/v1/notes/{id}/content": {
@@ -436,7 +500,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/notes/{id}": {
+    "/api/v1/projects": {
         parameters: {
             query?: never;
             header?: never;
@@ -444,63 +508,23 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Note
-         * @description Return note metadata by id (content is fetched separately).
+         * List Projects
+         * @description List projects with optional pagination.
          */
-        get: operations["get_note_api_v1_notes__id__get"];
-        /**
-         * Update Note
-         * @deprecated
-         * @description [Deprecated] Update a note via the legacy dispatcher.
-         *
-         *     Prefer ``PATCH /{id}`` for metadata + ``PUT /{id}/content`` for content.
-         *     This route is kept for backward compatibility and will be removed in the
-         *     next major.
-         */
-        put: operations["update_note_api_v1_notes__id__put"];
-        post?: never;
-        /**
-         * Delete Note
-         * @description Soft-delete a note: set trashed_at + move .md to .trash/ (idempotent, no tombstone).
-         */
-        delete: operations["delete_note_api_v1_notes__id__delete"];
-        options?: never;
-        head?: never;
-        /**
-         * Update Note Metadata
-         * @description Update note metadata (title/tags/etc) -- does NOT write the .md file.
-         *
-         *     Content-managed fields (content_hash, word_count) are intentionally
-         *     not accepted here; use ``PUT /{id}/content`` to rewrite the body.
-         */
-        patch: operations["update_note_metadata_api_v1_notes__id__patch"];
-        trace?: never;
-    };
-    "/api/v1/folders": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Folders
-         * @description List non-trashed folders, optionally filtered by parent_id.
-         */
-        get: operations["list_folders_api_v1_folders_get"];
+        get: operations["list_projects_api_v1_projects_get"];
         put?: never;
         /**
-         * Create Folder
-         * @description Create a new folder.
+         * Create Project
+         * @description Create a project via the TaskSpace command module.
          */
-        post: operations["create_folder_api_v1_folders_post"];
+        post: operations["create_project_api_v1_projects_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/folders/{id}": {
+    "/api/v1/projects/definitions": {
         parameters: {
             query?: never;
             header?: never;
@@ -508,25 +532,33 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get Folder
-         * @description Return a single folder by id.
+         * List Definitions
+         * @description List system status, type, and label definitions.
          */
-        get: operations["get_folder_api_v1_folders__id__get"];
-        /**
-         * Update Folder
-         * @description Update an existing folder (partial update).
-         */
-        put: operations["update_folder_api_v1_folders__id__put"];
+        get: operations["list_definitions_api_v1_projects_definitions_get"];
+        put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
         /**
-         * Delete Folder
-         * @description Soft-delete a folder and all its descendants via cascade.
-         *
-         *     System folders cannot be deleted (raises ValidationError).  Notes and
-         *     quick notes inside the subtree are detached (folder_id set to None)
-         *     so they remain visible as "unfiled".
+         * Get Project
+         * @description Get a single project by ID.
          */
-        delete: operations["delete_folder_api_v1_folders__id__delete"];
+        get: operations["get_project_api_v1_projects__project_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -556,33 +588,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/quick-notes/{id}/convert": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Convert Quick Note
-         * @description Convert a quick note into a full Note (transactional).
-         *
-         *     - Creates a Note with the quick note's content/tags/folder_id.
-         *     - Marks the quick note as archived (``archived_at`` + ``migrated_to_note_id``).
-         *     - Copies ``memo_comments`` rows to the new Note.
-         *
-         *     The original quick note row is kept (GET /{id} still 200) but excluded
-         *     from GET /quick-notes listings. Repeated convert returns 409.
-         */
-        post: operations["convert_quick_note_api_v1_quick_notes__id__convert_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/quick-notes/{id}": {
         parameters: {
             query?: never;
@@ -606,6 +611,33 @@ export interface paths {
          * @description Delete a quick note.
          */
         delete: operations["delete_quick_note_api_v1_quick_notes__id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/quick-notes/{id}/convert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Convert Quick Note
+         * @description Convert a quick note into a full Note (transactional).
+         *
+         *     Delegates to ``KnowledgeStore.convert_quick_note`` via the durable
+         *     mutation pipeline, which creates the Note, archives the QuickNote,
+         *     and copies memo_comments atomically.
+         *
+         *     The original quick note row is kept (GET /{id} still 200) but excluded
+         *     from GET /quick-notes listings. Repeated convert returns 409.
+         */
+        post: operations["convert_quick_note_api_v1_quick_notes__id__convert_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -663,82 +695,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/habits": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Habits
-         * @description List all habits ordered by sort_order.
-         */
-        get: operations["list_habits_api_v1_habits_get"];
-        put?: never;
-        /**
-         * Create Habit
-         * @description Create a new habit.
-         */
-        post: operations["create_habit_api_v1_habits_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/habits/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Habit
-         * @description Return a single habit by id.
-         */
-        get: operations["get_habit_api_v1_habits__id__get"];
-        /**
-         * Update Habit
-         * @description Update an existing habit (partial update).
-         */
-        put: operations["update_habit_api_v1_habits__id__put"];
-        post?: never;
-        /**
-         * Delete Habit
-         * @description Delete a habit.
-         */
-        delete: operations["delete_habit_api_v1_habits__id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/habits/{habit_id}/check-ins": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Check Ins
-         * @description List check-ins for a habit (newest date first).
-         */
-        get: operations["list_check_ins_api_v1_habits__habit_id__check_ins_get"];
-        put?: never;
-        /**
-         * Create Check In
-         * @description Record a check-in for the given habit (path habit_id is authoritative).
-         */
-        post: operations["create_check_in_api_v1_habits__habit_id__check_ins_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/schedules": {
         parameters: {
             query?: never;
@@ -786,6 +742,263 @@ export interface paths {
          * @description Delete a schedule.
          */
         delete: operations["delete_schedule_api_v1_schedules__id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Settings
+         * @description Return all settings as a ``{key: value}`` mapping.
+         */
+        get: operations["get_settings_api_v1_settings_get"];
+        /**
+         * Update Settings
+         * @description Upsert a batch of settings, rejecting protected keys.
+         *
+         *     Request body is a JSON object ``{key: value, ...}``.  Protected keys
+         *     are skipped and returned in ``rejected``; all others are inserted or
+         *     updated.
+         */
+        put: operations["update_settings_api_v1_settings_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/spaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Spaces
+         * @description List all registered spaces.
+         */
+        get: operations["list_spaces_api_v1_spaces_get"];
+        put?: never;
+        /**
+         * Create Space
+         * @description Provision a Space before publishing its Meta registration.
+         */
+        post: operations["create_space_api_v1_spaces_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/spaces/{space_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Space
+         * @description Return a single space by id (404 if not found).
+         */
+        get: operations["get_space_api_v1_spaces__space_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/spaces/{space_id}/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue Space Token
+         * @description Issue a space-scoped JWT for the given space.
+         *
+         *     The ``user_id`` embedded in the space token is taken from the
+         *     master token's ``sub`` claim.
+         */
+        post: operations["issue_space_token_api_v1_spaces__space_id__token_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/habit-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stats Habit Summary
+         * @description Return habit check-in rates, streaks, and completion for the period.
+         */
+        get: operations["stats_habit_summary_api_v1_stats_habit_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/note-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stats Note Summary
+         * @description Return note and folder counts (active + trashed).
+         */
+        get: operations["stats_note_summary_api_v1_stats_note_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stats/schedule-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stats Schedule Summary
+         * @description Return schedule completion rates (completed/pending/overdue).
+         */
+        get: operations["stats_schedule_summary_api_v1_stats_schedule_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync/v2/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ack V2 */
+        post: operations["ack_v2_api_v1_sync_v2_ack_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync/v2/operations/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query Operations V2 */
+        post: operations["query_operations_v2_api_v1_sync_v2_operations_query_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync/v2/pull": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pull V2 */
+        get: operations["pull_v2_api_v1_sync_v2_pull_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync/v2/push": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Push V2 */
+        post: operations["push_v2_api_v1_sync_v2_push_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync/v2/recover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recover V2 */
+        get: operations["recover_v2_api_v1_sync_v2_recover_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync/v2/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Status V2 */
+        get: operations["status_v2_api_v1_sync_v2_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -874,33 +1087,9 @@ export interface paths {
         put?: never;
         /**
          * Cleanup Expired
-         * @description Remove sync tombstones older than the TTL and return the count purged.
+         * @description Retain the compatibility route while S1 rejects unsafe cleanup.
          */
         post: operations["cleanup_expired_api_v1_trash_cleanup_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/trash/{entity_type}/{entity_id}/restore": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Restore Item
-         * @description Restore a trashed item by clearing its ``trashed_at`` timestamp.
-         *
-         *     For notes, also coordinates with the filesystem to move the ``.md``
-         *     file back from ``.trash/`` via ``NoteService.restore``. Other entity
-         *     types only clear the ORM ``trashed_at`` column.
-         */
-        post: operations["restore_item_api_v1_trash__entity_type___entity_id__restore_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -919,12 +1108,12 @@ export interface paths {
         post?: never;
         /**
          * Purge Item
-         * @description Permanently delete a trashed item (hard delete + sync tombstone).
+         * @description Permanently delete a trashed item via the durable mutation pipeline.
          *
-         *     For notes, also purges the filesystem ``.trash/`` entry via
-         *     ``fs.purge`` (deletes the ``.md`` file + fs SQLite index rows).
-         *     For folders, descendant folders discovered via ``CascadeService`` are
-         *     also hard-deleted and tombstoned.
+         *     Notes and folders are purged through the KnowledgeStore, which
+         *     handles DB deletion, tombstone creation, sync events, and
+         *     projections atomically.  Filesystem cleanup for notes is
+         *     best-effort after the durable commit.
          */
         delete: operations["purge_item_api_v1_trash__entity_type___entity_id__delete"];
         options?: never;
@@ -932,175 +1121,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/stats/overview": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Overview
-         * @description Return session counts and total durations by time period.
-         */
-        get: operations["stats_overview_api_v1_stats_overview_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/focus-trend": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Focus Trend
-         * @description Return daily focus trend (count + duration) for the last *days* days.
-         */
-        get: operations["stats_focus_trend_api_v1_stats_focus_trend_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/task-distribution": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Task Distribution
-         * @description Return task distribution grouped by status and by priority.
-         */
-        get: operations["stats_task_distribution_api_v1_stats_task_distribution_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/daily-detail": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Daily Detail
-         * @description Return session count and total duration for a specific date.
-         */
-        get: operations["stats_daily_detail_api_v1_stats_daily_detail_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/habit-summary": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Habit Summary
-         * @description Return habit check-in rates, streaks, and completion for the period.
-         */
-        get: operations["stats_habit_summary_api_v1_stats_habit_summary_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/schedule-summary": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Schedule Summary
-         * @description Return schedule completion rates (completed/pending/overdue).
-         */
-        get: operations["stats_schedule_summary_api_v1_stats_schedule_summary_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/note-summary": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stats Note Summary
-         * @description Return note and folder counts (active + trashed).
-         */
-        get: operations["stats_note_summary_api_v1_stats_note_summary_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Settings
-         * @description Return all settings as a ``{key: value}`` mapping.
-         */
-        get: operations["get_settings_api_v1_settings_get"];
-        /**
-         * Update Settings
-         * @description Upsert a batch of settings, rejecting protected keys.
-         *
-         *     Request body is a JSON object ``{key: value, ...}``.  Protected keys
-         *     are skipped and returned in ``rejected``; all others are inserted or
-         *     updated.
-         */
-        put: operations["update_settings_api_v1_settings_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/sync/push": {
+    "/api/v1/trash/{entity_type}/{entity_id}/restore": {
         parameters: {
             query?: never;
             header?: never;
@@ -1110,17 +1131,22 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Push Events
-         * @description Apply a batch of sync events.
+         * Restore Item
+         * @description Restore a trashed item via the durable mutation pipeline.
+         *
+         *     Notes, folders, and quick notes all clear ``trashed_at`` through
+         *     the KnowledgeStore, which handles DB update, sync events, and
+         *     projections atomically.  For notes, the filesystem ``.trash/``
+         *     file is moved back best-effort after the durable commit.
          */
-        post: operations["push_events_api_v1_sync_push_post"];
+        post: operations["restore_item_api_v1_trash__entity_type___entity_id__restore_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/sync/pull": {
+    "/api/v1/work-items": {
         parameters: {
             query?: never;
             header?: never;
@@ -1128,19 +1154,23 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Pull Changes
-         * @description Pull incremental changes since *since*.
+         * List Work Items
+         * @description List work items with optional project filter and pagination.
          */
-        get: operations["pull_changes_api_v1_sync_pull_get"];
+        get: operations["list_work_items_api_v1_work_items_get"];
         put?: never;
-        post?: never;
+        /**
+         * Create Work Item
+         * @description Create a work item via the TaskSpace command module.
+         */
+        post: operations["create_work_item_api_v1_work_items_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/sync/full": {
+    "/api/v1/work-items/{work_item_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1148,19 +1178,43 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Full Sync
-         * @description Full sync: returns ALL tombstones regardless of since.
+         * Get Work Item
+         * @description Get a single work item by ID.
          */
-        get: operations["full_sync_api_v1_sync_full_get"];
+        get: operations["get_work_item_api_v1_work_items__work_item_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Work Item
+         * @description Update mutable fields of a work item.
+         */
+        patch: operations["update_work_item_api_v1_work_items__work_item_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}/move": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Move Work Item
+         * @description Move a work item to a new parent.
+         */
+        post: operations["move_work_item_api_v1_work_items__work_item_id__move_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/sync/status": {
+    "/api/v1/work-items/{work_item_id}/note": {
         parameters: {
             query?: never;
             header?: never;
@@ -1168,11 +1222,15 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Sync Status
-         * @description Return entity counts + tombstone count.
+         * Read Note
+         * @description Read the note document for a work item.
          */
-        get: operations["sync_status_api_v1_sync_status_get"];
-        put?: never;
+        get: operations["read_note_api_v1_work_items__work_item_id__note_get"];
+        /**
+         * Replace Document
+         * @description Replace the entire note document.
+         */
+        put: operations["replace_document_api_v1_work_items__work_item_id__note_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -1180,40 +1238,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/sync/ledger-stats": {
+    "/api/v1/work-items/{work_item_id}/note/append-blocks": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Ledger Stats
-         * @description Return sync event ledger size stats (H2-E monitoring).
-         */
-        get: operations["ledger_stats_api_v1_sync_ledger_stats_get"];
+        get?: never;
         put?: never;
-        post?: never;
+        /**
+         * Append Blocks
+         * @description Append blocks to the note document.
+         */
+        post: operations["append_blocks_api_v1_work_items__work_item_id__note_append_blocks_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/health": {
+    "/api/v1/work-items/{work_item_id}/note/toggle-checklist-item": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Health Check
-         * @description Health check endpoint for orchestrators / load balancers.
-         */
-        get: operations["health_check_api_health_get"];
+        get?: never;
         put?: never;
-        post?: never;
+        /**
+         * Toggle Checklist Item
+         * @description Toggle a checklist item in the note document.
+         */
+        post: operations["toggle_checklist_item_api_v1_work_items__work_item_id__note_toggle_checklist_item_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}/transition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Transition Work Item
+         * @description Transition a work item to a new status.
+         */
+        post: operations["transition_work_item_api_v1_work_items__work_item_id__transition_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1224,6 +1302,19 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AppendBlocksRequest */
+        AppendBlocksRequest: {
+            /** Blocks */
+            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock-Input"])[];
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /**
          * AuthLoginResponse
          * @description Master-token response returned after login.
@@ -1233,6 +1324,14 @@ export interface components {
             access_token: string;
             /** Token Type */
             token_type: string;
+        };
+        /**
+         * AuthRevokeResponse
+         * @description Stable response after advancing the credential epoch.
+         */
+        AuthRevokeResponse: {
+            /** Message */
+            message: string;
         };
         /**
          * AuthSetupResponse
@@ -1247,34 +1346,112 @@ export interface components {
          * @description Claims exposed after verifying a bearer token.
          */
         AuthVerifyResponse: {
-            /** Valid */
-            valid: boolean;
-            /** User Id */
-            user_id: string;
             /** Type */
             type: string;
+            /** User Id */
+            user_id: string;
+            /** Valid */
+            valid: boolean;
         };
         /**
-         * CountDuration
-         * @description Count and aggregate duration shared by focus statistics.
+         * CanonicalErrorResponse
+         * @description Opt-in canonical error envelope shared by REST and MCP adapters.
          */
-        CountDuration: {
-            /** Count */
-            count: number;
-            /** Duration */
-            duration: number;
+        CanonicalErrorResponse: {
+            /** Code */
+            code: string;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
+            /** Message */
+            message: string;
+            /** Request Id */
+            request_id: string;
+            /** Retryable */
+            retryable: boolean;
         };
-        /**
-         * DailyDetailResponse
-         * @description Focus aggregates for one requested date.
-         */
-        DailyDetailResponse: {
-            /** Date */
-            date: string;
-            /** Count */
-            count: number;
-            /** Duration */
-            duration: number;
+        /** ChecklistBlock */
+        "ChecklistBlock-Input": {
+            /** Blockid */
+            blockId: string;
+            /** Items */
+            items: components["schemas"]["ChecklistItem-Input"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "checklist";
+        };
+        /** ChecklistBlock */
+        "ChecklistBlock-Output": {
+            /** Blockid */
+            blockId: string;
+            /** Items */
+            items: components["schemas"]["ChecklistItem-Output"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "checklist";
+        };
+        /** ChecklistItem */
+        "ChecklistItem-Input": {
+            /** Checked */
+            checked: boolean;
+            /** Children */
+            children?: components["schemas"]["ChecklistItem-Input"][];
+            /** Itemid */
+            itemId: string;
+            /** Text */
+            text: string;
+        };
+        /** ChecklistItem */
+        "ChecklistItem-Output": {
+            /** Checked */
+            checked: boolean;
+            /** Children */
+            children?: components["schemas"]["ChecklistItem-Output"][];
+            /** Itemid */
+            itemId: string;
+            /** Text */
+            text: string;
+        };
+        /** CreateProjectRequest */
+        CreateProjectRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Key */
+            key: string;
+            /** Name */
+            name: string;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
+        /** CreateWorkItemRequest */
+        CreateWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Description */
+            description?: string | null;
+            /** Parentid */
+            parentId?: string | null;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Priority */
+            priority?: string | null;
+            /** Projectid */
+            projectId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Statusdefinitionid */
+            statusDefinitionId?: string | null;
+            /** Title */
+            title: string;
+            /** Typedefinitionid */
+            typeDefinitionId?: string | null;
         };
         /**
          * EntityCategory
@@ -1307,35 +1484,19 @@ export interface components {
         EntitySchemaOut: {
             /** Entity Type */
             entity_type: string;
-            /** Table Name */
-            table_name: string;
-            /** Primary Key */
-            primary_key: string;
             /** Fields */
             fields: components["schemas"]["FieldSpecOut"][];
+            /** Primary Key */
+            primary_key: string;
+            /** Table Name */
+            table_name: string;
         };
         /**
          * EntitySpecOut
          * @description Full metadata for one entity.
          */
         EntitySpecOut: {
-            /** Name */
-            name: string;
-            /** Model Path */
-            model_path: string;
-            /** Table Name */
-            table_name: string;
-            storage_type: components["schemas"]["StorageType"];
             category: components["schemas"]["EntityCategory"];
-            /** Sync Enabled */
-            sync_enabled: boolean;
-            /** Soft Delete */
-            soft_delete: boolean;
-            /**
-             * Primary Key
-             * @default id
-             */
-            primary_key: string;
             /**
              * Description
              * @default
@@ -1343,10 +1504,28 @@ export interface components {
             description: string;
             /** Fields */
             fields: components["schemas"]["FieldSpecOut"][];
-            /** Sync Entity Type */
-            sync_entity_type?: string | null;
+            /** Model Path */
+            model_path: string;
+            /** Name */
+            name: string;
+            /**
+             * Primary Key
+             * @default id
+             */
+            primary_key: string;
             /** Pull Key */
             pull_key?: string | null;
+            /** Soft Delete */
+            soft_delete: boolean;
+            storage_type: components["schemas"]["StorageType"];
+            /** @default timestamp_lww */
+            sync_conflict_policy: components["schemas"]["SyncConflictPolicy"];
+            /** Sync Enabled */
+            sync_enabled: boolean;
+            /** Sync Entity Type */
+            sync_entity_type?: string | null;
+            /** Table Name */
+            table_name: string;
         };
         /**
          * ErrorResponse
@@ -1363,91 +1542,71 @@ export interface components {
          * @description A single column's metadata.
          */
         FieldSpecOut: {
-            /** Name */
-            name: string;
-            /** Type */
-            type: string;
-            /** Nullable */
-            nullable: boolean;
             /** Default */
             default?: unknown;
-            /**
-             * Indexed
-             * @default false
-             */
-            indexed: boolean;
-            /**
-             * Unique
-             * @default false
-             */
-            unique: boolean;
             /**
              * Description
              * @default
              */
             description: string;
-        };
-        /**
-         * FocusTrendPoint
-         * @description One date in a focus trend.
-         */
-        FocusTrendPoint: {
-            /** Date */
-            date: string;
-            /** Count */
-            count: number;
-            /** Duration */
-            duration: number;
-        };
-        /**
-         * FocusTrendResponse
-         * @description Daily focus aggregates for a requested date range.
-         */
-        FocusTrendResponse: {
-            /** Data */
-            data: components["schemas"]["FocusTrendPoint"][];
+            /**
+             * Indexed
+             * @default false
+             */
+            indexed: boolean;
+            /** Name */
+            name: string;
+            /** Nullable */
+            nullable: boolean;
+            /** Type */
+            type: string;
+            /**
+             * Unique
+             * @default false
+             */
+            unique: boolean;
         };
         /**
          * FolderCreate
          * @description Schema for creating a new folder.
          */
         FolderCreate: {
+            /** Id */
+            id?: string | null;
             /** Name */
             name: string;
             /** Parent Id */
             parent_id?: string | null;
-            /** Id */
-            id?: string | null;
         };
         /**
          * FolderResponse
          * @description Schema for folder API responses — exposes all persisted columns.
          */
         FolderResponse: {
-            /** Id */
-            id: string;
-            /** Name */
-            name: string;
-            /** Parent Id */
-            parent_id?: string | null;
-            /** Icon */
-            icon?: string | null;
             /** Color */
             color?: string | null;
-            /**
-             * Sort Order
-             * @default 0
-             */
-            sort_order: number;
+            /** Created At */
+            created_at: string;
+            /** Icon */
+            icon?: string | null;
+            /** Id */
+            id: string;
             /**
              * Is System
              * @default false
              */
             is_system: boolean;
+            /** Name */
+            name: string;
+            /** Parent Id */
+            parent_id?: string | null;
+            /**
+             * Sort Order
+             * @default 0
+             */
+            sort_order: number;
             /** Trashed At */
             trashed_at?: string | null;
-            /** Created At */
-            created_at: string;
             /** Updated At */
             updated_at: string;
             /**
@@ -1471,46 +1630,46 @@ export interface components {
          * @description Schema for creating a new habit check-in.
          */
         HabitCheckInCreate: {
-            /** Habit Id */
-            habit_id: string;
-            /** Date */
-            date: string;
             /**
              * Count
              * @default 1
              */
             count: number;
+            /** Date */
+            date: string;
+            /** Habit Id */
+            habit_id: string;
+            /** Id */
+            id?: string | null;
             /**
              * Note
              * @default
              */
             note: string;
-            /** Id */
-            id?: string | null;
         };
         /**
          * HabitCheckInResponse
          * @description Schema for habit check-in API responses.
          */
         HabitCheckInResponse: {
-            /** Habit Id */
-            habit_id: string;
-            /** Date */
-            date: string;
             /**
              * Count
              * @default 1
              */
             count: number;
+            /** Created At */
+            created_at: string;
+            /** Date */
+            date: string;
+            /** Habit Id */
+            habit_id: string;
+            /** Id */
+            id: string;
             /**
              * Note
              * @default
              */
             note: string;
-            /** Id */
-            id: string;
-            /** Created At */
-            created_at: string;
             /** Updated At */
             updated_at: string;
             /**
@@ -1524,28 +1683,28 @@ export interface components {
          * @description Schema for creating a new habit.
          */
         HabitCreate: {
-            /** Title */
-            title: string;
             /**
-             * Description
-             * @default
+             * Archived
+             * @default false
              */
-            description: string;
+            archived: boolean;
             /**
              * Color
              * @default #7F77DD
              */
             color: string;
             /**
+             * Description
+             * @default
+             */
+            description: string;
+            /**
              * Icon
              * @default ✅
              */
             icon: string;
-            /**
-             * Target Count
-             * @default 1
-             */
-            target_count: number;
+            /** Id */
+            id?: string | null;
             /**
              * Rest Day Protection
              * @default false
@@ -1559,40 +1718,42 @@ export interface components {
              */
             sort_order: number;
             /**
-             * Archived
-             * @default false
+             * Target Count
+             * @default 1
              */
-            archived: boolean;
-            /** Id */
-            id?: string | null;
+            target_count: number;
+            /** Title */
+            title: string;
         };
         /**
          * HabitResponse
          * @description Schema for habit API responses.
          */
         HabitResponse: {
-            /** Title */
-            title: string;
+            /**
+             * Archived
+             * @default false
+             */
+            archived: boolean;
+            /**
+             * Color
+             * @default #7F77DD
+             */
+            color: string;
+            /** Created At */
+            created_at: string;
             /**
              * Description
              * @default
              */
             description: string;
             /**
-             * Color
-             * @default #7F77DD
-             */
-            color: string;
-            /**
              * Icon
              * @default ✅
              */
             icon: string;
-            /**
-             * Target Count
-             * @default 1
-             */
-            target_count: number;
+            /** Id */
+            id: string;
             /**
              * Rest Day Protection
              * @default false
@@ -1606,14 +1767,12 @@ export interface components {
              */
             sort_order: number;
             /**
-             * Archived
-             * @default false
+             * Target Count
+             * @default 1
              */
-            archived: boolean;
-            /** Id */
-            id: string;
-            /** Created At */
-            created_at: string;
+            target_count: number;
+            /** Title */
+            title: string;
             /** Updated At */
             updated_at: string;
             /**
@@ -1627,18 +1786,18 @@ export interface components {
          * @description Check-in statistics for one active habit.
          */
         HabitSummaryItem: {
+            /** Check In Days */
+            check_in_days: number;
+            /** Completion Rate */
+            completion_rate: number;
+            /** Current Streak */
+            current_streak: number;
             /** Habit Id */
             habit_id: string;
             /** Title */
             title: string;
             /** Total Check Ins */
             total_check_ins: number;
-            /** Check In Days */
-            check_in_days: number;
-            /** Current Streak */
-            current_streak: number;
-            /** Completion Rate */
-            completion_rate: number;
         };
         /**
          * HabitSummaryResponse
@@ -1655,24 +1814,24 @@ export interface components {
          * @description Schema for updating an existing habit.
          */
         HabitUpdate: {
-            /** Title */
-            title?: string | null;
-            /** Description */
-            description?: string | null;
+            /** Archived */
+            archived?: boolean | null;
             /** Color */
             color?: string | null;
+            /** Description */
+            description?: string | null;
             /** Icon */
             icon?: string | null;
-            /** Target Count */
-            target_count?: number | null;
             /** Rest Day Protection */
             rest_day_protection?: boolean | null;
             /** Rest Days */
             rest_days?: number[] | null;
             /** Sort Order */
             sort_order?: number | null;
-            /** Archived */
-            archived?: boolean | null;
+            /** Target Count */
+            target_count?: number | null;
+            /** Title */
+            title?: string | null;
         };
         /**
          * HealthResponse
@@ -1684,6 +1843,19 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** MoveWorkItemRequest */
+        MoveWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Parentid */
+            parentId?: string | null;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /**
          * NoteCreate
          * @description Schema for creating a new note.
@@ -1693,10 +1865,19 @@ export interface components {
          */
         NoteCreate: {
             /**
-             * Title
+             * Content
              * @default
              */
-            title: string;
+            content: string;
+            /** Folder Id */
+            folder_id?: string | null;
+            /** Id */
+            id?: string | null;
+            /**
+             * Status
+             * @default active
+             */
+            status: string;
             /**
              * Summary
              * @default
@@ -1707,20 +1888,11 @@ export interface components {
              * @default []
              */
             tags: string[];
-            /** Folder Id */
-            folder_id?: string | null;
             /**
-             * Status
-             * @default active
-             */
-            status: string;
-            /**
-             * Content
+             * Title
              * @default
              */
-            content: string;
-            /** Id */
-            id?: string | null;
+            title: string;
         };
         /**
          * NoteMetadataUpdate
@@ -1731,18 +1903,18 @@ export interface components {
          *     to rewrite the ``.md`` body.
          */
         NoteMetadataUpdate: {
-            /** Title */
-            title?: string | null;
+            /** Category */
+            category?: string | null;
+            /** Folder Id */
+            folder_id?: string | null;
+            /** Status */
+            status?: string | null;
             /** Summary */
             summary?: string | null;
             /** Tags */
             tags?: string[] | null;
-            /** Folder Id */
-            folder_id?: string | null;
-            /** Category */
-            category?: string | null;
-            /** Status */
-            status?: string | null;
+            /** Title */
+            title?: string | null;
         };
         /**
          * NoteResponse
@@ -1753,10 +1925,21 @@ export interface components {
          */
         NoteResponse: {
             /**
-             * Title
+             * Content Hash
              * @default
              */
-            title: string;
+            content_hash: string;
+            /** Created At */
+            created_at: string;
+            /** Folder Id */
+            folder_id?: string | null;
+            /** Id */
+            id: string;
+            /**
+             * Status
+             * @default active
+             */
+            status: string;
             /**
              * Summary
              * @default
@@ -1767,29 +1950,13 @@ export interface components {
              * @default []
              */
             tags: string[];
-            /** Folder Id */
-            folder_id?: string | null;
             /**
-             * Status
-             * @default active
-             */
-            status: string;
-            /** Id */
-            id: string;
-            /**
-             * Content Hash
+             * Title
              * @default
              */
-            content_hash: string;
-            /**
-             * Word Count
-             * @default 0
-             */
-            word_count: number;
+            title: string;
             /** Trashed At */
             trashed_at?: string | null;
-            /** Created At */
-            created_at: string;
             /** Updated At */
             updated_at: string;
             /**
@@ -1797,6 +1964,11 @@ export interface components {
              * @default 1
              */
             version: number;
+            /**
+             * Word Count
+             * @default 0
+             */
+            word_count: number;
         };
         /**
          * NoteSearchResultItem
@@ -1805,36 +1977,36 @@ export interface components {
          *     Field-aligned with ``app.file_system.interfaces.SearchResult``.
          */
         NoteSearchResultItem: {
-            /** Note Id */
-            note_id: string;
-            /** Title */
-            title: string;
-            /** Folder Id */
-            folder_id?: string | null;
             /**
              * Excerpt
              * @default
              */
             excerpt: string;
+            /** Folder Id */
+            folder_id?: string | null;
+            /** Note Id */
+            note_id: string;
             /**
              * Score
              * @default 0
              */
             score: number;
+            /** Title */
+            title: string;
         };
         /**
          * NoteSummaryResponse
          * @description Active and trashed note/folder counts.
          */
         NoteSummaryResponse: {
-            /** Notes */
-            notes: number;
             /** Folders */
             folders: number;
-            /** Trashed Notes */
-            trashed_notes: number;
+            /** Notes */
+            notes: number;
             /** Trashed Folders */
             trashed_folders: number;
+            /** Trashed Notes */
+            trashed_notes: number;
         };
         /**
          * NoteUpdate
@@ -1849,25 +2021,28 @@ export interface components {
          *     be removed in the next major.
          */
         NoteUpdate: {
-            /** Title */
-            title?: string | null;
             /** Content */
             content?: string | null;
             /** Content Hash */
             content_hash?: string | null;
+            /** Folder Id */
+            folder_id?: string | null;
             /** Summary */
             summary?: string | null;
             /** Tags */
             tags?: string[] | null;
-            /** Folder Id */
-            folder_id?: string | null;
+            /** Title */
+            title?: string | null;
         };
         /** PaginatedResponse[FolderResponse] */
         PaginatedResponse_FolderResponse_: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Items */
             items: components["schemas"]["FolderResponse"][];
-            /** Total */
-            total: number;
             /**
              * Limit
              * @default 50
@@ -1878,18 +2053,18 @@ export interface components {
              * @default 0
              */
             offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
+            /** Total */
+            total: number;
         };
         /** PaginatedResponse[HabitCheckInResponse] */
         PaginatedResponse_HabitCheckInResponse_: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Items */
             items: components["schemas"]["HabitCheckInResponse"][];
-            /** Total */
-            total: number;
             /**
              * Limit
              * @default 50
@@ -1900,18 +2075,18 @@ export interface components {
              * @default 0
              */
             offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
+            /** Total */
+            total: number;
         };
         /** PaginatedResponse[HabitResponse] */
         PaginatedResponse_HabitResponse_: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Items */
             items: components["schemas"]["HabitResponse"][];
-            /** Total */
-            total: number;
             /**
              * Limit
              * @default 50
@@ -1922,18 +2097,18 @@ export interface components {
              * @default 0
              */
             offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
+            /** Total */
+            total: number;
         };
         /** PaginatedResponse[NoteResponse] */
         PaginatedResponse_NoteResponse_: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Items */
             items: components["schemas"]["NoteResponse"][];
-            /** Total */
-            total: number;
             /**
              * Limit
              * @default 50
@@ -1944,18 +2119,18 @@ export interface components {
              * @default 0
              */
             offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
+            /** Total */
+            total: number;
         };
         /** PaginatedResponse[QuickNoteResponse] */
         PaginatedResponse_QuickNoteResponse_: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Items */
             items: components["schemas"]["QuickNoteResponse"][];
-            /** Total */
-            total: number;
             /**
              * Limit
              * @default 50
@@ -1966,18 +2141,18 @@ export interface components {
              * @default 0
              */
             offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
+            /** Total */
+            total: number;
         };
         /** PaginatedResponse[ReflectionResponse] */
         PaginatedResponse_ReflectionResponse_: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Items */
             items: components["schemas"]["ReflectionResponse"][];
-            /** Total */
-            total: number;
             /**
              * Limit
              * @default 50
@@ -1988,18 +2163,18 @@ export interface components {
              * @default 0
              */
             offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
+            /** Total */
+            total: number;
         };
         /** PaginatedResponse[ScheduleResponse] */
         PaginatedResponse_ScheduleResponse_: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Items */
             items: components["schemas"]["ScheduleResponse"][];
-            /** Total */
-            total: number;
             /**
              * Limit
              * @default 50
@@ -2010,62 +2185,18 @@ export interface components {
              * @default 0
              */
             offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
-        };
-        /** PaginatedResponse[SessionResponse] */
-        PaginatedResponse_SessionResponse_: {
-            /** Items */
-            items: components["schemas"]["SessionResponse"][];
             /** Total */
             total: number;
-            /**
-             * Limit
-             * @default 50
-             */
-            limit: number;
-            /**
-             * Offset
-             * @default 0
-             */
-            offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
-        };
-        /** PaginatedResponse[TaskResponse] */
-        PaginatedResponse_TaskResponse_: {
-            /** Items */
-            items: components["schemas"]["TaskResponse"][];
-            /** Total */
-            total: number;
-            /**
-             * Limit
-             * @default 50
-             */
-            limit: number;
-            /**
-             * Offset
-             * @default 0
-             */
-            offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
         };
         /** PaginatedResponse[TimeBlockResponse] */
         PaginatedResponse_TimeBlockResponse_: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Items */
             items: components["schemas"]["TimeBlockResponse"][];
-            /** Total */
-            total: number;
             /**
              * Limit
              * @default 50
@@ -2076,18 +2207,18 @@ export interface components {
              * @default 0
              */
             offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
+            /** Total */
+            total: number;
         };
         /** PaginatedResponse[TrashItemResponse] */
         PaginatedResponse_TrashItemResponse_: {
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Items */
             items: components["schemas"]["TrashItemResponse"][];
-            /** Total */
-            total: number;
             /**
              * Limit
              * @default 50
@@ -2098,19 +2229,60 @@ export interface components {
              * @default 0
              */
             offset: number;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
+            /** Total */
+            total: number;
         };
-        /**
-         * PasswordRequest
-         * @description Request body for password setup / login.
-         */
+        /** ParagraphBlock */
+        ParagraphBlock: {
+            /** Blockid */
+            blockId: string;
+            /** Text */
+            text: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "paragraph";
+        };
+        /** PasswordRequest */
         PasswordRequest: {
             /** Password */
             password: string;
+        };
+        /** ProjectPageResponse */
+        ProjectPageResponse: {
+            /** Items */
+            items: components["schemas"]["ProjectResponse"][];
+            /** Nextcursor */
+            nextCursor: string | null;
+        };
+        /**
+         * ProjectResponse
+         * @description Project view returned by query routes.
+         */
+        ProjectResponse: {
+            /** Archivedat */
+            archivedAt: string | null;
+            /** Createdat */
+            createdAt: string;
+            /** Description */
+            description: string | null;
+            /** Id */
+            id: string;
+            /** Key */
+            key: string;
+            /** Name */
+            name: string;
+            /** Nextworkitemnumber */
+            nextWorkItemNumber: number;
+            /** Rank */
+            rank: number;
+            /** Spaceid */
+            spaceId: string;
+            /** Updatedat */
+            updatedAt: string;
+            /** Version */
+            version: number;
         };
         /**
          * QuickNoteConvertResponse
@@ -2121,91 +2293,87 @@ export interface components {
          *     set) but excluded from listings; the new Note is reachable via ``note_id``.
          */
         QuickNoteConvertResponse: {
-            /** Note Id */
-            note_id: string;
-            /** Quick Note Id */
-            quick_note_id: string;
             /**
              * Migrated Comments Count
              * @default 0
              */
             migrated_comments_count: number;
+            /** Note Id */
+            note_id: string;
+            /** Quick Note Id */
+            quick_note_id: string;
         };
         /**
          * QuickNoteCreate
          * @description Schema for creating a new quick note.
          */
         QuickNoteCreate: {
+            /** Archive File Path */
+            archive_file_path?: string | null;
+            /** Archived At */
+            archived_at?: string | null;
             /**
              * Content
              * @default
              */
             content: string;
+            /** Folder Id */
+            folder_id?: string | null;
+            /** Id */
+            id?: string | null;
+            /** Migrated To Note Id */
+            migrated_to_note_id?: string | null;
             /** Mood */
             mood?: ("normal" | "happy" | "sad" | "tired" | "excited" | "calm") | null;
-            /**
-             * Tags
-             * @default []
-             */
-            tags: string[];
             /**
              * Pinned
              * @default false
              */
             pinned: boolean;
-            /** Archived At */
-            archived_at?: string | null;
-            /** Archive File Path */
-            archive_file_path?: string | null;
-            /** Folder Id */
-            folder_id?: string | null;
+            /**
+             * Tags
+             * @default []
+             */
+            tags: string[];
             /** Trashed At */
             trashed_at?: string | null;
-            /** Migrated To Note Id */
-            migrated_to_note_id?: string | null;
-            /** Session Id */
-            session_id?: string | null;
-            /** Id */
-            id?: string | null;
         };
         /**
          * QuickNoteResponse
          * @description Schema for quick note API responses.
          */
         QuickNoteResponse: {
+            /** Archive File Path */
+            archive_file_path?: string | null;
+            /** Archived At */
+            archived_at?: string | null;
             /**
              * Content
              * @default
              */
             content: string;
+            /** Created At */
+            created_at: string;
+            /** Folder Id */
+            folder_id?: string | null;
+            /** Id */
+            id: string;
+            /** Migrated To Note Id */
+            migrated_to_note_id?: string | null;
             /** Mood */
             mood?: ("normal" | "happy" | "sad" | "tired" | "excited" | "calm") | null;
-            /**
-             * Tags
-             * @default []
-             */
-            tags: string[];
             /**
              * Pinned
              * @default false
              */
             pinned: boolean;
-            /** Archived At */
-            archived_at?: string | null;
-            /** Archive File Path */
-            archive_file_path?: string | null;
-            /** Folder Id */
-            folder_id?: string | null;
+            /**
+             * Tags
+             * @default []
+             */
+            tags: string[];
             /** Trashed At */
             trashed_at?: string | null;
-            /** Migrated To Note Id */
-            migrated_to_note_id?: string | null;
-            /** Session Id */
-            session_id?: string | null;
-            /** Id */
-            id: string;
-            /** Created At */
-            created_at: string;
             /** Updated At */
             updated_at: string;
             /**
@@ -2219,49 +2387,44 @@ export interface components {
          * @description Schema for updating an existing quick note.
          */
         QuickNoteUpdate: {
-            /** Content */
-            content?: string | null;
-            /** Mood */
-            mood?: ("normal" | "happy" | "sad" | "tired" | "excited" | "calm") | null;
-            /** Tags */
-            tags?: string[] | null;
-            /** Pinned */
-            pinned?: boolean | null;
             /** Archived At */
             archived_at?: string | null;
+            /** Content */
+            content?: string | null;
             /** Folder Id */
             folder_id?: string | null;
-            /** Trashed At */
-            trashed_at?: string | null;
             /** Migrated To Note Id */
             migrated_to_note_id?: string | null;
-            /** Session Id */
-            session_id?: string | null;
+            /** Mood */
+            mood?: ("normal" | "happy" | "sad" | "tired" | "excited" | "calm") | null;
+            /** Pinned */
+            pinned?: boolean | null;
+            /** Tags */
+            tags?: string[] | null;
+            /** Trashed At */
+            trashed_at?: string | null;
         };
         /**
          * ReflectionCreate
          * @description Schema for creating a new reflection.
          */
         ReflectionCreate: {
-            /** Date */
-            date: string;
             /**
              * Content
              * @default
              */
             content: string;
+            /** Date */
+            date: string;
+            /** Id */
+            id?: string | null;
+            /**
+             * Is Structured
+             * @default false
+             */
+            is_structured: boolean;
             /** Mood */
             mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /**
-             * Related Task Ids
-             * @default []
-             */
-            related_task_ids: string[];
-            /**
-             * Tags
-             * @default []
-             */
-            tags: string[];
             /**
              * Sections
              * @default []
@@ -2270,42 +2433,34 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /**
-             * Is Structured
-             * @default false
-             */
-            is_structured: boolean;
-            /**
-             * Auto Linked Session Ids
+             * Tags
              * @default []
              */
-            auto_linked_session_ids: string[];
-            /** Id */
-            id?: string | null;
+            tags: string[];
         };
         /**
          * ReflectionResponse
          * @description Schema for reflection API responses.
          */
         ReflectionResponse: {
-            /** Date */
-            date: string;
             /**
              * Content
              * @default
              */
             content: string;
+            /** Created At */
+            created_at: string;
+            /** Date */
+            date: string;
+            /** Id */
+            id: string;
+            /**
+             * Is Structured
+             * @default false
+             */
+            is_structured: boolean;
             /** Mood */
             mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /**
-             * Related Task Ids
-             * @default []
-             */
-            related_task_ids: string[];
-            /**
-             * Tags
-             * @default []
-             */
-            tags: string[];
             /**
              * Sections
              * @default []
@@ -2314,19 +2469,10 @@ export interface components {
                 [key: string]: unknown;
             }[];
             /**
-             * Is Structured
-             * @default false
-             */
-            is_structured: boolean;
-            /**
-             * Auto Linked Session Ids
+             * Tags
              * @default []
              */
-            auto_linked_session_ids: string[];
-            /** Id */
-            id: string;
-            /** Created At */
-            created_at: string;
+            tags: string[];
             /** Updated At */
             updated_at: string;
             /**
@@ -2340,38 +2486,50 @@ export interface components {
          * @description Schema for updating an existing reflection.
          */
         ReflectionUpdate: {
-            /** Date */
-            date?: string | null;
             /** Content */
             content?: string | null;
+            /** Date */
+            date?: string | null;
+            /** Is Structured */
+            is_structured?: boolean | null;
             /** Mood */
             mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /** Related Task Ids */
-            related_task_ids?: string[] | null;
-            /** Tags */
-            tags?: string[] | null;
             /** Sections */
             sections?: {
                 [key: string]: unknown;
             }[] | null;
-            /** Is Structured */
-            is_structured?: boolean | null;
-            /** Auto Linked Session Ids */
-            auto_linked_session_ids?: string[] | null;
+            /** Tags */
+            tags?: string[] | null;
         };
         /**
          * RegistryHealthOut
          * @description Health / stats payload for ``GET /api/v1/meta/health``.
          */
         RegistryHealthOut: {
-            /** Registry Loaded */
-            registry_loaded: boolean;
-            /** Entity Count */
-            entity_count: number;
+            /** Catalog Hash */
+            catalog_hash?: string | null;
+            /** Catalog Version */
+            catalog_version?: string | null;
             /** Categories */
             categories: {
                 [key: string]: number;
             };
+            /** Entity Count */
+            entity_count: number;
+            /** Registry Loaded */
+            registry_loaded: boolean;
+        };
+        /** ReplaceDocumentRequest */
+        ReplaceDocumentRequest: {
+            /** Commandid */
+            commandId: string;
+            document: components["schemas"]["WorkItemNoteDocumentV1-Input"];
+            /** Expectedversion */
+            expectedVersion?: number | null;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
         };
         /**
          * RequestValidationErrorResponse
@@ -2408,70 +2566,70 @@ export interface components {
          * @description Schema for creating a new schedule.
          */
         ScheduleCreate: {
-            /** Title */
-            title: string;
-            /** Due At */
-            due_at: string;
+            /**
+             * All Day
+             * @default false
+             */
+            all_day: boolean;
+            /**
+             * Color
+             * @default #3b82f6
+             */
+            color: string;
             /** Completed At */
             completed_at?: string | null;
+            /** Due At */
+            due_at: string;
+            /** End Time */
+            end_time?: string | null;
+            /** Id */
+            id?: string | null;
             /**
              * Priority
              * @default medium
              * @enum {string}
              */
             priority: "high" | "medium" | "low";
-            /**
-             * Color
-             * @default #3b82f6
-             */
-            color: string;
-            /**
-             * All Day
-             * @default false
-             */
-            all_day: boolean;
             /** Start Time */
             start_time?: string | null;
-            /** End Time */
-            end_time?: string | null;
-            /** Id */
-            id?: string | null;
+            /** Title */
+            title: string;
         };
         /**
          * ScheduleResponse
          * @description Schema for schedule API responses.
          */
         ScheduleResponse: {
-            /** Title */
-            title: string;
-            /** Due At */
-            due_at: string;
+            /**
+             * All Day
+             * @default false
+             */
+            all_day: boolean;
+            /**
+             * Color
+             * @default #3b82f6
+             */
+            color: string;
             /** Completed At */
             completed_at?: string | null;
+            /** Created At */
+            created_at: string;
+            /** Due At */
+            due_at: string;
+            /** End Time */
+            end_time?: string | null;
+            /** Id */
+            id: string;
             /**
              * Priority
              * @default medium
              * @enum {string}
              */
             priority: "high" | "medium" | "low";
-            /**
-             * Color
-             * @default #3b82f6
-             */
-            color: string;
-            /**
-             * All Day
-             * @default false
-             */
-            all_day: boolean;
             /** Start Time */
             start_time?: string | null;
-            /** End Time */
-            end_time?: string | null;
-            /** Id */
-            id: string;
-            /** Created At */
-            created_at: string;
+            /** Title */
+            title: string;
             /** Updated At */
             updated_at: string;
             /**
@@ -2485,245 +2643,40 @@ export interface components {
          * @description Schedule completion statistics for a requested period.
          */
         ScheduleSummaryResponse: {
-            /** Total */
-            total: number;
             /** Completed */
             completed: number;
-            /** Pending */
-            pending: number;
-            /** Overdue */
-            overdue: number;
-            /** Period Days */
-            period_days: number;
             /** Completion Rate */
             completion_rate: number;
+            /** Overdue */
+            overdue: number;
+            /** Pending */
+            pending: number;
+            /** Period Days */
+            period_days: number;
+            /** Total */
+            total: number;
         };
         /**
          * ScheduleUpdate
          * @description Schema for updating an existing schedule.
          */
         ScheduleUpdate: {
-            /** Title */
-            title?: string | null;
-            /** Due At */
-            due_at?: string | null;
-            /** Completed At */
-            completed_at?: string | null;
-            /** Priority */
-            priority?: ("high" | "medium" | "low") | null;
-            /** Color */
-            color?: string | null;
             /** All Day */
             all_day?: boolean | null;
-            /** Start Time */
-            start_time?: string | null;
+            /** Color */
+            color?: string | null;
+            /** Completed At */
+            completed_at?: string | null;
+            /** Due At */
+            due_at?: string | null;
             /** End Time */
             end_time?: string | null;
-        };
-        /**
-         * SessionCreate
-         * @description Schema for creating a new session.
-         */
-        SessionCreate: {
-            /** Task Id */
-            task_id?: string | null;
-            /**
-             * Type
-             * @enum {string}
-             */
-            type: "work" | "short_break" | "long_break" | "free" | "countdown";
-            /** Duration */
-            duration: number;
-            /**
-             * Completed
-             * @default false
-             */
-            completed: boolean;
-            /**
-             * Plan
-             * @default
-             */
-            plan: string;
-            /**
-             * Completion
-             * @default
-             */
-            completion: string;
-            /** Started At */
-            started_at: string;
-            /** Ended At */
-            ended_at?: string | null;
-            /** Mood */
-            mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /**
-             * Note
-             * @default
-             */
-            note: string;
-            /** Attention Score */
-            attention_score?: number | null;
-            /** Flow State Detected */
-            flow_state_detected?: boolean | null;
-            /** Flow State Confidence */
-            flow_state_confidence?: number | null;
-            /**
-             * Interruption Count
-             * @default 0
-             */
-            interruption_count: number | null;
-            /**
-             * Total Interruption Duration
-             * @default 0
-             */
-            total_interruption_duration: number | null;
-            /** Avg Recovery Time */
-            avg_recovery_time?: number | null;
-            /**
-             * Pause Count
-             * @default 0
-             */
-            pause_count: number | null;
-            /**
-             * Total Pause Duration
-             * @default 0
-             */
-            total_pause_duration: number | null;
-            /**
-             * Cognitive Mark Summary
-             * @default
-             */
-            cognitive_mark_summary: string | null;
-            /** Id */
-            id?: string | null;
-        };
-        /**
-         * SessionResponse
-         * @description Schema for session API responses.
-         */
-        SessionResponse: {
-            /** Task Id */
-            task_id?: string | null;
-            /**
-             * Type
-             * @enum {string}
-             */
-            type: "work" | "short_break" | "long_break" | "free" | "countdown";
-            /** Duration */
-            duration: number;
-            /**
-             * Completed
-             * @default false
-             */
-            completed: boolean;
-            /**
-             * Plan
-             * @default
-             */
-            plan: string;
-            /**
-             * Completion
-             * @default
-             */
-            completion: string;
-            /** Started At */
-            started_at: string;
-            /** Ended At */
-            ended_at?: string | null;
-            /** Mood */
-            mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /**
-             * Note
-             * @default
-             */
-            note: string;
-            /** Attention Score */
-            attention_score?: number | null;
-            /** Flow State Detected */
-            flow_state_detected?: boolean | null;
-            /** Flow State Confidence */
-            flow_state_confidence?: number | null;
-            /**
-             * Interruption Count
-             * @default 0
-             */
-            interruption_count: number | null;
-            /**
-             * Total Interruption Duration
-             * @default 0
-             */
-            total_interruption_duration: number | null;
-            /** Avg Recovery Time */
-            avg_recovery_time?: number | null;
-            /**
-             * Pause Count
-             * @default 0
-             */
-            pause_count: number | null;
-            /**
-             * Total Pause Duration
-             * @default 0
-             */
-            total_pause_duration: number | null;
-            /**
-             * Cognitive Mark Summary
-             * @default
-             */
-            cognitive_mark_summary: string | null;
-            /** Id */
-            id: string;
-            /** Created At */
-            created_at: string;
-            /** Updated At */
-            updated_at: string;
-            /**
-             * Version
-             * @default 1
-             */
-            version: number;
-        };
-        /**
-         * SessionUpdate
-         * @description Schema for updating an existing session.
-         */
-        SessionUpdate: {
-            /** Task Id */
-            task_id?: string | null;
-            /** Type */
-            type?: ("work" | "short_break" | "long_break" | "free" | "countdown") | null;
-            /** Duration */
-            duration?: number | null;
-            /** Completed */
-            completed?: boolean | null;
-            /** Plan */
-            plan?: string | null;
-            /** Completion */
-            completion?: string | null;
-            /** Started At */
-            started_at?: string | null;
-            /** Ended At */
-            ended_at?: string | null;
-            /** Mood */
-            mood?: ("great" | "good" | "normal" | "bad" | "terrible") | null;
-            /** Note */
-            note?: string | null;
-            /** Attention Score */
-            attention_score?: number | null;
-            /** Flow State Detected */
-            flow_state_detected?: boolean | null;
-            /** Flow State Confidence */
-            flow_state_confidence?: number | null;
-            /** Interruption Count */
-            interruption_count?: number | null;
-            /** Total Interruption Duration */
-            total_interruption_duration?: number | null;
-            /** Avg Recovery Time */
-            avg_recovery_time?: number | null;
-            /** Pause Count */
-            pause_count?: number | null;
-            /** Total Pause Duration */
-            total_pause_duration?: number | null;
-            /** Cognitive Mark Summary */
-            cognitive_mark_summary?: string | null;
+            /** Priority */
+            priority?: ("high" | "medium" | "low") | null;
+            /** Start Time */
+            start_time?: string | null;
+            /** Title */
+            title?: string | null;
         };
         /**
          * SettingsResponse
@@ -2737,12 +2690,12 @@ export interface components {
          * @description Accepted updates and protected keys rejected by a settings write.
          */
         SettingsUpdateResponse: {
+            /** Rejected */
+            rejected: string[];
             /** Updated */
             updated: {
                 [key: string]: string;
             };
-            /** Rejected */
-            rejected: string[];
         };
         /**
          * SpaceCreateRequest
@@ -2757,18 +2710,18 @@ export interface components {
          * @description Public metadata for one registered space.
          */
         SpaceResponse: {
-            /** Id */
-            id: string;
-            /** Name */
-            name: string;
-            /** Db Path */
-            db_path: string;
-            /** Notes Dir */
-            notes_dir: string;
-            /** Is Default */
-            is_default: boolean;
             /** Created At */
             created_at: string;
+            /** Db Path */
+            db_path: string;
+            /** Id */
+            id: string;
+            /** Is Default */
+            is_default: boolean;
+            /** Name */
+            name: string;
+            /** Notes Dir */
+            notes_dir: string;
             /** Updated At */
             updated_at: string;
         };
@@ -2783,402 +2736,219 @@ export interface components {
             token_type: string;
         };
         /**
-         * StatsOverviewResponse
-         * @description Bare dynamic mapping from requested period names to aggregates.
-         */
-        StatsOverviewResponse: {
-            [key: string]: components["schemas"]["CountDuration"];
-        };
-        /**
          * StorageType
          * @description How an entity's data is physically stored.
          * @enum {string}
          */
         StorageType: "db_only" | "fs_db_split" | "system";
         /**
-         * SyncAppliedItem
-         * @description An event that was successfully applied.
+         * SyncConflictPolicy
+         * @description Closed conflict-resolution vocabulary for catalog entities.
+         * @enum {string}
          */
-        SyncAppliedItem: {
-            /** Entity Type */
-            entity_type: string;
-            /** Entity Id */
-            entity_id: string;
-            /** Action */
-            action: string;
-            /** Resolution */
-            resolution?: string | null;
+        SyncConflictPolicy: "timestamp_lww" | "strict_cas";
+        /** SyncV2AckResponse */
+        SyncV2AckResponse: {
+            /**
+             * Accepted
+             * @constant
+             */
+            accepted: true;
+            /** Catalog Hash */
+            catalog_hash: string;
+            /** Client Id */
+            client_id: string;
+            /** Requires Recovery */
+            requires_recovery: boolean;
         };
-        /**
-         * SyncConflictItem
-         * @description A conflict that was resolved by LWW (remote event REJECTED).
-         */
-        SyncConflictItem: {
-            /** Entity Type */
-            entity_type: string;
-            /** Entity Id */
-            entity_id: string;
-            /** Resolution */
-            resolution: string;
-        };
-        /**
-         * SyncErrorItem
-         * @description An event that failed to apply.
-         */
-        SyncErrorItem: {
-            /** Entity Type */
-            entity_type: string;
-            /** Entity Id */
-            entity_id: string;
-            /** Error */
-            error: string;
-        };
-        /**
-         * SyncEvent
-         * @description A single sync event pushed by a client.
-         */
-        SyncEvent: {
-            /** Entity Type */
-            entity_type: string;
-            /** Entity Id */
-            entity_id: string;
-            /** Action */
-            action: string;
-            /** Payload */
-            payload?: {
-                [key: string]: unknown;
-            };
+        /** SyncV2EventRecord */
+        SyncV2EventRecord: {
             /**
-             * Client Updated At
-             * @default
-             */
-            client_updated_at: string;
-        };
-        /**
-         * SyncFullResponse
-         * @description Response body for GET /api/v1/sync/full.
-         */
-        SyncFullResponse: {
-            /** Server Time */
-            server_time: string;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
-            /**
-             * Tombstones Has More
-             * @default false
-             */
-            tombstones_has_more: boolean;
-            /**
-             * Next Since
-             * @default
-             */
-            next_since: string;
-            /**
-             * Next Since Id
-             * @default
-             */
-            next_since_id: string;
-            /**
-             * Next Tombstone Since Id
-             * @default
-             */
-            next_tombstone_since_id: string;
-            /** Tombstones */
-            tombstones?: {
-                [key: string]: unknown;
-            }[];
-            /** Next Cursor */
-            next_cursor?: number | null;
-            /** Cursor Version */
-            cursor_version?: number | null;
-            /** Snapshot Token */
-            snapshot_token?: string | null;
-            /** Snapshot Offset */
-            snapshot_offset?: number | null;
-            /**
-             * Is Full
-             * @default true
-             */
-            is_full: boolean;
-        } & {
-            [key: string]: unknown;
-        };
-        /**
-         * SyncLedgerStatsResponse
-         * @description Response body for GET /api/v1/sync/ledger-stats (H2-E monitoring).
-         */
-        SyncLedgerStatsResponse: {
-            /** Total Events */
-            total_events: number;
-            /** Min Id */
-            min_id?: number | null;
-            /** Max Id */
-            max_id?: number | null;
-        };
-        /**
-         * SyncPullResponse
-         * @description Response body for GET /api/v1/sync/pull.
-         *
-         *     Allows extra fields so the 14 entity groups keyed by pull_key
-         *     (tasks, sessions, notes, ...) pass through Pydantic validation.
-         */
-        SyncPullResponse: {
-            /** Server Time */
-            server_time: string;
-            /**
-             * Has More
-             * @default false
-             */
-            has_more: boolean;
-            /**
-             * Tombstones Has More
-             * @default false
-             */
-            tombstones_has_more: boolean;
-            /**
-             * Next Since
-             * @default
-             */
-            next_since: string;
-            /**
-             * Next Since Id
-             * @default
-             */
-            next_since_id: string;
-            /**
-             * Next Tombstone Since Id
-             * @default
-             */
-            next_tombstone_since_id: string;
-            /** Tombstones */
-            tombstones?: {
-                [key: string]: unknown;
-            }[];
-            /** Next Cursor */
-            next_cursor?: number | null;
-            /** Cursor Version */
-            cursor_version?: number | null;
-            /** Snapshot Token */
-            snapshot_token?: string | null;
-            /** Snapshot Offset */
-            snapshot_offset?: number | null;
-        } & {
-            [key: string]: unknown;
-        };
-        /**
-         * SyncPushRequest
-         * @description Request body for POST /api/v1/sync/push.
-         */
-        SyncPushRequest: {
-            /** Events */
-            events: components["schemas"]["SyncEvent"][];
-        };
-        /**
-         * SyncPushResponse
-         * @description Response body for POST /api/v1/sync/push.
-         */
-        SyncPushResponse: {
-            /** Applied */
-            applied: components["schemas"]["SyncAppliedItem"][];
-            /** Conflicts */
-            conflicts: components["schemas"]["SyncConflictItem"][];
-            /** Errors */
-            errors: components["schemas"]["SyncErrorItem"][];
-            /** Server Time */
-            server_time: string;
-        };
-        /**
-         * SyncStatusResponse
-         * @description Response body for GET /api/v1/sync/status.
-         */
-        SyncStatusResponse: {
-            /** Server Time */
-            server_time: string;
-            /** Entity Counts */
-            entity_counts: {
-                [key: string]: number;
-            };
-            /** Tombstone Count */
-            tombstone_count: number;
-        };
-        /**
-         * TaskCreate
-         * @description Schema for creating a new task.
-         */
-        TaskCreate: {
-            /** Title */
-            title: string;
-            /**
-             * Status
-             * @default todo
+             * Action
              * @enum {string}
              */
-            status: "todo" | "in_progress" | "done" | "archived";
-            /**
-             * Priority
-             * @default medium
-             * @enum {string}
-             */
-            priority: "low" | "medium" | "high" | "urgent";
-            /**
-             * Tags
-             * @default []
-             */
-            tags: string[];
-            /**
-             * Description
-             * @default
-             */
-            description: string;
-            /**
-             * Plan
-             * @default
-             */
-            plan: string;
-            /**
-             * Completion
-             * @default
-             */
-            completion: string;
-            /** Due Date */
-            due_date?: string | null;
-            /**
-             * Estimated Pomodoros
-             * @default 1
-             */
-            estimated_pomodoros: number;
-            /** Id */
-            id?: string | null;
-        };
-        /**
-         * TaskDistributionResponse
-         * @description Task counts grouped by status and priority.
-         */
-        TaskDistributionResponse: {
-            /** By Status */
-            by_status: {
-                [key: string]: number;
-            };
-            /** By Priority */
-            by_priority: {
-                [key: string]: number;
-            };
-        };
-        /**
-         * TaskResponse
-         * @description Schema for task API responses.
-         */
-        TaskResponse: {
-            /** Title */
-            title: string;
-            /**
-             * Status
-             * @default todo
-             * @enum {string}
-             */
-            status: "todo" | "in_progress" | "done" | "archived";
-            /**
-             * Priority
-             * @default medium
-             * @enum {string}
-             */
-            priority: "low" | "medium" | "high" | "urgent";
-            /**
-             * Tags
-             * @default []
-             */
-            tags: string[];
-            /**
-             * Description
-             * @default
-             */
-            description: string;
-            /**
-             * Plan
-             * @default
-             */
-            plan: string;
-            /**
-             * Completion
-             * @default
-             */
-            completion: string;
-            /** Due Date */
-            due_date?: string | null;
-            /**
-             * Estimated Pomodoros
-             * @default 1
-             */
-            estimated_pomodoros: number;
-            /** Id */
-            id: string;
+            action: "create" | "update" | "delete";
+            /** Batch Id */
+            batch_id: string;
             /** Created At */
             created_at: string;
-            /** Updated At */
-            updated_at: string;
-            /**
-             * Version
-             * @default 1
-             */
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Operation Id */
+            operation_id: string;
+            /** Payload */
+            payload: {
+                [key: string]: unknown;
+            };
+            /** Version */
             version: number;
-            /**
-             * Actual Pomodoros
-             * @default 0
-             */
-            actual_pomodoros: number;
-            /** Archived At */
-            archived_at?: string | null;
         };
-        /**
-         * TaskUpdate
-         * @description Schema for updating an existing task — all fields optional.
-         */
-        TaskUpdate: {
-            /** Title */
-            title?: string | null;
-            /** Status */
-            status?: ("todo" | "in_progress" | "done" | "archived") | null;
-            /** Priority */
-            priority?: ("low" | "medium" | "high" | "urgent") | null;
-            /** Tags */
-            tags?: string[] | null;
-            /** Description */
-            description?: string | null;
-            /** Plan */
-            plan?: string | null;
-            /** Completion */
-            completion?: string | null;
-            /** Due Date */
-            due_date?: string | null;
-            /** Estimated Pomodoros */
-            estimated_pomodoros?: number | null;
+        /** SyncV2OperationQueryItem */
+        SyncV2OperationQueryItem: {
+            /** Batch Id */
+            batch_id: string | null;
+            /** Operation Id */
+            operation_id: string;
+            result: components["schemas"]["SyncV2PushResponse"] | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "unknown" | "pending" | "terminal" | "recovery_required";
+        };
+        /** SyncV2OperationQueryResponse */
+        SyncV2OperationQueryResponse: {
+            /** Items */
+            items: components["schemas"]["SyncV2OperationQueryItem"][];
+        };
+        /** SyncV2PullResponse */
+        SyncV2PullResponse: {
+            /** Catalog Hash */
+            catalog_hash: string;
+            /** Events */
+            events: components["schemas"]["SyncV2EventRecord"][];
+            /** Has More */
+            has_more: boolean;
+            /** Next Cursor */
+            next_cursor: string;
+        };
+        /** SyncV2PushApplied */
+        SyncV2PushApplied: {
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Operation Id */
+            operation_id: string;
+            /** Resolution */
+            resolution: "remote" | null;
+            /** Version */
+            version: number;
+        };
+        /** SyncV2PushConflict */
+        SyncV2PushConflict: {
+            /**
+             * Code
+             * @enum {string}
+             */
+            code: "version_conflict" | "tombstone_conflict" | "cycle_detected";
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Operation Id */
+            operation_id: string;
+            /**
+             * Resolution
+             * @enum {string}
+             */
+            resolution: "local" | "tombstone" | "circular_ref" | "manual";
+        };
+        /** SyncV2PushError */
+        SyncV2PushError: {
+            /** Code */
+            code: string;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Operation Id */
+            operation_id: string;
+            /** Retryable */
+            retryable: boolean;
+        };
+        /** SyncV2PushResponse */
+        SyncV2PushResponse: {
+            /** Applied */
+            applied: components["schemas"]["SyncV2PushApplied"][];
+            /** Batch Id */
+            batch_id: string;
+            /** Conflicts */
+            conflicts: components["schemas"]["SyncV2PushConflict"][];
+            /** Errors */
+            errors: components["schemas"]["SyncV2PushError"][];
+        };
+        /** SyncV2RecoveryResponse */
+        SyncV2RecoveryResponse: {
+            /** Catalog Hash */
+            catalog_hash: string;
+            /** Chunk Sha256 */
+            chunk_sha256: string;
+            /** Entity Count */
+            entity_count: number;
+            /** Has More */
+            has_more: boolean;
+            /** Next Page Token */
+            next_page_token: string | null;
+            /** Payload Jsonl Base64 */
+            payload_jsonl_base64: string;
+            /** Waterline Cursor */
+            waterline_cursor: string;
+        };
+        /** SyncV2StatusResponse */
+        SyncV2StatusResponse: {
+            /** Active Client Count */
+            active_client_count: number;
+            /** Catalog Hash */
+            catalog_hash: string;
+            /** Client Id */
+            client_id: string | null;
+            /** Recovery Action */
+            recovery_action: "full_recovery" | null;
+            /** Recovery Client Count */
+            recovery_client_count: number;
+            /** Registered */
+            registered: boolean;
+            /** Requires Recovery */
+            requires_recovery: boolean | null;
+            /** Visible Event Count */
+            visible_event_count: number;
+        };
+        /** TaskSpaceAcceptedResponse */
+        TaskSpaceAcceptedResponse: {
+            /** Commandid */
+            commandId: string;
+            /** Entityid */
+            entityId: string;
+            /** Entitytype */
+            entityType: string;
+            /** Value */
+            value: {
+                [key: string]: unknown;
+            };
+            /** Version */
+            version: number;
+        };
+        /** TaskSpaceDefinitionsResponse */
+        TaskSpaceDefinitionsResponse: {
+            /** Labels */
+            labels: {
+                [key: string]: unknown;
+            }[];
+            /** Statuses */
+            statuses: {
+                [key: string]: unknown;
+            }[];
+            /** Types */
+            types: {
+                [key: string]: unknown;
+            }[];
         };
         /**
          * TimeBlockCreate
          * @description Schema for creating a new time block.
          */
         TimeBlockCreate: {
-            /** Task Id */
-            task_id?: string | null;
-            /**
-             * Title
-             * @default
-             */
-            title: string;
-            /** Date */
-            date: string;
-            /** Start Time */
-            start_time: string;
-            /** End Time */
-            end_time: string;
-            /**
-             * Planned Duration
-             * @default 0
-             */
-            planned_duration: number;
             /**
              * Actual Duration
              * @default 0
@@ -3190,6 +2960,24 @@ export interface components {
              * @enum {string}
              */
             block_type: "work" | "short_break" | "long_break";
+            /** Date */
+            date: string;
+            /** End Time */
+            end_time: string;
+            /** Id */
+            id?: string | null;
+            /**
+             * Planned Duration
+             * @default 0
+             */
+            planned_duration: number;
+            /**
+             * Sort Order
+             * @default 0
+             */
+            sort_order: number;
+            /** Start Time */
+            start_time: string;
             /**
              * Status
              * @default planned
@@ -3197,36 +2985,16 @@ export interface components {
              */
             status: "planned" | "in_progress" | "completed" | "skipped";
             /**
-             * Sort Order
-             * @default 0
+             * Title
+             * @default
              */
-            sort_order: number;
-            /** Id */
-            id?: string | null;
+            title: string;
         };
         /**
          * TimeBlockResponse
          * @description Schema for time block API responses.
          */
         TimeBlockResponse: {
-            /** Task Id */
-            task_id?: string | null;
-            /**
-             * Title
-             * @default
-             */
-            title: string;
-            /** Date */
-            date: string;
-            /** Start Time */
-            start_time: string;
-            /** End Time */
-            end_time: string;
-            /**
-             * Planned Duration
-             * @default 0
-             */
-            planned_duration: number;
             /**
              * Actual Duration
              * @default 0
@@ -3238,6 +3006,26 @@ export interface components {
              * @enum {string}
              */
             block_type: "work" | "short_break" | "long_break";
+            /** Created At */
+            created_at: string;
+            /** Date */
+            date: string;
+            /** End Time */
+            end_time: string;
+            /** Id */
+            id: string;
+            /**
+             * Planned Duration
+             * @default 0
+             */
+            planned_duration: number;
+            /**
+             * Sort Order
+             * @default 0
+             */
+            sort_order: number;
+            /** Start Time */
+            start_time: string;
             /**
              * Status
              * @default planned
@@ -3245,14 +3033,10 @@ export interface components {
              */
             status: "planned" | "in_progress" | "completed" | "skipped";
             /**
-             * Sort Order
-             * @default 0
+             * Title
+             * @default
              */
-            sort_order: number;
-            /** Id */
-            id: string;
-            /** Created At */
-            created_at: string;
+            title: string;
             /** Updated At */
             updated_at: string;
             /**
@@ -3266,26 +3050,54 @@ export interface components {
          * @description Schema for updating an existing time block.
          */
         TimeBlockUpdate: {
-            /** Task Id */
-            task_id?: string | null;
-            /** Title */
-            title?: string | null;
-            /** Date */
-            date?: string | null;
-            /** Start Time */
-            start_time?: string | null;
-            /** End Time */
-            end_time?: string | null;
-            /** Planned Duration */
-            planned_duration?: number | null;
             /** Actual Duration */
             actual_duration?: number | null;
             /** Block Type */
             block_type?: ("work" | "short_break" | "long_break") | null;
-            /** Status */
-            status?: ("planned" | "in_progress" | "completed" | "skipped") | null;
+            /** Date */
+            date?: string | null;
+            /** End Time */
+            end_time?: string | null;
+            /** Planned Duration */
+            planned_duration?: number | null;
             /** Sort Order */
             sort_order?: number | null;
+            /** Start Time */
+            start_time?: string | null;
+            /** Status */
+            status?: ("planned" | "in_progress" | "completed" | "skipped") | null;
+            /** Title */
+            title?: string | null;
+        };
+        /** ToggleChecklistItemRequest */
+        ToggleChecklistItemRequest: {
+            /** Blockid */
+            blockId: string;
+            /** Checked */
+            checked: boolean;
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Itemid */
+            itemId: string;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
+        /** TransitionWorkItemRequest */
+        TransitionWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Statusdefinitionid */
+            statusDefinitionId: string;
         };
         /**
          * TrashItemResponse
@@ -3297,14 +3109,33 @@ export interface components {
          *     (the entity's ``trashed_at`` value).
          */
         TrashItemResponse: {
-            /** Entity Type */
-            entity_type: string;
-            /** Entity Id */
-            entity_id: string;
-            /** Title */
-            title: string;
             /** Deleted At */
             deleted_at: string;
+            /** Entity Id */
+            entity_id: string;
+            /** Entity Type */
+            entity_type: string;
+            /** Title */
+            title: string;
+        };
+        /** UpdateWorkItemRequest */
+        UpdateWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Description */
+            description?: string | null;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Priority */
+            priority?: string | null;
+            /** Spaceid */
+            spaceId: string;
+            /** Title */
+            title?: string | null;
+            /** Typedefinitionid */
+            typeDefinitionId?: string | null;
         };
         /**
          * VersionRecordResponse
@@ -3313,16 +3144,129 @@ export interface components {
          *     Field-aligned with ``app.file_system.interfaces.VersionRecord``.
          */
         VersionRecordResponse: {
-            /** Version Id */
-            version_id: string;
-            /** Note Id */
-            note_id: string;
-            /** Content Hash */
-            content_hash: string;
-            /** Changed At */
-            changed_at: string;
             /** Change Summary */
             change_summary: string;
+            /** Changed At */
+            changed_at: string;
+            /** Content Hash */
+            content_hash: string;
+            /** Note Id */
+            note_id: string;
+            /** Version Id */
+            version_id: string;
+        };
+        /** WorkItemNoteDocumentV1 */
+        "WorkItemNoteDocumentV1-Input": {
+            /** Blocks */
+            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock-Input"])[];
+            /**
+             * Contentversion
+             * @constant
+             */
+            contentVersion: 1;
+        };
+        /** WorkItemNoteDocumentV1 */
+        "WorkItemNoteDocumentV1-Output": {
+            /** Blocks */
+            blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock-Output"])[];
+            /**
+             * Contentversion
+             * @constant
+             */
+            contentVersion: 1;
+        };
+        /**
+         * WorkItemNoteResponse
+         * @description Work item note view returned by the read route.
+         *
+         *     Fields are sourced from the actual query/model data: the ORM row
+         *     (``id``, ``work_item_id``, timestamps, and ``version``), the authorized
+         *     Space scope, and the parsed document JSON.
+         */
+        WorkItemNoteResponse: {
+            /** Createdat */
+            createdAt: string;
+            document: components["schemas"]["WorkItemNoteDocumentV1-Output"];
+            /** Noteid */
+            noteId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Updatedat */
+            updatedAt: string;
+            /** Version */
+            version: number;
+            /** Workitemid */
+            workItemId: string;
+        };
+        /** WorkItemPageResponse */
+        WorkItemPageResponse: {
+            /** Items */
+            items: components["schemas"]["WorkItemResponse"][];
+            /** Nextcursor */
+            nextCursor: string | null;
+        };
+        /**
+         * WorkItemResponse
+         * @description Work item view returned by query routes.
+         */
+        WorkItemResponse: {
+            /** Archivedat */
+            archivedAt: string | null;
+            /** Cancelledat */
+            cancelledAt: string | null;
+            /** Childrank */
+            childRank: number;
+            /** Completedat */
+            completedAt: string | null;
+            /** Completionwindowend */
+            completionWindowEnd: string | null;
+            /** Completionwindowstart */
+            completionWindowStart: string | null;
+            /** Confidence */
+            confidence: string | null;
+            /** Createdat */
+            createdAt: string;
+            /**
+             * Depth
+             * @enum {integer}
+             */
+            depth: 1 | 2 | 3;
+            /** Description */
+            description: string | null;
+            /** Displaykey */
+            displayKey: string;
+            /** Effortactualseconds */
+            effortActualSeconds: number;
+            /** Effortestimatelowerseconds */
+            effortEstimateLowerSeconds: number | null;
+            /** Effortestimateupperseconds */
+            effortEstimateUpperSeconds: number | null;
+            /** Harddeadline */
+            hardDeadline: string | null;
+            /** Id */
+            id: string;
+            /** Markedasattention */
+            markedAsAttention: boolean;
+            /** Parentid */
+            parentId: string | null;
+            /** Priority */
+            priority: string | null;
+            /** Projectid */
+            projectId: string;
+            /** Reviewpoint */
+            reviewPoint: string | null;
+            /** Spaceid */
+            spaceId: string;
+            /** Statusdefinitionid */
+            statusDefinitionId: string;
+            /** Title */
+            title: string;
+            /** Typedefinitionid */
+            typeDefinitionId: string;
+            /** Updatedat */
+            updatedAt: string;
+            /** Version */
+            version: number;
         };
     };
     responses: never;
@@ -3333,35 +3277,101 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    setup_password_api_v1_auth_setup_post: {
+    health_check_api_health_get: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PasswordRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
-            201: {
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AuthSetupResponse"];
+                    "application/json": components["schemas"]["HealthResponse"];
                 };
             };
-            /** @description Domain or request validation error */
-            422: {
+        };
+    };
+    metrics_api_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Prometheus metrics */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "text/plain": string;
+                };
+            };
+            /** @description Authentication required */
+            401: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+            /** @description Master token required */
+            403: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    readiness_check_api_ready_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Database unavailable */
+            503: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3391,10 +3401,84 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    revoke_tokens_api_v1_auth_revoke_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthRevokeResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    setup_password_api_v1_auth_setup_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthSetupResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -3420,945 +3504,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_spaces_api_v1_spaces_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SpaceResponse"][];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    create_space_api_v1_spaces_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SpaceCreateRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SpaceResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_space_api_v1_spaces__space_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                space_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SpaceResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    issue_space_token_api_v1_spaces__space_id__token_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                space_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SpaceTokenResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    registry_health_api_v1_meta_health_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RegistryHealthOut"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_entities_api_v1_meta_entities_get: {
-        parameters: {
-            query?: {
-                /** @description Filter by category: business|sync_infra|meta|setting */
-                category?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["EntityListOut"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_entity_api_v1_meta_entities__entity_type__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                entity_type: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["EntitySpecOut"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_entity_schema_api_v1_meta_entities__entity_type__schema_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                entity_type: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["EntitySchemaOut"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_tasks_api_v1_tasks_get: {
-        parameters: {
-            query?: {
-                /** @description Filter by status: todo|in_progress|done|archived */
-                status?: string | null;
-                /** @description Filter by priority: low|medium|high|urgent */
-                priority?: string | null;
-                /** @description Case-insensitive search on title */
-                search?: string | null;
-                page?: number;
-                per_page?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PaginatedResponse_TaskResponse_"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    create_task_api_v1_tasks_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TaskCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_task_api_v1_tasks__id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_task_api_v1_tasks__id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TaskUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    delete_task_api_v1_tasks__id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_sessions_api_v1_sessions_get: {
-        parameters: {
-            query?: {
-                /** @description Filter by type: work|short_break|long_break|free|countdown */
-                type?: string | null;
-                page?: number;
-                per_page?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PaginatedResponse_SessionResponse_"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    create_session_api_v1_sessions_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SessionCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_session_api_v1_sessions__id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_session_api_v1_sessions__id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SessionUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    delete_session_api_v1_sessions__id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_notes_api_v1_notes_get: {
-        parameters: {
-            query?: {
-                page?: number;
-                per_page?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PaginatedResponse_NoteResponse_"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    create_note_api_v1_notes_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["NoteCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NoteResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    search_notes_api_v1_notes_search_get: {
-        parameters: {
-            query: {
-                /** @description 搜索关键词 */
-                q: string;
-                limit?: number;
-                folder_id?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NoteSearchResultItem"][];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_note_content_api_v1_notes__id__content_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/plain": string;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_note_content_api_v1_notes__id__content_put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NoteResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_note_versions_api_v1_notes__id__versions_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["VersionRecordResponse"][];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_note_version_api_v1_notes__id__versions__version_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-                version_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/plain": string;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_note_api_v1_notes__id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NoteResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_note_api_v1_notes__id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["NoteUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NoteResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    delete_note_api_v1_notes__id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_note_metadata_api_v1_notes__id__patch: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["NoteMetadataUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NoteResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4389,10 +3542,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4422,10 +3579,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4453,10 +3614,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4488,10 +3653,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4519,367 +3688,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_quick_notes_api_v1_quick_notes_get: {
-        parameters: {
-            query?: {
-                page?: number;
-                per_page?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PaginatedResponse_QuickNoteResponse_"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    create_quick_note_api_v1_quick_notes_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["QuickNoteCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QuickNoteResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    convert_quick_note_api_v1_quick_notes__id__convert_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QuickNoteConvertResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_quick_note_api_v1_quick_notes__id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QuickNoteResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_quick_note_api_v1_quick_notes__id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["QuickNoteUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["QuickNoteResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    delete_quick_note_api_v1_quick_notes__id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_reflections_api_v1_reflections_get: {
-        parameters: {
-            query?: {
-                /** @description Filter by date (YYYY-MM-DD) */
-                date?: string | null;
-                page?: number;
-                per_page?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PaginatedResponse_ReflectionResponse_"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    create_reflection_api_v1_reflections_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ReflectionCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ReflectionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_reflection_api_v1_reflections__id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ReflectionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_reflection_api_v1_reflections__id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ReflectionUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ReflectionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    delete_reflection_api_v1_reflections__id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4908,10 +3724,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -4941,107 +3761,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_habit_api_v1_habits__id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HabitResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_habit_api_v1_habits__id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["HabitUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HabitResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    delete_habit_api_v1_habits__id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5072,10 +3799,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5107,10 +3838,1206 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_habit_api_v1_habits__id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HabitResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_habit_api_v1_habits__id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HabitUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HabitResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_habit_api_v1_habits__id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_entities_api_v1_meta_entities_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by category: business|sync_infra|meta|setting */
+                category?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntityListOut"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_entity_api_v1_meta_entities__entity_type__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entity_type: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntitySpecOut"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_entity_schema_api_v1_meta_entities__entity_type__schema_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entity_type: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntitySchemaOut"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    registry_health_api_v1_meta_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegistryHealthOut"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_notes_api_v1_notes_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                per_page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedResponse_NoteResponse_"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_note_api_v1_notes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NoteCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NoteResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    search_notes_api_v1_notes_search_get: {
+        parameters: {
+            query: {
+                /** @description 搜索关键词 */
+                q: string;
+                limit?: number;
+                folder_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NoteSearchResultItem"][];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_note_api_v1_notes__id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NoteResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_note_api_v1_notes__id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NoteUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NoteResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_note_api_v1_notes__id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_note_metadata_api_v1_notes__id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NoteMetadataUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NoteResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_note_content_api_v1_notes__id__content_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_note_content_api_v1_notes__id__content_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NoteResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_note_versions_api_v1_notes__id__versions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionRecordResponse"][];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_note_version_api_v1_notes__id__versions__version_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                version_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_projects_api_v1_projects_get: {
+        parameters: {
+            query?: {
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectPageResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_project_api_v1_projects_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_definitions_api_v1_projects_definitions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceDefinitionsResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_project_api_v1_projects__project_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_quick_notes_api_v1_quick_notes_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                per_page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedResponse_QuickNoteResponse_"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_quick_note_api_v1_quick_notes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["QuickNoteCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuickNoteResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_quick_note_api_v1_quick_notes__id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuickNoteResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_quick_note_api_v1_quick_notes__id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["QuickNoteUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuickNoteResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_quick_note_api_v1_quick_notes__id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    convert_quick_note_api_v1_quick_notes__id__convert_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuickNoteConvertResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_reflections_api_v1_reflections_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by date (YYYY-MM-DD) */
+                date?: string | null;
+                page?: number;
+                per_page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedResponse_ReflectionResponse_"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_reflection_api_v1_reflections_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReflectionCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReflectionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_reflection_api_v1_reflections__id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReflectionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_reflection_api_v1_reflections__id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReflectionUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReflectionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_reflection_api_v1_reflections__id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5139,10 +5066,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5172,10 +5103,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5203,10 +5138,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5238,10 +5177,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5269,517 +5212,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_time_blocks_api_v1_time_blocks_get: {
-        parameters: {
-            query?: {
-                /** @description Filter by date (YYYY-MM-DD) */
-                date?: string | null;
-                page?: number;
-                per_page?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PaginatedResponse_TimeBlockResponse_"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    create_time_block_api_v1_time_blocks_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TimeBlockCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TimeBlockResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    get_time_block_api_v1_time_blocks__id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TimeBlockResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    update_time_block_api_v1_time_blocks__id__put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TimeBlockUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TimeBlockResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    delete_time_block_api_v1_time_blocks__id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    list_trash_api_v1_trash_get: {
-        parameters: {
-            query?: {
-                page?: number;
-                per_page?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PaginatedResponse_TrashItemResponse_"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    cleanup_expired_api_v1_trash_cleanup_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    restore_item_api_v1_trash__entity_type___entity_id__restore_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                entity_type: string;
-                entity_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    purge_item_api_v1_trash__entity_type___entity_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                entity_type: string;
-                entity_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_overview_api_v1_stats_overview_get: {
-        parameters: {
-            query?: {
-                /** @description Periods to aggregate: today|week|month|total */
-                periods?: string[] | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["StatsOverviewResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_focus_trend_api_v1_stats_focus_trend_get: {
-        parameters: {
-            query?: {
-                /** @description Number of days to trend */
-                days?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FocusTrendResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_task_distribution_api_v1_stats_task_distribution_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskDistributionResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_daily_detail_api_v1_stats_daily_detail_get: {
-        parameters: {
-            query: {
-                /** @description Date in YYYY-MM-DD format */
-                date: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DailyDetailResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_habit_summary_api_v1_stats_habit_summary_get: {
-        parameters: {
-            query?: {
-                /** @description Period in days */
-                days?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HabitSummaryResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_schedule_summary_api_v1_stats_schedule_summary_get: {
-        parameters: {
-            query?: {
-                /** @description Period in days */
-                days?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ScheduleSummaryResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
-                };
-            };
-        };
-    };
-    stats_note_summary_api_v1_stats_note_summary_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NoteSummaryResponse"];
-                };
-            };
-            /** @description Domain or request validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5805,10 +5245,14 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
@@ -5840,15 +5284,52 @@ export interface operations {
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
     };
-    push_events_api_v1_sync_push_post: {
+    list_spaces_api_v1_spaces_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpaceResponse"][];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_space_api_v1_spaces_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -5857,9 +5338,44 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SyncPushRequest"];
+                "application/json": components["schemas"]["SpaceCreateRequest"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpaceResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_space_api_v1_spaces__space_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                space_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -5867,32 +5383,64 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SyncPushResponse"];
+                    "application/json": components["schemas"]["SpaceResponse"];
                 };
             };
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
     };
-    pull_changes_api_v1_sync_pull_get: {
+    issue_space_token_api_v1_spaces__space_id__token_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                space_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpaceTokenResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    stats_habit_summary_api_v1_stats_habit_summary_get: {
         parameters: {
             query?: {
-                /** @description ISO-8601 timestamp cursor */
-                since?: string;
-                /** @description Secondary cursor: last id within the same timestamp */
-                since_id?: string;
-                /** @description Secondary cursor for tombstones: last entity_id within the same deleted_at */
-                tombstone_since_id?: string;
-                limit?: number;
-                /** @description Global sync ledger cursor */
-                cursor?: number | null;
+                /** @description Period in days */
+                days?: number;
             };
             header?: never;
             path?: never;
@@ -5906,33 +5454,680 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SyncPullResponse"];
+                    "application/json": components["schemas"]["HabitSummaryResponse"];
                 };
             };
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
     };
-    full_sync_api_v1_sync_full_get: {
+    stats_note_summary_api_v1_stats_note_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NoteSummaryResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    stats_schedule_summary_api_v1_stats_schedule_summary_get: {
         parameters: {
             query?: {
-                since?: string;
-                /** @description Secondary cursor: last id within the same timestamp */
-                since_id?: string;
-                /** @description Secondary cursor for tombstones: last entity_id within the same deleted_at */
-                tombstone_since_id?: string;
+                /** @description Period in days */
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleSummaryResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    ack_v2_api_v1_sync_v2_ack_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Client Id */
+                    client_id: string;
+                    /** Cursor */
+                    cursor: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncV2AckResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    query_operations_v2_api_v1_sync_v2_operations_query_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Client Id */
+                    client_id: string;
+                    /** Operation Ids */
+                    operation_ids: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncV2OperationQueryResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    pull_v2_api_v1_sync_v2_pull_get: {
+        parameters: {
+            query: {
+                client_id: string;
+                cursor?: string | null;
+                limit?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncV2PullResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    push_v2_api_v1_sync_v2_push_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Batch Id */
+                    batch_id: string;
+                    /** Client Id */
+                    client_id: string;
+                    /** Events */
+                    events: {
+                        /**
+                         * Action
+                         * @enum {string}
+                         */
+                        action: "create" | "update" | "delete";
+                        /** Client Updated At */
+                        client_updated_at: string;
+                        /** Entity Id */
+                        entity_id: string;
+                        /** Entity Type */
+                        entity_type: string;
+                        /** Expected Version */
+                        expected_version: number | null;
+                        /** Operation Id */
+                        operation_id: string;
+                        /** Payload */
+                        payload: {
+                            [key: string]: unknown;
+                        };
+                    }[];
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncV2PushResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    recover_v2_api_v1_sync_v2_recover_get: {
+        parameters: {
+            query: {
+                client_id: string;
+                page_token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncV2RecoveryResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    status_v2_api_v1_sync_v2_status_get: {
+        parameters: {
+            query?: {
+                client_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncV2StatusResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_time_blocks_api_v1_time_blocks_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by date (YYYY-MM-DD) */
+                date?: string | null;
+                page?: number;
+                per_page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedResponse_TimeBlockResponse_"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_time_block_api_v1_time_blocks_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimeBlockCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeBlockResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_time_block_api_v1_time_blocks__id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeBlockResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_time_block_api_v1_time_blocks__id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimeBlockUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeBlockResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_time_block_api_v1_time_blocks__id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_trash_api_v1_trash_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                per_page?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaginatedResponse_TrashItemResponse_"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    cleanup_expired_api_v1_trash_cleanup_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    purge_item_api_v1_trash__entity_type___entity_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entity_type: string;
+                entity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    restore_item_api_v1_trash__entity_type___entity_id__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entity_type: string;
+                entity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_work_items_api_v1_work_items_get: {
+        parameters: {
+            query?: {
+                projectId?: string | null;
+                cursor?: string | null;
                 limit?: number;
-                /** @description Global sync ledger cursor */
-                cursor?: number | null;
-                snapshot_token?: string | null;
-                snapshot_offset?: number;
             };
             header?: never;
             path?: never;
@@ -5946,54 +6141,70 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SyncFullResponse"];
+                    "application/json": components["schemas"]["WorkItemPageResponse"];
                 };
             };
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
     };
-    sync_status_api_v1_sync_status_get: {
+    create_work_item_api_v1_work_items_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWorkItemRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
-            200: {
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SyncStatusResponse"];
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
                 };
             };
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
     };
-    ledger_stats_api_v1_sync_ledger_stats_get: {
+    get_work_item_api_v1_work_items__work_item_id__get: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                work_item_id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -6004,25 +6215,113 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SyncLedgerStatsResponse"];
+                    "application/json": components["schemas"]["WorkItemResponse"];
                 };
             };
             /** @description Domain or request validation error */
             422: {
                 headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };
     };
-    health_check_api_health_get: {
+    update_work_item_api_v1_work_items__work_item_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    move_work_item_api_v1_work_items__work_item_id__move_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    read_note_api_v1_work_items__work_item_id__note_get: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                work_item_id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -6033,7 +6332,184 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HealthResponse"];
+                    "application/json": components["schemas"]["WorkItemNoteResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    replace_document_api_v1_work_items__work_item_id__note_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplaceDocumentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    append_blocks_api_v1_work_items__work_item_id__note_append_blocks_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppendBlocksRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    toggle_checklist_item_api_v1_work_items__work_item_id__note_toggle_checklist_item_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToggleChecklistItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    transition_work_item_api_v1_work_items__work_item_id__transition_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TransitionWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
         };

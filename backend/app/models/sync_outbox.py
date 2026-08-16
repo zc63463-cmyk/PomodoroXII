@@ -1,6 +1,6 @@
 """SQLAlchemy model for the append-only server sync event ledger."""
 
-from sqlalchemy import Integer, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -29,3 +29,13 @@ class SyncOutbox(Base):
     payload: Mapped[str] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(32), default=utc_now_iso, index=True)
     synced_at: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    operation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    batch_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    visible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("0"), index=True
+    )
+
+    __table_args__ = (
+        CheckConstraint("version IS NULL OR version >= 0", name="version_nonnegative"),
+    )

@@ -4,8 +4,33 @@ import { createQuickNote } from '@/lib/quick-notes/quick-note-repository'
 import { useTrashStore } from '@/stores/trash-store'
 import type { CachedFolder, CachedNote } from '@/types'
 
+class FakeLockManager {
+  private readonly tails = new Map<string, Promise<void>>()
+
+  request<T>(
+    name: string,
+    _options: { mode: 'exclusive' },
+    callback: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.tails.get(name) ?? Promise.resolve()
+    const result = previous.then(callback)
+    const tail = result.then(() => undefined, () => undefined)
+    this.tails.set(name, tail)
+    void tail.finally(() => {
+      if (this.tails.get(name) === tail) this.tails.delete(name)
+    })
+    return result
+  }
+}
+
+const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+
 describe('useTrashStore QuickNote actions', () => {
   beforeEach(async () => {
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: new FakeLockManager(),
+    })
     useTrashStore.getState().reset()
     await spaceDBManager.switchTo(`trash-store-${crypto.randomUUID()}`)
   })
@@ -14,6 +39,8 @@ describe('useTrashStore QuickNote actions', () => {
     useTrashStore.getState().reset()
     await db.delete()
     spaceDBManager.close()
+    if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks)
+    else Reflect.deleteProperty(navigator, 'locks')
   })
 
   it('loads trashed quick notes', async () => {
@@ -90,6 +117,8 @@ describe('useTrashStore QuickNote actions', () => {
       entityType: 'note',
       action: 'update',
       synced: false,
+      expectedVersion: 2,
+      requiresVersionRebase: false,
     })
     expect(useTrashStore.getState().trashedNotes).toEqual([])
   })
@@ -111,6 +140,8 @@ describe('useTrashStore QuickNote actions', () => {
       entityType: 'folder',
       action: 'delete',
       synced: false,
+      expectedVersion: 1,
+      requiresVersionRebase: false,
     })
     expect(useTrashStore.getState().trashedFolders).toEqual([])
   })

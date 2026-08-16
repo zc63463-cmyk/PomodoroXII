@@ -13,7 +13,19 @@ from fastapi import FastAPI, Request
 from httpx import ASGITransport
 from pydantic import ValidationError
 
-from app.auth.security import create_master_token, create_space_token
+
+@pytest.fixture(autouse=True)
+def _disable_backup_for_client_tests(_isolate_env, monkeypatch) -> None:
+    """Keep client/lifespan tests free of the required recovery scheduler.
+
+    Task 3 made ``backup_enabled`` default to true with a mandatory external
+    target; the shared conftest ``client`` fixture enters the lifespan, which
+    would fail without a target.  These hardening tests do not exercise the
+    scheduler, so it is disabled here without changing production defaults.
+    """
+    import app.settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "backup_enabled", False)
 
 
 async def _request(app, *, body_frames, headers=()):
@@ -200,10 +212,13 @@ async def test_body_limit_does_not_send_second_start_after_response_started():
 
 
 async def test_declared_oversize_gets_request_id_and_security_headers(client):
+    from app.settings import settings
+
+    oversized = settings.request_body_max_bytes + 1
     response = await client.post(
         "/api/v1/auth/login",
         content=b"x",
-        headers={"content-length": str(10 * 1024 * 1024 + 1)},
+        headers={"content-length": str(oversized)},
     )
     assert response.status_code == 413
     assert response.json()["error_type"] == "request_too_large"
@@ -213,7 +228,7 @@ async def test_declared_oversize_gets_request_id_and_security_headers(client):
         "/api/v1/auth/login",
         content=b"x",
         headers={
-            "content-length": str(10 * 1024 * 1024 + 1),
+            "content-length": str(oversized),
             "origin": "http://localhost:5173",
         },
     )
@@ -350,52 +365,90 @@ def _event(payload: dict[str, Any] | None = None):
         "entity_id": "x",
         "action": "create",
         "payload": payload or {},
+        "expected_version": None,
+        "client_updated_at": "2026-08-06T10:00:00.000Z",
+        "operation_id": "prod-hardening-op",
     }
 
 
 @pytest.mark.parametrize("count", [1, 500])
 def test_sync_event_count_accepts_bounds(count):
-    from app.schemas.sync import SyncPushRequest
+    from app.schemas.sync import SyncV2PushRequest
 
-    assert len(SyncPushRequest(events=[_event() for _ in range(count)]).events) == count
+    request = SyncV2PushRequest(
+        client_id="prod-hardening-client",
+        batch_id="prod-hardening-batch",
+        events=[
+            {**_event(), "operation_id": f"prod-hardening-op-{index}"}
+            for index in range(count)
+        ],
+    )
+    assert len(request.events) == count
 
 
 @pytest.mark.parametrize("count", [0, 501])
 def test_sync_event_count_rejects_outside_bounds(count):
-    from app.schemas.sync import SyncPushRequest
+    from app.schemas.sync import SyncV2PushRequest
 
     with pytest.raises(ValidationError):
-        SyncPushRequest(events=[_event() for _ in range(count)])
+        SyncV2PushRequest(
+            client_id="prod-hardening-client",
+            batch_id="prod-hardening-batch",
+            events=[
+                {**_event(), "operation_id": f"prod-hardening-op-{index}"}
+                for index in range(count)
+            ],
+        )
 
 
 def test_sync_payload_utf8_compact_json_boundary(monkeypatch):
     import app.settings as settings_module
-    from app.schemas.sync import SyncEvent
+    from app.sync.contracts import (
+        SyncEventInput,
+        SyncInputError,
+        canonical_sync_event_bytes,
+        validate_sync_push_inputs,
+    )
 
-    monkeypatch.setattr(settings_module.settings, "sync_event_payload_max_bytes", 11)
-    assert SyncEvent(**_event({"x": "你"})).payload == {"x": "你"}  # exactly 11 bytes
-    with pytest.raises(ValidationError):
-        SyncEvent(**_event({"x": "你你"}))  # 14 UTF-8 bytes
+    exact = SyncEventInput.from_mapping(_event({"x": "你"}))
+    exact_size = len(canonical_sync_event_bytes(exact))
+    monkeypatch.setattr(
+        settings_module.settings, "sync_event_payload_max_bytes", exact_size
+    )
+    validate_sync_push_inputs(
+        "prod-hardening-client",
+        "prod-hardening-batch",
+        [exact],
+        max_event_bytes=settings_module.settings.sync_event_payload_max_bytes,
+    )
+    plus_one = SyncEventInput.from_mapping(_event({"x": "你你"}))
+    with pytest.raises(SyncInputError):
+        validate_sync_push_inputs(
+            "prod-hardening-client",
+            "prod-hardening-batch",
+            [plus_one],
+            max_event_bytes=settings_module.settings.sync_event_payload_max_bytes,
+        )
 
 
 @pytest.mark.parametrize("payload", [{"x": float("nan")}, {"x": float("inf")}, {"x": object()}])
 def test_sync_payload_rejects_non_json_values(payload):
-    from app.schemas.sync import SyncEvent
+    from app.schemas.sync import SyncV2Event
 
     with pytest.raises(ValidationError) as exc_info:
-        SyncEvent(**_event(payload))
-    assert "valid JSON" in str(exc_info.value)
+        SyncV2Event(**_event(payload))
+    assert "non_i_json" in str(exc_info.value)
 
 
 async def test_sync_validation_uses_safe_422_envelope():
     from app.errors import register_exception_handlers
-    from app.schemas.sync import SyncPushRequest
+    from app.schemas.sync import SyncV2PushRequest
 
     app = FastAPI()
     register_exception_handlers(app)
 
     @app.post("/sync")
-    async def sync(body: SyncPushRequest):
+    async def sync(body: SyncV2PushRequest):
         return body
 
     async with httpx.AsyncClient(
@@ -403,7 +456,7 @@ async def test_sync_validation_uses_safe_422_envelope():
     ) as local_client:
         response = await local_client.post(
             "/sync",
-            content='{"events":[{"entity_type":"task","entity_id":"x","action":"create","payload":{"x":NaN}}]}',
+            content='{"client_id":"prod-hardening-client","batch_id":"prod-hardening-batch","events":[{"entity_type":"task","entity_id":"x","action":"create","payload":{"x":NaN},"expected_version":null,"client_updated_at":"2026-08-06T10:00:00.000Z","operation_id":"prod-hardening-op"}]}',
             headers={"content-type": "application/json"},
         )
     assert response.status_code == 422
@@ -450,15 +503,47 @@ async def test_metrics_auth_and_prometheus_contract(client):
     missing = await client.get("/api/metrics")
     assert missing.status_code == 401
 
-    space_token = create_space_token("space", "user")
-    forbidden = await client.get(
-        "/api/metrics", headers={"authorization": f"Bearer {space_token}"}
+    setup = await client.post(
+        "/api/v1/auth/setup", json={"password": "test-password-123"}
     )
-    assert forbidden.status_code == 403
+    assert setup.status_code == 201
+    login = await client.post(
+        "/api/v1/auth/login", json={"password": "test-password-123"}
+    )
+    assert login.status_code == 200
+    master_token = login.json()["access_token"]
+    created = await client.post(
+        "/api/v1/spaces",
+        json={"name": "metrics"},
+        headers={"authorization": f"Bearer {master_token}"},
+    )
+    assert created.status_code == 201
+    issued = await client.post(
+        f"/api/v1/spaces/{created.json()['id']}/token",
+        headers={"authorization": f"Bearer {master_token}"},
+    )
+    assert issued.status_code == 200
+    space_token = issued.json()["space_token"]
 
-    master_token = create_master_token("operator")
+    # Master and space JWTs must never read metrics (403).
+    for token in (master_token, space_token):
+        forbidden = await client.get(
+            "/api/metrics", headers={"authorization": f"Bearer {token}"}
+        )
+        assert forbidden.status_code == 403
+
+    # Only the digest-only operations credential can read metrics.
+    from app.db.meta_session import get_meta_session
+    from app.ops.credentials import OperationsCredentialStore
+
+    async for session in get_meta_session():
+        store = OperationsCredentialStore(session)
+        issued_ops = await store.issue()
+        ops_token = issued_ops.token
+        break
+
     success = await client.get(
-        "/api/metrics", headers={"authorization": f"Bearer {master_token}"}
+        "/api/metrics", headers={"authorization": f"Bearer {ops_token}"}
     )
     assert success.status_code == 200
     assert success.headers["content-type"].startswith("text/plain; version=0.0.4")
@@ -467,7 +552,9 @@ async def test_metrics_auth_and_prometheus_contract(client):
 
 async def test_openapi_sync_bounds_and_metrics_security(client):
     schema = (await client.get("/openapi.json")).json()
-    events = schema["components"]["schemas"]["SyncPushRequest"]["properties"]["events"]
+    events = schema["paths"]["/api/v1/sync/v2/push"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["schema"]["properties"]["events"]
     assert events["minItems"] == 1
     assert events["maxItems"] == 500
     metrics = schema["paths"]["/api/metrics"]["get"]
@@ -497,7 +584,7 @@ def test_settings_require_positive_values(field):
         Settings(**{field: 0})
 
 
-def test_readiness_deployment_contracts():
+def test_readiness_and_lite_ci_deployment_contracts():
     root = Path(__file__).resolve().parents[2]
     compose = yaml.safe_load(
         (root / "backend" / "docker-compose.yml").read_text(encoding="utf-8")
@@ -513,26 +600,7 @@ def test_readiness_deployment_contracts():
     triggers = ci.get("on", ci.get(True))
     assert set(triggers["push"]["branches"]) == {"main", "master", "develop"}
     assert set(triggers["pull_request"]["branches"]) == {"main", "master"}
-    steps = ci["jobs"]["build"]["steps"]
-    login = next(step for step in steps if step["name"] == "Log in to GitHub Container Registry")
-    publish = next(step for step in steps if step["name"] == "Push main/master image to GHCR")
-    expected_publish_condition = (
-        "github.event_name == 'push' && "
-        "(github.ref_name == 'main' || github.ref_name == 'master')"
-    )
-    assert login["if"] == expected_publish_condition
-    assert publish["if"] == expected_publish_condition
-    build = next(step for step in steps if step["name"] == "Build image for smoke test")
-    assert build["with"]["push"] is False
-    assert build["with"]["load"] is True
-    smoke = next(step for step in steps if step["name"] == "Smoke-test the image")["run"]
-    assert "POMODOROXII_ENVIRONMENT=production" in smoke
-    assert "POMODOROXII_SECRET_KEY=" in smoke
-    assert "-v pomodoroxii-smoke-data:/app/data" in smoke
-    assert "POMODOROXII_DATABASE_URL=sqlite+aiosqlite:////app/data/meta.db" in smoke
-    assert "POMODOROXII_SPACES_DATA_DIR=/app/data/spaces" in smoke
-    assert "/api/ready" in smoke
-    assert "docker volume rm -f pomodoroxii-smoke-data" in smoke
-    publish_run = publish["run"]
-    assert 'docker push "$IMAGE:${{ github.sha }}"' in publish_run
-    assert 'docker push "$IMAGE:latest"' in publish_run
+    assert set(ci["jobs"]) == {"test"}
+    source = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "docker/" not in source
+    assert "docker push" not in source

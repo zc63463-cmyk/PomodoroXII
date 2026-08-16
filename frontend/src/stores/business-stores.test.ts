@@ -8,8 +8,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useAppStore } from '@/stores/app-store'
 import { useTimerStore } from '@/stores/timer-store'
-import { useSessionStore } from '@/stores/session-store'
-import { useTaskStore } from '@/stores/task-store'
+import { useFocusSessionStore } from '@/stores/focus-session-store'
+import { useTaskSpaceStore } from '@/stores/task-space-store'
 import { useNoteStore } from '@/stores/note-store'
 import { useQuickNoteStore } from '@/stores/quick-note-store'
 import { useFolderStore } from '@/stores/folder-store'
@@ -22,14 +22,15 @@ import { useSearchStore } from '@/stores/search-store'
 import { useTrashStore } from '@/stores/trash-store'
 import { useSyncStore } from '@/stores/sync-store'
 import { useSettingsStore } from '@/stores/settings-store'
+import { selectDerivedClock } from '@/stores/timer-store'
 
 describe('business stores reset', () => {
   beforeEach(() => {
     // Reset all stores before each test to ensure isolation
     useAppStore.getState().reset()
     useTimerStore.getState().reset()
-    useSessionStore.getState().reset()
-    useTaskStore.getState().reset()
+    useFocusSessionStore.getState().reset()
+    useTaskSpaceStore.getState().reset()
     useNoteStore.getState().reset()
     useQuickNoteStore.getState().reset()
     useFolderStore.getState().reset()
@@ -50,50 +51,66 @@ describe('business stores reset', () => {
     expect(useAppStore.getState().isOnline).toBe(true)
   })
 
-  it('timer-store reset restores mode, status, duration, remaining, activeSessionId', () => {
-    useTimerStore.setState({
-      mode: 'countdown',
-      status: 'running',
-      duration: 300,
-      remaining: 120,
-      activeSessionId: 'sess-1',
-    })
-    useTimerStore.getState().reset()
-    expect(useTimerStore.getState().mode).toBe('pomodoro')
-    expect(useTimerStore.getState().status).toBe('idle')
-    expect(useTimerStore.getState().duration).toBe(1500)
-    expect(useTimerStore.getState().remaining).toBe(1500)
-    expect(useTimerStore.getState().activeSessionId).toBeNull()
+  it('timer-store derives time from the active Session and rejects a second Space start', () => {
+    useTimerStore.getState().installLocator({
+      spaceId: 'space-a', sessionId: 'fs-1', operationId: 'op-1', state: 'active',
+      ownerDeviceId: 'device-a', ownerTabId: 'tab-a', ownershipEpoch: 1,
+      leaseExpiresAt: '2026-07-15T08:03:00Z', updatedAt: '2026-07-15T08:00:00Z',
+      session: {
+        session: {
+          id: 'fs-1', spaceId: 'space-a', sessionRevision: 1,
+          startedAt: '2026-07-15T08:00:00Z', endedAt: null, pauseStartedAt: null,
+          plannedSeconds: 1500, grossSeconds: 0, pausedSeconds: 0, breakSeconds: 0,
+          focusedSeconds: 0, clockState: 'running', timerCompletion: null,
+          validity: 'pending', validityReason: null, overallProgress: null, mood: null,
+          reviewState: 'not_required', ownershipState: 'authoritative', sessionNote: '',
+          version: 1, createdAt: '2026-07-15T08:00:00Z', updatedAt: '2026-07-15T08:00:00Z',
+        }, context: null, attribution: {} as never, plan: [], outcomes: [],
+        commandEnvelopes: [], commandReceipts: [],
+      },
+    } as never, { deviceId: 'device-a', tabId: 'tab-a' })
+    useTimerStore.getState().setNow(Date.parse('2026-07-15T08:05:00Z'))
+    expect(selectDerivedClock(useTimerStore.getState())?.remainingSeconds).toBe(1200)
+    expect(() => useTimerStore.getState().assertCanStart('space-b')).toThrow('active_session_exists')
+    expect(Object.keys(useTimerStore.getState())).not.toContain('tick')
   })
 
-  it('session-store reset restores sessions, isLoading, error', () => {
-    useSessionStore.setState({
-      sessions: [{ id: 's1' } as never],
-      isLoading: true,
-      error: 'test',
+  it('focus-session-store reset restores the current aggregate projection', () => {
+    useFocusSessionStore.setState({
+      sessions: [{ sessionId: 's1' } as never],
+      currentSessionId: 's1',
     })
-    useSessionStore.getState().reset()
-    expect(useSessionStore.getState().sessions).toEqual([])
-    expect(useSessionStore.getState().isLoading).toBe(false)
-    expect(useSessionStore.getState().error).toBeNull()
+    useFocusSessionStore.getState().reset()
+    expect(useFocusSessionStore.getState().sessions).toEqual([])
+    expect(useFocusSessionStore.getState().currentSessionId).toBeNull()
   })
 
-  it('task-store reset restores tasks, tags, taskTags, taskRelations, isLoading, error', () => {
-    useTaskStore.setState({
-      tasks: [{ id: 't1' } as never],
-      tags: [{ id: 'g1' } as never],
-      taskTags: [{ id: 'tt1' } as never],
-      taskRelations: [{ id: 'tr1' } as never],
+  it('task-space-store reset restores project, WorkItem, and Note selection', () => {
+    useTaskSpaceStore.setState({
+      projects: [{ id: 'p1' } as never],
+      workItems: [{ id: 'wi1' } as never],
+      selectedProjectId: 'p1',
+      selectedWorkItemId: 'wi1',
+      selectedLevel2WorkItemId: 'wi-parent',
+      selectedNote: { noteId: 'n1' } as never,
+      spaceId: 'space-1',
+      definitions: { statuses: [], types: [], labels: [] },
       isLoading: true,
       error: 'test',
+      repository: {} as never,
     })
-    useTaskStore.getState().reset()
-    expect(useTaskStore.getState().tasks).toEqual([])
-    expect(useTaskStore.getState().tags).toEqual([])
-    expect(useTaskStore.getState().taskTags).toEqual([])
-    expect(useTaskStore.getState().taskRelations).toEqual([])
-    expect(useTaskStore.getState().isLoading).toBe(false)
-    expect(useTaskStore.getState().error).toBeNull()
+    useTaskSpaceStore.getState().reset()
+    expect(useTaskSpaceStore.getState().projects).toEqual([])
+    expect(useTaskSpaceStore.getState().workItems).toEqual([])
+    expect(useTaskSpaceStore.getState().selectedProjectId).toBeNull()
+    expect(useTaskSpaceStore.getState().selectedWorkItemId).toBeNull()
+    expect(useTaskSpaceStore.getState().selectedLevel2WorkItemId).toBeNull()
+    expect(useTaskSpaceStore.getState().selectedNote).toBeNull()
+    expect(useTaskSpaceStore.getState().spaceId).toBeNull()
+    expect(useTaskSpaceStore.getState().definitions).toBeNull()
+    expect(useTaskSpaceStore.getState().isLoading).toBe(false)
+    expect(useTaskSpaceStore.getState().error).toBeNull()
+    expect(useTaskSpaceStore.getState().repository).toBeNull()
   })
 
   it('note-store reset restores notes, comments, currentNoteId, isLoading, error', () => {

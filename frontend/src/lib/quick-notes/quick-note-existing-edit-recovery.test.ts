@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { PomodoroXIDB } from '@/services/database'
+import type { PomodoroXIDB } from '@/services/database'
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import {
   createDexieQuickNoteExistingEditRecoveryAdapter,
   type QuickNoteExistingEditRecoverySnapshotV1,
@@ -14,7 +15,7 @@ function snapshot(overrides: Partial<QuickNoteExistingEditRecoverySnapshotV1> = 
 
 describe('quick-note-existing-edit-recovery', () => {
   let database: PomodoroXIDB
-  beforeEach(async () => { database = new PomodoroXIDB(`existing-edit-${crypto.randomUUID()}`); await database.open() })
+  beforeEach(async () => { database = await openPomodoroXIDB(SPACE_ID) })
   afterEach(async () => { await database.delete() })
 
   it('reports an absent checkpoint', async () => {

@@ -1,152 +1,195 @@
-"""Tests for BackupService integration into app lifespan (PR-18).
+"""Lifespan coverage for the required scheduled full recovery startup gate."""
 
-Validates that:
-1. Startup triggers BackupService.create_backup for each registered space.
-2. backup_enabled=False skips backup entirely.
-3. Backup failure logs error but does not block startup.
-"""
 from __future__ import annotations
 
-import sys
+import inspect
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 
-def _fresh_create_app():
-    """Import create_app after purging cached app.main so it rebinds to the
-    current settings singleton established by _isolate_env."""
-    for key in list(sys.modules.keys()):
-        if key == "app.main" or key.startswith("app.routes."):
-            del sys.modules[key]
-    from app.main import create_app
-
-    return create_app
-
-
 @pytest.mark.asyncio
-async def test_lifespan_triggers_backup_on_startup(_isolate_env, monkeypatch):
-    """Startup with backup_enabled=True should call create_backup per space."""
+async def test_disabled_backup_performs_no_backup_storage_io(
+    _isolate_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main_module
+    import app.runtime.bootstrap as bootstrap_module
     import app.settings as settings_module
 
-    monkeypatch.setattr(settings_module.settings, "backup_enabled", True)
+    monkeypatch.setattr(main_module.settings, "backup_enabled", False)
+    lifecycle: list[str] = []
 
-    calls: list[tuple[Path, Path]] = []
+    class Ready:
+        def assert_ready(self) -> None:
+            lifecycle.append("ready-check")
 
-    from app.file_system import backup as backup_module
+    @asynccontextmanager
+    async def bootstrap_runtime(_purpose: str):
+        lifecycle.append("bootstrap")
+        ready = Ready()
+        try:
+            yield SimpleNamespace(
+                runtime=ready,
+                executor=SimpleNamespace(gate=ready),
+            )
+        finally:
+            lifecycle.append("shutdown")
 
-    def _fake_create_backup(db_path: Path, backup_dir: Path) -> str | None:
-        calls.append((db_path, backup_dir))
-        return None
-
+    monkeypatch.setattr(bootstrap_module, "bootstrap_runtime", bootstrap_runtime)
+    scheduler_calls: list[str] = []
     monkeypatch.setattr(
-        backup_module.BackupService,
-        "create_backup",
-        classmethod(lambda cls, db_path, backup_dir: _fake_create_backup(db_path, backup_dir)),
+        main_module,
+        "RecoveryScheduler",
+        lambda *args, **kwargs: (
+            scheduler_calls.append("constructed") or SimpleNamespace(start=None, close=None)
+        ),
     )
 
-    from app.db.meta_session import close_meta_db, init_meta_db
-    from app.db.models.meta import Space
-    from app.db.session import create_session_factory
+    async with main_module.lifespan(main_module.app):
+        lifecycle.append("ready")
 
-    await init_meta_db()
-    from app.db.meta_session import get_meta_engine
-    factory = create_session_factory(get_meta_engine())
-    async with factory() as session:
-        session.add(Space(
-            id="spc_backup_test",
-            name="Backup Test Space",
-            db_path=str(Path("./data/spaces/spc_backup_test/space.db")),
-            notes_dir=str(Path("./data/spaces/spc_backup_test/notes")),
-            is_default=False,
-        ))
-        await session.commit()
-    space_db = settings_module.settings.space_db_path("spc_backup_test")
-    space_db.parent.mkdir(parents=True, exist_ok=True)
-    space_db.write_bytes(b"sqlite3")
-
-    create_app = _fresh_create_app()
-    app = create_app()
-    async with app.router.lifespan_context(app):
-        pass
-
-    await close_meta_db()
-
-    assert len(calls) == 1, f"expected 1 backup call, got {len(calls)}"
-    db_path, backup_dir = calls[0]
-    assert "spc_backup_test" in str(db_path)
+    assert lifecycle == [
+        "bootstrap",
+        "ready-check",
+        "ready-check",
+        "ready",
+        "shutdown",
+    ]
+    assert scheduler_calls == []
 
 
 @pytest.mark.asyncio
-async def test_lifespan_skips_backup_when_disabled(_isolate_env, monkeypatch):
-    """Startup with backup_enabled=False should not call create_backup."""
-    import app.settings as settings_module
+async def test_enabled_backup_requires_target_before_initialization(
+    _isolate_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main_module
+    import app.runtime.bootstrap as bootstrap_module
 
-    monkeypatch.setattr(settings_module.settings, "backup_enabled", False)
+    monkeypatch.setattr(main_module.settings, "backup_enabled", True)
+    monkeypatch.setattr(main_module.settings, "backup_target_dir", None)
+    initialized: list[str] = []
 
-    calls: list[tuple] = []
+    @asynccontextmanager
+    async def bootstrap_runtime(_purpose: str):
+        initialized.append("bootstrap")
+        yield SimpleNamespace(
+            runtime=SimpleNamespace(assert_ready=lambda: None),
+            executor=SimpleNamespace(gate=SimpleNamespace(assert_ready=lambda: None)),
+        )
 
-    from app.file_system import backup as backup_module
+    monkeypatch.setattr(bootstrap_module, "bootstrap_runtime", bootstrap_runtime)
 
+    with pytest.raises(RuntimeError, match="BACKUP_TARGET_DIR"):
+        async with main_module.lifespan(main_module.app):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_initial_snapshot_failure_aborts_startup(
+    _isolate_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main_module
+    import app.runtime.bootstrap as bootstrap_module
+
+    monkeypatch.setattr(main_module.settings, "backup_enabled", True)
     monkeypatch.setattr(
-        backup_module.BackupService,
-        "create_backup",
-        classmethod(lambda cls, db_path, backup_dir: calls.append((db_path, backup_dir)) or None),
+        main_module.settings,
+        "backup_target_dir",
+        Path("E:/DevTemp/pomodoroxii-backup-target"),
     )
+    monkeypatch.setattr(main_module.settings, "backup_interval_hours", 24)
+    monkeypatch.setattr(main_module.settings, "backup_retention_count", 30)
+    bootstrap_entered: list[str] = []
 
-    from app.db.meta_session import close_meta_db, init_meta_db
-    await init_meta_db()
+    @asynccontextmanager
+    async def bootstrap_runtime(_purpose: str):
+        bootstrap_entered.append("bootstrap")
+        yield SimpleNamespace(
+            runtime=SimpleNamespace(assert_ready=lambda: None),
+            executor=SimpleNamespace(gate=SimpleNamespace(assert_ready=lambda: None)),
+        )
 
-    create_app = _fresh_create_app()
-    app = create_app()
-    async with app.router.lifespan_context(app):
-        pass
+    class FailingSignals:
+        def __init__(self) -> None:
+            self.last_snapshot_success = None
+            self.snapshot_failure_code = None
 
-    await close_meta_db()
+        async def snapshot_started(self) -> None:
+            return None
 
-    assert calls == [], f"backup should be skipped when disabled, got {calls}"
+        async def snapshot_succeeded(self, _manifest_sha256: str) -> None:
+            raise AssertionError("initial snapshot must not succeed")
+
+        async def snapshot_failed(self, code: str) -> None:
+            self.snapshot_failure_code = code
+
+    class FailingCoordinator:
+        async def snapshot(self, _target):
+            raise RuntimeError("injected initial snapshot failure")
+
+        async def verify(self, _snapshot):
+            raise AssertionError("verify must not run after snapshot failure")
+
+    class FailingRecoveryService:
+        def __init__(self, _root: Path) -> None:
+            self.coordinator = FailingCoordinator()
+
+        async def aclose(self) -> None:
+            return None
+
+    class FailingScheduler:
+        def __init__(
+            self,
+            service,
+            target,
+            signals,
+            *,
+            interval_hours,
+            retention_count,
+            operation_recorder=None,
+        ) -> None:
+            self.signals = signals
+            self.started = False
+
+        async def start(self) -> None:
+            self.started = True
+            await self.signals.snapshot_started()
+            try:
+                await FailingCoordinator().snapshot(None)
+            except BaseException as exc:
+                await self.signals.snapshot_failed(type(exc).__name__)
+                raise
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(bootstrap_module, "bootstrap_runtime", bootstrap_runtime)
+    monkeypatch.setattr(main_module, "LocalRecoveryService", FailingRecoveryService)
+    monkeypatch.setattr(main_module, "RecoveryScheduler", FailingScheduler)
+
+    with pytest.raises(RuntimeError, match="injected initial snapshot failure"):
+        async with main_module.lifespan(main_module.app):
+            pass
+
+    assert bootstrap_entered == ["bootstrap"]
 
 
-@pytest.mark.asyncio
-async def test_lifespan_backup_failure_does_not_block_startup(_isolate_env, monkeypatch):
-    """If create_backup raises, startup should continue and /api/health work."""
-    import app.settings as settings_module
+def test_main_has_no_legacy_backup_path_enumeration() -> None:
+    import app.main as main_module
 
-    monkeypatch.setattr(settings_module.settings, "backup_enabled", True)
+    source = inspect.getsource(main_module)
+    assert "BackupService" not in source
+    assert "require_legacy_backup_disabled" not in source
+    assert "space_db_path" not in source
+    assert '"backups"' not in source
 
-    from app.file_system import backup as backup_module
 
-    def _boom(cls, db_path, backup_dir):
-        raise RuntimeError("backup explosion")
-
-    monkeypatch.setattr(backup_module.BackupService, "create_backup", classmethod(_boom))
-
-    from app.db.meta_session import close_meta_db, get_meta_engine, init_meta_db
-    from app.db.models.meta import Space
-    from app.db.session import create_session_factory
-
-    await init_meta_db()
-    factory = create_session_factory(get_meta_engine())
-    async with factory() as session:
-        session.add(Space(
-            id="spc_fail_test",
-            name="Fail Test Space",
-            db_path=str(Path("./data/spaces/spc_fail_test/space.db")),
-            notes_dir=str(Path("./data/spaces/spc_fail_test/notes")),
-            is_default=False,
-        ))
-        await session.commit()
-    space_db = settings_module.settings.space_db_path("spc_fail_test")
-    space_db.parent.mkdir(parents=True, exist_ok=True)
-    space_db.write_bytes(b"sqlite3")
-
-    create_app = _fresh_create_app()
-    app = create_app()
-    # Lifespan should not raise despite backup failure.
-    async with app.router.lifespan_context(app):
-        from httpx import ASGITransport, AsyncClient
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-            resp = await ac.get("/api/health")
-            assert resp.status_code == 200
-
-    await close_meta_db()
+def test_n_minus_one_fixture_explicitly_disables_legacy_backup() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "certification" / "populate_n_minus_one.py"
+    source = fixture.read_text(encoding="utf-8")
+    assert '"POMODOROXII_BACKUP_ENABLED": "false"' in source

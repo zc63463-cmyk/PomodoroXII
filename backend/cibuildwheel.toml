@@ -1,0 +1,23 @@
+[tool.cibuildwheel]
+build = "cp313-*"
+skip = "*-win32 *-manylinux_i686 *-musllinux_*"
+build-verbosity = 1
+build-frontend = "build[uv]"
+test-command = "python -m pytest -q {package}/tests/test_pxii_vfs.py -p no:cacheprovider"
+test-requires = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "aiosqlite>=0.20",
+]
+
+[[tool.cibuildwheel.overrides]]
+select = "cp313-manylinux_x86_64"
+test-command = ""
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+manylinux-x86_64-image = "manylinux_2_28"

@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "fixture_id": "backend-95plus-n-minus-one-v1",
+  "subject_sha": "1e4f0fc6d82ce6203f4bada0e84b518b16fcd97f",
+  "seed": 95001,
+  "fixed_timestamp": "2026-07-01T00:00:00.000Z",
+  "space_id": "spc_cert_n_minus_one",
+  "expected": {
+    "entity_counts": {"tasks": 1, "quick_notes": 1, "notes": 2},
+    "note_body_sha256": {
+      "note_cert_a": "6dfbdde5b0382b2e1fd8d636889366ff04c743a6e68343761a319e332d90fd22",
+      "note_cert_b": "c5a62e7ae6bf299351331bbb9ca1535c53784489df1b32fc76886654ab1749ca"
+    },
+    "sync_waterline": 4
+  }
+}

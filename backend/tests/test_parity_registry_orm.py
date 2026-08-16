@@ -28,3 +28,41 @@ def test_model_tablename_matches_spec(spec_name):
         f"{spec.name}: ORM __tablename__={model.__tablename__!r}, "
         f"spec.table_name={spec.table_name!r}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — Definition-model ownership scan
+# --------------------------------------------------------------------------- #
+
+FORBIDDEN_DEFINITION_MODEL_PATHS = [
+    "app.models.status_definition",
+    "app.models.type_definition",
+    "app.models.label",
+    "app.models.work_item_label",
+]
+
+EXPECTED_DEFINITION_MODEL_PATH = "app.models.work_item_definition"
+
+
+def test_definition_models_are_co_located_in_work_item_definition():
+    """StatusDefinition, TypeDefinition, Label, WorkItemLabel must all live
+    in app.models.work_item_definition — no per-entity model files.
+    """
+    import importlib
+    from pathlib import Path
+
+    # No forbidden module files may exist on disk.
+    backend_root = Path(__file__).resolve().parents[1]
+    for forbidden in FORBIDDEN_DEFINITION_MODEL_PATHS:
+        rel = forbidden.replace(".", "/") + ".py"
+        assert not (backend_root / rel).exists(), (
+            f"Forbidden model file exists: {rel}. "
+            f"Definition models must live in {EXPECTED_DEFINITION_MODEL_PATH}."
+        )
+
+    # All four classes must be importable from the expected module.
+    module = importlib.import_module(EXPECTED_DEFINITION_MODEL_PATH)
+    for class_name in ("StatusDefinition", "TypeDefinition", "Label", "WorkItemLabel"):
+        assert hasattr(module, class_name), (
+            f"{EXPECTED_DEFINITION_MODEL_PATH} missing class {class_name}"
+        )

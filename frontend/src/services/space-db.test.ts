@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { liveQuery } from 'dexie'
-import { spaceDBManager, db } from '@/services/space-db'
+import { spaceDBManager, db, withDetachedSpaceDatabase } from '@/services/space-db'
 import { PomodoroXIDB } from '@/services/database'
 import { dexieDbNameForSpace, PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
 
@@ -9,39 +9,53 @@ describe('SpaceDBManager', () => {
     spaceDBManager.close()
   })
 
-  it('T25: throws when accessing db.tasks without switchTo', () => {
-    expect(() => db.tasks).toThrow('No space selected')
+  it('T25: throws when accessing db.notes without switchTo', () => {
+    expect(() => db.notes).toThrow('No space selected')
   })
 
-  it('T26: db.tasks is accessible after switchTo', async () => {
+  it('T26: db.notes is accessible after switchTo', async () => {
     await spaceDBManager.switchTo('test-t26')
-    const tasks = await db.tasks.toArray()
-    expect(tasks).toEqual([])
+    const notes = await db.notes.toArray()
+    expect(notes).toEqual([])
+  })
+
+  it('opens a detached Space DB without changing the current binding', async () => {
+    await spaceDBManager.switchTo('test-detached-current')
+    const current = spaceDBManager.current
+    const observed = await withDetachedSpaceDatabase('test-detached-target', async (detached) => {
+      expect(detached.spaceId).toBe('test-detached-target')
+      expect(spaceDBManager.current).toBe(current)
+      expect(spaceDBManager.currentSpaceId).toBe('test-detached-current')
+      return detached.spaceId
+    })
+    expect(observed).toBe('test-detached-target')
+    expect(spaceDBManager.current).toBe(current)
+    expect(spaceDBManager.currentSpaceId).toBe('test-detached-current')
   })
 
   it('T27: switching A to B makes db point to B', async () => {
     await spaceDBManager.switchTo('test-t27-a')
-    await db.tasks.put({
+    await db.notes.put({
       id: 't1',
       title: 'in A',
-      status: 'todo',
-    } as unknown as Parameters<typeof db.tasks.put>[0])
+      content: 'in A',
+    } as unknown as Parameters<typeof db.notes.put>[0])
 
     await spaceDBManager.switchTo('test-t27-b')
-    const tasksInB = await db.tasks.toArray()
-    expect(tasksInB).toEqual([])
+    const notesInB = await db.notes.toArray()
+    expect(notesInB).toEqual([])
     expect(db.name).toBe(dexieDbNameForSpace('test-t27-b'))
   })
 
   it('T29: Proxy supports dexie liveQuery', async () => {
     await spaceDBManager.switchTo('test-t29')
-    await db.tasks.put({
+    await db.notes.put({
       id: 't29',
       title: 'livequery test',
-      status: 'todo',
-    } as unknown as Parameters<typeof db.tasks.put>[0])
+      content: 'livequery test',
+    } as unknown as Parameters<typeof db.notes.put>[0])
 
-    const observable = liveQuery(() => db.tasks.toArray())
+    const observable = liveQuery(() => db.notes.toArray())
     const result = await new Promise<unknown[]>((resolve, reject) => {
       const sub = observable.subscribe({
         next: (val) => {
@@ -110,12 +124,12 @@ describe('SpaceDBManager', () => {
 
     expect(observedCurrent).toBe('test-before-switch-a')
     expect(observedTarget).toBe('test-before-switch-b')
-    await previousDB.open()
-    expect(await previousDB.settings.get('before-switch')).toEqual({
+    const reopened = await (await import('./dexie-v18-cutover')).openPomodoroXIDB('test-before-switch-a')
+    expect(await reopened.settings.get('before-switch')).toEqual({
       key: 'before-switch',
       value: 'flushed',
     })
-    previousDB.close()
+    await reopened.delete()
   })
 
   it('flushes before-close listeners while the current Space DB is still writable', async () => {
@@ -139,13 +153,13 @@ describe('SpaceDBManager', () => {
     })
   })
 
-  it('does not reject flushBeforeClose when a listener fails', async () => {
+  it('rejects flushBeforeClose when a listener fails', async () => {
     await spaceDBManager.switchTo('test-before-close-reject')
     const unsubscribe = spaceDBManager.onBeforeSwitch(async () => {
       throw new Error('flush failed')
     })
 
-    await expect(spaceDBManager.flushBeforeClose()).resolves.toBeUndefined()
+    await expect(spaceDBManager.flushBeforeClose()).rejects.toThrow('flush failed')
     unsubscribe()
   })
 
@@ -155,9 +169,9 @@ describe('SpaceDBManager', () => {
       throw new Error('listener threw synchronously')
     })
 
-    await expect(spaceDBManager.switchTo('test-before-switch-sync-throw-b')).resolves.toBeUndefined()
-    expect(spaceDBManager.currentSpaceId).toBe('test-before-switch-sync-throw-b')
+    await expect(spaceDBManager.switchTo('test-before-switch-sync-throw-b')).rejects.toThrow('listener threw synchronously')
     unsubscribe()
+    expect(spaceDBManager.currentSpaceId).toBe('test-before-switch-sync-throw-a')
   })
 
   it('serializes concurrent switchTo calls and keeps the final DB aligned with its Space id', async () => {
@@ -192,8 +206,8 @@ describe('SpaceDBManager', () => {
       throw new Error('listener rejected')
     })
 
-    await expect(spaceDBManager.switchTo('test-before-switch-reject-b')).resolves.toBeUndefined()
-    expect(spaceDBManager.currentSpaceId).toBe('test-before-switch-reject-b')
+    await expect(spaceDBManager.switchTo('test-before-switch-reject-b')).rejects.toThrow('listener rejected')
     unsubscribe()
+    expect(spaceDBManager.currentSpaceId).toBe('test-before-switch-reject-a')
   })
 })

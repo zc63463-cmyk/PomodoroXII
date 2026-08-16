@@ -13,7 +13,11 @@ import {
   extractQuickNoteTags,
   mergeQuickNoteTags,
 } from '@/lib/quick-notes/quick-note-tags'
-import { enqueueOutbox } from '@/lib/sync/outbox'
+import { buildOutboxIdentity, enqueueOutbox } from '@/lib/sync/outbox'
+import {
+  withSpaceAuthorityFence,
+  type SpaceAuthorityToken,
+} from '@/lib/sync/space-authority-fence'
 import type { OutboxAction, SyncEntityType } from '@/lib/sync/types'
 
 export type QuickNoteRepositoryErrorCode =
@@ -83,14 +87,13 @@ export interface QuickNoteCreateInput {
   mood?: QuickNote['mood']
   tags?: string[]
   pinned?: boolean
-  session_id?: string | null
   folder_id?: string | null
   created_at?: string
   updated_at?: string
 }
 
 export type QuickNoteUpdateInput = Partial<
-  Pick<QuickNote, 'content' | 'mood' | 'tags' | 'pinned' | 'folder_id' | 'session_id'>
+  Pick<QuickNote, 'content' | 'mood' | 'tags' | 'pinned' | 'folder_id'>
 > & {
   updated_at?: string
 }
@@ -100,6 +103,7 @@ export interface QuickNoteMutationContext {
   entityId: string
   action: OutboxAction
   payload: QuickNote | { id: string }
+  expectedVersion?: number | null
 }
 
 export interface QuickNoteConvertResult {
@@ -205,23 +209,25 @@ export async function createQuickNote(
 ): Promise<QuickNote> {
   const database = spaceDBManager.current
 
-  return database.transaction(
-    'rw',
-    database.quickNotes,
-    database.outbox,
-    () => createQuickNoteInTransaction(database, input),
-  )
+  return withSpaceAuthorityFence(database.spaceId, (token) =>
+    database.transaction(
+      'rw',
+      database.quickNotes,
+      database.outbox,
+      () => createQuickNoteInTransaction(database, token, input),
+    ))
 }
 
 /** @internal Call only from a transaction containing quickNotes and outbox. */
 export async function createQuickNoteInTransaction(
   database: PomodoroXIDB,
+  token: SpaceAuthorityToken,
   input: QuickNoteCreateInput,
 ): Promise<QuickNote> {
   const note = buildQuickNote(input)
 
   await database.quickNotes.put(toCachedQuickNote(note))
-  await runConfiguredQuickNoteOutbox(database, {
+  await runConfiguredQuickNoteOutbox(database, token, {
     entityType: 'quickNote',
     entityId: note.id,
     action: 'create',
@@ -242,7 +248,6 @@ function buildQuickNote(input: QuickNoteCreateInput): QuickNote {
     pinned: input.pinned ?? false,
     archived_at: null,
     archive_file_path: null,
-    session_id: input.session_id ?? null,
     folder_id: input.folder_id ?? null,
     trashed_at: null,
     migrated_to_note_id: null,
@@ -261,6 +266,7 @@ export async function updateQuickNote(
     const existing = await getExistingQuickNote(id)
     assertActiveForUpdate(stripSyncFields(existing))
 
+    const baseVersion = existing.version ?? 1
     const updatedAt = patch.updated_at ?? new Date().toISOString()
     const row: CachedQuickNote = {
       ...existing,
@@ -268,13 +274,13 @@ export async function updateQuickNote(
       id,
       updated_at: updatedAt,
       deletion_state: deletionStateFor(existing),
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
 
     await db.quickNotes.put(row)
     const note = stripSyncFields(row)
-    return { result: note, payload: note }
+    return { result: note, payload: note, expectedVersion: baseVersion }
   })
 }
 
@@ -282,7 +288,8 @@ export async function commitQuickNoteExistingEdit(
   database: PomodoroXIDB,
   input: Readonly<{ id: string; expectedUpdatedAt: string; content: string }>,
 ): Promise<QuickNoteExistingEditCommitResult> {
-  return database.transaction('rw', database.quickNotes, database.outbox, async () => {
+  return withSpaceAuthorityFence(database.spaceId, (token) =>
+    database.transaction('rw', database.quickNotes, database.outbox, async () => {
     const existing = await database.quickNotes.get(input.id)
     if (!existing) return { kind: 'missing-or-inactive' }
     const current = stripSyncFields(existing)
@@ -293,22 +300,24 @@ export async function commitQuickNoteExistingEdit(
       return { kind: 'conflict', note: current }
     }
 
+    const baseVersion = existing.version ?? 1
     const content = normalizeContent(input.content)
     const row: CachedQuickNote = {
       ...existing,
       content,
       tags: mergeQuickNoteTags(undefined, extractQuickNoteTags(content)),
       updated_at: new Date().toISOString(),
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
     await database.quickNotes.put(row)
     const note = stripSyncFields(row)
-    await runConfiguredQuickNoteOutbox(database, {
+    await runConfiguredQuickNoteOutbox(database, token, {
       entityType: 'quickNote', entityId: note.id, action: 'update', payload: note,
+      expectedVersion: baseVersion,
     })
     return { kind: 'saved', note }
-  })
+    }))
 }
 
 export async function moveQuickNoteToTrash(id: string): Promise<QuickNote> {
@@ -316,19 +325,20 @@ export async function moveQuickNoteToTrash(id: string): Promise<QuickNote> {
     const existing = await getExistingQuickNote(id)
     assertActiveForTrash(stripSyncFields(existing))
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const row: CachedQuickNote = {
       ...existing,
       trashed_at: now,
       updated_at: now,
       deletion_state: 'deleted',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
 
     await db.quickNotes.put(row)
     const note = stripSyncFields(row)
-    return { result: note, payload: note }
+    return { result: note, payload: note, expectedVersion: baseVersion }
   })
 }
 
@@ -337,19 +347,20 @@ export async function restoreQuickNote(id: string): Promise<QuickNote> {
     const existing = await getExistingQuickNote(id)
     assertTrashedForRestore(stripSyncFields(existing))
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const row: CachedQuickNote = {
       ...existing,
       trashed_at: null,
       updated_at: now,
       deletion_state: 'active',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
 
     await db.quickNotes.put(row)
     const note = stripSyncFields(row)
-    return { result: note, payload: note }
+    return { result: note, payload: note, expectedVersion: baseVersion }
   })
 }
 
@@ -357,17 +368,22 @@ export async function purgeQuickNote(id: string): Promise<void> {
   await runQuickNoteMutation({ action: 'delete', entityId: id }, async () => {
     const existing = await getExistingQuickNote(id)
     assertTrashedForPurge(stripSyncFields(existing))
+    const baseVersion = existing.version ?? 1
     await db.quickNotes.delete(id)
-    return { result: undefined, payload: { id } }
+    return { result: undefined, payload: { id }, expectedVersion: baseVersion }
   })
 }
 
 export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConvertResult> {
-  return db.transaction('rw', db.quickNotes, db.notes, db.outbox, async () => {
-    const existing = await getExistingQuickNote(id)
+  const database = spaceDBManager.current
+  return withSpaceAuthorityFence(database.spaceId, (token) =>
+    database.transaction('rw', database.quickNotes, database.notes, database.outbox, async () => {
+    const existing = await database.quickNotes.get(id)
+    if (!existing) throw new QuickNoteRepositoryError('not_found')
     const source = stripSyncFields(existing)
     assertActiveForConvert(source)
 
+    const baseVersion = existing.version ?? 1
     const now = new Date().toISOString()
     const noteId = crypto.randomUUID()
     const note: CachedNote = {
@@ -393,23 +409,31 @@ export async function convertQuickNoteToNote(id: string): Promise<QuickNoteConve
       migrated_to_note_id: noteId,
       updated_at: now,
       deletion_state: 'active',
-      version: (existing.version ?? 1) + 1,
+      version: baseVersion + 1,
       _dirty: true,
     }
 
-    await db.notes.put(note)
-    await db.quickNotes.put(convertedRow)
+    await database.notes.put(note)
+    await database.quickNotes.put(convertedRow)
 
-    await enqueueOutbox(db, 'note', noteId, 'create', stripNoteSyncFields(note))
-    await runConfiguredQuickNoteOutbox(db, {
+    const notePayload = stripNoteSyncFields(note)
+    await enqueueOutbox(
+      database, database.spaceId, token, 'note', noteId, 'create', notePayload,
+      await buildOutboxIdentity(notePayload, {
+        operationId: crypto.randomUUID(), expectedVersion: null,
+        transportState: 'ready', createdAt: new Date().toISOString(),
+      }),
+    )
+    await runConfiguredQuickNoteOutbox(database, token, {
       entityType: 'quickNote',
       entityId: id,
       action: 'update',
       payload: stripSyncFields(convertedRow),
+      expectedVersion: baseVersion,
     })
 
     return { noteId, quickNoteId: id }
-  })
+    }))
 }
 
 async function runQuickNoteMutation<T>(
@@ -417,28 +441,32 @@ async function runQuickNoteMutation<T>(
     payload?: QuickNote | { id: string }
     sync?: boolean
   },
-  write: () => Promise<T | { result: T; payload: QuickNote | { id: string } }>,
+  write: () => Promise<T | { result: T; payload: QuickNote | { id: string }; expectedVersion?: number | null }>,
 ): Promise<T> {
-  return db.transaction('rw', db.quickNotes, db.outbox, async () => {
+  const database = spaceDBManager.current
+  return withSpaceAuthorityFence(database.spaceId, (token) =>
+    database.transaction('rw', database.quickNotes, database.outbox, async () => {
     const written = await write()
-    const { result, payload } = normalizeQuickNoteMutationResult(written)
+    const { result, payload, expectedVersion } = normalizeQuickNoteMutationResult(written)
     const hookPayload = payload ?? context.payload
 
     if (context.sync !== false && hookPayload) {
-      await runConfiguredQuickNoteOutbox(db, {
+      await runConfiguredQuickNoteOutbox(database, token, {
         entityType: 'quickNote',
         entityId: context.entityId,
         action: context.action,
         payload: hookPayload,
+        expectedVersion,
       })
     }
 
     return result
-  })
+    }))
 }
 
 async function runConfiguredQuickNoteOutbox(
   database: PomodoroXIDB,
+  token: SpaceAuthorityToken,
   context: QuickNoteMutationContext,
 ): Promise<void> {
   if (quickNoteOutboxConfiguration.kind === 'disabled') return
@@ -451,23 +479,31 @@ async function runConfiguredQuickNoteOutbox(
 
   await enqueueOutbox(
     database,
+    database.spaceId,
+    token,
     context.entityType,
     context.entityId,
     context.action,
     context.payload,
+    await buildOutboxIdentity(context.payload, {
+      operationId: crypto.randomUUID(),
+      expectedVersion: context.expectedVersion ?? null,
+      transportState: 'ready',
+      createdAt: new Date().toISOString(),
+    }),
   )
 }
 
 function normalizeQuickNoteMutationResult<T>(
-  written: T | { result: T; payload: QuickNote | { id: string } },
-): { result: T; payload?: QuickNote | { id: string } } {
+  written: T | { result: T; payload: QuickNote | { id: string }; expectedVersion?: number | null },
+): { result: T; payload?: QuickNote | { id: string }; expectedVersion?: number | null } {
   if (
     written &&
     typeof written === 'object' &&
     'result' in written &&
     'payload' in written
   ) {
-    return written as { result: T; payload: QuickNote | { id: string } }
+    return written as { result: T; payload: QuickNote | { id: string }; expectedVersion?: number | null }
   }
 
   return { result: written as T }
@@ -538,7 +574,6 @@ function normalizeUpdateInput(input: QuickNoteUpdateInput): QuickNoteUpdateInput
   if ('mood' in input && input.mood !== undefined) patch.mood = input.mood
   if ('pinned' in input && input.pinned !== undefined) patch.pinned = input.pinned
   if ('folder_id' in input && input.folder_id !== undefined) patch.folder_id = input.folder_id
-  if ('session_id' in input && input.session_id !== undefined) patch.session_id = input.session_id
   if ('updated_at' in input && input.updated_at !== undefined) patch.updated_at = input.updated_at
 
   if (Object.keys(patch).length === 0) {

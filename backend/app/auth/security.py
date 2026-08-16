@@ -18,14 +18,24 @@ import jwt
 
 from app.settings import settings
 
-
 # --------------------------------------------------------------------------- #
 # Password hashing
 # --------------------------------------------------------------------------- #
+MIN_PASSWORD_BYTES = 12
+MAX_PASSWORD_BYTES = 64
+
+
+def validate_password_policy(password: str) -> bytes:
+    """Validate the non-truncating password policy and return UTF-8 bytes."""
+    encoded = password.encode("utf-8")
+    if not MIN_PASSWORD_BYTES <= len(encoded) <= MAX_PASSWORD_BYTES:
+        raise ValueError("Password must be 12 to 64 UTF-8 bytes")
+    return encoded
+
+
 def hash_password(password: str) -> str:
     """Hash a plain-text password using bcrypt (12 rounds)."""
-    # bcrypt has a 72-byte limit; truncate if necessary.
-    pwd_bytes = password.encode("utf-8")[:72]
+    pwd_bytes = validate_password_policy(password)
     salt = bcrypt.gensalt(rounds=12)
     hashed = bcrypt.hashpw(pwd_bytes, salt)
     return hashed.decode("utf-8")
@@ -33,7 +43,10 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, hashed: str) -> bool:
     """Verify a plain-text password against a bcrypt hash."""
-    pwd_bytes = password.encode("utf-8")[:72]
+    try:
+        pwd_bytes = validate_password_policy(password)
+    except ValueError:
+        return False
     hash_bytes = hashed.encode("utf-8")
     return bcrypt.checkpw(pwd_bytes, hash_bytes)
 
@@ -45,24 +58,26 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def create_master_token(user_id: str) -> str:
+def create_master_token(user_id: str, *, epoch: int) -> str:
     """Create a long-lived master JWT (7 days)."""
     expire = _now() + timedelta(days=settings.master_token_expire_days)
     payload: dict[str, Any] = {
         "sub": user_id,
         "type": "master",
+        "epoch": epoch,
         "exp": expire,
     }
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 
-def create_space_token(space_id: str, user_id: str) -> str:
+def create_space_token(space_id: str, user_id: str, *, epoch: int) -> str:
     """Create a short-lived space-scoped JWT (8 hours)."""
     expire = _now() + timedelta(hours=settings.space_token_expire_hours)
     payload: dict[str, Any] = {
         "sub": user_id,
         "type": "space",
         "space_id": space_id,
+        "epoch": epoch,
         "exp": expire,
     }
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)

@@ -7,15 +7,24 @@ C10 integration tested in test_sync_integration.py.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
+
+from tests.sync_v2_helpers import (
+    make_sync_v2_event,
+    push_sync_v2,
+    ready_sync_v2_client,
+)
+
+pytestmark = pytest.mark.provisioned_space_storage
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 
 def _make_event(
-    entity_type: str = "task",
+    entity_type: str = "habit",
     action: str = "create",
     entity_id: str | None = None,
     payload: dict | None = None,
@@ -31,16 +40,37 @@ def _make_event(
     }
 
 
-def _task_payload(**overrides) -> dict:
-    """Build a minimal task payload."""
+def _habit_payload(**overrides) -> dict:
+    """Build a minimal habit payload."""
     base = {
-        "title": "Synced task",
-        "status": "todo",
-        "priority": "medium",
-        "tags": "[]",
+        "title": "Synced habit",
+        "description": "",
+        "color": "#7F77DD",
+        "icon": "✅",
+        "target_count": 1,
+        "rest_day_protection": False,
+        "rest_days": "[]",
+        "sort_order": 0,
+        "archived": False,
     }
     base.update(overrides)
     return base
+
+
+async def _clear_seeded_definitions(session):
+    """Delete seeded status_definitions and type_definitions from migration 010.
+
+    Migration 010 seeds system status/type definitions with updated_at
+    '2026-07-15T00:00:00.000Z', which interferes with tests that expect
+    empty or controlled entity groups.
+    """
+    from sqlalchemy import delete
+
+    from app.models.work_item_definition import StatusDefinition, TypeDefinition
+
+    await session.execute(delete(StatusDefinition))
+    await session.execute(delete(TypeDefinition))
+    await session.flush()
 
 
 # --------------------------------------------------------------------------- #
@@ -51,7 +81,7 @@ def _task_payload(**overrides) -> dict:
 async def test_push_create_event_inserts_row(space_session):
     """push() with action=create should insert a new row."""
 
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
@@ -61,25 +91,22 @@ async def test_push_create_event_inserts_row(space_session):
         action="create",
         payload={
             "id": eid,
-            "title": "Pushed task",
-            "status": "todo",
-            "priority": "medium",
-            "tags": "[]",
+            "title": "Pushed habit",
         },
     )
     result = await svc.push([event])
     assert len(result["applied"]) == 1
     assert result["errors"] == []
     # Verify row exists.
-    row = await space_session.get(Task, eid)
+    row = await space_session.get(Habit, eid)
     assert row is not None
-    assert row.title == "Pushed task"
+    assert row.title == "Pushed habit"
 
 
 @pytest.mark.asyncio
 async def test_push_update_event_modifies_row(space_session):
     """push() with action=update should modify an existing row."""
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
@@ -89,8 +116,7 @@ async def test_push_update_event_modifies_row(space_session):
         entity_id=eid,
         action="create",
         payload={
-            "id": eid, "title": "Original", "status": "todo",
-            "priority": "medium", "tags": "[]",
+            "id": eid, "title": "Original",
         },
     )])
     # Update.
@@ -101,14 +127,14 @@ async def test_push_update_event_modifies_row(space_session):
         client_updated_at="2026-07-04T12:00:00.000Z",
     )])
     assert len(result["applied"]) == 1
-    row = await space_session.get(Task, eid)
+    row = await space_session.get(Habit, eid)
     assert row.title == "Updated"
 
 
 @pytest.mark.asyncio
 async def test_push_delete_event_removes_row_and_writes_tombstone(space_session):
     """push() with action=delete should remove the row and write a tombstone."""
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
     from app.services.tombstone import TombstoneService
 
@@ -118,8 +144,7 @@ async def test_push_delete_event_removes_row_and_writes_tombstone(space_session)
         entity_id=eid,
         action="create",
         payload={
-            "id": eid, "title": "To delete", "status": "todo",
-            "priority": "medium", "tags": "[]",
+            "id": eid, "title": "To delete",
         },
     )])
     result = await svc.push([_make_event(
@@ -128,9 +153,9 @@ async def test_push_delete_event_removes_row_and_writes_tombstone(space_session)
         payload={},
     )])
     assert len(result["applied"]) == 1
-    row = await space_session.get(Task, eid)
+    row = await space_session.get(Habit, eid)
     assert row is None
-    tomb = await TombstoneService(space_session).exists("task", eid)
+    tomb = await TombstoneService(space_session).exists("habit", eid)
     assert tomb is not None
 
 
@@ -148,58 +173,51 @@ async def test_push_delete_idempotent_when_row_already_gone(space_session):
         payload={},
     )])
     assert len(result["applied"]) == 1
-    assert await TombstoneService(space_session).exists("task", eid) is not None
+    assert await TombstoneService(space_session).exists("habit", eid) is not None
 
 
 @pytest.mark.asyncio
 async def test_push_tombstone_blocks_create_resurrection(space_session):
     """C1: create after REST delete should conflict with tombstone."""
-    from app.models.session import Session
-    from app.routes.v1.sessions import SessionService
+    from app.models.schedule import Schedule
+    from app.services.schedule import ScheduleService
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
-    await SessionService(space_session).create({
+    await ScheduleService(space_session).create({
         "id": eid,
-        "type": "work",
-        "duration": 25,
-        "completed": True,
-        "started_at": "2026-07-04T10:00:00Z",
+        "title": "Test schedule",
+        "due_at": "2026-07-04T10:00:00Z",
     })
-    await SessionService(space_session).delete(eid)
+    await ScheduleService(space_session).delete(eid)
     result = await svc.push([_make_event(
-        entity_type="session",
+        entity_type="schedule",
         entity_id=eid,
         action="create",
         payload={
-            "type": "work",
-            "duration": 30,
-            "completed": False,
-            "started_at": "2026-07-04T11:00:00Z",
+            "title": "Resurrected schedule",
+            "due_at": "2026-07-04T11:00:00Z",
         },
     )])
     assert any(c.get("resolution") == "tombstone" for c in result["conflicts"])
-    assert await space_session.get(Session, eid) is None
+    assert await space_session.get(Schedule, eid) is None
 
 
 @pytest.mark.asyncio
 async def test_push_tombstone_blocks_update_upsert(space_session):
     """C1: update upsert on tombstoned id should not recreate the row."""
-    from app.models.task import Task
+    from app.models.habit import Habit
+    from app.services.habit import HabitService
     from app.services.sync import SyncService
-    from app.services.task import TaskService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
-    await TaskService(space_session).create({
+    await HabitService(space_session).create({
         "id": eid,
         "title": "Gone",
-        "status": "todo",
-        "priority": "medium",
-        "tags": "[]",
     })
-    await TaskService(space_session).delete(eid)
+    await HabitService(space_session).delete(eid)
     result = await svc.push([_make_event(
         entity_id=eid,
         action="update",
@@ -207,7 +225,7 @@ async def test_push_tombstone_blocks_update_upsert(space_session):
         client_updated_at="2026-07-04T12:00:00.000Z",
     )])
     assert any(c.get("resolution") == "tombstone" for c in result["conflicts"])
-    assert await space_session.get(Task, eid) is None
+    assert await space_session.get(Habit, eid) is None
 
 
 @pytest.mark.asyncio
@@ -258,7 +276,7 @@ async def test_push_folder_update_rejects_circular_parent(space_session):
 @pytest.mark.asyncio
 async def test_push_strips_client_fields_from_payload(space_session):
     """C2: push should ignore client-only and protected fields."""
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
@@ -269,17 +287,13 @@ async def test_push_strips_client_fields_from_payload(space_session):
         payload={
             "id": eid,
             "title": "Clean",
-            "status": "todo",
-            "priority": "medium",
-            "tags": "[]",
             "synced": True,
             "_dirty": True,
-            "actual_pomodoros": 99,
             "created_at": "2020-01-01T00:00:00.000Z",
             "version": 999,
         },
     )])
-    row = await space_session.get(Task, eid)
+    row = await space_session.get(Habit, eid)
     assert row is not None
     assert row.title == "Clean"
     assert not hasattr(row, "synced") or getattr(row, "synced", None) is None
@@ -289,7 +303,7 @@ async def test_push_strips_client_fields_from_payload(space_session):
 @pytest.mark.asyncio
 async def test_push_batch_events_applies_all(space_session):
     """push() with multiple events should apply all of them."""
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
@@ -300,9 +314,6 @@ async def test_push_batch_events_applies_all(space_session):
             payload={
                 "id": f"batch-{i}",
                 "title": f"Batch {i}",
-                "status": "todo",
-                "priority": "medium",
-                "tags": "[]",
             },
         )
         for i in range(3)
@@ -311,14 +322,14 @@ async def test_push_batch_events_applies_all(space_session):
     assert len(result["applied"]) == 3
     assert result["errors"] == []
     for i in range(3):
-        row = await space_session.get(Task, f"batch-{i}")
+        row = await space_session.get(Habit, f"batch-{i}")
         assert row is not None
 
 
 @pytest.mark.asyncio
 async def test_push_lww_conflict_keeps_newer(space_session):
     """push() should apply remote update when remote_ts > local_ts."""
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
@@ -328,8 +339,7 @@ async def test_push_lww_conflict_keeps_newer(space_session):
         entity_id=eid,
         action="create",
         payload={
-            "id": eid, "title": "Local", "status": "todo",
-            "priority": "medium", "tags": "[]",
+            "id": eid, "title": "Local",
         },
         client_updated_at="2026-07-04T10:00:00.000Z",
     )])
@@ -341,7 +351,7 @@ async def test_push_lww_conflict_keeps_newer(space_session):
         client_updated_at="2026-07-04T12:00:00.000Z",
     )])
     assert len(result["applied"]) == 1
-    row = await space_session.get(Task, eid)
+    row = await space_session.get(Habit, eid)
     assert row.title == "Remote wins"
 
 
@@ -355,17 +365,14 @@ async def test_pull_returns_all_when_since_empty(space_session):
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
-    # Seed 2 tasks + 1 folder.
+    # Seed 2 habits + 1 folder.
     for i in range(2):
         await svc.push([_make_event(
-            entity_id=f"pull-task-{i}",
+            entity_id=f"pull-habit-{i}",
             action="create",
             payload={
-                "id": f"pull-task-{i}",
-                "title": f"Task {i}",
-                "status": "todo",
-                "priority": "medium",
-                "tags": "[]",
+                "id": f"pull-habit-{i}",
+                "title": f"Habit {i}",
                 "updated_at": "2026-07-04T10:00:00.000Z",
             },
         )])
@@ -388,7 +395,7 @@ async def test_pull_returns_all_when_since_empty(space_session):
 
     result = await svc.pull(since="", limit=100)
     assert result["has_more"] is False
-    assert len(result["tasks"]) == 2
+    assert len(result["habits"]) == 2
     assert len(result["folders"]) == 1
     assert "server_time" in result
 
@@ -405,9 +412,6 @@ async def test_pull_filters_by_since(space_session):
         payload={
             "id": "since-old",
             "title": "Old",
-            "status": "todo",
-            "priority": "medium",
-            "tags": "[]",
             "updated_at": "2026-07-04T08:00:00.000Z",
         },
     )])
@@ -417,40 +421,52 @@ async def test_pull_filters_by_since(space_session):
         payload={
             "id": "since-new",
             "title": "New",
-            "status": "todo",
-            "priority": "medium",
-            "tags": "[]",
             "updated_at": "2026-07-04T12:00:00.000Z",
         },
     )])
 
     result = await svc.pull(since="2026-07-04T10:00:00.000Z", limit=100)
-    task_ids = [t["id"] for t in result["tasks"]]
-    assert "since-old" not in task_ids
-    assert "since-new" in task_ids
+    habit_ids = [t["id"] for t in result["habits"]]
+    assert "since-old" not in habit_ids
+    assert "since-new" in habit_ids
 
 
 @pytest.mark.asyncio
 async def test_pull_pagination_has_more(space_session):
-    """pull() with limit < total should set has_more=True."""
+    """Legacy pull rejects entity truncation without recording a pull."""
+    from sqlalchemy import func, select
+
+    from app.errors import CursorUpgradeRequiredError
+    from app.models.habit import Habit
+    from app.models.sync_audit_log import SyncAuditLog
     from app.services.sync import SyncService
 
+    await _clear_seeded_definitions(space_session)
     svc = SyncService(space_session)
     for i in range(5):
         await svc.push([_make_event(
-            entity_id=f"page-task-{i}",
+            entity_id=f"page-habit-{i}",
             action="create",
             payload={
-                "id": f"page-task-{i}",
+                "id": f"page-habit-{i}",
                 "title": f"Page {i}",
-                "status": "todo",
-                "priority": "medium",
-                "tags": "[]",
                 "updated_at": f"2026-07-04T1{i}:00:00.000Z",
             },
         )])
-    result = await svc.pull(since="", limit=2)
-    assert result["has_more"] is True
+    audit_count_before = await space_session.scalar(
+        select(func.count(SyncAuditLog.id))
+    )
+    with pytest.raises(CursorUpgradeRequiredError) as raised:
+        await svc.pull(since="", limit=2)
+
+    domain = raised.value.to_domain_record("req-pagination")
+    assert domain.code == "cursor_upgrade_required"
+    assert domain.retryable is False
+    assert raised.value.details == {"truncated_groups": ("habits",)}
+    assert await space_session.scalar(select(func.count(Habit.id))) == 5
+    assert await space_session.scalar(select(func.count(SyncAuditLog.id))) == (
+        audit_count_before
+    )
 
 
 @pytest.mark.asyncio
@@ -460,13 +476,13 @@ async def test_pull_returns_tombstones(space_session):
     from app.services.tombstone import TombstoneService
 
     tomb_svc = TombstoneService(space_session)
-    await tomb_svc.create("task", "tomb-task-1")
+    await tomb_svc.create("habit", "tomb-habit-1")
 
     svc = SyncService(space_session)
     result = await svc.pull(since="", limit=100)
     assert len(result["tombstones"]) >= 1
     entity_ids = [t["entity_id"] for t in result["tombstones"]]
-    assert "tomb-task-1" in entity_ids
+    assert "tomb-habit-1" in entity_ids
 
 
 @pytest.mark.asyncio
@@ -481,9 +497,6 @@ async def test_pull_includes_next_since(space_session):
         payload={
             "id": "next-ts-1",
             "title": "Next",
-            "status": "todo",
-            "priority": "medium",
-            "tags": "[]",
             "updated_at": "2026-07-04T15:00:00.000Z",
         },
     )])
@@ -504,8 +517,8 @@ async def test_full_returns_all_tombstones_ignoring_since(space_session):
     from app.services.tombstone import TombstoneService
 
     tomb_svc = TombstoneService(space_session)
-    await tomb_svc.create("task", "full-tomb-1")
-    await tomb_svc.create("task", "full-tomb-2")
+    await tomb_svc.create("habit", "full-tomb-1")
+    await tomb_svc.create("habit", "full-tomb-2")
 
     svc = SyncService(space_session)
     # Even with a future since, full() returns all tombstones.
@@ -538,7 +551,7 @@ async def test_full_issues_single_tombstones_query(space_session, monkeypatch):
     from app.services.tombstone import TombstoneService
 
     # Seed at least one tombstone so the query has rows to return.
-    await TombstoneService(space_session).create("task", "d3-tomb")
+    await TombstoneService(space_session).create("habit", "d3-tomb")
 
     svc = SyncService(space_session)
 
@@ -572,19 +585,16 @@ async def test_status_returns_entity_counts(space_session):
     svc = SyncService(space_session)
     for i in range(3):
         await svc.push([_make_event(
-            entity_id=f"status-task-{i}",
+            entity_id=f"status-habit-{i}",
             action="create",
             payload={
-                "id": f"status-task-{i}",
+                "id": f"status-habit-{i}",
                 "title": f"S {i}",
-                "status": "todo",
-                "priority": "medium",
-                "tags": "[]",
                 "updated_at": "2026-07-04T10:00:00.000Z",
             },
         )])
     result = await svc.status()
-    assert result["entity_counts"]["tasks"] == 3
+    assert result["entity_counts"]["habits"] == 3
     assert "server_time" in result
 
 
@@ -595,8 +605,8 @@ async def test_status_returns_tombstone_count(space_session):
     from app.services.tombstone import TombstoneService
 
     tomb_svc = TombstoneService(space_session)
-    await tomb_svc.create("task", "status-tomb-1")
-    await tomb_svc.create("task", "status-tomb-2")
+    await tomb_svc.create("habit", "status-tomb-1")
+    await tomb_svc.create("habit", "status-tomb-2")
 
     svc = SyncService(space_session)
     result = await svc.status()
@@ -604,16 +614,18 @@ async def test_status_returns_tombstone_count(space_session):
 
 
 @pytest.mark.asyncio
-async def test_status_returns_all_14_pull_keys_in_one_query(space_session):
-    """D-2: status() should return counts for all 14 pull_keys + tombstone.
+async def test_status_returns_all_22_pull_keys_in_one_query(space_session):
+    """D-2: status() should return counts for all 22 pull_keys + tombstone.
 
-    The optimization collapses 15 sequential COUNT queries into a single
+    The optimization collapses 22 sequential COUNT queries into a single
     UNION ALL. This test guards against regressions where a new entity is
     added to ENTITY_REGISTRY but not surfaced in status() output.
     """
     from app.services.sync import ENTITY_REGISTRY, SyncService
 
     svc = SyncService(space_session)
+    execute = AsyncMock(wraps=space_session.execute)
+    space_session.execute = execute
     result = await svc.status()
 
     expected_pull_keys = {entry["pull_key"] for entry in ENTITY_REGISTRY.values()}
@@ -629,21 +641,25 @@ async def test_status_returns_all_14_pull_keys_in_one_query(space_session):
     assert isinstance(result["tombstone_count"], int)
     assert result["tombstone_count"] >= 0
     assert "server_time" in result
+    assert execute.await_count == 1
 
 
 # --------------------------------------------------------------------------- #
 # C8: ENTITY_REGISTRY validation
 # --------------------------------------------------------------------------- #
 
-def test_entity_registry_has_14_entities():
-    """ENTITY_REGISTRY should contain exactly 14 entity types."""
+def test_entity_registry_has_22_entities():
+    """ENTITY_REGISTRY should contain exactly 22 final entity types."""
     from app.services.sync import ENTITY_REGISTRY
 
-    assert len(ENTITY_REGISTRY) == 14
+    assert len(ENTITY_REGISTRY) == 22
     expected_keys = {
-        "task", "session", "note", "folder", "quickNote", "reflection",
-        "habit", "habitCheckIn", "schedule", "timeBlock", "memoComment",
-        "sessionQuickNote", "scheduleQuickNote", "taskQuickNote",
+        "focusSession", "folder", "habit", "habitCheckIn", "label",
+        "memoComment", "note", "project", "quickNote", "reflection",
+        "schedule", "scheduleQuickNote", "sessionAttributionRevision",
+        "sessionTaskContext", "sessionWorkItemOutcome", "sessionWorkItemPlan",
+        "statusDefinition", "timeBlock", "typeDefinition", "workItem",
+        "workItemLabel", "workItemNote",
     }
     assert set(ENTITY_REGISTRY.keys()) == expected_keys
 
@@ -657,6 +673,26 @@ def test_entity_registry_entries_have_model_and_pull_key():
         assert "pull_key" in entry, f"{etype} missing 'pull_key'"
         assert entry["model"] is not None, f"{etype} model is None"
         assert isinstance(entry["pull_key"], str), f"{etype} pull_key not str"
+
+
+@pytest.mark.asyncio
+async def test_legacy_push_rejects_composite_key_work_item_label(space_session):
+    """Sync v1 rejects the final composite junction instead of crashing."""
+    from app.services.sync import SyncService
+
+    result = await SyncService(space_session).push([
+        _make_event(
+            entity_type="workItemLabel",
+            entity_id="work-item-1:label-1",
+            action="create",
+            payload={"work_item_id": "work-item-1", "label_id": "label-1"},
+        )
+    ])
+
+    assert result["applied"] == []
+    assert result["conflicts"] == []
+    assert len(result["errors"]) == 1
+    assert "Unsupported entity_type on legacy sync endpoint" in result["errors"][0]["error"]
 
 
 def test_entity_registry_pull_keys_are_unique():
@@ -791,8 +827,7 @@ async def test_push_writes_audit_log(space_session):
         entity_id=eid,
         action="create",
         payload={
-            "id": eid, "title": "Audit", "status": "todo",
-            "priority": "medium", "tags": "[]",
+            "id": eid, "title": "Audit",
         },
     )])
     rows = (await space_session.execute(
@@ -839,8 +874,7 @@ async def test_audit_failure_does_not_break_main_flow(space_session, monkeypatch
         entity_id=eid,
         action="create",
         payload={
-            "id": eid, "title": "Survives audit failure", "status": "todo",
-            "priority": "medium", "tags": "[]",
+            "id": eid, "title": "Survives audit failure",
         },
     )])
     assert len(result["applied"]) == 1
@@ -879,8 +913,7 @@ async def test_push_batches_audit_flushes(space_session, monkeypatch):
             entity_id=eid,
             action="create",
             payload={
-                "id": eid, "title": f"Batch {i}", "status": "todo",
-                "priority": "medium", "tags": "[]",
+                "id": eid, "title": f"Batch {i}",
             },
         ))
     result = await svc.push(events)
@@ -902,32 +935,33 @@ async def test_push_batches_audit_flushes(space_session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_pull_tombstones_respects_limit(space_session):
-    """D-5: pull() should cap tombstones at *limit* and set tombstones_has_more.
+    """Legacy pull rejects tombstone truncation without partial progress."""
+    from sqlalchemy import func, select
 
-    Without this cap, a 90-day TTL accumulation could blow up the response.
-    The test seeds 5 tombstones and pulls with limit=3 to verify truncation.
-    """
+    from app.errors import CursorUpgradeRequiredError
+    from app.models.sync_audit_log import SyncAuditLog
+    from app.models.tombstone import Tombstone
     from app.services.sync import SyncService
     from app.services.tombstone import TombstoneService
 
+    await _clear_seeded_definitions(space_session)
     tomb_svc = TombstoneService(space_session)
     for i in range(5):
-        await tomb_svc.create("task", f"d5-tomb-{i}")
+        await tomb_svc.create("habit", f"d5-tomb-{i}")
 
-    svc = SyncService(space_session)
-    result = await svc.pull(since="", limit=3)
+    audit_count_before = await space_session.scalar(
+        select(func.count(SyncAuditLog.id))
+    )
+    with pytest.raises(CursorUpgradeRequiredError) as raised:
+        await SyncService(space_session).pull(since="", limit=3)
 
-    # Tombstones should be capped at limit (3), with tombstones_has_more=True.
-    assert len(result["tombstones"]) == 3, (
-        f"Expected 3 tombstones (capped at limit), "
-        f"got {len(result['tombstones'])}"
-    )
-    assert result["tombstones_has_more"] is True, (
-        "tombstones_has_more should be True when truncated"
-    )
-    # The top-level has_more should also be True (D-5 surfaces tomb overflow).
-    assert result["has_more"] is True, (
-        "has_more should be True when tombstones overflow"
+    domain = raised.value.to_domain_record("req-tombstone-pagination")
+    assert domain.code == "cursor_upgrade_required"
+    assert domain.retryable is False
+    assert raised.value.details == {"truncated_groups": ("tombstones",)}
+    assert await space_session.scalar(select(func.count(Tombstone.id))) == 5
+    assert await space_session.scalar(select(func.count(SyncAuditLog.id))) == (
+        audit_count_before
     )
 
 
@@ -939,11 +973,12 @@ async def test_pull_tombstones_has_more_false_when_under_limit(space_session):
 
     tomb_svc = TombstoneService(space_session)
     for i in range(3):
-        await tomb_svc.create("task", f"d5-tomb-under-{i}")
+        await tomb_svc.create("habit", f"d5-tomb-under-{i}")
 
     svc = SyncService(space_session)
     result = await svc.pull(since="", limit=100)
 
+    assert result["workItemLabels"] == []
     assert len(result["tombstones"]) == 3
     assert result["tombstones_has_more"] is False, (
         "tombstones_has_more should be False when under limit"
@@ -962,19 +997,18 @@ async def test_push_conflict_local_not_in_applied(space_session):
     it in ``applied`` would mislead clients into thinking their change
     landed on the server.
     """
+    from app.services.habit import HabitService
     from app.services.sync import SyncService
-    from app.services.task import TaskService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
     # Local row at 12:00 (newer).
-    await TaskService(space_session).create({
-        "id": eid, "title": "Local", "status": "todo",
-        "priority": "medium", "tags": "[]",
+    await HabitService(space_session).create({
+        "id": eid, "title": "Local",
     })
     # Direct DB update to set updated_at to 12:00 (newer than client_ts).
-    from app.models.task import Task
-    row = await space_session.get(Task, eid)
+    from app.models.habit import Habit
+    row = await space_session.get(Habit, eid)
     row.updated_at = "2026-07-04T12:00:00.000Z"
     await space_session.flush()
 
@@ -997,23 +1031,21 @@ async def test_push_conflict_local_not_in_applied(space_session):
 @pytest.mark.asyncio
 async def test_push_conflict_tombstone_not_in_applied(space_session):
     """P1-1: tombstone-blocked create must NOT be in applied."""
+    from app.services.habit import HabitService
     from app.services.sync import SyncService
-    from app.services.task import TaskService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
-    await TaskService(space_session).create({
-        "id": eid, "title": "Gone", "status": "todo",
-        "priority": "medium", "tags": "[]",
+    await HabitService(space_session).create({
+        "id": eid, "title": "Gone",
     })
-    await TaskService(space_session).delete(eid)
+    await HabitService(space_session).delete(eid)
 
     result = await svc.push([_make_event(
         entity_id=eid,
         action="create",
         payload={
-            "id": eid, "title": "Resurrected", "status": "todo",
-            "priority": "medium", "tags": "[]",
+            "id": eid, "title": "Resurrected",
         },
     )])
     assert any(c.get("resolution") == "tombstone" for c in result["conflicts"]), (
@@ -1065,18 +1097,17 @@ async def test_push_conflict_remote_in_applied(space_session):
     (with resolution='remote' for client visibility). conflicts is
     reserved for rejected events (local/tombstone/circular_ref).
     """
+    from app.services.habit import HabitService
     from app.services.sync import SyncService
-    from app.services.task import TaskService
 
     svc = SyncService(space_session)
     eid = uuid.uuid4().hex
     # Local row at 10:00 (older).
-    await TaskService(space_session).create({
-        "id": eid, "title": "Local", "status": "todo",
-        "priority": "medium", "tags": "[]",
+    await HabitService(space_session).create({
+        "id": eid, "title": "Local",
     })
-    from app.models.task import Task
-    row = await space_session.get(Task, eid)
+    from app.models.habit import Habit
+    row = await space_session.get(Habit, eid)
     row.updated_at = "2026-07-04T10:00:00.000Z"
     await space_session.flush()
 
@@ -1126,33 +1157,32 @@ async def test_http_push_tombstone_conflict_excluded_from_applied(client):
     )
     space_token = resp.json()["space_token"]
     headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = await ready_sync_v2_client(client, headers)
 
-    # Create a task via REST, then delete it (writes tombstone).
+    # Create a habit via REST, then delete it (writes tombstone).
     eid = uuid.uuid4().hex
     resp = await client.post(
-        "/api/v1/tasks",
-        json={"id": eid, "title": "To delete", "status": "todo",
-              "priority": "medium", "tags": []},
+        "/api/v1/habits",
+        json={"id": eid, "title": "To delete"},
         headers=headers,
     )
     assert resp.status_code == 201
-    resp = await client.delete(f"/api/v1/tasks/{eid}", headers=headers)
+    resp = await client.delete(f"/api/v1/habits/{eid}", headers=headers)
     assert resp.status_code in (200, 204)
 
     # Push create same id → should conflict with tombstone, not be applied.
-    resp = await client.post(
-        "/api/v1/sync/push",
-        json={"events": [_make_event(
+    data = await push_sync_v2(
+        client,
+        headers,
+        client_id,
+        [make_sync_v2_event(
+            entity_type="habit",
             entity_id=eid, action="create",
-            payload={"id": eid, "title": "Resurrected", "status": "todo",
-                     "priority": "medium", "tags": "[]"},
-        )]},
-        headers=headers,
+            payload={"id": eid, "title": "Resurrected"},
+        )],
     )
-    assert resp.status_code == 200
-    data = resp.json()
     assert any(c.get("resolution") == "tombstone" for c in data["conflicts"]), (
-        f"expected tombstone conflict, got {data['conflicts']}"
+        f"expected tombstone conflict, got {data}"
     )
     applied_ids = [a["entity_id"] for a in data["applied"]]
     assert eid not in applied_ids, (
@@ -1246,16 +1276,15 @@ async def test_sync_mode_update_does_not_bump_updated_at_in_base_service(
     space_session, tmp_path,
 ):
     """P1-3: BaseService.update with bump_updated_at=False should NOT bump updated_at/version."""
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.base import BaseService
 
-    # Seed a task directly via BaseService
+    # Seed a habit directly via BaseService
     base = BaseService(space_session)
-    base.model = Task
+    base.model = Habit
     eid = "p13-base-bump-false"
     obj = await base.create({
-        "id": eid, "title": "Seed", "status": "todo",
-        "priority": "medium", "tags": "[]",
+        "id": eid, "title": "Seed",
         "updated_at": "2026-07-04T10:00:00.000Z",
     })
     original_ts = obj.updated_at

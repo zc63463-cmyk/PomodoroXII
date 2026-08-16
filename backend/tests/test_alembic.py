@@ -9,22 +9,34 @@ from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
-from tests.migrations import alembic_config, migration_engine
+from tests.migrations import alembic_config, migration_engine, run_bound_command
 
 
 @pytest.mark.parametrize(
     ("schema", "expected_tables"),
     [
-        ("meta", {"spaces", "meta_settings"}),
+        (
+            "meta",
+            {
+                "spaces", "meta_settings", "active_session_locator",
+                "active_session_operations",
+            },
+        ),
         (
             "space",
             {
-                "tasks", "sessions", "notes", "folders", "quick_notes",
-                "reflections", "habits", "habit_check_ins", "schedules",
-                "time_blocks", "memo_comments", "session_quick_notes",
-                "schedule_quick_notes", "task_quick_notes", "tombstones",
-                "settings", "sync_outbox", "sync_audit_log",
-                "sync_state", "sync_snapshots",
+                "mutation_batches", "mutation_operations", "mutation_steps",
+                "notes", "folders", "quick_notes", "reflections", "habits",
+                "habit_check_ins", "schedules", "time_blocks", "memo_comments",
+                "schedule_quick_notes", "tombstones", "settings", "sync_outbox",
+                "sync_audit_log", "sync_state", "sync_snapshots", "projects",
+                "status_definitions", "type_definitions", "labels",
+                "work_item_labels", "work_items", "work_item_notes",
+                "focus_sessions", "session_task_contexts",
+                "session_attribution_revisions", "session_work_item_plans",
+                "session_work_item_outcomes", "session_command_envelopes",
+                "session_command_receipts",
+                "sync_clients", "sync_recovery_manifests", "sync_recovery_chunks",
             },
         ),
     ],
@@ -35,10 +47,9 @@ def test_upgrade_head_is_isolated_and_idempotent(
     engine = migration_engine(tmp_path, schema)
     cfg = alembic_config(schema)
     try:
-        with engine.begin() as connection:
-            cfg.attributes["connection"] = connection
-            command.upgrade(cfg, "head")
-            command.upgrade(cfg, "head")
+        db_path = tmp_path / f"{schema}.db"
+        cfg = run_bound_command(schema, db_path, command.upgrade, "head")
+        run_bound_command(schema, db_path, command.upgrade, "head")
 
         version_table = cfg.get_main_option("version_table")
         tables = set(inspect(engine).get_table_names())
@@ -59,10 +70,9 @@ def test_downgrade_base_removes_only_chain_tables(tmp_path: Path, schema: str) -
     engine = migration_engine(tmp_path, schema)
     cfg = alembic_config(schema)
     try:
-        with engine.begin() as connection:
-            cfg.attributes["connection"] = connection
-            command.upgrade(cfg, "head")
-            command.downgrade(cfg, "base")
+        db_path = tmp_path / f"{schema}.db"
+        cfg = run_bound_command(schema, db_path, command.upgrade, "head")
+        run_bound_command(schema, db_path, command.downgrade, "base")
 
         assert set(inspect(engine).get_table_names()) <= {
             cfg.get_main_option("version_table")
@@ -73,11 +83,10 @@ def test_downgrade_base_removes_only_chain_tables(tmp_path: Path, schema: str) -
 
 def test_space_notes_table_has_no_content_column(tmp_path: Path) -> None:
     engine = migration_engine(tmp_path, "space")
-    cfg = alembic_config("space")
     try:
-        with engine.begin() as connection:
-            cfg.attributes["connection"] = connection
-            command.upgrade(cfg, "head")
+        run_bound_command(
+            "space", tmp_path / "space.db", command.upgrade, "head"
+        )
         columns = {column["name"] for column in inspect(engine).get_columns("notes")}
         assert "content" not in columns
         assert {"content_hash", "word_count"} <= columns

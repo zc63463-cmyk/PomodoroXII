@@ -12,6 +12,7 @@ to describe every ORM entity in a way that can be consumed by:
 The dataclasses are frozen so that registered specs are immutable once
 the process loads the registry singleton.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,21 +20,38 @@ from enum import Enum
 from typing import Any
 
 
+class SyncConflictPolicy(str, Enum):
+    """Closed conflict-resolution vocabulary for catalog entities."""
+
+    TIMESTAMP_LWW = "timestamp_lww"
+    STRICT_CAS = "strict_cas"
+
+
+SYNC_CONFLICT_POLICIES = frozenset(policy.value for policy in SyncConflictPolicy)
+
+
+def require_sync_conflict_policy(value: str | SyncConflictPolicy) -> SyncConflictPolicy:
+    try:
+        return SyncConflictPolicy(value)
+    except ValueError as exc:
+        raise ValueError(f"unsupported sync_conflict_policy: {value}") from exc
+
+
 class StorageType(str, Enum):
     """How an entity's data is physically stored."""
 
-    DB_ONLY = "db_only"           # Pure DB table (task, session, folder, ...)
-    FS_DB_SPLIT = "fs_db_split"   # FS holds content + DB holds meta (only note)
-    SYSTEM = "system"             # System table (tombstone, sync_outbox, sync_audit_log)
+    DB_ONLY = "db_only"  # Pure DB table (task, session, folder, ...)
+    FS_DB_SPLIT = "fs_db_split"  # FS holds content + DB holds meta (only note)
+    SYSTEM = "system"  # System table (tombstone, sync_outbox, sync_audit_log)
 
 
 class EntityCategory(str, Enum):
     """Business categorisation of an entity."""
 
-    BUSINESS = "business"         # First-class business entity (sync-eligible)
-    SYNC_INFRA = "sync_infra"     # Sync infrastructure table
-    META = "meta"                 # Meta-layer table (spaces, meta_settings)
-    SETTING = "setting"           # Per-space settings table
+    BUSINESS = "business"  # First-class business entity (sync-eligible)
+    SYNC_INFRA = "sync_infra"  # Sync infrastructure table
+    META = "meta"  # Meta-layer table (spaces, meta_settings)
+    SETTING = "setting"  # Per-space settings table
 
 
 @dataclass(frozen=True)
@@ -41,7 +59,7 @@ class FieldSpec:
     """Metadata for a single ORM column."""
 
     name: str
-    type: str                     # string|integer|datetime|json|text|boolean
+    type: str  # string|integer|datetime|json|text|boolean
     nullable: bool
     default: Any = None
     indexed: bool = False
@@ -57,13 +75,13 @@ class EntitySpec:
     ``app.registry.builtin`` at import time.
     """
 
-    name: str                     # entity_type, e.g. "note"
-    model_path: str               # fully-qualified ORM path, e.g. "app.models.note.Note"
-    table_name: str               # SQL table name, e.g. "notes"
+    name: str  # entity_type, e.g. "note"
+    model_path: str  # fully-qualified ORM path, e.g. "app.models.note.Note"
+    table_name: str  # SQL table name, e.g. "notes"
     storage_type: StorageType
     category: EntityCategory
-    sync_enabled: bool            # participates in Phase C sync
-    soft_delete: bool             # supports trashed_at soft-delete column
+    sync_enabled: bool  # participates in Phase C sync
+    soft_delete: bool  # supports trashed_at soft-delete column
     fields: tuple[FieldSpec, ...]
     primary_key: str = "id"
     description: str = ""
@@ -85,6 +103,10 @@ class EntitySpec:
     # P2.1: feature flags for scaffold / introspection.
     route_enabled: bool = False
     mcp_schema_enabled: bool = True
+    sync_conflict_policy: SyncConflictPolicy = SyncConflictPolicy.TIMESTAMP_LWW
+    # S3 Task 6: junction endpoint metadata for relation domain policy.
+    # Each tuple is (field_name, endpoint_entity_type).
+    junction_endpoints: tuple[tuple[str, str], ...] | None = None
 
     @property
     def field_names(self) -> tuple[str, ...]:

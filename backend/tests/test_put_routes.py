@@ -1,4 +1,4 @@
-"""Tests for PUT /{id} routes on sessions, habits, schedules, time_blocks,
+"""Tests for PUT /{id} routes on habits, schedules, time_blocks,
 and reflections (PR-19).
 
 Each entity follows the same pattern: create → put (partial update) → get
@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 # --------------------------------------------------------------------------- #
 # Helpers (mirrors test_routes_v1.py style)
 # --------------------------------------------------------------------------- #
 
 async def _get_space_client(client):
     """Set up admin password, log in, create a space, issue a space token."""
-    await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     resp = await client.post(
-        "/api/v1/auth/login", json={"password": "test123"}
+        "/api/v1/auth/login", json={"password": "test-password-123"}
     )
     master_token = resp.json()["access_token"]
     resp = await client.post(
@@ -38,45 +40,41 @@ def _auth(space_token: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Sessions
+# Schedules (extra PUT tests)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_session_update_partial(client):
-    """PUT /api/v1/sessions/{id} updates fields and returns 200."""
+async def test_schedule_update_extra_partial(client):
+    """PUT /api/v1/schedules/{id} updates fields and returns 200."""
     space_token, _ = await _get_space_client(client)
     headers = _auth(space_token)
     resp = await client.post(
-        "/api/v1/sessions",
-        json={
-            "type": "work",
-            "duration": 25,
-            "started_at": "2026-01-01T10:00:00Z",
-        },
+        "/api/v1/schedules",
+        json={"title": "Meeting", "due_at": "2026-01-01T10:00:00Z"},
         headers=headers,
     )
     sid = resp.json()["id"]
     resp = await client.put(
-        f"/api/v1/sessions/{sid}",
-        json={"duration": 30, "completed": True},
+        f"/api/v1/schedules/{sid}",
+        json={"color": "#ff0000", "all_day": True},
         headers=headers,
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["duration"] == 30
-    assert data["completed"] is True
+    assert data["color"] == "#ff0000"
+    assert data["all_day"] is True
 
-    resp = await client.get(f"/api/v1/sessions/{sid}", headers=headers)
-    assert resp.json()["duration"] == 30
+    resp = await client.get(f"/api/v1/schedules/{sid}", headers=headers)
+    assert resp.json()["color"] == "#ff0000"
 
 
 @pytest.mark.asyncio
-async def test_session_update_404(client):
-    """PUT /api/v1/sessions/{nonexistent} returns 404."""
+async def test_schedule_update_extra_404(client):
+    """PUT /api/v1/schedules/{nonexistent} returns 404."""
     space_token, _ = await _get_space_client(client)
     resp = await client.put(
-        "/api/v1/sessions/nonexistent",
-        json={"duration": 30},
+        "/api/v1/schedules/nonexistent",
+        json={"title": "X"},
         headers=_auth(space_token),
     )
     assert resp.status_code == 404

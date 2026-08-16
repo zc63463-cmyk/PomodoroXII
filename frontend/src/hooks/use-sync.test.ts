@@ -37,7 +37,7 @@ describe('useSync', () => {
   it('returns error and conflicts from store', () => {
     useSyncStore.setState({
       error: '同步出错',
-      conflicts: [{ outboxId: 1, entityType: 'task', entityId: 't1', localVersion: {}, remoteVersion: {}, conflictType: 'version' }],
+      conflicts: [{ outboxId: 1, entityType: 'note', entityId: 'n1', localVersion: {}, remoteVersion: {}, conflictType: 'version' }],
     })
     const { result } = renderHook(() => useSync())
     expect(result.current.error).toBe('同步出错')

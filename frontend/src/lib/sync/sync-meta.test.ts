@@ -1,167 +1,70 @@
-import { describe, it, expect, afterEach } from 'vitest'
-import { PomodoroXIDB } from '@/services/database'
-import { SYNC_META_KEYS } from './types'
-import { loadSyncMeta, saveSyncMeta, clearSyncCursors, touchLastSyncAt, touchLastFullSync } from './sync-meta'
+import { afterEach, describe, expect, it } from 'vitest'
+import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 
-/**
- * sync-meta.ts 单测（SM1–SM6）。
- *
- * 验证 F1 §2.1 syncMeta 六键的读写、偏量 upsert、清游标、隔离性。
- * 测试范式：随机 dbName + db.open() + afterEach db.delete()（对齐 database.test.ts）。
- */
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
+import { spaceApi } from '@/services/api'
+import { getOrCreateClientId } from './client-registry'
+import { loadSyncV2Meta, sendPendingAck, writeSyncV2Meta } from './sync-meta'
+import { withSpaceAuthorityFence } from './space-authority-fence'
+import type { PomodoroXIDB } from '@/services/database'
 
-async function openTestDb(): Promise<PomodoroXIDB> {
-  const db = new PomodoroXIDB('sync-meta-test-' + crypto.randomUUID())
-  await db.open()
-  return db
+const catalogHash = 'a'.repeat(64)
+const originalAdapter = spaceApi.defaults.adapter
+
+function ok(data: unknown, config: InternalAxiosRequestConfig): AxiosResponse {
+  return { data, status: 200, statusText: 'OK', headers: {}, config }
 }
 
-describe('sync-meta', () => {
-  let db: PomodoroXIDB
-
+describe('Sync v2 protocol metadata', () => {
+  let db: PomodoroXIDB | undefined
   afterEach(async () => {
+    spaceApi.defaults.adapter = originalAdapter
     if (db) await db.delete()
+    db = undefined
   })
 
-  it('SM1: 空库 loadSyncMeta 返回全空快照', async () => {
-    db = await openTestDb()
-    const meta = await loadSyncMeta(db)
-    expect(meta.since).toBe('')
-    expect(meta.sinceId).toBe('')
-    expect(meta.tombstoneSinceId).toBe('')
-    expect(meta.serverTime).toBe('')
-    expect(meta.lastFullSync).toBe('')
-    expect(meta.lastSyncAt).toBe('')
-  })
-
-  it('SM2: saveSyncMeta 偏量写入 — since 有值，其余仍空', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { since: '2026-01-01T00:00:00.000Z' })
-    const meta = await loadSyncMeta(db)
-    expect(meta.since).toBe('2026-01-01T00:00:00.000Z')
-    expect(meta.sinceId).toBe('')
-    expect(meta.tombstoneSinceId).toBe('')
-    expect(meta.serverTime).toBe('')
-    expect(meta.lastFullSync).toBe('')
-    expect(meta.lastSyncAt).toBe('')
-  })
-
-  it('SM3: 写入 since + sinceId + tombstoneSinceId + serverTime — round-trip 一致', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, {
-      since: '2026-07-01T00:00:00.000Z',
-      sinceId: 'task-123',
-      tombstoneSinceId: 'note-456',
-      serverTime: '2026-07-01T12:00:00.000Z',
+  it('requires recovery when protocol state is absent', async () => {
+    db = await openPomodoroXIDB(`sync-meta-${crypto.randomUUID()}`)
+    await expect(loadSyncV2Meta(db)).resolves.toEqual({
+      cursor: null, pendingAck: null, catalogHash: null, requiresFullRecovery: true,
     })
-    const meta = await loadSyncMeta(db)
-    expect(meta.since).toBe('2026-07-01T00:00:00.000Z')
-    expect(meta.sinceId).toBe('task-123')
-    expect(meta.tombstoneSinceId).toBe('note-456')
-    expect(meta.serverTime).toBe('2026-07-01T12:00:00.000Z')
-    // 未写入的字段仍为空
-    expect(meta.lastFullSync).toBe('')
-    expect(meta.lastSyncAt).toBe('')
   })
 
-  it('SM4: clearSyncCursors 仅清三游标，保留 serverTime/lastFullSync/lastSyncAt', async () => {
-    db = await openTestDb()
-    // 先写入全部六字段
-    await saveSyncMeta(db, {
-      since: '2026-07-01T00:00:00.000Z',
-      sinceId: 'task-123',
-      tombstoneSinceId: 'note-456',
-      serverTime: '2026-07-01T12:00:00.000Z',
-      lastFullSync: '2026-06-01T00:00:00.000Z',
-      lastSyncAt: '2026-07-01T11:00:00.000Z',
+  it('writes opaque state only under the live same-Space fence', async () => {
+    db = await openPomodoroXIDB(`sync-meta-${crypto.randomUUID()}`)
+    await withSpaceAuthorityFence(db.spaceId, (token) => writeSyncV2Meta(
+      db!, db!.spaceId, token,
+      { cursor: 'opaque-cursor-01', pendingAck: 'opaque-cursor-01',
+        catalogHash, requiresFullRecovery: false },
+    ))
+    await expect(loadSyncV2Meta(db)).resolves.toMatchObject({
+      cursor: 'opaque-cursor-01', pendingAck: 'opaque-cursor-01', catalogHash,
     })
-    // 清游标
-    await clearSyncCursors(db)
-    const meta = await loadSyncMeta(db)
-    // 三游标清空
-    expect(meta.since).toBe('')
-    expect(meta.sinceId).toBe('')
-    expect(meta.tombstoneSinceId).toBe('')
-    // 非游标字段保留
-    expect(meta.serverTime).toBe('2026-07-01T12:00:00.000Z')
-    expect(meta.lastFullSync).toBe('2026-06-01T00:00:00.000Z')
-    expect(meta.lastSyncAt).toBe('2026-07-01T11:00:00.000Z')
   })
 
-  it('SM5: 两个独立 dbName — meta 不串扰', async () => {
-    const db1 = await openTestDb()
-    const db2 = await openTestDb()
-    try {
-      await saveSyncMeta(db1, { since: 'A' })
-      await saveSyncMeta(db2, { since: 'B' })
-      const meta1 = await loadSyncMeta(db1)
-      const meta2 = await loadSyncMeta(db2)
-      expect(meta1.since).toBe('A')
-      expect(meta2.since).toBe('B')
-    } finally {
-      await db1.delete()
-      await db2.delete()
+  it('compare-clears only the acknowledged pending ACK', async () => {
+    db = await openPomodoroXIDB(`sync-meta-${crypto.randomUUID()}`)
+    await withSpaceAuthorityFence(db.spaceId, (token) => writeSyncV2Meta(
+      db!, db!.spaceId, token,
+      { cursor: 'opaque-cursor-01', pendingAck: 'opaque-cursor-01',
+        catalogHash, requiresFullRecovery: false },
+    ))
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const body = typeof config.data === 'string' ? JSON.parse(config.data) : config.data
+      return ok({ client_id: body.client_id, accepted: true,
+        requires_recovery: false, catalog_hash: catalogHash }, config)
     }
+    await withSpaceAuthorityFence(db.spaceId, (token) =>
+      sendPendingAck(db!, spaceApi, db!.spaceId, 'client-a', token))
+    await expect(loadSyncV2Meta(db)).resolves.toMatchObject({ pendingAck: null })
   })
 
-  it('SM6: touchLastSyncAt 写入 last_sync_at key', async () => {
-    db = await openTestDb()
-    const iso = '2026-07-06T12:00:00.000Z'
-    await touchLastSyncAt(db, iso)
-    const row = await db.syncMeta.get(SYNC_META_KEYS.LAST_SYNC_AT)
-    expect(row?.value).toBe(iso)
-  })
-
-  it('SM7: saveSyncMeta 空对象 no-op + undefined 值过滤', async () => {
-    db = await openTestDb()
-    // 空对象 → no-op
-    await saveSyncMeta(db, {})
-    expect(await db.syncMeta.count()).toBe(0)
-    // undefined 值 → 过滤，不写入 "undefined" 字符串
-    await saveSyncMeta(db, { since: undefined })
-    expect(await db.syncMeta.count()).toBe(0)
-    const meta = await loadSyncMeta(db)
-    expect(meta.since).toBe('')
-  })
-
-  it('SM8: touchLastFullSync 写入 last_full_sync key', async () => {
-    db = await openTestDb()
-    const iso = '2026-07-06T00:00:00.000Z'
-    await touchLastFullSync(db, iso)
-    const row = await db.syncMeta.get(SYNC_META_KEYS.LAST_FULL_SYNC)
-    expect(row?.value).toBe(iso)
-    // 验证 loadSyncMeta 也能读到
-    const meta = await loadSyncMeta(db)
-    expect(meta.lastFullSync).toBe(iso)
-  })
-
-  it('SM9: nullable cursor 使用空串编码且 round-trip 保持 null', async () => {
-    db = await openTestDb()
-    await saveSyncMeta(db, { cursor: null, cursorVersion: null })
-
-    expect((await db.syncMeta.get(SYNC_META_KEYS.CURSOR))?.value).toBe('')
-    expect((await db.syncMeta.get(SYNC_META_KEYS.CURSOR_VERSION))?.value).toBe('')
-    const meta = await loadSyncMeta(db)
-    expect(meta.cursor).toBeNull()
-    expect(meta.cursorVersion).toBeNull()
-  })
-
-  it.each([
-    ['null', 'null'],
-    ['NaN', '2'],
-    ['1.5', '2'],
-    ['-1', '2'],
-    ['12', '1'],
-    ['12', 'broken'],
-  ])('SM10: 损坏或不支持的 cursor meta %s/%s fail-closed 到 legacy', async (cursor, version) => {
-    db = await openTestDb()
-    await db.syncMeta.bulkPut([
-      { key: SYNC_META_KEYS.CURSOR, value: cursor },
-      { key: SYNC_META_KEYS.CURSOR_VERSION, value: version },
-    ])
-
-    const meta = await loadSyncMeta(db)
-    expect(meta.cursor).toBeNull()
-    expect(meta.cursorVersion).toBeNull()
+  it('creates and reuses one stable client ID', async () => {
+    db = await openPomodoroXIDB(`sync-meta-${crypto.randomUUID()}`)
+    await withSpaceAuthorityFence(db.spaceId, async (token) => {
+      const first = await getOrCreateClientId(db!, db!.spaceId, token)
+      const second = await getOrCreateClientId(db!, db!.spaceId, token)
+      expect(first).toBe(second)
+    })
   })
 })

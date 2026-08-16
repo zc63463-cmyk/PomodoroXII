@@ -1,6 +1,6 @@
 """Tombstone model for tracking deleted entities during sync."""
 
-from sqlalchemy import Integer, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -23,6 +23,10 @@ class Tombstone(Base):
     __tablename__ = "tombstones"
     __table_args__ = (
         UniqueConstraint("entity_type", "entity_id", name="uq_tombstone_entity"),
+        CheckConstraint(
+            "delete_sequence IS NULL OR delete_sequence >= 0",
+            name="delete_sequence_nonnegative",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -31,3 +35,4 @@ class Tombstone(Base):
     deleted_at: Mapped[str] = mapped_column(
         String(32), default=utc_now_iso, index=True
     )
+    delete_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)

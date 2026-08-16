@@ -22,3 +22,9 @@ class AuthVerifyResponse(BaseModel):
     valid: bool
     user_id: str
     type: str
+
+
+class AuthRevokeResponse(BaseModel):
+    """Stable response after advancing the credential epoch."""
+
+    message: str

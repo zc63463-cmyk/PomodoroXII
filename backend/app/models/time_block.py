@@ -17,9 +17,6 @@ class TimeBlock(Base, SyncMixin):
 
     __tablename__ = "time_blocks"
 
-    task_id: Mapped[str | None] = mapped_column(
-        String(36), nullable=True, index=True
-    )
     title: Mapped[str] = mapped_column(String(500), default="")
     date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     start_time: Mapped[str] = mapped_column(String(10), nullable=False)

@@ -3,23 +3,72 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.body_size_limit import BodySizeLimitMiddleware
-from app.deps import require_master_token
 from app.errors import register_exception_handlers
-from app.logging import setup_logging
-from app.middleware import RequestIdMiddleware, SecurityHeadersMiddleware
+from app.logging import close_structured_logging, setup_logging
+from app.middleware import (
+    RequestIdMiddleware,
+    RequestMetricsMiddleware,
+    SecurityHeadersMiddleware,
+)
+from app.ops.routes import record_recovery_operation
+from app.ops.routes import router as ops_router
+from app.ops.signals import OperationalSignals
 from app.rate_limit import RateLimitMiddleware
+from app.recovery.local_service import LocalRecoveryService
+from app.recovery.scheduler import RecoveryScheduler
 from app.schemas.common import ErrorResponse, HealthResponse
 from app.settings import settings
 
 logger = logging.getLogger("pomodoroxi")
+
+
+def _probe_data_root() -> None:
+    """Create + fsync + delete one probe file in the data root.
+
+    The probe path is derived from the configured data root and never appears
+    in logs or responses; any failure aborts readiness.
+    """
+    root = Path(settings.data_root).expanduser().resolve()
+    probe = root / f".readiness_probe_{uuid4().hex}"
+    fd = os.open(str(probe), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        try:
+            os.write(fd, b"readiness")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException as exc:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError as cleanup_exc:
+            exc.add_note(f"readiness probe cleanup failed: {type(cleanup_exc).__name__}")
+        raise
+    else:
+        probe.unlink()
+
+
+async def _probe_meta_writable(connection: AsyncConnection) -> None:
+    """Prove the persistent Meta database accepts writes without committing one."""
+    await connection.exec_driver_sql("SAVEPOINT readiness_meta_write_probe")
+    try:
+        await connection.exec_driver_sql(
+            "UPDATE alembic_version_meta SET version_num = version_num || ''"
+        )
+    finally:
+        await connection.exec_driver_sql("ROLLBACK TO SAVEPOINT readiness_meta_write_probe")
+        await connection.exec_driver_sql("RELEASE SAVEPOINT readiness_meta_write_probe")
 
 
 @asynccontextmanager
@@ -30,47 +79,61 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("PomodoroXII API starting up (env=%s)", settings.environment)
 
     # --- Startup ---
-    from app.db.meta_session import close_meta_db, init_meta_db
-    from app.space_manager import dispose_space_engine_manager, get_space_engine_manager
+    from app.runtime.bootstrap import bootstrap_runtime
 
+    scheduler: RecoveryScheduler | None = None
+    recovery_service: LocalRecoveryService | None = None
     try:
-        await init_meta_db()
-        logger.info("Meta database initialised.")
+        async with bootstrap_runtime("fastapi") as services:
+            app.state.runtime_services = services
+            app.state.runtime = services.runtime
+            app.state.runtime_executor = services.executor
+            app.state.operational_signals = OperationalSignals()
+            services.executor.gate.assert_ready()
+            services.runtime.assert_ready()
+            if settings.backup_enabled:
+                if settings.backup_target_dir is None:
+                    raise RuntimeError(
+                        "POMODOROXII_BACKUP_TARGET_DIR is required when backup is enabled"
+                    )
+                recovery_service = LocalRecoveryService(settings.data_root)
+                scheduler = RecoveryScheduler(
+                    recovery_service,
+                    target=settings.backup_target_dir,
+                    signals=app.state.operational_signals,
+                    interval_hours=settings.backup_interval_hours,
+                    retention_count=settings.backup_retention_count,
+                    operation_recorder=record_recovery_operation,
+                )
+                # The required initial snapshot must succeed before readiness;
+                # a failure aborts startup instead of logging and continuing.
+                await scheduler.start()
+            app.state.ready = True
+            logger.info("PomodoroXII API ready.")
+            yield
     except Exception as exc:
-        logger.critical("Failed to initialise meta database: %s", exc, exc_info=True)
+        logger.critical("Failed to initialise runtime: %s", exc, exc_info=True)
         raise
-
-    # Warm up the space engine manager singleton.
-    get_space_engine_manager()
-
-    # Startup backup: snapshot each space's DB if backup_enabled.
-    if settings.backup_enabled:
-        from sqlalchemy import select
-
-        from app.db.meta_session import get_meta_session
-        from app.db.models.meta import Space
-        from app.file_system.backup import BackupService
-
-        try:
-            async for session in get_meta_session():
-                spaces = (await session.execute(select(Space))).scalars().all()
-                break
-            for space in spaces:
-                db_path = settings.space_db_path(space.id)
-                if not db_path.exists():
-                    continue
-                backup_dir = settings.spaces_data_dir / space.id / ".meta" / "backups"
-                BackupService.create_backup(db_path, backup_dir)
-        except Exception as exc:
-            logger.error("Startup backup failed: %s", exc, exc_info=True)
-
-    logger.info("PomodoroXII API ready.")
-    yield
+    finally:
+        app.state.ready = False
+        if scheduler is not None:
+            # Shutdown order: cancel + await the scheduler task before closing
+            # the resources it holds.
+            await scheduler.close()
+        if recovery_service is not None:
+            await recovery_service.aclose()
+        if hasattr(app.state, "runtime"):
+            delattr(app.state, "runtime")
+        if hasattr(app.state, "runtime_services"):
+            delattr(app.state, "runtime_services")
+        if hasattr(app.state, "runtime_executor"):
+            delattr(app.state, "runtime_executor")
+        if hasattr(app.state, "operational_signals"):
+            delattr(app.state, "operational_signals")
+        close_structured_logging()
 
     # --- Shutdown ---
     logger.info("PomodoroXII API shutting down.")
-    await dispose_space_engine_manager()
-    await close_meta_db()
 
 
 def create_app() -> FastAPI:
@@ -96,8 +159,12 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(RequestMetricsMiddleware)
 
     register_exception_handlers(app)
+
+    # Operational endpoints (metrics etc.) with operations-token auth.
+    app.include_router(ops_router)
 
     # Mount v1 API routes
     from app.routes.v1 import build_v1_router
@@ -112,8 +179,12 @@ def create_app() -> FastAPI:
         "/api/ready",
         responses={503: {"description": "Database unavailable", "model": ErrorResponse}},
     )
-    async def readiness_check() -> Response:
-        """Verify meta database connectivity without exposing failures."""
+    async def readiness_check(request: Request) -> Response:
+        """Verify meta database, runtime, snapshot and data-root writability.
+
+        The probe never leaks root paths, credentials or exception text: any
+        failure is reported as a generic 503 with ``service_not_ready``.
+        """
         from sqlalchemy import text
 
         from app.db.meta_session import get_meta_session_factory
@@ -123,20 +194,23 @@ def create_app() -> FastAPI:
             async with factory() as session:
                 await session.execute(text("SELECT version_num FROM alembic_version_meta LIMIT 1"))
                 connection = await session.connection()
-                await connection.exec_driver_sql("SAVEPOINT readiness_probe")
-                try:
-                    await connection.exec_driver_sql(
-                        "CREATE TEMP TABLE readiness_write_probe (value INTEGER)"
-                    )
-                    await connection.exec_driver_sql(
-                        "INSERT INTO readiness_write_probe (value) VALUES (1)"
-                    )
-                finally:
-                    await connection.exec_driver_sql("ROLLBACK TO SAVEPOINT readiness_probe")
-                    await connection.exec_driver_sql("RELEASE SAVEPOINT readiness_probe")
+                await _probe_meta_writable(connection)
+
+            # Runtime must be initialised and, when scheduled recovery is
+            # required, a verified snapshot must already exist.
+            runtime = getattr(request.app.state, "runtime", None)
+            if runtime is None:
+                raise RuntimeError("runtime_not_initialised")
+            if settings.backup_enabled and not getattr(
+                request.app.state, "ready", False
+            ):
+                raise RuntimeError("snapshot_not_ready")
+
+            # Persistent data-root probe: create + fsync + delete.
+            _probe_data_root()
         except Exception as exc:
             logger.error(
-                "Readiness database check failed (error_type=%s)",
+                "Readiness check failed (error_type=%s)",
                 type(exc).__name__,
             )
             return JSONResponse(
@@ -147,32 +221,6 @@ def create_app() -> FastAPI:
                 },
             )
         return JSONResponse(content={"status": "ready"})
-
-    @app.get(
-        "/api/metrics",
-        dependencies=[Depends(require_master_token)],
-        response_class=Response,
-        responses={
-            200: {
-                "description": "Prometheus metrics",
-                "content": {"text/plain": {"schema": {"type": "string"}}},
-            },
-            401: {"description": "Authentication required", "model": ErrorResponse},
-            403: {"description": "Master token required", "model": ErrorResponse},
-        },
-    )
-    async def metrics() -> Response:
-        """Expose minimal Prometheus metrics to authenticated operators."""
-        content = "\n".join([
-            "# HELP pomodoroxii_api_up API process status (1=up)",
-            "# TYPE pomodoroxii_api_up gauge",
-            "pomodoroxii_api_up 1",
-            "",
-        ])
-        return Response(
-            content=content,
-            media_type="text/plain; version=0.0.4",
-        )
 
     return app
 

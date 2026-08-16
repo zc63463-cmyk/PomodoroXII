@@ -7,7 +7,7 @@ import { createQuickNote, updateQuickNote } from '@/lib/quick-notes/quick-note-r
 
 const note: QuickNote = {
   id: 'note-1', content: 'before', mood: null, tags: [], pinned: false,
-  archived_at: null, session_id: null, folder_id: null, trashed_at: null,
+  archived_at: null, folder_id: null, trashed_at: null,
   migrated_to_note_id: null, created_at: '2026-07-15T00:00:00.000Z', updated_at: '2026-07-15T00:00:00.000Z',
 }
 

@@ -1,7 +1,6 @@
 /** Core type definitions for PomodoroXI. */
 
 // Enums
-export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'archived'
 export type SessionType = 'work' | 'short_break' | 'long_break' | 'free' | 'countdown'
 export type Mood = 'great' | 'good' | 'normal' | 'bad' | 'terrible'
 export type Priority = 'low' | 'medium' | 'high' | 'urgent'
@@ -34,141 +33,17 @@ export interface SortOption {
   order: SortOrder
 }
 
-// Task filtering
-export interface TaskFilter {
-  status?: TaskStatus
-  priority?: Priority
-  tag?: string
-  search?: string
-  date_from?: string
-  date_to?: string
-}
-
-// Task statistics
-export interface TaskStats {
-  total: number
-  todo: number
-  in_progress: number
-  done: number
-  archived: number
-  total_estimated: number
-  total_actual: number
-}
-
-// Create/Update task inputs
-export interface CreateTaskInput {
-  title: string
-  description?: string
-  priority?: Priority
-  estimated_pomodoros?: number
-  tags?: string[]
-  due_date?: string | null
-  plan?: string
-  completion?: string
-}
-
-export interface UpdateTaskInput {
-  title?: string
-  description?: string
-  status?: TaskStatus
-  priority?: Priority
-  estimated_pomodoros?: number
-  tags?: string[]
-  due_date?: string | null
-  plan?: string
-  completion?: string
-  archived_at?: string | null
-}
-
-// Task
-export interface Task {
-  id: string
-  title: string
-  description: string
-  status: TaskStatus
-  priority: Priority
-  tags: string[]
-  plan: string
-  completion: string
-  due_date: string | null
-  estimated_pomodoros: number
-  actual_pomodoros: number
-  archived_at: string | null
-  created_at: string
-  updated_at: string
-  // Phase 2: structured tag references (optional, backward compatible)
-  tag_refs?: { tag_id: string; weight: number; source: 'user' | 'auto' | 'inferred' }[]
-}
-
-// Session (Pomodoro)
-export interface Session {
-  id: string
-  task_id: string | null
-  type: SessionType
-  duration: number
-  completed: boolean
-  plan: string
-  completion: string
-  started_at: string
-  ended_at: string | null
-  synced: boolean
-  updated_at: string
-  created_at: string
-  mood: Mood | null
-  note: string
-  // Phase 1: enhanced metrics (computed from event stream, optional)
-  attention_score?: number | null
-  flow_state_detected?: boolean | null
-  flow_state_confidence?: number | null
-  interruption_count?: number
-  total_interruption_duration?: number
-  avg_recovery_time?: number | null
-  pause_count?: number
-  total_pause_duration?: number
-  cognitive_mark_summary?: Record<string, number>
-}
-
-// Create Session input
-export interface CreateSessionInput {
-  id?: string
-  task_id?: string | null
-  type: SessionType
-  duration: number
-  plan?: string
-  completion?: string
-  completed?: boolean
-  started_at?: string
-  ended_at?: string | null
-  mood?: Mood | null
-  note?: string
-  created_at?: string
-  updated_at?: string
-  // Phase 1: enhanced metrics
-  attention_score?: number | null
-  flow_state_detected?: boolean | null
-  flow_state_confidence?: number | null
-  interruption_count?: number
-  total_interruption_duration?: number
-  avg_recovery_time?: number | null
-  pause_count?: number
-  total_pause_duration?: number
-  cognitive_mark_summary?: Record<string, number>
-}
-
 // Reflection — daily review, independent from sessions
 export interface Reflection {
   id: string
   date: string
   content: string
   mood: Mood | null
-  related_task_ids: string[]
   tags: string[]
   created_at: string
   updated_at: string
-  // Phase 2 extensions (optional, backward compatible)
   sections?: import('./reflection-extensions').ReflectionSection[]
   is_structured?: boolean
-  auto_linked_session_ids?: string[]
 }
 
 // ---- Reflection Templates (v10) ----
@@ -258,11 +133,6 @@ export type { SyncFields, SyncPlumbingTable } from './sync'
 export { SYNC_PLUMBING_TABLES } from './sync'
 import type { SyncFields } from './sync'
 
-// Cached entities for IndexedDB
-export interface CachedTask extends Task, SyncFields {}
-
-export interface CachedSession extends Session, SyncFields {}
-
 export interface CachedReflection extends Reflection, SyncFields {}
 
 export interface CachedReflectionTemplate extends ReflectionTemplate, SyncFields {}
@@ -287,7 +157,7 @@ export interface Schedule {
 
 export interface CachedSchedule extends Schedule, SyncFields {}
 
-// ---- QuickNote (rapid capture with optional session link) ----
+// ---- QuickNote (rapid capture) ----
 
 export type QuickNoteMood = 'normal' | 'happy' | 'sad' | 'tired' | 'excited' | 'calm'
 
@@ -299,7 +169,6 @@ export interface QuickNote {
   pinned: boolean
   archived_at: string | null
   archive_file_path?: string | null     // 归档文件相对路径（服务端生成，可选）
-  session_id: string | null          // optional: link to pomodoro session
   folder_id: string | null           // virtual file system folder
   trashed_at: string | null          // soft delete timestamp
   migrated_to_note_id: string | null // set when converted to a Note
@@ -321,17 +190,6 @@ export interface MemoComment {
 
 export interface CachedMemoComment extends MemoComment, SyncFields {}
 
-// ---- Session ↔ QuickNote junction (many-to-many) ----
-
-export interface SessionQuickNote {
-  id: string
-  session_id: string
-  quick_note_id: string
-  created_at: string
-}
-
-export interface CachedSessionQuickNote extends SessionQuickNote, SyncFields {}
-
 // ---- Schedule ↔ QuickNote junction (many-to-many) ----
 
 export interface ScheduleQuickNote {
@@ -342,17 +200,6 @@ export interface ScheduleQuickNote {
 }
 
 export interface CachedScheduleQuickNote extends ScheduleQuickNote, SyncFields {}
-
-// ---- Task ↔ QuickNote junction (many-to-many) ----
-
-export interface TaskQuickNote {
-  id: string
-  task_id: string
-  quick_note_id: string
-  created_at: string
-}
-
-export interface CachedTaskQuickNote extends TaskQuickNote, SyncFields {}
 
 // ---- Note (lightweight knowledge base with category/search) ----
 
@@ -397,18 +244,34 @@ export interface FolderTreeNode {
 // Outbox event for sync
 export interface OutboxEvent {
   id?: number
-  entityType: 'task' | 'session' | 'reflection' | 'habit' | 'habitCheckIn' | 'timeBlock'
-    | 'schedule' | 'quickNote' | 'note' | 'memoComment' | 'folder'
-    | 'sessionQuickNote' | 'scheduleQuickNote' | 'taskQuickNote'
+  spaceId: string
+  entityType: string
   entityId: string
   action: 'create' | 'update' | 'delete'
   payload: string
-  createdAt: number
+  payloadHash: string
+  operationId: string
+  compoundOperationId: string | null
+  compoundOrder: number | null
+  expectedVersion: number | null
+  requiresVersionRebase: boolean
+  transportState:
+    | 'ready'
+    | 'awaiting_s4'
+    | 'blocked_conflict'
+    | 'terminal_conflict'
+    | 'terminal_error'
+  createdAt: string
   synced: boolean
-  lastError?: string | null
-  lastErrorCode?: string | null
-  failedAt?: string | null
-  attemptCount?: number
+  lastError: string | null
+  lastErrorCode: string | null
+  failedAt: string | null
+  attemptCount: number
+  serverOutcomeCanonicalBase64: string | null
+  retryable: boolean
+  nextAttemptAt: string | null
+  retryPredecessorOperationId: string | null
+  retrySuccessorOperationId: string | null
 }
 
 // Sync meta stored in IndexedDB
@@ -429,16 +292,12 @@ export interface SyncState {
 // Sync pull response
 export interface SyncPullResponse {
   changes: {
-    tasks: Task[]
-    sessions: Session[]
     reflections: Reflection[]
     schedules: Schedule[]
     quickNotes: QuickNote[]
     notes: Note[]
     memoComments: MemoComment[]
-    sessionQuickNotes: SessionQuickNote[]
     scheduleQuickNotes: ScheduleQuickNote[]
-    taskQuickNotes: TaskQuickNote[]
     habits: Habit[]
     habitCheckIns: HabitCheckIn[]
     timeBlocks: TimeBlock[]
@@ -576,7 +435,6 @@ export type TimeBlockStatus = 'planned' | 'in_progress' | 'completed' | 'skipped
 
 export interface TimeBlock {
   id: string
-  task_id: string | null
   title: string
   date: string                   // YYYY-MM-DD
   start_time: string             // HH:mm
@@ -601,7 +459,7 @@ export interface TimeBlockPlanConfig {
 
 // ---- Custom Report ----
 
-export type ReportDimension = 'date_range' | 'tags' | 'task_type' | 'mood' | 'session_type'
+export type ReportDimension = 'date_range' | 'tags' | 'mood'
 export type ReportFormat = 'markdown' | 'csv' | 'json' | 'ics' | 'png'
 export type ReportChartType = 'trend' | 'donut' | 'bar' | 'heatmap' | 'table'
 
@@ -610,8 +468,6 @@ export interface CustomReportConfig {
   date_range: { start: string; end: string }
   dimensions: ReportDimension[]
   tags: string[]
-  task_ids: string[]
-  session_types: SessionType[]
   moods: Mood[]
   charts: ReportChartType[]
   format: ReportFormat
@@ -650,33 +506,139 @@ export interface EfficiencyBenchmark {
   sampleSize: number
 }
 
-// Phase 1 — Advanced Metadata & Export Types
-// Re-export from phase1.ts for unified import path
-// ============================================================================
-export * from './phase1'
-
-// ============================================================================
-// Phase 2 — Semantic Enhancement & Focus Pattern Recognition
-// Re-export from phase2.ts for unified import path
-// ============================================================================
-export * from './phase2'
-
-// ============================================================================
-// Synced 别名 — plain 同步实体附加 SyncFields（用于 database.ts Table 泛型）
-// phase1/phase2 的类型通过 export * re-export，但 Synced* 别名定义需要在本
-// 文件作用域内引用，故显式 import type。
-// ============================================================================
-import type { SessionEvent, SessionContext, CognitiveMark } from './phase1'
-import type { Tag, TaskTag, TaskRelation, FocusPattern } from './phase2'
+// Synced aliases for surviving product tables.
 export type SyncedDailyReport = DailyReport & SyncFields
 export type SyncedReportTemplate = ReportTemplate & SyncFields
 export type SyncedHabit = Habit & SyncFields
 export type SyncedHabitCheckIn = HabitCheckIn & SyncFields
 export type SyncedTimeBlock = TimeBlock & SyncFields
-export type SyncedSessionEvent = SessionEvent & SyncFields
-export type SyncedSessionContext = SessionContext & SyncFields
-export type SyncedCognitiveMark = CognitiveMark & SyncFields
-export type SyncedTag = Tag & SyncFields
-export type SyncedTaskTag = TaskTag & SyncFields
-export type SyncedTaskRelation = TaskRelation & SyncFields
-export type SyncedFocusPattern = FocusPattern & SyncFields
+
+// Final Task Space / FocusSession cache rows. Wire space identity is checked
+// before persistence and omitted from per-Space business rows.
+import type { WorkItemNoteDocument, Project, WorkItem } from '@/lib/contracts/task-space'
+import type {
+  FocusSessionView,
+  SessionAttributionRevisionView,
+  SessionTaskContextView,
+  SessionWorkItemOutcomeView,
+  SessionWorkItemPlanView,
+  SessionCommandEnvelopeView,
+} from '@/lib/contracts/focus-session'
+
+export type CachedProject = Omit<Project, 'spaceId'>
+export type CachedWorkItem = Omit<WorkItem, 'spaceId'>
+export interface CachedWorkItemNote {
+  noteId: string
+  workItemId: string
+  document: WorkItemNoteDocument
+  version: number
+  localRevision: number
+  syncState: 'clean' | 'dirty' | 'conflict'
+  createdAt: string
+  updatedAt: string
+}
+export type CachedFocusSession = Omit<FocusSessionView, 'id' | 'spaceId'> & { sessionId: string }
+export type CachedSessionTaskContext = Omit<SessionTaskContextView, 'spaceId'>
+export type CachedSessionAttributionRevision = Omit<SessionAttributionRevisionView, 'spaceId'>
+export type CachedSessionWorkItemPlan = Omit<SessionWorkItemPlanView, 'spaceId'>
+export type CachedSessionWorkItemOutcome = Omit<SessionWorkItemOutcomeView, 'spaceId'>
+export type CachedSessionCommandEnvelope = SessionCommandEnvelopeView & { replaySafe: boolean }
+
+export interface WorkItemNoteConflictRow {
+  spaceId: string
+  workItemId: string
+  noteId: string
+  localDocument: WorkItemNoteDocument
+  localRevision: number
+  baseVersion: number
+  remoteDocument: WorkItemNoteDocument
+  remoteVersion: number
+  detectedAt: string
+}
+
+export interface SessionCommandQueueRow {
+  commandId: string
+  spaceId: string
+  sessionId: string
+  payloadHash: string
+  replaySafe: boolean
+  envelopeJson: string
+  state: 'held' | 'querying' | 'dispatchable' | 'terminal'
+  lastReceiptState: 'not_needed' | 'pending' | 'succeeded' | 'failed' | 'conflict' | 'unknown' | 'abandoned'
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CommandReconciliationAttemptRow {
+  operationId: string
+  spaceId: string
+  sessionId: string
+  requestJson: string
+  requestHash: string
+  state: 'prepared' | 'in_flight' | 'terminal'
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SessionActivationConflictRow {
+  id: string
+  conflictId: string
+  provisionalOperationId: string
+  authoritativeSpaceId: string
+  authoritativeSessionId: string
+  provisionalSpaceId: string
+  provisionalSessionId: string
+  detectedAt: string
+  resolutionOperationId: string | null
+  resolvedAt: string | null
+  selectedRole: 'active' | 'candidate' | null
+}
+
+export interface SessionActivationApplicationReceiptRow {
+  receiptId: string
+  operationId: string
+  provisionalSpaceId: string
+  provisionalSessionId: string
+  resultKind: 'authoritative' | 'resumed' | 'activation_conflict'
+  resultHash: string
+  resultJson: string
+  activeSpaceId: string
+  activeSessionId: string
+  activeSessionVersion: number
+  ownershipEpoch: number
+  absorbedOutboxIds: number[]
+  appliedAt: string
+}
+
+export interface DirectCommandIntentRow {
+  operationId: string
+  kind: 'create_project' | 'create_work_item' | 'move_work_item' | 'transition_work_item' | 'submit_review'
+  spaceId: string
+  targetId: string | null
+  requestJson: string
+  requestHash: string
+  state: 'prepared' | 'in_flight' | 'terminal'
+  resultJson: string | null
+  resultHash: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SessionReviewDraftRow {
+  spaceId: string
+  sessionId: string
+  draftJson: string
+  operationId: string
+  updatedAt: string
+}
+
+export interface TimerNoteComposerDraftRow {
+  spaceId: string
+  workItemId: string
+  contentVersion: 1
+  draftJson: string
+  appendState: 'draft' | 'submitting' | 'committed'
+  appendOperationId: string | null
+  submittedBlockJson: string | null
+  updatedAt: string
+}
