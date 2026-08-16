@@ -37,7 +37,14 @@ from .contracts import (
     VerificationResult,
 )
 from .manifest import canonical_json, parse_manifest, validate_relative_path
-from .sqlite_copy import backup_sqlite, fsync_directory, fsync_file, sha256_file
+from .sqlite_copy import (
+    SnapshotIntegrityError,
+    backup_sqlite,
+    fsync_directory,
+    fsync_file,
+    normalize_sqlite_journal_mode,
+    sha256_file,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,8 +473,22 @@ class RecoveryCoordinator:
             spaces = self._registered_spaces()
             for source, relative, kind in self._database_sources(spaces):
                 destination = temporary / relative
-                result = backup_sqlite(source, destination, read_only_source=True)
-                files.append(SnapshotFile(relative, result.size, result.sha256, kind))
+                try:
+                    backup_sqlite(source, destination, read_only_source=True)
+                    normalize_sqlite_journal_mode(destination)
+                except SnapshotIntegrityError as exc:
+                    raise DomainFailure(
+                        "snapshot_invalid",
+                        f"snapshot database journal mode cannot be normalized: {relative}",
+                    ) from exc
+                files.append(
+                    SnapshotFile(
+                        relative,
+                        destination.stat().st_size,
+                        sha256_file(destination),
+                        kind,
+                    )
+                )
                 self.failpoint(f"database_copy:{relative}")
             for source, relative, kind in self._asset_sources(spaces):
                 source = Path(source)
@@ -1606,16 +1627,12 @@ class RecoveryCoordinator:
         must leave the inventory byte-for-byte unchanged.
         """
         try:
-            with closing(sqlite3.connect(path)) as connection:
-                mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()
-                if mode is None or str(mode[0]).lower() != "delete":
-                    raise sqlite3.DatabaseError("journal mode did not become DELETE")
-        except sqlite3.DatabaseError as exc:
+            normalize_sqlite_journal_mode(path)
+        except SnapshotIntegrityError as exc:
             raise DomainFailure(
                 "restore_inventory_mismatch",
                 f"staged database journal mode cannot be normalized: {path.name}",
             ) from exc
-        fsync_file(path)
 
     @staticmethod
     def _staged_relative_path(manifest_relative: str) -> str:

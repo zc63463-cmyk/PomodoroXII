@@ -635,6 +635,28 @@ async def test_snapshot_includes_committed_wal_rows(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_snapshot_normalizes_wal_index_before_manifest_publication(
+    tmp_path: Path,
+) -> None:
+    coordinator, _leases, active_root, engines = _coordinator(tmp_path)
+    source = active_root / "spaces" / "alpha" / "index.db"
+    connection = sqlite3.connect(source)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("INSERT INTO schema_meta(key, value) VALUES ('snapshot-wal', '1')")
+    connection.commit()
+    try:
+        receipt = await coordinator.snapshot(tmp_path / "snapshots")
+    finally:
+        connection.close()
+
+    assert not (receipt.root / "spaces" / "alpha" / "index.db-wal").exists()
+    assert not (receipt.root / "spaces" / "alpha" / "index.db-shm").exists()
+    verified = await coordinator.verify(receipt)
+    assert verified.valid, verified.failures
+    await _dispose(engines)
+
+
+@pytest.mark.asyncio
 async def test_copy_failure_leaves_no_complete_snapshot(tmp_path: Path, monkeypatch) -> None:
     import app.recovery.coordinator as recovery_coordinator
 
