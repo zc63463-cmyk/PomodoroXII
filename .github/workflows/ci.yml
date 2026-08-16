@@ -108,7 +108,8 @@ jobs:
 
       - name: Verify backend test evidence
         if: success()
-        run: uv run python scripts/ci/verify_test_artifacts.py "$POMODOROXII_CI_RESULTS_DIR"
+        shell: pwsh
+        run: uv run python scripts/ci/verify_test_artifacts.py "$env:POMODOROXII_CI_RESULTS_DIR"
 
       - name: Upload backend test evidence
         if: always()
