@@ -1,19 +1,4 @@
-# ===================================================================
-# PomodoroXII CI/CD Pipeline
-# ===================================================================
-# Phase E step 1: continuous integration for the FastAPI backend.
-#
-# Triggers:
-#   - workflow_dispatch (manual)
-#   - push to main / develop
-#   - pull_request to main
-#
-# Jobs:
-#   1. test   — pytest + ruff lint
-#   2. build  — Docker image build + readiness smoke (pushes only outside PRs)
-# ===================================================================
-
-name: CI
+name: Backend CI
 
 on:
   workflow_dispatch:
@@ -21,15 +6,16 @@ on:
     branches: [main, master, develop]
     paths:
       - "backend/**"
-      - ".github/workflows/**"
-      - ".gitignore"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main, master]
     paths:
       - "backend/**"
-      - ".github/workflows/**"
+      - ".github/workflows/ci.yml"
 
-# Cancel in-progress runs of the same ref when a new commit lands.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -39,127 +25,111 @@ env:
   WORKING_DIR: backend
 
 jobs:
-  # -----------------------------------------------------------------
-  # Job 1: Test — pytest + ruff
-  # -----------------------------------------------------------------
   test:
-    name: Test & Lint
-    runs-on: ubuntu-latest
+    name: Backend tests and evidence
+    runs-on: windows-latest
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
 
     steps:
+      - name: Configure checkout line endings
+        shell: pwsh
+        working-directory: .
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+          $backupTarget = Join-Path $env:RUNNER_TEMP 'pomodoroxii-backups'
+          "POMODOROXII_BACKUP_TARGET_DIR=$backupTarget" | Add-Content -LiteralPath $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force -Path $backupTarget | Out-Null
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 1
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install uv (fast Python package manager)
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-          enable-cache: true
-          cache-dependency-glob: "${{ env.WORKING_DIR }}/uv.lock"
+      - name: Set up MSVC build environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
 
-      - name: Sync dependencies (dev extras included)
+      - name: Install uv
+        uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Sync locked dependencies
         run: uv sync --frozen --extra dev
 
-      - name: Lint with ruff
-        run: uv run ruff check app tests
+      - name: Lint backend
+        run: uv run ruff check app tests scripts
 
-      - name: Run pytest
+      - name: Prepare run-scoped artifact directories
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "pomodoroxii-ci/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $results = Join-Path $root "results"
+          $artifacts = Join-Path $root "pomodoroxii-test-artifacts"
+          $structuredLog = Join-Path $results "backend.jsonl"
+          "POMODOROXII_CI_RUN_ROOT=$root" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "POMODOROXII_CI_RESULTS_DIR=$results" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "POMODOROXII_TEST_ARTIFACTS_ROOT=$artifacts" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "POMODOROXII_STRUCTURED_LOG_PATH=$structuredLog" | Add-Content -LiteralPath $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force -Path $results, $artifacts | Out-Null
+          $env:POMODOROXII_STRUCTURED_LOG_PATH = $structuredLog
+          uv run python -c "import logging; from app.logging import close_structured_logging, setup_logging; setup_logging(); logging.getLogger('pomodoroxii.ci').info('backend CI test run started'); close_structured_logging()"
+
+      - name: Run backend tests with evidence
+        shell: pwsh
         env:
           PYTHONDONTWRITEBYTECODE: "1"
           PYTHONUNBUFFERED: "1"
         run: |
-          uv run pytest tests/ \
-            --no-header \
-            -q \
-            --tb=short \
-            --maxfail=10 \
-            -p no:cacheprovider
+          $pytestArgs = @(
+            'tests/',
+            '--no-header',
+            '-q',
+            '--tb=short',
+            '--maxfail=10',
+            '-p', 'no:cacheprovider',
+            "--junitxml=$env:POMODOROXII_CI_RESULTS_DIR/junit.xml",
+            '--cov=app',
+            '--cov-branch',
+            "--cov-report=xml:$env:POMODOROXII_CI_RESULTS_DIR/coverage.xml",
+            '--cov-report=term'
+          )
+          & uv run pytest @pytestArgs 2>&1 | Tee-Object -FilePath "$env:POMODOROXII_CI_RESULTS_DIR/pytest.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload test artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - name: Verify backend test evidence
+        if: success()
+        shell: pwsh
+        run: uv run python scripts/ci/verify_test_artifacts.py "$env:POMODOROXII_CI_RESULTS_DIR"
+
+      - name: Upload backend test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pytest-output-${{ github.run_id }}
-          path: |
-            ${{ env.WORKING_DIR }}/.pytest_cache/
-            ${{ env.WORKING_DIR }}/pytest_*.log
+          name: backend-test-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pomodoroxii-ci/${{ github.run_id }}-${{ github.run_attempt }}/results
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload failed test sandboxes
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: backend-failed-sandboxes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pomodoroxii-ci/${{ github.run_id }}-${{ github.run_attempt }}/pomodoroxii-test-artifacts
+          if-no-files-found: warn
           retention-days: 7
 
-  # -----------------------------------------------------------------
-  # Job 2: Build + smoke — all protected branches and pull requests
-  # -----------------------------------------------------------------
-  build:
-    name: Build & Smoke Docker Image
-    needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build image for smoke test
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ env.WORKING_DIR }}
-          file: ${{ env.WORKING_DIR }}/Dockerfile
-          push: false
-          tags: pomodoroxii-backend:ci-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          load: true
-
-      - name: Smoke-test the image
-        run: |
-          docker volume create pomodoroxii-smoke-data
-          trap 'docker logs smoke || true; docker rm -f smoke || true; docker volume rm -f pomodoroxii-smoke-data || true' EXIT
-          docker run -d -p 8000:8000 \
-            --name smoke \
-            -e POMODOROXII_ENVIRONMENT=production \
-            -e POMODOROXII_SECRET_KEY=ci-smoke-strong-secret-7d118f6339a84cbd9eab71bcd8e51681 \
-            -e POMODOROXII_DATABASE_URL=sqlite+aiosqlite:////app/data/meta.db \
-            -e POMODOROXII_SPACES_DATA_DIR=/app/data/spaces \
-            -v pomodoroxii-smoke-data:/app/data \
-            pomodoroxii-backend:ci-${{ github.sha }}
-          for attempt in {1..30}; do
-            if curl -fsS http://localhost:8000/api/ready; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "READINESS_CHECK_FAILED"
-          exit 1
-
-      - name: Push main/master image to GHCR
-        if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
-        run: |
-          IMAGE=ghcr.io/${{ github.repository_owner }}/pomodoroxii-backend
-          docker tag pomodoroxii-backend:ci-${{ github.sha }} "$IMAGE:${{ github.sha }}"
-          docker tag pomodoroxii-backend:ci-${{ github.sha }} "$IMAGE:latest"
-          docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
+      - name: Clean successful run artifacts
+        if: success()
+        shell: pwsh
+        run: Remove-Item -LiteralPath $env:POMODOROXII_CI_RUN_ROOT -Recurse -Force

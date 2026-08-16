@@ -11,13 +11,18 @@ from app.routes.v1 import build_v1_router
 
 # Routers that are not tied to a single EntitySpec route_enabled entry.
 # Spaces are handled by the ``space`` EntitySpec (route_enabled=True), so
-# they are NOT listed here.
+# they are NOT listed here.  Task Space project/work-item routers expose
+# contract-shaped operations rather than generic EntitySpec CRUD, so they
+# belong to this explicit non-entity set as well.
 EXPECTED_NON_ENTITY_PREFIXES = {
     "/auth",
+    "/active-session",
     "/meta",
+    "/projects",
     "/trash",
     "/stats",
     "/sync",
+    "/work-items",
 }
 
 
@@ -27,8 +32,8 @@ def _extract_v1_prefix(route) -> str | None:
     ``build_v1_router()`` mounts sub-routers via ``include_router``; the
     resulting routes are ``_IncludedRouter`` instances whose
     ``include_context.prefix`` holds the full mounted path
-    (e.g. ``/api/v1/tasks``). This helper strips the leading ``/api/v1``
-    and returns ``/tasks``.
+    (e.g. ``/api/v1/habits``). This helper strips the leading ``/api/v1``
+    and returns ``/habits``.
     """
     include_context = getattr(route, "include_context", None)
     if include_context is None:

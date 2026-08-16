@@ -41,8 +41,8 @@ import { ConflictPanel } from '@/components/sync/conflict-panel'
 
 const conflict = {
   outboxId: 1,
-  entityType: 'task',
-  entityId: 't1',
+  entityType: 'note',
+  entityId: 'n1',
   localVersion: {},
   remoteVersion: {},
   conflictType: 'version' as const,
@@ -56,7 +56,7 @@ describe('ConflictPanel', () => {
   it('CP1: status=conflict + conflicts 非空 → 渲染条目与按钮', () => {
     mockUseSync.mockReturnValue({ status: 'conflict', conflicts: [conflict], resolveConflict: vi.fn() })
     render(createElement(ConflictPanel))
-    expect(screen.getByText(/task/)).toBeInTheDocument()
+    expect(screen.getByText(/note/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /接受远端/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /保留本地/ })).toBeInTheDocument()
   })
@@ -64,7 +64,7 @@ describe('ConflictPanel', () => {
   it('CP2: status != conflict → 不渲染条目', () => {
     mockUseSync.mockReturnValue({ status: 'idle', conflicts: [], resolveConflict: vi.fn() })
     const { container } = render(createElement(ConflictPanel))
-    expect(container.textContent).not.toMatch(/task/)
+    expect(container.textContent).not.toMatch(/note/)
   })
 
   it('CP3: 点击"接受远端"调 resolveConflict(outboxId, accept-remote)', () => {
@@ -75,7 +75,7 @@ describe('ConflictPanel', () => {
     expect(resolveConflict).toHaveBeenCalledWith(
       1,
       'accept-remote',
-      { entityType: 'task', entityId: 't1' },
+      { entityType: 'note', entityId: 'n1' },
     )
   })
 

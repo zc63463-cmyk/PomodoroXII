@@ -1,21 +1,21 @@
-"""Tests for D-1: SyncMixin.updated_at index on all 14 sync entities.
+"""Tests for D-1: SyncMixin.updated_at index on all 21 sync entities.
 
-Without these indexes, ``SyncService.pull`` would full-scan all 14 tables
+Without these indexes, ``SyncService.pull`` would full-scan all 21 tables
 on every incremental sync request (WHERE updated_at > since).
 
 The indexes are auto-created by SQLAlchemy when ``index=True`` is set on the
 column declaration (see ``app.models.mixins.SyncMixin.updated_at``). This
-test verifies that every sync entity table has the expected index.
+test verifies that every sync entity table with SyncMixin has the expected
+index.
 """
 from __future__ import annotations
 
 import pytest
 from sqlalchemy import text
 
-# All 14 sync entities (table_name, expected_index_name).
+# All 21 sync entities with SyncMixin (table_name, expected_index_name).
 SYNC_ENTITY_TABLES = [
-    ("tasks", "ix_tasks_updated_at"),
-    ("sessions", "ix_sessions_updated_at"),
+    # Legacy business entities (10)
     ("notes", "ix_notes_updated_at"),
     ("folders", "ix_folders_updated_at"),
     ("quick_notes", "ix_quick_notes_updated_at"),
@@ -25,9 +25,19 @@ SYNC_ENTITY_TABLES = [
     ("schedules", "ix_schedules_updated_at"),
     ("time_blocks", "ix_time_blocks_updated_at"),
     ("memo_comments", "ix_memo_comments_updated_at"),
-    ("session_quick_notes", "ix_session_quick_notes_updated_at"),
     ("schedule_quick_notes", "ix_schedule_quick_notes_updated_at"),
-    ("task_quick_notes", "ix_task_quick_notes_updated_at"),
+    # Task Space and FocusSession entities (11)
+    ("projects", "ix_projects_updated_at"),
+    ("status_definitions", "ix_status_definitions_updated_at"),
+    ("type_definitions", "ix_type_definitions_updated_at"),
+    ("labels", "ix_labels_updated_at"),
+    ("work_items", "ix_work_items_updated_at"),
+    ("work_item_notes", "ix_work_item_notes_updated_at"),
+    ("focus_sessions", "ix_focus_sessions_updated_at"),
+    ("session_task_contexts", "ix_session_task_contexts_updated_at"),
+    ("session_attribution_revisions", "ix_session_attribution_revisions_updated_at"),
+    ("session_work_item_plans", "ix_session_work_item_plans_updated_at"),
+    ("session_work_item_outcomes", "ix_session_work_item_outcomes_updated_at"),
 ]
 
 
@@ -82,7 +92,7 @@ async def test_sync_pull_uses_index_for_updated_at_filter(space_session):
     q = (
         text(
             "EXPLAIN QUERY PLAN "
-            "SELECT * FROM tasks WHERE updated_at > :since "
+            "SELECT * FROM habits WHERE updated_at > :since "
             "ORDER BY updated_at ASC LIMIT 1001"
         )
     )
@@ -92,10 +102,10 @@ async def test_sync_pull_uses_index_for_updated_at_filter(space_session):
 
     # The query plan should mention either the index name or "USING INDEX".
     # On SQLite the auto-index from index=True will be named ix_<table>_<col>.
-    assert "ix_tasks_updated_at" in plan_text or "USING INDEX" in plan_text.upper(), (
-        f"Expected query plan to use ix_tasks_updated_at index, got:\n{plan_text}"
+    assert "ix_habits_updated_at" in plan_text or "USING INDEX" in plan_text.upper(), (
+        f"Expected query plan to use ix_habits_updated_at index, got:\n{plan_text}"
     )
-    # Make sure we are not doing a full SCAN on tasks.
+    # Make sure we are not doing a full SCAN on habits.
     assert "SCAN" not in plan_text.upper(), (
         f"Query plan falls back to full SCAN:\n{plan_text}"
     )

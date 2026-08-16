@@ -8,9 +8,9 @@
  * vi.hoisted: vi.mock factories hoisted above const declarations.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 
 const mockUseSync = vi.hoisted(() => vi.fn())
 vi.mock('@/hooks/use-sync', () => ({
@@ -29,7 +29,18 @@ vi.mock('lucide-react', () => ({
 import { SyncStatusBar } from '@/components/layout/sync-status-bar'
 
 describe('SyncStatusBar', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.useRealTimers()
+    vi.stubEnv('TZ', 'UTC')
+    vi.resetAllMocks()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    vi.unstubAllEnvs()
+  })
 
   it('SSB1: idle + lastSyncedAt 显示 "已同步 HH:mm"', () => {
     mockUseSync.mockReturnValue({

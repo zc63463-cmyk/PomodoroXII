@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from sqlalchemy import (
@@ -230,32 +231,40 @@ def init_database(db_path: Path) -> None:
     # Windows 路径含中文时, SQLAlchemy 的 sqlite:///{path} URL 解析会失败
     # (sqlite3.OperationalError: unable to open database file).
     # 解决方案: 全部使用 sqlite3 原生连接, 通过 Base.metadata.ddl 生成 DDL 再执行.
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA foreign_keys=ON")
+    engine = create_engine("sqlite:///:memory:", echo=False)
+    try:
+        # Use ``closing`` as well as the transaction context. sqlite3's
+        # connection context manager commits or rolls back but deliberately
+        # does not close the connection. On Windows, leaving a WAL connection
+        # to finalization keeps the ``-shm`` handle open and prevents a later
+        # atomic data-root rename.
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            with conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA foreign_keys=ON")
 
-        # 使用 SQLAlchemy DDL 生成 CREATE TABLE 语句 (兼容 ORM 定义)
-        # 创建临时内存数据库来获取 DDL (不依赖文件系统路径)
-        engine = create_engine("sqlite:///:memory:", echo=False)
-        Base.metadata.create_all(engine)
-        # 将表定义导出为 SQL 并在真实数据库上执行
-        for table in Base.metadata.sorted_tables:
-            ddl = str(CreateTable(table, if_not_exists=True).compile(dialect=engine.dialect))
-            conn.execute(ddl)
-            # CREATE TABLE 已包含内联 INDEX/UNIQUE 约束; 单独 INDEX (via Index()) 在 create_all 中已创建
-            # SQLAlchemy ORM 的 Index() 通过 sorted_tables 关联, 但 Base.metadata 没有顶层 indexes 属性
-            # 所以无需额外处理; 索引由 CREATE TABLE 内的 UNIQUE/INDEX 子句创建.
+                # 使用 SQLAlchemy DDL 生成 CREATE TABLE 语句 (兼容 ORM 定义)
+                # 创建临时内存数据库来获取 DDL (不依赖文件系统路径)
+                Base.metadata.create_all(engine)
+                # 将表定义导出为 SQL 并在真实数据库上执行
+                for table in Base.metadata.sorted_tables:
+                    ddl = str(CreateTable(table, if_not_exists=True).compile(dialect=engine.dialect))
+                    conn.execute(ddl)
+                    # CREATE TABLE 已包含内联 INDEX/UNIQUE 约束; 单独 INDEX (via Index()) 在 create_all 中已创建
+                    # SQLAlchemy ORM 的 Index() 通过 sorted_tables 关联, 但 Base.metadata 没有顶层 indexes 属性
+                    # 所以无需额外处理; 索引由 CREATE TABLE 内的 UNIQUE/INDEX 子句创建.
 
-        # ---- 版本化迁移 (替代旧的 _migrate_notes_columns 直接调用) ----
-        _run_migrations(conn)
+                # ---- 版本化迁移 (替代旧的 _migrate_notes_columns 直接调用) ----
+                _run_migrations(conn)
 
-    # 原生 SQL 创建 FTS5（SQLAlchemy 不支持）
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute(FTS5_CREATE_SQL)
-        conn.execute(FTS5_TRIGGER_INSERT)
-        conn.execute(FTS5_TRIGGER_UPDATE)
-        conn.execute(FTS5_TRIGGER_DELETE)
-
-    engine.dispose()
+        # 原生 SQL 创建 FTS5（SQLAlchemy 不支持）
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            with conn:
+                conn.execute(FTS5_CREATE_SQL)
+                conn.execute(FTS5_TRIGGER_INSERT)
+                conn.execute(FTS5_TRIGGER_UPDATE)
+                conn.execute(FTS5_TRIGGER_DELETE)
+    finally:
+        engine.dispose()

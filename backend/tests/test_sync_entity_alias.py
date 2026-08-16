@@ -15,8 +15,8 @@ def test_canonicalize_camelCase_unchanged():
     from app.services.sync_entity_types import canonicalize_entity_type
 
     assert canonicalize_entity_type("quickNote") == "quickNote"
-    assert canonicalize_entity_type("taskQuickNote") == "taskQuickNote"
-    assert canonicalize_entity_type("task") == "task"
+    assert canonicalize_entity_type("habitCheckIn") == "habitCheckIn"
+    assert canonicalize_entity_type("habit") == "habit"
     assert canonicalize_entity_type("note") == "note"
 
 
@@ -28,9 +28,7 @@ def test_canonicalize_snakeCase_to_camelCase():
     assert canonicalize_entity_type("habit_check_in") == "habitCheckIn"
     assert canonicalize_entity_type("time_block") == "timeBlock"
     assert canonicalize_entity_type("memo_comment") == "memoComment"
-    assert canonicalize_entity_type("session_quick_note") == "sessionQuickNote"
     assert canonicalize_entity_type("schedule_quick_note") == "scheduleQuickNote"
-    assert canonicalize_entity_type("task_quick_note") == "taskQuickNote"
 
 
 def test_canonicalize_unknown_returns_none():
@@ -39,6 +37,13 @@ def test_canonicalize_unknown_returns_none():
 
     assert canonicalize_entity_type("nonexistent") is None
     assert canonicalize_entity_type("") is None
+    # TS0 breaking cutover: removed entities must no longer resolve.
+    assert canonicalize_entity_type("task") is None
+    assert canonicalize_entity_type("session") is None
+    assert canonicalize_entity_type("taskQuickNote") is None
+    assert canonicalize_entity_type("sessionQuickNote") is None
+    assert canonicalize_entity_type("task_quick_note") is None
+    assert canonicalize_entity_type("session_quick_note") is None
 
 
 @pytest.mark.asyncio
@@ -47,14 +52,13 @@ async def test_push_accepts_snake_case_entity_type(space_session, tmp_path):
     from app.services.sync import SyncService
 
     svc = SyncService(space_session)
-    eid = "p12-snake-task"
+    eid = "p12-snake-habit"
     result = await svc.push([{
-        "entity_type": "task",  # snake_case == camelCase for task, control
+        "entity_type": "habit",  # snake_case == camelCase for habit, control
         "entity_id": eid,
         "action": "create",
         "payload": {
-            "id": eid, "title": "Snake", "status": "todo",
-            "priority": "medium", "tags": "[]",
+            "id": eid, "title": "Snake",
         },
         "client_updated_at": "2026-07-04T10:00:00.000Z",
     }])

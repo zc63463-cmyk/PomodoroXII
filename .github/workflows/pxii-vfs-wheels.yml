@@ -1,0 +1,83 @@
+name: pxii-vfs-wheels
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            platform_id: windows-x86_64
+            cibw_arch: AMD64
+    runs-on: ${{ matrix.os }}
+    env:
+      CIBW_BUILD: cp313-*
+      CIBW_ARCHS: ${{ matrix.cibw_arch }}
+      CIBW_CONFIG_FILE: backend/cibuildwheel.toml
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc
+      - name: Sync locked build and test tools without building the project
+        shell: pwsh
+        run: uv sync --project backend --frozen --no-install-project
+      - name: Verify native source closure
+        shell: pwsh
+        run: python backend/scripts/verify_pxii_vfs_source_hash.py
+      - name: Verify runner SQLite load extension capability
+        shell: pwsh
+        run: |
+          $python = if ($IsWindows) { "backend/.venv/Scripts/python.exe" } else { "backend/.venv/bin/python" }
+          & $python -c "import sqlite3; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); c.enable_load_extension(False); c.close(); print('PXII_VFS_LOAD_EXTENSION_CAPABILITY_OK')"
+          if ($LASTEXITCODE -ne 0) { throw "runner SQLite load extension capability is unavailable" }
+      - name: Build one CPython 3.13 wheel
+        shell: pwsh
+        run: |
+          $python = if ($IsWindows) { "backend/.venv/Scripts/python.exe" } else { "backend/.venv/bin/python" }
+          & $python -m cibuildwheel --config-file backend/cibuildwheel.toml --output-dir wheelhouse backend
+          if ($LASTEXITCODE -ne 0) { throw "wheel build failed" }
+      - name: Install and execute native feasibility matrix
+        shell: pwsh
+        run: |
+          $python = if ($IsWindows) { "backend/.venv/Scripts/python.exe" } else { "backend/.venv/bin/python" }
+          $wheel = @(Get-ChildItem -LiteralPath wheelhouse -Filter *.whl -File)
+          if ($wheel.Count -ne 1) { throw "expected exactly one wheel" }
+          uv pip install --python $python --no-index --no-deps --force-reinstall $wheel[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw "wheel install failed" }
+          & $python -m pytest -q backend/tests/test_pxii_vfs.py -p no:cacheprovider --junitxml=.test-results/pxii-vfs.xml
+          if ($LASTEXITCODE -ne 0) { throw "native feasibility matrix failed" }
+          & $python backend/scripts/verify_pxii_vfs_source_hash.py --emit-build-receipt ${{ matrix.platform_id }} --wheel $wheel[0].FullName --junit .test-results/pxii-vfs.xml --output wheelhouse/build-receipt.json
+          if ($LASTEXITCODE -ne 0) { throw "build receipt failed" }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pxii-vfs-${{ matrix.platform_id }}
+          path: wheelhouse/
+          if-no-files-found: error
+
+  manifest:
+    needs: wheel
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: pxii-vfs-*
+          path: ${{ runner.temp }}/pxii-vfs-inputs
+      - name: Assemble closed Windows-only manifest
+        run: python backend/scripts/verify_pxii_vfs_source_hash.py --assemble-wheel-manifest "${RUNNER_TEMP}/pxii-vfs-inputs" --subject-sha "${GITHUB_SHA}" --output pxii-vfs-wheel-manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pxii-vfs-wheel-manifest-v1
+          path: pxii-vfs-wheel-manifest.json
+          if-no-files-found: error

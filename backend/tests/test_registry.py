@@ -7,7 +7,7 @@ remain stable as the project evolves.
 
 Any new ORM model added to ``app/models`` or ``app/db/models/meta.py``
 MUST be accompanied by a registration in ``app/registry/builtin.py``;
-otherwise ``test_registry_has_20_entities`` will fail and surface the
+otherwise ``test_registry_has_31_entities`` will fail and surface the
 omission before it reaches Phase C sync or the meta API.
 """
 from __future__ import annotations
@@ -18,31 +18,33 @@ from app.registry import REGISTRY
 from app.registry.entities import EntityCategory, StorageType
 
 
-def test_registry_has_20_entities():
-    """Registry must contain exactly 20 entities.
+def test_registry_has_31_entities():
+    """Registry must contain exactly 31 entities.
 
     Breakdown:
-    - 14 BUSINESS (11 first-class + 3 junctions)
-    - 3 SYNC_INFRA (tombstone, sync_outbox, sync_audit_log)
-    - 2 META (space, meta_setting)
+    - 22 BUSINESS (first-class + junctions)
+    - 5 SYNC_INFRA (tombstone, sync_outbox, sync_audit_log,
+      session_command_envelope, session_command_receipt)
+    - 3 META (space, meta_setting, active_session_locator)
     - 1 SETTING (setting)
     """
-    assert len(REGISTRY) == 20, (
-        f"Expected 20 entities, got {len(REGISTRY)}. "
+    assert len(REGISTRY) == 31, (
+        f"Expected 31 entities, got {len(REGISTRY)}. "
         "Did you add a new model without registering it in builtin.py?"
     )
 
     # Every expected entity name must be present.
     expected_names = {
-        # 14 business
-        "task", "session", "note", "folder", "quick_note", "reflection",
+        "note", "folder", "quick_note", "reflection",
         "habit", "habit_check_in", "schedule", "time_block", "memo_comment",
-        "session_quick_note", "schedule_quick_note", "task_quick_note",
-        # 3 sync infra
+        "schedule_quick_note",
+        "project", "status_definition", "type_definition", "label",
+        "work_item_label", "work_item", "work_item_note",
+        "focus_session", "session_task_context", "session_attribution_revision",
+        "session_work_item_plan", "session_work_item_outcome",
         "tombstone", "sync_outbox", "sync_audit_log",
-        # 2 meta
-        "space", "meta_setting",
-        # 1 setting
+        "session_command_envelope", "session_command_receipt",
+        "space", "meta_setting", "active_session_locator",
         "setting",
     }
     actual_names = {s.name for s in REGISTRY.list()}
@@ -85,33 +87,37 @@ def test_registry_categorization_and_classifications():
     - ``trash.py._resolve_model`` (list_soft_delete)
     """
     # Category counts.
-    assert len(REGISTRY.list_by_category(EntityCategory.BUSINESS)) == 14
-    assert len(REGISTRY.list_by_category(EntityCategory.SYNC_INFRA)) == 3
-    assert len(REGISTRY.list_by_category(EntityCategory.META)) == 2
+    assert len(REGISTRY.list_by_category(EntityCategory.BUSINESS)) == 22
+    assert len(REGISTRY.list_by_category(EntityCategory.SYNC_INFRA)) == 5
+    assert len(REGISTRY.list_by_category(EntityCategory.META)) == 3
     assert len(REGISTRY.list_by_category(EntityCategory.SETTING)) == 1
 
-    # Sync eligibility: only the 14 business entities participate in sync.
+    # Sync eligibility: all 22 business entities participate in sync.
     sync_names = {s.name for s in REGISTRY.list_sync_enabled()}
     assert sync_names == {
-        "task", "session", "note", "folder", "quick_note", "reflection",
+        "note", "folder", "quick_note", "reflection",
         "habit", "habit_check_in", "schedule", "time_block", "memo_comment",
-        "session_quick_note", "schedule_quick_note", "task_quick_note",
+        "schedule_quick_note",
+        "project", "status_definition", "type_definition", "label",
+        "work_item_label", "work_item", "work_item_note",
+        "focus_session", "session_task_context", "session_attribution_revision",
+        "session_work_item_plan", "session_work_item_outcome",
     }
 
     # Soft-delete support: only note / folder / quick_note have trashed_at.
     soft_delete_names = {s.name for s in REGISTRY.list_soft_delete()}
     assert soft_delete_names == {"note", "folder", "quick_note"}
 
-    # Task must NOT support soft-delete (P1-1 confirmed: no trashed_at column).
-    task_spec = REGISTRY.get("task")
-    assert task_spec.soft_delete is False
-
-    # SYSTEM storage applies only to the 3 sync-infra tables.
+    # SYSTEM storage applies to sync-infra tables (including session command
+    # envelopes/receipts which are immutable infra records).
     system_names = {
         s.name for s in REGISTRY.list()
         if s.storage_type == StorageType.SYSTEM
     }
-    assert system_names == {"tombstone", "sync_outbox", "sync_audit_log"}
+    assert system_names == {
+        "tombstone", "sync_outbox", "sync_audit_log",
+        "session_command_envelope", "session_command_receipt",
+    }
 
 
 def test_registry_get_unknown_raises_keyerror():
@@ -143,3 +149,64 @@ def test_registry_register_duplicate_raises_valueerror():
     local.register(spec)
     with pytest.raises(ValueError):
         local.register(spec)
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — Task Space entity and sync-key parity gates
+# --------------------------------------------------------------------------- #
+
+TASK_SPACE_ENTITY_NAMES = frozenset({
+    "project",
+    "status_definition",
+    "type_definition",
+    "label",
+    "work_item_label",
+    "work_item",
+    "work_item_note",
+    "focus_session",
+    "session_task_context",
+    "session_attribution_revision",
+    "session_work_item_plan",
+    "session_work_item_outcome",
+})
+
+EXPECTED_CAMEL_CASE_SYNC_KEYS = {
+    "project": "project",
+    "status_definition": "statusDefinition",
+    "type_definition": "typeDefinition",
+    "label": "label",
+    "work_item_label": "workItemLabel",
+    "work_item": "workItem",
+    "work_item_note": "workItemNote",
+    "focus_session": "focusSession",
+    "session_task_context": "sessionTaskContext",
+    "session_attribution_revision": "sessionAttributionRevision",
+    "session_work_item_plan": "sessionWorkItemPlan",
+    "session_work_item_outcome": "sessionWorkItemOutcome",
+}
+
+
+def test_task_space_entities_are_registered():
+    """All seven core Task Space entities must be present in the registry."""
+    actual_names = {s.name for s in REGISTRY.list()}
+    missing = TASK_SPACE_ENTITY_NAMES - actual_names
+    assert not missing, f"Task Space entities missing from registry: {missing}"
+
+
+def test_task_space_entities_have_camel_case_sync_keys():
+    """Each Task Space entity must expose the correct camelCase sync_entity_type."""
+    for snake_name, expected_camel in EXPECTED_CAMEL_CASE_SYNC_KEYS.items():
+        spec = REGISTRY.get(snake_name)
+        assert spec.effective_sync_entity_type == expected_camel, (
+            f"Entity '{snake_name}' has sync_entity_type="
+            f"{spec.effective_sync_entity_type!r}, expected {expected_camel!r}"
+        )
+
+
+def test_legacy_task_entity_is_absent():
+    """The legacy 'task' entity must NOT exist in the registry."""
+    actual_names = {s.name for s in REGISTRY.list()}
+    assert "task" not in actual_names, (
+        "Legacy 'task' entity must not be registered; "
+        "it has been replaced by 'work_item'."
+    )

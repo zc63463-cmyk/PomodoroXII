@@ -6,9 +6,93 @@ Covers:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import jwt
 import pytest
 from sqlalchemy import select
+
+
+class _ProvisionHandle:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc_info):
+        return False
+
+
+class _FakeLease:
+    fence = 1
+
+    async def release(self) -> None:
+        return None
+
+
+class _FakeLeases:
+    async def acquire_global(self, *_args):
+        return _FakeLease()
+
+    def register_pending_lease_cleanup(self, _lease) -> None:
+        return None
+
+
+class _Task8RouteRuntime:
+    def __init__(self) -> None:
+        self.leases = _FakeLeases()
+        self.provisioned = []
+
+    async def provision(self, spec):
+        from app.db.meta_session import get_meta_session
+        from app.db.models.meta import Space
+        from app.settings import settings
+
+        root = settings.spaces_data_dir / spec.space_id
+        root.mkdir(parents=True, exist_ok=True)
+        space = Space(
+            id=spec.space_id,
+            name=spec.name,
+            db_path=str(root / "space.db"),
+            notes_dir=str(root / "notes"),
+        )
+        async for session in get_meta_session():
+            session.add(space)
+            await session.commit()
+            break
+        self.provisioned.append(spec)
+        return _ProvisionHandle()
+
+    async def open_resolved(
+        self, scope, _mode, _global_lease, *, owns_global_lease: bool
+    ):
+        assert owns_global_lease is True
+        return SimpleNamespace(scope=scope)
+
+    async def get_registered(self, space_id: str):
+        from app.db.meta_session import get_meta_session
+        from app.db.models.meta import Space
+
+        async for session in get_meta_session():
+            return await session.scalar(select(Space).where(Space.id == space_id))
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _install_task8_runtime(request):
+    if "client" not in request.fixturenames:
+        return
+    client = request.getfixturevalue("client")
+    client._transport.app.state.runtime = _Task8RouteRuntime()
+
+
+def test_create_space_delegates_provisioning_to_runtime() -> None:
+    import inspect
+
+    from app.routes.v1 import spaces
+
+    source = inspect.getsource(spaces.create_space)
+    assert "mkdir" not in source
+    assert "settings.space_db_path" not in source
+    assert "runtime.provision" in source
 
 
 async def _setup_and_login(client) -> str:
@@ -352,6 +436,9 @@ async def test_space_token_decoded_by_get_space_context(client):
     payload = await get_current_user(
         credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=space_token)
     )
-    ctx = await get_space_context(user=payload)
+    ctx = await get_space_context(
+        request=SimpleNamespace(app=SimpleNamespace(state=client._transport.app.state)),
+        user=payload,
+    )
     assert ctx["space_id"] == space_id
     assert ctx["user_id"] is not None

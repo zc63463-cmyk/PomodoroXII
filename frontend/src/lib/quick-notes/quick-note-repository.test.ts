@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PomodoroXIDB } from '@/services/database'
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import { db, spaceDBManager } from '@/services/space-db'
+import { withSpaceAuthorityFence } from '@/lib/sync/space-authority-fence'
 import {
   configureQuickNoteOutboxHook,
   convertQuickNoteToNote,
@@ -20,8 +21,38 @@ import {
   type QuickNoteMutationContext,
 } from '@/lib/quick-notes/quick-note-repository'
 
+class FakeLockManager {
+  private readonly tails = new Map<string, Promise<void>>()
+
+  request<T>(
+    name: string,
+    options: { mode: 'exclusive' },
+    callback: () => Promise<T>,
+  ): Promise<T> {
+    expect(options).toEqual({ mode: 'exclusive' })
+    const previous = this.tails.get(name) ?? Promise.resolve()
+    const result = previous.then(callback)
+    const tail = result.then(() => undefined, () => undefined)
+    this.tails.set(name, tail)
+    void tail.finally(() => {
+      if (this.tails.get(name) === tail) this.tails.delete(name)
+    })
+    return result
+  }
+}
+
+const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+
+function installLocks(locks: FakeLockManager | undefined): void {
+  Object.defineProperty(navigator, 'locks', {
+    configurable: true,
+    value: locks,
+  })
+}
+
 describe('quick-note-repository', () => {
   beforeEach(async () => {
+    installLocks(new FakeLockManager())
     resetQuickNoteOutboxHook()
     await spaceDBManager.switchTo(`quick-note-repo-${crypto.randomUUID()}`)
   })
@@ -30,6 +61,8 @@ describe('quick-note-repository', () => {
     resetQuickNoteOutboxHook()
     await db.delete()
     spaceDBManager.close()
+    if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks)
+    else Reflect.deleteProperty(navigator, 'locks')
   })
 
   it('creates a complete QuickNote row with sync fields', async () => {
@@ -51,22 +84,21 @@ describe('quick-note-repository', () => {
   })
 
   it('writes create and default Outbox rows only to the supplied transaction database', async () => {
-    const isolatedDB = new PomodoroXIDB(
-      `quick-note-repo-concrete-${crypto.randomUUID()}`,
-    )
+    const isolatedDB = await openPomodoroXIDB(`quick-note-repo-concrete-${crypto.randomUUID()}`)
 
     try {
-      await isolatedDB.transaction(
-        'rw',
-        isolatedDB.quickNotes,
-        isolatedDB.outbox,
-        async () => {
-          await createQuickNoteInTransaction(isolatedDB, {
-            id: 'concrete-create',
-            content: 'captured database #draft',
-          })
-        },
-      )
+      await withSpaceAuthorityFence(isolatedDB.spaceId, (token) =>
+        isolatedDB.transaction(
+          'rw',
+          isolatedDB.quickNotes,
+          isolatedDB.outbox,
+          async () => {
+            await createQuickNoteInTransaction(isolatedDB, token, {
+              id: 'concrete-create',
+              content: 'captured database #draft',
+            })
+          },
+        ))
 
       expect(await isolatedDB.quickNotes.get('concrete-create')).toMatchObject({
         id: 'concrete-create',
@@ -132,6 +164,8 @@ describe('quick-note-repository', () => {
       entityId: note.id,
       action: 'create',
       synced: false,
+      expectedVersion: null,
+      requiresVersionRebase: false,
     })
     expect(JSON.parse(rows[0]!.payload)).toMatchObject({
       id: note.id,
@@ -185,6 +219,8 @@ describe('quick-note-repository', () => {
       entityId: note.id,
       action: 'delete',
       synced: false,
+      expectedVersion: 2,
+      requiresVersionRebase: false,
     })
     expect(JSON.parse(rows[0]!.payload)).toEqual({ id: note.id })
   })
@@ -231,6 +267,12 @@ describe('quick-note-repository', () => {
     expect(contexts[3]?.payload).toMatchObject({ id: note.id, trashed_at: restored.trashed_at })
     expect(contexts[5]?.payload).toEqual({ id: note.id })
     expect(contexts).toHaveLength(6)
+    expect(contexts[0]?.expectedVersion).toBeUndefined()
+    expect(contexts[1]?.expectedVersion).toBe(1)
+    expect(contexts[2]?.expectedVersion).toBe(2)
+    expect(contexts[3]?.expectedVersion).toBe(3)
+    expect(contexts[4]?.expectedVersion).toBe(4)
+    expect(contexts[5]?.expectedVersion).toBe(5)
     expect(await db.outbox.count()).toBe(0)
   })
 
@@ -272,6 +314,12 @@ describe('quick-note-repository', () => {
       'note:create',
       'quickNote:update',
     ])
+    const noteCreateRow = outboxRows.find((r) => r.entityType === 'note' && r.action === 'create')!
+    expect(noteCreateRow.expectedVersion).toBeNull()
+    expect(noteCreateRow.requiresVersionRebase).toBe(false)
+    const quickNoteUpdateRow = outboxRows.find((r) => r.entityType === 'quickNote' && r.action === 'update')!
+    expect(quickNoteUpdateRow.expectedVersion).toBe(1)
+    expect(quickNoteUpdateRow.requiresVersionRebase).toBe(false)
     expect((await listQuickNotes()).map((item) => item.id)).not.toContain(quickNote.id)
     expect((await listQuickNoteLifecycleStates())[quickNote.id]).toBe('converted')
   })
@@ -382,12 +430,12 @@ describe('quick-note-repository', () => {
   })
 
   it('commits an existing edit and its Outbox update in the supplied database', async () => {
-    const isolated = new PomodoroXIDB(`quick-note-existing-edit-${crypto.randomUUID()}`)
-    await isolated.open()
+    const isolated = await openPomodoroXIDB(`quick-note-existing-edit-${crypto.randomUUID()}`)
     try {
-      const created = await isolated.transaction('rw', isolated.quickNotes, isolated.outbox, () =>
-        createQuickNoteInTransaction(isolated, { id: 'existing-cas', content: 'before #old' }),
-      )
+      const created = await withSpaceAuthorityFence(isolated.spaceId, (token) =>
+        isolated.transaction('rw', isolated.quickNotes, isolated.outbox, () =>
+          createQuickNoteInTransaction(isolated, token, { id: 'existing-cas', content: 'before #old' }),
+        ))
       await isolated.outbox.clear()
 
       const result = await commitQuickNoteExistingEdit(isolated, {
@@ -405,7 +453,8 @@ describe('quick-note-repository', () => {
 
   it('returns conflict without writing when the captured revision is stale', async () => {
     const note = await createQuickNote({ content: 'before' })
-    await updateQuickNote(note.id, { content: 'remote' })
+    const remoteUpdatedAt = new Date(Date.parse(note.updated_at) + 1000).toISOString()
+    await updateQuickNote(note.id, { content: 'remote', updated_at: remoteUpdatedAt })
     await db.outbox.clear()
 
     await expect(commitQuickNoteExistingEdit(spaceDBManager.current, {

@@ -12,6 +12,14 @@ from app.settings import Settings
 # --------------------------------------------------------------------------- #
 def _make_settings(**env_overrides: str | None) -> Settings:
     """Create a Settings instance with temporary env overrides."""
+    if env_overrides.get("environment") == "production":
+        env_overrides.setdefault(
+            "sync_cursor_secret",
+            "test-sync-cursor-secret-0123456789abcdef",
+        )
+        # Secret-policy tests are independent of the scheduler.  The required
+        # external backup target is covered by test_recovery_scheduler.
+        env_overrides.setdefault("backup_enabled", "false")
     old_values: dict[str, str | None] = {}
     for key, value in env_overrides.items():
         env_key = f"POMODOROXII_{key.upper()}"
@@ -63,6 +71,34 @@ class TestSecretKeyValidation:
         )
         assert s.secret_key == "a-very-secure-random-key-1234567890"
 
+    @pytest.mark.parametrize("secret", ["x" * 31, "密" * 10])
+    def test_rejects_production_secret_below_32_utf8_bytes(self, secret: str):
+        with pytest.raises(ValueError, match="at least 32 UTF-8 bytes"):
+            _make_settings(secret_key=secret, environment="production")
+
+    @pytest.mark.parametrize("secret", ["x" * 32, "密" * 11])
+    def test_accepts_production_secret_at_or_above_32_utf8_bytes(self, secret: str):
+        assert _make_settings(
+            secret_key=secret,
+            environment="production",
+        ).secret_key == secret
+
+    def test_rejects_weak_cursor_secret_in_production(self):
+        with pytest.raises(ValueError, match="SYNC_CURSOR_SECRET.*weak"):
+            _make_settings(
+                secret_key="a-very-secure-random-key-1234567890",
+                sync_cursor_secret="change-me-sync-cursor-secret-change-me",
+                environment="production",
+            )
+
+    def test_rejects_cursor_secret_reuse_in_production(self):
+        with pytest.raises(ValueError, match="distinct"):
+            _make_settings(
+                secret_key="a-very-secure-random-key-1234567890",
+                sync_cursor_secret="a-very-secure-random-key-1234567890",
+                environment="production",
+            )
+
 
 # --------------------------------------------------------------------------- #
 # cors_origins parsing
@@ -78,6 +114,31 @@ class TestCorsOrigins:
         s = Settings()
         assert isinstance(s.cors_origins, list)
         assert len(s.cors_origins) >= 1
+
+
+def test_backup_enabled_defaults_true():
+    assert _make_settings(backup_enabled=None).backup_enabled is True
+
+
+def test_data_root_drives_canonical_meta_and_spaces_layout(tmp_path):
+    root = tmp_path / "runtime-data"
+    configured = _make_settings(
+        data_root=str(root),
+        database_url=f"sqlite+aiosqlite:///{root / 'meta.db'}",
+        spaces_data_dir=str(root / "spaces"),
+    )
+    assert configured.meta_db_path == root.resolve() / "meta.db"
+    assert configured.canonical_spaces_root == root.resolve() / "spaces"
+    assert configured.spaces_data_dir.resolve() == configured.canonical_spaces_root
+
+
+def test_explicit_split_runtime_layout_is_rejected(tmp_path):
+    root = tmp_path / "runtime-data"
+    with pytest.raises(ValueError, match="data_root"):
+        _make_settings(
+            data_root=str(root),
+            spaces_data_dir=str(tmp_path / "other-spaces"),
+        )
 
 
 # --------------------------------------------------------------------------- #

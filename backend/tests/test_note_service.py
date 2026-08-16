@@ -215,8 +215,11 @@ async def test_delete_idempotent(space_session, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_create_db_failure_compensates_fs_delete(space_session, tmp_path):
-    """If DB flush fails after FS write, the .md file should be deleted."""
+async def test_create_db_failure_does_not_compensate_fs_delete(space_session, tmp_path):
+    """After compensation removal, DB failure leaves orphan .md file.
+
+    The durable recovery/journal mechanism handles cleanup, not NoteService.
+    """
     from unittest.mock import AsyncMock, patch
 
     from app.services.base import BaseService
@@ -230,14 +233,14 @@ async def test_create_db_failure_compensates_fs_delete(space_session, tmp_path):
         with pytest.raises(RuntimeError, match="DB down"):
             await svc.create({"title": "Saga", "content": "compensate me"})
 
-    # Compensation: no .md file should remain.
+    # No compensation: orphan .md file remains (durable recovery handles it).
     notes = await fs.list_notes()
-    assert len(notes) == 0, "Orphan .md file left after DB failure"
+    assert len(notes) == 1, "Orphan .md file should remain after DB failure"
 
 
 @pytest.mark.asyncio
-async def test_update_content_db_failure_restores_old_content(space_session, tmp_path):
-    """If DB flush fails after FS rewrite, old .md content should be restored."""
+async def test_update_content_db_failure_does_not_restore_old_content(space_session, tmp_path):
+    """After compensation removal, DB failure leaves new content in .md file."""
     from unittest.mock import AsyncMock
 
     from app.services.note import NoteService
@@ -258,9 +261,9 @@ async def test_update_content_db_failure_restores_old_content(space_session, tmp
     finally:
         space_session.flush = original_flush
 
-    # Compensation: FS content should be restored to old value.
+    # No compensation: FS keeps new content (durable recovery handles it).
     content = await fs.read_note(note_id)
-    assert content == "Old content", f"Content not restored: {content!r}"
+    assert content == "New content", f"FS should keep new content: {content!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +273,7 @@ async def test_update_content_db_failure_restores_old_content(space_session, tmp
 @pytest.mark.asyncio
 async def test_savepoint_create_rollback_does_not_break_outer(space_session, tmp_path):
     """NoteService.create inside a SAVEPOINT rolled back should not break the outer session."""
-    from app.models.task import Task
+    from app.models.project import Project
     from app.services.note import NoteService
 
     fs = await _make_fs(tmp_path)
@@ -287,17 +290,17 @@ async def test_savepoint_create_rollback_does_not_break_outer(space_session, tmp
         except Exception:
             await space_session.rollback()
 
-    # Outer session still usable: create an unrelated Task.
-    task = Task(
-        id="post-savepoint-task",
-        title="After rollback",
-        status="todo",
-        priority="medium",
-        tags="[]",
+    # Outer session still usable: create an unrelated Project.
+    project = Project(
+        id="post-savepoint-project",
+        key="TS01",
+        name="After rollback",
+        default_status_definition_id="sd-1",
+        default_type_definition_id="td-1",
     )
-    space_session.add(task)
+    space_session.add(project)
     await space_session.flush()
-    assert task.id is not None
+    assert project.id is not None
 
 
 @pytest.mark.asyncio

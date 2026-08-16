@@ -14,34 +14,51 @@ matching against the versions other modules already bound.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib
 import os
 import re
+import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 _tests_dir = Path(__file__).resolve().parent
 _backend_dir = _tests_dir.parent
 _project_root = _backend_dir.parent
-_DEFAULT_ARTIFACTS_ROOT = (_backend_dir / ".test-artifacts").resolve()
+_DEFAULT_ARTIFACTS_ROOT = (
+    Path(tempfile.gettempdir()) / "pomodoroxii-test-artifacts"
+).resolve()
 _EXTERNAL_ARTIFACTS_ROOT_PATTERN = re.compile(r"pomodoroxii-test-artifacts\Z", re.IGNORECASE)
 _RUN_ROOT_PATTERN = re.compile(r"run-[0-9a-f]{16}\Z")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "self_contained_measurement: skip application fixture bootstrap for an isolated probe",
+    )
+    config.addinivalue_line(
+        "markers",
+        "provisioned_space_storage: explicitly provision storage for Spaces "
+        "created through the test HTTP client",
+    )
 
 
 def _resolve_artifacts_root(configured_root: str | Path | None = None) -> Path:
     """Resolve and approve the dedicated root used for persistent test artifacts.
 
-    The default remains ``backend/.test-artifacts``. An environment override must
+    New runs default to the OS temporary directory. An environment override must
     resolve outside the source tree, must not be a drive root or home directory,
     and must use the explicit ``pomodoroxii-test-artifacts`` directory name.
     """
     if configured_root is None:
         configured_root = os.environ.get("POMODOROXII_TEST_ARTIFACTS_ROOT")
     if configured_root is None:
-        return _DEFAULT_ARTIFACTS_ROOT
+        configured_root = _DEFAULT_ARTIFACTS_ROOT
 
     resolved = Path(configured_root).expanduser().resolve()
     home = Path.home().resolve()
@@ -103,9 +120,9 @@ def _test_path_for_nodeid(run_root: Path, nodeid: str) -> Path:
 def test_run_root() -> Path:
     """Create one approved short run root without recursive in-suite cleanup.
 
-    By default artifacts stay under ``backend/.test-artifacts``. Set
-    ``POMODOROXII_TEST_ARTIFACTS_ROOT`` to an external, dedicated directory named
-    ``pomodoroxii-test-artifacts`` when a shorter Windows path is required.
+    By default artifacts stay under the OS temporary directory in a dedicated
+    ``pomodoroxii-test-artifacts`` root. Set ``POMODOROXII_TEST_ARTIFACTS_ROOT``
+    to use another external root with the same dedicated directory name.
     Lifecycle cleanup remains the responsibility of CI/workspace tooling.
     """
     return _allocate_run_root()
@@ -115,9 +132,9 @@ def test_run_root() -> Path:
 def tmp_path(request: pytest.FixtureRequest, test_run_root: Path) -> Path:  # type: ignore[no-redef]
     """Return a fresh nodeid-hashed directory under the current run root.
 
-    The run root is allocated below ``backend/.test-artifacts`` for Windows path
-    compatibility. Neither this fixture nor session teardown recursively deletes
-    it; CI/workspace lifecycle tooling owns eventual cleanup.
+    The run root is allocated below the dedicated OS temporary artifacts root.
+    Neither this fixture nor session teardown recursively deletes it;
+    CI/workspace lifecycle tooling owns eventual cleanup.
     """
     path = _test_path_for_nodeid(test_run_root, request.node.nodeid)
     path.mkdir(parents=False, exist_ok=False)
@@ -147,6 +164,7 @@ def _ensure_inside_temp_root(path: Path, temp_root: Path) -> None:
 def _isolate_env(
     tmp_path: Path,
     test_run_root: Path,
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Path:
     """Point all PomodoroXII paths at the current test's unique sandbox.
@@ -154,6 +172,9 @@ def _isolate_env(
     The directory is newly created from a nodeid hash below a run-scoped root,
     so isolation does not depend on deleting leftovers from earlier tests.
     """
+    if request.node.get_closest_marker("self_contained_measurement") is not None:
+        return tmp_path
+
     _ensure_inside_temp_root(tmp_path, test_run_root)
 
     meta_db = tmp_path / "meta.db"
@@ -193,7 +214,7 @@ def _isolate_env(
     import app.services.time as services_time_module
     importlib.reload(services_time_module)
 
-    # Phase B: reload business models (registers 18 tables on new Base.metadata)
+    # Phase B: reload business models (registers all tables on new Base.metadata)
     # Must purge submodules from sys.modules so they re-import with the new Base.
     import sys
     for key in list(sys.modules.keys()):
@@ -208,11 +229,63 @@ def _isolate_env(
         if key.startswith("app.services.") and key != "app.services.time":
             del sys.modules[key]
 
+    # The production catalog intentionally keeps its startup-frozen model
+    # identities. Tests replace the ORM graph per case, so rebind only the
+    # test-local sync registry to those fresh classes without replacing CATALOG.
+    import app.registry.sync_registry as sync_registry_module
+
+    production_catalog = sync_registry_module.CATALOG
+    fresh_models: dict[str, type] = {}
+    for spec in production_catalog.list_sync_enabled():
+        model_path = spec.model_path
+        module_name, _, class_name = model_path.rpartition(".")
+        fresh_models[spec.name] = getattr(
+            importlib.import_module(module_name), class_name
+        )
+
+    class _TestSyncCatalog:
+        def list_sync_enabled(self):
+            return production_catalog.list_sync_enabled()
+
+        def model_for(self, name: str):
+            return fresh_models[name]
+
+    monkeypatch.setattr(sync_registry_module, "CATALOG", _TestSyncCatalog())
+
     import app.auth.security as security_module
     importlib.reload(security_module)
 
     import app.space_manager as space_manager_module
     importlib.reload(space_manager_module)
+
+    # Test setup owns fixture creation; production init_meta_db only opens a
+    # database that the runtime migration coordinator has already prepared.
+    if request.node.name != "test_missing_bound_store_never_creates_companion":
+        from app.db.migrations import run_migrations
+
+        run_migrations("meta", settings_module.settings.meta_db_path)
+
+    # Legacy MCP unit tests explicitly install a runtime without entering the
+    # process bootstrap. Adapt that test-only entrypoint to the same immutable
+    # RuntimeServices shape; production uses install_mcp_runtime_services.
+    import app.mcp.server as mcp_server
+    from app.runtime.bootstrap import _FreshAuthorizedSpaceScope
+
+    def install_test_runtime(runtime) -> None:
+        if runtime is None:
+            mcp_server._installed_runtime_services = None
+            mcp_server._installed_space_runtime = None
+            return
+        mcp_server._installed_runtime_services = SimpleNamespace(
+            runtime=runtime,
+            scope=_FreshAuthorizedSpaceScope(runtime),
+            executor=SimpleNamespace(),
+            credential_verifier=None,
+            catalog=None,
+        )
+        mcp_server._installed_space_runtime = runtime
+
+    monkeypatch.setattr(mcp_server, "install_space_runtime", install_test_runtime)
 
     # NOTE: app.deps imports app.errors (not reloaded) and app.auth.security
     # (reloaded above). Reload deps so it rebinds security + space_manager.
@@ -226,33 +299,90 @@ def _isolate_env(
 async def space_session(_isolate_env: Path):
     """Yield an AsyncSession for a per-test space DB with all tables created.
 
-    The space_manager.get_session() call internally runs
+    The test fixture directly runs
     Base.metadata.create_all (excluding meta tables) on the space engine,
     so all 18 business tables are available.
     """
     from app.db.meta_session import close_meta_db, init_meta_db
-    from app.space_manager import (
-        dispose_space_engine_manager,
-        get_space_engine_manager,
-    )
+    from app.db.migrations import run_migrations
+    from app.db.session import create_engine, create_session_factory
 
     await init_meta_db()
-    manager = get_space_engine_manager()
-    session = await manager.get_session("spc_test")
+    from app.settings import settings
+
+    database = settings.space_db_path("spc_test")
+    database.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(run_migrations, "space", database)
+    engine = create_engine(
+        f"sqlite+aiosqlite:///{database.as_posix()}", echo=settings.debug
+    )
+    session = create_session_factory(engine)()
     try:
         yield session
     finally:
         await session.close()
-        await dispose_space_engine_manager()
+        await engine.dispose()
         await close_meta_db()
 
 
 @pytest.fixture
-async def client(_isolate_env: Path):
+def space_storage_provisioner(_isolate_env: Path):
+    """Return an explicit, sandbox-bound Space storage provisioner."""
+
+    async def provision(space_id: str) -> None:
+        from app.db.migrations import run_migrations
+        from app.runtime.joined_thread import run_joined_thread
+        from app.settings import settings
+
+        parent = settings.spaces_data_dir / space_id
+        _ensure_inside_temp_root(parent, _isolate_env)
+        database = settings.space_db_path(space_id)
+        notes = settings.space_notes_dir(space_id)
+        index = parent / "index.db"
+        if not parent.is_dir() or not notes.is_dir():
+            raise RuntimeError("registered test Space directories are missing")
+        if database.exists() or index.exists():
+            raise RuntimeError("registered test Space storage already exists")
+
+        created = [
+            database,
+            database.with_name(f"{database.name}-wal"),
+            database.with_name(f"{database.name}-shm"),
+            database.with_name(f"{database.name}-journal"),
+            index,
+            index.with_name(f"{index.name}-wal"),
+            index.with_name(f"{index.name}-shm"),
+            index.with_name(f"{index.name}-journal"),
+        ]
+        try:
+            await run_joined_thread(lambda: run_migrations("space", database))
+
+            def create_index() -> None:
+                import sqlite3
+
+                connection = sqlite3.connect(index)
+                connection.close()
+
+            await run_joined_thread(create_index)
+        except BaseException:
+            for path in reversed(created):
+                if path.is_file():
+                    path.unlink()
+            raise
+
+    return provision
+
+
+@pytest.fixture
+async def client(
+    _isolate_env: Path,
+    request: pytest.FixtureRequest,
+    space_storage_provisioner,
+):
     """Yield an httpx AsyncClient backed by ASGITransport.
 
-    ASGITransport does not trigger the app's lifespan, so we must
-    manually initialise the meta database before creating the app.
+    ASGITransport does not trigger the app's lifespan, so the fixture
+    enters the application lifespan explicitly.
     """
     import sys
 
@@ -264,13 +394,93 @@ async def client(_isolate_env: Path):
 
     from httpx import ASGITransport, AsyncClient
 
-    from app.db.meta_session import close_meta_db, init_meta_db
     from app.main import create_app
-    from app.space_manager import dispose_space_engine_manager
+    from app.settings import settings
 
-    await init_meta_db()
     app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        yield ac
-    await dispose_space_engine_manager()
-    await close_meta_db()
+    provision_storage = (
+        request.node.get_closest_marker("provisioned_space_storage") is not None
+    )
+
+    async def provision_created_space(response) -> None:
+        if (
+            provision_storage
+            and response.request.method == "POST"
+            and response.request.url.path == "/api/v1/spaces"
+            and response.status_code == 201
+        ):
+            await response.aread()
+            space_id = response.json()["id"]
+            if not (
+                settings.space_db_path(space_id).exists()
+                and settings.space_notes_dir(space_id).exists()
+                and (settings.spaces_data_dir / space_id / "index.db").exists()
+            ):
+                await space_storage_provisioner(space_id)
+
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            event_hooks={"response": [provision_created_space]},
+        ) as ac:
+            yield ac
+
+
+# -- S3 mutation fixture factory for TS1 Task Space tests ---------------------
+
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from app.commands.entity import EntityCommand
+from app.registry import CATALOG
+from app.task_space.compiler import TaskSpaceCompiler
+from app.task_space.module import DefaultTaskSpaceCommandModule
+from app.task_space.queries import DefaultTaskSpaceQueryModule
+from tests.mutation_fixture import MutationFixture, build_mutation_fixture
+from tests.task_space_fixture import FrozenClock, TaskSpaceFixture
+
+
+@pytest.fixture
+def mutation_fixture_factory(space_session, tmp_path):
+    """Return a factory that constructs mutation fixtures with given policies."""
+
+    sessions = async_sessionmaker(space_session.bind, expire_on_commit=False)
+    stage_root = tmp_path / "stages"
+    projection_root = tmp_path / "projection"
+    database_path = Path(str(space_session.bind.url.database))
+    fixtures: list[MutationFixture] = []
+
+    def factory(*, policies: tuple = ()) -> MutationFixture:
+        fixture = build_mutation_fixture(
+            sessions=sessions,
+            catalog=CATALOG,
+            policies=policies,
+            stage_root=stage_root,
+            projection_root=projection_root,
+            database_path=database_path,
+        )
+        fixtures.append(fixture)
+        return fixture
+
+    yield factory
+
+    for fixture in reversed(fixtures):
+        fixture.close()
+
+
+@pytest.fixture
+async def task_space_fixture(mutation_fixture_factory):
+    clock = FrozenClock()
+    policy = TaskSpaceCompiler(clock.now_iso_ms)
+    mutation = mutation_fixture_factory(policies=(policy,))
+    fixture = TaskSpaceFixture(
+        mutation=mutation,
+        clock=clock,
+        module=DefaultTaskSpaceCommandModule(mutation.uow),
+        queries=DefaultTaskSpaceQueryModule(),
+        entity_commands=EntityCommand(mutation.catalog),
+    )
+    try:
+        yield fixture
+    finally:
+        fixture.mutation.close()

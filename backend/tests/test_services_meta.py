@@ -19,28 +19,28 @@ def test_meta_service_list_by_category():
     svc = MetaService()
 
     business = svc.list_entities(category=EntityCategory.BUSINESS)
-    assert len(business) == 14
+    assert len(business) == 22
     assert all(s.category == EntityCategory.BUSINESS for s in business)
 
     sync_infra = svc.list_entities(category=EntityCategory.SYNC_INFRA)
-    assert len(sync_infra) == 3
+    assert len(sync_infra) == 5
 
     meta = svc.list_entities(category=EntityCategory.META)
-    assert len(meta) == 2
+    assert len(meta) == 3
 
     setting = svc.list_entities(category=EntityCategory.SETTING)
     assert len(setting) == 1
 
-    # No filter -> all 20 entities.
+    # No filter -> all 31 entities.
     all_entities = svc.list_entities()
-    assert len(all_entities) == 20
+    assert len(all_entities) == 31
 
 
 def test_meta_service_list_with_string_category():
     """list_entities accepts a string category and coerces it."""
     svc = MetaService()
     business = svc.list_entities(category="business")
-    assert len(business) == 14
+    assert len(business) == 22
 
 
 def test_meta_service_list_invalid_category_raises_validation_error():
@@ -81,9 +81,9 @@ def test_meta_service_get_entity_returns_full_spec():
 def test_meta_service_get_schema_returns_dict():
     """get_schema returns a code-generator-friendly dict."""
     svc = MetaService()
-    schema = svc.get_schema("task")
-    assert schema["entity_type"] == "task"
-    assert schema["table_name"] == "tasks"
+    schema = svc.get_schema("habit")
+    assert schema["entity_type"] == "habit"
+    assert schema["table_name"] == "habits"
     assert schema["primary_key"] == "id"
     assert isinstance(schema["fields"], list)
     assert len(schema["fields"]) > 0
@@ -104,11 +104,11 @@ def test_meta_service_health_returns_correct_structure():
     svc = MetaService()
     h = svc.health()
     assert h["registry_loaded"] is True
-    assert h["entity_count"] == 20
+    assert h["entity_count"] == 31
     assert isinstance(h["categories"], dict)
-    assert h["categories"]["business"] == 14
-    assert h["categories"]["sync_infra"] == 3
-    assert h["categories"]["meta"] == 2
+    assert h["categories"]["business"] == 22
+    assert h["categories"]["sync_infra"] == 5
+    assert h["categories"]["meta"] == 3
     assert h["categories"]["setting"] == 1
 
 
@@ -128,12 +128,61 @@ def test_meta_service_list_sync_enabled_and_soft_delete():
     """list_sync_enabled / list_soft_delete return the expected subsets."""
     svc = MetaService()
     sync_enabled = svc.list_sync_enabled()
-    assert len(sync_enabled) == 14
+    assert len(sync_enabled) == 22
     assert {s.name for s in sync_enabled} == {
-        "task", "session", "note", "folder", "quick_note", "reflection",
-        "habit", "habit_check_in", "schedule", "time_block", "memo_comment",
-        "session_quick_note", "schedule_quick_note", "task_quick_note",
+        "note", "folder", "quick_note", "reflection",
+        "habit", "habit_check_in", "schedule", "time_block",
+        "memo_comment", "schedule_quick_note",
+        "project", "status_definition", "type_definition", "label",
+        "work_item_label", "work_item", "work_item_note",
+        "focus_session", "session_task_context",
+        "session_attribution_revision", "session_work_item_plan",
+        "session_work_item_outcome",
     }
 
     soft_delete = svc.list_soft_delete()
     assert {s.name for s in soft_delete} == {"note", "folder", "quick_note"}
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — Task Space entity metadata parity
+# --------------------------------------------------------------------------- #
+
+TASK_SPACE_ENTITY_NAMES = frozenset({
+    "project",
+    "status_definition",
+    "type_definition",
+    "label",
+    "work_item_label",
+    "work_item",
+    "work_item_note",
+    "focus_session",
+    "session_task_context",
+    "session_attribution_revision",
+    "session_work_item_plan",
+    "session_work_item_outcome",
+})
+
+
+def test_meta_service_task_space_entities_resolvable():
+    """Every Task Space entity must be resolvable via MetaService.get_entity."""
+    svc = MetaService()
+    for name in TASK_SPACE_ENTITY_NAMES:
+        spec = svc.get_entity(name)
+        assert spec.name == name
+        assert spec.category == EntityCategory.BUSINESS
+        assert spec.sync_enabled is True
+
+
+def test_meta_service_task_space_entities_have_sync_enabled():
+    """All Task Space entities must appear in list_sync_enabled()."""
+    svc = MetaService()
+    sync_names = {s.name for s in svc.list_sync_enabled()}
+    assert TASK_SPACE_ENTITY_NAMES <= sync_names
+
+
+def test_meta_service_legacy_task_entity_not_resolvable():
+    """The legacy 'task' entity must not be resolvable via MetaService."""
+    svc = MetaService()
+    with pytest.raises(NotFoundError):
+        svc.get_entity("task")

@@ -2,9 +2,9 @@
 
 Does NOT import FastAPI.  Only flushes, never commits.
 """
-
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -59,24 +59,31 @@ class QuickNoteService(BaseService):
             await self.db.execute(select(func.count()).select_from(q.subquery()))
         ).scalar() or 0
         # Pinned first, then newest.
-        q = q.order_by(QuickNote.pinned.desc(), QuickNote.created_at.desc())
+        q = q.order_by(QuickNote.pinned.desc(), QuickNote.created_at.desc(), QuickNote.id.desc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()
         return rows, total
 
     async def convert(
-        self, id: str, *, note_service: "NoteService"
+        self,
+        id: str,
+        *,
+        note_service: "NoteService",
+        store: Any | None = None,
+        scope: Any | None = None,
     ) -> dict[str, Any]:
         """Convert a QuickNote into a full Note (transactional).
 
-        - Creates a Note with the quick note's content + tags + folder_id.
-        - Sets ``archived_at`` + ``migrated_to_note_id`` on the quick note
-          (the quick note row is kept for reference but excluded from
-          listings via ``list()`` filter).
-        - Copies ``memo_comments`` rows: the new rows point to ``note.id``,
-          the original rows are preserved (their ``note_id`` still refers
-          to the quick note id).
+        When *store* and *scope* are provided, delegates to
+        ``KnowledgeStore.convert_quick_note`` which routes the entire
+        conversion (note create + quick note archive + memo comment
+        copies) through the durable mutation pipeline as one atomic
+        batch.  This ensures sync events, projections, and journal
+        entries are created atomically.
+
+        Without *store*/*scope*, falls back to the legacy direct ORM
+        path (used by service-layer tests that don't have a runtime).
 
         Raises:
             NotFoundError: quick note missing (via ``self.get``).
@@ -93,6 +100,31 @@ class QuickNoteService(BaseService):
         if qn.archived_at is not None or qn.migrated_to_note_id is not None:
             raise ConflictError(f"QuickNote {id} already converted")
 
+        # ── Durable path: delegate to KnowledgeStore ──
+        if store is not None and scope is not None:
+            import uuid
+
+            operation_id = f"convert:quick_note:{id}:{uuid.uuid4().hex[:16]}"
+            await store.convert_quick_note(
+                scope, id, qn.version, operation_id,
+            )
+            # Compute deterministic note_id (same algorithm as store).
+            note_id = hashlib.sha256(
+                f"{operation_id}\0note".encode("ascii")
+            ).hexdigest()[:32]
+            # Count memo comments for the response.
+            comments = (
+                await self.db.execute(
+                    select(MemoComment).where(MemoComment.note_id == id)
+                )
+            ).scalars().all()
+            return {
+                "note_id": note_id,
+                "quick_note_id": id,
+                "migrated_comments_count": len(comments),
+            }
+
+        # ── Legacy path: direct ORM (service-layer tests) ──
         tags = json.loads(qn.tags) if qn.tags else []
         raw = (qn.content or "").strip()
         if raw:
@@ -117,6 +149,7 @@ class QuickNoteService(BaseService):
             entity_id=qn.id,
             action="update",
             payload=serialize_entity(qn),
+            visible=True,
         )
 
         # Copy memo_comments (note_id points to new Note.id; originals kept).
@@ -140,6 +173,7 @@ class QuickNoteService(BaseService):
                     entity_id=copied.id,
                     action="create",
                     payload=serialize_entity(copied),
+                    visible=True,
                 )
 
         return {

@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import pytest
 
+from tests.sync_v2_helpers import pull_sync_v2, ready_sync_v2_client
+
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 async def _make_fs_for_sync(tmp_path):
     """Helper: create a FileSystem instance for sync tests."""
@@ -233,9 +237,10 @@ async def _setup_login_and_space_token(client) -> str:
 
 @pytest.mark.asyncio
 async def test_rest_note_create_then_pull_returns_same_content(client):
-    """REST POST /notes → GET /sync/pull should return the same content."""
+    """REST POST /notes then Sync v2 pull returns the same content."""
     space_token = await _setup_login_and_space_token(client)
     headers = {"Authorization": f"Bearer {space_token}"}
+    client_id = await ready_sync_v2_client(client, headers)
 
     # Create a note via REST.
     resp = await client.post(
@@ -251,15 +256,14 @@ async def test_rest_note_create_then_pull_returns_same_content(client):
     note_id = resp.json()["id"]
 
     # Pull via sync — content must be present.
-    resp = await client.get(
-        "/api/v1/sync/pull?since=&limit=100", headers=headers
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    notes = data["notes"]
-    matching = [n for n in notes if n["id"] == note_id]
+    data = await pull_sync_v2(client, headers, client_id)
+    matching = [
+        event
+        for event in data["events"]
+        if event["entity_type"] == "note" and event["entity_id"] == note_id
+    ]
     assert len(matching) == 1, (
-        f"note {note_id} not in pull notes: {[n['id'] for n in notes]}"
+        f"note {note_id} not in pull events: "
+        f"{[event['entity_id'] for event in data['events']]}"
     )
-    assert matching[0]["content"] == "REST body content"
-    assert matching[0]["content_missing"] is False
+    assert matching[0]["payload"]["content"] == "REST body content"

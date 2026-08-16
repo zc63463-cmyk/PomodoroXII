@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.errors import NotFoundError, ValidationError
-from app.registry import REGISTRY
+from app.registry import CATALOG
 from app.registry.entities import EntityCategory, EntitySpec
 
 
@@ -22,7 +22,7 @@ class MetaService:
     """Read-only query facade over the global ``REGISTRY`` singleton."""
 
     def __init__(self) -> None:
-        self.registry = REGISTRY
+        self.registry = CATALOG
 
     # ------------------------------------------------------------------ #
     # Listing queries
@@ -90,6 +90,8 @@ class MetaService:
             "registry_loaded": len(self.registry) > 0,
             "entity_count": len(self.registry),
             "categories": cats,
+            "catalog_version": self.registry.version,
+            "catalog_hash": self.registry.hash,
         }
 
     # ------------------------------------------------------------------ #
@@ -114,6 +116,7 @@ class MetaService:
             "fields": [MetaService._field_dict(f) for f in spec.fields],
             "sync_entity_type": spec.sync_entity_type,
             "pull_key": spec.pull_key,
+            "sync_conflict_policy": spec.sync_conflict_policy,
         }
 
     @staticmethod

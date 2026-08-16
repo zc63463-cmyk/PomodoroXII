@@ -75,6 +75,7 @@ describe('api.ts interceptors', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   // -------- Test 1: T30 单飞 --------
@@ -195,5 +196,108 @@ describe('api.ts interceptors', () => {
     expect(tokenStorageMock.clearSpace).toHaveBeenCalledTimes(1)
     expect(tokenStorageMock.clearAll).not.toHaveBeenCalled()
     expect(window.location.href).toBe('/select-space')
+  })
+
+  // -------- S3-Task10: Idempotency-Key tests --------
+  it('T31: POST gets Idempotency-Key header', async () => {
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      expect(config.headers?.get('Idempotency-Key')).toBeTruthy()
+      return makeResponse(200, { ok: true }, config)
+    }
+    await spaceApi.post('/tasks', { title: 'test' })
+  })
+
+  it('T31b: GET does not get Idempotency-Key header', async () => {
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      expect(config.headers?.get('Idempotency-Key')).toBeFalsy()
+      return makeResponse(200, { ok: true }, config)
+    }
+    await spaceApi.get('/tasks')
+  })
+
+  it('T32: lowercase idempotency-key header is preserved (case-insensitive)', async () => {
+    const presetKey = 'preset-uuid-123'
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const key = config.headers?.get('Idempotency-Key')
+      expect(key).toBe(presetKey)
+      return makeResponse(200, { ok: true }, config)
+    }
+    await spaceApi.post('/tasks', { title: 'test' }, { headers: { 'idempotency-key': presetKey } })
+  })
+
+  it('T33: 401 retry reuses the same Idempotency-Key', async () => {
+    tokenStorageMock.getMasterToken.mockReturnValue('master-xxx')
+    tokenStorageMock.getCurrentSpaceId.mockReturnValue('space-1')
+    tokenStorageMock.getSpaceToken.mockReturnValue('expired-token')
+
+    const keys: (string | undefined)[] = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const key = config.headers?.get('Idempotency-Key') as string | undefined
+      keys.push(key)
+      const auth = config.headers?.Authorization ?? ''
+      if (auth === 'Bearer expired-token') {
+        throw makeError(401, config)
+      }
+      return makeResponse(200, { ok: true }, config)
+    }
+
+    axiosPostSpy.mockResolvedValue({ data: { space_token: 'new-token' } })
+
+    await spaceApi.post('/tasks', { title: 'test' })
+
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBeDefined()
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('T34: Cloudflare 522 retry reuses the same Idempotency-Key', async () => {
+    vi.useFakeTimers()
+    const keys: (string | undefined)[] = []
+    spaceApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const key = config.headers?.get('Idempotency-Key') as string | undefined
+      keys.push(key)
+      if (keys.length === 1) {
+        throw makeError(522, config)
+      }
+      return makeResponse(200, { ok: true }, config)
+    }
+
+    const promise = spaceApi.post('/tasks', { title: 'test' })
+    await vi.advanceTimersByTimeAsync(3000)
+    await promise
+
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBeDefined()
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('T35: metaApi POST gets an Idempotency-Key header', async () => {
+    metaApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      expect(config.headers?.get('Idempotency-Key')).toBeTruthy()
+      return makeResponse(200, { ok: true }, config)
+    }
+
+    await metaApi.post('/spaces', { name: 'Test space' })
+  })
+
+  it('T36: metaApi Cloudflare retry reuses the same Idempotency-Key', async () => {
+    vi.useFakeTimers()
+    const keys: (string | undefined)[] = []
+    metaApi.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
+      const key = config.headers?.get('Idempotency-Key') as string | undefined
+      keys.push(key)
+      if (keys.length === 1) {
+        throw makeError(522, config)
+      }
+      return makeResponse(200, { ok: true }, config)
+    }
+
+    const promise = metaApi.delete('/spaces/space-1')
+    await vi.advanceTimersByTimeAsync(3000)
+    await promise
+
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBeDefined()
+    expect(keys[1]).toBe(keys[0])
   })
 })

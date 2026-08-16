@@ -1,4 +1,4 @@
-"""RelationService -- link/unlink quick notes to tasks, sessions, schedules.
+"""RelationService -- link/unlink quick notes to schedules.
 
 Does NOT import FastAPI.  Only flushes, never commits.
 
@@ -17,8 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ValidationError
 from app.models.schedule_quick_note import ScheduleQuickNote
-from app.models.session_quick_note import SessionQuickNote
-from app.models.task_quick_note import TaskQuickNote
 from app.services.serializers import serialize_entity
 from app.services.sync_outbox import record_sync_event
 
@@ -27,21 +25,15 @@ class RelationService:
     """Manage many-to-many links between quick notes and parent entities.
 
     Supported kinds:
-      - ``"task"``     -> TaskQuickNote     (parent column: ``task_id``)
-      - ``"session"``  -> SessionQuickNote  (parent column: ``session_id``)
       - ``"schedule"`` -> ScheduleQuickNote (parent column: ``schedule_id``)
     """
 
     _KIND_MAP: dict[str, tuple[type, str]] = {
-        "task": (TaskQuickNote, "task_id"),
-        "session": (SessionQuickNote, "session_id"),
         "schedule": (ScheduleQuickNote, "schedule_id"),
     }
 
     # Maps internal kind -> sync ENTITY_REGISTRY entity_type string.
     _KIND_TO_ENTITY_TYPE: dict[str, str] = {
-        "task": "taskQuickNote",
-        "session": "sessionQuickNote",
         "schedule": "scheduleQuickNote",
     }
 
@@ -86,6 +78,7 @@ class RelationService:
                     entity_id=row.id,
                     action="create",
                     payload=serialize_entity(row),
+                    visible=True,
                 )
             return row
         except IntegrityError:
@@ -131,6 +124,7 @@ class RelationService:
                 entity_type=entity_type,
                 entity_id=entity_id,
                 action="delete",
+                visible=True,
             )
 
     async def list_quick_notes(self, kind: str, parent_id: str) -> list[Any]:

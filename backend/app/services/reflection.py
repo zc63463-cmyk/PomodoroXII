@@ -14,10 +14,8 @@ from app.services.base import BaseService
 
 # Fields stored as JSON-serialised strings in SQLite.
 _JSON_LIST_FIELDS = (
-    "related_task_ids",
     "tags",
     "sections",
-    "auto_linked_session_ids",
 )
 
 
@@ -48,7 +46,7 @@ class ReflectionService(BaseService):
         total = (
             await self.db.execute(select(func.count()).select_from(q.subquery()))
         ).scalar() or 0
-        q = q.order_by(Reflection.date.desc())
+        q = q.order_by(Reflection.date.desc(), Reflection.id.desc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()

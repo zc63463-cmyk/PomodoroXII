@@ -55,20 +55,19 @@ def test_stat_specs_covers_all_rest_endpoints():
     )
 
 
-def test_daily_detail_mcp_tool_exists():
-    """daily_detail must have a corresponding MCP tool (regression guard).
-
-    REST /stats/daily-detail previously existed without an MCP equivalent.
-    This test ensures the drift does not recur.
-    """
+def test_removed_legacy_stats_tools_stay_absent():
+    """Legacy Task/Session statistics must not leak through MCP."""
     skip_if_mcp_unavailable()
 
     import app.mcp.server as mcp_module
 
-    assert hasattr(mcp_module, "get_daily_detail"), (
-        "MCP server missing get_daily_detail tool "
-        "(REST /daily-detail has no MCP equivalent)"
-    )
+    removed = {
+        "get_stats_overview",
+        "get_focus_trend",
+        "get_task_distribution",
+        "get_daily_detail",
+    }
+    assert not {name for name in removed if hasattr(mcp_module, name)}
 
 
 def test_mcp_tools_consistent_with_registration():
@@ -91,3 +90,11 @@ def test_mcp_tools_consistent_with_registration():
         f"MCP registered stats tools drift from STAT_SPECS: "
         f"missing={expected - actual}, extra={actual - expected}"
     )
+
+
+def test_sync_catalog_tools_are_not_classified_as_stats_tools():
+    """The complete Sync v2 adapter must not widen the stats catalog."""
+    from app.sync.operations import SYNC_OPERATIONS
+
+    sync_tools = {spec.mcp_tool for spec in SYNC_OPERATIONS}
+    assert get_actual_stats_mcp_tools().isdisjoint(sync_tools)

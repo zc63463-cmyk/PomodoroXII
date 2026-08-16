@@ -40,7 +40,7 @@ class HabitService(BaseService):
         total = (
             await self.db.execute(select(func.count()).select_from(q.subquery()))
         ).scalar() or 0
-        q = q.order_by(Habit.sort_order.asc())
+        q = q.order_by(Habit.sort_order.asc(), Habit.id.asc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()
@@ -67,7 +67,7 @@ class HabitCheckInService(BaseService):
         total = (
             await self.db.execute(select(func.count()).select_from(q.subquery()))
         ).scalar() or 0
-        q = q.order_by(HabitCheckIn.date.desc())
+        q = q.order_by(HabitCheckIn.date.desc(), HabitCheckIn.id.desc())
         rows = (
             await self.db.execute(q.offset(offset).limit(limit))
         ).scalars().all()

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PomodoroXIDB } from '@/services/database'
+import { INITIAL_S4_OUTBOX_FIELDS, type PomodoroXIDB } from '@/services/database'
+import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
 import {
   configureQuickNoteOutboxHook,
   resetQuickNoteOutboxHook,
@@ -12,6 +13,13 @@ import {
 } from '@/lib/quick-notes/quick-note-draft-repository'
 
 const UPDATED_AT = '2026-07-10T04:00:00.000Z'
+const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+
+class FakeLockManager {
+  request<T>(_name: string, _options: { mode: 'exclusive' }, callback: () => Promise<T>): Promise<T> {
+    return callback()
+  }
+}
 
 function createSnapshot(
   draftId: string,
@@ -39,15 +47,17 @@ describe('quick-note-draft-repository', () => {
   let dbB: PomodoroXIDB
 
   beforeEach(async () => {
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: new FakeLockManager() })
     resetQuickNoteOutboxHook()
-    dbA = new PomodoroXIDB(`quick-note-draft-a-${crypto.randomUUID()}`)
-    dbB = new PomodoroXIDB(`quick-note-draft-b-${crypto.randomUUID()}`)
-    await Promise.all([dbA.open(), dbB.open()])
+    dbA = await openPomodoroXIDB(`quick-note-draft-a-${crypto.randomUUID()}`)
+    dbB = await openPomodoroXIDB(`quick-note-draft-b-${crypto.randomUUID()}`)
   })
 
   afterEach(async () => {
     resetQuickNoteOutboxHook()
     await Promise.all([dbA.delete(), dbB.delete()])
+    if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks)
+    else Reflect.deleteProperty(navigator, 'locks')
   })
 
   describe('owner-aware Dexie adapter', () => {
@@ -200,7 +210,6 @@ describe('quick-note-draft-repository', () => {
         pinned: false,
         archived_at: null,
         archive_file_path: null,
-        session_id: null,
         folder_id: null,
         trashed_at: null,
         migrated_to_note_id: null,
@@ -222,12 +231,25 @@ describe('quick-note-draft-repository', () => {
         entityId: snapshot.draftId,
         action: 'create',
         payload: JSON.stringify(note),
-        createdAt: expect.any(Number),
+        createdAt: expect.any(String),
         synced: false,
+        spaceId: dbA.spaceId,
+        payloadHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        compoundOperationId: null,
+        compoundOrder: null,
         lastError: null,
         lastErrorCode: null,
         failedAt: null,
         attemptCount: 0,
+        operationId: expect.any(String),
+        expectedVersion: null,
+        requiresVersionRebase: false,
+        transportState: 'ready',
+        serverOutcomeCanonicalBase64: null,
+        retryable: false,
+        nextAttemptAt: null,
+        retryPredecessorOperationId: null,
+        retrySuccessorOperationId: null,
       }])
       expect(await getRawDraft(dbA)).toBeUndefined()
     })
@@ -345,16 +367,25 @@ describe('quick-note-draft-repository', () => {
       const raw = await getRawDraft(dbA)
       configureQuickNoteOutboxHook(async () => {
         await dbA.outbox.add({
+          spaceId: dbA.spaceId,
           entityType: 'quickNote',
           entityId: snapshot.draftId,
           action: 'create',
           payload: JSON.stringify({ id: snapshot.draftId, content: snapshot.content }),
-          createdAt: Date.now(),
+          createdAt: '2026-07-06T00:00:00.000Z',
           synced: false,
+          payloadHash: '0'.repeat(64),
+          compoundOperationId: null,
+          compoundOrder: null,
           lastError: null,
           lastErrorCode: null,
           failedAt: null,
           attemptCount: 0,
+          ...INITIAL_S4_OUTBOX_FIELDS,
+          operationId: 'op-qn-delayed-hook',
+          expectedVersion: null,
+          requiresVersionRebase: false,
+          transportState: 'ready',
         })
         await new Promise<void>((resolve) => setTimeout(resolve, 0))
         throw new Error('delayed custom hook failed')

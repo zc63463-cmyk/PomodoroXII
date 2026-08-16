@@ -10,6 +10,15 @@ Uses conftest.py's async `client` fixture (httpx.AsyncClient).
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
+from app.main import app
+from app.models.work_item import WorkItem
+
+pytestmark = pytest.mark.provisioned_space_storage
+
 HTTP_METHODS = (
     "get",
     "put",
@@ -27,6 +36,8 @@ PUBLIC_OPERATIONS = {
     ("GET", "/api/ready"),
 }
 ERROR_RESPONSE_REF = "#/components/schemas/ErrorResponse"
+CANONICAL_ERROR_RESPONSE_REF = "#/components/schemas/CanonicalErrorResponse"
+CANONICAL_ERROR_MEDIA_TYPE = "application/vnd.pomodoroxii.error+json;version=2"
 REQUEST_VALIDATION_ERROR_RESPONSE_REF = (
     "#/components/schemas/RequestValidationErrorResponse"
 )
@@ -65,9 +76,9 @@ def _is_error_status(status) -> bool:
 
 
 async def _space_auth_headers(client) -> dict[str, str]:
-    setup = await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    setup = await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     assert setup.status_code == 201
-    login = await client.post("/api/v1/auth/login", json={"password": "test123"})
+    login = await client.post("/api/v1/auth/login", json={"password": "test-password-123"})
     assert login.status_code == 200
     master_headers = {
         "Authorization": f"Bearer {login.json()['access_token']}"
@@ -151,11 +162,11 @@ class TestBearerSecurityScheme:
             f"{create_security}"
         )
 
-        # /api/v1/tasks (POST) requires space token
-        create_task = paths.get("/api/v1/tasks", {}).get("post", {})
-        create_security = create_task.get("security", [])
+        # /api/v1/habits (POST) requires space token
+        create_habit = paths.get("/api/v1/habits", {}).get("post", {})
+        create_security = create_habit.get("security", [])
         assert create_security == PROTECTED_SECURITY, (
-            "POST /api/v1/tasks must have exact HTTPBearer security: "
+            "POST /api/v1/habits must have exact HTTPBearer security: "
             f"{create_security}"
         )
 
@@ -229,7 +240,7 @@ class TestValidationEnvelope:
         """FastAPI records a wrong request Content-Type as a 422 JSON validation error."""
         resp = await client.post(
             "/api/v1/auth/setup",
-            content='{"password":"test123"}',
+            content='{"password":"test-password-123"}',
             headers={"Content-Type": "text/plain"},
         )
 
@@ -249,20 +260,36 @@ class TestOpenAPIContractGate:
     """B4: Structural OpenAPI assertions to prevent contract regressions."""
 
     async def test_paths_count_is_stable(self, client):
-        """OpenAPI must keep at least the existing 51 paths."""
+        """OpenAPI must keep the 47 paths remaining after the TS0 cutover."""
         resp = await client.get("/openapi.json")
         schema = resp.json()
         paths = schema.get("paths", {})
-        assert len(paths) >= 51, f"Got {len(paths)} paths, expected at least 51"
+        assert len(paths) >= 47, f"Got {len(paths)} paths, expected at least 47"
 
     async def test_operations_count_is_stable(self, client):
-        """OpenAPI must keep at least the existing 83 operations."""
+        """OpenAPI must keep the 73 operations remaining after the cutover."""
         resp = await client.get("/openapi.json")
         schema = resp.json()
         operations = list(_iter_operations(schema))
-        assert len(operations) >= 83, (
-            f"Got {len(operations)} operations, expected at least 83"
+        assert len(operations) >= 73, (
+            f"Got {len(operations)} operations, expected at least 73"
         )
+
+    async def test_sync_cutover_exposes_only_v2_operation_set(self, client):
+        schema = (await client.get("/openapi.json")).json()
+        sync_operations = {
+            (method, path)
+            for method, path, _operation in _iter_operations(schema)
+            if path.startswith("/api/v1/sync/")
+        }
+        assert sync_operations == {
+            ("POST", "/api/v1/sync/v2/operations/query"),
+            ("POST", "/api/v1/sync/v2/push"),
+            ("GET", "/api/v1/sync/v2/pull"),
+            ("GET", "/api/v1/sync/v2/recover"),
+            ("POST", "/api/v1/sync/v2/ack"),
+            ("GET", "/api/v1/sync/v2/status"),
+        }
 
     def test_error_status_detection_covers_numeric_and_range_keys(self):
         """Error response detection covers numeric statuses and OpenAPI ranges."""
@@ -375,9 +402,299 @@ class TestOpenAPIContractGate:
             "/api/v1/notes/{id}/versions/{version_id}",
         ):
             content = schema["paths"][path]["get"]["responses"]["422"]["content"]
-            assert set(content) == {"application/json"}, (
-                f"GET {path} must document 422 as application/json: {content}"
+            assert set(content) == {
+                "application/json",
+                CANONICAL_ERROR_MEDIA_TYPE,
+            }, (
+                f"GET {path} must document both error media types: {content}"
             )
             assert set(_schema_refs(content["application/json"]["schema"])) == (
                 STANDARD_ERROR_COMPONENTS
             )
+            assert set(_schema_refs(content[CANONICAL_ERROR_MEDIA_TYPE]["schema"])) == {
+                CANONICAL_ERROR_RESPONSE_REF
+            }
+
+
+# ─── Task 5: WorkItemNote v1 boundary absence gate ───────────────
+
+
+def test_v1_openapi_and_orm_have_no_richer_note_or_promotion_surface() -> None:
+    """WorkItemNote v1 must not expose richer blocks or promotion surfaces."""
+    schema = app.openapi()
+    serialized = json.dumps(schema, sort_keys=True)
+
+    assert not any(
+        path.endswith("/note/promote-list-item")
+        for path in schema["paths"]
+    )
+
+    for forbidden in (
+        '"heading"',
+        '"ordered_list"',
+        '"unordered_list"',
+        '"work_item_ref"',
+        '"PromoteListItem"',
+    ):
+        assert forbidden not in serialized
+
+    assert {
+        "source_note_id",
+        "source_block_id",
+        "source_item_id",
+    }.isdisjoint(WorkItem.__table__.columns.keys())
+
+
+# ─── Task 6: Task Space route presence and legacy absence gate ─────
+
+
+class TestTaskSpaceOpenAPIGate:
+    """Task Space routes must be present and legacy routes absent."""
+
+    def test_openapi_contains_task_space_project_routes(self) -> None:
+        schema = app.openapi()
+        paths = schema["paths"]
+        assert "/api/v1/projects" in paths
+        assert "get" in paths["/api/v1/projects"]
+        assert "post" in paths["/api/v1/projects"]
+        assert "/api/v1/projects/definitions" in paths
+        assert "/api/v1/projects/{project_id}" in paths
+
+    def test_openapi_contains_task_space_work_item_routes(self) -> None:
+        schema = app.openapi()
+        paths = schema["paths"]
+        assert "/api/v1/work-items" in paths
+        assert "get" in paths["/api/v1/work-items"]
+        assert "post" in paths["/api/v1/work-items"]
+        assert "/api/v1/work-items/{work_item_id}" in paths
+
+    def test_openapi_contains_task_space_note_routes(self) -> None:
+        schema = app.openapi()
+        paths = schema["paths"]
+        note_paths = {
+            path
+            for path in paths
+            if path.startswith("/api/v1/work-items/{work_item_id}/note")
+        }
+        assert (
+            "/api/v1/work-items/{work_item_id}/note" in note_paths
+        )
+        assert (
+            "/api/v1/work-items/{work_item_id}/note/append-blocks"
+            in note_paths
+        )
+        assert (
+            "/api/v1/work-items/{work_item_id}/note/toggle-checklist-item"
+            in note_paths
+        )
+
+    def test_openapi_excludes_legacy_tasks_route(self) -> None:
+        schema = app.openapi()
+        assert "/api/v1/tasks" not in schema["paths"]
+
+    def test_openapi_excludes_work_items_tree_route(self) -> None:
+        schema = app.openapi()
+        assert "/api/v1/work-items/tree" not in schema["paths"]
+        assert not any(
+            path.endswith("/work-items/tree")
+            for path in schema["paths"]
+        )
+
+    def test_openapi_excludes_generic_note_command_routes(self) -> None:
+        schema = app.openapi()
+        for path in schema["paths"]:
+            assert "/note/commands" not in path
+
+
+# ─── TS1 Task 7: Typed response schemas and camelCase serialization ─
+
+
+class TestTypedResponseSchemas:
+    """TS1 Task 7: Task Space routes must expose typed, independent response schemas."""
+
+    def test_project_response_is_independent_schema(self) -> None:
+        """ProjectResponse must be a named component with camelCase fields."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ProjectResponse"]
+        props = set(component["properties"])
+        assert props == {
+            "id", "spaceId", "key", "name", "description",
+            "nextWorkItemNumber", "rank", "archivedAt", "version",
+            "createdAt", "updatedAt",
+        }
+        assert set(component["required"]) == props
+        assert "next_work_item_number" not in props
+
+    def test_work_item_response_is_independent_schema(self) -> None:
+        """WorkItemResponse must be a named component with camelCase fields."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["WorkItemResponse"]
+        props = set(component["properties"])
+        assert props == {
+            "id", "spaceId", "displayKey", "projectId", "title",
+            "description", "typeDefinitionId", "statusDefinitionId",
+            "priority", "parentId", "childRank", "depth",
+            "completionWindowStart", "completionWindowEnd", "reviewPoint",
+            "hardDeadline", "effortEstimateLowerSeconds",
+            "effortEstimateUpperSeconds", "effortActualSeconds", "confidence",
+            "completedAt", "cancelledAt", "archivedAt", "markedAsAttention",
+            "version", "createdAt", "updatedAt",
+        }
+        assert set(component["required"]) == props
+        assert "display_key" not in props
+        assert "project_id" not in props
+
+    def test_work_item_note_response_is_independent_schema(self) -> None:
+        """WorkItemNoteResponse must be a named component with camelCase fields."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["WorkItemNoteResponse"]
+        props = set(component["properties"])
+        assert props == {
+            "spaceId", "noteId", "workItemId", "document", "version",
+            "createdAt", "updatedAt",
+        }
+        assert set(component["required"]) == props
+        assert "work_item_id" not in props
+        assert "content_version" not in props
+        assert "write_supported" not in props
+
+    def test_project_get_route_references_project_response(self) -> None:
+        """GET /api/v1/projects/{project_id} must return ProjectResponse."""
+        schema = app.openapi()
+        response_schema = (
+            schema["paths"]["/api/v1/projects/{project_id}"]["get"]
+            ["responses"]["200"]["content"]["application/json"]["schema"]
+        )
+        assert response_schema == {"$ref": "#/components/schemas/ProjectResponse"}
+
+    def test_work_item_get_route_references_work_item_response(self) -> None:
+        """GET /api/v1/work-items/{work_item_id} must return WorkItemResponse."""
+        schema = app.openapi()
+        response_schema = (
+            schema["paths"]["/api/v1/work-items/{work_item_id}"]["get"]
+            ["responses"]["200"]["content"]["application/json"]["schema"]
+        )
+        assert response_schema == {"$ref": "#/components/schemas/WorkItemResponse"}
+
+    def test_note_get_route_references_work_item_note_response(self) -> None:
+        """GET /api/v1/work-items/{work_item_id}/note must return WorkItemNoteResponse."""
+        schema = app.openapi()
+        response_schema = (
+            schema["paths"]["/api/v1/work-items/{work_item_id}/note"]["get"]
+            ["responses"]["200"]["content"]["application/json"]["schema"]
+        )
+        assert response_schema == {"$ref": "#/components/schemas/WorkItemNoteResponse"}
+
+    def test_project_page_response_uses_typed_items(self) -> None:
+        """ProjectPageResponse.items must reference ProjectResponse, not generic dict."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ProjectPageResponse"]
+        items = component["properties"]["items"]
+        assert items["type"] == "array"
+        assert items["items"] == {"$ref": "#/components/schemas/ProjectResponse"}
+
+    def test_work_item_page_response_uses_typed_items(self) -> None:
+        """WorkItemPageResponse.items must reference WorkItemResponse, not generic dict."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["WorkItemPageResponse"]
+        items = component["properties"]["items"]
+        assert items["type"] == "array"
+        assert items["items"] == {"$ref": "#/components/schemas/WorkItemResponse"}
+
+    def test_paragraph_block_is_independent_schema(self) -> None:
+        """ParagraphBlock must be a named component with camelCase blockId."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ParagraphBlock"]
+        props = set(component["properties"])
+        assert props == {"type", "blockId", "text"}
+        assert "block_id" not in props
+
+    def test_checklist_block_is_independent_schema(self) -> None:
+        """ChecklistBlock must be a named component with camelCase blockId."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ChecklistBlock-Output"]
+        props = set(component["properties"])
+        assert props == {"type", "blockId", "items"}
+        assert "block_id" not in props
+
+    def test_checklist_item_uses_camel_case_fields(self) -> None:
+        """ChecklistItem must use camelCase itemId, not snake_case."""
+        schema = app.openapi()
+        component = schema["components"]["schemas"]["ChecklistItem-Output"]
+        props = set(component["properties"])
+        assert "itemId" in props
+        assert "item_id" not in props
+
+    def test_note_document_uses_camel_case_content_version(self) -> None:
+        """WorkItemNoteDocumentV1 must use camelCase contentVersion in properties."""
+        schema = app.openapi()
+        for name, component in schema["components"]["schemas"].items():
+            props = component.get("properties", {})
+            if "contentVersion" in props:
+                assert "content_version" not in props, (
+                    f"{name} must use camelCase contentVersion, not content_version"
+                )
+
+    def test_three_canonical_note_command_routes_exist(self) -> None:
+        """The three canonical Note command routes must be present."""
+        schema = app.openapi()
+        paths = schema["paths"]
+        assert "put" in paths["/api/v1/work-items/{work_item_id}/note"]
+        assert "post" in paths[
+            "/api/v1/work-items/{work_item_id}/note/append-blocks"
+        ]
+        assert "post" in paths[
+            "/api/v1/work-items/{work_item_id}/note/toggle-checklist-item"
+        ]
+
+
+# ─── TS1 Task 7: Idempotency and session behavior non-regression ──
+
+
+class TestIdempotencyNonRegression:
+    """TS1 Task 7: idempotency_conflict and session behavior must not regress."""
+
+    def test_idempotency_conflict_remains_registered(self) -> None:
+        """idempotency_conflict must still be in MUTATION_REJECTION_SPECS."""
+        from app.errors import MUTATION_REJECTION_SPECS
+
+        assert "idempotency_conflict" in MUTATION_REJECTION_SPECS
+
+    def test_space_scope_mismatch_remains_registered(self) -> None:
+        """space_scope_mismatch must still be in MUTATION_REJECTION_SPECS."""
+        from app.errors import MUTATION_REJECTION_SPECS
+
+        assert "space_scope_mismatch" in MUTATION_REJECTION_SPECS
+
+    def test_idempotency_conflict_not_in_compiler_producer_set(self) -> None:
+        """idempotency_conflict must NOT appear in compiler.py's producer set."""
+        from pathlib import Path
+
+        from tests.ast_helpers import literal_exception_codes
+
+        backend_root = Path(__file__).resolve().parents[1]
+        compiler_path = backend_root / "app" / "task_space" / "compiler.py"
+        raw_producer = literal_exception_codes(compiler_path, "MutationRuleViolation")
+        assert "idempotency_conflict" not in raw_producer
+
+    def test_space_scope_mismatch_in_compiler_producer_set(self) -> None:
+        """space_scope_mismatch MUST appear in compiler.py's producer set."""
+        from pathlib import Path
+
+        from tests.ast_helpers import literal_exception_codes
+
+        backend_root = Path(__file__).resolve().parents[1]
+        compiler_path = backend_root / "app" / "task_space" / "compiler.py"
+        raw_producer = literal_exception_codes(compiler_path, "MutationRuleViolation")
+        assert "space_scope_mismatch" in raw_producer
+
+    def test_idempotency_conflict_in_unit_of_work_producer_set(self) -> None:
+        """idempotency_conflict must appear in unit_of_work.py's producer set."""
+        from pathlib import Path
+
+        from tests.ast_helpers import literal_exception_codes
+
+        backend_root = Path(__file__).resolve().parents[1]
+        uow_path = backend_root / "app" / "mutation" / "unit_of_work.py"
+        raw_producer = literal_exception_codes(uow_path, "MutationRuleViolation")
+        assert "idempotency_conflict" in raw_producer

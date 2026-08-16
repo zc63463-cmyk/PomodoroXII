@@ -119,35 +119,31 @@ def test_sanitize_zero_time_preserves_real_timestamp():
 
 def test_serialize_entity_converts_orm_to_dict_with_tags_parsed(space_session):
     """serialize_entity should extract columns and parse tags JSON to list."""
-    from app.models.task import Task
+    from app.models.quick_note import QuickNote
     from app.services.sync_safety import serialize_entity
 
-    task = Task(
+    qn = QuickNote(
         id="ser-1",
-        title="Serialize me",
-        status="todo",
-        priority="medium",
+        content="Serialize me",
         tags='["work","urgent"]',
     )
-    d = serialize_entity(task)
+    d = serialize_entity(qn)
     assert d["id"] == "ser-1"
-    assert d["title"] == "Serialize me"
+    assert d["content"] == "Serialize me"
     assert d["tags"] == ["work", "urgent"]
 
 
 def test_serialize_entity_handles_empty_tags(space_session):
     """serialize_entity should return [] for empty tags string."""
-    from app.models.task import Task
+    from app.models.quick_note import QuickNote
     from app.services.sync_safety import serialize_entity
 
-    task = Task(
+    qn = QuickNote(
         id="ser-2",
-        title="Empty tags",
-        status="todo",
-        priority="medium",
+        content="Empty tags",
         tags="",
     )
-    d = serialize_entity(task)
+    d = serialize_entity(qn)
     assert d["tags"] == []
 
 
@@ -158,15 +154,12 @@ def test_serialize_entity_handles_empty_tags(space_session):
 @pytest.mark.asyncio
 async def test_check_lww_conflict_returns_local_when_local_newer(space_session):
     """If local updated_at > remote_ts, conflict resolves to 'local'."""
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync_safety import check_lww_conflict
 
-    local = Task(
+    local = Habit(
         id="lww-1",
         title="Local",
-        status="todo",
-        priority="medium",
-        tags="[]",
         updated_at="2026-07-04T12:00:00.000Z",
     )
     decision = check_lww_conflict(local, "2026-07-04T10:00:00.000Z")
@@ -176,15 +169,12 @@ async def test_check_lww_conflict_returns_local_when_local_newer(space_session):
 @pytest.mark.asyncio
 async def test_check_lww_conflict_returns_remote_when_remote_newer(space_session):
     """If remote_ts > local updated_at, conflict resolves to 'remote'."""
-    from app.models.task import Task
+    from app.models.habit import Habit
     from app.services.sync_safety import check_lww_conflict
 
-    local = Task(
+    local = Habit(
         id="lww-2",
         title="Local",
-        status="todo",
-        priority="medium",
-        tags="[]",
         updated_at="2026-07-04T10:00:00.000Z",
     )
     decision = check_lww_conflict(local, "2026-07-04T12:00:00.000Z")
@@ -208,20 +198,9 @@ def test_strip_client_fields_removes_generic_and_protected():
         "created_at": "2020-01-01T00:00:00.000Z",
         "version": 5,
     }
-    stripped = strip_client_fields(data, "task")
+    stripped = strip_client_fields(data, "habit")
     assert stripped == {"title": "Keep"}
     assert data["title"] == "Keep"  # original unchanged
-
-
-def test_strip_client_fields_removes_entity_specific_task_fields():
-    """Task payloads should drop actual_pomodoros."""
-    from app.services.sync_safety import strip_client_fields
-
-    stripped = strip_client_fields(
-        {"title": "T", "actual_pomodoros": 3},
-        "task",
-    )
-    assert stripped == {"title": "T"}
 
 
 def test_strip_client_fields_removes_quick_note_client_fields():

@@ -19,9 +19,9 @@ import pytest
 
 async def _get_master_token(client) -> str:
     """Set up admin password and return a fresh master token."""
-    await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     resp = await client.post(
-        "/api/v1/auth/login", json={"password": "test123"}
+        "/api/v1/auth/login", json={"password": "test-password-123"}
     )
     return resp.json()["access_token"]
 
@@ -44,10 +44,10 @@ async def test_meta_health(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["registry_loaded"] is True
-    assert body["entity_count"] == 20
-    assert body["categories"]["business"] == 14
-    assert body["categories"]["sync_infra"] == 3
-    assert body["categories"]["meta"] == 2
+    assert body["entity_count"] == 31
+    assert body["categories"]["business"] == 22
+    assert body["categories"]["sync_infra"] == 5
+    assert body["categories"]["meta"] == 3
     assert body["categories"]["setting"] == 1
 
 
@@ -57,18 +57,19 @@ async def test_meta_health(client):
 
 @pytest.mark.asyncio
 async def test_meta_list_entities(client):
-    """GET /api/v1/meta/entities returns all 20 entities."""
+    """GET /api/v1/meta/entities returns the final 31-entry catalog."""
     token = await _get_master_token(client)
     resp = await client.get(
         "/api/v1/meta/entities", headers=_master_auth(token)
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["total"] == 20
-    assert len(body["entities"]) == 20
+    assert body["total"] == 31
+    assert len(body["entities"]) == 31
     names = {e["name"] for e in body["entities"]}
     assert "note" in names
-    assert "task" in names
+    assert "work_item" in names
+    assert "focus_session" in names
     assert "tombstone" in names
     assert "space" in names
     assert "setting" in names
@@ -84,7 +85,7 @@ async def test_meta_list_entities_filter_category(client):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["total"] == 14
+    assert body["total"] == 22
     assert all(e["category"] == "business" for e in body["entities"])
 
     # sync_infra filter
@@ -93,7 +94,7 @@ async def test_meta_list_entities_filter_category(client):
         headers=_master_auth(token),
     )
     assert resp.status_code == 200
-    assert resp.json()["total"] == 3
+    assert resp.json()["total"] == 5
 
     # meta filter
     resp = await client.get(
@@ -101,7 +102,7 @@ async def test_meta_list_entities_filter_category(client):
         headers=_master_auth(token),
     )
     assert resp.status_code == 200
-    assert resp.json()["total"] == 2
+    assert resp.json()["total"] == 3
 
 
 @pytest.mark.asyncio
@@ -161,15 +162,15 @@ async def test_meta_get_entity_unknown_404(client):
 
 @pytest.mark.asyncio
 async def test_meta_get_entity_schema(client):
-    """GET /api/v1/meta/entities/task/schema returns the field schema."""
+    """GET /api/v1/meta/entities/work_item/schema returns the field schema."""
     token = await _get_master_token(client)
     resp = await client.get(
-        "/api/v1/meta/entities/task/schema", headers=_master_auth(token)
+        "/api/v1/meta/entities/work_item/schema", headers=_master_auth(token)
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["entity_type"] == "task"
-    assert body["table_name"] == "tasks"
+    assert body["entity_type"] == "work_item"
+    assert body["table_name"] == "work_items"
     assert body["primary_key"] == "id"
     assert isinstance(body["fields"], list)
     assert len(body["fields"]) > 0
@@ -244,9 +245,8 @@ async def test_meta_serialize_includes_sync_entity_type(client):
     # quick_note has sync_entity_type='quickNote'
     qn = next(e for e in data["entities"] if e["name"] == "quick_note")
     assert qn["sync_entity_type"] == "quickNote"
-    # task has no explicit sync_entity_type (name == sync_entity_type), None
-    task = next(e for e in data["entities"] if e["name"] == "task")
-    assert task.get("sync_entity_type") is None
+    work_item = next(e for e in data["entities"] if e["name"] == "work_item")
+    assert work_item["sync_entity_type"] == "workItem"
 
 
 @pytest.mark.asyncio
@@ -260,5 +260,5 @@ async def test_meta_serialize_includes_pull_key(client):
     data = resp.json()
     qn = next(e for e in data["entities"] if e["name"] == "quick_note")
     assert qn["pull_key"] == "quickNotes"
-    task = next(e for e in data["entities"] if e["name"] == "task")
-    assert task["pull_key"] == "tasks"
+    work_item = next(e for e in data["entities"] if e["name"] == "work_item")
+    assert work_item["pull_key"] == "workItems"

@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.provisioned_space_storage
+
 
 def _response_schema(
     openapi: Mapping[str, Any],
@@ -51,9 +53,9 @@ async def _openapi(client) -> dict[str, Any]:
 
 
 async def _empty_space_headers(client) -> dict[str, str]:
-    setup = await client.post("/api/v1/auth/setup", json={"password": "test123"})
+    setup = await client.post("/api/v1/auth/setup", json={"password": "test-password-123"})
     assert setup.status_code == 201
-    login = await client.post("/api/v1/auth/login", json={"password": "test123"})
+    login = await client.post("/api/v1/auth/login", json={"password": "test-password-123"})
     assert login.status_code == 200
     master_headers = {
         "Authorization": f"Bearer {login.json()['access_token']}"
@@ -164,16 +166,38 @@ class TestCoreResponseSchemas:
         assert properties["rejected"].get("items") == {"type": "string"}
 
 
+class TestSyncV2ResponseSchemas:
+    @pytest.mark.parametrize(
+        ("method", "path", "component_name"),
+        [
+            ("post", "/api/v1/sync/v2/operations/query", "SyncV2OperationQueryResponse"),
+            ("post", "/api/v1/sync/v2/push", "SyncV2PushResponse"),
+            ("get", "/api/v1/sync/v2/pull", "SyncV2PullResponse"),
+            ("get", "/api/v1/sync/v2/recover", "SyncV2RecoveryResponse"),
+            ("post", "/api/v1/sync/v2/ack", "SyncV2AckResponse"),
+            ("get", "/api/v1/sync/v2/status", "SyncV2StatusResponse"),
+        ],
+    )
+    async def test_v2_responses_reference_strict_components(
+        self, client, method: str, path: str, component_name: str
+    ) -> None:
+        openapi = await _openapi(client)
+        _assert_component_ref(_response_schema(openapi, method, path), component_name)
+
+    async def test_legacy_sync_components_are_absent(self, client) -> None:
+        schemas = (await _openapi(client))["components"]["schemas"]
+        assert not {
+            "SyncEvent", "SyncPushRequest", "SyncPushResponse", "SyncPullResponse",
+            "SyncFullResponse", "SyncStatusResponse",
+        } & schemas.keys()
+
+
 class TestStatsResponseSchemas:
-    """All seven stats routes expose precise, reusable response components."""
+    """All three stats routes expose precise, reusable response components."""
 
     @pytest.mark.parametrize(
         ("path", "component_name"),
         [
-            ("/api/v1/stats/overview", "StatsOverviewResponse"),
-            ("/api/v1/stats/focus-trend", "FocusTrendResponse"),
-            ("/api/v1/stats/task-distribution", "TaskDistributionResponse"),
-            ("/api/v1/stats/daily-detail", "DailyDetailResponse"),
             ("/api/v1/stats/habit-summary", "HabitSummaryResponse"),
             ("/api/v1/stats/schedule-summary", "ScheduleSummaryResponse"),
             ("/api/v1/stats/note-summary", "NoteSummaryResponse"),
@@ -188,48 +212,9 @@ class TestStatsResponseSchemas:
         openapi = await _openapi(client)
         _assert_component_ref(_response_schema(openapi, "get", path), component_name)
 
-    async def test_overview_keeps_dynamic_typed_period_keys(self, client):
-        openapi = await _openapi(client)
-        overview = _component(openapi, "StatsOverviewResponse")
-        assert overview.get("type") == "object"
-        assert overview.get("additionalProperties") == {
-            "$ref": "#/components/schemas/CountDuration"
-        }
-        assert "properties" not in overview
-        _assert_object_fields(
-            _component(openapi, "CountDuration"),
-            {"count": "integer", "duration": "integer"},
-        )
-
     async def test_nested_stats_components_are_precise(self, client):
         openapi = await _openapi(client)
 
-        _assert_object_fields(
-            _component(openapi, "FocusTrendPoint"),
-            {"date": "string", "count": "integer", "duration": "integer"},
-        )
-        trend = _component(openapi, "FocusTrendResponse")
-        assert set(trend.get("required", [])) == {"data"}
-        assert trend["properties"]["data"].get("type") == "array"
-        _assert_component_ref(
-            trend["properties"]["data"].get("items", {}), "FocusTrendPoint"
-        )
-
-        distribution = _component(openapi, "TaskDistributionResponse")
-        assert set(distribution.get("required", [])) == {
-            "by_status",
-            "by_priority",
-        }
-        for field in ("by_status", "by_priority"):
-            assert distribution["properties"][field].get("type") == "object"
-            assert distribution["properties"][field].get("additionalProperties") == {
-                "type": "integer"
-            }
-
-        _assert_object_fields(
-            _component(openapi, "DailyDetailResponse"),
-            {"date": "string", "count": "integer", "duration": "integer"},
-        )
         _assert_object_fields(
             _component(openapi, "HabitSummaryItem"),
             {
@@ -278,45 +263,6 @@ class TestEmptySpaceStatsResponses:
     async def test_all_stats_routes_validate_documented_empty_shapes(self, client):
         headers = await _empty_space_headers(client)
 
-        overview = await client.get(
-            "/api/v1/stats/overview",
-            params={"periods": "custom-window"},
-            headers=headers,
-        )
-        assert overview.status_code == 200
-        assert overview.json() == {
-            "custom-window": {"count": 0, "duration": 0}
-        }
-
-        trend = await client.get(
-            "/api/v1/stats/focus-trend", params={"days": 7}, headers=headers
-        )
-        assert trend.status_code == 200
-        trend_body = trend.json()
-        assert set(trend_body) == {"data"}
-        assert len(trend_body["data"]) == 7
-        assert all(
-            set(point) == {"date", "count", "duration"}
-            and isinstance(point["date"], str)
-            and point["count"] == 0
-            and point["duration"] == 0
-            for point in trend_body["data"]
-        )
-
-        distribution = await client.get(
-            "/api/v1/stats/task-distribution", headers=headers
-        )
-        assert distribution.status_code == 200
-        assert distribution.json() == {"by_status": {}, "by_priority": {}}
-
-        daily = await client.get(
-            "/api/v1/stats/daily-detail",
-            params={"date": "2026-07-01"},
-            headers=headers,
-        )
-        assert daily.status_code == 200
-        assert daily.json() == {"date": "2026-07-01", "count": 0, "duration": 0}
-
         habit = await client.get(
             "/api/v1/stats/habit-summary", params={"days": 30}, headers=headers
         )
@@ -355,17 +301,6 @@ class TestPopulatedSpaceStatsResponses:
         headers = await _empty_space_headers(client)
         today = utc_now().date().isoformat()
 
-        task = await client.post(
-            "/api/v1/tasks",
-            json={
-                "title": "Contract task",
-                "status": "in_progress",
-                "priority": "high",
-            },
-            headers=headers,
-        )
-        assert task.status_code == 201
-
         habit = await client.post(
             "/api/v1/habits",
             json={"title": "Contract habit"},
@@ -381,27 +316,22 @@ class TestPopulatedSpaceStatsResponses:
         )
         assert check_in.status_code == 201
 
-        session = await client.post(
-            "/api/v1/sessions",
+        schedule = await client.post(
+            "/api/v1/schedules",
             json={
-                "type": "work",
-                "duration": 25,
-                "completed": True,
-                "started_at": f"{today}T10:00:00Z",
+                "title": "Contract schedule",
+                "due_at": "2099-12-31T23:59:59Z",
             },
             headers=headers,
         )
-        assert session.status_code == 201
+        assert schedule.status_code == 201
 
-        distribution = await client.get(
-            "/api/v1/stats/task-distribution",
+        note = await client.post(
+            "/api/v1/notes",
+            json={"title": "Contract note", "content": "data"},
             headers=headers,
         )
-        assert distribution.status_code == 200
-        assert distribution.json() == {
-            "by_status": {"in_progress": 1},
-            "by_priority": {"high": 1},
-        }
+        assert note.status_code == 201
 
         habit_summary = await client.get(
             "/api/v1/stats/habit-summary",
@@ -423,22 +353,82 @@ class TestPopulatedSpaceStatsResponses:
             "period_days": 30,
         }
 
-        focus_trend = await client.get(
-            "/api/v1/stats/focus-trend",
-            params={"days": 7},
+        schedule_summary = await client.get(
+            "/api/v1/stats/schedule-summary",
+            params={"days": 30},
             headers=headers,
         )
-        assert focus_trend.status_code == 200
-        focus_body = focus_trend.json()
-        assert set(focus_body) == {"data"}
-        assert len(focus_body["data"]) == 7
-        assert all(
-            set(point) == {"date", "count", "duration"}
-            and isinstance(point["date"], str)
-            and isinstance(point["count"], int)
-            and isinstance(point["duration"], int)
-            for point in focus_body["data"]
+        assert schedule_summary.status_code == 200
+        schedule_data = schedule_summary.json()
+        assert schedule_data["total"] >= 1
+        assert schedule_data["pending"] >= 1
+        assert schedule_data["period_days"] == 30
+
+        note_summary = await client.get(
+            "/api/v1/stats/note-summary",
+            headers=headers,
         )
-        assert next(
-            point for point in focus_body["data"] if point["date"] == today
-        ) == {"date": today, "count": 1, "duration": 25}
+        assert note_summary.status_code == 200
+        assert note_summary.json()["notes"] >= 1
+
+
+class TestTaskSpaceResponseSchemas:
+    """Task Space routes must document precise response component schemas."""
+
+    @pytest.mark.parametrize(
+        ("method", "path", "status", "component_name"),
+        [
+            ("post", "/api/v1/projects", "201", "TaskSpaceAcceptedResponse"),
+            ("get", "/api/v1/projects", "200", "ProjectPageResponse"),
+            (
+                "get",
+                "/api/v1/projects/{project_id}",
+                "200",
+                "ProjectResponse",
+            ),
+            (
+                "get",
+                "/api/v1/projects/definitions",
+                "200",
+                "TaskSpaceDefinitionsResponse",
+            ),
+            ("post", "/api/v1/work-items", "201", "TaskSpaceAcceptedResponse"),
+            ("get", "/api/v1/work-items", "200", "WorkItemPageResponse"),
+            (
+                "get",
+                "/api/v1/work-items/{work_item_id}",
+                "200",
+                "WorkItemResponse",
+            ),
+            (
+                "patch",
+                "/api/v1/work-items/{work_item_id}",
+                "200",
+                "TaskSpaceAcceptedResponse",
+            ),
+            (
+                "put",
+                "/api/v1/work-items/{work_item_id}/note",
+                "200",
+                "TaskSpaceAcceptedResponse",
+            ),
+            (
+                "get",
+                "/api/v1/work-items/{work_item_id}/note",
+                "200",
+                "WorkItemNoteResponse",
+            ),
+        ],
+    )
+    async def test_task_space_responses_reference_components(
+        self,
+        client,
+        method: str,
+        path: str,
+        status: str,
+        component_name: str,
+    ):
+        openapi = await _openapi(client)
+        _assert_component_ref(
+            _response_schema(openapi, method, path, status), component_name
+        )

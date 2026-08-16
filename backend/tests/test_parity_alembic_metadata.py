@@ -10,7 +10,11 @@ import pytest
 from alembic import command
 from sqlalchemy import Inspector, MetaData, inspect
 
-from tests.migrations import alembic_config, migration_engine
+from tests.migrations import migration_engine, run_bound_command
+
+LEGACY_CUTOVER_TABLES = frozenset(
+    {"tasks", "sessions", "task_quick_notes", "session_quick_notes"}
+)
 
 
 def _normalize_sql(value: Any) -> str | None:
@@ -82,6 +86,7 @@ def _metadata_signature(metadata: MetaData, tmp_path: Path, schema: str) -> dict
         return {
             table_name: _schema_signature(inspector, table_name)
             for table_name in inspector.get_table_names()
+            if table_name not in LEGACY_CUTOVER_TABLES
         }
     finally:
         engine.dispose()
@@ -93,11 +98,13 @@ def test_alembic_head_matches_metadata(tmp_path: Path, schema: str) -> None:
 
     metadata = get_meta_metadata() if schema == "meta" else get_space_metadata()
     engine = migration_engine(tmp_path, f"alembic_{schema}")
-    cfg = alembic_config(schema)
     try:
-        with engine.begin() as connection:
-            cfg.attributes["connection"] = connection
-            command.upgrade(cfg, "head")
+        cfg = run_bound_command(
+            schema,
+            tmp_path / f"alembic_{schema}.db",
+            command.upgrade,
+            "head",
+        )
         inspector = inspect(engine)
         version_table = cfg.get_main_option("version_table")
         actual = {
@@ -109,3 +116,29 @@ def test_alembic_head_matches_metadata(tmp_path: Path, schema: str) -> None:
         engine.dispose()
 
     assert actual == _metadata_signature(metadata, tmp_path, schema)
+
+
+# --------------------------------------------------------------------------- #
+# TS1 Task 7 — Space Alembic unique head gate
+# --------------------------------------------------------------------------- #
+
+
+def test_space_alembic_unique_head_is_sync_clients_streaming() -> None:
+    """The Space Alembic chain must have exactly one head: space_011."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    backend_root = Path(__file__).resolve().parents[1]
+    cfg = Config(str(backend_root / "alembic_space.ini"))
+    cfg.set_main_option(
+        "script_location", str(backend_root / "alembic_space")
+    )
+    script_dir = ScriptDirectory.from_config(cfg)
+    heads = script_dir.get_heads()
+    assert len(heads) == 1, (
+        f"Space Alembic must have exactly one head, got {len(heads)}: {heads}"
+    )
+    assert heads[0] == "space_011_sync_clients_streaming", (
+        f"Space Alembic head must be 'space_011_sync_clients_streaming', "
+        f"got {heads[0]!r}"
+    )

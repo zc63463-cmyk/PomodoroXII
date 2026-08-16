@@ -12,7 +12,7 @@ coordinates both stores and requires a ``FileSystem`` instance.
 - ``PUT /{id}`` (deprecated) dispatches content to fs + metadata to DB.
 - ``DELETE`` soft-deletes: sets trashed_at + moves .md to .trash/ (idempotent, no tombstone). Use DELETE /trash/note/{id} to purge.
 
-Routes commit; the service only flushes.
+Writes use the durable mutation UoW; read-only endpoints use the query service.
 """
 from __future__ import annotations
 
@@ -20,10 +20,21 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import get_file_system, get_space_context, get_space_db
+from app.deps import (
+    entity_id_for_operation,
+    expected_version_from_request,
+    get_file_system,
+    get_knowledge_store,
+    get_operation_id,
+    get_space_context,
+    get_space_db,
+    get_space_runtime_handle,
+)
 from app.errors import NotFoundError, ValidationError
 from app.file_system.interfaces import FileSystem
+from app.models.note import Note
 from app.routes.v1.responses import PLAIN_TEXT_VALIDATION_ERROR_RESPONSES
+from app.runtime.space import SpaceRuntimeHandle
 from app.schemas.common import PaginatedResponse
 from app.schemas.note import (
     NoteCreate,
@@ -34,6 +45,7 @@ from app.schemas.note import (
     VersionRecordResponse,
 )
 from app.services.note import NoteService
+from app.services.time import utc_now_iso_ms
 
 router = APIRouter()
 
@@ -41,15 +53,15 @@ router = APIRouter()
 @router.post("", response_model=NoteResponse, status_code=201)
 async def create_note(
     data: NoteCreate,
-    db: AsyncSession = Depends(get_space_db),
-    fs: FileSystem = Depends(get_file_system),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Create a note: write the .md file via fs, then insert the ORM row."""
-    obj = await NoteService(db, fs).create(data.model_dump())
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    payload = data.model_dump()
+    payload["id"] = payload.get("id") or entity_id_for_operation(operation_id, "note")
+    result = await store.create_note(scope, payload, None, operation_id)
+    return dict(result.value)
 
 
 @router.get("", response_model=PaginatedResponse[NoteResponse])
@@ -159,8 +171,9 @@ async def update_note_content(
     id: str,
     request: Request,
     db: AsyncSession = Depends(get_space_db),
-    fs: FileSystem = Depends(get_file_system),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Replace the .md body for a note.
 
@@ -184,33 +197,51 @@ async def update_note_content(
         raise ValidationError("content exceeds max length 100000")
 
     try:
-        obj = await NoteService(db, fs).update_content(id, content)
+        current = await db.get(Note, id)
+        if current is None:
+            raise NotFoundError(f"Note {id} not found")
+        if current.trashed_at is not None:
+            raise NotFoundError(f"Note {id} not found")
+        result = await store.update_note_content(
+            scope,
+            id,
+            content,
+            expected_version_from_request(request, current.version),
+            operation_id,
+        )
     except (KeyError, FileNotFoundError) as exc:
         raise NotFoundError(f"Note {id} not found") from exc
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    return dict(result.value)
 
 
 @router.patch("/{id}", response_model=NoteResponse)
 async def update_note_metadata(
     id: str,
     data: NoteMetadataUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    fs: FileSystem = Depends(get_file_system),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Update note metadata (title/tags/etc) -- does NOT write the .md file.
 
     Content-managed fields (content_hash, word_count) are intentionally
     not accepted here; use ``PUT /{id}/content`` to rewrite the body.
     """
-    obj = await NoteService(db, fs).update_metadata(
-        id, data.model_dump(exclude_unset=True)
+    current = await db.get(Note, id)
+    if current is None:
+        raise NotFoundError(f"Note {id} not found")
+    if current.trashed_at is not None:
+        raise ValidationError(f"Note {id} is in trash; restore before editing")
+    result = await store.update_note_metadata(
+        scope,
+        id,
+        data.model_dump(exclude_unset=True),
+        expected_version_from_request(request, current.version),
+        operation_id,
     )
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    return dict(result.value)
 
 
 @router.get("/{id}", response_model=NoteResponse)
@@ -228,9 +259,11 @@ async def get_note(
 async def update_note(
     id: str,
     data: NoteUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    fs: FileSystem = Depends(get_file_system),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """[Deprecated] Update a note via the legacy dispatcher.
 
@@ -238,20 +271,42 @@ async def update_note(
     This route is kept for backward compatibility and will be removed in the
     next major.
     """
-    obj = await NoteService(db, fs).update(id, data.model_dump(exclude_unset=True))
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+    current = await db.get(Note, id)
+    if current is None:
+        raise NotFoundError(f"Note {id} not found")
+    update_data = data.model_dump(exclude_unset=True)
+    if current.trashed_at is not None and "content" in update_data:
+        raise NotFoundError(f"Note {id} not found")
+    if current.trashed_at is not None:
+        raise ValidationError(f"Note {id} is in trash; restore before editing")
+    result = await store.update_note(
+        scope,
+        id,
+        update_data,
+        expected_version_from_request(request, current.version),
+        operation_id,
+    )
+    return dict(result.value)
 
 
 @router.delete("/{id}")
 async def delete_note(
     id: str,
+    request: Request,
     db: AsyncSession = Depends(get_space_db),
-    fs: FileSystem = Depends(get_file_system),
-    ctx: dict = Depends(get_space_context),
+    store=Depends(get_knowledge_store),
+    scope: SpaceRuntimeHandle = Depends(get_space_runtime_handle),
+    operation_id: str = Depends(get_operation_id),
 ):
     """Soft-delete a note: set trashed_at + move .md to .trash/ (idempotent, no tombstone)."""
-    await NoteService(db, fs).delete(id)
-    await db.commit()
+    current = await db.get(Note, id)
+    if current is None:
+        raise NotFoundError(f"Note {id} not found")
+    await store.update_note(
+        scope,
+        id,
+        {"trashed_at": utc_now_iso_ms()},
+        expected_version_from_request(request, current.version),
+        operation_id,
+    )
     return {"message": "Deleted"}
