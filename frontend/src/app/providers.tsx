@@ -21,7 +21,6 @@ import { queryClient } from '@/lib/query-client'
 import { SpaceBootstrap } from '@/lib/space-bootstrap'
 import { SpaceSwitchProvider } from '@/lib/on-space-switch'
 import { CrossTabSyncProvider } from '@/lib/cross-tab-sync'
-import { ActiveSessionProvider } from '@/lib/focus-session/active-session-provider'
 import { Toaster } from '@/components/ui/sonner'
 import { THEMES } from '@/utils/constants'
 
@@ -36,9 +35,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       >
         <SpaceBootstrap>
           <SpaceSwitchProvider>
-            <ActiveSessionProvider>
-              <CrossTabSyncProvider>{children}</CrossTabSyncProvider>
-            </ActiveSessionProvider>
+            <CrossTabSyncProvider>{children}</CrossTabSyncProvider>
           </SpaceSwitchProvider>
         </SpaceBootstrap>
         <Toaster position="bottom-right" />
