@@ -6,6 +6,7 @@ import { tokenStorage } from '@/lib/token-storage'
 import { useBootstrapStore } from '@/lib/bootstrap-store'
 import { resolveAppRouteGuard } from '@/lib/route-guard'
 import { AppShell } from '@/components/layout/app-shell'
+import { ActiveSessionProvider } from '@/lib/focus-session/active-session-provider'
 import {
   isQuickNotePreviewEnabled,
   isQuickNotePreviewRoute,
@@ -83,5 +84,9 @@ export default function AppLayout({
   if (decision === 'redirect-login' || decision === 'redirect-select-space')
     return <LoadingScreen />
   // allow-shell
-  return <AppShell>{children}</AppShell>
+  return (
+    <ActiveSessionProvider>
+      <AppShell>{children}</AppShell>
+    </ActiveSessionProvider>
+  )
 }
