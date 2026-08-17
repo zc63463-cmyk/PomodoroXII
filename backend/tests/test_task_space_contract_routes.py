@@ -290,11 +290,16 @@ def test_create_project_delegates_to_commands(
     resp = task_space_client.post("/api/v1/projects", json={
         "commandId": "cmd-p1", "spaceId": "s1",
         "payloadHash": "a" * 64,
-        "key": "PROJ", "name": "Project One",
+        "key": "PROJ", "name": "Project One", "description": "Project detail",
     })
     assert resp.status_code == 201
     assert len(fake_task_commands.calls) == 1
     assert fake_task_commands.calls[0] == ("create_project", "cmd-p1", "s1")
+    assert fake_task_commands.last_command.payload == {
+        "key": "PROJ",
+        "name": "Project One",
+        "description": "Project detail",
+    }
 
 
 def test_get_project_delegates_to_query(

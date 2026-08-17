@@ -144,6 +144,7 @@ class CreateProjectRequest(WireModel):
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     key: ProjectKey
     name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=10_000)
 
 
 class CreateWorkItemRequest(WireModel):

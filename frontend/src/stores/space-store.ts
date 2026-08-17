@@ -43,6 +43,9 @@ const toSpaceInfo = (meta: SpaceMeta): SpaceInfo => ({
   has_password: false,
 })
 
+// A double click or Enter key repeat must share the same in-flight request.
+let createSpaceRequest: Promise<SpaceInfo> | null = null
+
 export const useSpaceStore = create<SpaceState & SpaceActions>()(
   devtools(
     (set, get) => ({
@@ -66,17 +69,23 @@ export const useSpaceStore = create<SpaceState & SpaceActions>()(
       },
 
       createSpace: async (name, _password) => {
+        if (createSpaceRequest) return createSpaceRequest
         set({ isLoading: true, error: null })
-        try {
-          const raw = await spacesApi.createSpace(name)
-          await metaDB.spaces.put(raw)
-          const info = toSpaceInfo(raw)
-          set((s) => ({ spaces: [...s.spaces, info], isLoading: false }))
-          return info
-        } catch (e) {
-          set({ isLoading: false, error: (e as Error).message })
-          throw e
-        }
+        createSpaceRequest = (async () => {
+          try {
+            const raw = await spacesApi.createSpace(name)
+            await metaDB.spaces.put(raw)
+            const info = toSpaceInfo(raw)
+            set((s) => ({ spaces: [...s.spaces, info], isLoading: false }))
+            return info
+          } catch (e) {
+            set({ isLoading: false, error: (e as Error).message })
+            throw e
+          } finally {
+            createSpaceRequest = null
+          }
+        })()
+        return createSpaceRequest
       },
 
       selectSpace: async (spaceId, spacePassword) => {

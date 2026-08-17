@@ -33,6 +33,7 @@ export default function SelectSpacePage() {
 
   const [createDialogOpen, setCreateDialogOpen] = useState(false)
   const [newSpaceName, setNewSpaceName] = useState('')
+  const [isCreating, setIsCreating] = useState(false)
 
   useEffect(() => {
     loadSpaces().catch(() => {
@@ -50,8 +51,10 @@ export default function SelectSpacePage() {
   }
 
   const handleCreate = async () => {
+    if (isCreating) return
     const name = newSpaceName.trim()
     if (!name) return
+    setIsCreating(true)
     try {
       const space = await createSpace(name)
       await selectSpace(space.id)
@@ -60,6 +63,8 @@ export default function SelectSpacePage() {
       router.replace('/dashboard')
     } catch (e) {
       toast.error('创建空间失败', { description: (e as Error).message })
+    } finally {
+      setIsCreating(false)
     }
   }
 
@@ -99,7 +104,9 @@ export default function SelectSpacePage() {
           ) : null}
 
           <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
-            <DialogTrigger render={<Button variant="default" />}>
+            <DialogTrigger
+              render={<Button variant="default" disabled={isLoading || isCreating} />}
+            >
               <PlusIcon className="size-4" />
               创建空间
             </DialogTrigger>
@@ -114,13 +121,17 @@ export default function SelectSpacePage() {
                     id="spaceName"
                     value={newSpaceName}
                     onChange={(e) => setNewSpaceName(e.target.value)}
+                    disabled={isCreating}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleCreate()
+                      if (e.key === 'Enter') void handleCreate()
                     }}
                   />
                 </div>
-                <Button onClick={handleCreate} disabled={!newSpaceName.trim()}>
-                  创建
+                <Button
+                  onClick={() => void handleCreate()}
+                  disabled={!newSpaceName.trim() || isCreating}
+                >
+                  {isCreating ? '创建并进入中…' : '创建'}
                 </Button>
               </div>
             </DialogContent>

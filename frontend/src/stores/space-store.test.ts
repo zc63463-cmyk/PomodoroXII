@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { useSpaceStore } from '@/stores/space-store'
 import { useBootstrapStore } from '@/lib/bootstrap-store'
 import { spaceDBManager } from '@/services/space-db'
+import { spacesApi } from '@/services/spaces-api'
 
 // Mock 依赖
 vi.mock('@/services/spaces-api', () => ({
@@ -81,5 +82,37 @@ describe('space-store selectSpace', () => {
     expect(dispatchedEvent.detail).toEqual({ spaceId: 'space-2' })
 
     dispatchSpy.mockRestore()
+  })
+})
+
+describe('space-store createSpace', () => {
+  beforeEach(() => {
+    useSpaceStore.getState().reset()
+    vi.clearAllMocks()
+  })
+
+  it('shares one in-flight create request across repeated submissions', async () => {
+    let resolveCreate!: (value: { id: string; name: string; db_path: string; notes_dir: string; is_default: boolean; created_at: string; updated_at: string }) => void
+    vi.mocked(spacesApi.createSpace).mockImplementation(
+      () => new Promise((resolve) => {
+        resolveCreate = resolve
+      }),
+    )
+
+    const first = useSpaceStore.getState().createSpace('Work')
+    const second = useSpaceStore.getState().createSpace('Work')
+
+    expect(spacesApi.createSpace).toHaveBeenCalledTimes(1)
+    resolveCreate({
+      id: 'space-1', name: 'Work', db_path: 'spaces/space-1/index.db',
+      notes_dir: 'spaces/space-1/notes', is_default: false,
+      created_at: '2026-08-17T00:00:00Z', updated_at: '2026-08-17T00:00:00Z',
+    })
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ id: 'space-1' }),
+      expect.objectContaining({ id: 'space-1' }),
+    ])
+    expect(useSpaceStore.getState().spaces).toHaveLength(1)
   })
 })
