@@ -33,7 +33,7 @@ export interface paths {
         };
         /**
          * Metrics
-         * @description Expose minimal Prometheus metrics to authenticated operators.
+         * @description Expose bounded Prometheus metrics to authenticated operators.
          */
         get: operations["metrics_api_metrics_get"];
         put?: never;
@@ -53,11 +53,294 @@ export interface paths {
         };
         /**
          * Readiness Check
-         * @description Verify meta database connectivity without exposing failures.
+         * @description Verify meta database, runtime, snapshot and data-root writability.
+         *
+         *     The probe never leaks root paths, credentials or exception text: any
+         *     failure is reported as a generic 503 with ``service_not_ready``.
          */
         get: operations["readiness_check_api_ready_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Locate
+         * @description Locate the current active session for the master principal.
+         */
+        get: operations["locate_api_v1_active_session_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/activate-provisional": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Activate Provisional
+         * @description Activate a provisional session as the global active session.
+         */
+        post: operations["activate_provisional_api_v1_active_session_activate_provisional_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/end": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * End
+         * @description End the active session.
+         */
+        post: operations["end_api_v1_active_session_end_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Heartbeat
+         * @description Send a heartbeat for the active session.
+         */
+        post: operations["heartbeat_api_v1_active_session_heartbeat_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/note": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update Note
+         * @description Update the session note.
+         */
+        put: operations["update_note_api_v1_active_session_note_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause
+         * @description Pause the active session.
+         */
+        post: operations["pause_api_v1_active_session_pause_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/plan/add": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add Plan Item
+         * @description Add a plan item to the session.
+         */
+        post: operations["add_plan_item_api_v1_active_session_plan_add_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/plan/completion-draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Completion Draft
+         * @description Set the completion draft for a plan item.
+         */
+        post: operations["set_completion_draft_api_v1_active_session_plan_completion_draft_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/plan/current": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Current Plan Item
+         * @description Set the current plan item.
+         */
+        post: operations["set_current_plan_item_api_v1_active_session_plan_current_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/plan/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Remove Plan Item
+         * @description Remove a plan item from the session.
+         */
+        post: operations["remove_plan_item_api_v1_active_session_plan_remove_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/resolve-activation-conflict": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Activation Conflict
+         * @description Resolve an activation conflict between two sessions.
+         */
+        post: operations["resolve_activation_conflict_api_v1_active_session_resolve_activation_conflict_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume
+         * @description Resume the paused active session.
+         */
+        post: operations["resume_api_v1_active_session_resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start
+         * @description Start a new active session.
+         */
+        post: operations["start_api_v1_active_session_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/active-session/takeover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Takeover
+         * @description Take over the active session from another device/tab.
+         */
+        post: operations["takeover_api_v1_active_session_takeover_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -819,6 +1102,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/spaces/{space_id}/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Space Health
+         * @description Return one Space's health using the real ``SpaceRuntime.health()``.
+         *
+         *     The space token must be scoped to this exact Space; a degraded Space
+         *     yields 503 (``space_recovery_required``) but never affects other Spaces
+         *     or the global ``/api/ready`` endpoint.  The runtime handle dependency
+         *     closes the request-owned resources on exit.
+         */
+        get: operations["space_health_api_v1_spaces__space_id__health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/spaces/{space_id}/token": {
         parameters: {
             query?: never;
@@ -1302,6 +1610,146 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ActivateProvisionalPayload */
+        ActivateProvisionalPayload: {
+            /** Cachedat */
+            cachedAt: string;
+            /** Cachedownershipepoch */
+            cachedOwnershipEpoch?: number | null;
+            /** Expectedworkitemversions */
+            expectedWorkItemVersions: {
+                [key: string]: number;
+            };
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            pair: components["schemas"]["ConflictPairIdentity"];
+            snapshot: components["schemas"]["ProvisionalFocusSessionSnapshot"];
+        };
+        /** ActivateProvisionalRequest */
+        ActivateProvisionalRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch?: null;
+            payload: components["schemas"]["ActivateProvisionalPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+        };
+        /** ActivationCandidateResponse */
+        ActivationCandidateResponse: {
+            session: components["schemas"]["FocusSessionAggregateResponse"];
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+        };
+        /** ActivationConflictResponse */
+        ActivationConflictResponse: {
+            active: components["schemas"]["ActiveSessionResponse"];
+            candidate: components["schemas"]["ActivationCandidateResponse"];
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "activation_conflict";
+        };
+        /** ActivationConflictValidityCorrection */
+        ActivationConflictValidityCorrection: {
+            /**
+             * Loservalidity
+             * @constant
+             */
+            loserValidity: "invalid";
+            /**
+             * Loservalidityreason
+             * @constant
+             */
+            loserValidityReason: "activation_conflict_loser";
+        };
+        /** ActiveSessionLocatorResponse */
+        ActiveSessionLocatorResponse: {
+            /** Leaseexpiresat */
+            leaseExpiresAt: string;
+            /** Operationid */
+            operationId: string;
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "claiming" | "active" | "releasing";
+            /** Updatedat */
+            updatedAt: string;
+        };
+        /** ActiveSessionResponse */
+        ActiveSessionResponse: {
+            /** Kind */
+            kind?: ("authoritative" | "resumed") | null;
+            /** Leaseexpiresat */
+            leaseExpiresAt: string;
+            /** Operationid */
+            operationId: string;
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            session: components["schemas"]["FocusSessionAggregateResponse"];
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "claiming" | "active" | "releasing";
+            /** Updatedat */
+            updatedAt: string;
+        };
+        /** AddPlanItemPayload */
+        AddPlanItemPayload: {
+            /** Addedat */
+            addedAt: string;
+            /** Expectedworkitemversion */
+            expectedWorkItemVersion: number;
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            /** Planrank */
+            planRank: number;
+            /** Workitemid */
+            workItemId: string;
+        };
+        /** AddPlanItemRequest */
+        AddPlanItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["AddPlanItemPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+        };
         /** AppendBlocksRequest */
         AppendBlocksRequest: {
             /** Blocks */
@@ -1417,6 +1865,18 @@ export interface components {
             /** Text */
             text: string;
         };
+        /** ConflictPairIdentity */
+        ConflictPairIdentity: {
+            active: components["schemas"]["ConflictSideIdentity"];
+            candidate: components["schemas"]["ConflictSideIdentity"];
+        };
+        /** ConflictSideIdentity */
+        ConflictSideIdentity: {
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /** CreateProjectRequest */
         CreateProjectRequest: {
             /** Commandid */
@@ -1452,6 +1912,47 @@ export interface components {
             title: string;
             /** Typedefinitionid */
             typeDefinitionId?: string | null;
+        };
+        /** EndActiveSessionPayload */
+        EndActiveSessionPayload: {
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Occurredat */
+            occurredAt: string;
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            /**
+             * Timercompletion
+             * @enum {string}
+             */
+            timerCompletion: "completed" | "ended_early" | "interrupted";
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "pending" | "valid" | "invalid";
+            /** Validityreason */
+            validityReason?: string | null;
+        };
+        /** EndActiveSessionRequest */
+        EndActiveSessionRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["EndActiveSessionPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+        };
+        /** EndActiveSessionResponse */
+        EndActiveSessionResponse: {
+            /** Locator */
+            locator: null;
+            session: components["schemas"]["FocusSessionAggregateResponse"];
         };
         /**
          * EntityCategory
@@ -1565,6 +2066,79 @@ export interface components {
              * @default false
              */
             unique: boolean;
+        };
+        /** FocusSessionAggregateResponse */
+        FocusSessionAggregateResponse: {
+            attribution: components["schemas"]["SessionAttributionRevisionResponse"];
+            /** Commandenvelopes */
+            commandEnvelopes: components["schemas"]["SessionCommandEnvelopeResponse"][];
+            /** Commandreceipts */
+            commandReceipts: components["schemas"]["SessionCommandReceiptResponse"][];
+            context: components["schemas"]["SessionTaskContextResponse"] | null;
+            /** Outcomes */
+            outcomes: components["schemas"]["SessionWorkItemOutcomeResponse"][];
+            /** Plan */
+            plan: components["schemas"]["SessionWorkItemPlanResponse"][];
+            session: components["schemas"]["FocusSessionResponse"];
+        };
+        /**
+         * FocusSessionResponse
+         * @description Authoritative FocusSession wire post-image.
+         */
+        FocusSessionResponse: {
+            /** Breakseconds */
+            breakSeconds: number;
+            /** Createdat */
+            createdAt: string;
+            /** Endedat */
+            endedAt: string | null;
+            /** Focusedseconds */
+            focusedSeconds: number;
+            /** Grossseconds */
+            grossSeconds: number;
+            /** Id */
+            id: string;
+            /** Mood */
+            mood: ("great" | "good" | "normal" | "bad") | null;
+            /** Overallprogress */
+            overallProgress: ("smooth" | "progressed" | "stuck" | "interrupted") | null;
+            /**
+             * Ownershipstate
+             * @enum {string}
+             */
+            ownershipState: "authoritative" | "local_provisional" | "activation_conflict";
+            /** Pausestartedat */
+            pauseStartedAt: string | null;
+            /** Pausedseconds */
+            pausedSeconds: number;
+            /** Plannedseconds */
+            plannedSeconds: number;
+            /**
+             * Reviewstate
+             * @enum {string}
+             */
+            reviewState: "not_required" | "pending" | "completed" | "skipped";
+            /** Sessionnote */
+            sessionNote: string;
+            /** Sessionrevision */
+            sessionRevision: number;
+            /** Spaceid */
+            spaceId: string;
+            /** Startedat */
+            startedAt: string;
+            /** Timercompletion */
+            timerCompletion: ("completed" | "ended_early" | "interrupted") | null;
+            /** Updatedat */
+            updatedAt: string;
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "pending" | "valid" | "invalid";
+            /** Validityreason */
+            validityReason: string | null;
+            /** Version */
+            version: number;
         };
         /**
          * FolderCreate
@@ -1843,6 +2417,27 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** HeartbeatPayload */
+        HeartbeatPayload: {
+            /** Heartbeatat */
+            heartbeatAt: string;
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+        };
+        /** HeartbeatRequest */
+        HeartbeatRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["HeartbeatPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+        };
         /** MoveWorkItemRequest */
         MoveWorkItemRequest: {
             /** Commandid */
@@ -2033,6 +2628,17 @@ export interface components {
             tags?: string[] | null;
             /** Title */
             title?: string | null;
+        };
+        /** OwnedClockPayload */
+        OwnedClockPayload: {
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Occurredat */
+            occurredAt: string;
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
         };
         /** PaginatedResponse[FolderResponse] */
         PaginatedResponse_FolderResponse_: {
@@ -2249,6 +2855,18 @@ export interface components {
             /** Password */
             password: string;
         };
+        /** PauseActiveSessionRequest */
+        PauseActiveSessionRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["OwnedClockPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+        };
         /** ProjectPageResponse */
         ProjectPageResponse: {
             /** Items */
@@ -2283,6 +2901,112 @@ export interface components {
             updatedAt: string;
             /** Version */
             version: number;
+        };
+        /** ProvisionalFocusSessionSnapshot */
+        ProvisionalFocusSessionSnapshot: {
+            context: components["schemas"]["ProvisionalTaskContextSnapshot"];
+            /** Plan */
+            plan: components["schemas"]["ProvisionalPlanItemSnapshot"][];
+            session: components["schemas"]["ProvisionalSessionSnapshot"];
+        };
+        /** ProvisionalPlanItemSnapshot */
+        ProvisionalPlanItemSnapshot: {
+            /** Addedat */
+            addedAt: string;
+            /** Completiondraft */
+            completionDraft: boolean;
+            /** Currentduringsession */
+            currentDuringSession: boolean;
+            /** Id */
+            id: string;
+            /** Level2Workitemidsnapshot */
+            level2WorkItemIdSnapshot: string;
+            /** Planrank */
+            planRank: number;
+            /** Removalreason */
+            removalReason?: string | null;
+            /** Removedat */
+            removedAt?: string | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "before_start" | "during_session";
+            /** Titlesnapshot */
+            titleSnapshot: string;
+            /** Workitemid */
+            workItemId: string;
+            /** Workitemversionsnapshot */
+            workItemVersionSnapshot: number;
+        };
+        /** ProvisionalSessionSnapshot */
+        ProvisionalSessionSnapshot: {
+            /** Breakseconds */
+            breakSeconds: number;
+            /** Focusedseconds */
+            focusedSeconds: number;
+            /** Grossseconds */
+            grossSeconds: number;
+            /**
+             * Ownershipstate
+             * @constant
+             */
+            ownershipState: "local_provisional";
+            /** Pausestartedat */
+            pauseStartedAt?: string | null;
+            /** Pausedseconds */
+            pausedSeconds: number;
+            /** Plannedseconds */
+            plannedSeconds: number;
+            /**
+             * Reviewstate
+             * @constant
+             */
+            reviewState: "not_required";
+            /**
+             * Sessionnote
+             * @default
+             */
+            sessionNote: string;
+            /** Sessionrevision */
+            sessionRevision: number;
+            /** Startedat */
+            startedAt: string;
+            /**
+             * Validity
+             * @constant
+             */
+            validity: "pending";
+            /** Validityreason */
+            validityReason?: string | null;
+        };
+        /** ProvisionalTaskContextSnapshot */
+        ProvisionalTaskContextSnapshot: {
+            /** Level2Effortlowersecondssnapshot */
+            level2EffortLowerSecondsSnapshot?: number | null;
+            /** Level2Effortuppersecondssnapshot */
+            level2EffortUpperSecondsSnapshot?: number | null;
+            /** Level2Parentidsnapshot */
+            level2ParentIdSnapshot?: string | null;
+            /** Level2Statusdefinitionidsnapshot */
+            level2StatusDefinitionIdSnapshot: string;
+            /** Level2Titlesnapshot */
+            level2TitleSnapshot: string;
+            /** Level2Versionsnapshot */
+            level2VersionSnapshot: number;
+            /** Level2Workitemid */
+            level2WorkItemId: string;
+            /**
+             * Linkmethod
+             * @enum {string}
+             */
+            linkMethod: "explicit" | "contextual_confirmed";
+            /** Linkedat */
+            linkedAt: string;
+            /** Projectid */
+            projectId: string;
+            /** Projecttitlesnapshot */
+            projectTitleSnapshot: string;
         };
         /**
          * QuickNoteConvertResponse
@@ -2519,6 +3243,33 @@ export interface components {
             /** Registry Loaded */
             registry_loaded: boolean;
         };
+        /** RemovePlanItemPayload */
+        RemovePlanItemPayload: {
+            /** Expectedplanversion */
+            expectedPlanVersion: number;
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            /** Planitemid */
+            planItemId: string;
+            /** Removalreason */
+            removalReason: string;
+            /** Removedat */
+            removedAt: string;
+        };
+        /** RemovePlanItemRequest */
+        RemovePlanItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["RemovePlanItemPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+        };
         /** ReplaceDocumentRequest */
         ReplaceDocumentRequest: {
             /** Commandid */
@@ -2560,6 +3311,41 @@ export interface components {
             msg: string;
             /** Type */
             type: string;
+        };
+        /** ResolveActivationConflictPayload */
+        ResolveActivationConflictPayload: {
+            /** Decisionat */
+            decisionAt: string;
+            validityCorrection: components["schemas"]["ActivationConflictValidityCorrection"];
+            /**
+             * Winnerrole
+             * @enum {string}
+             */
+            winnerRole: "active" | "candidate";
+        };
+        /** ResolveActivationConflictRequest */
+        ResolveActivationConflictRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["ResolveActivationConflictPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+        };
+        /** ResumeActiveSessionRequest */
+        ResumeActiveSessionRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["OwnedClockPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
         };
         /**
          * ScheduleCreate
@@ -2678,6 +3464,258 @@ export interface components {
             /** Title */
             title?: string | null;
         };
+        /** SessionAttributionRevisionResponse */
+        SessionAttributionRevisionResponse: {
+            /** Correctedfromrevision */
+            correctedFromRevision?: number | null;
+            /** Createdat */
+            createdAt: string;
+            /** Effective */
+            effective: boolean;
+            /** Id */
+            id: string;
+            /** Level2Workitemid */
+            level2WorkItemId: string;
+            /** Projectid */
+            projectId: string;
+            /** Reason */
+            reason: string | null;
+            /** Revision */
+            revision: number;
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Updatedat */
+            updatedAt: string;
+            /** Version */
+            version: number;
+        };
+        /** SessionCommandEnvelopeResponse */
+        SessionCommandEnvelopeResponse: {
+            /** Commandid */
+            commandId: string;
+            /** Createdat */
+            createdAt: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Replaysafe */
+            replaySafe: boolean;
+            /** Sessionid */
+            sessionId: string;
+            /** Sessionrevision */
+            sessionRevision: number;
+            /** Spaceid */
+            spaceId: string;
+            /**
+             * Targettransition
+             * @enum {string}
+             */
+            targetTransition: "complete" | "cancel";
+            /** Workitemid */
+            workItemId: string;
+        };
+        /** SessionCommandReceiptResponse */
+        SessionCommandReceiptResponse: {
+            /** Commandid */
+            commandId: string;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            } | null;
+            /** Errorcode */
+            errorCode: string | null;
+            /** Result */
+            result: unknown | null;
+            /** Retryable */
+            retryable: boolean;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "not_needed" | "pending" | "succeeded" | "failed" | "conflict" | "unknown" | "abandoned";
+            /** Updatedat */
+            updatedAt: string;
+        };
+        /** SessionTaskContextResponse */
+        SessionTaskContextResponse: {
+            /** Createdat */
+            createdAt: string;
+            /** Id */
+            id: string;
+            /** Level2Effortlowersecondssnapshot */
+            level2EffortLowerSecondsSnapshot?: number | null;
+            /** Level2Effortuppersecondssnapshot */
+            level2EffortUpperSecondsSnapshot?: number | null;
+            /** Level2Parentidsnapshot */
+            level2ParentIdSnapshot: string | null;
+            /** Level2Statusdefinitionidsnapshot */
+            level2StatusDefinitionIdSnapshot: string;
+            /** Level2Titlesnapshot */
+            level2TitleSnapshot: string;
+            /** Level2Versionsnapshot */
+            level2VersionSnapshot: number;
+            /** Level2Workitemid */
+            level2WorkItemId: string;
+            /**
+             * Linkmethod
+             * @enum {string}
+             */
+            linkMethod: "explicit" | "contextual_confirmed";
+            /** Linkedat */
+            linkedAt: string;
+            /** Projectid */
+            projectId: string;
+            /** Projecttitlesnapshot */
+            projectTitleSnapshot: string;
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Updatedat */
+            updatedAt: string;
+            /** Version */
+            version: number;
+        };
+        /** SessionWorkItemOutcomeResponse */
+        SessionWorkItemOutcomeResponse: {
+            /** Commandid */
+            commandId: string | null;
+            /** Correctedfromrevision */
+            correctedFromRevision?: number | null;
+            /** Createdat */
+            createdAt: string;
+            /** Effective */
+            effective: boolean;
+            /** Executionpersona */
+            executionPersona: ("ox" | "pig" | "hajimi" | "wukong") | null;
+            /** Id */
+            id: string;
+            /** Personanote */
+            personaNote?: string | null;
+            /** Personaswitched */
+            personaSwitched: boolean | null;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "completed" | "progressed" | "stuck" | "untouched" | "cancelled";
+            /** Reviewedat */
+            reviewedAt: string | null;
+            /** Revision */
+            revision: number;
+            /** Sessionid */
+            sessionId: string;
+            /** Sessionrevision */
+            sessionRevision: number;
+            /** Spaceid */
+            spaceId: string;
+            /**
+             * Statecommand
+             * @enum {string}
+             */
+            stateCommand: "complete" | "cancel" | "none";
+            /** Touched */
+            touched: boolean;
+            /** Updatedat */
+            updatedAt: string;
+            /** Version */
+            version: number;
+            /** Workitemid */
+            workItemId: string;
+        };
+        /** SessionWorkItemPlanResponse */
+        SessionWorkItemPlanResponse: {
+            /** Addedat */
+            addedAt: string;
+            /** Completiondraft */
+            completionDraft: boolean;
+            /** Createdat */
+            createdAt: string;
+            /** Currentduringsession */
+            currentDuringSession: boolean;
+            /** Id */
+            id: string;
+            /** Level2Workitemidsnapshot */
+            level2WorkItemIdSnapshot: string;
+            /** Planrank */
+            planRank: number;
+            /** Removalreason */
+            removalReason: string | null;
+            /** Removedat */
+            removedAt: string | null;
+            /** Sessionid */
+            sessionId: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "before_start" | "during_session" | "review_materialized";
+            /** Spaceid */
+            spaceId: string;
+            /** Titlesnapshot */
+            titleSnapshot: string;
+            /** Updatedat */
+            updatedAt: string;
+            /** Version */
+            version: number;
+            /** Workitemid */
+            workItemId: string;
+            /** Workitemversionsnapshot */
+            workItemVersionSnapshot: number;
+        };
+        /** SetCompletionDraftPayload */
+        SetCompletionDraftPayload: {
+            /** Completiondraft */
+            completionDraft: boolean;
+            /** Expectedplanversion */
+            expectedPlanVersion: number;
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            /** Planitemid */
+            planItemId: string;
+        };
+        /** SetCompletionDraftRequest */
+        SetCompletionDraftRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["SetCompletionDraftPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+        };
+        /** SetCurrentPlanItemPayload */
+        SetCurrentPlanItemPayload: {
+            /** Expectedplanversions */
+            expectedPlanVersions: {
+                [key: string]: number;
+            };
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            /** Workitemid */
+            workItemId?: string | null;
+        };
+        /** SetCurrentPlanItemRequest */
+        SetCurrentPlanItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["SetCurrentPlanItemPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+        };
         /**
          * SettingsResponse
          * @description Bare dynamic key/value settings object.
@@ -2704,6 +3742,24 @@ export interface components {
         SpaceCreateRequest: {
             /** Name */
             name: string;
+        };
+        /**
+         * SpaceHealthResponse
+         * @description Health status for a single Space (bounded, non-secret fields).
+         */
+        SpaceHealthResponse: {
+            /** Available */
+            available: boolean;
+            /** Catalog Hash */
+            catalog_hash: string;
+            /** Degraded Reason */
+            degraded_reason?: string | null;
+            /** Index Schema Version */
+            index_schema_version: number;
+            /** Migration Head */
+            migration_head: string;
+            /** Space Id */
+            space_id: string;
         };
         /**
          * SpaceResponse
@@ -2734,6 +3790,39 @@ export interface components {
             space_token: string;
             /** Token Type */
             token_type: string;
+        };
+        /** StartActiveSessionPayload */
+        StartActiveSessionPayload: {
+            /** Expectedworkitemversions */
+            expectedWorkItemVersions: {
+                [key: string]: number;
+            };
+            /** Level2Workitemid */
+            level2WorkItemId: string;
+            /** Level3Workitemids */
+            level3WorkItemIds: string[];
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            /** Plannedseconds */
+            plannedSeconds: number;
+            /** Startedat */
+            startedAt: string;
+        };
+        /** StartActiveSessionRequest */
+        StartActiveSessionRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch?: null;
+            payload: components["schemas"]["StartActiveSessionPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
         };
         /**
          * StorageType
@@ -2913,6 +4002,25 @@ export interface components {
             requires_recovery: boolean | null;
             /** Visible Event Count */
             visible_event_count: number;
+        };
+        /** TakeoverPayload */
+        TakeoverPayload: {
+            /** Newownerdeviceid */
+            newOwnerDeviceId: string;
+            /** Newownertabid */
+            newOwnerTabId: string;
+        };
+        /** TakeoverRequest */
+        TakeoverRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["TakeoverPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
         };
         /** TaskSpaceAcceptedResponse */
         TaskSpaceAcceptedResponse: {
@@ -3117,6 +4225,29 @@ export interface components {
             entity_type: string;
             /** Title */
             title: string;
+        };
+        /** UpdateActiveSessionNotePayload */
+        UpdateActiveSessionNotePayload: {
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Ownerdeviceid */
+            ownerDeviceId: string;
+            /** Ownertabid */
+            ownerTabId: string;
+            /** Sessionnote */
+            sessionNote: string;
+        };
+        /** UpdateActiveSessionNoteRequest */
+        UpdateActiveSessionNoteRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch: number;
+            payload: components["schemas"]["UpdateActiveSessionNotePayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
         };
         /** UpdateWorkItemRequest */
         UpdateWorkItemRequest: {
@@ -3328,7 +4459,7 @@ export interface operations {
                     "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
-            /** @description Master token required */
+            /** @description Operations credential required */
             403: {
                 headers: {
                     "X-PomodoroXII-Error-Code"?: string;
@@ -3371,6 +4502,546 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    locate_api_v1_active_session_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"] | components["schemas"]["ActivationConflictResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    activate_provisional_api_v1_active_session_activate_provisional_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActivateProvisionalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"] | components["schemas"]["ActivationConflictResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    end_api_v1_active_session_end_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EndActiveSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EndActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    heartbeat_api_v1_active_session_heartbeat_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HeartbeatRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionLocatorResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_note_api_v1_active_session_note_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateActiveSessionNoteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    pause_api_v1_active_session_pause_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PauseActiveSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    add_plan_item_api_v1_active_session_plan_add_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddPlanItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    set_completion_draft_api_v1_active_session_plan_completion_draft_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetCompletionDraftRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    set_current_plan_item_api_v1_active_session_plan_current_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetCurrentPlanItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    remove_plan_item_api_v1_active_session_plan_remove_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemovePlanItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    resolve_activation_conflict_api_v1_active_session_resolve_activation_conflict_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveActivationConflictRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    resume_api_v1_active_session_resume_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResumeActiveSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    start_api_v1_active_session_start_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartActiveSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    takeover_api_v1_active_session_takeover_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TakeoverRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
                     "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
                 };
             };
@@ -5384,6 +7055,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SpaceResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    space_health_api_v1_spaces__space_id__health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                space_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpaceHealthResponse"];
                 };
             };
             /** @description Domain or request validation error */
