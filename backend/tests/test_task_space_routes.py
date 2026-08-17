@@ -228,6 +228,152 @@ async def _setup_space_and_get_headers(client) -> tuple[dict[str, str], str]:
 
 
 @pytest.mark.provisioned_space_storage
+class TestProjectPayloadHashContract:
+    """Project create canonical-payload contract between frontend and backend.
+
+    Frozen rule (RED regression for nullable description):
+      - the canonical business payload for CreateProject is ALWAYS
+        ``{key, name, description}`` — ``description`` is kept as ``null``
+        when the client omits it or sends ``null`` explicitly;
+      - the frontend hashes ``{name, key, description: null}`` (see
+        frontend/src/services/task-space-api.ts createProject), so the route
+        must build the same field set for the backend canonical hash;
+      - a duplicate key must return a stable ``409 project_key_conflict`` and
+        must never be confused with a payload-hash rejection.
+    """
+
+    async def test_null_description_accepts_frontend_canonical_payload(self, client) -> None:
+        """description=null must hash as {key,name,description:null} and succeed."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        business_payload = {"key": "NULL", "name": "Null Description", "description": None}
+        resp = await client.post(
+            "/api/v1/projects",
+            json={
+                "commandId": "rest-project-null-desc",
+                "spaceId": space_id,
+                "payloadHash": canonical_payload_hash(business_payload),
+                "key": "null",
+                "name": "Null Description",
+                "description": None,
+            },
+            headers={**headers, "Idempotency-Key": "rest-project-null-desc"},
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["value"]["key"] == "NULL"
+        assert body["value"]["description"] is None
+
+    async def test_omitted_description_equals_null_canonical_payload(self, client) -> None:
+        """An omitted wire description must canonicalize to description=null."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        # Same canonical payload as the explicit-null request above: the wire
+        # simply omits the description key.
+        business_payload = {"key": "OMIT", "name": "Omitted Description", "description": None}
+        resp = await client.post(
+            "/api/v1/projects",
+            json={
+                "commandId": "rest-project-omitted-desc",
+                "spaceId": space_id,
+                "payloadHash": canonical_payload_hash(business_payload),
+                "key": "omit",
+                "name": "Omitted Description",
+            },
+            headers={**headers, "Idempotency-Key": "rest-project-omitted-desc"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["value"]["description"] is None
+
+    async def test_non_null_description_hash_stays_consistent(self, client) -> None:
+        """description="demo" must hash with the description field and succeed."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        business_payload = {"key": "DEMO", "name": "Demo Description", "description": "demo"}
+        resp = await client.post(
+            "/api/v1/projects",
+            json={
+                "commandId": "rest-project-demo-desc",
+                "spaceId": space_id,
+                "payloadHash": canonical_payload_hash(business_payload),
+                "key": "demo",
+                "name": "Demo Description",
+                "description": "demo",
+            },
+            headers={**headers, "Idempotency-Key": "rest-project-demo-desc"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["value"]["description"] == "demo"
+
+    async def test_duplicate_key_returns_stable_409_project_key_conflict(self, client) -> None:
+        """A repeated key must 409 with code project_key_conflict, not 422."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        business_payload = {"key": "DUPL", "name": "Duplicate", "description": None}
+        first = await client.post(
+            "/api/v1/projects",
+            json={
+                "commandId": "rest-project-dup-first",
+                "spaceId": space_id,
+                "payloadHash": canonical_payload_hash(business_payload),
+                "key": "dupl",
+                "name": "Duplicate",
+                "description": None,
+            },
+            headers={**headers, "Idempotency-Key": "rest-project-dup-first"},
+        )
+        assert first.status_code == 201, first.text
+
+        second = await client.post(
+            "/api/v1/projects",
+            json={
+                "commandId": "rest-project-dup-second",
+                "spaceId": space_id,
+                "payloadHash": canonical_payload_hash(business_payload),
+                "key": "dupl",
+                "name": "Duplicate",
+                "description": None,
+            },
+            headers={**headers, "Idempotency-Key": "rest-project-dup-second"},
+        )
+        assert second.status_code == 409, second.text
+        assert second.json()["detail"]["code"] == "project_key_conflict"
+        assert "invalid_payload_hash" not in second.text
+
+        page = (await client.get("/api/v1/projects", headers=headers)).json()
+        matches = [item for item in page["items"] if item["key"] == "DUPL"]
+        assert len(matches) == 1
+
+    async def test_same_operation_id_replay_is_idempotent(self, client) -> None:
+        """Replaying the same operation_id and payload must not duplicate."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        business_payload = {"key": "REPL", "name": "Replay", "description": None}
+        body = {
+            "commandId": "rest-project-replay",
+            "spaceId": space_id,
+            "payloadHash": canonical_payload_hash(business_payload),
+            "key": "repl",
+            "name": "Replay",
+            "description": None,
+        }
+        req_headers = {**headers, "Idempotency-Key": "rest-project-replay"}
+        first = await client.post("/api/v1/projects", json=body, headers=req_headers)
+        second = await client.post("/api/v1/projects", json=body, headers=req_headers)
+        assert first.status_code == second.status_code == 201, (first.text, second.text)
+        assert first.json() == second.json()
+
+        page = (await client.get("/api/v1/projects", headers=headers)).json()
+        matches = [item for item in page["items"] if item["key"] == "REPL"]
+        assert len(matches) == 1
+
+
+@pytest.mark.provisioned_space_storage
 class TestTaskSpaceIntegration:
     """Provider-backed integration tests through the real app."""
 
@@ -258,7 +404,7 @@ class TestTaskSpaceIntegration:
         from app.mutation.types import canonical_payload_hash
 
         headers, space_id = await _setup_space_and_get_headers(client)
-        business_payload = {"key": "IDEM", "name": "Idempotent"}
+        business_payload = {"key": "IDEM", "name": "Idempotent", "description": None}
         body = {
             "commandId": "rest-project-idem",
             "spaceId": space_id,
@@ -279,7 +425,7 @@ class TestTaskSpaceIntegration:
         project_body = {
             "commandId": "note-proj",
             "spaceId": space_id,
-            "payloadHash": canonical_payload_hash({"key": "NP", "name": "NoteProj"}),
+            "payloadHash": canonical_payload_hash({"key": "NP", "name": "NoteProj", "description": None}),
             "key": "np",
             "name": "NoteProj",
         }
@@ -328,7 +474,7 @@ class TestTaskSpaceIntegration:
         project_body = {
             "commandId": "filter-proj",
             "spaceId": space_id,
-            "payloadHash": canonical_payload_hash({"key": "FP", "name": "FilterProj"}),
+            "payloadHash": canonical_payload_hash({"key": "FP", "name": "FilterProj", "description": None}),
             "key": "fp",
             "name": "FilterProj",
         }
@@ -353,7 +499,7 @@ class TestTaskSpaceIntegration:
         from app.mutation.types import canonical_payload_hash
 
         headers, space_id = await _setup_space_and_get_headers(client)
-        project_payload = {"key": "FULL", "name": "Complete rows"}
+        project_payload = {"key": "FULL", "name": "Complete rows", "description": None}
         project = await client.post(
             "/api/v1/projects",
             json={
@@ -469,7 +615,7 @@ class TestTaskSpaceIntegration:
         project_body = {
             "commandId": "cas-proj",
             "spaceId": space_id,
-            "payloadHash": canonical_payload_hash({"key": "CAS", "name": "CasProj"}),
+            "payloadHash": canonical_payload_hash({"key": "CAS", "name": "CasProj", "description": None}),
             "key": "cas",
             "name": "CasProj",
         }
