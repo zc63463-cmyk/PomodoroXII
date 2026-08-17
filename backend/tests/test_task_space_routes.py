@@ -17,6 +17,30 @@ HTTP_METHODS = {"get", "put", "post", "patch", "delete"}
 
 
 # --------------------------------------------------------------------------- #
+# Test-local backup scheduler isolation
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _isolate_route_tests_from_backup_scheduler(
+    _isolate_env, monkeypatch
+) -> None:
+    """Keep Task Space client/lifespan tests free of the recovery scheduler.
+
+    These route tests exercise the Task Space HTTP contract through the real
+    app lifespan and do not verify the backup scheduler.  ``backup_enabled``
+    defaults to true in production with a mandatory external target, so it is
+    disabled only for this test module -- without inventing a fake backup
+    target and without mocking the lifespan.  The production default must
+    stay true.
+    """
+    import app.settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "backup_enabled", False)
+
+
+
+# --------------------------------------------------------------------------- #
 # OpenAPI route presence tests
 # --------------------------------------------------------------------------- #
 
