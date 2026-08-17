@@ -90,11 +90,14 @@ async def create_project(
     """Create a project via the TaskSpace command module."""
     require_idempotency_key(body.command_id, idempotency_key)
     require_space_identity(scope, body.space_id)
+    payload = {"key": body.key, "name": body.name}
+    if body.description is not None:
+        payload["description"] = body.description
     command = CreateProject(
         command_id=body.command_id,
         space_id=body.space_id,
         payload_hash=body.payload_hash,
-        payload={"key": body.key, "name": body.name},
+        payload=payload,
     )
     outcome = await command_module.execute(scope, command)
     return map_task_space_outcome(outcome)
