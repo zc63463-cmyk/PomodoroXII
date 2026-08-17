@@ -90,9 +90,16 @@ async def create_project(
     """Create a project via the TaskSpace command module."""
     require_idempotency_key(body.command_id, idempotency_key)
     require_space_identity(scope, body.space_id)
-    payload = {"key": body.key, "name": body.name}
-    if body.description is not None:
-        payload["description"] = body.description
+    # Canonical CreateProject business payload is always {key, name,
+    # description}: a null/omitted description is kept as None so the backend
+    # hash matches the frontend canonical payload hash, which always includes
+    # description (null kept).  The module-level canonical hash derives from
+    # this exact field set via _business_payload -> dict(command.payload).
+    payload = {
+        "key": body.key,
+        "name": body.name,
+        "description": body.description,
+    }
     command = CreateProject(
         command_id=body.command_id,
         space_id=body.space_id,
