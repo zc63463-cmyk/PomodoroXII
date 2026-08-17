@@ -1881,6 +1881,8 @@ export interface components {
         CreateProjectRequest: {
             /** Commandid */
             commandId: string;
+            /** Description */
+            description?: string | null;
             /** Key */
             key: string;
             /** Name */
