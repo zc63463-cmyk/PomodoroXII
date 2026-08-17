@@ -27,8 +27,8 @@ import {
 
 const setupSchema = z
   .object({
-    password: z.string().min(8, '密码至少 8 位'),
-    confirmPassword: z.string().min(8, '密码至少 8 位'),
+    password: z.string().min(12, '密码至少 12 位'),
+    confirmPassword: z.string().min(12, '密码至少 12 位'),
   })
   .refine((data) => data.password === data.confirmPassword, {
     message: '两次输入的密码不一致',
