@@ -235,13 +235,14 @@ class TestTaskSpaceIntegration:
         from app.mutation.types import canonical_payload_hash
 
         headers, space_id = await _setup_space_and_get_headers(client)
-        business_payload = {"key": "RM", "name": "Roadmap"}
+        business_payload = {"key": "RM", "name": "Roadmap", "description": "Daily planning"}
         body = {
             "commandId": "rest-project-one",
             "spaceId": space_id,
             "payloadHash": canonical_payload_hash(business_payload),
             "key": " rm ",
             "name": "Roadmap",
+            "description": "Daily planning",
         }
         resp = await client.post(
             "/api/v1/projects",
