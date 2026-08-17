@@ -47,11 +47,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 git rev-parse HEAD
-git diff --exit-code origin/main
+git diff --exit-code origin/main -- backend frontend .github scripts
 git status --short
 ~~~
 
-Expected: HEAD equals fa547a2; no tracked source diff.
+Expected: HEAD is the verification-plan commit atop fa547a2; no tracked production-source diff.
 
 - [ ] **Step 2: Regenerate types and reject drift**
 
@@ -227,4 +227,3 @@ Expected: the commit contains one evidence document. If any prior gate failed, d
 - No source, schema, route, migration, workflow, or lockfile change occurs during verification.
 - The evidence record distinguishes verified behavior from unrun environment-specific gates.
 - Only after acceptance may the next product task be selected: a narrowly scoped observed-defect repair or a new capability outside the frozen Workbench scope.
-
