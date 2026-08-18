@@ -47,6 +47,24 @@ describe('taskSpaceApi', () => {
     expect(body.payloadHash).toBe(await hashCommandPayload({ name: 'Roadmap', key: 'RM', description: null }))
   })
 
+  it('hashes omitted and explicit-null descriptions identically (description: null kept)', async () => {
+    // Frozen canonical contract: omitted === null, and the field is KEPT as
+    // null in the hashed payload. The backend must canonicalize with the same
+    // field set (see backend/app/routes/v1/projects.py create_project).
+    vi.mocked(spaceApi.post).mockResolvedValue({ data: accepted })
+    await taskSpaceApi.createProject({
+      operationId: 'op-null-desc', spaceId: 'space-a', name: 'R', key: 'R', description: null,
+    })
+    const nullHash = (vi.mocked(spaceApi.post).mock.calls[0]![1] as Record<string, unknown>).payloadHash
+    vi.mocked(spaceApi.post).mockClear()
+    await taskSpaceApi.createProject({
+      operationId: 'op-omitted-desc', spaceId: 'space-a', name: 'R', key: 'R',
+    })
+    const omittedHash = (vi.mocked(spaceApi.post).mock.calls[0]![1] as Record<string, unknown>).payloadHash
+    expect(omittedHash).toBe(nullHash)
+    expect(omittedHash).toBe(await hashCommandPayload({ name: 'R', key: 'R', description: null }))
+  })
+
   it('keeps project identity on the wire but excludes it from Move business hash', async () => {
     vi.mocked(spaceApi.post).mockResolvedValue({ data: accepted })
     await taskSpaceApi.moveWorkItem({

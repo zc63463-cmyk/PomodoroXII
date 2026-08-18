@@ -1,6 +1,6 @@
 'use client'
 
-import { createElement, useState, type FormEvent } from 'react'
+import { createElement, useRef, useState, type FormEvent } from 'react'
 import { Plus } from 'lucide-react'
 import type { CachedProject } from '@/types'
 import { Button } from '@/components/ui/button'
@@ -30,6 +30,37 @@ export interface ProjectRailProps {
   isOnline?: boolean
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/**
+ * Stable, user-facing message for a failed Project create. Never surfaces raw
+ * Axios text, response objects, or server detail strings. Handles both the
+ * canonical error body ({ code, ... }) and the legacy body ({ detail, ... }),
+ * where detail may be a plain string or { code, retryable, details }.
+ */
+export function resolveCreateProjectError(error: unknown): string {
+  const conflictMessage = '该 Key 已被当前空间使用，请更换 Key。'
+  const validationMessage = '请求内容校验失败，请刷新后重试。'
+  const genericMessage = '无法创建项目，请检查服务连接后重试。'
+
+  const response = isRecord(error) ? error.response : undefined
+  const data = isRecord(response) ? response.data : undefined
+  const headers = isRecord(response) ? response.headers : undefined
+
+  let code: unknown = isRecord(data) ? data.code : undefined
+  if (!code && isRecord(data) && isRecord(data.detail)) {
+    code = data.detail.code
+  }
+  if (code === undefined && isRecord(headers)) {
+    code = headers['x-pomodoroxii-error-code']
+  }
+
+  if (code === 'project_key_conflict') return conflictMessage
+  if (code === 'invalid_payload_hash') return validationMessage
+  return genericMessage
+}
+
 function browserOnline(): boolean {
   return typeof navigator === 'undefined' || navigator.onLine !== false
 }
@@ -46,6 +77,11 @@ export function ProjectRail({
   const [key, setKey] = useState('')
   const [description, setDescription] = useState('')
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  // Synchronous single-flight guard: state updates are async, so a second
+  // submit event fired in the same tick would still see stale state. The ref
+  // is written synchronously before onCreate and cleared in finally.
+  const submittingRef = useRef(false)
 
   const resetForm = () => {
     setName('')
@@ -56,13 +92,18 @@ export function ProjectRail({
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!onCreate || !name.trim() || !key.trim()) return
+    if (!onCreate || submittingRef.current || !name.trim() || !key.trim()) return
+    submittingRef.current = true
+    setIsSubmitting(true)
     try {
       await onCreate({ name: name.trim(), key: key.trim(), description: description.trim() || null })
       setOpen(false)
       resetForm()
     } catch (error) {
-      setSubmitError((error as Error).message)
+      setSubmitError(resolveCreateProjectError(error))
+    } finally {
+      submittingRef.current = false
+      setIsSubmitting(false)
     }
   }
 
@@ -97,6 +138,10 @@ export function ProjectRail({
     {
       open,
       onOpenChange: (nextOpen: boolean) => {
+        // While a create request is in flight, ignore close requests (ESC,
+        // backdrop, close button) so the dialog cannot unmount mid-flight and
+        // let a late response write into dead state.
+        if (!nextOpen && isSubmitting) return
         setOpen(nextOpen)
         if (!nextOpen) resetForm()
       },
@@ -117,25 +162,25 @@ export function ProjectRail({
           'div',
           { className: 'grid gap-2' },
           createElement(Label, { htmlFor: 'project-name' }, 'Name'),
-          createElement(Input, { id: 'project-name', value: name, onChange: (event) => setName(event.target.value), required: true }),
+          createElement(Input, { id: 'project-name', value: name, onChange: (event) => setName(event.target.value), required: true, disabled: isSubmitting }),
         ),
         createElement(
           'div',
           { className: 'grid gap-2' },
           createElement(Label, { htmlFor: 'project-key' }, 'Key'),
-          createElement(Input, { id: 'project-key', value: key, onChange: (event) => setKey(event.target.value), required: true }),
+          createElement(Input, { id: 'project-key', value: key, onChange: (event) => setKey(event.target.value), required: true, disabled: isSubmitting }),
         ),
         createElement(
           'div',
           { className: 'grid gap-2' },
           createElement(Label, { htmlFor: 'project-description' }, 'Description'),
-          createElement(Input, { id: 'project-description', value: description, onChange: (event) => setDescription(event.target.value) }),
+          createElement(Input, { id: 'project-description', value: description, onChange: (event) => setDescription(event.target.value), disabled: isSubmitting }),
         ),
         submitError ? createElement('p', { role: 'alert', className: 'text-sm text-destructive' }, submitError) : null,
         createElement(
           DialogFooter,
           null,
-          createElement(Button, { type: 'submit' }, 'Create'),
+          createElement(Button, { type: 'submit', disabled: isSubmitting }, 'Create'),
         ),
       ),
     ),
