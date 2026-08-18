@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CachedProject, CachedWorkItem } from '@/types'
 import type { CachedWorkItemNote, WorkItemNoteConflictRow } from '@/types'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
-import { useTaskSpaceStore, type TaskSpaceNoteRepositoryLike, type TaskSpaceRepositoryLike } from './task-space-store'
+import { selectMoveCandidates, useTaskSpaceStore, type TaskSpaceNoteRepositoryLike, type TaskSpaceRepositoryLike } from './task-space-store'
 
 const workItem = (id: string, parentId: string | null, depth: 1 | 2 | 3): CachedWorkItem => ({
   id,
@@ -164,6 +164,20 @@ describe('task-space-store projection', () => {
 
     expect(useTaskSpaceStore.getState().workItems.map((item) => item.id)).toEqual(['l1', 'l2'])
     expect(useTaskSpaceStore.getState().isLoading).toBe(false)
+  })
+
+  it('maps a failed reconciliation to a stable message without leaking axios text', async () => {
+    const conflict = axiosError(409, 'version_conflict')
+    const repository = repositoryFixture({
+      resumePendingDirectCommandIntents: vi.fn().mockRejectedValue(conflict),
+    })
+    await useTaskSpaceStore.getState().hydrate('space-a', repository)
+
+    const state = useTaskSpaceStore.getState()
+    expect(state.error).not.toMatch(/Request failed/)
+    expect(state.error).not.toBeNull()
+    // The cached rows are still projected into the store.
+    expect(state.workItems.length).toBeGreaterThan(0)
   })
 
   it('selecting a level-3 item preserves its level-2 parent for Session launch', () => {
@@ -379,5 +393,33 @@ describe('task-space-store mutation lifecycle', () => {
       version: 1, statusDefinitionId: 'status-open',
     })
     expect(useTaskSpaceStore.getState().mutationError).toEqual({ targetId: 'l1', code: 'idempotency_conflict' })
+  })
+})
+
+describe('selectMoveCandidates', () => {
+  it('excludes the selected item and every descendant from move parents', () => {
+    const items = [
+      workItem('l1', null, 1),
+      workItem('l2', 'l1', 2),
+      workItem('l3', 'l2', 3),
+      workItem('other', null, 1),
+    ]
+    // Moving l2: its descendant l3 must not be offered; l1 and other remain.
+    expect(selectMoveCandidates(items, 'l2').map((item) => item.id).sort()).toEqual(['l1', 'other'])
+    // Moving l1: the whole subtree l2/l3 is excluded.
+    expect(selectMoveCandidates(items, 'l1').map((item) => item.id)).toEqual(['other'])
+    // No selection yields no candidates.
+    expect(selectMoveCandidates(items, null)).toEqual([])
+  })
+
+  it('still applies the depth < 3 rule to remaining candidates', () => {
+    const items = [
+      workItem('root', null, 1),
+      workItem('mid', 'root', 2),
+      workItem('leaf', 'mid', 3),
+    ]
+    // A depth-3 item can never be a new parent for anyone.
+    expect(selectMoveCandidates(items, 'leaf').map((item) => item.id)).toEqual(['root', 'mid'])
+    expect(selectMoveCandidates(items, 'mid').map((item) => item.id)).toEqual(['root'])
   })
 })

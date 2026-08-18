@@ -49,7 +49,9 @@ export function WorkItemTree({
       'Loading work items',
     )
   }
-  if (error) {
+  // A refresh error must not hide already-cached rows: the failure state is
+  // only shown when there is nothing to render.
+  if (error && items.length === 0) {
     return createElement(
       'p',
       { role: 'alert', className: 'px-2 py-3 text-sm text-destructive' },

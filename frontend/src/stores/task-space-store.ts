@@ -206,6 +206,35 @@ export function selectProjectTree(items: CachedWorkItem[], projectId: string | n
     ))
 }
 
+/**
+ * Same-project nodes that may become the new parent of ``selectedWorkItemId``.
+ * A candidate must be shallow enough (depth < 3) and must never be the item
+ * itself or one of its descendants (the backend rejects both with a stable
+ * invalid_work_item_tree conflict, so the UI never offers doomed choices).
+ */
+export function selectMoveCandidates(items: CachedWorkItem[], selectedWorkItemId: string | null): CachedWorkItem[] {
+  if (!selectedWorkItemId) return []
+  const children = new Map<string | null, CachedWorkItem[]>()
+  for (const item of items) {
+    const group = children.get(item.parentId) ?? []
+    group.push(item)
+    children.set(item.parentId, group)
+  }
+  const descendants = new Set<string>()
+  const frontier = [selectedWorkItemId]
+  while (frontier.length > 0) {
+    const id = frontier.pop()!
+    for (const child of children.get(id) ?? []) {
+      if (descendants.has(child.id)) continue
+      descendants.add(child.id)
+      frontier.push(child.id)
+    }
+  }
+  return items.filter((item) => (
+    item.depth < 3 && item.id !== selectedWorkItemId && !descendants.has(item.id)
+  ))
+}
+
 export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
   devtools((set, get) => {
     let hydrationSequence = 0
@@ -292,7 +321,16 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             selectedProjectId: cachedProjectId,
           })
 
-          await repository.resumePendingDirectCommandIntents()
+          // Reconcile pending intents, but a rejected intent (e.g. a replayed
+          // duplicate-key create) must not break the workbench: record a
+          // stable recovery message and let the refresh below still rebuild
+          // the view from authoritative server rows.
+          let resumeFailed = false
+          try {
+            await repository.resumePendingDirectCommandIntents()
+          } catch {
+            resumeFailed = true
+          }
           const remote = await repository.refreshOverview()
           if (sequence !== hydrationSequence || !isCurrent(get(), spaceId)) return
           const selectedProjectId = get().selectedProjectId && remote.projects.some(
@@ -306,11 +344,13 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             definitions: remote.definitions,
             selectedProjectId,
             isLoading: false,
-            error: null,
+            error: resumeFailed ? '部分本地操作未能同步，请刷新页面重试。' : null,
           })
         } catch (error) {
           if (sequence !== hydrationSequence || !isCurrent(get(), spaceId)) return
-          set({ isLoading: false, error: (error as Error).message })
+          // A failed reconciliation (e.g. replaying a rejected intent) must
+          // surface a stable message, never raw Axios text.
+          set({ isLoading: false, error: resolveTaskSpaceMutationError(error).message })
         }
       },
 

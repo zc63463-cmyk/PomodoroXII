@@ -17,9 +17,10 @@ import { WorkItemTree } from '@/components/task-space/work-item-tree'
 import { WorkItemNoteEditor } from '@/components/task-space/work-item-note-editor'
 import { TaskSpaceRepository } from '@/lib/task-space/task-space-repository'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
-import { selectProjectTree, useTaskSpaceStore } from '@/stores/task-space-store'
+import { selectMoveCandidates, selectProjectTree, resolveTaskSpaceMutationError, useTaskSpaceStore } from '@/stores/task-space-store'
 import { useSpaceStore } from '@/stores/space-store'
 import { spaceDBManager } from '@/services/space-db'
+import { PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
 import type { WorkItemNoteConflictRow } from '@/types'
 
 type NoteRepositoryWithConflict = {
@@ -65,26 +66,48 @@ export default function TasksPage() {
       return
     }
     let cancelled = false
-    try {
-      const database = spaceDBManager.current
-      const repository = new TaskSpaceRepository(database, spaceId)
-      const noteRepository = new WorkItemNoteRepository(database, spaceId)
-      const noteRepositoryWithConflict = noteRepository as unknown as NoteRepositoryWithConflict
-      attachNoteRepository({
-        read: (workItemId) => noteRepository.read(workItemId),
-        saveLocal: (input) => noteRepository.saveLocal(input),
-        dispatchReplace: (workItemId) => noteRepository.dispatchReplace(workItemId),
-        resolveReloadRemote: (workItemId) => noteRepository.resolveReloadRemote(workItemId),
-        resolveOverwriteLocal: (workItemId) => noteRepository.resolveOverwriteLocal(workItemId),
-        readConflict: async (workItemId) => await noteRepositoryWithConflict.conflict(workItemId) ?? null,
-      })
-      void (async () => {
-        if (cancelled) return
-        await hydrate(spaceId, repository)
-      })()
-    } catch (hydrationError) {
-      // The route guard normally prevents this; keep the workbench fail-closed if it races.
-      useTaskSpaceStore.setState({ error: (hydrationError as Error).message, isLoading: false })
+    const run = () => {
+      if (cancelled) return
+      try {
+        const database = spaceDBManager.current
+        const repository = new TaskSpaceRepository(database, spaceId)
+        const noteRepository = new WorkItemNoteRepository(database, spaceId)
+        const noteRepositoryWithConflict = noteRepository as unknown as NoteRepositoryWithConflict
+        attachNoteRepository({
+          read: (workItemId) => noteRepository.read(workItemId),
+          saveLocal: (input) => noteRepository.saveLocal(input),
+          dispatchReplace: (workItemId) => noteRepository.dispatchReplace(workItemId),
+          resolveReloadRemote: (workItemId) => noteRepository.resolveReloadRemote(workItemId),
+          resolveOverwriteLocal: (workItemId) => noteRepository.resolveOverwriteLocal(workItemId),
+          readConflict: async (workItemId) => await noteRepositoryWithConflict.conflict(workItemId) ?? null,
+        })
+        void (async () => {
+          if (cancelled) return
+          await hydrate(spaceId, repository)
+        })()
+      } catch (hydrationError) {
+        // The route guard normally prevents this; keep the workbench
+        // fail-closed with a stable message if it races.
+        useTaskSpaceStore.setState({
+          error: resolveTaskSpaceMutationError(hydrationError).message,
+          isLoading: false,
+        })
+      }
+    }
+    if (spaceDBManager.currentSpaceId === spaceId) {
+      run()
+    } else {
+      // The space store publishes currentSpaceId before its switchTo()
+      // completes; hydrate only once the space database is actually ready.
+      const onSpaceSwitched = () => {
+        if (spaceDBManager.currentSpaceId === spaceId) run()
+      }
+      window.addEventListener(PXII_SPACE_SWITCHED_EVENT, onSpaceSwitched)
+      return () => {
+        cancelled = true
+        window.removeEventListener(PXII_SPACE_SWITCHED_EVENT, onSpaceSwitched)
+        attachNoteRepository(null)
+      }
     }
     return () => {
       cancelled = true
@@ -99,10 +122,9 @@ export default function TasksPage() {
 
   const visibleItems = selectProjectTree(workItems, selectedProjectId)
   const selectedWorkItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
-  // Only same-project nodes at depth < 3 can become a new parent.
-  const availableParents = selectedWorkItem
-    ? visibleItems.filter((item) => item.depth < 3 && item.id !== selectedWorkItem.id)
-    : []
+  // Same-project nodes that may become a new parent: never the item itself,
+  // its descendants, or a depth-3 node (all rejected by the backend anyway).
+  const availableParents = selectMoveCandidates(visibleItems, selectedWorkItemId)
 
   const submitChild = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()

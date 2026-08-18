@@ -136,4 +136,16 @@ describe('WorkItemTree', () => {
     }))
     expect(screen.getByRole('button', { name: 'Create child under Busy' })).toBeDisabled()
   })
+
+  it('still renders the cached tree when a refresh error occurs with data present', () => {
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Cached Row', null, 1)],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      error: '部分本地操作未能同步，请刷新后重试。',
+    }))
+    expect(screen.getByRole('treeitem', { name: /Cached Row/ })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
 })
