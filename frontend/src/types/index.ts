@@ -617,9 +617,10 @@ export interface DirectCommandIntentRow {
   targetId: string | null
   requestJson: string
   requestHash: string
-  state: 'prepared' | 'in_flight' | 'terminal'
+  state: 'prepared' | 'in_flight' | 'terminal' | 'failed'
   resultJson: string | null
   resultHash: string | null
+  failureCode: string | null
   createdAt: string
   updatedAt: string
 }

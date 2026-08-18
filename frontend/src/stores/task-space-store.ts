@@ -60,7 +60,7 @@ export interface TaskSpaceRepositoryLike {
     workItemId: string
     statusDefinitionId: string
   }) => Promise<CachedWorkItem>
-  resumePendingDirectCommandIntents: () => Promise<void>
+  resumePendingDirectCommandIntents: () => Promise<{ failed: Array<{ operationId: string; code: string }> }>
 }
 
 export interface TaskSpaceNoteRepositoryLike {
@@ -327,7 +327,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           // the view from authoritative server rows.
           let resumeFailed = false
           try {
-            await repository.resumePendingDirectCommandIntents()
+            resumeFailed = (await repository.resumePendingDirectCommandIntents()).failed.length > 0
           } catch {
             resumeFailed = true
           }

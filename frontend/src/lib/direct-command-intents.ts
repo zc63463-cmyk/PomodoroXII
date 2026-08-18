@@ -13,10 +13,14 @@ export type DirectCommandHandlerMap = Record<DirectCommandKind, {
   executeExact(intent: DirectCommandIntentRow): Promise<void>
 }>
 
+export interface DirectCommandResumeResult {
+  failed: Array<{ operationId: string; code: string }>
+}
+
 type PrepareInput = Omit<
   DirectCommandIntentRow,
   'operationId' | 'requestJson' | 'requestHash' | 'state' | 'resultJson' |
-  'resultHash' | 'createdAt' | 'updatedAt'
+  'resultHash' | 'failureCode' | 'createdAt' | 'updatedAt'
 > & {
   request: Record<string, JsonValue>
   now: string
@@ -49,6 +53,7 @@ export async function prepareDirectCommandIntent(
     state: 'prepared',
     resultJson: null,
     resultHash: null,
+    failureCode: null,
     createdAt: input.now,
     updatedAt: input.now,
   }
@@ -111,6 +116,7 @@ export async function executeDurableDirectCommand<TResult>(
         }
         return { terminal: input.parseResult(JSON.parse(typed.resultJson)), hasTerminal: true }
       }
+      if (typed.state === 'failed') throw new Error('direct_command_intent_failed')
       await input.db.directCommandIntents.update(input.intent.operationId, {
         state: 'in_flight', updatedAt: input.now(),
       })
@@ -140,24 +146,77 @@ export async function executeDurableDirectCommand<TResult>(
       }
       await input.applyResult(result)
       await input.db.directCommandIntents.update(input.intent.operationId, {
-        state: 'terminal', resultJson, resultHash, updatedAt: input.now(),
+        state: 'terminal', resultJson, resultHash, failureCode: null, updatedAt: input.now(),
       })
     },
   )
   return result
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+function responseField(value: unknown, field: string): unknown {
+  if (!isRecord(value)) return undefined
+  const direct = value[field]
+  if (direct !== undefined) return direct
+  const detail = value.detail
+  return isRecord(detail) ? detail[field] : undefined
+}
+
+function nonRetryableFailureCode(error: unknown): string | null {
+  const response = isRecord(error) ? error.response : undefined
+  const data = isRecord(response) ? response.data : undefined
+  const code = responseField(data, 'code')
+  const retryable = responseField(data, 'retryable')
+  return typeof code === 'string' && code.length > 0 && retryable === false ? code : null
+}
+
+async function markIntentFailed(
+  db: PomodoroXIDB,
+  intent: DirectCommandIntentRow,
+  failureCode: string,
+): Promise<void> {
+  await db.transaction('rw', db.directCommandIntents, async () => {
+    const current = await db.directCommandIntents.get(intent.operationId)
+    if (
+      !current ||
+      current.requestJson !== intent.requestJson ||
+      current.requestHash !== intent.requestHash ||
+      current.kind !== intent.kind ||
+      current.spaceId !== intent.spaceId ||
+      current.state === 'terminal' ||
+      current.state === 'failed'
+    ) {
+      throw new Error('direct_command_intent_lost')
+    }
+    await db.directCommandIntents.update(intent.operationId, {
+      state: 'failed', failureCode, resultJson: null, resultHash: null, updatedAt: canonicalNow(),
+    })
+  })
+}
+
 export async function resumePendingDirectCommandIntents(
   db: PomodoroXIDB,
   handlers: DirectCommandHandlerMap,
-): Promise<void> {
+): Promise<DirectCommandResumeResult> {
   const pending = await db.directCommandIntents
     .where('state')
     .anyOf('prepared', 'in_flight')
     .sortBy('createdAt')
+  const failed: DirectCommandResumeResult['failed'] = []
   for (const row of pending) {
     const handler = handlers[row.kind as DirectCommandKind]
     if (!handler) throw new Error(`direct_command_handler_missing:${row.kind}`)
-    await handler.executeExact(row as unknown as DirectCommandIntentRow)
+    const intent = row as unknown as DirectCommandIntentRow
+    try {
+      await handler.executeExact(intent)
+    } catch (error) {
+      const failureCode = nonRetryableFailureCode(error)
+      if (!failureCode) throw error
+      await markIntentFailed(db, intent, failureCode)
+      failed.push({ operationId: intent.operationId, code: failureCode })
+    }
   }
+  return { failed }
 }

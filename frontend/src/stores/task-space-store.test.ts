@@ -69,7 +69,7 @@ function repositoryFixture(overrides: Partial<TaskSpaceRepositoryLike> = {}): Ta
     updateWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     moveWorkItem: vi.fn().mockResolvedValue(workItem('l3', 'l1', 2)),
     transitionWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
-    resumePendingDirectCommandIntents: vi.fn().mockResolvedValue(undefined),
+    resumePendingDirectCommandIntents: vi.fn().mockResolvedValue({ failed: [] }),
     ...overrides,
   }
 }
@@ -178,6 +178,19 @@ describe('task-space-store projection', () => {
     expect(state.error).not.toBeNull()
     // The cached rows are still projected into the store.
     expect(state.workItems.length).toBeGreaterThan(0)
+  })
+
+  it('reports terminalized reconciliation conflicts without replaying them', async () => {
+    const repository = repositoryFixture({
+      resumePendingDirectCommandIntents: vi.fn().mockResolvedValue({
+        failed: [{ operationId: 'op-rejected', code: 'project_key_conflict' }],
+      }),
+    })
+
+    await useTaskSpaceStore.getState().hydrate('space-a', repository)
+
+    expect(useTaskSpaceStore.getState().error).toBe('部分本地操作未能同步，请刷新页面重试。')
+    expect(repository.resumePendingDirectCommandIntents).toHaveBeenCalledTimes(1)
   })
 
   it('selecting a level-3 item preserves its level-2 parent for Session launch', () => {
