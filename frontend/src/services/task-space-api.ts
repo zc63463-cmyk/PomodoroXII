@@ -85,14 +85,17 @@ export const taskSpaceApi = {
     )
   },
   async updateWorkItem(input: UpdateWorkItemInput) {
-    const internal: Record<string, unknown> = {}
-    if (input.title !== undefined) internal.title = input.title
-    if (input.description !== undefined) internal.description = input.description
-    if (input.priority !== undefined) internal.priority = input.priority
-    if (input.typeDefinitionId !== undefined) internal.type_definition_id = input.typeDefinitionId
+    // Wire body stays flat camelCase; the canonical business payload mirrors
+    // the backend compiler contract: a nested {"patch": {...}} over the exact
+    // fields the caller provided (explicit null keeps the field in the hash).
+    const patch: Record<string, unknown> = {}
+    if (input.title !== undefined) patch.title = input.title
+    if (input.description !== undefined) patch.description = input.description
+    if (input.priority !== undefined) patch.priority = input.priority
+    if (input.typeDefinitionId !== undefined) patch.type_definition_id = input.typeDefinitionId
     return command(input.operationId, input.spaceId,
       { expectedVersion: input.expectedVersion, title: input.title, description: input.description, priority: input.priority, typeDefinitionId: input.typeDefinitionId },
-      internal,
+      { patch },
       (body, options) => spaceApi.patch(`/work-items/${encodeURIComponent(input.workItemId)}`, body, options),
     )
   },

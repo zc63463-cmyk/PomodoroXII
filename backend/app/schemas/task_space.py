@@ -176,7 +176,9 @@ class MoveWorkItemRequest(WireModel):
     space_id: str = Field(min_length=1, max_length=64)
     expected_version: int = Field(ge=0)
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    project_id: str = Field(min_length=1, max_length=64)
     parent_id: str | None = Field(default=None, max_length=64)
+    child_rank: int = Field(default=0, ge=0)
 
 
 class TransitionWorkItemRequest(WireModel):

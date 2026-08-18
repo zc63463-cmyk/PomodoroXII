@@ -238,7 +238,12 @@ async def move_work_item(
         work_item_id=work_item_id,
         expected_version=body.expected_version,
         payload_hash=body.payload_hash,
-        payload={"parent_id": body.parent_id},
+        payload={
+            "operation": "move",
+            "project_id": body.project_id,
+            "new_parent_id": body.parent_id,
+            "child_rank": body.child_rank,
+        },
     )
     outcome = await command_module.execute(scope, command)
     return await _map_work_item_outcome(outcome, scope, query_module)
@@ -264,7 +269,10 @@ async def transition_work_item(
         work_item_id=work_item_id,
         expected_version=body.expected_version,
         payload_hash=body.payload_hash,
-        payload={"status_definition_id": body.status_definition_id},
+        payload={
+            "operation": "transition",
+            "status_definition_id": body.status_definition_id,
+        },
     )
     outcome = await command_module.execute(scope, command)
     return await _map_work_item_outcome(outcome, scope, query_module)
@@ -287,22 +295,22 @@ async def update_work_item(
     """Update mutable fields of a work item."""
     require_idempotency_key(body.command_id, idempotency_key)
     require_space_identity(scope, body.space_id)
-    payload: dict[str, Any] = {}
-    if body.title is not None:
-        payload["title"] = body.title
-    if body.description is not None:
-        payload["description"] = body.description
-    if body.priority is not None:
-        payload["priority"] = body.priority
-    if body.type_definition_id is not None:
-        payload["type_definition_id"] = body.type_definition_id
+    # The business payload is a nested ``patch`` object that mirrors the
+    # compiler contract (``_compile_UpdateWorkItem`` reads payload["patch"]).
+    # Only fields the caller explicitly provided appear in the patch, so an
+    # explicit ``description: null`` clears the field while an omitted field
+    # is left untouched -- matching the frontend canonical hash input.
+    patch: dict[str, Any] = {}
+    for field_name in ("title", "description", "priority", "type_definition_id"):
+        if field_name in body.model_fields_set:
+            patch[field_name] = getattr(body, field_name)
     command = MutateWorkItem(
         command_id=body.command_id,
         space_id=body.space_id,
         work_item_id=work_item_id,
         expected_version=body.expected_version,
         payload_hash=body.payload_hash,
-        payload=payload,
+        payload={"operation": "update", "patch": patch},
     )
     outcome = await command_module.execute(scope, command)
     return await _map_work_item_outcome(outcome, scope, query_module)

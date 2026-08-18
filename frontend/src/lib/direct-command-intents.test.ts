@@ -69,6 +69,7 @@ describe('durable direct command intents', () => {
         },
       },
       create_work_item: { executeExact: async () => undefined },
+      update_work_item: { executeExact: async () => undefined },
       move_work_item: { executeExact: async () => undefined },
       transition_work_item: { executeExact: async () => undefined },
       submit_review: { executeExact: async () => undefined },

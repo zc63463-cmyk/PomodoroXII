@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CachedProject, CachedWorkItem } from '@/types'
 import type { CachedWorkItemNote, WorkItemNoteConflictRow } from '@/types'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
-import { useTaskSpaceStore, type TaskSpaceNoteRepositoryLike, type TaskSpaceRepositoryLike } from './task-space-store'
+import { selectMoveCandidates, useTaskSpaceStore, type TaskSpaceNoteRepositoryLike, type TaskSpaceRepositoryLike } from './task-space-store'
 
 const workItem = (id: string, parentId: string | null, depth: 1 | 2 | 3): CachedWorkItem => ({
   id,
@@ -66,6 +66,7 @@ function repositoryFixture(overrides: Partial<TaskSpaceRepositoryLike> = {}): Ta
     }),
     createProject: vi.fn().mockResolvedValue(project('project-2')),
     createWorkItem: vi.fn().mockResolvedValue(workItem('new', 'l2', 3)),
+    updateWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     moveWorkItem: vi.fn().mockResolvedValue(workItem('l3', 'l1', 2)),
     transitionWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     resumePendingDirectCommandIntents: vi.fn().mockResolvedValue(undefined),
@@ -100,6 +101,23 @@ const conflict = (): WorkItemNoteConflictRow => ({
   remoteVersion: 4,
   detectedAt: '2026-07-15T08:04:00.000Z',
 })
+
+type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+function axiosError(status: number, code: string): Error {
+  return Object.assign(new Error(`Request failed with status code ${status}`), {
+    isAxiosError: true,
+    response: { status, data: { detail: { code, retryable: false, details: {} } } },
+  })
+}
 
 function noteRepositoryFixture(overrides: Partial<TaskSpaceNoteRepositoryLike> = {}): TaskSpaceNoteRepositoryLike {
   const current = note()
@@ -146,6 +164,20 @@ describe('task-space-store projection', () => {
 
     expect(useTaskSpaceStore.getState().workItems.map((item) => item.id)).toEqual(['l1', 'l2'])
     expect(useTaskSpaceStore.getState().isLoading).toBe(false)
+  })
+
+  it('maps a failed reconciliation to a stable message without leaking axios text', async () => {
+    const conflict = axiosError(409, 'version_conflict')
+    const repository = repositoryFixture({
+      resumePendingDirectCommandIntents: vi.fn().mockRejectedValue(conflict),
+    })
+    await useTaskSpaceStore.getState().hydrate('space-a', repository)
+
+    const state = useTaskSpaceStore.getState()
+    expect(state.error).not.toMatch(/Request failed/)
+    expect(state.error).not.toBeNull()
+    // The cached rows are still projected into the store.
+    expect(state.workItems.length).toBeGreaterThan(0)
   })
 
   it('selecting a level-3 item preserves its level-2 parent for Session launch', () => {
@@ -251,5 +283,143 @@ describe('task-space-store projection', () => {
       expect(source).not.toMatch(/work_item_ref|titleSnapshot/)
       expect(source).not.toMatch(/contentEditable|ordered_list|unordered_list|workItemReference|Markdown/)
     }
+  })
+})
+
+describe('task-space-store mutation lifecycle', () => {
+  beforeEach(() => useTaskSpaceStore.getState().reset())
+
+  it('guards against same-tick double submit for the same work item', async () => {
+    const pending = deferred<CachedWorkItem>()
+    const moveWorkItem = vi.fn(() => pending.promise)
+    const repository = repositoryFixture({ moveWorkItem })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', selectedProjectId: 'project-1',
+      workItems: [workItem('l1', null, 1)],
+    })
+
+    const first = useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 0)
+    expect(useTaskSpaceStore.getState().pendingMutations).toMatchObject({ l1: true })
+    await expect(
+      useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 0),
+    ).rejects.toThrow('work_item_mutation_in_flight')
+    expect(moveWorkItem).toHaveBeenCalledTimes(1)
+
+    pending.resolve({ ...workItem('l1', null, 1), parentId: 'l2', version: 2 })
+    await first
+    expect(useTaskSpaceStore.getState().pendingMutations).toEqual({})
+  })
+
+  it('updates the store from the server post-image on success', async () => {
+    const moved = { ...workItem('l1', null, 1), parentId: 'l2', childRank: 3, version: 2 }
+    const moveWorkItem = vi.fn().mockResolvedValue(moved)
+    const repository = repositoryFixture({ moveWorkItem })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1)],
+    })
+
+    await useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 3)
+    expect(useTaskSpaceStore.getState().workItems.find((item) => item.id === 'l1')).toEqual(moved)
+    expect(useTaskSpaceStore.getState().error).toBeNull()
+    expect(useTaskSpaceStore.getState().mutationError).toBeNull()
+  })
+
+  it('preserves the prior item and maps a stable code on failure', async () => {
+    const moveWorkItem = vi.fn().mockRejectedValue(axiosError(409, 'version_conflict'))
+    const repository = repositoryFixture({ moveWorkItem })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1)],
+    })
+
+    await expect(useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 0)).rejects.toThrow()
+    expect(useTaskSpaceStore.getState().workItems.find((item) => item.id === 'l1')).toMatchObject({
+      version: 1, parentId: null,
+    })
+    expect(useTaskSpaceStore.getState().mutationError).toEqual({ targetId: 'l1', code: 'version_conflict' })
+    expect(useTaskSpaceStore.getState().error).not.toMatch(/Request failed/)
+    expect(useTaskSpaceStore.getState().error).not.toBeNull()
+  })
+
+  it('does not block a mutation of item B while item A is pending', async () => {
+    const pendingA = deferred<CachedWorkItem>()
+    const moveWorkItem = vi.fn((args: { workItemId: string }) => (
+      args.workItemId === 'l1'
+        ? pendingA.promise
+        : Promise.resolve({ ...workItem('l2', 'l1', 2), version: 2 })
+    ))
+    const repository = repositoryFixture({ moveWorkItem })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1), workItem('l2', 'l1', 2)],
+    })
+
+    const first = useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 0)
+    await useTaskSpaceStore.getState().moveWorkItem('l2', null, 0)
+    expect(moveWorkItem).toHaveBeenCalledTimes(2)
+    pendingA.resolve({ ...workItem('l1', null, 1), version: 2 })
+    await first
+  })
+
+  it('guards double create-child submission under the same parent', async () => {
+    const pending = deferred<CachedWorkItem>()
+    const createWorkItem = vi.fn(() => pending.promise)
+    const repository = repositoryFixture({ createWorkItem })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', selectedProjectId: 'project-1',
+      workItems: [workItem('l2', 'l1', 2)],
+    })
+
+    const first = useTaskSpaceStore.getState().createChild('l2', { title: 'New' })
+    expect(useTaskSpaceStore.getState().pendingMutations).toMatchObject({ l2: true })
+    await expect(
+      useTaskSpaceStore.getState().createChild('l2', { title: 'New' }),
+    ).rejects.toThrow('work_item_child_creation_in_flight')
+    expect(createWorkItem).toHaveBeenCalledTimes(1)
+
+    pending.resolve({ ...workItem('l3', 'l2', 3) })
+    await first
+  })
+
+  it('maps transition failure to a stable code and keeps the previous status', async () => {
+    const transitionWorkItem = vi.fn().mockRejectedValue(axiosError(409, 'idempotency_conflict'))
+    const repository = repositoryFixture({ transitionWorkItem })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1)],
+    })
+
+    await expect(
+      useTaskSpaceStore.getState().transitionWorkItem('l1', 'status-done'),
+    ).rejects.toThrow()
+    expect(useTaskSpaceStore.getState().workItems.find((item) => item.id === 'l1')).toMatchObject({
+      version: 1, statusDefinitionId: 'status-open',
+    })
+    expect(useTaskSpaceStore.getState().mutationError).toEqual({ targetId: 'l1', code: 'idempotency_conflict' })
+  })
+})
+
+describe('selectMoveCandidates', () => {
+  it('excludes the selected item and every descendant from move parents', () => {
+    const items = [
+      workItem('l1', null, 1),
+      workItem('l2', 'l1', 2),
+      workItem('l3', 'l2', 3),
+      workItem('other', null, 1),
+    ]
+    // Moving l2: its descendant l3 must not be offered; l1 and other remain.
+    expect(selectMoveCandidates(items, 'l2').map((item) => item.id).sort()).toEqual(['l1', 'other'])
+    // Moving l1: the whole subtree l2/l3 is excluded.
+    expect(selectMoveCandidates(items, 'l1').map((item) => item.id)).toEqual(['other'])
+    // No selection yields no candidates.
+    expect(selectMoveCandidates(items, null)).toEqual([])
+  })
+
+  it('still applies the depth < 3 rule to remaining candidates', () => {
+    const items = [
+      workItem('root', null, 1),
+      workItem('mid', 'root', 2),
+      workItem('leaf', 'mid', 3),
+    ]
+    // A depth-3 item can never be a new parent for anyone.
+    expect(selectMoveCandidates(items, 'leaf').map((item) => item.id)).toEqual(['root', 'mid'])
+    expect(selectMoveCandidates(items, 'mid').map((item) => item.id)).toEqual(['root'])
   })
 })

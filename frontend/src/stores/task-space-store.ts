@@ -43,6 +43,13 @@ export interface TaskSpaceRepositoryLike {
     statusDefinitionId: string | null
     priority: string | null
   }) => Promise<CachedWorkItem>
+  updateWorkItem: (input: {
+    workItemId: string
+    title?: string
+    description?: string | null
+    priority?: string | null
+    typeDefinitionId?: string | null
+  }) => Promise<CachedWorkItem>
   moveWorkItem: (input: {
     projectId: string
     workItemId: string
@@ -85,6 +92,10 @@ export interface TaskSpaceState {
   error: string | null
   repository: TaskSpaceRepositoryLike | null
   noteRepository: TaskSpaceNoteRepositoryLike | null
+  /** Work item ids (or parent ids for child creation) with an in-flight mutation. */
+  pendingMutations: Record<string, boolean>
+  /** Stable, user-safe code of the last failed mutation (never raw Axios text). */
+  mutationError: { targetId: string; code: string } | null
 }
 
 export interface TaskSpaceActions {
@@ -101,6 +112,12 @@ export interface TaskSpaceActions {
   selectWorkItem: (workItemId: string) => void
   createProject: (input: { name: string; key: string; description: string | null }) => Promise<CachedProject>
   createChild: (parentId: string, input?: CreateChildInput) => Promise<CachedWorkItem>
+  updateWorkItem: (workItemId: string, input: {
+    title?: string
+    description?: string | null
+    priority?: string | null
+    typeDefinitionId?: string | null
+  }) => Promise<CachedWorkItem>
   moveWorkItem: (workItemId: string, newParentId: string | null, childRank?: number) => Promise<CachedWorkItem>
   transitionWorkItem: (workItemId: string, statusDefinitionId: string) => Promise<CachedWorkItem>
   reset: () => void
@@ -120,7 +137,45 @@ const initialState = (): TaskSpaceState => ({
   error: null,
   repository: null,
   noteRepository: null,
+  pendingMutations: {},
+  mutationError: null,
 })
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const MUTATION_ERROR_MESSAGES: Record<string, string> = {
+  version_conflict: '该项目项已被其他操作更新，请刷新后重试。',
+  idempotency_conflict: '该操作已被使用，请重试或刷新。',
+  invalid_work_item_tree: '当前树结构不允许该操作。',
+  active_child_conflict: '存在进行中的子项，无法完成该操作。',
+  not_found: '项目项不存在或已被删除。',
+  invalid_payload_hash: '请求校验失败，请刷新后重试。',
+}
+
+const GENERIC_MUTATION_ERROR = '操作失败，请检查服务连接后重试。'
+
+/**
+ * Map a failed mutation to a stable error code and a closed, user-safe
+ * message. Never surfaces raw Axios text, exception messages, response
+ * objects, tokens, or paths. Handles canonical ({code, ...}), legacy
+ * ({detail: string | {code, ...}}) and error-code header shapes.
+ */
+export function resolveTaskSpaceMutationError(error: unknown): { code: string; message: string } {
+  const response = isRecord(error) ? error.response : undefined
+  const data = isRecord(response) ? response.data : undefined
+  const headers = isRecord(response) ? response.headers : undefined
+
+  let code: unknown = isRecord(data) ? data.code : undefined
+  if (!code && isRecord(data) && isRecord(data.detail)) code = data.detail.code
+  if (code === undefined && isRecord(headers)) code = headers['x-pomodoroxii-error-code']
+
+  const stableCode = typeof code === 'string' && code.length > 0 ? code : 'unknown'
+  return {
+    code: stableCode,
+    message: MUTATION_ERROR_MESSAGES[stableCode] ?? GENERIC_MUTATION_ERROR,
+  }
+}
 
 const isCurrent = (state: TaskSpaceState, spaceId: string): boolean => state.spaceId === spaceId
 
@@ -151,6 +206,35 @@ export function selectProjectTree(items: CachedWorkItem[], projectId: string | n
     ))
 }
 
+/**
+ * Same-project nodes that may become the new parent of ``selectedWorkItemId``.
+ * A candidate must be shallow enough (depth < 3) and must never be the item
+ * itself or one of its descendants (the backend rejects both with a stable
+ * invalid_work_item_tree conflict, so the UI never offers doomed choices).
+ */
+export function selectMoveCandidates(items: CachedWorkItem[], selectedWorkItemId: string | null): CachedWorkItem[] {
+  if (!selectedWorkItemId) return []
+  const children = new Map<string | null, CachedWorkItem[]>()
+  for (const item of items) {
+    const group = children.get(item.parentId) ?? []
+    group.push(item)
+    children.set(item.parentId, group)
+  }
+  const descendants = new Set<string>()
+  const frontier = [selectedWorkItemId]
+  while (frontier.length > 0) {
+    const id = frontier.pop()!
+    for (const child of children.get(id) ?? []) {
+      if (descendants.has(child.id)) continue
+      descendants.add(child.id)
+      frontier.push(child.id)
+    }
+  }
+  return items.filter((item) => (
+    item.depth < 3 && item.id !== selectedWorkItemId && !descendants.has(item.id)
+  ))
+}
+
 export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
   devtools((set, get) => {
     let hydrationSequence = 0
@@ -163,6 +247,25 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
       now: string
     }
     let noteAutosave: NoteAutosaveController<PendingNoteEdit> | null = null
+    // Synchronous per-target single-flight guard: state updates are async, so
+    // a second mutation in the same tick would still see stale state. The Set
+    // is written synchronously before any await and cleared in finally.
+    const mutationGuards = new Set<string>()
+
+    const beginMutation = (targetId: string, inFlightCode: string): void => {
+      if (mutationGuards.has(targetId)) throw new Error(inFlightCode)
+      mutationGuards.add(targetId)
+      set((state) => ({ pendingMutations: { ...state.pendingMutations, [targetId]: true } }))
+    }
+
+    const endMutation = (targetId: string): void => {
+      mutationGuards.delete(targetId)
+      set((state) => {
+        const next = { ...state.pendingMutations }
+        delete next[targetId]
+        return { pendingMutations: next }
+      })
+    }
 
     const ensureNoteAutosave = (): NoteAutosaveController<PendingNoteEdit> => {
       if (noteAutosave) return noteAutosave
@@ -199,6 +302,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           repository,
           isLoading: true,
           error: null,
+          mutationError: null,
           selectedProjectId: null,
           selectedWorkItemId: null,
           selectedLevel2WorkItemId: null,
@@ -217,7 +321,16 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             selectedProjectId: cachedProjectId,
           })
 
-          await repository.resumePendingDirectCommandIntents()
+          // Reconcile pending intents, but a rejected intent (e.g. a replayed
+          // duplicate-key create) must not break the workbench: record a
+          // stable recovery message and let the refresh below still rebuild
+          // the view from authoritative server rows.
+          let resumeFailed = false
+          try {
+            await repository.resumePendingDirectCommandIntents()
+          } catch {
+            resumeFailed = true
+          }
           const remote = await repository.refreshOverview()
           if (sequence !== hydrationSequence || !isCurrent(get(), spaceId)) return
           const selectedProjectId = get().selectedProjectId && remote.projects.some(
@@ -231,11 +344,13 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             definitions: remote.definitions,
             selectedProjectId,
             isLoading: false,
-            error: null,
+            error: resumeFailed ? '部分本地操作未能同步，请刷新页面重试。' : null,
           })
         } catch (error) {
           if (sequence !== hydrationSequence || !isCurrent(get(), spaceId)) return
-          set({ isLoading: false, error: (error as Error).message })
+          // A failed reconciliation (e.g. replaying a rejected intent) must
+          // surface a stable message, never raw Axios text.
+          set({ isLoading: false, error: resolveTaskSpaceMutationError(error).message })
         }
       },
 
@@ -354,6 +469,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           selectedWorkItemId: null,
           selectedLevel2WorkItemId: null,
           error: null,
+          mutationError: null,
         })
         await get().loadTree(projectId)
       },
@@ -393,13 +509,14 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
       },
 
       async createChild(parentId, input = {}) {
+        beginMutation(parentId, 'work_item_child_creation_in_flight')
         const repository = get().repository
         const state = get()
         const parent = state.workItems.find((item) => item.id === parentId)
-        if (!repository) throw new Error('task_space_repository_not_ready')
-        if (!state.selectedProjectId) throw new Error('task_space_project_not_selected')
-        if (!parent || parent.depth >= 3) throw new Error('work_item_child_depth_exceeded')
         try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          if (!state.selectedProjectId) throw new Error('task_space_project_not_selected')
+          if (!parent || parent.depth >= 3) throw new Error('work_item_child_depth_exceeded')
           const created = await repository.createWorkItem({
             projectId: state.selectedProjectId,
             title: input.title?.trim() || 'New work item',
@@ -414,21 +531,50 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             selectedWorkItemId: created.id,
             selectedLevel2WorkItemId: created.depth === 2 ? created.id : parent.depth === 2 ? parent.id : current.selectedLevel2WorkItemId,
             error: null,
+            mutationError: null,
           }))
           return created
         } catch (error) {
-          set({ error: (error as Error).message })
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: parentId, code: mapped.code } })
           throw error
+        } finally {
+          endMutation(parentId)
+        }
+      },
+
+      async updateWorkItem(workItemId, input) {
+        beginMutation(workItemId, 'work_item_mutation_in_flight')
+        const repository = get().repository
+        const state = get()
+        const item = state.workItems.find((candidate) => candidate.id === workItemId)
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          if (!item) throw new Error('work_item_not_loaded')
+          const updated = await repository.updateWorkItem({ workItemId, ...input })
+          set((current) => ({
+            workItems: current.workItems.map((candidate) => candidate.id === updated.id ? updated : candidate),
+            error: null,
+            mutationError: null,
+          }))
+          return updated
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
+          throw error
+        } finally {
+          endMutation(workItemId)
         }
       },
 
       async moveWorkItem(workItemId, newParentId, childRank = 0) {
+        beginMutation(workItemId, 'work_item_mutation_in_flight')
         const repository = get().repository
         const state = get()
         const item = state.workItems.find((candidate) => candidate.id === workItemId)
-        if (!repository) throw new Error('task_space_repository_not_ready')
-        if (!item) throw new Error('work_item_not_loaded')
         try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          if (!item) throw new Error('work_item_not_loaded')
           const moved = await repository.moveWorkItem({
             projectId: item.projectId,
             workItemId,
@@ -438,32 +584,42 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           set((current) => ({
             workItems: current.workItems.map((candidate) => candidate.id === moved.id ? moved : candidate),
             error: null,
+            mutationError: null,
           }))
           return moved
         } catch (error) {
-          set({ error: (error as Error).message })
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
           throw error
+        } finally {
+          endMutation(workItemId)
         }
       },
 
       async transitionWorkItem(workItemId, statusDefinitionId) {
+        beginMutation(workItemId, 'work_item_mutation_in_flight')
         const repository = get().repository
-        if (!repository) throw new Error('task_space_repository_not_ready')
         try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
           const transitioned = await repository.transitionWorkItem({ workItemId, statusDefinitionId })
           set((state) => ({
             workItems: state.workItems.map((item) => item.id === transitioned.id ? transitioned : item),
             error: null,
+            mutationError: null,
           }))
           return transitioned
         } catch (error) {
-          set({ error: (error as Error).message })
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
           throw error
+        } finally {
+          endMutation(workItemId)
         }
       },
 
       reset() {
         hydrationSequence += 1
+        mutationGuards.clear()
         noteAutosave?.cancel()
         noteAutosave = null
         set(initialState())
