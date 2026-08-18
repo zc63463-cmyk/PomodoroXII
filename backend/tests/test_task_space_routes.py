@@ -722,3 +722,357 @@ class TestTaskSpaceIntegration:
         after_value = after.json()
         assert after_value["version"] == before_value["version"]
         assert after_value["document"] == before_value["document"]
+
+
+# --------------------------------------------------------------------------- #
+# WorkItem mutation contract (TS-W2 Task 1): update / transition / move /
+# idempotency against the real ASGI app and isolated temporary data root.
+# --------------------------------------------------------------------------- #
+
+
+async def _create_project(client, headers, space_id: str, command_id: str, key: str, name: str) -> str:
+    from app.mutation.types import canonical_payload_hash
+
+    project_payload = {"key": key, "name": name, "description": None}
+    resp = await client.post(
+        "/api/v1/projects",
+        json={
+            "commandId": command_id,
+            "spaceId": space_id,
+            "payloadHash": canonical_payload_hash(project_payload),
+            "key": key,
+            "name": name,
+        },
+        headers={**headers, "Idempotency-Key": command_id},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["entityId"]
+
+
+async def _create_work_item(
+    client, headers, space_id: str, command_id: str, project_id: str,
+    *, title: str = "Task", parent_id: str | None = None, priority: str | None = None,
+) -> dict:
+    from app.mutation.types import canonical_payload_hash
+
+    wi_payload = {
+        "title": title,
+        "description": None,
+        "parent_id": parent_id,
+        "type_definition_id": None,
+        "status_definition_id": None,
+        "priority": priority,
+    }
+    resp = await client.post(
+        "/api/v1/work-items",
+        json={
+            "commandId": command_id,
+            "spaceId": space_id,
+            "projectId": project_id,
+            "payloadHash": canonical_payload_hash(wi_payload),
+            "title": title,
+            "parentId": parent_id,
+            "priority": priority,
+        },
+        headers={**headers, "Idempotency-Key": command_id},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    return {"id": body["entityId"], "version": body["version"], "value": body["value"]}
+
+
+async def _first_in_progress_status(client, headers) -> str:
+    resp = await client.get("/api/v1/projects/definitions", headers=headers)
+    assert resp.status_code == 200, resp.text
+    statuses = resp.json()["statuses"]
+    in_progress = next((s for s in statuses if s["category"] == "in_progress"), None)
+    assert in_progress is not None, "expected a seeded in_progress status"
+    return str(in_progress["id"])
+
+
+@pytest.mark.provisioned_space_storage
+class TestWorkItemMutationContract:
+    """Freeze the WorkItem update / transition / move REST contract.
+
+    RED contract for TS-W2 Task 1:
+      - update / transition / move accept the flat camelCase wire body and the
+        canonical business payload hash defined by TaskSpaceCommandModule;
+      - stale expectedVersion returns a stable 409 with
+        ``detail.code == "version_conflict"``;
+      - an accepted mutation returns the enriched post-image with version+1;
+      - replaying the same commandId+payload is idempotent; a different
+        payload under the same commandId is a stable 409.
+    """
+
+    async def test_work_item_create_l2_post_image(self, client) -> None:
+        """A legal L2 create returns a complete accepted post-image."""
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_id = await _create_project(client, headers, space_id, "wi-l2-proj", "L2P", "L2 Project")
+        l1 = await _create_work_item(client, headers, space_id, "wi-l2-l1", project_id, title="Parent")
+        l2 = await _create_work_item(
+            client, headers, space_id, "wi-l2-l2", project_id, title="Child", parent_id=l1["id"]
+        )
+        assert l2["value"]["parentId"] == l1["id"]
+        assert l2["value"]["depth"] == 2
+        assert l2["value"]["version"] == 1
+        assert l2["value"]["title"] == "Child"
+        assert l2["value"]["projectId"] == project_id
+        assert l2["value"]["statusDefinitionId"]
+
+    async def test_work_item_update_patch_post_image(self, client) -> None:
+        """PATCH title/description/priority returns version+1 with the patch applied."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_id = await _create_project(client, headers, space_id, "wi-up-proj", "UPP", "Update Project")
+        item = await _create_work_item(client, headers, space_id, "wi-up-item", project_id, title="Original")
+
+        update_payload = {"patch": {"title": "Edited", "description": None, "priority": "low"}}
+        resp = await client.patch(
+            f"/api/v1/work-items/{item['id']}",
+            json={
+                "commandId": "wi-up-edit",
+                "spaceId": space_id,
+                "expectedVersion": item["version"],
+                "payloadHash": canonical_payload_hash(update_payload),
+                "title": "Edited",
+                "description": None,
+                "priority": "low",
+            },
+            headers={**headers, "Idempotency-Key": "wi-up-edit"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["entityType"] == "work_item"
+        assert body["entityId"] == item["id"]
+        assert body["commandId"] == "wi-up-edit"
+        assert body["version"] == item["version"] + 1
+        assert body["value"]["title"] == "Edited"
+        assert body["value"]["description"] is None
+        assert body["value"]["priority"] == "low"
+        assert body["value"]["version"] == item["version"] + 1
+
+    async def test_work_item_update_stale_version_conflict(self, client) -> None:
+        """A stale expectedVersion must 409 version_conflict without mutating."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_id = await _create_project(client, headers, space_id, "wi-cas-proj", "WCP", "CAS Project")
+        item = await _create_work_item(client, headers, space_id, "wi-cas-item", project_id, title="Stable")
+
+        update_payload = {"patch": {"title": "Nope"}}
+        stale = await client.patch(
+            f"/api/v1/work-items/{item['id']}",
+            json={
+                "commandId": "wi-cas-stale",
+                "spaceId": space_id,
+                "expectedVersion": item["version"] - 1,
+                "payloadHash": canonical_payload_hash(update_payload),
+                "title": "Nope",
+            },
+            headers={**headers, "Idempotency-Key": "wi-cas-stale"},
+        )
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["detail"]["code"] == "version_conflict"
+
+        fresh = await client.get(f"/api/v1/work-items/{item['id']}", headers=headers)
+        assert fresh.status_code == 200
+        assert fresh.json()["version"] == item["version"]
+        assert fresh.json()["title"] == "Stable"
+
+    async def test_work_item_transition_post_image(self, client) -> None:
+        """Transition to a real definition returns version+1 with the new status."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_id = await _create_project(client, headers, space_id, "wi-tr-proj", "TRP", "Transition Project")
+        item = await _create_work_item(client, headers, space_id, "wi-tr-item", project_id, title="Flow")
+        target_status = await _first_in_progress_status(client, headers)
+        assert item["value"]["statusDefinitionId"] != target_status
+
+        transition_payload = {"status_definition_id": target_status}
+        resp = await client.post(
+            f"/api/v1/work-items/{item['id']}/transition",
+            json={
+                "commandId": "wi-tr-transition",
+                "spaceId": space_id,
+                "expectedVersion": item["version"],
+                "payloadHash": canonical_payload_hash(transition_payload),
+                "statusDefinitionId": target_status,
+            },
+            headers={**headers, "Idempotency-Key": "wi-tr-transition"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["version"] == item["version"] + 1
+        assert body["value"]["statusDefinitionId"] == target_status
+        assert body["value"]["version"] == item["version"] + 1
+
+    async def test_work_item_transition_stale_version_conflict(self, client) -> None:
+        """Transition with a stale expectedVersion must 409 version_conflict."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_id = await _create_project(client, headers, space_id, "wi-tc-proj", "TCP", "Transition CAS")
+        item = await _create_work_item(client, headers, space_id, "wi-tc-item", project_id, title="CAS Flow")
+        target_status = await _first_in_progress_status(client, headers)
+
+        transition_payload = {"status_definition_id": target_status}
+        stale = await client.post(
+            f"/api/v1/work-items/{item['id']}/transition",
+            json={
+                "commandId": "wi-tc-stale",
+                "spaceId": space_id,
+                "expectedVersion": item["version"] - 1,
+                "payloadHash": canonical_payload_hash(transition_payload),
+                "statusDefinitionId": target_status,
+            },
+            headers={**headers, "Idempotency-Key": "wi-tc-stale"},
+        )
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["detail"]["code"] == "version_conflict"
+
+    async def test_work_item_move_updates_parent_and_rank(self, client) -> None:
+        """Move under a same-project parent returns parentId/depth/childRank."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_id = await _create_project(client, headers, space_id, "wi-mv-proj", "MVP", "Move Project")
+        first = await _create_work_item(client, headers, space_id, "wi-mv-a", project_id, title="Alpha")
+        second = await _create_work_item(client, headers, space_id, "wi-mv-b", project_id, title="Beta")
+
+        move_payload = {"new_parent_id": second["id"], "child_rank": 0}
+        resp = await client.post(
+            f"/api/v1/work-items/{first['id']}/move",
+            json={
+                "commandId": "wi-mv-move",
+                "spaceId": space_id,
+                "expectedVersion": first["version"],
+                "payloadHash": canonical_payload_hash(move_payload),
+                "projectId": project_id,
+                "parentId": second["id"],
+                "childRank": 0,
+            },
+            headers={**headers, "Idempotency-Key": "wi-mv-move"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["version"] == first["version"] + 1
+        assert body["value"]["parentId"] == second["id"]
+        assert body["value"]["depth"] == 2
+        assert body["value"]["childRank"] == 0
+        assert body["value"]["version"] == first["version"] + 1
+
+    async def test_work_item_move_cross_project_rejected(self, client) -> None:
+        """Moving into another project must 409 invalid_work_item_tree."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_a = await _create_project(client, headers, space_id, "wi-xp-pa", "XPA", "XP Project A")
+        project_b = await _create_project(client, headers, space_id, "wi-xp-pb", "XPB", "XP Project B")
+        item = await _create_work_item(client, headers, space_id, "wi-xp-item", project_a, title="A Item")
+
+        move_payload = {"new_parent_id": None, "child_rank": 0}
+        resp = await client.post(
+            f"/api/v1/work-items/{item['id']}/move",
+            json={
+                "commandId": "wi-xp-move",
+                "spaceId": space_id,
+                "expectedVersion": item["version"],
+                "payloadHash": canonical_payload_hash(move_payload),
+                "projectId": project_b,
+                "parentId": None,
+                "childRank": 0,
+            },
+            headers={**headers, "Idempotency-Key": "wi-xp-move"},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "invalid_work_item_tree"
+
+    async def test_work_item_create_replay_is_idempotent(self, client) -> None:
+        """Replaying the exact same commandId+payload must not create a second row."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_id = await _create_project(client, headers, space_id, "wi-re-proj", "REP", "Replay Project")
+        wi_payload = {
+            "title": "Once",
+            "description": None,
+            "parent_id": None,
+            "type_definition_id": None,
+            "status_definition_id": None,
+            "priority": None,
+        }
+        body = {
+            "commandId": "wi-re-replay",
+            "spaceId": space_id,
+            "projectId": project_id,
+            "payloadHash": canonical_payload_hash(wi_payload),
+            "title": "Once",
+        }
+        first = await client.post(
+            "/api/v1/work-items", json=body,
+            headers={**headers, "Idempotency-Key": "wi-re-replay"},
+        )
+        assert first.status_code == 201, first.text
+        second = await client.post(
+            "/api/v1/work-items", json=body,
+            headers={**headers, "Idempotency-Key": "wi-re-replay"},
+        )
+        assert second.status_code == 201, second.text
+        assert second.json()["entityId"] == first.json()["entityId"]
+
+        listed = await client.get(
+            "/api/v1/work-items", params={"projectId": project_id}, headers=headers
+        )
+        assert listed.status_code == 200
+        assert len(listed.json()["items"]) == 1
+
+    async def test_work_item_operation_payload_mismatch_conflict(self, client) -> None:
+        """The same commandId with a different canonical payload must 409."""
+        from app.mutation.types import canonical_payload_hash
+
+        headers, space_id = await _setup_space_and_get_headers(client)
+        project_id = await _create_project(client, headers, space_id, "wi-om-proj", "OMP", "Op Mismatch")
+        base_payload = {
+            "title": "One",
+            "description": None,
+            "parent_id": None,
+            "type_definition_id": None,
+            "status_definition_id": None,
+            "priority": None,
+        }
+        first = await client.post(
+            "/api/v1/work-items",
+            json={
+                "commandId": "wi-om-same",
+                "spaceId": space_id,
+                "projectId": project_id,
+                "payloadHash": canonical_payload_hash(base_payload),
+                "title": "One",
+            },
+            headers={**headers, "Idempotency-Key": "wi-om-same"},
+        )
+        assert first.status_code == 201, first.text
+
+        altered_payload = {
+            "title": "Two",
+            "description": None,
+            "parent_id": None,
+            "type_definition_id": None,
+            "status_definition_id": None,
+            "priority": None,
+        }
+        conflict = await client.post(
+            "/api/v1/work-items",
+            json={
+                "commandId": "wi-om-same",
+                "spaceId": space_id,
+                "projectId": project_id,
+                "payloadHash": canonical_payload_hash(altered_payload),
+                "title": "Two",
+            },
+            headers={**headers, "Idempotency-Key": "wi-om-same"},
+        )
+        assert conflict.status_code == 409, conflict.text
+        assert conflict.json()["detail"]["code"] == "idempotency_conflict"
