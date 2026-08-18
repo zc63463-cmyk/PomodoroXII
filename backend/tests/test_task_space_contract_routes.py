@@ -180,7 +180,7 @@ class FakeTaskSpaceCommandModule:
             payload_keys = set(command.payload.keys())
             if "status_definition_id" in payload_keys and "title" not in payload_keys:
                 kind = "transition"
-            elif "parent_id" in payload_keys:
+            elif "new_parent_id" in payload_keys:
                 kind = "move"
             else:
                 kind = "update"
@@ -423,11 +423,18 @@ def test_move_work_item_delegates_to_commands(
     resp = task_space_client.post("/api/v1/work-items/w1/move", json={
         "commandId": "cmd-m1", "spaceId": "s1",
         "expectedVersion": 2, "payloadHash": "d" * 64,
+        "projectId": "project-1",
         "parentId": "parent-1",
     })
     assert resp.status_code == 200
     assert len(fake_task_commands.calls) == 1
     assert fake_task_commands.calls[0] == ("move", "cmd-m1", "s1", "w1", 2)
+    assert fake_task_commands.last_command.payload == {
+        "operation": "move",
+        "project_id": "project-1",
+        "new_parent_id": "parent-1",
+        "child_rank": 0,
+    }
 
 
 def test_transition_work_item_delegates_to_commands(
