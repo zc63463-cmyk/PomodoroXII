@@ -95,7 +95,7 @@ def _task_payload_hash(action: str, payload: dict[str, object]) -> str:
 async def _create_project(
     client, space_headers: dict[str, str], *, key: str = "PRJ", space_id: str = "space-a",
 ) -> str:
-    payload = {"key": key, "name": f"Project {key}"}
+    payload = {"key": key, "name": f"Project {key}", "description": None}
     body = {
         "commandId": f"op-proj-{key}",
         "spaceId": space_id,

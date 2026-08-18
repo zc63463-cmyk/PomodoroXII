@@ -128,7 +128,7 @@ async def _create_project(client, space_headers: dict[str, str], *, space_id: st
     body = {
         "commandId": f"op-proj-{key}",
         "spaceId": space_id,
-        "payloadHash": canonical_payload_hash({"key": key, "name": f"Project {key}"}),
+        "payloadHash": canonical_payload_hash({"key": key, "name": f"Project {key}", "description": None}),
         "key": key,
         "name": f"Project {key}",
     }
