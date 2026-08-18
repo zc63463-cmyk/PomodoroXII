@@ -109,4 +109,64 @@ describe('taskSpaceApi', () => {
     expect(note.noteId).toBe('n-1')
     expect(note.document.contentVersion).toBe(1)
   })
+
+  it('hashes updateWorkItem as {patch} including priority/null description and binds Idempotency-Key', async () => {
+    vi.mocked(spaceApi.patch).mockResolvedValue({ data: accepted })
+    await taskSpaceApi.updateWorkItem({
+      operationId: 'update-1', spaceId: 'space-a', workItemId: 'wi-1', expectedVersion: 4,
+      title: 'Edited', description: null, priority: 'low',
+    })
+    const [path, body, options] = vi.mocked(spaceApi.patch).mock.calls[0]!
+    expect(path).toBe('/work-items/wi-1')
+    expect(body).toMatchObject({
+      commandId: 'update-1',
+      spaceId: 'space-a',
+      expectedVersion: 4,
+      title: 'Edited',
+      description: null,
+      priority: 'low',
+    })
+    expect(options?.headers?.['Idempotency-Key']).toBe('update-1')
+    expect((body as Record<string, unknown>).payloadHash).toBe(
+      await hashCommandPayload({ patch: { title: 'Edited', description: null, priority: 'low' } }),
+    )
+  })
+
+  it('binds Idempotency-Key and camelCase wire fields for create/move/transition', async () => {
+    vi.mocked(spaceApi.post).mockResolvedValue({ data: accepted })
+
+    await taskSpaceApi.moveWorkItem({
+      projectId: 'p-1', workItemId: 'wi-1', operationId: 'move-1', spaceId: 'space-a',
+      expectedVersion: 3, newParentId: 'p2', childRank: 5,
+    })
+    const move = vi.mocked(spaceApi.post).mock.calls[0]!
+    expect(move[0]).toBe('/work-items/wi-1/move')
+    expect(move[1]).toMatchObject({ projectId: 'p-1', parentId: 'p2', childRank: 5, expectedVersion: 3 })
+    expect(move[2]?.headers?.['Idempotency-Key']).toBe('move-1')
+    expect((move[1] as Record<string, unknown>).payloadHash).toBe(
+      await hashCommandPayload({ new_parent_id: 'p2', child_rank: 5 }),
+    )
+
+    vi.mocked(spaceApi.post).mockClear()
+    await taskSpaceApi.transitionWorkItem({
+      workItemId: 'wi-1', operationId: 'tr-1', spaceId: 'space-a',
+      expectedVersion: 3, statusDefinitionId: 's-1',
+    })
+    const transition = vi.mocked(spaceApi.post).mock.calls[0]!
+    expect(transition[0]).toBe('/work-items/wi-1/transition')
+    expect(transition[1]).toMatchObject({ statusDefinitionId: 's-1', expectedVersion: 3 })
+    expect(transition[2]?.headers?.['Idempotency-Key']).toBe('tr-1')
+    expect((transition[1] as Record<string, unknown>).payloadHash).toBe(
+      await hashCommandPayload({ status_definition_id: 's-1' }),
+    )
+
+    vi.mocked(spaceApi.post).mockClear()
+    await taskSpaceApi.createWorkItem({
+      operationId: 'cr-1', spaceId: 'space-a', projectId: 'p-1', title: 'T', description: null,
+      parentId: null, typeDefinitionId: null, statusDefinitionId: null, priority: null,
+    })
+    const create = vi.mocked(spaceApi.post).mock.calls[0]!
+    expect(create[2]?.headers?.['Idempotency-Key']).toBe('cr-1')
+    expect(create[1]).toMatchObject({ projectId: 'p-1', title: 'T', description: null })
+  })
 })

@@ -2442,6 +2442,11 @@ export interface components {
         };
         /** MoveWorkItemRequest */
         MoveWorkItemRequest: {
+            /**
+             * Childrank
+             * @default 0
+             */
+            childRank: number;
             /** Commandid */
             commandId: string;
             /** Expectedversion */
@@ -2450,6 +2455,8 @@ export interface components {
             parentId?: string | null;
             /** Payloadhash */
             payloadHash: string;
+            /** Projectid */
+            projectId: string;
             /** Spaceid */
             spaceId: string;
         };

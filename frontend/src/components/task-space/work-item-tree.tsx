@@ -2,6 +2,7 @@
 
 import { createElement, type ReactNode } from 'react'
 import { ChevronRight, Plus } from 'lucide-react'
+import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
 import type { CachedWorkItem } from '@/types'
 import { Button } from '@/components/ui/button'
 
@@ -10,9 +11,54 @@ export interface WorkItemTreeProps {
   selectedId: string | null
   onSelect: (workItemId: string) => void
   onCreateChild: (parentId: string) => void
+  definitions?: TaskSpaceDefinitions | null
+  isLoading?: boolean
+  error?: string | null
+  pendingMutations?: Record<string, boolean>
 }
 
-export function WorkItemTree({ items, selectedId, onSelect, onCreateChild }: WorkItemTreeProps) {
+function definitionLabel(
+  definitions: TaskSpaceDefinitions | null | undefined,
+  group: 'statuses' | 'types',
+  id: string,
+): string {
+  const entry = definitions?.[group].find((candidate) => (
+    typeof candidate.id === 'string' && candidate.id === id
+  ))
+  if (!entry) return id
+  for (const key of ['label', 'name', 'title'] as const) {
+    if (typeof entry[key] === 'string' && entry[key]) return entry[key] as string
+  }
+  return id
+}
+
+export function WorkItemTree({
+  items,
+  selectedId,
+  onSelect,
+  onCreateChild,
+  definitions,
+  isLoading = false,
+  error = null,
+  pendingMutations = {},
+}: WorkItemTreeProps) {
+  if (isLoading) {
+    return createElement(
+      'p',
+      { className: 'px-2 py-3 text-sm text-muted-foreground' },
+      'Loading work items',
+    )
+  }
+  // A refresh error must not hide already-cached rows: the failure state is
+  // only shown when there is nothing to render.
+  if (error && items.length === 0) {
+    return createElement(
+      'p',
+      { role: 'alert', className: 'px-2 py-3 text-sm text-destructive' },
+      error,
+    )
+  }
+
   const children = new Map<string | null, CachedWorkItem[]>()
   for (const item of items) {
     const group = children.get(item.parentId) ?? []
@@ -48,6 +94,13 @@ export function WorkItemTree({ items, selectedId, onSelect, onCreateChild }: Wor
           },
           createElement('span', { className: 'mr-1 font-mono text-xs text-muted-foreground' }, item.displayKey),
           createElement('span', null, item.title),
+          createElement(
+            'span',
+            { className: 'ml-1 shrink-0 text-[10px] text-muted-foreground' },
+            [definitionLabel(definitions, 'types', item.typeDefinitionId),
+              definitionLabel(definitions, 'statuses', item.statusDefinitionId),
+              item.priority ?? ''].filter(Boolean).join(' · '),
+          ),
         ),
         level < 3
           ? createElement(
@@ -58,6 +111,7 @@ export function WorkItemTree({ items, selectedId, onSelect, onCreateChild }: Wor
                 size: 'icon-sm',
                 'aria-label': `Create child under ${item.title}`,
                 title: `Create child under ${item.title}`,
+                disabled: pendingMutations[item.id] === true,
                 onClick: () => onCreateChild(item.id),
               },
               createElement(Plus, { 'aria-hidden': true }),
@@ -73,6 +127,6 @@ export function WorkItemTree({ items, selectedId, onSelect, onCreateChild }: Wor
   return createElement(
     'ul',
     { role: 'tree', 'aria-label': 'Work items', className: 'min-w-0 py-2' },
-    renderLevel(null, 1),
+    renderLevel(null, 1) ?? createElement('li', { className: 'px-2 py-3 text-sm text-muted-foreground' }, 'No work items'),
   )
 }
