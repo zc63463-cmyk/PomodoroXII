@@ -5,6 +5,7 @@ import {
   executeDurableDirectCommand,
   prepareDirectCommandIntent,
   resumePendingDirectCommandIntents,
+  type DirectCommandResumeResult,
 } from '@/lib/direct-command-intents'
 import type { PomodoroXIDB } from '@/services/database'
 import { taskSpaceApi } from '@/services/task-space-api'
@@ -291,8 +292,8 @@ export class TaskSpaceRepository {
       .then((result) => result.workItem)
   }
 
-  async resumePendingDirectCommandIntents(): Promise<void> {
-    await resumePendingDirectCommandIntents(this.db, {
+  async resumePendingDirectCommandIntents(): Promise<DirectCommandResumeResult> {
+    return resumePendingDirectCommandIntents(this.db, {
       create_project: { executeExact: (intent) => this.executeProjectIntent(intent) },
       create_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.createWorkItem(request as never)).then(() => undefined) },
       update_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.updateWorkItem(request as never)).then(() => undefined) },
