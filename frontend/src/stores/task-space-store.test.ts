@@ -66,6 +66,7 @@ function repositoryFixture(overrides: Partial<TaskSpaceRepositoryLike> = {}): Ta
     }),
     createProject: vi.fn().mockResolvedValue(project('project-2')),
     createWorkItem: vi.fn().mockResolvedValue(workItem('new', 'l2', 3)),
+    updateWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     moveWorkItem: vi.fn().mockResolvedValue(workItem('l3', 'l1', 2)),
     transitionWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     resumePendingDirectCommandIntents: vi.fn().mockResolvedValue(undefined),

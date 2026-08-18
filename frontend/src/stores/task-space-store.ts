@@ -43,6 +43,13 @@ export interface TaskSpaceRepositoryLike {
     statusDefinitionId: string | null
     priority: string | null
   }) => Promise<CachedWorkItem>
+  updateWorkItem: (input: {
+    workItemId: string
+    title?: string
+    description?: string | null
+    priority?: string | null
+    typeDefinitionId?: string | null
+  }) => Promise<CachedWorkItem>
   moveWorkItem: (input: {
     projectId: string
     workItemId: string
@@ -105,6 +112,12 @@ export interface TaskSpaceActions {
   selectWorkItem: (workItemId: string) => void
   createProject: (input: { name: string; key: string; description: string | null }) => Promise<CachedProject>
   createChild: (parentId: string, input?: CreateChildInput) => Promise<CachedWorkItem>
+  updateWorkItem: (workItemId: string, input: {
+    title?: string
+    description?: string | null
+    priority?: string | null
+    typeDefinitionId?: string | null
+  }) => Promise<CachedWorkItem>
   moveWorkItem: (workItemId: string, newParentId: string | null, childRank?: number) => Promise<CachedWorkItem>
   transitionWorkItem: (workItemId: string, statusDefinitionId: string) => Promise<CachedWorkItem>
   reset: () => void
@@ -487,6 +500,30 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           throw error
         } finally {
           endMutation(parentId)
+        }
+      },
+
+      async updateWorkItem(workItemId, input) {
+        beginMutation(workItemId, 'work_item_mutation_in_flight')
+        const repository = get().repository
+        const state = get()
+        const item = state.workItems.find((candidate) => candidate.id === workItemId)
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          if (!item) throw new Error('work_item_not_loaded')
+          const updated = await repository.updateWorkItem({ workItemId, ...input })
+          set((current) => ({
+            workItems: current.workItems.map((candidate) => candidate.id === updated.id ? updated : candidate),
+            error: null,
+            mutationError: null,
+          }))
+          return updated
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
+          throw error
+        } finally {
+          endMutation(workItemId)
         }
       },
 

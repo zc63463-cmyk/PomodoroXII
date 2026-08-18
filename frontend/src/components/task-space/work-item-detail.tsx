@@ -1,41 +1,37 @@
 'use client'
 
-import { createElement, type ReactNode } from 'react'
+import { createElement, useEffect, useState, type ReactNode } from 'react'
 import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
 import type { CachedWorkItem } from '@/types'
+import { Button } from '@/components/ui/button'
 
 export interface WorkItemDetailProps {
   workItem?: CachedWorkItem | null
-  workItemId?: string | null
   definitions?: TaskSpaceDefinitions | null
   noteEditor?: ReactNode
+  pendingMutations?: Record<string, boolean>
+  mutationError?: { targetId: string; code: string } | null
+  error?: string | null
+  /** Same-project nodes that may become the new parent (depth < 3). */
+  availableParents?: CachedWorkItem[]
+  onUpdate?: (input: { title: string; description: string | null; priority: string | null }) => Promise<unknown> | unknown
+  onTransition?: (statusDefinitionId: string) => Promise<unknown> | unknown
+  onMove?: (parentId: string | null) => Promise<unknown> | unknown
 }
 
-function definitionValue(
+function definitionLabel(
   definitions: TaskSpaceDefinitions | null | undefined,
   group: 'statuses' | 'types',
   id: string,
-): Record<string, unknown> | null {
+): string {
   const entry = definitions?.[group].find((candidate) => (
     typeof candidate.id === 'string' && candidate.id === id
   ))
-  return entry ?? null
-}
-
-function definitionLabel(value: Record<string, unknown> | null, fallback: string): string {
-  if (!value) return fallback
-  for (const key of ['label', 'name', 'title']) {
-    if (typeof value[key] === 'string' && value[key]) return value[key] as string
+  if (!entry) return id
+  for (const key of ['label', 'name', 'title'] as const) {
+    if (typeof entry[key] === 'string' && entry[key]) return entry[key] as string
   }
-  return fallback
-}
-
-function definitionColor(value: Record<string, unknown> | null): string | undefined {
-  if (!value) return undefined
-  for (const key of ['color', 'hexColor']) {
-    if (typeof value[key] === 'string') return value[key] as string
-  }
-  return undefined
+  return id
 }
 
 function timing(label: string, value: string | null): ReactNode {
@@ -48,7 +44,30 @@ function timing(label: string, value: string | null): ReactNode {
   )
 }
 
-export function WorkItemDetail({ workItem, definitions, noteEditor }: WorkItemDetailProps) {
+export function WorkItemDetail({
+  workItem,
+  definitions,
+  noteEditor,
+  pendingMutations = {},
+  mutationError = null,
+  error = null,
+  availableParents = [],
+  onUpdate,
+  onTransition,
+  onMove,
+}: WorkItemDetailProps) {
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [priority, setPriority] = useState('')
+
+  // The draft always mirrors the store post-image; it is reset only when the
+  // selected item or its version changes (i.e. after a successful mutation).
+  useEffect(() => {
+    setName(workItem?.title ?? '')
+    setDescription(workItem?.description ?? '')
+    setPriority(workItem?.priority ?? '')
+  }, [workItem?.id, workItem?.version, workItem?.title, workItem?.description, workItem?.priority])
+
   if (!workItem) {
     return createElement(
       'section',
@@ -57,33 +76,41 @@ export function WorkItemDetail({ workItem, definitions, noteEditor }: WorkItemDe
     )
   }
 
-  const status = definitionValue(definitions, 'statuses', workItem.statusDefinitionId)
-  const type = definitionValue(definitions, 'types', workItem.typeDefinitionId)
-  const statusColor = definitionColor(status)
-  const typeColor = definitionColor(type)
+  const pending = pendingMutations[workItem.id] === true
+  const readonly = workItem.archivedAt !== null
+  const visibleError = mutationError?.targetId === workItem.id ? error : null
+  const statusOptions = definitions?.statuses ?? []
 
-  const statusRow = createElement(
-    'div',
-    { className: 'grid grid-cols-[auto_1fr] items-center gap-3 text-sm' },
-    createElement('dt', { className: 'text-muted-foreground' }, 'Status'),
-    createElement(
-      'dd',
-      { className: 'flex min-w-0 items-center gap-2 truncate' },
-      statusColor ? createElement('span', { className: 'size-2.5 shrink-0 rounded-full', style: { backgroundColor: statusColor }, 'aria-hidden': true }) : null,
-      createElement('span', { className: 'truncate' }, definitionLabel(status, workItem.statusDefinitionId)),
-    ),
-  )
-  const typeRow = createElement(
-    'div',
-    { className: 'grid grid-cols-[auto_1fr] items-center gap-3 text-sm' },
-    createElement('dt', { className: 'text-muted-foreground' }, 'Type'),
-    createElement(
-      'dd',
-      { className: 'flex min-w-0 items-center gap-2 truncate' },
-      typeColor ? createElement('span', { className: 'size-2.5 shrink-0 rounded-full', style: { backgroundColor: typeColor }, 'aria-hidden': true }) : null,
-      createElement('span', { className: 'truncate' }, definitionLabel(type, workItem.typeDefinitionId)),
-    ),
-  )
+  const save = async () => {
+    if (!onUpdate) return
+    try {
+      await onUpdate({
+        title: name.trim(),
+        description: description.trim() || null,
+        priority: priority.trim() || null,
+      })
+    } catch {
+      // Keep the draft; the store has already surfaced a stable error.
+    }
+  }
+
+  const changeStatus = async (statusDefinitionId: string) => {
+    if (!onTransition || statusDefinitionId === workItem.statusDefinitionId) return
+    try {
+      await onTransition(statusDefinitionId)
+    } catch {
+      // Stable error is surfaced by the store; keep the previous status.
+    }
+  }
+
+  const changeParent = async (parentId: string) => {
+    if (!onMove) return
+    try {
+      await onMove(parentId === '' ? null : parentId)
+    } catch {
+      // Stable error is surfaced by the store; keep the previous tree.
+    }
+  }
 
   return createElement(
     'article',
@@ -99,16 +126,107 @@ export function WorkItemDetail({ workItem, definitions, noteEditor }: WorkItemDe
       ),
       createElement('span', { className: 'shrink-0 text-xs text-muted-foreground' }, `v${workItem.version}`),
     ),
+    visibleError
+      ? createElement('p', { role: 'alert', className: 'border-b py-3 text-sm text-destructive' }, visibleError)
+      : null,
+    createElement(
+      'section',
+      { 'aria-label': 'Edit work item', className: 'grid gap-3 border-b py-4' },
+      createElement(
+        'div',
+        { className: 'grid gap-1' },
+        createElement('label', { htmlFor: 'wi-title', className: 'text-xs font-medium text-muted-foreground' }, 'Title'),
+        createElement('input', {
+          id: 'wi-title', className: 'h-9 rounded-md border bg-background px-3 text-sm outline-none',
+          value: name, disabled: pending || readonly,
+          onChange: (event: React.ChangeEvent<HTMLInputElement>) => setName(event.target.value),
+        }),
+      ),
+      createElement(
+        'div',
+        { className: 'grid gap-1' },
+        createElement('label', { htmlFor: 'wi-description', className: 'text-xs font-medium text-muted-foreground' }, 'Description'),
+        createElement('textarea', {
+          id: 'wi-description', className: 'min-h-20 rounded-md border bg-background px-3 py-2 text-sm outline-none',
+          value: description, disabled: pending || readonly,
+          onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setDescription(event.target.value),
+        }),
+      ),
+      createElement(
+        'div',
+        { className: 'grid gap-1' },
+        createElement('label', { htmlFor: 'wi-priority', className: 'text-xs font-medium text-muted-foreground' }, 'Priority'),
+        createElement('input', {
+          id: 'wi-priority', className: 'h-9 rounded-md border bg-background px-3 text-sm outline-none',
+          value: priority, disabled: pending || readonly,
+          onChange: (event: React.ChangeEvent<HTMLInputElement>) => setPriority(event.target.value),
+        }),
+      ),
+      createElement(
+        Button,
+        { type: 'button', disabled: pending || readonly || !onUpdate, onClick: () => void save() },
+        'Save changes',
+      ),
+    ),
     createElement(
       'dl',
       { className: 'grid gap-3 border-b py-4 sm:grid-cols-2' },
-      statusRow,
-      typeRow,
       createElement(
         'div',
-        { className: 'grid grid-cols-[auto_1fr] gap-3 text-sm' },
-        createElement('dt', { className: 'text-muted-foreground' }, 'Priority'),
-        createElement('dd', null, workItem.priority ?? 'Not set'),
+        { className: 'grid grid-cols-[auto_1fr] items-center gap-3 text-sm' },
+        createElement('dt', { className: 'text-muted-foreground' }, 'Status'),
+        createElement(
+          'dd',
+          { className: 'min-w-0' },
+          createElement(
+            'select',
+            {
+              'aria-label': 'Status',
+              className: 'h-9 w-full rounded-md border bg-background px-2 text-sm outline-none',
+              value: workItem.statusDefinitionId,
+              disabled: pending || readonly || !onTransition,
+              onChange: (event: React.ChangeEvent<HTMLSelectElement>) => void changeStatus(event.target.value),
+            },
+            statusOptions.length === 0
+              ? createElement('option', { value: workItem.statusDefinitionId }, workItem.statusDefinitionId)
+              : statusOptions.map((status) => createElement(
+                  'option',
+                  { key: String(status.id), value: String(status.id) },
+                  String(status.label ?? status.name ?? status.id),
+                )),
+          ),
+        ),
+      ),
+      createElement(
+        'div',
+        { className: 'grid grid-cols-[auto_1fr] items-center gap-3 text-sm' },
+        createElement('dt', { className: 'text-muted-foreground' }, 'Type'),
+        createElement('dd', { className: 'truncate' }, definitionLabel(definitions, 'types', workItem.typeDefinitionId)),
+      ),
+      createElement(
+        'div',
+        { className: 'grid grid-cols-[auto_1fr] items-center gap-3 text-sm' },
+        createElement('dt', { className: 'text-muted-foreground' }, 'Parent'),
+        createElement(
+          'dd',
+          { className: 'min-w-0' },
+          createElement(
+            'select',
+            {
+              'aria-label': 'Parent',
+              className: 'h-9 w-full rounded-md border bg-background px-2 text-sm outline-none',
+              value: workItem.parentId ?? '',
+              disabled: pending || readonly || !onMove,
+              onChange: (event: React.ChangeEvent<HTMLSelectElement>) => void changeParent(event.target.value),
+            },
+            createElement('option', { value: '' }, 'No parent'),
+            availableParents.map((parent) => createElement(
+              'option',
+              { key: parent.id, value: parent.id },
+              `${parent.displayKey} ${parent.title}`,
+            )),
+          ),
+        ),
       ),
       createElement(
         'div',

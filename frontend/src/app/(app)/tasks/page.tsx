@@ -51,6 +51,11 @@ export default function TasksPage() {
   const resolveOverwriteLocalNote = useTaskSpaceStore((state) => state.resolveOverwriteLocalNote)
   const createProject = useTaskSpaceStore((state) => state.createProject)
   const createChild = useTaskSpaceStore((state) => state.createChild)
+  const updateWorkItem = useTaskSpaceStore((state) => state.updateWorkItem)
+  const moveWorkItem = useTaskSpaceStore((state) => state.moveWorkItem)
+  const transitionWorkItem = useTaskSpaceStore((state) => state.transitionWorkItem)
+  const pendingMutations = useTaskSpaceStore((state) => state.pendingMutations)
+  const mutationError = useTaskSpaceStore((state) => state.mutationError)
   const [createParentId, setCreateParentId] = useState<string | null>(null)
   const [childTitle, setChildTitle] = useState('')
 
@@ -94,13 +99,22 @@ export default function TasksPage() {
 
   const visibleItems = selectProjectTree(workItems, selectedProjectId)
   const selectedWorkItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
+  // Only same-project nodes at depth < 3 can become a new parent.
+  const availableParents = selectedWorkItem
+    ? visibleItems.filter((item) => item.depth < 3 && item.id !== selectedWorkItem.id)
+    : []
 
   const submitChild = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!createParentId) return
-    await createChild(createParentId, { title: childTitle })
-    setCreateParentId(null)
-    setChildTitle('')
+    try {
+      await createChild(createParentId, { title: childTitle })
+      setCreateParentId(null)
+      setChildTitle('')
+    } catch {
+      // Keep the dialog open with the typed title; the store surfaced a
+      // stable error shown inside the dialog.
+    }
   }
 
   const selectWorkItemAndDispatch = (workItemId: string) => {
@@ -129,6 +143,10 @@ export default function TasksPage() {
               selectedId={selectedWorkItemId}
               onSelect={selectWorkItemAndDispatch}
               onCreateChild={setCreateParentId}
+              definitions={definitions}
+              isLoading={isLoading}
+              error={error}
+              pendingMutations={pendingMutations}
             />
           ) : (
             <p className="p-4 text-sm text-muted-foreground">Select a project</p>
@@ -137,6 +155,13 @@ export default function TasksPage() {
         <WorkItemDetail
           workItem={selectedWorkItem}
           definitions={definitions}
+          pendingMutations={pendingMutations}
+          mutationError={mutationError}
+          error={error}
+          availableParents={availableParents}
+          onUpdate={(input) => updateWorkItem(selectedWorkItemId ?? '', input)}
+          onTransition={(statusDefinitionId) => transitionWorkItem(selectedWorkItemId ?? '', statusDefinitionId)}
+          onMove={(parentId) => moveWorkItem(selectedWorkItemId ?? '', parentId, 0)}
           noteEditor={selectedNote ? (
             <WorkItemNoteEditor
               document={selectedNote.document}
@@ -168,8 +193,16 @@ export default function TasksPage() {
               <Label htmlFor="child-title">Title</Label>
               <Input id="child-title" value={childTitle} onChange={(event) => setChildTitle(event.target.value)} required />
             </div>
+            {createParentId !== null && mutationError?.targetId === createParentId && error
+              ? <p role="alert" className="text-sm text-destructive">{error}</p>
+              : null}
             <DialogFooter>
-              <Button type="submit">Create</Button>
+              <Button
+                type="submit"
+                disabled={createParentId !== null && pendingMutations[createParentId] === true}
+              >
+                Create
+              </Button>
             </DialogFooter>
           </form>
         </DialogContent>

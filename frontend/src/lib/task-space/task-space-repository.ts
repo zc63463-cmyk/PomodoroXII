@@ -261,6 +261,24 @@ export class TaskSpaceRepository {
       .then((result) => result.workItem)
   }
 
+  async updateWorkItem(input: {
+    workItemId: string
+    title?: string
+    description?: string | null
+    priority?: string | null
+    typeDefinitionId?: string | null
+  }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const cached = await this.db.workItems.get(input.workItemId)
+    if (!cached) throw new Error('work_item_not_loaded')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'update_work_item', spaceId: this.spaceId, targetId: input.workItemId,
+      request: { ...input, expectedVersion: (cached as CachedWorkItem).version, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeWorkItemIntent(intent, (request) => this.api.updateWorkItem(request as never))
+      .then((result) => result.workItem)
+  }
+
   async transitionWorkItem(input: TransitionWorkItemInput) {
     if (!online()) throw new Error('offline_formal_mutation_forbidden')
     const cached = await this.db.workItems.get(input.workItemId)
@@ -277,6 +295,7 @@ export class TaskSpaceRepository {
     await resumePendingDirectCommandIntents(this.db, {
       create_project: { executeExact: (intent) => this.executeProjectIntent(intent) },
       create_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.createWorkItem(request as never)).then(() => undefined) },
+      update_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.updateWorkItem(request as never)).then(() => undefined) },
       move_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.moveWorkItem(request as never)).then(() => undefined) },
       transition_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.transitionWorkItem(request as never)).then(() => undefined) },
       submit_review: { executeExact: async () => { throw new Error('submit_review_handler_not_bound') } },

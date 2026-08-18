@@ -612,7 +612,7 @@ export interface SessionActivationApplicationReceiptRow {
 
 export interface DirectCommandIntentRow {
   operationId: string
-  kind: 'create_project' | 'create_work_item' | 'move_work_item' | 'transition_work_item' | 'submit_review'
+  kind: 'create_project' | 'create_work_item' | 'update_work_item' | 'move_work_item' | 'transition_work_item' | 'submit_review'
   spaceId: string
   targetId: string | null
   requestJson: string
