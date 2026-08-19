@@ -216,13 +216,23 @@ class TestFocusSessionModuleIntegration:
                 default_type_definition_id="type-task",
             ))
             session.add(WorkItem(
+                id="root",
+                project_id="proj-1",
+                display_key="TEST-ROOT",
+                title="Root Item",
+                type_definition_id="type-task",
+                status_definition_id="status-todo",
+                parent_id=None,
+                version=1,
+            ))
+            session.add(WorkItem(
                 id="l2-a",
                 project_id="proj-1",
                 display_key="TEST-1",
                 title="Level 2 Item A",
                 type_definition_id="type-task",
                 status_definition_id="status-todo",
-                parent_id=None,
+                parent_id="root",
                 version=1,
             ))
             session.add(WorkItem(
@@ -444,19 +454,6 @@ class TestFocusSessionModuleIntegration:
         from app.models.work_item import WorkItem
 
         async with focus_fixture.scope.session_factory() as session:
-            session.add(WorkItem(
-                id="root",
-                project_id="proj-1",
-                display_key="TEST-ROOT",
-                title="Root Item",
-                type_definition_id="type-task",
-                status_definition_id="status-todo",
-                parent_id=None,
-                version=1,
-            ))
-            level2 = await session.get(WorkItem, "l2-a")
-            assert level2 is not None
-            level2.parent_id = "root"
             session.add(WorkItem(
                 id="l3-b",
                 project_id="proj-1",

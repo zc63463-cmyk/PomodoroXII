@@ -114,6 +114,16 @@ async def _seed_catalog(
             default_status_definition_id="status-todo",
             default_type_definition_id="type-task",
         ))
+        session.add(WorkItem(
+            id="root",
+            project_id=project_id,
+            display_key="TEST-0",
+            title="Root L1",
+            type_definition_id="type-task",
+            status_definition_id="status-todo",
+            parent_id=None,
+            version=1,
+        ))
         for l2_id in l2_ids:
             session.add(WorkItem(
                 id=l2_id,
@@ -122,7 +132,7 @@ async def _seed_catalog(
                 title=f"Level 2 Item {l2_id}",
                 type_definition_id="type-task",
                 status_definition_id="status-todo",
-                parent_id=None,
+                parent_id="root",
                 version=1,
             ))
         for l3_id in l3_ids:
@@ -1130,13 +1140,23 @@ class TestAttributionTargetValidationFailClosed:
                 default_type_definition_id="type-task",
             ))
             session.add(WorkItem(
+                id="root-2",
+                project_id="proj-2",
+                display_key="TEST2-root",
+                title="Root L1",
+                type_definition_id="type-task",
+                status_definition_id="status-todo",
+                parent_id=None,
+                version=1,
+            ))
+            session.add(WorkItem(
                 id="l2-cross",
                 project_id="proj-2",
                 display_key="TEST2-l2-cross",
                 title="Cross Project L2",
                 type_definition_id="type-task",
                 status_definition_id="status-todo",
-                parent_id=None,
+                parent_id="root-2",
                 version=1,
             ))
             await session.commit()
