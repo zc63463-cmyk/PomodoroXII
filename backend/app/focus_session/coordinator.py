@@ -111,6 +111,15 @@ def _canonical_utc_now(clock) -> str:
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+# Kinds advanced through ``_touch`` that must also persist their business
+# fact to the Space FocusSession row (clock/note/plan). Meta-only kinds
+# (heartbeat, takeover) are excluded.
+_TOUCH_SPACE_KINDS = frozenset({
+    "pause", "resume", "update_note", "set_current_plan_item",
+    "set_completion_draft", "add_plan_item", "remove_plan_item",
+})
+
+
 def _lease_expiry(now_iso: str, minutes: int = _LEASE_MINUTES) -> str:
     parsed = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
     expiry = parsed + timedelta(minutes=minutes)
@@ -1102,26 +1111,31 @@ class ProductionActiveSessionCoordinator:
         now = _canonical_utc_now(self._clock)
         intent = self._intent(operation_id, "end", command, business=dict(command.payload))
         async with self._meta_session_factory() as session:
-            # database-level CAS: only the owning locator may enter releasing
-            result = await session.execute(
-                sa_text(
-                    "UPDATE active_session_locator SET state='releasing', "
-                    "updated_at=:now "
-                    "WHERE singleton_key='active' AND operation_id=:oid "
-                    "AND state IN ('active','claiming')"
-                ),
-                {"now": now, "oid": operation_id},
-            )
-            if result.rowcount != 1:
+            # The Space end mutation must run while the locator is still
+            # ``claiming`` (the FocusSession policy requires it), so the
+            # releasing transition happens last.
+            installed = await session.get(ActiveSessionLocator, "active")
+            if installed is None:
+                existing = await session.get(ActiveSessionOperation, operation_id)
+                if existing is not None:
+                    self._assert_replay_matches(
+                        existing, kind="end", payload_hash=command.payload_hash
+                    )
+                    replay_intent = json.loads(existing.intent_json)
+                    space_id = str(replay_intent.get("space_id") or "")
+                    session_id = str(replay_intent.get("session_id") or "")
+                    if space_id and session_id:
+                        await session.commit()
+                        return ActiveSessionView(
+                            value=await self._end_session_view(space_id, session_id)
+                        )
                 await session.rollback()
                 raise ActiveSessionCoordinationError(
-                    "end requires the owning active/claiming locator"
+                    "end requires an active locator"
                 )
-            locator = await session.get(ActiveSessionLocator, "active")
             if (
                 command.ownership_epoch is not None
-                and locator is not None
-                and locator.ownership_epoch != command.ownership_epoch
+                and installed.ownership_epoch != command.ownership_epoch
             ):
                 await session.rollback()
                 raise ActiveSessionCoordinationError(
@@ -1129,10 +1143,15 @@ class ProductionActiveSessionCoordinator:
                 )
             existing = await session.get(ActiveSessionOperation, operation_id)
             if existing is not None:
+                self._assert_replay_matches(existing, kind="end", payload_hash=command.payload_hash)
                 await session.commit()
                 return ActiveSessionView(
-                    value=await self._end_session_view(locator)
+                    value=await self._end_session_view(installed.space_id, installed.session_id)
                 )
+            # The request carries no space ID by design. Persist the identity
+            # resolved from the active locator so an already-completed end can
+            # be replayed after that locator has been released.
+            intent["space_id"] = installed.space_id
             session.add(
                 ActiveSessionOperation(
                     operation_id=operation_id,
@@ -1151,16 +1170,78 @@ class ProductionActiveSessionCoordinator:
                 raise ActiveSessionCoordinationError(
                     f"duplicate end operation {operation_id!r} with a different payload"
                 ) from exc
-        return ActiveSessionView(value=await self._end_session_view(locator))
+        # Real Space write: persist ended_at/timer facts through the module so
+        # the end response aggregate reflects durable Space state. The
+        # locator operation must rotate to this end command first (the
+        # FocusSession policy checks operation_id) while the state stays
+        # ``claiming``; the releasing transition happens after the commit.
+        async with self._meta_session_factory() as session:
+            result = await session.execute(
+                sa_text(
+                    "UPDATE active_session_locator SET updated_at=:now, "
+                    "operation_id=:oid "
+                    "WHERE singleton_key='active' AND operation_id=:prev_oid"
+                ),
+                {"now": now, "oid": operation_id, "prev_oid": installed.operation_id},
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                raise ActiveSessionCoordinationError(
+                    "end requires the owning locator of this operation"
+                )
+            await session.commit()
+        handle = await self._space_handle_provider(installed.space_id)
+        end_request = build_focus_request(
+            "end",
+            FocusSessionCommand(
+                command_id=operation_id,
+                space_id=installed.space_id,
+                session_id=installed.session_id,
+                ownership_epoch=command.ownership_epoch,
+                payload_hash=self._require_payload_hash(command.payload_hash),
+                payload=dict(command.payload),
+            ),
+        )
+        async with handle.mutation_lease("active-session-end", 5):
+            await self._uow.execute(handle, end_request, operation_id)
+        # Finally release the singleton locator: transition through
+        # ``releasing`` (the FocusSession policy still sees the row while the
+        # end mutation runs) and then remove it so locate returns 404 — an
+        # ended Session is never an active Session.
+        async with self._meta_session_factory() as session:
+            result = await session.execute(
+                sa_text(
+                    "UPDATE active_session_locator SET state='releasing', "
+                    "updated_at=:now "
+                    "WHERE singleton_key='active' AND operation_id=:oid "
+                    "AND state IN ('active','claiming')"
+                ),
+                {"now": now, "oid": operation_id},
+            )
+            if result.rowcount != 1:
+                # The Space end already committed; a concurrent release does
+                # not roll back a durable end. Return the ended aggregate.
+                pass
+            await session.execute(
+                sa_text(
+                    "DELETE FROM active_session_locator "
+                    "WHERE singleton_key='active'"
+                )
+            )
+            await session.commit()
+        return ActiveSessionView(
+            value=await self._end_session_view(installed.space_id, installed.session_id)
+        )
 
     async def _end_session_view(
-        self, locator: ActiveSessionLocator
+        self, space_id: str, session_id: str
     ) -> dict[str, object]:
         """End response contract: the real Session aggregate and a null locator
         (the wire model drops locator details after release)."""
-        handle = await self._space_handle_provider(locator.space_id)
-        session_aggregate = await self._load_session_aggregate(
-            handle, locator.session_id
+        handle = await self._space_handle_provider(space_id)
+        session_aggregate = await self._with_mutation_lease(
+            handle,
+            lambda h: self._load_session_aggregate(h, session_id),
         )
         return {"locator": None, "session": session_aggregate}
 
@@ -1227,17 +1308,28 @@ class ProductionActiveSessionCoordinator:
         now = _canonical_utc_now(self._clock)
         intent = self._intent(operation_id, kind, command, business=dict(command.payload))
         async with self._meta_session_factory() as session:
-            # database-level CAS: only the owning, live locator may advance
+            # database-level CAS: the new command must advance the locator
+            # that the previous successful command installed. The locator
+            # operation rotates to the new command id in the same statement,
+            # so a stale caller (or an interrupted write) can never advance
+            # a locator it does not own.
+            installed = await session.get(ActiveSessionLocator, "active")
+            if installed is None:
+                await session.rollback()
+                raise ActiveSessionCoordinationError(
+                    f"{kind} requires an active locator"
+                )
             result = await session.execute(
                 sa_text(
                     "UPDATE active_session_locator SET updated_at=:now, "
-                    "lease_expires_at=:lease "
-                    "WHERE singleton_key='active' AND operation_id=:oid"
+                    "lease_expires_at=:lease, operation_id=:oid "
+                    "WHERE singleton_key='active' AND operation_id=:prev_oid"
                 ),
                 {
                     "now": now,
                     "lease": _lease_expiry(now),
                     "oid": operation_id,
+                    "prev_oid": installed.operation_id,
                 },
             )
             if result.rowcount != 1:
@@ -1245,10 +1337,14 @@ class ProductionActiveSessionCoordinator:
                 raise ActiveSessionCoordinationError(
                     f"{kind} requires the owning locator of this operation"
                 )
-            locator = await session.get(ActiveSessionLocator, "active")
+            # Reflect the atomic rotation on the in-session object (the
+            # identity map would otherwise return the stale pre-update row).
+            installed.operation_id = operation_id
+            installed.updated_at = now
+            installed.lease_expires_at = _lease_expiry(now)
+            locator = installed
             if (
                 command.ownership_epoch is not None
-                and locator is not None
                 and locator.ownership_epoch != command.ownership_epoch
             ):
                 await session.rollback()
@@ -1257,7 +1353,10 @@ class ProductionActiveSessionCoordinator:
                 )
             existing = await session.get(ActiveSessionOperation, operation_id)
             if existing is not None:
-                # idempotent replay of the same command returns the prior row
+                self._assert_replay_matches(existing, kind=kind, payload_hash=payload_hash)
+                # Idempotent replay of the same command returns the prior row.
+                # A matching command ID alone is never sufficient: callers
+                # must not be able to reuse it for a different mutation.
                 await session.commit()
                 if include_session:
                     return ActiveSessionView(
@@ -1282,6 +1381,26 @@ class ProductionActiveSessionCoordinator:
                 raise ActiveSessionCoordinationError(
                     f"duplicate operation {operation_id!r} with a different payload"
                 ) from exc
+            # Real Space write: clock/plan facts (pause_started_at, pause
+            # seconds, ended_at, note, plan) are persisted through the
+            # FocusSession module so the returned aggregate reflects durable
+            # Space state, never a fabricated dict. Meta-only kinds
+            # (heartbeat, takeover) stay as-is.
+            if kind in _TOUCH_SPACE_KINDS:
+                handle = await self._space_handle_provider(locator.space_id)
+                focus_request = build_focus_request(
+                    kind,
+                    FocusSessionCommand(
+                        command_id=operation_id,
+                        space_id=locator.space_id,
+                        session_id=locator.session_id,
+                        ownership_epoch=command.ownership_epoch,
+                        payload_hash=payload_hash,
+                        payload=dict(command.payload),
+                    ),
+                )
+                async with handle.mutation_lease("active-session-touch", 5):
+                    await self._uow.execute(handle, focus_request, operation_id)
             if include_session:
                 return ActiveSessionView(
                     value=await self._locator_aggregate_view(locator)
@@ -1808,6 +1927,16 @@ class ProductionActiveSessionCoordinator:
         ):
             raise ActiveSessionCoordinationError("invalid payload hash")
         return value
+
+    @staticmethod
+    def _assert_replay_matches(
+        existing: ActiveSessionOperation, *, kind: str, payload_hash: str
+    ) -> None:
+        """Reject command-ID reuse unless it is the original command exactly."""
+        if existing.kind != kind or existing.payload_hash != payload_hash:
+            raise ActiveSessionCoordinationError(
+                "idempotency conflict: command_id is already bound to a different request"
+            )
 
     @staticmethod
     def _locator_view(locator: ActiveSessionLocator) -> dict[str, object]:

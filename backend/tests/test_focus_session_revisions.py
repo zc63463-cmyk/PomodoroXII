@@ -100,13 +100,23 @@ async def _seed_catalog(
             default_type_definition_id="type-task",
         ))
         session.add(WorkItem(
+            id="root-1",
+            project_id=project_id,
+            display_key="TEST-0",
+            title="Root L1",
+            type_definition_id="type-task",
+            status_definition_id="status-todo",
+            parent_id=None,
+            version=1,
+        ))
+        session.add(WorkItem(
             id="l2-a",
             project_id=project_id,
             display_key="TEST-1",
             title="Level 2 Item A",
             type_definition_id="type-task",
             status_definition_id="status-todo",
-            parent_id=None,
+            parent_id="root-1",
             version=1,
         ))
         for l2_id in extra_l2_ids:
@@ -117,7 +127,7 @@ async def _seed_catalog(
                 title=f"Level 2 Item {l2_id}",
                 type_definition_id="type-task",
                 status_definition_id="status-todo",
-                parent_id=None,
+                parent_id="root-1",
                 version=1,
             ))
         session.add(WorkItem(

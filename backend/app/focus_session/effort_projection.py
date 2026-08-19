@@ -233,11 +233,11 @@ def _compute_effort_map(
                 },
             )
 
-        # Validate target is level-2 (top-level work item, parent_id=None).
-        # In the hierarchy: Project = level 1, top-level WorkItem = level 2,
-        # child WorkItem = level 3.  _work_item_depth returns 1 for
-        # parent_id=None, so level-2 == depth 1.
-        if _work_item_depth(authority, work_item) != 1:
+        # Validate target is level-2 in the Task Space hierarchy. The
+        # Task Space depth contract (start/policy) numbers the Project
+        # subtree as depth 1 = root L1, depth 2 = L2 (the Focus Session
+        # attribution target), depth 3 = L3 plan items.
+        if _work_item_depth(authority, work_item) != 2:
             raise MutationRuleViolation(
                 "invalid_work_item_tree",
                 {

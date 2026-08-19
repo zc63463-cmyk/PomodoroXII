@@ -125,6 +125,16 @@ def _make_command(
     )
 
 
+async def _run_locator_mutation(operation):
+    """Expose command-ID reuse as a stable client conflict, not a 500."""
+    try:
+        return await operation
+    except ActiveSessionCoordinationError as exc:
+        if "idempotency conflict:" in str(exc):
+            raise AppError(code="idempotency_conflict") from exc
+        raise
+
+
 def _map_start_payload(payload: StartActiveSessionPayload) -> dict[str, object]:
     return {
         "level2_work_item_id": payload.level2_work_item_id,
@@ -420,7 +430,9 @@ async def pause(
     command = _make_command(
         body, space_id=None, payload=_map_owned_clock_payload(body.payload)
     )
-    view = await coordinator.pause(_master_principal(claims), command)
+    view = await _run_locator_mutation(
+        coordinator.pause(_master_principal(claims), command)
+    )
     return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
@@ -436,7 +448,9 @@ async def resume(
     command = _make_command(
         body, space_id=None, payload=_map_owned_clock_payload(body.payload)
     )
-    view = await coordinator.resume(_master_principal(claims), command)
+    view = await _run_locator_mutation(
+        coordinator.resume(_master_principal(claims), command)
+    )
     return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
@@ -464,10 +478,14 @@ async def end(
     """End the active session."""
     require_idempotency_key(body.command_id, idempotency_key)
     command = _make_command(body, space_id=None, payload=_map_end_payload(body.payload))
-    view = await coordinator.end(_master_principal(claims), command)
-    flattened = _flatten_session_response(view.value)
+    view = await _run_locator_mutation(
+        coordinator.end(_master_principal(claims), command)
+    )
+    # The end view carries a null locator (already released); flattening
+    # would fail on ``dict(None)``, so pass the real Session aggregate
+    # straight through.
     return EndActiveSessionResponse.model_validate(
-        {"session": flattened["session"], "locator": None}
+        {"session": view.value["session"], "locator": None}
     )
 
 
