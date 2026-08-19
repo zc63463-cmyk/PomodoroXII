@@ -853,7 +853,7 @@ async def test_pause_resume_end_lifecycle_over_http(client) -> None:
         headers=master_headers,
     )
     assert conflicting_pause.status_code == 409, conflicting_pause.text
-    assert conflicting_pause.json()["detail"]["code"] == "idempotency_conflict"
+    assert conflicting_pause.headers["X-PomodoroXII-Error-Code"] == "idempotency_conflict"
 
     located = await client.get("/api/v1/active-session", headers=master_headers)
     assert located.status_code == 200, located.text
