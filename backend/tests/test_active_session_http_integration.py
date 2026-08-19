@@ -847,6 +847,14 @@ async def test_pause_resume_end_lifecycle_over_http(client) -> None:
     paused_version = int(paused.json()["session"]["session"]["version"])
     assert paused_version > version, "pause must advance the server version"
 
+    conflicting_pause = await client.post(
+        "/api/v1/active-session/pause",
+        json=_clock_body("op-pause", session_id, version, "2026-07-15T08:01:01.000Z"),
+        headers=master_headers,
+    )
+    assert conflicting_pause.status_code == 409, conflicting_pause.text
+    assert conflicting_pause.json()["detail"]["code"] == "idempotency_conflict"
+
     located = await client.get("/api/v1/active-session", headers=master_headers)
     assert located.status_code == 200, located.text
     assert located.json()["session"]["session"]["id"] == session_id
@@ -866,6 +874,15 @@ async def test_pause_resume_end_lifecycle_over_http(client) -> None:
         headers=master_headers,
     )
     assert ended.status_code == 200, ended.text
+
+    replayed_end = await client.post(
+        "/api/v1/active-session/end",
+        json=_clock_body("op-end", session_id, resumed_version, "2026-07-15T08:03:00.000Z", action="end"),
+        headers=master_headers,
+    )
+    # End removes the locator, but a byte-identical command remains replayable.
+    assert replayed_end.status_code == 200, replayed_end.text
+    assert replayed_end.json()["session"]["session"]["id"] == session_id
 
     gone = await client.get("/api/v1/active-session", headers=master_headers)
     assert gone.status_code == 404, gone.text

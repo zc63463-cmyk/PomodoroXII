@@ -1116,6 +1116,19 @@ class ProductionActiveSessionCoordinator:
             # releasing transition happens last.
             installed = await session.get(ActiveSessionLocator, "active")
             if installed is None:
+                existing = await session.get(ActiveSessionOperation, operation_id)
+                if existing is not None:
+                    self._assert_replay_matches(
+                        existing, kind="end", payload_hash=command.payload_hash
+                    )
+                    replay_intent = json.loads(existing.intent_json)
+                    space_id = str(replay_intent.get("space_id") or "")
+                    session_id = str(replay_intent.get("session_id") or "")
+                    if space_id and session_id:
+                        await session.commit()
+                        return ActiveSessionView(
+                            value=await self._end_session_view(space_id, session_id)
+                        )
                 await session.rollback()
                 raise ActiveSessionCoordinationError(
                     "end requires an active locator"
@@ -1130,10 +1143,15 @@ class ProductionActiveSessionCoordinator:
                 )
             existing = await session.get(ActiveSessionOperation, operation_id)
             if existing is not None:
+                self._assert_replay_matches(existing, kind="end", payload_hash=command.payload_hash)
                 await session.commit()
                 return ActiveSessionView(
-                    value=await self._end_session_view(installed)
+                    value=await self._end_session_view(installed.space_id, installed.session_id)
                 )
+            # The request carries no space ID by design. Persist the identity
+            # resolved from the active locator so an already-completed end can
+            # be replayed after that locator has been released.
+            intent["space_id"] = installed.space_id
             session.add(
                 ActiveSessionOperation(
                     operation_id=operation_id,
@@ -1211,17 +1229,19 @@ class ProductionActiveSessionCoordinator:
                 )
             )
             await session.commit()
-        return ActiveSessionView(value=await self._end_session_view(installed))
+        return ActiveSessionView(
+            value=await self._end_session_view(installed.space_id, installed.session_id)
+        )
 
     async def _end_session_view(
-        self, locator: ActiveSessionLocator
+        self, space_id: str, session_id: str
     ) -> dict[str, object]:
         """End response contract: the real Session aggregate and a null locator
         (the wire model drops locator details after release)."""
-        handle = await self._space_handle_provider(locator.space_id)
+        handle = await self._space_handle_provider(space_id)
         session_aggregate = await self._with_mutation_lease(
             handle,
-            lambda h: self._load_session_aggregate(h, locator.session_id),
+            lambda h: self._load_session_aggregate(h, session_id),
         )
         return {"locator": None, "session": session_aggregate}
 
@@ -1333,7 +1353,10 @@ class ProductionActiveSessionCoordinator:
                 )
             existing = await session.get(ActiveSessionOperation, operation_id)
             if existing is not None:
-                # idempotent replay of the same command returns the prior row
+                self._assert_replay_matches(existing, kind=kind, payload_hash=payload_hash)
+                # Idempotent replay of the same command returns the prior row.
+                # A matching command ID alone is never sufficient: callers
+                # must not be able to reuse it for a different mutation.
                 await session.commit()
                 if include_session:
                     return ActiveSessionView(
@@ -1904,6 +1927,16 @@ class ProductionActiveSessionCoordinator:
         ):
             raise ActiveSessionCoordinationError("invalid payload hash")
         return value
+
+    @staticmethod
+    def _assert_replay_matches(
+        existing: ActiveSessionOperation, *, kind: str, payload_hash: str
+    ) -> None:
+        """Reject command-ID reuse unless it is the original command exactly."""
+        if existing.kind != kind or existing.payload_hash != payload_hash:
+            raise ActiveSessionCoordinationError(
+                "idempotency conflict: command_id is already bound to a different request"
+            )
 
     @staticmethod
     def _locator_view(locator: ActiveSessionLocator) -> dict[str, object]:
