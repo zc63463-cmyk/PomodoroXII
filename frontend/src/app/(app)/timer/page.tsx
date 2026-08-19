@@ -7,6 +7,7 @@ import { SessionLauncher, type LaunchSelection } from '@/components/timer/sessio
 import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
+import { resolveTimerError } from '@/lib/focus-session/timer-error'
 import { FocusSessionRepository, readSessionCommandReceipts, type LocalFocusSessionAggregate } from '@/lib/focus-session/focus-session-repository'
 import { SessionReviewDraftController, type SessionReviewDraft } from '@/lib/focus-session/session-review-draft-registry'
 import { CommandReconciliation } from '@/lib/focus-session/command-reconciliation'
@@ -86,6 +87,7 @@ export default function TimerPage() {
   const reviewDraft = useFocusSessionStore((state) => state.reviewDraft)
   const setReviewDraft = useFocusSessionStore((state) => state.setReviewDraft)
   const [error, setError] = useState<string | null>(null)
+  const setStableError = (cause: unknown) => setError(resolveTimerError(cause).message)
 
   useEffect(() => {
     if (!spaceId) {
@@ -106,7 +108,7 @@ export default function TimerPage() {
       setFocusRepository(focus)
       void hydrateTaskSpace(spaceId, taskRepository)
     } catch (cause) {
-      if (!cancelled) setError((cause as Error).message)
+      if (!cancelled) setStableError(cause)
     }
     return () => { cancelled = true }
   }, [coordinator, hydrateTaskSpace, identity, provisionalLock, resetTaskSpace, spaceId])
@@ -144,7 +146,7 @@ export default function TimerPage() {
     void noteRepository.read(focusedWorkItemId).then((note) => {
       if (!cancelled) setFocusedNote(note)
     }).catch((cause) => {
-      if (!cancelled) setError((cause as Error).message)
+      if (!cancelled) setStableError(cause)
     })
     return () => { cancelled = true }
   }, [focusedWorkItemId, noteRepository])
@@ -177,7 +179,7 @@ export default function TimerPage() {
       },
     )
     setDraftController(controller)
-    void controller.hydrate().catch((cause) => setError((cause as Error).message))
+    void controller.hydrate().catch((cause) => setStableError(cause))
     return () => {
       controller.dispose()
       setDraftController(null)
@@ -199,7 +201,7 @@ export default function TimerPage() {
       const local = await readLocalAggregate(database, ended.sessionId)
       if (!cancelled) setEndedAggregate(local)
     }).catch((cause) => {
-      if (!cancelled) setError((cause as Error).message)
+      if (!cancelled) setStableError(cause)
     })
     return () => { cancelled = true }
   }, [database, focusRepository, localProvisional, locator])
@@ -238,7 +240,7 @@ export default function TimerPage() {
       })
       setReviewDraft(controller.currentDraft())
     }).catch((cause) => {
-      if (!cancelled) setError((cause as Error).message)
+      if (!cancelled) setStableError(cause)
     })
     return () => {
       cancelled = true
@@ -284,7 +286,7 @@ export default function TimerPage() {
         })
       }
     } catch (cause) {
-      setError((cause as Error).message)
+      setStableError(cause)
     }
   }
 
@@ -305,7 +307,7 @@ export default function TimerPage() {
       else if (action === 'resume') await coordinator.resume(occurredAt)
       else await coordinator.end({ occurredAt, timerCompletion: 'ended_early', validity: 'pending', validityReason: null })
     } catch (cause) {
-      setError((cause as Error).message)
+      setStableError(cause)
     }
   }
 
@@ -319,7 +321,7 @@ export default function TimerPage() {
       } else {
         await coordinator.updateSessionNote({ sessionId: sessionIdOf(aggregate.session), sessionNote: value })
       }
-    } catch (cause) { setError((cause as Error).message) }
+    } catch (cause) { setStableError(cause) }
   }
 
   const setCurrent = async (workItemId: string | null) => {
@@ -331,7 +333,7 @@ export default function TimerPage() {
         await localAggregateRefresh()
       } else await coordinator.setCurrentPlanItem({ sessionId: sessionIdOf(aggregate.session), workItemId })
     } catch (cause) {
-      setError((cause as Error).message)
+      setStableError(cause)
       throw cause
     }
   }
@@ -343,7 +345,7 @@ export default function TimerPage() {
         await focusRepository?.setCompletionDraft(localProvisional.aggregate.session.sessionId, planItemId, completionDraft)
         await localAggregateRefresh()
       } else await coordinator.setCompletionDraft({ sessionId: sessionIdOf(aggregate.session), planItemId, completionDraft })
-    } catch (cause) { setError((cause as Error).message) }
+    } catch (cause) { setStableError(cause) }
   }
 
   const addPlanItem = async (workItemId: string) => {
@@ -356,7 +358,7 @@ export default function TimerPage() {
         await focusRepository?.addPlanItem(localProvisional.aggregate.session.sessionId, workItemId, planRank, canonicalNow())
         await localAggregateRefresh()
       } else await coordinator.addPlanItem({ sessionId: sessionIdOf(aggregate.session), workItemId, expectedWorkItemVersion: item.version, planRank, addedAt: canonicalNow() })
-    } catch (cause) { setError((cause as Error).message) }
+    } catch (cause) { setStableError(cause) }
   }
 
   const removePlanItem = async (planItemId: string) => {
@@ -366,7 +368,7 @@ export default function TimerPage() {
         await focusRepository?.removePlanItem(localProvisional.aggregate.session.sessionId, planItemId, canonicalNow(), 'removed from current plan')
         await localAggregateRefresh()
       } else await coordinator.removePlanItem({ sessionId: sessionIdOf(aggregate.session), planItemId, removedAt: canonicalNow(), removalReason: 'removed from current plan' })
-    } catch (cause) { setError((cause as Error).message) }
+    } catch (cause) { setStableError(cause) }
   }
 
   const appendBlocks = async (workItemId: string, blocks: NoteBlock[], operationId: string) => {
@@ -388,7 +390,7 @@ export default function TimerPage() {
       setReviewDraft(persisted)
       await reviewController.flush('before-submit')
     } catch (cause) {
-      setError((cause as Error).message)
+      setStableError(cause)
     }
   }
 
@@ -416,7 +418,7 @@ export default function TimerPage() {
       setReviewController(null)
       setReviewDraft(null)
     } catch (cause) {
-      setError((cause as Error).message)
+      setStableError(cause)
     }
   }
 
@@ -428,7 +430,7 @@ export default function TimerPage() {
       setEndedAggregate(await readLocalAggregate(database, sessionIdOf(aggregate.session)))
       return true
     } catch (cause) {
-      setError((cause as Error).message)
+      setStableError(cause)
       return false
     }
   }
@@ -439,7 +441,7 @@ export default function TimerPage() {
       const reconciliation = new CommandReconciliation(database, focusSessionApi)
       await reconciliation.abandon(sessionIdOf(aggregate.session), commandId, canonicalNow())
       setEndedAggregate(await readLocalAggregate(database, sessionIdOf(aggregate.session)))
-    } catch (cause) { setError((cause as Error).message) }
+    } catch (cause) { setStableError(cause) }
   }
 
   const content: ReactNode = aggregate && aggregate.session.clockState === 'ended'

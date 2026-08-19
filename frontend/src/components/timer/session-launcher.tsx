@@ -36,6 +36,7 @@ export function SessionLauncher({ items, initialWorkItemId, onStart }: SessionLa
   const [level2Id, setLevel2Id] = useState<string | null>(initial.level2Id)
   const [level3Ids, setLevel3Ids] = useState<string[]>(initial.level3Ids)
   const [plannedSeconds, setPlannedSeconds] = useState(1500)
+  const [starting, setStarting] = useState(false)
   useEffect(() => {
     setLevel2Id(initial.level2Id)
     setLevel3Ids(initial.level3Ids)
@@ -50,8 +51,10 @@ export function SessionLauncher({ items, initialWorkItemId, onStart }: SessionLa
       className: 'grid gap-4',
       onSubmit: (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault()
-        if (!level2Id) return
-        void onStart({ level2WorkItemId: level2Id, level3WorkItemIds: level3Ids, plannedSeconds })
+        if (!level2Id || starting) return
+        setStarting(true)
+        void Promise.resolve(onStart({ level2WorkItemId: level2Id, level3WorkItemIds: level3Ids, plannedSeconds }))
+          .finally(() => setStarting(false))
       },
     },
     createElement('div', { className: 'grid gap-2' },
@@ -89,6 +92,6 @@ export function SessionLauncher({ items, initialWorkItemId, onStart }: SessionLa
         onChange: (event: React.ChangeEvent<HTMLInputElement>) => setPlannedSeconds(Math.max(1, Number(event.target.value) || 1) * 60),
       }),
     ),
-    createElement('button', { type: 'submit', disabled: !level2Id }, 'Start focus session'),
+    createElement('button', { type: 'submit', disabled: !level2Id || starting }, 'Start focus session'),
   )
 }

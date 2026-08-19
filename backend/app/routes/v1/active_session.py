@@ -465,9 +465,11 @@ async def end(
     require_idempotency_key(body.command_id, idempotency_key)
     command = _make_command(body, space_id=None, payload=_map_end_payload(body.payload))
     view = await coordinator.end(_master_principal(claims), command)
-    flattened = _flatten_session_response(view.value)
+    # The end view carries a null locator (already released); flattening
+    # would fail on ``dict(None)``, so pass the real Session aggregate
+    # straight through.
     return EndActiveSessionResponse.model_validate(
-        {"session": flattened["session"], "locator": None}
+        {"session": view.value["session"], "locator": None}
     )
 
 

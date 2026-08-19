@@ -12,6 +12,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ProjectRail } from '@/components/task-space/project-rail'
+import { LaunchSessionButton } from '@/components/task-space/launch-session-button'
 import { WorkItemDetail } from '@/components/task-space/work-item-detail'
 import { WorkItemTree } from '@/components/task-space/work-item-tree'
 import { WorkItemNoteEditor } from '@/components/task-space/work-item-note-editor'
@@ -174,28 +175,34 @@ export default function TasksPage() {
             <p className="p-4 text-sm text-muted-foreground">Select a project</p>
           )}
         </section>
-        <WorkItemDetail
-          workItem={selectedWorkItem}
-          definitions={definitions}
-          pendingMutations={pendingMutations}
-          mutationError={mutationError}
-          error={error}
-          availableParents={availableParents}
-          onUpdate={(input) => updateWorkItem(selectedWorkItemId ?? '', input)}
-          onTransition={(statusDefinitionId) => transitionWorkItem(selectedWorkItemId ?? '', statusDefinitionId)}
-          onMove={(parentId) => moveWorkItem(selectedWorkItemId ?? '', parentId, 0)}
-          noteEditor={selectedNote ? (
-            <WorkItemNoteEditor
-              document={selectedNote.document}
-              onChange={updateNoteDocument}
-              conflict={noteConflict}
-              onReloadRemote={() => resolveReloadRemoteNote(selectedWorkItemId ?? selectedNote.workItemId).catch(() => undefined)}
-              onOverwriteLocal={() => resolveOverwriteLocalNote(selectedWorkItemId ?? selectedNote.workItemId).catch(() => undefined)}
-              saveLabel={selectedNote.syncState === 'conflict' ? 'Conflict requires review' : selectedNote.syncState === 'dirty' ? 'Local edit pending' : 'Saved'}
-              onFlush={(reason) => flushNote(reason).catch(() => undefined)}
-            />
-          ) : undefined}
-        />
+        <div className="flex min-w-0 flex-col">
+          <div className="flex items-center justify-between border-b px-3 py-2">
+            <h2 className="text-sm font-semibold">Work item</h2>
+            <LaunchSessionButton workItem={selectedWorkItem} />
+          </div>
+          <WorkItemDetail
+            workItem={selectedWorkItem}
+            definitions={definitions}
+            pendingMutations={pendingMutations}
+            mutationError={mutationError}
+            error={error}
+            availableParents={availableParents}
+            onUpdate={(input) => updateWorkItem(selectedWorkItemId ?? '', input)}
+            onTransition={(statusDefinitionId) => transitionWorkItem(selectedWorkItemId ?? '', statusDefinitionId)}
+            onMove={(parentId) => moveWorkItem(selectedWorkItemId ?? '', parentId, 0)}
+            noteEditor={selectedNote ? (
+              <WorkItemNoteEditor
+                document={selectedNote.document}
+                onChange={updateNoteDocument}
+                conflict={noteConflict}
+                onReloadRemote={() => resolveReloadRemoteNote(selectedWorkItemId ?? selectedNote.workItemId).catch(() => undefined)}
+                onOverwriteLocal={() => resolveOverwriteLocalNote(selectedWorkItemId ?? selectedNote.workItemId).catch(() => undefined)}
+                saveLabel={selectedNote.syncState === 'conflict' ? 'Conflict requires review' : selectedNote.syncState === 'dirty' ? 'Local edit pending' : 'Saved'}
+                onFlush={(reason) => flushNote(reason).catch(() => undefined)}
+              />
+            ) : undefined}
+          />
+        </div>
       </div>
       <Dialog
         open={createParentId !== null}

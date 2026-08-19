@@ -1,5 +1,5 @@
 import { createElement } from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { SessionLauncher } from './session-launcher'
 
@@ -48,5 +48,21 @@ describe('SessionLauncher', () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       level2WorkItemId: 'l2', level3WorkItemIds: ['l3-b'],
     }))
+  })
+
+  it('disables the start button while a start is pending and submits only once', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const start = vi.fn().mockImplementation(() => gate)
+    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+    const button = screen.getByRole('button', { name: 'Start focus session' })
+
+    fireEvent.click(button)
+    await waitFor(() => expect(button).toBeDisabled())
+    fireEvent.click(button)
+    expect(start).toHaveBeenCalledTimes(1)
+
+    release()
+    await waitFor(() => expect(button).not.toBeDisabled())
   })
 })

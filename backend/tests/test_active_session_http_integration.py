@@ -778,3 +778,94 @@ async def test_duplicate_start_same_command_id_fails_closed(client) -> None:
     # same command_id + same payload hash: idempotent replay succeeds (201)
     assert second.status_code == 201, second.text
     assert second.json()["session"]["session"]["id"] == "fs-1"
+
+
+def _clock_hash(expected_version: int, occurred_at: str, *, action: str = "pause") -> str:
+    # expected_version/ownership_epoch are HASH_GUARD fields and must not
+    # enter the canonical hash (the frontend ownedHash omits them too).
+    payload: dict[str, object] = {
+        "occurred_at": occurred_at,
+        "owner_device_id": "device-1", "owner_tab_id": "tab-1",
+    }
+    if action == "end":
+        payload.update({
+            "timer_completion": "completed", "validity": "valid", "validity_reason": None,
+        })
+    return canonical_payload_hash(payload)
+
+
+def _clock_body(
+    command_id: str, session_id: str, expected_version: int, occurred_at: str, *, action: str = "pause",
+) -> dict[str, Any]:
+    payload: dict[str, object] = {
+        "expectedVersion": expected_version, "occurredAt": occurred_at,
+        "ownerDeviceId": "device-1", "ownerTabId": "tab-1",
+    }
+    if action == "end":
+        payload.update({
+            "timerCompletion": "completed", "validity": "valid", "validityReason": None,
+        })
+    return {
+        "commandId": command_id, "sessionId": session_id, "ownershipEpoch": 1,
+        "payloadHash": _clock_hash(expected_version, occurred_at, action=action),
+        "payload": payload,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pause_resume_end_lifecycle_over_http(client) -> None:
+    """Start -> pause -> locate(paused) -> resume -> end -> locate 404.
+
+    Each clock command uses a fresh operation ID (the frontend contract),
+    carries the server-returned Session version as CAS, and must return the
+    server post-image — never a client-fabricated state.
+    """
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space = await _create_space(client, master_headers, "Lifecycle Space")
+    project_id = await _create_project(
+        client, space["headers"], key="LIFE", space_id=space["id"]
+    )
+    wi_id = await _create_work_item(client, space["headers"], project_id, space_id=space["id"])
+
+    start = await client.post(
+        "/api/v1/active-session/start",
+        json=_start_body(space_id=space["id"], work_item_id=wi_id),
+        headers=master_headers,
+    )
+    assert start.status_code == 201, start.text
+    data = start.json()
+    session_id = data["sessionId"]
+    version = int(data["session"]["session"]["version"])
+
+    paused = await client.post(
+        "/api/v1/active-session/pause",
+        json=_clock_body("op-pause", session_id, version, "2026-07-15T08:01:00.000Z"),
+        headers=master_headers,
+    )
+    assert paused.status_code == 200, paused.text
+    paused_version = int(paused.json()["session"]["session"]["version"])
+    assert paused_version > version, "pause must advance the server version"
+
+    located = await client.get("/api/v1/active-session", headers=master_headers)
+    assert located.status_code == 200, located.text
+    assert located.json()["session"]["session"]["id"] == session_id
+
+    resumed = await client.post(
+        "/api/v1/active-session/resume",
+        json=_clock_body("op-resume", session_id, paused_version, "2026-07-15T08:02:00.000Z"),
+        headers=master_headers,
+    )
+    assert resumed.status_code == 200, resumed.text
+    resumed_version = int(resumed.json()["session"]["session"]["version"])
+    assert resumed_version > paused_version
+
+    ended = await client.post(
+        "/api/v1/active-session/end",
+        json=_clock_body("op-end", session_id, resumed_version, "2026-07-15T08:03:00.000Z", action="end"),
+        headers=master_headers,
+    )
+    assert ended.status_code == 200, ended.text
+
+    gone = await client.get("/api/v1/active-session", headers=master_headers)
+    assert gone.status_code == 404, gone.text
