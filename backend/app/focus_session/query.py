@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from app.errors import AppError
+from app.focus_session.module import derive_clock_state
 from app.focus_session.receipts import receipt_view
 from app.models.focus_session import FocusSession, SessionTaskContext
 from app.models.project import Project
@@ -291,6 +292,14 @@ class FocusSessionQuery:
 
 
 def _project_session(row: FocusSession, space_id: str) -> dict[str, object]:
+    # clockState reuses the canonical derive_clock_state (ended > paused >
+    # running); a missing started_at with no terminal/paused timestamp fails
+    # closed instead of silently reporting running.
+    clock_state = derive_clock_state(
+        started_at=row.started_at,
+        pause_started_at=row.pause_started_at,
+        ended_at=row.ended_at,
+    )
     return {
         "id": row.id,
         "spaceId": space_id,
@@ -314,6 +323,7 @@ def _project_session(row: FocusSession, space_id: str) -> dict[str, object]:
         "sessionNote": row.session_note,
         "reviewState": row.review_state,
         "ownershipState": row.ownership_state,
+        "clockState": clock_state,
     }
 
 
