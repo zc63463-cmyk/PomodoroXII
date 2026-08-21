@@ -62,6 +62,21 @@ def _sha256_file(path: Path) -> str:
     return _sha256_bytes(path.read_bytes())
 
 
+def _canonical_source_bytes(path: Path) -> bytes:
+    """Return source bytes in the repository's LF-normalized form.
+
+    The VFS manifest is generated from Git source content.  A Windows checkout
+    may materialize those same text files with CRLF line endings, which must
+    not invalidate a native-source provenance check or its build receipt.
+    """
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
+def _source_digest_and_size(path: Path) -> tuple[str, int]:
+    value = _canonical_source_bytes(path)
+    return _sha256_bytes(value), len(value)
+
+
 def _canonical_bytes(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode(
         "ascii"
@@ -108,10 +123,10 @@ def verify_sources() -> dict[str, object]:
     inputs: list[dict[str, object]] = []
     for relative, expected in rows:
         source = BACKEND_ROOT / relative
-        actual = _sha256_file(source)
+        actual, size = _source_digest_and_size(source)
         if actual != expected:
             raise SystemExit(f"pxii-vfs source hash mismatch: {relative}")
-        inputs.append({"path": relative, "sha256": actual, "size": source.stat().st_size})
+        inputs.append({"path": relative, "sha256": actual, "size": size})
     tree_hash = _sha256_bytes(_canonical_bytes(inputs))
     return {"schema": "pxii-vfs-source-v1", "source_tree_sha256": tree_hash, "inputs": inputs}
 
