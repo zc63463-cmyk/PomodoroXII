@@ -184,6 +184,9 @@ def _isolate_env(
     monkeypatch.setenv("POMODOROXII_SPACES_DATA_DIR", str(spaces_dir))
     monkeypatch.setenv("POMODOROXII_ENVIRONMENT", "development")
     monkeypatch.setenv("POMODOROXII_SECRET_KEY", "test-secret-key-not-for-production-use")
+    # Normal application tests exercise isolated storage, not scheduled
+    # recovery. Backup lifecycle tests opt in explicitly with a target.
+    monkeypatch.setenv("POMODOROXII_BACKUP_ENABLED", "false")
 
     # Reload only modules that capture the settings singleton at import time,
     # in dependency order so each rebinds to the fresh settings.
