@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.errors import SQLiteAuthorityRevokedError
 from app.runtime.sqlite_vfs import BoundSQLiteTarget, _extension_candidates
+from scripts import verify_pxii_vfs_source_hash
 
 
 @pytest.fixture
@@ -60,6 +61,40 @@ def _walk_private_values(value: object) -> tuple[object, ...]:
             if isinstance(name, str) and hasattr(current, name):
                 pending.append(getattr(current, name))
     return tuple(values)
+
+
+def test_vfs_source_verification_normalizes_windows_crlf_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_contents = {
+        "native/pxii_vfs/pxii_vfs.c": b"int main(void) {\n    return 0;\n}\n",
+        "native/pxii_vfs/pxii_vfs.h": b"#pragma once\n",
+        "native/vendor/sqlite3ext.h": b"#define SQLITE_OK 0\n",
+    }
+    manifest_rows: list[str] = []
+    for relative, lf_content in source_contents.items():
+        source = tmp_path / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(lf_content.replace(b"\n", b"\r\n"))
+        manifest_rows.append(
+            f"{verify_pxii_vfs_source_hash._sha256_bytes(lf_content)}  {relative}"
+        )
+
+    manifest = tmp_path / "cmake" / "pxii-vfs-source.sha256"
+    manifest.parent.mkdir()
+    manifest.write_text("\n".join(manifest_rows) + "\n", encoding="ascii")
+    monkeypatch.setattr(verify_pxii_vfs_source_hash, "BACKEND_ROOT", tmp_path)
+    monkeypatch.setattr(verify_pxii_vfs_source_hash, "MANIFEST", manifest)
+
+    source = verify_pxii_vfs_source_hash.verify_sources()
+
+    assert [entry["sha256"] for entry in source["inputs"]] == [
+        verify_pxii_vfs_source_hash._sha256_bytes(content)
+        for content in source_contents.values()
+    ]
+    assert [entry["size"] for entry in source["inputs"]] == [
+        len(content) for content in source_contents.values()
+    ]
 
 
 def _write_fake_wheel_receipt(
