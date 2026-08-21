@@ -886,3 +886,226 @@ async def test_pause_resume_end_lifecycle_over_http(client) -> None:
 
     gone = await client.get("/api/v1/active-session", headers=master_headers)
     assert gone.status_code == 404, gone.text
+
+
+# --------------------------------------------------------------------------- #
+# Frozen frontend session contract + stable conflict surfaces (backend fix).
+# --------------------------------------------------------------------------- #
+
+_FROZEN_SESSION_KEYS = (
+    "endedAt", "pauseStartedAt", "timerCompletion", "validityReason",
+    "overallProgress", "mood", "clockState",
+)
+_FROZEN_CONTEXT_KEYS = (
+    "level2EffortLowerSecondsSnapshot", "level2EffortUpperSecondsSnapshot",
+)
+_FROZEN_ATTRIBUTION_KEYS = ("reason", "correctedFromRevision")
+
+
+def _assert_frozen_contract(aggregate: dict[str, Any]) -> None:
+    session = aggregate["session"]
+    for key in _FROZEN_SESSION_KEYS:
+        assert key in session, f"missing session key: {key}"
+    context = aggregate["context"]
+    assert context is not None, "context must be present"
+    for key in _FROZEN_CONTEXT_KEYS:
+        assert key in context, f"missing context key: {key}"
+        assert context[key] is None or isinstance(context[key], int), (
+            f"{key} must be None or int"
+        )
+    attribution = aggregate["attribution"]
+    assert attribution is not None, "attribution must be present"
+    for key in _FROZEN_ATTRIBUTION_KEYS:
+        assert key in attribution, f"missing attribution key: {key}"
+
+
+@pytest.mark.asyncio
+async def test_frozen_session_contract_fields_present_across_lifecycle(client) -> None:
+    """start/locate/pause/resume/end all return the frozen schema keys; the
+    derived clockState advances running -> paused -> running -> ended while
+    pre-end facts stay null instead of disappearing from the wire."""
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space = await _create_space(client, master_headers, "BF Frozen Space")
+    project_id = await _create_project(
+        client, space["headers"], key="BFRZ", space_id=space["id"]
+    )
+    wi_id = await _create_work_item(client, space["headers"], project_id, space_id=space["id"])
+
+    start = await client.post(
+        "/api/v1/active-session/start",
+        json=_start_body(space_id=space["id"], work_item_id=wi_id),
+        headers=master_headers,
+    )
+    assert start.status_code == 201, start.text
+    data = start.json()
+    session_id = data["sessionId"]
+    version = int(data["session"]["session"]["version"])
+    _assert_frozen_contract(data["session"])
+    session = data["session"]["session"]
+    assert session["clockState"] == "running", session
+    assert session["endedAt"] is None and session["pauseStartedAt"] is None
+    assert session["timerCompletion"] is None
+    assert session["validityReason"] is None
+    assert session["overallProgress"] is None
+    assert session["mood"] is None
+
+    located = await client.get("/api/v1/active-session", headers=master_headers)
+    assert located.status_code == 200, located.text
+    _assert_frozen_contract(located.json()["session"])
+    assert located.json()["session"]["session"]["clockState"] == "running"
+
+    paused = await client.post(
+        "/api/v1/active-session/pause",
+        json=_clock_body("op-bf-pause", session_id, version, "2026-07-15T08:01:00.000Z"),
+        headers=master_headers,
+    )
+    assert paused.status_code == 200, paused.text
+    paused_data = paused.json()
+    _assert_frozen_contract(paused_data["session"])
+    paused_session = paused_data["session"]["session"]
+    assert paused_session["clockState"] == "paused", paused_session
+    assert paused_session["pauseStartedAt"] is not None
+    paused_version = int(paused_session["version"])
+
+    resumed = await client.post(
+        "/api/v1/active-session/resume",
+        json=_clock_body("op-bf-resume", session_id, paused_version, "2026-07-15T08:02:00.000Z"),
+        headers=master_headers,
+    )
+    assert resumed.status_code == 200, resumed.text
+    resumed_data = resumed.json()
+    _assert_frozen_contract(resumed_data["session"])
+    resumed_session = resumed_data["session"]["session"]
+    assert resumed_session["clockState"] == "running", resumed_session
+    assert resumed_session["pauseStartedAt"] is None
+    resumed_version = int(resumed_session["version"])
+
+    ended = await client.post(
+        "/api/v1/active-session/end",
+        json=_clock_body(
+            "op-bf-end", session_id, resumed_version, "2026-07-15T08:03:00.000Z", action="end",
+        ),
+        headers=master_headers,
+    )
+    assert ended.status_code == 200, ended.text
+    ended_data = ended.json()
+    _assert_frozen_contract(ended_data["session"])
+    ended_session = ended_data["session"]["session"]
+    assert ended_session["clockState"] == "ended", ended_session
+    assert ended_session["endedAt"] is not None
+    assert ended_session["timerCompletion"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_start_returns_409_active_session_exists(client) -> None:
+    """A second start while an ActiveSession is claimed is a stable domain
+    conflict (409 + active_session_exists), never a 500, and never leaks the
+    underlying exception text."""
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space = await _create_space(client, master_headers, "BF Dup409 Space")
+    project_id = await _create_project(
+        client, space["headers"], key="BD409", space_id=space["id"]
+    )
+    wi_id = await _create_work_item(client, space["headers"], project_id, space_id=space["id"])
+
+    first = await client.post(
+        "/api/v1/active-session/start",
+        json=_start_body(space_id=space["id"], work_item_id=wi_id),
+        headers=master_headers,
+    )
+    assert first.status_code == 201, first.text
+
+    second = await client.post(
+        "/api/v1/active-session/start",
+        json=_start_body(
+            space_id=space["id"], work_item_id=wi_id,
+            command_id="op-start-dup", session_id="fs-dup",
+        ),
+        headers=master_headers,
+    )
+    assert second.status_code == 409, second.text
+    body = second.json()
+    assert body.get("detail") == "An active Session already exists", body
+    assert body.get("error_type") == "conflict", body
+    code = second.headers.get("X-PomodoroXII-Error-Code", "")
+    assert code == "active_session_exists", code
+    for fragment in ("ActiveSessionCoordinationError", "Traceback", "already claimed"):
+        assert fragment not in second.text, f"leaked {fragment!r}: {second.text[:300]}"
+
+
+@pytest.mark.asyncio
+async def test_null_locator_mutations_return_stable_conflict(client) -> None:
+    """After end removes the locator, every clock mutation on the freed slot
+    (pause/resume/end) returns exactly HTTP 404 with the not_found code --
+    never 409, never a bare 500, never a dict(None) TypeError, and never the
+    underlying exception text."""
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space = await _create_space(client, master_headers, "BF NullLoc Space")
+    project_id = await _create_project(
+        client, space["headers"], key="BNLOC", space_id=space["id"]
+    )
+    wi_id = await _create_work_item(client, space["headers"], project_id, space_id=space["id"])
+
+    start = await client.post(
+        "/api/v1/active-session/start",
+        json=_start_body(space_id=space["id"], work_item_id=wi_id),
+        headers=master_headers,
+    )
+    assert start.status_code == 201, start.text
+    data = start.json()
+    session_id = data["sessionId"]
+    version = int(data["session"]["session"]["version"])
+
+    ended = await client.post(
+        "/api/v1/active-session/end",
+        json=_clock_body(
+            "op-bf-nl-end", session_id, version, "2026-07-15T08:03:00.000Z", action="end",
+        ),
+        headers=master_headers,
+    )
+    assert ended.status_code == 200, ended.text
+
+    gone = await client.get("/api/v1/active-session", headers=master_headers)
+    assert gone.status_code == 404, gone.text
+
+    for kind, command_id in (
+        ("pause", "op-bf-nl-pause"),
+        ("resume", "op-bf-nl-resume"),
+        ("end", "op-bf-nl-end-2"),
+    ):
+        resp = await client.post(
+            f"/api/v1/active-session/{kind}",
+            json=_clock_body(command_id, session_id, version, "2026-07-15T08:04:00.000Z", action="end" if kind == "end" else "pause"),
+            headers=master_headers,
+        )
+        assert resp.status_code == 404, (
+            f"{kind} after end must be exactly 404, got {resp.status_code}: {resp.text[:200]}"
+        )
+        body = resp.json()
+        assert body.get("detail") == "Entity not found", body
+        assert body.get("error_type") == "not_found", body
+        assert resp.headers.get("X-PomodoroXII-Error-Code") == "not_found", resp.headers
+        for fragment in (
+            "Traceback", "TypeError", "ActiveSessionCoordinationError",
+            "requires an active locator", "idempotency conflict",
+        ):
+            assert fragment not in resp.text, f"leaked {fragment!r}: {resp.text[:300]}"
+
+
+def test_derive_clock_state_semantics() -> None:
+    """derive_clock_state priority (ended > paused > running) and the
+    fail-closed behaviour when started_at is missing."""
+    from app.focus_session.module import derive_clock_state
+
+    ts = "2026-07-15T08:00:00.000Z"
+    assert derive_clock_state(started_at=ts, pause_started_at=None, ended_at=None) == "running"
+    assert derive_clock_state(started_at=ts, pause_started_at=ts, ended_at=None) == "paused"
+    assert derive_clock_state(started_at=ts, pause_started_at=None, ended_at=ts) == "ended"
+    # ended wins over paused regardless of order
+    assert derive_clock_state(started_at=ts, pause_started_at=ts, ended_at=ts) == "ended"
+    # started_at missing with no terminal/paused fact must fail closed
+    with pytest.raises(ValueError):
+        derive_clock_state(started_at=None, pause_started_at=None, ended_at=None)

@@ -89,6 +89,7 @@ def _focus_value(session_id: str) -> dict[str, Any]:
             "validityReason": None,
             "overallProgress": None,
             "mood": None,
+            "clockState": "running",
             "sessionNote": "",
             "reviewState": "not_required",
             "ownershipState": "authoritative",
