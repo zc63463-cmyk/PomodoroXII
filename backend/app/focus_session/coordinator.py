@@ -80,7 +80,16 @@ __all__ = [
 
 
 class ActiveSessionCoordinationError(RuntimeError):
-    """Fail-closed coordination error raised by the production writer."""
+    """Fail-closed coordination error raised by the production writer.
+
+    ``code`` is a stable, machine-readable failure identifier that routes
+    map to stable HTTP errors without inspecting exception text. Unknown
+    codes keep the original fail-closed behaviour (bare 500).
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ActiveSessionRecoveryRequiredError(ActiveSessionCoordinationError):
@@ -435,7 +444,8 @@ class ProductionActiveSessionCoordinator:
             if locator is not None:
                 if locator.operation_id != operation_id:
                     raise ActiveSessionCoordinationError(
-                        "an ActiveSession is already claimed"
+                        "an ActiveSession is already claimed",
+                        code="active_session_exists",
                     )
                 # Idempotent replay: the same command_id already claimed this
                 # slot.  Same payload hash -> return the durable state; a
@@ -715,7 +725,8 @@ class ProductionActiveSessionCoordinator:
                 ):
                     raise ActiveSessionCoordinationError(
                         "resolution replay payload hash does not match the "
-                        "completed operation (idempotency conflict)"
+                        "completed operation (idempotency conflict)",
+                        code="idempotency_conflict",
                     )
                 # fully completed: idempotent replay, return the active shape
                 related_operation_id = existing_res.related_operation_id or ""
@@ -922,7 +933,8 @@ class ProductionActiveSessionCoordinator:
                         else:
                             raise ActiveSessionCoordinationError(
                                 "resolution locator CAS conflict (another "
-                                "resolution owns the conflict)"
+                                "resolution owns the conflict)",
+                                code="idempotency_conflict",
                             )
             elif (
                 existing.kind != "resolve_activation_conflict"
@@ -932,7 +944,8 @@ class ProductionActiveSessionCoordinator:
             ):
                 raise ActiveSessionCoordinationError(
                     "resolution operation conflicts with the persisted row "
-                    "(idempotency conflict)"
+                    "(idempotency conflict)",
+                    code="idempotency_conflict",
                 )
             await session.commit()
         # 3) Rebuild the frozen proof entirely from the freshly persisted Meta
@@ -1131,7 +1144,8 @@ class ProductionActiveSessionCoordinator:
                         )
                 await session.rollback()
                 raise ActiveSessionCoordinationError(
-                    "end requires an active locator"
+                    "end requires an active locator",
+                    code="not_found",
                 )
             if (
                 command.ownership_epoch is not None
@@ -1317,7 +1331,8 @@ class ProductionActiveSessionCoordinator:
             if installed is None:
                 await session.rollback()
                 raise ActiveSessionCoordinationError(
-                    f"{kind} requires an active locator"
+                    f"{kind} requires an active locator",
+                    code="not_found",
                 )
             result = await session.execute(
                 sa_text(
@@ -1543,7 +1558,8 @@ class ProductionActiveSessionCoordinator:
         if envelope.payload_hash != child_command.payload_hash:
             raise ActiveSessionCoordinationError(
                 f"child envelope payload hash mismatch for {child_id!r} "
-                "(idempotency conflict)"
+                "(idempotency conflict)",
+                code="idempotency_conflict",
             )
         if not envelope.replay_safe or envelope.target_transition != "complete":
             raise ActiveSessionCoordinationError(
@@ -1935,7 +1951,8 @@ class ProductionActiveSessionCoordinator:
         """Reject command-ID reuse unless it is the original command exactly."""
         if existing.kind != kind or existing.payload_hash != payload_hash:
             raise ActiveSessionCoordinationError(
-                "idempotency conflict: command_id is already bound to a different request"
+                "idempotency conflict: command_id is already bound to a different request",
+                code="idempotency_conflict",
             )
 
     @staticmethod

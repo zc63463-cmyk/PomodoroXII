@@ -503,6 +503,7 @@ class FocusSessionResponse(WireResponseModel):
     validity_reason: str | None
     overall_progress: Literal["smooth", "progressed", "stuck", "interrupted"] | None
     mood: Literal["great", "good", "normal", "bad"] | None
+    clock_state: Literal["running", "paused", "ended"]
     session_note: str = Field(max_length=20_000)
     review_state: Literal["not_required", "pending", "completed", "skipped"]
     ownership_state: Literal["authoritative", "local_provisional", "activation_conflict"]

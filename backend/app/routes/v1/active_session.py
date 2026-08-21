@@ -126,12 +126,20 @@ def _make_command(
 
 
 async def _run_locator_mutation(operation):
-    """Expose command-ID reuse as a stable client conflict, not a 500."""
+    """Expose command-ID reuse and missing-locator cases as stable client
+    conflicts (409/404), never a bare 500, never the exception text."""
     try:
         return await operation
     except ActiveSessionCoordinationError as exc:
-        if "idempotency conflict:" in str(exc):
+        # Stable machine-readable codes from the coordinator; unknown codes
+        # keep the original fail-closed behaviour (bare 500, generic detail).
+        if exc.code == "idempotency_conflict":
             raise AppError(code="idempotency_conflict") from exc
+        if exc.code == "not_found":
+            # The singleton slot is free (ended or never claimed): the
+            # mutation cannot run. Stable 404 matches the frontend
+            # not_found contract.
+            raise AppError(code="not_found") from exc
         raise
 
 
@@ -338,7 +346,7 @@ def _map_resolution_payload(payload: ResolveActivationConflictPayload) -> dict[s
 # --------------------------------------------------------------------------- #
 
 
-@router.get("", response_model=ActiveSessionOperationResponse, response_model_exclude_none=True)
+@router.get("", response_model=ActiveSessionOperationResponse)
 async def locate(
     coordinator=Depends(get_active_session_coordinator),
     claims=Depends(require_master_token),
@@ -359,7 +367,7 @@ async def locate(
     "/start",
     status_code=201,
     response_model=ActiveSessionResponse,
-    response_model_exclude_none=True,
+
 )
 async def start(
     body: StartActiveSessionRequest,
@@ -372,14 +380,24 @@ async def start(
     command = _make_command(
         body, space_id=body.space_id, payload=_map_start_payload(body.payload)
     )
-    view = await coordinator.start(_master_principal(claims), command)
+    try:
+        view = await coordinator.start(_master_principal(claims), command)
+    except ActiveSessionCoordinationError as exc:
+        # Stable machine-readable codes; never the exception text.
+        if exc.code == "active_session_exists":
+            # The singleton ActiveSession slot is taken by another Session:
+            # a stable domain conflict, never a 500, never the exception text.
+            raise AppError(code="active_session_exists") from exc
+        if exc.code == "idempotency_conflict":
+            raise AppError(code="idempotency_conflict") from exc
+        raise
     return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
 @router.post(
     "/activate-provisional",
     response_model=ActiveSessionOperationResponse,
-    response_model_exclude_none=True,
+
 )
 async def activate_provisional(
     body: ActivateProvisionalRequest,
@@ -418,7 +436,7 @@ async def heartbeat(
     return ActiveSessionLocatorResponse.model_validate(dict(view.value))
 
 
-@router.post("/pause", response_model=ActiveSessionResponse, response_model_exclude_none=True)
+@router.post("/pause", response_model=ActiveSessionResponse)
 async def pause(
     body: PauseActiveSessionRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -436,7 +454,7 @@ async def pause(
     return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
-@router.post("/resume", response_model=ActiveSessionResponse, response_model_exclude_none=True)
+@router.post("/resume", response_model=ActiveSessionResponse)
 async def resume(
     body: ResumeActiveSessionRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -454,7 +472,7 @@ async def resume(
     return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
-@router.post("/takeover", response_model=ActiveSessionResponse, response_model_exclude_none=True)
+@router.post("/takeover", response_model=ActiveSessionResponse)
 async def takeover(
     body: TakeoverRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -494,7 +512,7 @@ async def end(
 # --------------------------------------------------------------------------- #
 
 
-@router.put("/note", response_model=ActiveSessionResponse, response_model_exclude_none=True)
+@router.put("/note", response_model=ActiveSessionResponse)
 async def update_note(
     body: UpdateActiveSessionNoteRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -516,7 +534,7 @@ async def update_note(
 @router.post(
     "/plan/current",
     response_model=ActiveSessionResponse,
-    response_model_exclude_none=True,
+
 )
 async def set_current_plan_item(
     body: SetCurrentPlanItemRequest,
@@ -536,7 +554,7 @@ async def set_current_plan_item(
 @router.post(
     "/plan/completion-draft",
     response_model=ActiveSessionResponse,
-    response_model_exclude_none=True,
+
 )
 async def set_completion_draft(
     body: SetCompletionDraftRequest,
@@ -553,7 +571,7 @@ async def set_completion_draft(
     return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
 
 
-@router.post("/plan/add", response_model=ActiveSessionResponse, response_model_exclude_none=True)
+@router.post("/plan/add", response_model=ActiveSessionResponse)
 async def add_plan_item(
     body: AddPlanItemRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -570,7 +588,7 @@ async def add_plan_item(
 @router.post(
     "/plan/remove",
     response_model=ActiveSessionResponse,
-    response_model_exclude_none=True,
+
 )
 async def remove_plan_item(
     body: RemovePlanItemRequest,
@@ -595,7 +613,7 @@ async def remove_plan_item(
 @router.post(
     "/resolve-activation-conflict",
     response_model=ActiveSessionResponse,
-    response_model_exclude_none=True,
+
 )
 async def resolve_activation_conflict(
     body: ResolveActivationConflictRequest,
@@ -619,12 +637,13 @@ async def resolve_activation_conflict(
         ) from exc
     except ActiveSessionCoordinationError as exc:
         # A lost CAS / idempotency conflict is a stable client-visible 409,
-        # never a bare 500.
-        message = str(exc)
-        if "idempotency" in message.lower() or "cas" in message.lower():
+        # never a bare 500, never the exception text.
+        if exc.code == "idempotency_conflict":
             raise AppError(
                 code="idempotency_conflict",
                 details={"reason": "resolution_conflict"},
             ) from exc
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # Unknown coordination failures remain fail-closed.  Do not turn an
+        # unclassified writer error into a client-retryable conflict.
+        raise
     return ActiveSessionResponse.model_validate(_flatten_session_response(view.value))
