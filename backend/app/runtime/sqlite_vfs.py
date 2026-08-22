@@ -157,6 +157,13 @@ def _source_closure_root() -> Path:
     return packaged[0]
 
 
+def _source_digest(path: Path) -> str:
+    value = path.read_bytes()
+    if path.suffix.lower() in {".c", ".h"}:
+        value = value.replace(b"\r\n", b"\n")
+    return hashlib.sha256(value).hexdigest()
+
+
 def _verify_source_manifest() -> None:
     source_root = _source_closure_root()
     manifest = source_root / "cmake" / "pxii-vfs-source.sha256"
@@ -165,7 +172,7 @@ def _verify_source_manifest() -> None:
     for line in manifest.read_text(encoding="ascii").splitlines():
         expected, relative = line.split("  ", 1)
         source = source_root / relative
-        actual = hashlib.sha256(source.read_bytes()).hexdigest()
+        actual = _source_digest(source)
         if actual != expected:
             raise RuntimeError(f"pxii-vfs source hash mismatch: {relative}")
 

@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.errors import SQLiteAuthorityRevokedError
+from app.runtime import sqlite_vfs
 from app.runtime.sqlite_vfs import BoundSQLiteTarget, _extension_candidates
 from scripts import verify_pxii_vfs_source_hash
 
@@ -95,6 +96,27 @@ def test_vfs_source_verification_normalizes_windows_crlf_checkout(
     assert [entry["size"] for entry in source["inputs"]] == [
         len(content) for content in source_contents.values()
     ]
+
+
+@pytest.mark.self_contained_measurement
+def test_runtime_vfs_source_verification_normalizes_windows_crlf_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    relative = "native/pxii_vfs/pxii_vfs.c"
+    lf_content = b"int main(void) {\n    return 0;\n}\n"
+    source = tmp_path / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(lf_content.replace(b"\n", b"\r\n"))
+    manifest = tmp_path / "cmake" / "pxii-vfs-source.sha256"
+    manifest.parent.mkdir()
+    manifest.write_text(
+        f"{verify_pxii_vfs_source_hash._sha256_bytes(lf_content)}  {relative}\n",
+        encoding="ascii",
+    )
+
+    monkeypatch.setattr(sqlite_vfs, "_source_closure_root", lambda: tmp_path)
+
+    sqlite_vfs._verify_source_manifest()
 
 
 def _write_fake_wheel_receipt(
