@@ -117,7 +117,33 @@ desktop.ini
 .trae/mcp.json
 .trae/cognee-venv/
 
-# NOTE: .trae/documents/ IS committed — these are project design docs.
+# Private project documents and review material. Keep these on local storage and
+# private cloud backups; they must not be added to the public repository.
+.trae/documents/
+docs/superpowers/
+docs/task-space-design/
+docs/research/
+documents/
+核心文档/
+审计报告/
+output/
+*.html
+*审查*.md
+*审计*.md
+*报告*.md
+*实施*.md
+*行动指导*.md
+*深度*.md
+*Prompt*.md
+*prompt*.md
+*plan*.md
+*review*.md
+*report*.md
+*body*.md
+overview*.md
+HANDOFF.md
+PhaseC-sync-repair-dispatch.md
+
 # NOTE: backend/.codebase-memory/graph.db.zst IS committed — shared index artifact.
 # codebase-memory artifact.json contains volatile indexed_at/commit fields — do not commit.
 .codebase-memory/artifact.json
