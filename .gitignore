@@ -119,7 +119,8 @@ desktop.ini
 
 # Private project documents and review material. Keep these on local storage and
 # private cloud backups; they must not be added to the public repository.
-.trae/documents/
+.trae/
+docs/
 docs/superpowers/
 docs/task-space-design/
 docs/research/
@@ -141,6 +142,8 @@ output/
 *report*.md
 *body*.md
 overview*.md
+/*.md
+!README.md
 HANDOFF.md
 PhaseC-sync-repair-dispatch.md
 
