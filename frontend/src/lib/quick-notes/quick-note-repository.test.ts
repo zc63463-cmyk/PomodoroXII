@@ -11,6 +11,7 @@ import {
   getQuickNoteRepositoryUserMessage,
   listQuickNoteLifecycleStates,
   listQuickNotes,
+  listQuickNoteSyncStates,
   listTrashedQuickNotes,
   moveQuickNoteToTrash,
   purgeQuickNote,
@@ -672,5 +673,17 @@ describe('quick-note-repository', () => {
     await expect(moveQuickNoteToTrash(archived.id)).rejects.toMatchObject({
       code: 'not_active',
     } satisfies Partial<QuickNoteRepositoryError>)
+  })
+
+  it('reports failed sync status from outbox failure diagnostics', async () => {
+    const note = await createQuickNote({ content: 'failed probe #S2' })
+
+    await db.outbox.where('entityId').equals(note.id).modify({
+      lastError: 'Request failed with status code 500',
+      lastErrorCode: 'http_5xx',
+      failedAt: new Date().toISOString(),
+    })
+
+    expect(await listQuickNoteSyncStates()).toEqual({ [note.id]: 'failed' })
   })
 })

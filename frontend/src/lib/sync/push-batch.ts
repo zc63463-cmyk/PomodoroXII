@@ -48,7 +48,12 @@ import {
 } from './admission'
 import { getOrCreateClientId } from './client-registry'
 import { resumeImportedProvisionalReviews } from '@/lib/focus-session/focus-session-repository'
-import type { ApiSyncV2Event } from './types'
+import type { OutboxEvent } from '@/types'
+import type {
+  ApiSyncV2Event,
+  ApiSyncV2PushResponse,
+  SyncConflict,
+} from './types'
 
 export type QueryDecision =
   | { kind: 'unknown' }
@@ -83,26 +88,94 @@ export async function classifyOperationQuery(
   return { kind: 'unknown' }
 }
 
+/** QN-S7：把 push 阶段服务端裁决的 conflicts 映射为面板冲突（outboxId = 实际 outbox 行 id）。 */
+function buildPushConflicts(
+  selected: PushSelection,
+  result: ApiSyncV2PushResponse,
+): SyncConflict[] {
+  const frozenByOperation = new Map(
+    selected.frozenRows.map((row) => [row.operationId, row]),
+  )
+  return result.conflicts.map((outcome) => {
+    const frozen = frozenByOperation.get(outcome.operation_id)
+    if (!frozen) {
+      throw new PushAuthorityIntegrityError('conflict_outcome_row_missing')
+    }
+    // QN-S8b：本地 frozen 行内容（与 buildV2PushEvents 同口径解码），供面板对比
+    let localVersion: Record<string, unknown> | null = null
+    try {
+      const payloadText = new TextDecoder().decode(
+        decodeCanonicalBase64(frozen.payloadCanonicalBase64),
+      )
+      localVersion = JSON.parse(payloadText) as Record<string, unknown>
+    } catch {
+      localVersion = null
+    }
+    return {
+      outboxId: frozen.durableKey,
+      entityType: frozen.entityType,
+      entityId: frozen.entityId,
+      localVersion,
+      // QN-S8b：服务端 snapshot 回传时携带远端权威 post-image；老后端缺失时保持 null 回退
+      remoteVersion: outcome.snapshot ?? null,
+      conflictType: 'version',
+    }
+  })
+}
+
+/** QN-S2 补强：push 传输失败（5xx/Network）时给尝试过的 outbox 行写入失败诊断字段。 */
+async function markAttemptedRowsFailed(
+  db: PomodoroXIDB,
+  spaceId: string,
+  token: SpaceAuthorityToken,
+  attemptedKeys: ReadonlySet<number>,
+  error: unknown,
+): Promise<void> {
+  if (attemptedKeys.size === 0) return
+  const now = new Date().toISOString()
+  const axiosErr = error as { response?: { status?: number }; message?: string }
+  const status = axiosErr?.response?.status
+  const lastErrorCode = typeof status === 'number' && status >= 500
+    ? 'http_5xx'
+    : (axiosErr?.message?.includes('Network') ?? false)
+      ? 'network_error'
+      : 'sync_error'
+  const rows = (await db.outbox.bulkGet([...attemptedKeys]))
+    .filter((row): row is OutboxEvent => row !== undefined && !row.synced)
+  if (rows.length === 0) return
+  const message = error instanceof Error ? error.message : String(error)
+  await db.transaction('rw', db.outbox, async () => {
+    requireSpaceAuthorityToken(token, spaceId)
+    for (const row of rows) {
+      await db.outbox.update(row.id!, { lastError: message, lastErrorCode, failedAt: now })
+    }
+  })
+}
+
 export async function pushActivePendingBatch(
   db: PomodoroXIDB,
   meta: MetaDB,
   spaceId: string,
   api: AxiosInstance,
   token: SpaceAuthorityToken,
-): Promise<{ state: 'empty' | 'blocked' | 'terminal' | 'pushed'; applied: number }> {
+): Promise<{
+  state: 'empty' | 'blocked' | 'terminal' | 'pushed'
+  applied: number
+  conflicts: SyncConflict[]
+}> {
   requireSpaceAuthorityToken(token, spaceId)
   requireSpaceDatabaseBinding(db, spaceId)
   const receipt = await loadAndValidateActiveReceiptInCurrentTransaction(db)
-  if (!receipt) return { state: 'empty', applied: 0 }
+  if (!receipt) return { state: 'empty', applied: 0, conflicts: [] }
   if (receipt.spaceId !== spaceId) throw new PushAuthorityIntegrityError('pending_receipt_space_mismatch')
   const selected = selectionFromReceipt(receipt)
   const decision = await classifyOperationQuery(api, receipt.clientId, receipt.operationIds)
-  if (decision.kind === 'blocked') return { state: 'blocked', applied: 0 }
+  if (decision.kind === 'blocked') return { state: 'blocked', applied: 0, conflicts: [] }
   if (decision.kind === 'terminal') {
     const applied = await applyTerminalResultTwoPhase(
       db, meta, spaceId, token, selected, decision.result, 'operation_query',
     )
-    return { state: 'terminal', applied }
+    return { state: 'terminal', applied, conflicts: buildPushConflicts(selected, decision.result) }
   }
   await reloadAndRevalidateReceiptImmediatelyBeforePush(
     db, meta, spaceId, selected, receipt, token,
@@ -113,7 +186,7 @@ export async function pushActivePendingBatch(
   const applied = await applyTerminalResultTwoPhase(
     db, meta, spaceId, token, selected, response, 'push_response',
   )
-  return { state: 'pushed', applied }
+  return { state: 'pushed', applied, conflicts: buildPushConflicts(selectionFromReceipt(receipt), response) }
 }
 
 export async function pushAllPendingUnderFence(
@@ -123,7 +196,11 @@ export async function pushAllPendingUnderFence(
   clientId: string,
   api: AxiosInstance,
   token: SpaceAuthorityToken,
-): Promise<{ state: 'empty' | 'blocked' | 'pushed' | 'terminal'; applied: number }> {
+): Promise<{
+  state: 'empty' | 'blocked' | 'pushed' | 'terminal'
+  applied: number
+  conflicts: SyncConflict[]
+}> {
   requireSpaceAuthorityToken(token, spaceId)
   requireSpaceDatabaseBinding(db, spaceId)
   await reconcileSpaceCommittedTerminalEvidence(db, meta, spaceId, token)
@@ -131,15 +208,62 @@ export async function pushAllPendingUnderFence(
   await admitTs3AwaitingS4(db, meta, spaceId, token)
   await assertS4AdmissionReady(db, meta, spaceId, token)
   const attempted = new Set<string>()
+  const attemptedKeys = new Set<number>()
+  const conflicts: SyncConflict[] = []
   let appliedTotal = 0
   let authorityRestarts = 0
-  while (true) {
-    const active = await db.transaction('r', db.syncPushBatches, async () =>
-      loadAndValidateActiveReceiptInCurrentTransaction(db))
-    if (active) {
-      let result: Awaited<ReturnType<typeof pushActivePendingBatch>>
+  try {
+    while (true) {
+      const active = await db.transaction('r', db.syncPushBatches, async () =>
+        loadAndValidateActiveReceiptInCurrentTransaction(db))
+      if (active) {
+        let result: Awaited<ReturnType<typeof pushActivePendingBatch>>
+        try {
+          active.frozenRows.forEach((row) => attemptedKeys.add(row.durableKey))
+          result = await pushActivePendingBatch(db, meta, spaceId, api, token)
+        } catch (error: unknown) {
+          if (!(error instanceof PushAuthorityDriftError) ||
+              error.code !== 'new_complete_paired_root') throw error
+          if (authorityRestarts >= 1) {
+            throw new PushAuthorityIntegrityError('push_authority_restart_exhausted')
+          }
+          authorityRestarts += 1
+          await restartAdmissionAfterTypedDrift(db, meta, spaceId, token)
+          continue
+        }
+        appliedTotal += result.applied
+        conflicts.push(...result.conflicts)
+        if (result.state === 'blocked') return { state: 'blocked', applied: appliedTotal, conflicts }
+        active.operationIds.forEach((id) => attempted.add(id))
+        continue
+      }
+      const selected = await selectOneAuthorityUnit(db, attempted)
+      if (!selected) {
+        return {
+          state: appliedTotal ? 'pushed' : 'empty', applied: appliedTotal, conflicts,
+        }
+      }
+      const query = await classifyOperationQuery(api, clientId, selected.operationIds)
+      if (query.kind === 'blocked') return { state: 'blocked', applied: appliedTotal, conflicts }
+      if (query.kind === 'terminal') {
+        const count = await applyTerminalResultTwoPhase(
+          db, meta, spaceId, token, selected, query.result, 'operation_query',
+        )
+        await resumeImportedProvisionalReviews(db, meta, spaceId, token)
+        appliedTotal += count
+        conflicts.push(...buildPushConflicts(selected, query.result))
+        selected.operationIds.forEach((id) => attempted.add(id))
+        continue
+      }
+      let receipt: SyncPendingPushBatch
       try {
-        result = await pushActivePendingBatch(db, meta, spaceId, api, token)
+        selected.frozenRows.forEach((row) => attemptedKeys.add(row.durableKey))
+        receipt = await createPendingPushBatchAfterUnknown(
+          db, meta, spaceId, clientId, selected, token,
+        )
+        await reloadAndRevalidateReceiptImmediatelyBeforePush(
+          db, meta, spaceId, selected, receipt, token,
+        )
       } catch (error: unknown) {
         if (!(error instanceof PushAuthorityDriftError) ||
             error.code !== 'new_complete_paired_root') throw error
@@ -150,50 +274,21 @@ export async function pushAllPendingUnderFence(
         await restartAdmissionAfterTypedDrift(db, meta, spaceId, token)
         continue
       }
-      appliedTotal += result.applied
-      if (result.state === 'blocked') return { state: 'blocked', applied: appliedTotal }
-      active.operationIds.forEach((id) => attempted.add(id))
-      continue
-    }
-    const selected = await selectOneAuthorityUnit(db, attempted)
-    if (!selected) return { state: appliedTotal ? 'pushed' : 'empty', applied: appliedTotal }
-    const query = await classifyOperationQuery(api, clientId, selected.operationIds)
-    if (query.kind === 'blocked') return { state: 'blocked', applied: appliedTotal }
-    if (query.kind === 'terminal') {
+      const response = await syncV2PushCanonical(api, canonicalRequestText(receipt))
       const count = await applyTerminalResultTwoPhase(
-        db, meta, spaceId, token, selected, query.result, 'operation_query',
+        db, meta, spaceId, token, selectionFromReceipt(receipt), response.data, 'push_response',
       )
       await resumeImportedProvisionalReviews(db, meta, spaceId, token)
       appliedTotal += count
+      conflicts.push(...buildPushConflicts(selectionFromReceipt(receipt), response.data))
       selected.operationIds.forEach((id) => attempted.add(id))
-      continue
+      if (count === 0) return { state: 'pushed', applied: appliedTotal, conflicts }
     }
-    let receipt: SyncPendingPushBatch
-    try {
-      receipt = await createPendingPushBatchAfterUnknown(
-        db, meta, spaceId, clientId, selected, token,
-      )
-      await reloadAndRevalidateReceiptImmediatelyBeforePush(
-        db, meta, spaceId, selected, receipt, token,
-      )
-    } catch (error: unknown) {
-      if (!(error instanceof PushAuthorityDriftError) ||
-          error.code !== 'new_complete_paired_root') throw error
-      if (authorityRestarts >= 1) {
-        throw new PushAuthorityIntegrityError('push_authority_restart_exhausted')
-      }
-      authorityRestarts += 1
-      await restartAdmissionAfterTypedDrift(db, meta, spaceId, token)
-      continue
-    }
-    const response = await syncV2PushCanonical(api, canonicalRequestText(receipt))
-    const count = await applyTerminalResultTwoPhase(
-      db, meta, spaceId, token, selectionFromReceipt(receipt), response.data, 'push_response',
-    )
-    await resumeImportedProvisionalReviews(db, meta, spaceId, token)
-    appliedTotal += count
-    selected.operationIds.forEach((id) => attempted.add(id))
-    if (count === 0) return { state: 'pushed', applied: appliedTotal }
+  } catch (error: unknown) {
+    // QN-S2 补强：非 authority-drift 的传输失败（5xx/Network）写入失败诊断后再上抛
+    if (error instanceof PushAuthorityDriftError) throw error
+    await markAttemptedRowsFailed(db, spaceId, token, attemptedKeys, error)
+    throw error
   }
 }
 

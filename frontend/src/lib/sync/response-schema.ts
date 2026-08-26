@@ -303,6 +303,10 @@ const pushConflict = z.strictObject({
   code: z.enum(['version_conflict', 'tombstone_conflict', 'cycle_detected']),
   resolution: z.enum(['local', 'tombstone', 'circular_ref', 'manual']),
   details,
+  // QN-S8b：snapshot-aware version_conflict 回传的远端权威 post-image
+  // （snapshot/version 均可选，兼容老后端不带快照的冲突响应）
+  snapshot: z.record(jsonString, jsonValue).nullable().optional(),
+  version: safeNonnegativeInt.nullable().optional(),
 })
 const pushError = z.strictObject({
   operation_id: operationId,

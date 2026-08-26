@@ -11,7 +11,8 @@ import type {
   SyncTerminalApplicationEvidence,
 } from '@/services/database'
 import type { OutboxEvent } from '@/types'
-import type { ApiSyncV2PushResponse } from './types'
+import type { ApiSyncV2PushResponse, RetainedLwwSyncEntityType } from './types'
+import { ENTITY_TYPE_TO_TABLE } from './types'
 import { requireCanonicalStoredTimestamp } from './response-schema'
 import {
   encodeBase64,
@@ -251,8 +252,22 @@ export async function applyTerminalResultTwoPhase(
   requireSpaceAuthorityToken(token, spaceId)
   requireSpaceDatabaseBinding(db, spaceId)
   const evidence = await buildEvidence(spaceId, selected, result, source)
+  // QN-S2 补强：applied 的 RetainedLWW 实体行收敛 _dirty=false（仅限 LWW 实体，避开 TS3/S4）
+  const appliedIds = new Set(result.applied.map((item) => item.operation_id))
+  const appliedEntityTables = new Set<string>()
+  for (const outcome of result.applied) {
+    const tableName =
+      ENTITY_TYPE_TO_TABLE[outcome.entity_type as RetainedLwwSyncEntityType]
+    if (tableName) appliedEntityTables.add(tableName)
+  }
+  const transactionTables: Array<string | Dexie.Table> = [
+    db.outbox, db.syncPushBatches, db.syncTerminalApplications,
+  ]
+  for (const tableName of appliedEntityTables) {
+    transactionTables.push(db.table(tableName))
+  }
   await db.transaction(
-    'rw', db.outbox, db.syncPushBatches, db.syncTerminalApplications,
+    'rw', transactionTables,
     async () => {
       requireSpaceAuthorityToken(token, spaceId)
       await reloadCompleteAuthorityAndRequireUnchangedSelection(db, selected)
@@ -262,7 +277,6 @@ export async function applyTerminalResultTwoPhase(
       }
       if (!existing) await db.syncTerminalApplications.put(evidence)
       const terminalizedAt = existing?.committedAt ?? evidence.committedAt
-      const appliedIds = new Set(result.applied.map((item) => item.operation_id))
       for (const frozen of selected.frozenRows) {
         const current = await db.outbox.get(frozen.durableKey)
         if (!current) throw new PushAuthorityIntegrityError('terminal_outbox_row_missing')
@@ -270,7 +284,13 @@ export async function applyTerminalResultTwoPhase(
           frozen,
           await Dexie.waitFor(freezeOutboxIdentity(current)),
         )
-        if (appliedIds.has(frozen.operationId)) await db.outbox.delete(frozen.durableKey)
+        if (!appliedIds.has(frozen.operationId)) continue
+        await db.outbox.delete(frozen.durableKey)
+        const tableName =
+          ENTITY_TYPE_TO_TABLE[frozen.entityType as RetainedLwwSyncEntityType]
+        if (tableName) {
+          await db.table(tableName).update(frozen.entityId, { _dirty: false })
+        }
       }
       const rejected = [...result.conflicts, ...result.errors]
       for (const outcome of rejected) {

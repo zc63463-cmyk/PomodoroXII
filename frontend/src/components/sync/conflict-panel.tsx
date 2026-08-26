@@ -44,51 +44,72 @@ export function ConflictPanel() {
       createElement(
         'ul',
         { className: 'space-y-3' },
-        conflicts.map((c: SyncConflict, i: number) =>
-          createElement(
+        conflicts.map((c: SyncConflict, i: number) => {
+          // P1a：同周期 pre-push（编辑冲突）与 post-push（远端已更新）双条目并存并标注差异
+          const isPostPush = c.outboxId >= 0
+          const remote = c.remoteVersion as Record<string, unknown> | null | undefined
+          const preview =
+            typeof remote?.content === 'string' && remote.content.length > 0
+              ? remote.content
+              : typeof remote?.title === 'string' && remote.title.length > 0
+                ? remote.title
+                : null
+          return createElement(
             'li',
             {
               key: `${c.outboxId}-${c.entityType}-${c.entityId}-${i}`,
               className:
-                'flex items-center justify-between rounded border p-2 text-sm',
+                'flex flex-col gap-1 rounded border p-2 text-sm',
             },
             createElement(
               'span',
-              null,
-              `${c.entityType} / ${c.entityId} (${c.conflictType})`,
-            ),
-            createElement(
-              'span',
-              { className: 'flex gap-2' },
+              { className: 'flex w-full items-center justify-between gap-2' },
               createElement(
-                Button,
-                {
-                  size: 'sm',
-                  variant: 'default',
-                  onClick: () => resolveConflict(
-                    c.outboxId,
-                    'accept-remote',
-                    { entityType: c.entityType, entityId: c.entityId },
-                  ),
-                },
-                '接受远端',
+                'span',
+                null,
+                `${isPostPush ? '远端已更新' : '编辑冲突'}：${c.entityType} / ${c.entityId} (${c.conflictType})`,
               ),
               createElement(
-                Button,
-                {
-                  size: 'sm',
-                  variant: 'outline',
-                  onClick: () => resolveConflict(
-                    c.outboxId,
-                    'keep-local',
-                    { entityType: c.entityType, entityId: c.entityId },
-                  ),
-                },
-                '保留本地',
+                'span',
+                { className: 'flex gap-2' },
+                createElement(
+                  Button,
+                  {
+                    size: 'sm',
+                    variant: 'default',
+                    onClick: () => resolveConflict(
+                      c.outboxId,
+                      'accept-remote',
+                      { entityType: c.entityType, entityId: c.entityId },
+                    ),
+                  },
+                  '接受远端',
+                ),
+                createElement(
+                  Button,
+                  {
+                    size: 'sm',
+                    variant: 'outline',
+                    onClick: () => resolveConflict(
+                      c.outboxId,
+                      'keep-local',
+                      { entityType: c.entityType, entityId: c.entityId },
+                    ),
+                  },
+                  '保留本地',
+                ),
               ),
             ),
-          ),
-        ),
+            // QN-S8b F4：post-push 且服务端回传快照时，展示远端内容预览
+            preview !== null
+              ? createElement(
+                  'span',
+                  { className: 'text-xs opacity-70' },
+                  `远端：${preview.slice(0, 48)}`,
+                )
+              : null,
+          )
+        }),
       ),
     ),
   )

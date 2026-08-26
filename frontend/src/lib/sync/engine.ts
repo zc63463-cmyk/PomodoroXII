@@ -155,11 +155,46 @@ export class RealSyncEngine implements SyncEngine {
       }
       // keep-local：保留 _dirty + outbox，no-op
     } else {
-      // outboxId >= 0：post-push 冲突
+      // outboxId >= 0：post-push 冲突（QN-S7 / QN-S8b）
       if (resolution === 'accept-remote') {
-        await this.db.outbox.delete(outboxId)
+        // QN-S8b：采纳远端——服务端回传权威快照时直接写入，立即收敛；
+        // 无快照（老后端/tombstone/cycle）回退：删 outbox 行 + _dirty 收敛为 false，等后续 pull 覆盖
+        const tableName =
+          ENTITY_TYPE_TO_TABLE[
+            conflict.entityType as keyof typeof ENTITY_TYPE_TO_TABLE
+          ]
+        const remote = conflict.remoteVersion as Record<string, unknown> | null | undefined
+        await this.db.transaction(
+          'rw',
+          [tableName ? this.db.table(tableName) : this.db.outbox, this.db.outbox],
+          async () => {
+            await this.db.outbox.delete(outboxId)
+            if (tableName) {
+              if (remote) {
+                await this.db.table(tableName).put({
+                  ...remote,
+                  id: String(remote.id ?? conflict.entityId),
+                  _dirty: false,
+                })
+              } else {
+                await this.db.table(tableName).update(conflict.entityId, { _dirty: false })
+              }
+            }
+          },
+        )
       } else {
-        await this.db.outbox.update(outboxId, { synced: false })
+        // keep-local：保留本地内容，outbox 行复位为可重试
+        // （transportState ready + 清 terminal 诊断标记）
+        await this.db.outbox.update(outboxId, {
+          synced: false,
+          transportState: 'ready',
+          serverOutcomeCanonicalBase64: null,
+          retryable: false,
+          nextAttemptAt: null,
+          lastError: null,
+          lastErrorCode: null,
+          failedAt: null,
+        })
       }
     }
 
@@ -289,6 +324,11 @@ export class RealSyncEngine implements SyncEngine {
       if (pushResult.state === 'blocked') this.setStatus('syncing')
       // S1-Hard-2：onPushComplete 每周期一次（循环外）
       this.listeners.push.forEach((cb) => cb())
+      // QN-S7：post-push 冲突（outboxId>=0）进入冲突面板；按 outboxId 去重避免跨周期重复
+      const existingConflictKeys = new Set(this.conflicts.map((conflict) => conflict.outboxId))
+      this.addConflicts(pushResult.conflicts.filter(
+        (conflict) => !existingConflictKeys.has(conflict.outboxId),
+      ))
 
       // 3. 收尾
       await this.refreshPendingCount()

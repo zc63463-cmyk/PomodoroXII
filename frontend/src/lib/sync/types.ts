@@ -196,6 +196,9 @@ export interface ApiSyncV2PushConflict {
   code: 'version_conflict' | 'tombstone_conflict' | 'cycle_detected'
   resolution: 'local' | 'tombstone' | 'circular_ref' | 'manual'
   details: Record<string, unknown>
+  /** QN-S8b：snapshot-aware version_conflict 回传的远端权威 post-image（老后端缺失时为空） */
+  snapshot?: Record<string, unknown> | null
+  version?: number | null
 }
 
 export interface ApiSyncV2PushError {
