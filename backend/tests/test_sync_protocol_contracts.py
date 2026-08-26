@@ -913,6 +913,40 @@ def test_push_result_preserves_server_local_lww_conflict_resolution() -> None:
     assert result.conflicts[0].resolution == "local"
 
 
+def test_push_result_lifts_authoritative_snapshot_out_of_conflict_details() -> None:
+    from app.mutation.types import MutationRejection
+    from app.sync.contracts import PushResult, SyncEventInput
+
+    event = SyncEventInput(**_event(action="update", expected_version=2))
+    result = PushResult.from_uow(
+        "snapshot-batch",
+        [event],
+        (),
+        (
+            MutationRejection(
+                0,
+                event.operation_id,
+                event.entity_type,
+                event.entity_id,
+                "version_conflict",
+                False,
+                {
+                    "entityId": event.entity_id,
+                    "resolution": "local",
+                    "snapshot": {"id": event.entity_id, "title": "Remote", "version": 3},
+                    "version": 3,
+                },
+            ),
+        ),
+    )
+    conflict = result.conflicts[0]
+    # snapshot-aware version_conflict lifts the post-image to top-level fields...
+    assert conflict.snapshot == {"id": event.entity_id, "title": "Remote", "version": 3}
+    assert conflict.version == 3
+    # ...and keeps details unchanged for legacy consumers (carried exactly once).
+    assert dict(conflict.details) == {"entityId": event.entity_id, "resolution": "local"}
+
+
 def test_push_result_rejects_incomplete_duplicate_or_extra_receipts() -> None:
     from app.mutation.types import MutationRejection, MutationResult, MutationState
     from app.sync.contracts import PushResult, SyncEventInput

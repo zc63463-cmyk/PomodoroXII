@@ -141,6 +141,10 @@ class SyncV2PushConflict(BaseModel):
     code: Literal["version_conflict", "tombstone_conflict", "cycle_detected"]
     resolution: Literal["local", "tombstone", "circular_ref", "manual"]
     details: IJsonObject
+    # QN-S8b: authoritative remote post-image carried by snapshot-aware
+    # version_conflict rejections; absent for legacy/tombstone/cycle conflicts.
+    snapshot: IJsonObject | None = None
+    version: SafeNonnegativeInt | None = None
 
 
 class SyncV2PushError(BaseModel):

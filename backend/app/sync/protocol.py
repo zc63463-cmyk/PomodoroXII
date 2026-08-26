@@ -38,6 +38,7 @@ from app.sync.contracts import (
     SyncStatusResult,
     canonical_contract_bytes,
     conflict_resolution_for_rejection,
+    split_conflict_snapshot,
     validate_client_id,
     validate_cursor_token,
     validate_operation_query_inputs,
@@ -93,6 +94,7 @@ def _batch_push_result(receipt: BatchMutationResult) -> PushResult:
     for item in receipt.rejected:
         resolution = conflict_resolution_for_rejection(item.code, item.details)
         if resolution is not None:
+            kept_details, snapshot, snapshot_version = split_conflict_snapshot(item.details)
             conflicts.append(
                 PushConflict(
                     item.operation_id,
@@ -100,7 +102,9 @@ def _batch_push_result(receipt: BatchMutationResult) -> PushResult:
                     item.entity_id,
                     item.code,
                     resolution,  # type: ignore[arg-type]
-                    item.details,
+                    kept_details,
+                    snapshot,
+                    snapshot_version,
                 )
             )
         else:

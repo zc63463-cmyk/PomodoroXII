@@ -418,6 +418,10 @@ class PushConflict:
     code: Literal["version_conflict", "tombstone_conflict", "cycle_detected"]
     resolution: Literal["local", "tombstone", "circular_ref", "manual"]
     details: Mapping[str, Any]
+    # QN-S8b: authoritative remote post-image carried by snapshot-aware
+    # version_conflict rejections so clients can adopt it immediately.
+    snapshot: Mapping[str, Any] | None = None
+    version: int | None = None
 
     def __post_init__(self) -> None:
         validate_sync_operation_id(self.operation_id)
@@ -426,6 +430,10 @@ class PushConflict:
         if self.resolution not in {"local", "tombstone", "circular_ref", "manual"}:
             raise ValueError("invalid conflict resolution")
         object.__setattr__(self, "details", require_frozen_i_json_object(self.details))
+        if self.snapshot is not None:
+            object.__setattr__(self, "snapshot", require_frozen_i_json_object(self.snapshot))
+        if self.version is not None:
+            require_safe_nonnegative_int(self.version, field="version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,6 +513,9 @@ class PushResult:
                 rejection.code, rejection.details
             )
             if conflict_resolution is not None:
+                kept_details, snapshot, snapshot_version = split_conflict_snapshot(
+                    rejection.details
+                )
                 output_conflicts.append(
                     PushConflict(
                         event.operation_id,
@@ -512,7 +523,9 @@ class PushResult:
                         rejection.entity_id,
                         rejection.code,
                         conflict_resolution,  # type: ignore[arg-type]
-                        rejection.details,
+                        kept_details,
+                        snapshot,
+                        snapshot_version,
                     )
                 )
             else:
@@ -540,6 +553,23 @@ def conflict_resolution_for_rejection(
         "tombstone_conflict": "tombstone",
         "cycle_detected": "circular_ref",
     }.get(code)  # type: ignore[return-value]
+
+
+def split_conflict_snapshot(
+    details: Mapping[str, object],
+) -> tuple[Mapping[str, object], Mapping[str, Any] | None, int | None]:
+    """Lift the authoritative post-image embedded in a rejection's details.
+
+    QN-S8b: snapshot-aware ``version_conflict`` rejections tag the current
+    server row under ``snapshot``/``version`` inside their details.  This lifts
+    them into the PushConflict's top-level fields (so the wire carries them
+    exactly once) and keeps ``details`` unchanged for legacy consumers.
+    """
+    kept = {
+        key: value for key, value in details.items()
+        if key not in {"snapshot", "version"}
+    }
+    return kept, details.get("snapshot"), details.get("version")
 
 
 @dataclass(frozen=True, slots=True)

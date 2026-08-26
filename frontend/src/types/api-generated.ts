@@ -2090,6 +2090,11 @@ export interface components {
         FocusSessionResponse: {
             /** Breakseconds */
             breakSeconds: number;
+            /**
+             * Clockstate
+             * @enum {string}
+             */
+            clockState: "running" | "paused" | "ended";
             /** Createdat */
             createdAt: string;
             /** Endedat */
@@ -3947,6 +3952,12 @@ export interface components {
              * @enum {string}
              */
             resolution: "local" | "tombstone" | "circular_ref" | "manual";
+            /** Snapshot */
+            snapshot?: {
+                [key: string]: unknown;
+            } | null;
+            /** Version */
+            version?: number | null;
         };
         /** SyncV2PushError */
         SyncV2PushError: {

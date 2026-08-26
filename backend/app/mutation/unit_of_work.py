@@ -567,7 +567,14 @@ def _require_current_version(
     if expected is None:
         if spec.sync_conflict_policy == "strict_cas":
             raise MutationRuleViolation(
-                "version_conflict", {"entityId": request.entity_id}
+                "version_conflict",
+                {
+                    "entityId": request.entity_id,
+                    # QN-S8b: authoritative post-image so clients can adopt the
+                    # current remote content instead of waiting for a re-pull.
+                    "snapshot": _sync_wire_payload(spec, current),
+                    "version": current.get("version"),
+                },
             )
         return None
     if actual == expected:
@@ -591,6 +598,10 @@ def _require_current_version(
                 if client_instant > authoritative_instant:
                     return "remote"
                 details["resolution"] = "local"
+    # QN-S8b: snapshot-aware — carry the current server post-image so
+    # accept-remote can converge immediately without a re-pull.
+    details["snapshot"] = _sync_wire_payload(spec, current)
+    details["version"] = current.get("version")
     raise MutationRuleViolation("version_conflict", details)
 
 
@@ -659,8 +670,15 @@ async def compile_catalog_entity_command(
 
     if request.name == "entity.create":
         if current is not None:
+            # QN-S8b: entity already exists — return its post-image so the
+            # client can adopt the authoritative remote row on accept-remote.
             raise MutationRuleViolation(
-                "version_conflict", {"entityId": request.entity_id}
+                "version_conflict",
+                {
+                    "entityId": request.entity_id,
+                    "snapshot": _sync_wire_payload(spec, current),
+                    "version": current.get("version"),
+                },
             )
         if request.expected_version is not None:
             raise MutationRuleViolation(

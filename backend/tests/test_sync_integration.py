@@ -353,6 +353,15 @@ async def test_sync_push_rejects_stale_update_with_lww_conflict(client):
         ],
     )
     assert stale["conflicts"][0]["resolution"] == "local"
+    # QN-S8b: the conflict carries the authoritative remote post-image and
+    # version so accept-remote can converge immediately without a re-pull.
+    conflict = stale["conflicts"][0]
+    assert conflict["code"] == "version_conflict"
+    assert conflict["version"] == 1
+    assert conflict["snapshot"]["id"] == entity_id
+    assert conflict["snapshot"]["title"] == "Original"
+    assert conflict["snapshot"]["version"] == 1
+    assert conflict["details"]["entityId"] == entity_id
 
 
 async def test_cursor_advances_without_duplicates_for_tied_timestamps(client):
