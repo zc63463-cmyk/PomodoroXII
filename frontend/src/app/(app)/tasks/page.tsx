@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -19,6 +19,7 @@ import { WorkItemNoteEditor } from '@/components/task-space/work-item-note-edito
 import { TaskSpaceRepository } from '@/lib/task-space/task-space-repository'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
 import { syncEngine } from '@/lib/sync'
+import { useTaskSpaceShortcuts } from '@/hooks/use-task-space-shortcuts'
 import { selectMoveCandidates, selectProjectTree, resolveTaskSpaceMutationError, useTaskSpaceStore } from '@/stores/task-space-store'
 import { useSpaceStore } from '@/stores/space-store'
 import { spaceDBManager } from '@/services/space-db'
@@ -62,6 +63,7 @@ export default function TasksPage() {
   const mutationError = useTaskSpaceStore((state) => state.mutationError)
   const [createTarget, setCreateTarget] = useState<{ kind: 'child'; parentId: string } | { kind: 'root' } | null>(null)
   const [childTitle, setChildTitle] = useState('')
+  const [collapseSignal, setCollapseSignal] = useState<{ seq: number; mode: 'collapse' | 'expand' }>({ seq: 0, mode: 'expand' })
 
   useEffect(() => {
     if (!spaceId) {
@@ -180,6 +182,31 @@ export default function TasksPage() {
     selectWorkItem(workItemId)
   }
 
+  // T3 前端打磨: tasks-page keyboard shortcuts (n = create, e = collapse
+  // toggle, s = start focus).  Callbacks stay stable per render via
+  // useCallback so the hook's effect does not thrash.
+  const handleShortcutCreate = useCallback(() => {
+    setCreateTarget(selectedWorkItemId ? { kind: 'child', parentId: selectedWorkItemId } : { kind: 'root' })
+  }, [selectedWorkItemId])
+  const handleShortcutCollapse = useCallback(() => {
+    setCollapseSignal((current) => ({
+      seq: current.seq + 1,
+      mode: current.mode === 'collapse' ? 'expand' : 'collapse',
+    }))
+  }, [])
+  const handleShortcutFocus = useCallback(() => {
+    document.querySelector<HTMLButtonElement>('[data-launch-session]')?.click()
+  }, [])
+  useTaskSpaceShortcuts({
+    onCreateWorkItem: handleShortcutCreate,
+    onToggleCollapse: handleShortcutCollapse,
+    onStartFocus: handleShortcutFocus,
+  })
+
+  const handleTreeMove = useCallback((workItemId: string, newParentId: string | null) => {
+    void moveWorkItem(workItemId, newParentId).catch(() => undefined)
+  }, [moveWorkItem])
+
   return (
     <div className="flex min-h-full min-w-0 flex-col">
       {error ? <p role="alert" className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p> : null}
@@ -206,6 +233,8 @@ export default function TasksPage() {
               isLoading={isLoading}
               error={error}
               pendingMutations={pendingMutations}
+              onMove={handleTreeMove}
+              collapseSignal={collapseSignal}
             />
           ) : (
             <p className="p-4 text-sm text-muted-foreground">Select a project</p>

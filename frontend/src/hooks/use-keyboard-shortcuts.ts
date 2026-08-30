@@ -24,6 +24,8 @@ function isFormField(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable
 }
 
+export { isFormField }
+
 export function useKeyboardShortcuts(): void {
   const router = useRouter()
   const pathname = usePathname()

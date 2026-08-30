@@ -27,5 +27,8 @@ export function LaunchSessionButton({ workItem }: LaunchSessionButtonProps) {
     disabled: workItem === null,
     'aria-label': label,
     onClick: () => router.push('/timer'),
+    // Tasks-page shortcut (`s`) clicks this button programmatically.  The
+    // spread bypasses Button's excess-property check for data attributes.
+    ...({ 'data-launch-session': 'true' } as unknown as Record<string, never>),
   }, 'Start focus session')
 }
