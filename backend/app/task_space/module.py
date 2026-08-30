@@ -59,8 +59,13 @@ def _business_payload(command: TaskSpaceCommand) -> Mapping[str, object]:
             if key != "operation"
         }
         if operation == "move":
-            # project_id is an authority guard, not Move business content.
+            # project_id is an authority guard, not Move business content, and
+            # child_rank is never client-supplied online: the external Move API
+            # rejects it and the server assigns the authoritative rank.  Both
+            # are excluded from the canonical business payload, so a caller
+            # cannot smuggle child_rank through the payload hash either.
             payload.pop("project_id", None)
+            payload.pop("child_rank", None)
         return payload
     if isinstance(command, WorkItemNoteCommand):
         return {
@@ -98,6 +103,10 @@ def build_task_space_request(command: TaskSpaceCommand) -> MutationRequest:
         entity_id = command.work_item_id or command.command_id
         expected_version = command.expected_version
         payload = {key: value for key, value in command.payload.items() if key != "operation"}
+        if operation == "move":
+            # See _business_payload: child_rank is server-assigned only, so
+            # the online request never carries it to the compiler.
+            payload.pop("child_rank", None)
     elif isinstance(command, WorkItemNoteCommand):
         request_name = NOTE_REQUEST_NAMES[command.kind]
         entity_id = command.work_item_id

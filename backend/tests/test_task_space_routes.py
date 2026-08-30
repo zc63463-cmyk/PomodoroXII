@@ -941,7 +941,7 @@ class TestWorkItemMutationContract:
         first = await _create_work_item(client, headers, space_id, "wi-mv-a", project_id, title="Alpha")
         second = await _create_work_item(client, headers, space_id, "wi-mv-b", project_id, title="Beta")
 
-        move_payload = {"new_parent_id": second["id"], "child_rank": 0}
+        move_payload = {"new_parent_id": second["id"]}
         resp = await client.post(
             f"/api/v1/work-items/{first['id']}/move",
             json={
@@ -951,7 +951,6 @@ class TestWorkItemMutationContract:
                 "payloadHash": canonical_payload_hash(move_payload),
                 "projectId": project_id,
                 "parentId": second["id"],
-                "childRank": 0,
             },
             headers={**headers, "Idempotency-Key": "wi-mv-move"},
         )
@@ -972,7 +971,7 @@ class TestWorkItemMutationContract:
         project_b = await _create_project(client, headers, space_id, "wi-xp-pb", "XPB", "XP Project B")
         item = await _create_work_item(client, headers, space_id, "wi-xp-item", project_a, title="A Item")
 
-        move_payload = {"new_parent_id": None, "child_rank": 0}
+        move_payload = {"new_parent_id": None}
         resp = await client.post(
             f"/api/v1/work-items/{item['id']}/move",
             json={
@@ -982,7 +981,6 @@ class TestWorkItemMutationContract:
                 "payloadHash": canonical_payload_hash(move_payload),
                 "projectId": project_b,
                 "parentId": None,
-                "childRank": 0,
             },
             headers={**headers, "Idempotency-Key": "wi-xp-move"},
         )

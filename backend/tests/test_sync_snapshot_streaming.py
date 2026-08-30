@@ -356,7 +356,8 @@ async def test_committed_recovery_vectors_reparse_and_hash_exact_bytes():
         vector["record"]["entity_type"] for vector in vectors if vector["record"] is not None
     }
     assert aliases == {spec.effective_sync_entity_type for spec in CATALOG.list_sync_enabled()}
-    assert len(aliases) == 22
+    # work_item_label is not sync-enabled, so the vector set covers 21 entities.
+    assert len(aliases) == 21
     assert any(
         isinstance(value, dict) and "nested" in value
         for vector in vectors
@@ -421,7 +422,8 @@ async def test_serializer_covers_all_aliases_space_and_exact_note_markdown():
         if spec.name == "note":
             assert payload["content"] == markdown
     assert aliases == {spec.effective_sync_entity_type for spec in CATALOG.list_sync_enabled()}
-    assert len(aliases) == 22
+    # work_item_label is not sync-enabled, so the serializer covers 21 aliases.
+    assert len(aliases) == 21
 
 
 @pytest.mark.asyncio

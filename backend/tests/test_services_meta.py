@@ -125,16 +125,21 @@ def test_meta_service_serialize_roundtrips_spec():
 
 
 def test_meta_service_list_sync_enabled_and_soft_delete():
-    """list_sync_enabled / list_soft_delete return the expected subsets."""
+    """list_sync_enabled / list_soft_delete return the expected subsets.
+
+    work_item_label is a registered BUSINESS junction but is deliberately NOT
+    sync-enabled (its real primary key is composite), so it must not appear
+    in the sync-enabled subset.
+    """
     svc = MetaService()
     sync_enabled = svc.list_sync_enabled()
-    assert len(sync_enabled) == 22
+    assert len(sync_enabled) == 21
     assert {s.name for s in sync_enabled} == {
         "note", "folder", "quick_note", "reflection",
         "habit", "habit_check_in", "schedule", "time_block",
         "memo_comment", "schedule_quick_note",
         "project", "status_definition", "type_definition", "label",
-        "work_item_label", "work_item", "work_item_note",
+        "work_item", "work_item_note",
         "focus_session", "session_task_context",
         "session_attribution_revision", "session_work_item_plan",
         "session_work_item_outcome",
@@ -142,6 +147,18 @@ def test_meta_service_list_sync_enabled_and_soft_delete():
 
     soft_delete = svc.list_soft_delete()
     assert {s.name for s in soft_delete} == {"note", "folder", "quick_note"}
+
+
+def test_meta_service_work_item_label_registered_but_not_sync_enabled():
+    """work_item_label remains resolvable for introspection but must never be
+    delivered over the generic sync protocol.
+    """
+    svc = MetaService()
+    spec = svc.get_entity("work_item_label")
+    assert spec.name == "work_item_label"
+    assert spec.category == EntityCategory.BUSINESS
+    assert spec.sync_enabled is False
+    assert "work_item_label" not in {s.name for s in svc.list_sync_enabled()}
 
 
 # --------------------------------------------------------------------------- #
@@ -153,7 +170,10 @@ TASK_SPACE_ENTITY_NAMES = frozenset({
     "status_definition",
     "type_definition",
     "label",
-    "work_item_label",
+    # work_item_label is intentionally excluded: it remains registered for
+    # introspection but is NOT sync-enabled (composite primary key).  Its
+    # registration/non-sync contract is asserted by
+    # test_meta_service_work_item_label_registered_but_not_sync_enabled.
     "work_item",
     "work_item_note",
     "focus_session",

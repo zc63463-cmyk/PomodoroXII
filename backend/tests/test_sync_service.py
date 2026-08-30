@@ -470,6 +470,76 @@ async def test_pull_pagination_has_more(space_session):
 
 
 @pytest.mark.asyncio
+async def test_cursor_pull_fails_closed_on_historical_nonsync_entity(space_session):
+    """Wave 2C Task D: a historical work_item_label event (sync_enabled=False)
+    in the outbox must NOT be silently skipped while the cursor advances —
+    that would make the event invisible and lose data.  The legacy cursor pull
+    must fail closed and require a full recovery."""
+    from sqlalchemy import func, select
+
+    from app.errors import CursorUpgradeRequiredError
+    from app.models.sync_outbox import SyncOutbox
+    from app.services.sync import SyncService
+    from app.services.sync_outbox import get_current_cursor, record_sync_event
+    from app.services.time import utc_now_iso
+
+    await _clear_seeded_definitions(space_session)
+
+    # A real sync-enabled event first (so the cursor pull has something to read).
+    await record_sync_event(
+        space_session,
+        entity_type="habit",
+        entity_id="hist-habit-1",
+        action="create",
+        payload={"id": "hist-habit-1", "title": "H", "updated_at": utc_now_iso()},
+        visible=True,
+    )
+    # A historical work_item_label event that predates the sync_enabled=False
+    # cutover.  It is NOT in ENTITY_REGISTRY any more.
+    await record_sync_event(
+        space_session,
+        entity_type="workItemLabel",
+        entity_id="hist-wil-1",
+        action="create",
+        payload={"work_item_id": "wi-1", "label_id": "label-1", "updated_at": utc_now_iso()},
+        visible=True,
+    )
+    await space_session.flush()
+    cursor_before = await get_current_cursor(space_session)
+    assert cursor_before > 0
+
+    svc = SyncService(space_session)
+    with pytest.raises(CursorUpgradeRequiredError) as raised:
+        await svc.pull(cursor=0, limit=10)
+
+    assert raised.value.code == "cursor_upgrade_required"
+    assert any("workItemLabel" in group for group in raised.value.details["truncated_groups"])
+    # Fail-closed: the cursor did NOT advance past the historical event, and the
+    # outbox row is untouched, so a retry/recovery can still surface it.
+    assert await get_current_cursor(space_session) == cursor_before
+    rows = list(
+        (
+            await space_session.execute(
+                select(SyncOutbox).where(SyncOutbox.entity_type == "workItemLabel")
+            )
+        ).scalars()
+    )
+    assert len(rows) == 1  # the historical event is NOT silently dropped
+
+
+@pytest.mark.asyncio
+async def test_sync_catalog_excludes_work_item_label(space_session):
+    """Wave 2C Task D: the new client-facing catalog must not include
+    work_item_label (sync_enabled=False); its absence is what makes the
+    historical-event fail-closed behavior meaningful."""
+    from app.registry.sync_registry import build_sync_registry
+
+    registry = build_sync_registry()
+    assert "workItemLabel" not in registry
+    assert "work_item_label" not in registry
+
+
+@pytest.mark.asyncio
 async def test_pull_returns_tombstones(space_session):
     """pull() should include tombstones with deleted_at > since."""
     from app.services.sync import SyncService
@@ -648,18 +718,23 @@ async def test_status_returns_all_22_pull_keys_in_one_query(space_session):
 # C8: ENTITY_REGISTRY validation
 # --------------------------------------------------------------------------- #
 
-def test_entity_registry_has_22_entities():
-    """ENTITY_REGISTRY should contain exactly 22 final entity types."""
+def test_entity_registry_has_21_entities():
+    """ENTITY_REGISTRY should contain exactly 21 final entity types.
+
+    work_item_label was removed from the generic sync directory: its real
+    primary key is composite, so it is delivered by neither the legacy nor
+    the derived sync registry.
+    """
     from app.services.sync import ENTITY_REGISTRY
 
-    assert len(ENTITY_REGISTRY) == 22
+    assert len(ENTITY_REGISTRY) == 21
     expected_keys = {
         "focusSession", "folder", "habit", "habitCheckIn", "label",
         "memoComment", "note", "project", "quickNote", "reflection",
         "schedule", "scheduleQuickNote", "sessionAttributionRevision",
         "sessionTaskContext", "sessionWorkItemOutcome", "sessionWorkItemPlan",
         "statusDefinition", "timeBlock", "typeDefinition", "workItem",
-        "workItemLabel", "workItemNote",
+        "workItemNote",
     }
     assert set(ENTITY_REGISTRY.keys()) == expected_keys
 
@@ -676,8 +751,10 @@ def test_entity_registry_entries_have_model_and_pull_key():
 
 
 @pytest.mark.asyncio
-async def test_legacy_push_rejects_composite_key_work_item_label(space_session):
-    """Sync v1 rejects the final composite junction instead of crashing."""
+async def test_legacy_push_rejects_off_sync_directory_work_item_label(space_session):
+    """work_item_label is no longer in the generic sync directory at all, so
+    the legacy endpoint rejects it as unknown instead of half-owning it.
+    """
     from app.services.sync import SyncService
 
     result = await SyncService(space_session).push([
@@ -692,7 +769,7 @@ async def test_legacy_push_rejects_composite_key_work_item_label(space_session):
     assert result["applied"] == []
     assert result["conflicts"] == []
     assert len(result["errors"]) == 1
-    assert "Unsupported entity_type on legacy sync endpoint" in result["errors"][0]["error"]
+    assert "Unknown entity_type: workItemLabel" in result["errors"][0]["error"]
 
 
 def test_entity_registry_pull_keys_are_unique():
@@ -978,7 +1055,9 @@ async def test_pull_tombstones_has_more_false_when_under_limit(space_session):
     svc = SyncService(space_session)
     result = await svc.pull(since="", limit=100)
 
-    assert result["workItemLabels"] == []
+    # work_item_label is no longer part of the generic sync directory, so
+    # pull responses no longer carry a workItemLabels group at all.
+    assert "workItemLabels" not in result
     assert len(result["tombstones"]) == 3
     assert result["tombstones_has_more"] is False, (
         "tombstones_has_more should be False when under limit"

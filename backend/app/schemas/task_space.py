@@ -178,7 +178,12 @@ class MoveWorkItemRequest(WireModel):
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     project_id: str = Field(min_length=1, max_length=64)
     parent_id: str | None = Field(default=None, max_length=64)
-    child_rank: int = Field(default=0, ge=0)
+    # NOTE: child_rank is intentionally absent.  Online Move never accepts a
+    # client-supplied rank; the server assigns the authoritative
+    # max(existing ranks, -1) + 1 inside the same transaction.  The sync
+    # replay path carries the authoritative rank inside the full post-image
+    # payload, which is validated separately.  (extra="forbid" rejects any
+    # attempt to smuggle childRank through the external API.)
 
 
 class TransitionWorkItemRequest(WireModel):

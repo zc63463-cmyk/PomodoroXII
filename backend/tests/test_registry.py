@@ -92,14 +92,16 @@ def test_registry_categorization_and_classifications():
     assert len(REGISTRY.list_by_category(EntityCategory.META)) == 3
     assert len(REGISTRY.list_by_category(EntityCategory.SETTING)) == 1
 
-    # Sync eligibility: all 22 business entities participate in sync.
+    # Sync eligibility: 21 of the 22 business entities participate in sync.
+    # work_item_label (composite (work_item_id, label_id) primary key) is the
+    # deliberate exception — see the builtin.py declaration comment.
     sync_names = {s.name for s in REGISTRY.list_sync_enabled()}
     assert sync_names == {
         "note", "folder", "quick_note", "reflection",
         "habit", "habit_check_in", "schedule", "time_block", "memo_comment",
         "schedule_quick_note",
         "project", "status_definition", "type_definition", "label",
-        "work_item_label", "work_item", "work_item_note",
+        "work_item", "work_item_note",
         "focus_session", "session_task_context", "session_attribution_revision",
         "session_work_item_plan", "session_work_item_outcome",
     }
@@ -210,3 +212,33 @@ def test_legacy_task_entity_is_absent():
         "Legacy 'task' entity must not be registered; "
         "it has been replaced by 'work_item'."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Wave 1 — work_item_label is NOT handed to the generic sync protocol
+# --------------------------------------------------------------------------- #
+
+
+def test_work_item_label_remains_registered_but_not_sync_enabled():
+    """The work_item_label junction stays registered (composite key intact)
+    but is never declared sync-enabled: the generic sync directory must not
+    own a relation whose real primary key is composite.
+    """
+    spec = REGISTRY.get("work_item_label")
+    assert spec.sync_enabled is False
+    assert spec.category == EntityCategory.BUSINESS
+    # The fabricated single-column primary key is metadata only; the real
+    # composite key is unchanged and no API is added.
+    assert spec.primary_key == "work_item_id"
+    assert "work_item_label" not in {s.name for s in REGISTRY.list_sync_enabled()}
+
+
+def test_build_sync_registry_excludes_work_item_label():
+    """build_sync_registry (the source of the generic sync protocol) must not
+    contain the work_item_label relation.
+    """
+    from app.registry.sync_registry import build_sync_registry
+
+    registry = build_sync_registry()
+    assert "workItemLabel" not in registry
+    assert "workItemLabels" not in {entry["pull_key"] for entry in registry.values()}

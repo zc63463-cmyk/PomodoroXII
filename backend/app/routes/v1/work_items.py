@@ -238,11 +238,13 @@ async def move_work_item(
         work_item_id=work_item_id,
         expected_version=body.expected_version,
         payload_hash=body.payload_hash,
+        # child_rank is deliberately absent: the online Move API never accepts
+        # a client-supplied rank.  The server assigns the authoritative
+        # max(existing ranks, -1) + 1 within the same transaction.
         payload={
             "operation": "move",
             "project_id": body.project_id,
             "new_parent_id": body.parent_id,
-            "child_rank": body.child_rank,
         },
     )
     outcome = await command_module.execute(scope, command)

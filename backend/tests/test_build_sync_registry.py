@@ -6,12 +6,17 @@
 from __future__ import annotations
 
 
-def test_build_sync_registry_returns_22_entries():
-    """build_sync_registry 必须返回 22 个实体。"""
+def test_build_sync_registry_returns_21_entries():
+    """build_sync_registry 必须返回 21 个实体。
+
+    work_item_label 的复合主键使其不得进入通用同步目录，因此从
+    REGISTRY.list_sync_enabled() 派生的 registry 不再包含 workItemLabel。
+    """
     from app.registry.sync_registry import build_sync_registry
 
     registry = build_sync_registry()
-    assert len(registry) == 22
+    assert len(registry) == 21
+    assert "workItemLabel" not in registry
 
 
 def test_build_sync_registry_uses_camelcase_keys():

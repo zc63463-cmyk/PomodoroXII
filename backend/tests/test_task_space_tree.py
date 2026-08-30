@@ -102,6 +102,58 @@ async def test_root_child_rank_is_scoped_to_its_project(task_space_fixture) -> N
 
 
 @pytest.mark.asyncio
+async def test_online_create_assigns_consecutive_append_only_ranks(task_space_fixture) -> None:
+    """Sibling creation assigns consecutive ranks 0,1,2 (empty set starts at 0)."""
+    project = await task_space_fixture.create_project(
+        command_id="rank-consecutive", key="RC"
+    )
+    pid = project.value["id"]
+    a = await task_space_fixture.create_work_item(pid, "A", None, "rc-a")
+    b = await task_space_fixture.create_work_item(pid, "B", None, "rc-b")
+    c = await task_space_fixture.create_work_item(pid, "C", None, "rc-c")
+
+    assert (a.value["child_rank"], b.value["child_rank"], c.value["child_rank"]) == (0, 1, 2)
+
+
+@pytest.mark.asyncio
+async def test_append_only_rank_never_reuses_holes_left_by_moves(task_space_fixture) -> None:
+    """Online move leaves holes in the source sibling set; appends use
+    max(existing ranks, -1) + 1 and never reuse a freed rank."""
+    project = await task_space_fixture.create_project(
+        command_id="rank-holes", key="RH"
+    )
+    pid = project.value["id"]
+    a = await task_space_fixture.create_work_item(pid, "A", None, "rh-a")
+    b = await task_space_fixture.create_work_item(pid, "B", None, "rh-b")
+    c = await task_space_fixture.create_work_item(pid, "C", None, "rh-c")
+
+    # Move B under A (A has no children yet -> authoritative rank 0).  The
+    # root sibling set becomes [0, 2]: a hole at 1.
+    moved_b = await task_space_fixture.move(b.value["id"], pid, a.value["id"], "rh-move-b")
+    assert moved_b.value["child_rank"] == 0
+    roots = await task_space_fixture.queries.list_work_items(
+        task_space_fixture.scope,
+        TaskSpacePageQuery(None, 100, {"project_id": pid}),
+    )
+    root_ranks = sorted(
+        int(row["child_rank"])
+        for row in roots.items
+        if row["parent_id"] is None
+    )
+    assert root_ranks == [0, 2]
+
+    # Append a root: max([0,2]) + 1 = 3; the freed rank 1 is not reused.
+    d = await task_space_fixture.create_work_item(pid, "D", None, "rh-d")
+    assert d.value["child_rank"] == 3
+
+    # Move C out too: roots become [0, 3]; C lands under A at max([0]) + 1 = 1.
+    moved_c = await task_space_fixture.move(c.value["id"], pid, a.value["id"], "rh-move-c")
+    assert moved_c.value["child_rank"] == 1
+    e = await task_space_fixture.create_work_item(pid, "E", None, "rh-e")
+    assert e.value["child_rank"] == 4
+
+
+@pytest.mark.asyncio
 async def test_same_payload_with_distinct_command_ids_allocates_distinct_work_items(
     task_space_fixture,
 ) -> None:
@@ -516,6 +568,57 @@ async def test_sync_work_item_accepted_move_matches_typed_post_image(task_space_
     assert events[0].entity_type == "workItem"
     assert events[0].payload == result.value
     assert set(events[0].payload) == WORK_ITEM_POST_IMAGE_FIELDS
+
+
+@pytest.mark.asyncio
+async def test_sync_work_item_move_applies_authoritative_rank_verbatim(task_space_fixture) -> None:
+    """Sync replay must apply the event's authoritative rank without recomputing.
+
+    The new parent already has children ranked 0 and 1, so an append-only
+    recompute would produce 2; the event carries 5 and 5 must be applied.
+    """
+    item = await task_space_fixture.seed_level2("sync-authoritative-rank")
+    project_id = str(item["project_id"])
+    new_parent = await task_space_fixture.create_work_item(
+        project_id, "Parent", None, "sync-ar-parent"
+    )
+    await task_space_fixture.create_work_item(
+        project_id, "Child 0", new_parent.value["id"], "sync-ar-c0"
+    )
+    await task_space_fixture.create_work_item(
+        project_id, "Child 1", new_parent.value["id"], "sync-ar-c1"
+    )
+    client_updated_at = task_space_fixture.clock.tick()
+    candidate = {
+        **item,
+        "parent_id": str(new_parent.value["id"]),
+        "child_rank": 5,
+        "updated_at": client_updated_at,
+        "version": int(item["version"]) + 1,
+    }
+    event = task_space_fixture.sync_event(
+        entity_type="workItem",
+        entity_id=str(item["id"]),
+        action="update",
+        payload=candidate,
+        expected_version=int(item["version"]),
+        client_updated_at=client_updated_at,
+    )
+    request = task_space_fixture.entity_commands.from_sync_event(
+        task_space_fixture.scope, event
+    )
+
+    result = await task_space_fixture.uow.execute(
+        task_space_fixture.scope, request, "sync-authoritative-rank-op"
+    )
+
+    assert result.value["child_rank"] == 5
+    assert result.value["version"] == int(item["version"]) + 1
+    events = await task_space_fixture.visible_events(
+        operation_id="sync-authoritative-rank-op"
+    )
+    assert len(events) == 1
+    assert events[0].payload == result.value
 
 
 @pytest.mark.asyncio

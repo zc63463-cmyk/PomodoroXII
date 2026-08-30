@@ -334,6 +334,26 @@ def _subtree_relative_depth(overlay, root_id: str) -> int:
     return maximum
 
 
+def _authoritative_child_rank(
+    overlay, project_id: str, parent_id: str | None
+) -> int:
+    """Assign the authoritative append-only rank for one target parent.
+
+    Online Create/Move always run this inside the same transaction as the
+    target mutation: ``max(existing ranks, -1) + 1``.  Empty sibling sets
+    therefore start at 0, and holes left by earlier moves never get reused.
+    Sync replay does NOT call this — it applies the rank carried by the
+    full post-image verbatim.
+    """
+    ranks = [
+        int(row["child_rank"])
+        for row in overlay.rows("work_item")
+        if str(row["project_id"]) == project_id
+        and row["parent_id"] == parent_id
+    ]
+    return max(ranks, default=-1) + 1
+
+
 # -- CreateWorkItem -----------------------------------------------------------
 
 
@@ -383,11 +403,12 @@ async def _compile_CreateWorkItem(self, context, request):
         "status_definition_id": status_definition_id,
         "priority": request.payload.get("priority"),
         "parent_id": parent_id,
-        "child_rank": len([
-            row
-            for row in overlay.rows("work_item")
-            if row["project_id"] == project["id"] and row["parent_id"] == parent_id
-        ]),
+        # Authoritative append-only placement: max(existing ranks, -1) + 1
+        # inside the same transaction.  The full post-image (including this
+        # assigned rank) is what mutation/outbox persist and peers replay.
+        "child_rank": _authoritative_child_rank(
+            overlay, str(project["id"]), parent_id
+        ),
         "completion_window_start": None,
         "completion_window_end": None,
         "review_point": None,
@@ -501,10 +522,29 @@ async def _compile_MoveWorkItem(self, context, request):
             "invalid_work_item_tree", {"reason": "subtree_depth"}, retryable=False
         )
     now = _monotonic_updated_at(str(item["updated_at"]), self.now_iso_ms())
+    declared_rank = request.payload.get("child_rank")
+    if declared_rank is not None:
+        # Sync replay path: the event carries the authoritative rank in its
+        # full post-image.  Apply it verbatim — never recompute.  Only the
+        # server-side replay (_typed_sync_request) may supply this field; the
+        # online Move API rejects childRank at the wire layer and never
+        # includes it in the payload.  Malformed values are rejected through
+        # the same registered work_item_structure_changed gate the sync path
+        # already uses.
+        if type(declared_rank) is not int or declared_rank < 0:
+            _reject_work_item_sync("invalid_child_rank")
+        child_rank = declared_rank
+    else:
+        # Online path: authoritative append-only placement inside the same
+        # transaction as the move.  Holes left by earlier moves are never
+        # reused.
+        child_rank = _authoritative_child_rank(
+            overlay, str(item["project_id"]), parent_id
+        )
     after = {
         **item,
         "parent_id": parent_id,
-        "child_rank": int(request.payload["child_rank"]),
+        "child_rank": child_rank,
         "updated_at": now,
         "version": int(item["version"]) + 1,
     }
@@ -602,18 +642,6 @@ def _typed_sync_request(
     )
 
 
-def _retain_sync_request(
-    context, original: MutationRequest, planned: MutationCommand
-):
-    return context.command(
-        request=original,
-        db_plans=planned.db_plans,
-        projections=planned.projections,
-        sync_events=planned.sync_events,
-        value=planned.result_value,
-    )
-
-
 def _full_work_item_sync_candidate(
     request: MutationRequest,
     before: Mapping[str, object],
@@ -695,7 +723,10 @@ async def _compile_sync_work_item(self, context, request):
             "UpdateWorkItem",
             {"patch": {field: candidate[field] for field in scalar_changes}},
         )
-        planned = await _compile_UpdateWorkItem(self, context, typed)
+        # Shared constraint validation only: the typed compiler re-validates
+        # patch ownership / referenced definitions but would regenerate
+        # ``updated_at``; replay adopts the candidate verbatim below.
+        await _compile_UpdateWorkItem(self, context, typed)
     elif family == "move":
         if type(candidate["child_rank"]) is not int or candidate["child_rank"] < 0:
             _reject_work_item_sync("invalid_child_rank")
@@ -709,7 +740,9 @@ async def _compile_sync_work_item(self, context, request):
                 "child_rank": candidate["child_rank"],
             },
         )
-        planned = await _compile_MoveWorkItem(self, context, typed)
+        # Shared constraint validation (cross-project, cycle, subtree depth,
+        # rank validity) — the replayed rank is taken from the candidate below.
+        await _compile_MoveWorkItem(self, context, typed)
     else:
         typed = _typed_sync_request(
             context,
@@ -717,8 +750,31 @@ async def _compile_sync_work_item(self, context, request):
             "TransitionWorkItem",
             {"status_definition_id": candidate["status_definition_id"]},
         )
-        planned = await _compile_TransitionWorkItem(self, context, typed)
-    return _retain_sync_request(context, request, planned)
+        # Shared constraint validation (status machine, active-child conflict,
+        # envelope claim).  completed_at/cancelled_at are adopted verbatim.
+        await _compile_TransitionWorkItem(self, context, typed)
+
+    # The validated candidate is the authoritative result of a sync replay:
+    # every WORK_ITEM_SYNC_FIELDS value is adopted verbatim.  The typed
+    # compilers above share the constraint validation but MUST NOT share the
+    # "regenerate the result" behavior — online commands generate authoritative
+    # server timestamps, replay never re-derives updated_at / completed_at /
+    # cancelled_at / child_rank.
+    after = dict(candidate)
+    plan = DbMutationPlan(
+        "work_items", {"id": after["id"]}, "update",
+        request.expected_version, before, after,
+    )
+    event = SyncEventPlan(
+        "work_item", str(after["id"]), "update", after,
+        int(after["version"]), str(after["updated_at"]),
+    )
+    return context.command(
+        request=request,
+        db_plans=(plan,),
+        sync_events=(event,),
+        value=after,
+    )
 
 
 TaskSpaceCompiler.compile_sync_work_item = _compile_sync_work_item
@@ -934,10 +990,18 @@ def _sync_note_document(request, before):
             raise MutationRuleViolation(
                 "version_conflict",
                 {
-                    "current_version": before["version"],
-                    "current_document": _json.loads(
-                        str(before["document_json"])
-                    ),
+                    "entityId": request.entity_id,
+                    # QN-S8b: authoritative remote post-image so clients can
+                    # adopt the current remote Note on reload without a re-pull.
+                    "snapshot": {
+                        "id": str(before["id"]),
+                        "work_item_id": str(before["work_item_id"]),
+                        "document_json": str(before["document_json"]),
+                        "created_at": str(before["created_at"]),
+                        "updated_at": str(before["updated_at"]),
+                        "version": int(before["version"]),
+                    },
+                    "version": int(before["version"]),
                 },
                 retryable=False,
             )

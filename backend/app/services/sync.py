@@ -63,10 +63,10 @@ SYNC_SNAPSHOT_TTL = timedelta(hours=1)
 ENTITY_REGISTRY: dict[str, dict[str, Any]] = build_sync_registry()
 
 # The legacy timestamp-based pull/full implementation requires a single ``id``
-# cursor plus ``updated_at``.  The final catalog also contains the composite-key
-# ``workItemLabel`` junction, which is delivered by the S4 ledger protocol rather
-# than this compatibility path.  Keep it in ENTITY_REGISTRY so the final wire
-# identity remains authoritative, but never run timestamp queries against it.
+# cursor plus ``updated_at``.  Only entities exposing both are eligible.
+# (The ``work_item_label`` junction is intentionally NOT in ENTITY_REGISTRY at
+# all: its composite primary key makes it incompatible with the generic sync
+# protocol, and it is served by a future typed label command instead.)
 TIMESTAMP_PULL_REGISTRY: dict[str, dict[str, Any]] = {
     entity_type: entry
     for entity_type, entry in ENTITY_REGISTRY.items()
@@ -707,7 +707,17 @@ class SyncService:
             event = latest[key]
             entry = ENTITY_REGISTRY.get(event.entity_type)
             if entry is None:
-                continue
+                # Wave 2C (Task D): a historical sync event for an entity that
+                # is no longer sync-enabled (e.g. work_item_label after its
+                # sync_enabled=False cutover) must NOT be silently skipped while
+                # the cursor advances — the event would become invisible and
+                # its data would be lost.  Fail closed and require a full
+                # recovery/rebuild so the historical event is surfaced (the v2
+                # protocol path already delivers such events raw; this legacy
+                # cursor path must not silently drop them either).
+                raise CursorUpgradeRequiredError(
+                    truncated_groups=[f"entity:{event.entity_type}"],
+                )
             if event.action == "delete":
                 # Use the event timestamp as deleted_at.  This may differ
                 # slightly from the Tombstone.deleted_at used by the legacy

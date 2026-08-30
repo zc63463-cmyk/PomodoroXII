@@ -116,10 +116,12 @@ async def test_sync_conflict_returns_the_authoritative_document(
         )
 
     assert caught.value.rejection.code == "version_conflict"
-    assert thaw_json(caught.value.rejection.details) == {
-        "current_version": note["version"],
-        "current_document": json.loads(note["document_json"]),
-    }
+    # QN-S8b: the sync (S4 outbox) path carries the authoritative remote
+    # post-image under snapshot/version so clients can adopt it on reload.
+    details = thaw_json(caught.value.rejection.details)
+    assert details["snapshot"]["document_json"] == note["document_json"]
+    assert details["snapshot"]["version"] == note["version"]
+    assert details["version"] == note["version"]
     assert task_space_fixture.overlay_snapshot() == before
     assert (
         await task_space_fixture.visible_events(operation_id="sync-local-loser")

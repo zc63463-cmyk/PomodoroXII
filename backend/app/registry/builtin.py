@@ -16,7 +16,10 @@ Each ``EntitySpec`` declares:
 - ``fields``: tuple of ``FieldSpec`` describing each column
 
 Counts (must match the gate test in ``tests/test_registry.py``):
-- 22 BUSINESS entities (sync_enabled=True): includes 12 Task Space entities + 10 legacy entities
+- 22 BUSINESS entities total; 21 are sync_enabled=True (11 Task Space entities + 10 legacy entities).
+  ``work_item_label`` remains a registered BUSINESS junction but is deliberately NOT sync-enabled:
+  its real primary key is the composite ``(work_item_id, label_id)``, so it must never be handed
+  to the generic single-column sync protocol.
 - 5 SYNC_INFRA entities (tombstone, sync_outbox, sync_audit_log, session_command_envelope, session_command_receipt)
 - 3 META entities (space, meta_setting, active_session_locator)
 - 1 SETTING entity (setting)
@@ -330,9 +333,10 @@ REGISTRY.register(EntitySpec(
 # --------------------------------------------------------------------------- #
 # Task Space and FocusSession entities (15, strict_cas)
 # --------------------------------------------------------------------------- #
-# 12 business entities (sync_enabled=True), 2 sync_infra entities
-# (sync_enabled=False), and 1 meta entity (sync_enabled=False).
-# All use sync_conflict_policy="strict_cas".
+# 11 business entities (sync_enabled=True), 2 sync_infra entities
+# (sync_enabled=False), 1 meta entity (sync_enabled=False), and 1 business
+# junction (work_item_label, sync_enabled=False — composite primary key).
+# All business entities use sync_conflict_policy="strict_cas".
 
 REGISTRY.register(EntitySpec(
     name="project",
@@ -428,7 +432,13 @@ REGISTRY.register(EntitySpec(
     table_name="work_item_labels",
     storage_type=StorageType.DB_ONLY,
     category=EntityCategory.BUSINESS,
-    sync_enabled=True,
+    # Deliberately NOT sync-enabled: the real primary key is the composite
+    # (work_item_id, label_id).  Declaring sync_enabled=True here would hand a
+    # fabricated single-column primary_key to the generic sync protocol while
+    # the compiler rejects every write — a contradiction.  The relation stays
+    # fully registered for introspection/junction metadata, but is never
+    # delivered over the generic sync directory.
+    sync_enabled=False,
     soft_delete=False,
     sync_conflict_policy="strict_cas",
     primary_key="work_item_id",

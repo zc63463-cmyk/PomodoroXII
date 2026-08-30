@@ -588,23 +588,6 @@
   },
   {
     "record": {
-      "entity_id": "workItemLabel-1",
-      "entity_type": "workItemLabel",
-      "kind": "entity",
-      "payload": {
-        "labelId": "value",
-        "spaceId": "spc_test",
-        "workItemId": "workItemLabel-1"
-      },
-      "updated_at": "2026-08-06T00:00:00.000Z",
-      "version": 0
-    },
-    "jsonl_base64": "eyJlbnRpdHlfaWQiOiJ3b3JrSXRlbUxhYmVsLTEiLCJlbnRpdHlfdHlwZSI6IndvcmtJdGVtTGFiZWwiLCJraW5kIjoiZW50aXR5IiwicGF5bG9hZCI6eyJsYWJlbElkIjoidmFsdWUiLCJzcGFjZUlkIjoic3BjX3Rlc3QiLCJ3b3JrSXRlbUlkIjoid29ya0l0ZW1MYWJlbC0xIn0sInVwZGF0ZWRfYXQiOiIyMDI2LTA4LTA2VDAwOjAwOjAwLjAwMFoiLCJ2ZXJzaW9uIjowfQo=",
-    "sha256": "85436dc3b167311f4939e3f79dbf633d3ebff2b05468147ecc58302bc7866049",
-    "entity_count": 1
-  },
-  {
-    "record": {
       "entity_id": "workItemNote-1",
       "entity_type": "workItemNote",
       "kind": "entity",

@@ -58,7 +58,14 @@ READ_ONLY_SYNC_WIRE_TYPES = {
 }
 
 
-@pytest.mark.parametrize("entity_type", sorted(READ_ONLY_SYNC_TYPES))
+@pytest.mark.parametrize("entity_type", [
+    entity_type
+    for entity_type in sorted(READ_ONLY_SYNC_TYPES)
+    # work_item_label was removed from the generic sync directory (composite
+    # primary key); from_sync_event rejects it before the compiler, and its
+    # off-sync-directory contract is covered by registry-level tests.
+    if entity_type != "work_item_label"
+])
 @pytest.mark.parametrize("action", ("create", "update", "delete"))
 @pytest.mark.asyncio
 async def test_every_read_only_sync_action_is_policy_owned_and_zero_effect(
@@ -237,7 +244,9 @@ def test_project_adapter_normalizes_before_payload_hash(task_space_fixture) -> N
 
 
 def test_move_hash_excludes_project_guard_but_request_hash_covers_it() -> None:
-    business_payload = {"new_parent_id": "parent-a", "child_rank": 3}
+    # child_rank is server-assigned only and is never part of the online Move
+    # business payload (the module strips it before hashing).
+    business_payload = {"new_parent_id": "parent-a"}
     payload_hash = canonical_payload_hash(business_payload)
 
     def command(project_id: str) -> MutateWorkItem:

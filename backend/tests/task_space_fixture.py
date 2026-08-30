@@ -187,11 +187,11 @@ class TaskSpaceFixture:
         project_id: str,
         new_parent_id: str | None,
         command_id: str,
-        *,
-        child_rank: int = 0,
     ):
         current = await self.read_work_item(work_item_id)
-        business = {"new_parent_id": new_parent_id, "child_rank": child_rank}
+        # The online Move contract never accepts a client-supplied rank: the
+        # server assigns the authoritative max(existing ranks, -1) + 1.
+        business = {"new_parent_id": new_parent_id}
         command = MutateWorkItem(
             command_id=command_id,
             space_id=self.space_id,
