@@ -136,6 +136,22 @@ async function createWorkItemViaDialog(page: Page, title: string) {
   await page.getByRole('button', { name: 'Create', exact: true }).click()
 }
 
+/**
+ * Select a work item in the tree by its title.  The row contains several
+ * buttons (collapse chevron, title, create-child) since the tree gained
+ * collapse + drag; the title button's accessible name is exactly
+ * "<displayKey> <title>" while the create-child button is prefixed with
+ * "Create child under", so anchor on the displayKey pattern.
+ */
+const selectTreeItem = async (page: Page, title: string) => {
+  await page
+    .getByRole('treeitem')
+    .filter({ hasText: title })
+    .getByRole('button', { name: new RegExp(`^[A-Z][A-Z0-9]*-[0-9]+ ${title}$`) })
+    .click()
+}
+
+
 test('creates a root work item in an empty project', async ({ page, request }) => {
   const tokens = await seedAuthAndSpace(request)
   await openTasks(page, tokens)
@@ -304,7 +320,7 @@ test('offline Note edit reaches the server via the S4 outbox push after reconnec
   await seedNote(request, tokens, item.id, [{ type: 'paragraph', blockId: 'p1', text: 'Initial' }])
 
   await openTasks(page, tokens)
-  await page.getByRole('treeitem').filter({ hasText: 'Gap Root' }).getByRole('button').first().click()
+  await selectTreeItem(page, 'Gap Root')
   await expect(page.getByText('Saved')).toBeVisible()
 
   await context.setOffline(true)
@@ -336,7 +352,7 @@ test('after reconnect the sync status converges and the server holds the offline
   await seedNote(request, tokens, item.id, [{ type: 'paragraph', blockId: 'p1', text: 'Initial' }])
 
   await openTasks(page, tokens)
-  await page.getByRole('treeitem').filter({ hasText: 'Gap Ev Root' }).getByRole('button').first().click()
+  await selectTreeItem(page, 'Gap Ev Root')
   await expect(page.getByText('Saved')).toBeVisible()
 
   await context.setOffline(true)
@@ -369,7 +385,7 @@ test('direct reload inside the debounce window recovers the edit via the durable
   await seedNote(request, tokens, item.id, [{ type: 'paragraph', blockId: 'p1', text: 'Initial' }])
 
   await openTasks(page, tokens)
-  await page.getByRole('treeitem').filter({ hasText: 'Draft Root' }).getByRole('button').first().click()
+  await selectTreeItem(page, 'Draft Root')
   await expect(page.getByText('Saved')).toBeVisible()
 
   // Edit and reload IMMEDIATELY (inside the 800ms debounce window, WITHOUT the
@@ -392,7 +408,7 @@ test('direct reload inside the debounce window recovers the edit via the durable
   }, `pxii:noteDraft:${tokens.spaceId}:${item.id}`), { timeout: 10_000 }).toBe(true)
   await page.reload()
 
-  await page.getByRole('treeitem').filter({ hasText: 'Draft Root' }).getByRole('button').first().click()
+  await selectTreeItem(page, 'Draft Root')
   await expect(page.getByText('Draft-recovered')).toBeVisible({ timeout: 10_000 })
 })
 
@@ -432,7 +448,7 @@ async function offlineEditToConflict(
   const initial = await seedNote(request, tokens, item.id, [{ type: 'paragraph', blockId: 'p1', text: 'Base' }])
 
   await openTasks(page, tokens)
-  await page.getByRole('treeitem').filter({ hasText: title }).getByRole('button').first().click()
+  await selectTreeItem(page, title)
   await expect(page.getByText('Saved')).toBeVisible()
 
   // A edits offline.
