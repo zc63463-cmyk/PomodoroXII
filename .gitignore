@@ -185,3 +185,19 @@ temp/
 .Spotlight-V100
 .Trashes
 ehthumbs.db
+
+# --- T6b (2026-08-30): track upstream task-space contracts -------------------
+# These sources are read-only upstream spec exports (MANIFEST SHA-256 baselined)
+# with no privacy risk.  Tracking them makes external contract-citation review
+# reproducible from a clean checkout (see 任务空间核查裁决-2026-08-26 §四).
+# Everything else under docs/ and docs/task-space-design/ stays ignored.
+!docs/
+docs/*
+!docs/task-space-design/
+docs/task-space-design/*
+!docs/task-space-design/sources/
+docs/task-space-design/sources/*
+!docs/task-space-design/sources/upstream-tip-tip/
+!docs/task-space-design/sources/upstream-tip-tip/**
+
+!docs/task-space-design/MANIFEST.md
