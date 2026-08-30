@@ -21,11 +21,11 @@ jobs:
       CIBW_ARCHS: ${{ matrix.cibw_arch }}
       CIBW_CONFIG_FILE: backend/cibuildwheel.toml
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.13"
-      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
       - name: Sync locked build and test tools without building the project
         shell: pwsh
         run: uv sync --project backend --frozen --no-install-project
@@ -56,7 +56,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "native feasibility matrix failed" }
           & $python backend/scripts/verify_pxii_vfs_source_hash.py --emit-build-receipt ${{ matrix.platform_id }} --wheel $wheel[0].FullName --junit .test-results/pxii-vfs.xml --output wheelhouse/build-receipt.json
           if ($LASTEXITCODE -ne 0) { throw "build receipt failed" }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pxii-vfs-${{ matrix.platform_id }}
           path: wheelhouse/
@@ -66,17 +66,17 @@ jobs:
     needs: wheel
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.13"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           pattern: pxii-vfs-*
           path: ${{ runner.temp }}/pxii-vfs-inputs
       - name: Assemble closed Windows-only manifest
         run: python backend/scripts/verify_pxii_vfs_source_hash.py --assemble-wheel-manifest "${RUNNER_TEMP}/pxii-vfs-inputs" --subject-sha "${GITHUB_SHA}" --output pxii-vfs-wheel-manifest.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pxii-vfs-wheel-manifest-v1
           path: pxii-vfs-wheel-manifest.json

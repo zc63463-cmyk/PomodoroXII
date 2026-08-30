@@ -144,6 +144,11 @@ EXPECTED_MCP_TOOLS = frozenset(
         "get_registry_health",
         "list_entities",
         "get_entity_schema",
+        "list_task_space_projects",
+        "query_work_items",
+        "get_work_item",
+        "get_work_item_note",
+        "list_task_space_definitions",
         "get_sync_status",
         "sync_pull",
     }

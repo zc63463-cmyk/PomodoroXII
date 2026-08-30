@@ -168,6 +168,8 @@ mcp = FastMCP(
         "PomodoroXII is a pomodoro timer app with multi-space sync. "
         "Use list_spaces to discover available spaces, then pass space_id "
         "to other tools. Stats tools return aggregate analytics. "
+        "Task Space tools expose read-only project/work-item/note queries "
+        "(three-level tree with statuses, types and labels). "
         "Meta tools expose the entity schema registry. "
         "Sync tools expose push/pull/status for cross-device synchronization."
     ),
@@ -251,6 +253,143 @@ async def get_note_summary(space_id: str) -> dict:
     scope = await _authorize_space(space_id, "read")
     async with get_space_session(scope) as db:
         return await StatsService(db).note_summary()
+
+
+# --------------------------------------------------------------------------- #
+# Tools — Task Space (read-only work item queries, T9)
+# --------------------------------------------------------------------------- #
+
+@mcp.tool
+@canonical_mcp_errors
+async def list_task_space_projects(
+    space_id: str, include_archived: bool = False, limit: int = 50, cursor: str | None = None
+) -> dict:
+    """List Task Space projects (read-only).
+
+    Args:
+        space_id: The space to query.
+        include_archived: Include archived projects (default False).
+        limit: Page size (1-100, default 50).
+        cursor: Pagination cursor from a previous call.
+
+    Returns:
+        Dict with "items" (project rows) and "next_cursor" (null when done).
+    """
+    from app.task_space.contracts import TaskSpacePageQuery
+    from app.task_space.queries import DefaultTaskSpaceQueryModule
+
+    scope = await _authorize_space(space_id, "read")
+    page = await DefaultTaskSpaceQueryModule().list_projects(
+        scope,
+        TaskSpacePageQuery(
+            cursor=cursor, limit=limit, filters={"include_archived": include_archived}
+        ),
+    )
+    return {"items": [dict(item) for item in page.items], "next_cursor": page.next_cursor}
+
+
+@mcp.tool
+@canonical_mcp_errors
+async def query_work_items(
+    space_id: str, project_id: str | None = None, limit: int = 50, cursor: str | None = None
+) -> dict:
+    """Query work items in a space (read-only).
+
+    Args:
+        space_id: The space to query.
+        project_id: Optional project filter.
+        limit: Page size (1-100, default 50).
+        cursor: Pagination cursor from a previous call.
+
+    Returns:
+        Dict with "items" (work item rows, each carrying its tree "depth")
+        and "next_cursor" (null when done).
+    """
+    from app.routes.v1.work_items import _work_item_depths
+    from app.task_space.contracts import TaskSpacePageQuery
+    from app.task_space.queries import DefaultTaskSpaceQueryModule
+
+    scope = await _authorize_space(space_id, "read")
+    filters: dict[str, Any] = {}
+    if project_id is not None:
+        filters["project_id"] = project_id
+    page = await DefaultTaskSpaceQueryModule().list_work_items(
+        scope, TaskSpacePageQuery(cursor=cursor, limit=limit, filters=filters)
+    )
+    depths = await _work_item_depths(scope, page.items)
+    items = [dict(item) for item in page.items]
+    for item in items:
+        item["depth"] = depths[str(item["id"])]
+    return {"items": items, "next_cursor": page.next_cursor}
+
+
+@mcp.tool
+@canonical_mcp_errors
+async def get_work_item(space_id: str, work_item_id: str) -> dict:
+    """Get a single work item with its tree depth (read-only).
+
+    Args:
+        space_id: The space to query.
+        work_item_id: The work item id.
+
+    Returns:
+        The work item row (including "depth").
+    """
+    from app.routes.v1.work_items import _work_item_depths
+    from app.task_space.queries import DefaultTaskSpaceQueryModule
+
+    scope = await _authorize_space(space_id, "read")
+    view = await DefaultTaskSpaceQueryModule().get_work_item(scope, work_item_id)
+    depths = await _work_item_depths(scope, (view.value,))
+    value = dict(view.value)
+    value["depth"] = depths[str(value["id"])]
+    return value
+
+
+@mcp.tool
+@canonical_mcp_errors
+async def get_work_item_note(space_id: str, work_item_id: str) -> dict:
+    """Get the structured Note document attached to a work item (read-only).
+
+    Args:
+        space_id: The space to query.
+        work_item_id: The work item id.
+
+    Returns:
+        Dict with the note row ("document" holds the parsed Block document
+        and "content_version" its schema version) or "exists": False when
+        the work item has no note yet.
+    """
+    from app.task_space.queries import DefaultTaskSpaceQueryModule
+
+    scope = await _authorize_space(space_id, "read")
+    view = await DefaultTaskSpaceQueryModule().read_note(scope, work_item_id)
+    if view is None:
+        return {"exists": False, "work_item_id": work_item_id}
+    return {"exists": True, **dict(view.value)}
+
+
+@mcp.tool
+@canonical_mcp_errors
+async def list_task_space_definitions(space_id: str) -> dict:
+    """List Task Space vocabulary: status/type definitions and labels (read-only).
+
+    Args:
+        space_id: The space to query.
+
+    Returns:
+        Dict with "statuses", "types" and "labels" rows — the id vocabulary
+        referenced by work items.
+    """
+    from app.task_space.queries import DefaultTaskSpaceQueryModule
+
+    scope = await _authorize_space(space_id, "read")
+    view = await DefaultTaskSpaceQueryModule().list_definitions(scope)
+    return {
+        "statuses": [dict(row) for row in view.statuses],
+        "types": [dict(row) for row in view.types],
+        "labels": [dict(row) for row in view.labels],
+    }
 
 
 # --------------------------------------------------------------------------- #
