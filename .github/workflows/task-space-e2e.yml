@@ -1,0 +1,109 @@
+name: Task Space E2E
+
+# Dedicated browser E2E gate for Task Space / Focus offline flows.
+#
+# The backend "lite" gate (ci.yml) intentionally stays a single lightweight
+# `test` job: it must not pull in heavy browser/native-matrix work.  The
+# full-stack Playwright suite lives here instead, with the same backend-trigger
+# surface as the lite gate plus the E2E-relevant frontend paths, so a change to
+# the E2E suite itself re-runs it.
+#
+# The job runs `run-task-space-e2e.ps1`, which starts its OWN backend on a
+# fresh temp data root (`pxii-e2e-$PID`) and its own `next dev` frontend on
+# explicit ports — never touching services already running on 3000/5173/8011.
+# Playwright runs with `workers=1` and preserves trace/screenshot/report for
+# failure diagnosis; artifacts are uploaded on every run (`if: always()`).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master, develop]
+    paths:
+      - "backend/**"
+      - "frontend/e2e/**"
+      - "frontend/playwright.config.ts"
+      - "frontend/scripts/run-task-space-e2e.ps1"
+      - ".github/workflows/task-space-e2e.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "backend/**"
+      - "frontend/e2e/**"
+      - "frontend/playwright.config.ts"
+      - "frontend/scripts/run-task-space-e2e.ps1"
+      - ".github/workflows/task-space-e2e.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  NODE_VERSION: "22"
+
+jobs:
+  e2e:
+    name: Task Space Playwright E2E (controlled stack)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Configure checkout line endings
+        shell: pwsh
+        working-directory: .
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up MSVC build environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Sync backend dependencies
+        working-directory: backend
+        run: uv sync --frozen --extra dev
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run Task Space Playwright E2E (explicit ports, controlled lifecycle)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File frontend/scripts/run-task-space-e2e.ps1 -BackendPort 8022 -FrontendPort 4190
+
+      - name: Upload E2E artifacts (trace / screenshot / report)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: task-space-e2e-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            frontend/test-results
+            frontend/playwright-report
+          if-no-files-found: warn
+          retention-days: 14

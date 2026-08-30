@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -615,7 +617,7 @@ def test_data_root_probe_fails_closed_when_probe_cannot_be_removed(
 
 
 def test_slo_latency_query_keeps_histogram_bucket_boundary() -> None:
-    slo = (Path(__file__).resolve().parents[1] / "docs" / "SLO.md").read_text(
+    slo = (Path(__file__).resolve().parents[1] / "SLO.md").read_text(
         encoding="utf-8"
     )
 
@@ -627,3 +629,52 @@ def test_slo_latency_query_keeps_histogram_bucket_boundary() -> None:
     assert "< 300 seconds" in slo
     assert "< 26 h" in slo
     assert "older than 24 h" not in slo
+
+
+def test_slo_contract_is_tracked_and_clean_checkout_ready() -> None:
+    """The SLO contract must live OUTSIDE the gitignored ``docs/`` tree so a
+    fresh checkout always carries it.  ``git check-ignore`` returning non-zero
+    proves the path is not ignored and therefore ships with the repository.
+    """
+    slo = Path(__file__).resolve().parents[1] / "SLO.md"
+    assert slo.is_file(), "tracked SLO contract missing"
+    assert "docs" not in slo.parts, "SLO contract must not live under docs/"
+    check = subprocess.run(
+        ["git", "check-ignore", "--no-index", str(slo)],
+        cwd=slo.parents[1],
+        capture_output=True,
+        text=True,
+    )
+    assert check.returncode == 1, f"SLO contract is gitignored: {check.stdout}"
+
+
+def test_slo_referenced_metrics_are_exported_by_ops() -> None:
+    """The PromQL/scrape queries in the SLO contract must refer only to metric
+    families the application actually exports, so the query boundary cannot
+    drift silently from the implementation.
+    """
+    from prometheus_client import REGISTRY
+
+    import app.ops.routes as ops_routes  # noqa: F401  (registers the metrics)
+
+    slo = (Path(__file__).resolve().parents[1] / "SLO.md").read_text(
+        encoding="utf-8"
+    )
+    referenced = set(re.findall(r"pomodoroxii_[a-z0-9_]+", slo))
+    assert referenced, "SLO contract references no pomodoroxii_* metrics"
+
+    exported = {metric.name for metric in REGISTRY.collect()}
+    for name in referenced:
+        # Histogram families surface as <name>_bucket/_sum/_count samples and
+        # Counter families surface as <name>_total in exposition, but both
+        # register a single family under the base name; strip those suffixes.
+        family = re.sub(r"_(bucket|sum|count|total)$", "", name)
+        assert family in exported, (
+            f"SLO contract references metric {name!r} (family {family!r}) "
+            "that app.ops.routes does not export"
+        )
+
+    histogram_family = "pomodoroxii_http_request_duration_seconds"
+    assert histogram_family in exported, "latency histogram family missing"
+    family = next(m for m in REGISTRY.collect() if m.name == histogram_family)
+    assert family.type == "histogram", "latency metric must stay a histogram"

@@ -111,6 +111,13 @@ jobs:
         shell: pwsh
         run: uv run python scripts/ci/verify_test_artifacts.py "$env:POMODOROXII_CI_RESULTS_DIR"
 
+      - name: Check OpenAPI drift (backend vs frontend/openapi.json vs api-generated.ts)
+        if: success()
+        shell: pwsh
+        run: |
+          uv run python scripts/check_openapi_drift.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Upload backend test evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

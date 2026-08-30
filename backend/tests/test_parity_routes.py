@@ -13,10 +13,15 @@ from app.routes.v1 import build_v1_router
 # Spaces are handled by the ``space`` EntitySpec (route_enabled=True), so
 # they are NOT listed here.  Task Space project/work-item routers expose
 # contract-shaped operations rather than generic EntitySpec CRUD, so they
-# belong to this explicit non-entity set as well.
+# belong to this explicit non-entity set as well.  The focus-session router
+# is the same kind of surface: it is a state-machine operation route
+# (get aggregate / start / pause / resume / end / review / ...) that drives
+# the ``focus_session`` EntitySpec through contract-shaped commands, NOT a
+# generic EntitySpec CRUD router — mirroring ``/active-session``.
 EXPECTED_NON_ENTITY_PREFIXES = {
     "/auth",
     "/active-session",
+    "/focus-sessions",
     "/meta",
     "/projects",
     "/trash",

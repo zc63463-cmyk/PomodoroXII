@@ -22,6 +22,7 @@ def build_v1_router() -> APIRouter:
     # Sub-routers (alphabetically sorted; mounted in groups below).
     from app.routes.v1.active_session import router as active_session_router
     from app.routes.v1.auth import router as auth_router
+    from app.routes.v1.focus_sessions import router as focus_sessions_router
     from app.routes.v1.folders import router as folders_router
     from app.routes.v1.habits import router as habits_router
     from app.routes.v1.meta import router as meta_router
@@ -47,6 +48,9 @@ def build_v1_router() -> APIRouter:
     # Space-scoped entities (space token required).
     router.include_router(notes_router, prefix="/notes", tags=["notes"])
     router.include_router(folders_router, prefix="/folders", tags=["folders"])
+    router.include_router(
+        focus_sessions_router, prefix="/focus-sessions", tags=["focus-sessions"]
+    )
     router.include_router(
         quick_notes_router, prefix="/quick-notes", tags=["quick-notes"]
     )

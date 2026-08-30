@@ -62,6 +62,24 @@ def _work_item_snapshot(
     project: Project | None,
 ) -> Mapping[str, object]:
     frozen = _snapshot(context.structure_snapshot)
+    if not frozen:
+        # Offline provisional imports carry no frozen WorkItem identity in
+        # structure_snapshot ("{}" is the legitimate no-snapshot sentinel,
+        # matching _parse_work_item_structure_snapshot). Fall back to the
+        # live authoritative WorkItem/Project rows the loader already read.
+        # Malformed non-empty snapshots still fail closed below.
+        if level2 is None:
+            return {}
+        return {
+            "project_title": project.name if project is not None else None,
+            "level2_title": level2.title,
+            "level2_parent_id": level2.parent_id,
+            "level2_status_definition_id": level2.status_definition_id,
+            "level2_version": level2.version,
+            "effort_lower": level2.effort_estimate_lower_seconds,
+            "effort_upper": level2.effort_estimate_upper_seconds,
+            "plan": {},
+        }
     frozen_project = frozen.get("project")
     frozen_level2 = frozen.get("level2")
     if not isinstance(frozen_project, Mapping) or not isinstance(frozen_level2, Mapping):

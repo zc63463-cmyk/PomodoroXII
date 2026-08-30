@@ -35,6 +35,7 @@ import {
   transitionProvisionalOperation,
 } from '@/lib/sync/provisional-operation-authority'
 import { parseAndValidateTerminalEvidenceResult } from '@/lib/sync/authority-identity'
+import { normalizeSyncEntityType } from '@/lib/sync/terminal-application'
 import type { PomodoroXIDB } from '@/services/database'
 import {
   buildProvisionalOperationRow,
@@ -132,7 +133,8 @@ export async function resumeImportedProvisionalReviews(
         terminal.applied.length !== evidence.operationIds.length ||
         evidence.appliedCount !== evidence.operationIds.length || focusChildren.length !== 1 ||
         !terminal.applied.some((item) => item.operation_id === focusChildren[0]!.operationId &&
-          item.entity_type === 'focusSession' && item.entity_id === draft.sessionId)) {
+          normalizeSyncEntityType(item.entity_type) === normalizeSyncEntityType('focusSession') &&
+          item.entity_id === draft.sessionId)) {
       throw new Error('imported_review_root_not_fully_applied')
     }
     const existingIntent = await db.directCommandIntents.get(
@@ -160,10 +162,14 @@ export async function resumeImportedProvisionalReviews(
         draft.sessionId,
       ) as unknown as CachedFocusSession | undefined
       const outcomes = await db.sessionWorkItemOutcomes.where('sessionId').equals(draft.sessionId).count()
+      // The imported root is applied, but the authoritative session is not yet
+      // materialised locally (the next pull applies the create's server version).
+      // This is transient — skip so the current cycle can push the remaining
+      // clock updates first; the review resumes once the pull has caught up.
       if (!session || session.version <= 0 || session.endedAt === null ||
           session.clockState !== 'ended' || session.ownershipState !== 'local_provisional' ||
           session.validity !== 'pending' || session.reviewState !== 'pending' || outcomes !== 0) {
-        throw new Error('imported_review_authoritative_session_not_ready')
+        continue
       }
       intent = await prepareDirectCommandIntent(db, {
         kind: 'submit_review', spaceId, targetId: draft.sessionId,
@@ -1216,23 +1222,26 @@ export class FocusSessionRepository {
   ): Promise<CachedFocusSession> {
     requireSpaceAuthorityToken(token, this.spaceId)
     requireSpaceDatabaseBinding(this.db, this.spaceId)
+    const payloadVersion = next.sessionRevision - 1
+    if (payloadVersion < 1) throw new Error('invalid_provisional_clock_version')
     const payloadHash = await hashCommandPayload(localSessionCreateHashPayload(next))
-    const operationId = await boundedChildOperationId(operation.operationId, 'focus_session')
+    const operationId = await boundedChildOperationId(
+      operation.operationId,
+      `clock:${next.sessionRevision}`,
+    )
     await this.db.transaction('rw', this.db.focusSessions, this.db.outbox, async () => {
-      const existing = await this.db.outbox.where('spaceId').equals(this.spaceId)
-        .and((row) => row.entityType === 'focusSession' && row.entityId === next.sessionId && !row.synced)
-        .first()
       await this.db.focusSessions.put({ id: next.sessionId, ...next })
       await enqueueOutbox(this.db, this.spaceId, token, 'focusSession', next.sessionId,
-        previous.version === 0 ? 'create' : 'update', serializeFocusSessionCommandPostImage(next), {
+        'update', serializeFocusSessionCommandPostImage({ ...next, version: payloadVersion }), {
           operationId,
           payloadHash,
           hashPayload: localSessionCreateHashPayload(next),
-          expectedVersion: previous.version === 0 ? null : previous.version,
+          expectedVersion: payloadVersion,
           transportState: 'awaiting_s4',
           createdAt: next.updatedAt,
-          compoundOperationId: existing?.compoundOperationId ?? null,
-          compoundOrder: existing?.compoundOrder ?? null,
+          compoundOperationId: null,
+          compoundOrder: null,
+          preserveExisting: true,
         })
     })
     return next

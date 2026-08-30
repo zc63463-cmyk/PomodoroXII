@@ -2345,7 +2345,14 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             or "2026-07-15T08:00:00Z"
         )
         _require_canonical_timestamp(timestamp)
-        row_data.setdefault("version", 1)
+        if entity_type == "focus_session":
+            # Server-authoritative version after create is 1 (matches online
+            # activation snapshot). Offline create post-image carries a local
+            # provisional version 0; overriding keeps the clock update CAS
+            # chain (expectedVersion=1/2/3) consistent.
+            row_data["version"] = 1
+        else:
+            row_data.setdefault("version", 1)
         row_data.setdefault("created_at", timestamp)
         row_data.setdefault("updated_at", request.client_updated_at or timestamp)
         for field in spec.fields:
@@ -2442,10 +2449,22 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         fields below.
         """
         payload = request.payload
-        immutable = (
-            "id", "created_at", "session_revision", "started_at",
-            "planned_seconds", "ownership_state", "review_state",
+        # The offline end transition legitimately marks the ended Session as
+        # awaiting review (review_state not_required -> pending); the offline
+        # review-import flow depends on it. Any other review_state change in a
+        # Sync post-image stays fail-closed.
+        end_pending_review = (
+            payload.get("ended_at") is not None
+            and current.get("ended_at") is None
+            and current.get("review_state") == "not_required"
+            and payload.get("review_state") == "pending"
         )
+        immutable = (
+            "id", "created_at", "started_at",
+            "planned_seconds", "ownership_state",
+        )
+        if not end_pending_review:
+            immutable += ("review_state",)
         for field in immutable:
             if field in payload and payload[field] != current.get(field):
                 raise _MutationRuleViolation(
@@ -2495,7 +2514,9 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             marker = payload.get(
                 "ended_at" if clock_action == "end" else "pause_started_at",
             )
-            if not isinstance(transition_at, str) or marker != transition_at:
+            if not isinstance(transition_at, str) or (
+                clock_action != "resume" and marker != transition_at
+            ):
                 raise _MutationRuleViolation(
                     "work_item_structure_changed", {"reason": "clock_timestamp_mismatch"},
                 )
@@ -2518,6 +2539,8 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                         {"reason": "clock_post_image_mismatch", "field": field},
                     )
             after = generated
+            if end_pending_review:
+                after["review_state"] = "pending"
         else:
             if any(
                 field in payload and payload[field] != current.get(field)
@@ -2944,9 +2967,16 @@ def _validate_sync_update_row(
     allow_terminal_validity: bool = False,
 ) -> None:
     if entity_type == "focus_session":
-        immutable = ("id", "created_at", "ownership_state", "review_state")
-        if not allow_terminal_validity:
-            immutable += ("validity",)
+        immutable = ("id", "created_at", "ownership_state")
+        if allow_terminal_validity and (
+            before.get("review_state") == "not_required"
+            and after.get("review_state") == "pending"
+        ):
+            pass  # end transition may mark the Session as awaiting review
+        else:
+            immutable += ("review_state",)
+            if not allow_terminal_validity:
+                immutable += ("validity",)
         if any(before.get(key) != after.get(key) for key in immutable):
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "session_immutable_field"})
         _require_canonical_timestamp(after.get("started_at"))

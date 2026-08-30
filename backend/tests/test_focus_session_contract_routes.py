@@ -931,12 +931,12 @@ def test_active_session_requires_master_authentication() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Not-mounted test
+# Production v1 route mounting test
 # --------------------------------------------------------------------------- #
 
 
-def test_focus_session_contract_routers_not_mounted_in_production_v1() -> None:
-    """The production v1 router must NOT include contract routers."""
+def test_focus_session_contract_routers_mounted_in_production_v1() -> None:
+    """The production v1 router includes the FocusSession contract routes."""
     from app.routes.v1 import build_v1_router
 
     router = build_v1_router()
@@ -951,9 +951,8 @@ def test_focus_session_contract_routers_not_mounted_in_production_v1() -> None:
                         paths.add(candidate.path)
             except Exception:
                 pass
-    assert "/api/v1/focus-sessions" not in paths
-    assert "/api/v1/focus-sessions/{session_id}" not in paths
-    # The production v1 router DOES mount the master-scoped ActiveSession
-    # controller (TS2 production contract).
+    assert "/api/v1/focus-sessions/{session_id}" in paths
+    assert "/api/v1/focus-sessions/{session_id}/review" in paths
+    assert "/api/v1/focus-sessions/{session_id}/commands/reconcile" in paths
     assert "/api/v1/active-session" in paths
     assert "/api/v1/active-session/start" in paths

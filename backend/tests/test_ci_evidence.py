@@ -130,6 +130,85 @@ def test_ci_lite_excludes_supply_chain_and_native_matrix_work() -> None:
     assert "provenance" not in source.lower()
 
 
+E2E_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "task-space-e2e.yml"
+
+
+def _e2e_workflow_job() -> dict[str, object]:
+    loaded = yaml.load(
+        E2E_WORKFLOW_PATH.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+    )
+    assert isinstance(loaded, dict)
+    jobs = loaded["jobs"]
+    assert isinstance(jobs, dict)
+    assert set(jobs) == {"e2e"}
+    job = jobs["e2e"]
+    assert isinstance(job, dict)
+    return job
+
+
+def test_e2e_workflow_runs_controlled_stack_with_always_upload() -> None:
+    """The dedicated Task Space E2E workflow must run the controlled-stack
+    runner (own backend/frontend on explicit ports — never the live 3000/5173/
+    8011 services) and upload artifacts on every run so failures are preserved.
+    """
+    steps = _e2e_workflow_job()["steps"]
+    assert isinstance(steps, list)
+    assert all(isinstance(step, dict) for step in steps)
+
+    run_step = next(
+        step
+        for step in steps
+        if step.get("name")
+        == "Run Task Space Playwright E2E (explicit ports, controlled lifecycle)"
+    )
+    run_script = str(run_step["run"])
+    assert "frontend/scripts/run-task-space-e2e.ps1" in run_script
+    assert "-BackendPort 8022" in run_script
+    assert "-FrontendPort 4190" in run_script
+
+    upload = next(
+        step for step in steps if str(step.get("name", "")).startswith("Upload E2E artifacts")
+    )
+    assert upload["if"] == "always()"
+    paths = str(upload["with"]["path"])
+    assert "frontend/test-results" in paths
+    assert "frontend/playwright-report" in paths
+
+
+def test_e2e_workflow_stays_out_of_supply_chain_and_native_matrix() -> None:
+    """The E2E workflow must not silently pull in docker build/push, the
+    pxii-vfs native wheel matrix, or SBOM/provenance generation.
+    """
+    source = E2E_WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "docker push" not in source
+    assert "pxii-vfs-wheels" not in source
+    assert "sbom" not in source.lower()
+    assert "provenance" not in source.lower()
+
+
+def test_e2e_runner_uses_fresh_temp_data_root() -> None:
+    """The runner must materialize its own fresh backend data root so the E2E
+    never reads or writes the local dev/CI data root (no cross-contamination).
+    """
+    runner = ROOT / "frontend" / "scripts" / "run-task-space-e2e.ps1"
+    source = runner.read_text(encoding="utf-8")
+    assert 'pxii-e2e-$PID' in source
+    assert 'GetTempPath()) "pxii-e2e-$PID"' in source
+    assert "POMODOROXII_DATA_ROOT" in source
+    assert "POMODOROXII_DATABASE_URL" in source
+
+
+def test_e2e_playwright_config_is_single_worker_and_diagnosable() -> None:
+    """Playwright must run with workers=1 (deterministic ordering against one
+    live backend) and retain trace/screenshot on failure.
+    """
+    config = (ROOT / "frontend" / "playwright.config.ts").read_text(encoding="utf-8")
+    assert "workers: 1" in config
+    assert "fullyParallel: false" in config
+    assert "trace: 'retain-on-failure'" in config
+    assert "screenshot: 'only-on-failure'" in config
+
+
 def _write_valid_artifacts(results_dir: Path) -> None:
     results_dir.mkdir()
     (results_dir / "junit.xml").write_text(

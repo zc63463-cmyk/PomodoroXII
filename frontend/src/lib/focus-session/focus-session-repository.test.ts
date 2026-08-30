@@ -317,7 +317,7 @@ describe('FocusSession aggregate persistence', () => {
     expect(await meta.provisionalOperations.count()).toBe(0)
   })
 
-  it('persists provisional pause, resume, and end as one held focus-session post-image', async () => {
+  it('preserves the initial create and enqueues ordered standalone clock updates', async () => {
     const db = await openPomodoroXIDB(`focus-clock-${crypto.randomUUID()}`)
     const meta = new MetaDB(`meta-focus-clock-${crypto.randomUUID()}`)
     databases.push(db, meta)
@@ -359,13 +359,31 @@ describe('FocusSession aggregate persistence', () => {
     })
     expect(await meta.provisionalOperations.get('offline-clock-1'))
       .toMatchObject({ state: 'awaiting_s4' })
-    const held = await db.outbox.where('entityType').equals('focusSession').toArray()
-    expect(held).toHaveLength(1)
-    expect(held[0]).toMatchObject({
-      entityId: 'offline-clock-1', action: 'create', expectedVersion: null,
-      transportState: 'awaiting_s4',
-    })
+    const held = (await db.outbox.where('entityType').equals('focusSession').toArray())
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    expect(held).toHaveLength(4)
+    expect(held.map((row) => row.action)).toEqual(['create', 'update', 'update', 'update'])
+    expect(held.map((row) => row.compoundOperationId)).toEqual([
+      'offline-clock-1', null, null, null,
+    ])
+    expect(held.map((row) => row.expectedVersion)).toEqual([null, 1, 2, 3])
+    expect(held.map((row) => JSON.parse(row.payload).version)).toEqual([0, 1, 2, 3])
+    expect(held.map((row) => row.transportState)).toEqual([
+      'awaiting_s4', 'awaiting_s4', 'awaiting_s4', 'awaiting_s4',
+    ])
     expect(JSON.parse(held[0]!.payload)).toMatchObject({
+      id: 'offline-clock-1', endedAt: null, grossSeconds: 0,
+      pausedSeconds: 0, focusedSeconds: 0,
+    })
+    expect(JSON.parse(held[1]!.payload)).toMatchObject({
+      id: 'offline-clock-1', endedAt: null, pauseStartedAt: '2026-07-15T08:05:00.000Z',
+      grossSeconds: 300, pausedSeconds: 0, focusedSeconds: 300,
+    })
+    expect(JSON.parse(held[2]!.payload)).toMatchObject({
+      id: 'offline-clock-1', endedAt: null, pauseStartedAt: null,
+      grossSeconds: 360, pausedSeconds: 60, focusedSeconds: 300,
+    })
+    expect(JSON.parse(held[3]!.payload)).toMatchObject({
       id: 'offline-clock-1', endedAt: '2026-07-15T08:10:00.000Z',
       grossSeconds: 600, pausedSeconds: 60, focusedSeconds: 540,
     })

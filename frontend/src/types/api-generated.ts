@@ -415,6 +415,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/focus-sessions/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Focus Session
+         * @description Get a FocusSession by ID.
+         */
+        get: operations["get_focus_session_api_v1_focus_sessions__session_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/focus-sessions/{session_id}/commands/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reconcile Commands
+         * @description Reconcile pending FocusSession commands.
+         */
+        post: operations["reconcile_commands_api_v1_focus_sessions__session_id__commands_reconcile_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/focus-sessions/{session_id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit Review
+         * @description Submit a FocusSession review.
+         */
+        post: operations["submit_review_api_v1_focus_sessions__session_id__review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/folders": {
         parameters: {
             query?: never;
@@ -2447,11 +2507,6 @@ export interface components {
         };
         /** MoveWorkItemRequest */
         MoveWorkItemRequest: {
-            /**
-             * Childrank
-             * @default 0
-             */
-            childRank: number;
             /** Commandid */
             commandId: string;
             /** Expectedversion */
@@ -3142,6 +3197,31 @@ export interface components {
             /** Trashed At */
             trashed_at?: string | null;
         };
+        /** ReconcileFocusSessionCommandsPayload */
+        ReconcileFocusSessionCommandsPayload: {
+            /** Abandoncommandids */
+            abandonCommandIds?: string[];
+            /** Commandids */
+            commandIds: string[];
+            /** Decisionat */
+            decisionAt?: string | null;
+            /** Replaysafe */
+            replaySafe: boolean;
+        };
+        /** ReconcileFocusSessionCommandsRequest */
+        ReconcileFocusSessionCommandsRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch?: null;
+            payload: components["schemas"]["ReconcileFocusSessionCommandsPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /**
          * ReflectionCreate
          * @description Schema for creating a new reflection.
@@ -3360,6 +3440,31 @@ export interface components {
             payloadHash: string;
             /** Sessionid */
             sessionId: string;
+        };
+        /** ReviewOutcomePayload */
+        ReviewOutcomePayload: {
+            /** Executionpersona */
+            executionPersona?: ("ox" | "pig" | "hajimi" | "wukong") | null;
+            /** Expectedworkitemversion */
+            expectedWorkItemVersion: number;
+            /** Personanote */
+            personaNote?: string | null;
+            /** Personaswitched */
+            personaSwitched?: boolean | null;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "completed" | "progressed" | "stuck" | "untouched" | "cancelled";
+            /**
+             * Statecommand
+             * @enum {string}
+             */
+            stateCommand: "complete" | "cancel" | "none";
+            /** Touched */
+            touched: boolean;
+            /** Workitemid */
+            workItemId: string;
         };
         /**
          * ScheduleCreate
@@ -3844,6 +3949,39 @@ export interface components {
          * @enum {string}
          */
         StorageType: "db_only" | "fs_db_split" | "system";
+        /** SubmitFocusSessionReviewPayload */
+        SubmitFocusSessionReviewPayload: {
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Outcomes */
+            outcomes: components["schemas"]["ReviewOutcomePayload"][];
+            /**
+             * Reviewstate
+             * @enum {string}
+             */
+            reviewState: "completed" | "skipped";
+            /** Reviewedat */
+            reviewedAt: string;
+            /**
+             * Validity
+             * @enum {string}
+             */
+            validity: "valid" | "invalid";
+        };
+        /** SubmitFocusSessionReviewRequest */
+        SubmitFocusSessionReviewRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Ownershipepoch */
+            ownershipEpoch?: null;
+            payload: components["schemas"]["SubmitFocusSessionReviewPayload"];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Sessionid */
+            sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /**
          * SyncConflictPolicy
          * @description Closed conflict-resolution vocabulary for catalog entities.
@@ -5190,6 +5328,123 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuthVerifyResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_focus_session_api_v1_focus_sessions__session_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FocusSessionAggregateResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    reconcile_commands_api_v1_focus_sessions__session_id__commands_reconcile_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReconcileFocusSessionCommandsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FocusSessionAggregateResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    submit_review_api_v1_focus_sessions__session_id__review_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubmitFocusSessionReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FocusSessionAggregateResponse"];
                 };
             };
             /** @description Domain or request validation error */
