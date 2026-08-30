@@ -7,6 +7,7 @@ import { SessionLauncher, type LaunchSelection } from '@/components/timer/sessio
 import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
+import { deriveSessionClock } from '@/lib/focus-session/clock'
 import { resolveTimerError } from '@/lib/focus-session/timer-error'
 import { FocusSessionRepository, readSessionCommandReceipts, type LocalFocusSessionAggregate } from '@/lib/focus-session/focus-session-repository'
 import { SessionReviewDraftController, type SessionReviewDraft } from '@/lib/focus-session/session-review-draft-registry'
@@ -32,7 +33,7 @@ import type {
 import { useSpaceStore } from '@/stores/space-store'
 import { useTaskSpaceStore } from '@/stores/task-space-store'
 import { useFocusSessionStore } from '@/stores/focus-session-store'
-import { selectDerivedClock, useTimerStore } from '@/stores/timer-store'
+import { useTimerStore } from '@/stores/timer-store'
 
 async function readLocalAggregate(database: PomodoroXIDB, sessionId: string): Promise<LocalFocusSessionAggregate> {
   const row = await database.focusSessions.get(sessionId) as (CachedFocusSession & { id?: string }) | undefined
@@ -118,7 +119,18 @@ export default function TimerPage() {
   const currentPlan = plans.find((plan) => plan.currentDuringSession) ?? plans[0] ?? null
   const focusedWorkItemId = currentPlan?.workItemId ?? selectedWorkItemId
   const selectedWorkItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
-  const clock = useTimerStore((state) => selectDerivedClock(state))
+  // Wave 2C fix: previously subscribed via `useTimerStore((state) =>
+  // selectDerivedClock(state))`, whose selector returned a fresh object every
+  // call once a session existed.  useSyncExternalStore treats that as an
+  // always-changing snapshot → "getSnapshot should be cached" → infinite
+  // update loop that crashed the timer page on Start.  Subscribe to the
+  // primitive inputs (session reference + nowMs) and memoize the derivation:
+  // the clock object is now reference-stable between ticks, and only
+  // recomputes when the session or the ticking clock actually changes.
+  const clock = useMemo(
+    () => (session ? deriveSessionClock(session, nowMs) : null),
+    [session, nowMs],
+  )
   const reviewSession = useMemo(() => {
     if (!aggregate || !spaceId || !isReviewableEndedSession(aggregate.session)) return null
     return {

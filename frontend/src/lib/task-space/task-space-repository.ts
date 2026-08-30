@@ -25,7 +25,6 @@ export interface MoveWorkItemInput {
   projectId: string
   workItemId: string
   newParentId: string | null
-  childRank: number
 }
 
 export interface TransitionWorkItemInput {
@@ -191,12 +190,25 @@ export class TaskSpaceRepository {
     }
     const workItems = workItemsWire.map((item) => mapWorkItem(item, this.spaceId))
     const definitions = mapDefinitions(definitionsWire)
+    // Scoped reconcile after a FULL successful pagination: drop cached rows the
+    // server no longer returns for this space.  The Dexie database is
+    // space-scoped, so this never touches another space's data; work items
+    // whose project disappeared remotely are also removed (they are not part of
+    // any remote project page).
+    const remoteProjectIds = new Set(projects.map((project) => project.id))
+    const remoteWorkItemIds = new Set(workItems.map((item) => item.id))
     await this.db.transaction(
       'rw', this.db.projects, this.db.workItems,
       this.db.statusDefinitions, this.db.typeDefinitions, this.db.labels,
       async () => {
         await this.db.projects.bulkPut(projects)
         await this.db.workItems.bulkPut(workItems)
+        await this.db.projects
+          .filter((row) => !remoteProjectIds.has(String(row.id)))
+          .delete()
+        await this.db.workItems
+          .filter((row) => !remoteWorkItemIds.has(String(row.id)))
+          .delete()
         await this.db.statusDefinitions.clear()
         await this.db.typeDefinitions.clear()
         await this.db.labels.clear()
@@ -212,7 +224,16 @@ export class TaskSpaceRepository {
     if (!projectId) return this.refreshOverview()
     const page = await allPages((cursor) => this.api.listWorkItems(this.spaceId, projectId, cursor))
     const workItems = page.map((item) => mapWorkItem(item, this.spaceId))
-    await this.db.workItems.bulkPut(workItems)
+    // Project-scoped reconcile: delete cached work items for THIS project that
+    // the server no longer returns.  Rows of other projects/spaces are never
+    // touched.
+    const remoteIds = new Set(workItems.map((item) => item.id))
+    await this.db.transaction('rw', this.db.workItems, async () => {
+      await this.db.workItems.bulkPut(workItems)
+      await this.db.workItems
+        .filter((row) => String(row.projectId) === projectId && !remoteIds.has(String(row.id)))
+        .delete()
+    })
     return { cached: await this.db.workItems.where('projectId').equals(projectId).toArray(), remote: workItems }
   }
 
@@ -256,6 +277,8 @@ export class TaskSpaceRepository {
     if (!cached) throw new Error('work_item_not_loaded')
     const intent = await prepareDirectCommandIntent(this.db, {
       kind: 'move_work_item', spaceId: this.spaceId, targetId: input.workItemId,
+      // childRank is intentionally absent: the server assigns the
+      // authoritative append-only rank.
       request: { ...input, expectedVersion: (cached as CachedWorkItem).version, spaceId: this.spaceId }, now: canonicalNow(),
     })
     return this.executeWorkItemIntent(intent, (request) => this.api.moveWorkItem(request as never))

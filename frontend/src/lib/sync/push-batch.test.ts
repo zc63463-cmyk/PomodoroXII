@@ -172,6 +172,85 @@ describe('Sync v2 push receipt', () => {
       .resolves.toEqual({ kind: 'blocked', state: 'pending' })
   })
 
+  it('emits flat legacy snake_case post-images for focus-session entities (Wave 2C Task B)', async () => {
+    db = await openPomodoroXIDB(`push-focus-wire-${crypto.randomUUID()}`)
+    meta = new MetaDB(`push-focus-wire-meta-${crypto.randomUUID()}`)
+    await meta.open()
+    const timestamp = '2026-08-07T01:00:00.000Z'
+    const sessionId = 'session-wire'
+    const payloads: Array<{ entityType: string; id: string; payload: Record<string, unknown> }> = [
+      {
+        entityType: 'focusSession', id: sessionId,
+        payload: {
+          id: sessionId, version: 1, createdAt: timestamp, updatedAt: timestamp,
+          sessionRevision: 1, startedAt: timestamp, endedAt: null, pauseStartedAt: null,
+          plannedSeconds: 1500, grossSeconds: 0, pausedSeconds: 0, breakSeconds: 0,
+          focusedSeconds: 0, timerCompletion: null, validity: 'pending',
+          validityReason: null, overallProgress: null, mood: null,
+          reviewState: 'not_required', ownershipState: 'local_provisional', sessionNote: '',
+        },
+      },
+      {
+        entityType: 'sessionTaskContext', id: 'context-wire',
+        payload: {
+          id: 'context-wire', version: 1, createdAt: timestamp, updatedAt: timestamp,
+          sessionId, projectId: 'project-a', level2WorkItemId: 'work-a',
+          projectTitleSnapshot: 'Project', level2TitleSnapshot: 'Work',
+          level2ParentIdSnapshot: null, level2StatusDefinitionIdSnapshot: 'status-a',
+          level2VersionSnapshot: 1, level2EffortLowerSecondsSnapshot: null,
+          level2EffortUpperSecondsSnapshot: null, linkedAt: timestamp, linkMethod: 'explicit',
+        },
+      },
+      {
+        entityType: 'sessionAttributionRevision', id: 'attr-wire',
+        payload: {
+          id: 'attr-wire', version: 1, createdAt: timestamp, updatedAt: timestamp,
+          sessionId, revision: 1, projectId: 'project-a', level2WorkItemId: 'work-a',
+          reason: null, correctedFromRevision: null, effective: true,
+        },
+      },
+    ]
+    const rows: OutboxEvent[] = await Promise.all(payloads.map(async (item, index) => {
+      const payloadValue = JSON.parse(JSON.stringify(item.payload)) as JsonValue
+      return {
+        id: index + 1, spaceId: db!.spaceId, entityType: item.entityType,
+        entityId: item.id, action: 'create', payload: JSON.stringify(payloadValue),
+        payloadHash: await recomputeEntityBusinessPayloadHash(
+          item.entityType as never, 'create', payloadValue,
+        ),
+        operationId: `wire-operation-${index}`, compoundOperationId: 'wire-root',
+        compoundOrder: index, expectedVersion: null, requiresVersionRebase: false,
+        transportState: 'ready', createdAt: timestamp, synced: false,
+        lastError: null, lastErrorCode: null, failedAt: null, attemptCount: 0,
+        ...INITIAL_S4_OUTBOX_FIELDS,
+      }
+    }))
+    await db!.outbox.bulkPut(rows)
+    const selected = (await selectOneAuthorityUnit(db!))!
+    const receipt = await withSpaceAuthorityFence(db!.spaceId, (token) =>
+      createPendingPushBatchAfterUnknown(db!, meta!, db!.spaceId, 'client-a', selected, token))
+    const body = receipt as { events: Array<{ entity_type: string; payload: Record<string, unknown> }> }
+    const byType = Object.fromEntries(body.events.map((event) => [event.entity_type, event.payload]))
+    expect(byType.focusSession).toMatchObject({
+      session_revision: 1, started_at: timestamp, planned_seconds: 1500,
+      ownership_state: 'local_provisional', session_note: '',
+    })
+    expect(byType.focusSession).not.toHaveProperty('sessionRevision')
+    expect(byType.focusSession).not.toHaveProperty('startedAt')
+    expect(byType.sessionTaskContext).toMatchObject({
+      session_id: sessionId, project_id: 'project-a', level2_work_item_id: 'work-a',
+      title_snapshot: 'Work', parent_snapshot: null, status_snapshot: 'status-a',
+      structure_snapshot: '{}', linked_at: timestamp, link_method: 'explicit',
+    })
+    expect(byType.sessionTaskContext).not.toHaveProperty('level2TitleSnapshot')
+    expect(byType.sessionTaskContext).not.toHaveProperty('projectTitleSnapshot')
+    expect(byType.sessionAttributionRevision).toMatchObject({
+      session_id: sessionId, revision: 1, effective: true,
+      corrected_from_revision: null,
+    })
+    expect(byType.sessionAttributionRevision).not.toHaveProperty('correctedFromRevision')
+  })
+
   it('replays the exact persisted canonical request bytes', async () => {
     db = await openPomodoroXIDB(`push-replay-${crypto.randomUUID()}`)
     meta = new MetaDB(`push-replay-meta-${crypto.randomUUID()}`)

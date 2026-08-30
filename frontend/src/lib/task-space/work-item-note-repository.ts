@@ -1,5 +1,6 @@
 import Dexie from 'dexie'
-import { acceptedMutationSchema, parseNoteDocument, workItemNoteCommandPostImageSchema, workItemNoteSchema, type NoteBlock, type WorkItemNote, type WorkItemNoteDocument } from '@/lib/contracts/task-space'
+import { canonicalize } from 'json-canonicalize'
+import { acceptedMutationSchema, parseNoteDocument, workItemNoteSchema, type NoteBlock, type WorkItemNote, type WorkItemNoteDocument } from '@/lib/contracts/task-space'
 import { hashCommandPayload } from '@/lib/contracts/payload-hash'
 import { canonicalNow } from '@/lib/direct-command-intents'
 import { enqueueOutbox } from '@/lib/sync/outbox'
@@ -9,6 +10,13 @@ import {
   withSpaceAuthorityFence,
   type SpaceAuthorityToken,
 } from '@/lib/sync/space-authority-fence'
+import {
+  buildNoteEditDraft,
+  clearNoteEditDraft,
+  loadNoteEditDraft,
+  persistNoteEditDraft,
+  type NoteEditDraft,
+} from '@/lib/task-space/note-draft-store'
 import type { PomodoroXIDB } from '@/services/database'
 import { taskSpaceApi } from '@/services/task-space-api'
 import type { CachedWorkItemNote, OutboxEvent, WorkItemNoteConflictRow } from '@/types'
@@ -95,14 +103,25 @@ function parseWireNote(value: unknown, spaceId: string, fallback?: Partial<Cache
 export function serializeWorkItemNoteCommandPostImage(
   row: CachedWorkItemNote,
 ) {
-  return workItemNoteCommandPostImageSchema.parse({
-    noteId: row.noteId,
-    workItemId: row.workItemId,
-    document: row.document,
-    version: row.version,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  })
+  // The S4 sync wire format uses the server catalog's snake_case fields
+  // (work_item_id / document_json / created_at / updated_at).  document_json
+  // must be the EXACT canonical form produced by
+  // backend/app/task_space/document.py::canonical_document_json (RFC 8785
+  // key-sorted compact JSON, raw UTF-8); the server re-canonicalizes and
+  // rejects with `document_json_not_canonical` on any byte difference.
+  const documentJson = canonicalize(row.document)
+  if (documentJson === undefined) throw new Error('note_document_not_canonical')
+  return {
+    id: row.noteId,
+    work_item_id: row.workItemId,
+    document_json: documentJson,
+    // The cached row.version is the LAST server-applied version; the sync
+    // post-image must carry the NEXT version (before.version + 1) so the
+    // server's `invalid_candidate_version` guard passes.
+    version: row.version + 1,
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
+  }
 }
 
 function isVersionConflict(error: unknown): boolean {
@@ -157,10 +176,28 @@ export class WorkItemNoteRepository {
   }
 
   async saveLocal(input: SaveLocalNoteInput): Promise<CachedWorkItemNote> {
+    try {
+      return await this.saveLocalAuthorized(input)
+    } catch (error) {
+      // Durable retryable draft: a failed flush must survive repository/space
+      // rebinding and reload, not just the in-memory autosave controller.
+      persistNoteEditDraft(buildNoteEditDraft({
+        spaceId: this.spaceId,
+        workItemId: input.workItemId,
+        expectedLocalRevision: input.expectedLocalRevision,
+        document: input.document,
+        operationId: input.operationId,
+        now: input.now,
+      }))
+      throw error
+    }
+  }
+
+  private async saveLocalAuthorized(input: SaveLocalNoteInput): Promise<CachedWorkItemNote> {
     return this.withAuthority(async (token) => {
       const document = parseNoteDocument(input.document)
       const payloadHash = await hashCommandPayload({ document })
-      return this.db.transaction('rw', this.db.workItemNotes, this.db.outbox, async () => {
+      const saved = await this.db.transaction('rw', this.db.workItemNotes, this.db.outbox, async () => {
       const current = await this.find(input.workItemId)
       if (!current) throw new Error('work_item_note_not_loaded')
       if (current.syncState === 'conflict') throw new Error('version_conflict')
@@ -187,8 +224,109 @@ export class WorkItemNoteRepository {
           createdAt: input.now,
         },
       )
+      // A successful local save supersedes any durable draft — but only when
+      // the saved edit IS the draft, or is strictly NEWER than it.  A stale
+      // flush (e.g. an editor blur racing with a newer keystroke) can complete
+      // AFTER a newer edit scheduled a fresh draft; clearing that newer draft
+      // here would drop the edit on a hard reload inside the debounce window.
+      const existingDraft = loadNoteEditDraft(this.spaceId, input.workItemId)
+      if (
+        existingDraft
+        && (
+          existingDraft.operationId === input.operationId
+          || input.expectedLocalRevision > existingDraft.expectedLocalRevision
+        )
+      ) {
+        clearNoteEditDraft(this.spaceId, input.workItemId)
+      }
       return next
-      }) as Promise<CachedWorkItemNote>
+      })
+      return saved
+    })
+  }
+
+  /** Durable draft accessors — survive repository/space rebinding and reload. */
+  loadDraft(workItemId: string): NoteEditDraft | null {
+    return loadNoteEditDraft(this.spaceId, workItemId)
+  }
+
+  clearDraft(workItemId: string): void {
+    clearNoteEditDraft(this.spaceId, workItemId)
+  }
+
+  /** Synchronously persist a durable draft (before the debounced flush). */
+  persistDraft(input: {
+    workItemId: string
+    expectedLocalRevision: number
+    document: WorkItemNoteDocument
+    operationId: string
+    now: string
+  }): void {
+    persistNoteEditDraft(buildNoteEditDraft({ spaceId: this.spaceId, ...input }))
+  }
+
+  /** Re-apply a durable draft if one exists; returns the saved note or null. */
+  async retryDraft(workItemId: string): Promise<CachedWorkItemNote | null> {
+    const draft = loadNoteEditDraft(this.spaceId, workItemId)
+    if (!draft) return null
+    try {
+      return await this.withAuthority((token) => this.reapplyDraftAuthorized(token, draft))
+    } catch {
+      // Still pending; the durable draft remains for a later retry.
+      return null
+    }
+  }
+
+  /**
+   * Atomically re-apply a durable draft.
+   *
+   * The guard and the write share one transaction: retryDraft previously read
+   * `current` BEFORE opening the save transaction, and the sync engine can
+   * reset the row (push terminal → syncState clean/localRevision 0) between
+   * those two reads, so saveLocal's strict `localRevision === expected`
+   * check threw `local_version_conflict` and the draft was never re-applied.
+   * Re-reading once inside the transaction closes that race.
+   *
+   * Fail-closed: if the row has advanced PAST the draft's base revision, a
+   * newer successful save exists and the draft may be stale — keep it durable
+   * instead of clobbering newer content.  If the note is at or behind the
+   * draft's base (the base save never landed, e.g. a hard reload interrupted
+   * an in-flight flush), re-apply the draft over the current state.
+   */
+  private async reapplyDraftAuthorized(
+    token: SpaceAuthorityToken,
+    draft: NoteEditDraft,
+  ): Promise<CachedWorkItemNote | null> {
+    this.assertAuthority(token)
+    const document = parseNoteDocument(draft.document)
+    const payloadHash = await hashCommandPayload({ document })
+    return this.db.transaction('rw', this.db.workItemNotes, this.db.outbox, async () => {
+      const current = await this.find(draft.workItemId)
+      if (!current) return null
+      if (current.syncState === 'conflict') return null
+      if (current.localRevision > draft.expectedLocalRevision) return null
+      const next: CachedWorkItemNote = {
+        ...current,
+        document,
+        localRevision: current.localRevision + 1,
+        syncState: 'dirty',
+        updatedAt: draft.now,
+      }
+      await this.db.workItemNotes.put(storeNoteRow(next))
+      await enqueueOutbox(
+        this.db, this.spaceId, token, 'workItemNote', current.noteId, 'update',
+        serializeWorkItemNoteCommandPostImage(next),
+        {
+          operationId: draft.operationId,
+          payloadHash,
+          hashPayload: { document },
+          expectedVersion: current.version,
+          transportState: 'awaiting_s4',
+          createdAt: draft.now,
+        },
+      )
+      clearNoteEditDraft(this.spaceId, draft.workItemId)
+      return next
     })
   }
 
@@ -378,7 +516,7 @@ export class WorkItemNoteRepository {
         },
       )
       return next
-    }) as Promise<CachedWorkItemNote>
+    })
   }
 
   private async dispatchFocused(

@@ -350,10 +350,112 @@ async function restartAdmissionAfterTypedDrift(
   await assertS4AdmissionReady(db, meta, spaceId, token)
 }
 
+/**
+ * Focus-session wire post-image transform (Wave 2C Task B).
+ *
+ * The backend catalog for the 4 provisional focus-session entities
+ * (`focus_session`, `session_task_context`, `session_attribution_revision`,
+ * `session_work_item_plan`) stores the LEGACY flat snake_case columns (see
+ * app/registry/builtin.py).  The client outbox keeps the rich camelCase local
+ * post-image (used for hash recompute and conflict comparison), so the flat
+ * legacy form is produced HERE at the push wire boundary and nowhere else.
+ */
+function toFocusSessionWirePostImage(
+  entityType: string,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  switch (entityType) {
+    case 'focusSession':
+      return {
+        id: payload.id,
+        created_at: payload.createdAt,
+        updated_at: payload.updatedAt,
+        version: payload.version,
+        session_revision: payload.sessionRevision,
+        started_at: payload.startedAt,
+        ended_at: payload.endedAt,
+        pause_started_at: payload.pauseStartedAt,
+        planned_seconds: payload.plannedSeconds,
+        gross_seconds: payload.grossSeconds,
+        paused_seconds: payload.pausedSeconds,
+        break_seconds: payload.breakSeconds,
+        focused_seconds: payload.focusedSeconds,
+        timer_completion: payload.timerCompletion,
+        validity: payload.validity,
+        validity_reason: payload.validityReason,
+        overall_progress: payload.overallProgress,
+        mood: payload.mood,
+        session_note: payload.sessionNote,
+        review_state: payload.reviewState,
+        ownership_state: payload.ownershipState,
+      }
+    case 'sessionTaskContext':
+      return {
+        id: payload.id,
+        created_at: payload.createdAt,
+        updated_at: payload.updatedAt,
+        version: payload.version,
+        session_id: payload.sessionId,
+        project_id: payload.projectId,
+        level2_work_item_id: payload.level2WorkItemId,
+        title_snapshot: payload.level2TitleSnapshot,
+        parent_snapshot: payload.level2ParentIdSnapshot,
+        estimate_snapshot: payload.level2EffortUpperSecondsSnapshot,
+        status_snapshot: payload.level2StatusDefinitionIdSnapshot,
+        structure_snapshot: '{}',
+        linked_at: payload.linkedAt,
+        link_method: payload.linkMethod,
+      }
+    case 'sessionAttributionRevision':
+      return {
+        id: payload.id,
+        created_at: payload.createdAt,
+        updated_at: payload.updatedAt,
+        version: payload.version,
+        session_id: payload.sessionId,
+        revision: payload.revision,
+        project_id: payload.projectId,
+        level2_work_item_id: payload.level2WorkItemId,
+        reason: payload.reason,
+        corrected_from_revision: payload.correctedFromRevision,
+        effective: payload.effective,
+      }
+    case 'sessionWorkItemPlan':
+      return {
+        id: payload.id,
+        created_at: payload.createdAt,
+        updated_at: payload.updatedAt,
+        version: payload.version,
+        session_id: payload.sessionId,
+        work_item_id: payload.workItemId,
+        title_snapshot: payload.titleSnapshot,
+        level2_snapshot: payload.level2WorkItemIdSnapshot,
+        work_item_version_snapshot: payload.workItemVersionSnapshot,
+        plan_rank: payload.planRank,
+        source: payload.source,
+        added_at: payload.addedAt,
+        removed_at: payload.removedAt,
+        removal_reason: payload.removalReason,
+        current_during_session: payload.currentDuringSession,
+        completion_draft: payload.completionDraft,
+      }
+    default:
+      return payload
+  }
+}
+
+const FOCUS_SESSION_WIRE_ENTITY_TYPES = new Set([
+  'focusSession', 'sessionTaskContext', 'sessionAttributionRevision',
+  'sessionWorkItemPlan',
+])
+
 function buildV2PushEvents(selection: PushSelection): ApiSyncV2Event[] {
   return selection.frozenRows.map((row) => {
     const payloadText = new TextDecoder().decode(decodeCanonicalBase64(row.payloadCanonicalBase64))
-    const payload = JSON.parse(payloadText) as Record<string, unknown>
+    const parsed = JSON.parse(payloadText) as Record<string, unknown>
+    const payload = FOCUS_SESSION_WIRE_ENTITY_TYPES.has(row.entityType)
+      ? toFocusSessionWirePostImage(row.entityType, parsed)
+      : parsed
     return {
       entity_type: row.entityType,
       entity_id: row.entityId,

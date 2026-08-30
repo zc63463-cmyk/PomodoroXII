@@ -306,9 +306,13 @@ export async function parseAndValidateTerminalEvidenceResult(
     throw new PushAuthorityIntegrityError('terminal_evidence_result_coverage_mismatch')
   }
   const childByOperation = new Map(children.map((child) => [child.operationId, child]))
+  // Client outbox rows use camelCase sync keys; the server push response uses
+  // the catalog name (snake_case).  Compare entity types ignoring case/underscores.
+  const normalized = (value: string) => value.replaceAll('_', '').toLowerCase()
   for (const outcome of [...result.applied, ...result.conflicts, ...result.errors]) {
     const child = childByOperation.get(outcome.operation_id)
-    if (!child || child.entityType !== outcome.entity_type || child.entityId !== outcome.entity_id) {
+    if (!child || normalized(child.entityType) !== normalized(outcome.entity_type) ||
+        child.entityId !== outcome.entity_id) {
       throw new PushAuthorityIntegrityError('terminal_evidence_result_entity_mismatch')
     }
   }

@@ -69,11 +69,14 @@ describe('taskSpaceApi', () => {
     vi.mocked(spaceApi.post).mockResolvedValue({ data: accepted })
     await taskSpaceApi.moveWorkItem({
       projectId: 'project-a', workItemId: 'wi-a', operationId: 'move-a', spaceId: 'space-a',
-      expectedVersion: 4, newParentId: 'l2', childRank: 7,
+      expectedVersion: 4, newParentId: 'l2',
     })
     const body = vi.mocked(spaceApi.post).mock.calls[0]![1] as Record<string, unknown>
     expect(body.projectId).toBe('project-a')
-    expect(body.payloadHash).toBe(await hashCommandPayload({ new_parent_id: 'l2', child_rank: 7 }))
+    // child_rank is server-assigned only; the wire body and canonical hash
+    // carry only the new parent.
+    expect('childRank' in body).toBe(false)
+    expect(body.payloadHash).toBe(await hashCommandPayload({ new_parent_id: 'l2' }))
   })
 
   it('uses only the three locked WorkItemNote write paths', async () => {
@@ -137,14 +140,16 @@ describe('taskSpaceApi', () => {
 
     await taskSpaceApi.moveWorkItem({
       projectId: 'p-1', workItemId: 'wi-1', operationId: 'move-1', spaceId: 'space-a',
-      expectedVersion: 3, newParentId: 'p2', childRank: 5,
+      expectedVersion: 3, newParentId: 'p2',
     })
     const move = vi.mocked(spaceApi.post).mock.calls[0]!
     expect(move[0]).toBe('/work-items/wi-1/move')
-    expect(move[1]).toMatchObject({ projectId: 'p-1', parentId: 'p2', childRank: 5, expectedVersion: 3 })
+    const moveBody = move[1] as Record<string, unknown>
+    expect(moveBody).toMatchObject({ projectId: 'p-1', parentId: 'p2', expectedVersion: 3 })
+    expect('childRank' in moveBody).toBe(false)
     expect(move[2]?.headers?.['Idempotency-Key']).toBe('move-1')
-    expect((move[1] as Record<string, unknown>).payloadHash).toBe(
-      await hashCommandPayload({ new_parent_id: 'p2', child_rank: 5 }),
+    expect(moveBody.payloadHash).toBe(
+      await hashCommandPayload({ new_parent_id: 'p2' }),
     )
 
     vi.mocked(spaceApi.post).mockClear()

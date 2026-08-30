@@ -6,7 +6,7 @@ export interface SpaceCommandBase { spaceId: string; operationId: string }
 export interface CreateProjectInput extends SpaceCommandBase { name: string; key: string; description?: string | null }
 export interface CreateWorkItemInput extends SpaceCommandBase { projectId: string; title: string; description: string | null; parentId: string | null; typeDefinitionId: string | null; statusDefinitionId: string | null; priority: string | null }
 export interface UpdateWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; title?: string; description?: string | null; priority?: string | null; typeDefinitionId?: string | null }
-export interface MoveWorkItemInput extends SpaceCommandBase { projectId: string; workItemId: string; expectedVersion: number; newParentId: string | null; childRank: number }
+export interface MoveWorkItemInput extends SpaceCommandBase { projectId: string; workItemId: string; expectedVersion: number; newParentId: string | null }
 export interface TransitionWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; statusDefinitionId: string }
 export interface ReplaceNoteInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; document: WorkItemNoteDocument }
 export interface AppendBlocksInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; blocks: WorkItemNoteDocument['blocks'] }
@@ -100,9 +100,11 @@ export const taskSpaceApi = {
     )
   },
   async moveWorkItem(input: MoveWorkItemInput) {
+    // child_rank is never client-supplied online: the server assigns the
+    // authoritative max(existing ranks, -1) + 1 inside the same transaction.
     return command(input.operationId, input.spaceId,
-      { projectId: input.projectId, expectedVersion: input.expectedVersion, parentId: input.newParentId, childRank: input.childRank },
-      { new_parent_id: input.newParentId, child_rank: input.childRank },
+      { projectId: input.projectId, expectedVersion: input.expectedVersion, parentId: input.newParentId },
+      { new_parent_id: input.newParentId },
       (body, options) => spaceApi.post(`/work-items/${encodeURIComponent(input.workItemId)}/move`, body, options),
     )
   },

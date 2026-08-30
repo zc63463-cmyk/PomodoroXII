@@ -5,6 +5,7 @@ export type FlushReason =
   | 'session-end'
   | 'space-switch'
   | 'logout'
+  | 'unmount'
 
 export class NoteAutosaveController<T extends { revision: number }> {
   private timer: ReturnType<typeof setTimeout> | null = null

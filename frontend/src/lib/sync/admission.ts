@@ -214,8 +214,26 @@ export async function admitTs3AwaitingS4(
   requireSpaceDatabaseBinding(db, spaceId)
   let pending = await db.syncAdmissionState.get('active')
   if (pending?.state === 'ready') {
-    await assertS4AdmissionReady(db, meta, spaceId, token)
-    return
+    // A ready state only means the PREVIOUS readyRootSet was admitted (and its
+    // rows were later deleted on a successful push).  New awaiting_s4 rows can
+    // arrive afterwards — e.g. a FocusSession clock update, or a fresh offline
+    // Note edit enqueued with transportState 'awaiting_s4'.  Instead of
+    // failing with `admission_awaiting_rows_after_ready`, reset the state so
+    // the new rows are admitted and pushed.  Because synced rows are deleted,
+    // this re-admission is clean: only the new awaiting rows participate.
+    const hasNewAwaiting = await db.outbox
+      .filter((row) => row.transportState === 'awaiting_s4')
+      .count()
+    if (hasNewAwaiting > 0) {
+      await db.syncAdmissionState.put({
+        key: 'active', state: 'pending', readyRoots: [],
+        readyRootSetSha256: null, errorCode: null,
+      })
+      pending = undefined
+    } else {
+      await assertS4AdmissionReady(db, meta, spaceId, token)
+      return
+    }
   }
   if (pending?.state !== 'meta_pending') {
     const metaRows = await loadSameSpaceAdmissionMeta(meta, spaceId)

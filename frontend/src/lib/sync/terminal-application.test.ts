@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { canonicalize } from 'json-canonicalize'
 import { hashCommandPayload } from '@/lib/contracts/payload-hash'
 import { INITIAL_S4_OUTBOX_FIELDS } from '@/services/database'
 import { openPomodoroXIDB } from '@/services/dexie-v18-cutover'
@@ -184,6 +185,63 @@ describe('terminal application coverage', () => {
       conflicts: [{ operation_id: 'op-b', entity_type: 'note', entity_id: 'note-b', code: 'version_conflict', resolution: 'manual', details: {} }],
       errors: [],
     })).not.toThrow()
+  })
+
+  it('writes a reviewable workItemNote conflict row on a snapshot-aware version_conflict', async () => {
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: new FakeLockManager() })
+    const spaceId = `terminal-note-conflict-${crypto.randomUUID()}`
+    const db = await openPomodoroXIDB(spaceId)
+    const meta = new MetaDB(`terminal-note-conflict-meta-${crypto.randomUUID()}`)
+    await meta.open()
+    databases.push(db, meta)
+    const createdAt = '2026-07-14T10:00:00.000Z'
+    const localDocument = { contentVersion: 1, blocks: [{ blockId: 'b1', type: 'paragraph', text: 'Local' }] }
+    const remoteDocument = { contentVersion: 1, blocks: [{ blockId: 'b2', type: 'paragraph', text: 'Remote' }] }
+    const documentJson = canonicalize(remoteDocument) as string
+    await db.workItemNotes.put({
+      id: 'note-1', noteId: 'note-1', workItemId: 'wi-1',
+      document: localDocument, version: 3, localRevision: 2, syncState: 'dirty',
+      createdAt, updatedAt: createdAt,
+    })
+    const postImage = {
+      id: 'note-1', work_item_id: 'wi-1',
+      document_json: canonicalize(localDocument) as string,
+      created_at: createdAt, updated_at: createdAt, version: 4,
+    }
+    await db.outbox.add({
+      id: 1, spaceId, entityType: 'workItemNote', entityId: 'note-1', action: 'update',
+      payload: JSON.stringify(postImage),
+      payloadHash: await hashCommandPayload({ document: localDocument }),
+      operationId: 'op-note', compoundOperationId: null, compoundOrder: null,
+      expectedVersion: 3, requiresVersionRebase: false, transportState: 'ready', createdAt,
+      synced: false, lastError: null, lastErrorCode: null, failedAt: null,
+      attemptCount: 0, ...INITIAL_S4_OUTBOX_FIELDS,
+    })
+    await withSpaceAuthorityFence(spaceId, async (token) => {
+      const selected = await selectOneAuthorityUnit(db)
+      expect(selected).not.toBeNull()
+      await applyTerminalResultTwoPhase(db, meta, spaceId, token, selected!, {
+        batch_id: selected!.authority.batchId,
+        applied: [],
+        conflicts: [{
+          operation_id: 'op-note', entity_type: 'work_item_note', entity_id: 'note-1',
+          code: 'version_conflict', resolution: 'manual', details: {},
+          snapshot: {
+            id: 'note-1', work_item_id: 'wi-1', document_json: documentJson,
+            created_at: createdAt, updated_at: createdAt, version: 4,
+          },
+          version: 4,
+        }],
+        errors: [],
+      }, 'push_response')
+      const conflict = await db.workItemNoteConflicts.get('wi-1') as Record<string, unknown> | undefined
+      expect(conflict).toBeDefined()
+      expect((conflict!.localDocument as { blocks: Array<{ text: string }> }).blocks[0].text).toBe('Local')
+      expect((conflict!.remoteDocument as { blocks: Array<{ text: string }> }).blocks[0].text).toBe('Remote')
+      expect(conflict).toMatchObject({ baseVersion: 3, remoteVersion: 4 })
+      expect((await db.workItemNotes.get('note-1'))?.syncState).toBe('conflict')
+      expect((await db.outbox.get(1))?.transportState).toBe('blocked_conflict')
+    })
   })
 
   it('rejects missing, duplicate, or wrong entity outcomes', () => {

@@ -25,6 +25,7 @@ import {
   type OutboxMergeResult,
   type SyncEntityType,
 } from './types'
+import { syncEngine } from './index'
 
 export interface OutboxIdentity {
   operationId: string
@@ -36,6 +37,7 @@ export interface OutboxIdentity {
   createdAt: string
   compoundOperationId?: string | null
   compoundOrder?: number | null
+  preserveExisting?: boolean
 }
 
 export async function buildOutboxIdentity(
@@ -236,7 +238,9 @@ export async function enqueueOutbox(
 
   // An attempted command is immutable. A newer local edit gets its own row;
   // the in-flight row is removed only after its response is acknowledged.
-  const mergeable = existing.filter((row) => row.attemptCount === 0)
+  const mergeable = identity.preserveExisting
+    ? []
+    : existing.filter((row) => row.attemptCount === 0)
   if (mergeable.length > 0) {
     const latest = mergeable.reduce((a, b) =>
       a.createdAt > b.createdAt ? a : b,
@@ -273,6 +277,7 @@ export async function enqueueOutbox(
       latest.compoundOperationId = compoundOperationId
       latest.compoundOrder = compoundOrder
       await db.outbox.put(latest)
+      syncEngine.markDirty(entityType, entityId, action)
       return
     }
 
@@ -300,6 +305,7 @@ export async function enqueueOutbox(
       .filter((e) => e.id !== latest.id)
       .map((e) => e.id!)
     if (olderIds.length > 0) await db.outbox.bulkDelete(olderIds)
+    syncEngine.markDirty(entityType, entityId, action)
     return
   }
 
@@ -325,6 +331,7 @@ export async function enqueueOutbox(
     transportState: identity.transportState,
     ...INITIAL_S4_OUTBOX_FIELDS,
   })
+  syncEngine.markDirty(entityType, entityId, action)
 }
 
 /** 未同步 outbox 行数 — 用 filter 避免 boolean 索引查询（DataError） */

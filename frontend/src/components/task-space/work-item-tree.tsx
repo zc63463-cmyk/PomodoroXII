@@ -11,6 +11,8 @@ export interface WorkItemTreeProps {
   selectedId: string | null
   onSelect: (workItemId: string) => void
   onCreateChild: (parentId: string) => void
+  /** Root-item creation entry shown when the project has no work items yet. */
+  onCreateRoot?: () => void
   definitions?: TaskSpaceDefinitions | null
   isLoading?: boolean
   error?: string | null
@@ -37,6 +39,7 @@ export function WorkItemTree({
   selectedId,
   onSelect,
   onCreateChild,
+  onCreateRoot,
   definitions,
   isLoading = false,
   error = null,
@@ -127,6 +130,29 @@ export function WorkItemTree({
   return createElement(
     'ul',
     { role: 'tree', 'aria-label': 'Work items', className: 'min-w-0 py-2' },
-    renderLevel(null, 1) ?? createElement('li', { className: 'px-2 py-3 text-sm text-muted-foreground' }, 'No work items'),
+    renderLevel(null, 1) ?? createElement(
+      'li',
+      { className: 'px-2 py-3' },
+      createElement(
+        'div',
+        { className: 'text-sm text-muted-foreground' },
+        'No work items',
+      ),
+      onCreateRoot
+        ? createElement(
+            Button,
+            {
+              type: 'button',
+              variant: 'ghost',
+              size: 'sm',
+              'aria-label': 'Create root work item',
+              disabled: pendingMutations.__root__ === true,
+              onClick: onCreateRoot,
+            },
+            createElement(Plus, { 'aria-hidden': true }),
+            'Create root work item',
+          )
+        : null,
+    ),
   )
 }

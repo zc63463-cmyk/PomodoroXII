@@ -33,6 +33,7 @@ import {
   type SyncOp,
   type SyncStatus,
 } from './types'
+import { normalizeSyncEntityType } from './terminal-application'
 
 const SYNC_DEBOUNCE_MS = 5000
 
@@ -284,8 +285,15 @@ export class RealSyncEngine implements SyncEngine {
 
   /** 追加冲突 + 触发 onConflict 回调 */
   private addConflicts(newConflicts: SyncConflict[]): void {
-    if (newConflicts.length === 0) return
-    this.conflicts.push(...newConflicts)
+    // WorkItemNote conflicts are resolved through the dedicated in-editor
+    // NoteConflictPanel (resolveReloadRemote / resolveOverwriteLocal), driven
+    // by the workItemNoteConflicts table — NOT the generic accept-remote /
+    // keep-local dialog.  Excluding them here keeps a single authority for Note
+    // resolution and prevents the generic dialog from overlapping the editor.
+    const surfaced = newConflicts.filter((conflict) =>
+      normalizeSyncEntityType(conflict.entityType) !== 'workitemnote')
+    if (surfaced.length === 0) return
+    this.conflicts.push(...surfaced)
     this.listeners.conflict.forEach((cb) => cb(this.conflicts))
   }
 

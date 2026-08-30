@@ -54,7 +54,6 @@ export interface TaskSpaceRepositoryLike {
     projectId: string
     workItemId: string
     newParentId: string | null
-    childRank: number
   }) => Promise<CachedWorkItem>
   transitionWorkItem: (input: {
     workItemId: string
@@ -76,6 +75,20 @@ export interface TaskSpaceNoteRepositoryLike {
   resolveReloadRemote: (workItemId: string) => Promise<void>
   resolveOverwriteLocal: (workItemId: string) => Promise<void>
   readConflict: (workItemId: string) => Promise<WorkItemNoteConflictRow | null>
+  /** Re-apply a durable failed-flush draft; returns the saved note or null. */
+  retryDraft: (workItemId: string) => Promise<CachedWorkItemNote | null>
+  /**
+   * Synchronously persist a durable draft for an edit, BEFORE the debounced
+   * flush.  This closes the hard-reload-during-debounce gap without touching
+   * the note row or outbox semantics (separate draft collection).
+   */
+  persistDraft: (input: {
+    workItemId: string
+    expectedLocalRevision: number
+    document: WorkItemNoteDocument
+    operationId: string
+    now: string
+  }) => void
 }
 
 export interface TaskSpaceState {
@@ -112,13 +125,15 @@ export interface TaskSpaceActions {
   selectWorkItem: (workItemId: string) => void
   createProject: (input: { name: string; key: string; description: string | null }) => Promise<CachedProject>
   createChild: (parentId: string, input?: CreateChildInput) => Promise<CachedWorkItem>
+  /** Root-item creation entry for an empty project (parentId=null). */
+  createRoot: (input?: CreateChildInput) => Promise<CachedWorkItem>
   updateWorkItem: (workItemId: string, input: {
     title?: string
     description?: string | null
     priority?: string | null
     typeDefinitionId?: string | null
   }) => Promise<CachedWorkItem>
-  moveWorkItem: (workItemId: string, newParentId: string | null, childRank?: number) => Promise<CachedWorkItem>
+  moveWorkItem: (workItemId: string, newParentId: string | null) => Promise<CachedWorkItem>
   transitionWorkItem: (workItemId: string, statusDefinitionId: string) => Promise<CachedWorkItem>
   reset: () => void
 }
@@ -177,6 +192,33 @@ export function resolveTaskSpaceMutationError(error: unknown): { code: string; m
   }
 }
 
+// Closed, user-safe messages for Note autosave failures.  These deliberately
+// never surface raw exception text (Dexie quota errors, Axios bodies, ...).
+const NOTE_ERROR_MESSAGES: Record<string, string> = {
+  version_conflict: '该笔记已被其他设备更新，请刷新后重试。',
+  local_version_conflict: '本地编辑版本冲突，请刷新后重试。',
+  work_item_note_not_loaded: '笔记尚未加载，无法保存。',
+  work_item_note_not_found: '该笔记不存在或已被删除。',
+  task_space_note_repository_not_ready: '笔记存储尚未就绪，无法保存。',
+}
+const GENERIC_NOTE_ERROR = '笔记保存失败，请检查服务连接后重试。'
+
+/**
+ * Map a Note-autosave failure to a stable code + closed message.  Uses the
+ * same canonical-wire extraction as mutations but with note-specific wording.
+ */
+export function resolveTaskSpaceNoteError(error: unknown): { code: string; message: string } {
+  if (error instanceof Error) {
+    const code = error.message
+    if (NOTE_ERROR_MESSAGES[code]) return { code, message: NOTE_ERROR_MESSAGES[code] }
+  }
+  const mapped = resolveTaskSpaceMutationError(error)
+  if (mapped.code !== 'unknown') {
+    return { code: mapped.code, message: NOTE_ERROR_MESSAGES[mapped.code] ?? GENERIC_NOTE_ERROR }
+  }
+  return { code: 'unknown', message: GENERIC_NOTE_ERROR }
+}
+
 const isCurrent = (state: TaskSpaceState, spaceId: string): boolean => state.spaceId === spaceId
 
 const mergeProjectWorkItems = (
@@ -208,12 +250,20 @@ export function selectProjectTree(items: CachedWorkItem[], projectId: string | n
 
 /**
  * Same-project nodes that may become the new parent of ``selectedWorkItemId``.
- * A candidate must be shallow enough (depth < 3) and must never be the item
- * itself or one of its descendants (the backend rejects both with a stable
- * invalid_work_item_tree conflict, so the UI never offers doomed choices).
+ * A candidate must never be the item itself or one of its descendants, and the
+ * whole selected subtree must still fit within the 3-level ceiling:
+ *
+ *   candidate.depth + 1 + (subtreeMaxDepth - selected.depth) <= 3
+ *
+ * where subtreeMaxDepth is the deepest node in the selected subtree (including
+ * the selected item itself).  This mirrors the backend MoveWorkItem guard
+ * ``new_parent_depth + _subtree_relative_depth(item) > 3`` exactly, so the UI
+ * never offers a parent the server would reject.
  */
 export function selectMoveCandidates(items: CachedWorkItem[], selectedWorkItemId: string | null): CachedWorkItem[] {
   if (!selectedWorkItemId) return []
+  const selected = items.find((item) => item.id === selectedWorkItemId)
+  if (!selected) return []
   const children = new Map<string | null, CachedWorkItem[]>()
   for (const item of items) {
     const group = children.get(item.parentId) ?? []
@@ -221,17 +271,21 @@ export function selectMoveCandidates(items: CachedWorkItem[], selectedWorkItemId
     children.set(item.parentId, group)
   }
   const descendants = new Set<string>()
+  let subtreeMaxDepth: number = selected.depth
   const frontier = [selectedWorkItemId]
   while (frontier.length > 0) {
     const id = frontier.pop()!
     for (const child of children.get(id) ?? []) {
       if (descendants.has(child.id)) continue
       descendants.add(child.id)
+      subtreeMaxDepth = Math.max(subtreeMaxDepth, child.depth)
       frontier.push(child.id)
     }
   }
   return items.filter((item) => (
-    item.depth < 3 && item.id !== selectedWorkItemId && !descendants.has(item.id)
+    item.id !== selectedWorkItemId
+    && !descendants.has(item.id)
+    && item.depth + 1 + (subtreeMaxDepth - selected.depth) <= 3
   ))
 }
 
@@ -245,6 +299,11 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
       document: WorkItemNoteDocument
       operationId: string
       now: string
+      /** The note repository captured at schedule time.  A debounced edit is
+       *  flushed against this exact repository even if the store later detaches
+       *  it (item/space switch, unmount, logout), so a pending edit is never
+       *  dropped by a controlled unbind. */
+      repository: TaskSpaceNoteRepositoryLike
     }
     let noteAutosave: NoteAutosaveController<PendingNoteEdit> | null = null
     // Synchronous per-target single-flight guard: state updates are async, so
@@ -271,9 +330,9 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
       if (noteAutosave) return noteAutosave
       noteAutosave = new NoteAutosaveController<PendingNoteEdit>(
         async (edit) => {
-          const repository = get().noteRepository
-          if (!repository) throw new Error('task_space_note_repository_not_ready')
-          const saved = await repository.saveLocal(edit)
+          // Always persist against the repository that captured the edit, so
+          // a controlled unbind can flush without reading detached state.
+          const saved = await edit.repository.saveLocal(edit)
           const current = get().selectedNote
           if (!current || current.noteId !== saved.noteId) return
           if (current.localRevision <= saved.localRevision) {
@@ -287,9 +346,34 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           }
         },
         800,
-        (error) => set({ error: (error as Error).message }),
+        (error) => set({ error: resolveTaskSpaceNoteError(error).message }),
       )
       return noteAutosave
+    }
+
+    /**
+     * Best-effort flush of any pending debounced edit against its captured
+     * repository.  Returns true when a dirty flush was started; the caller must
+     * then NOT discard the controller, because on failure the controller
+     * re-pends the edit and keeps it as a retryable draft.
+     */
+    const flushPendingNoteBestEffort = (
+      reason: 'unmount' | 'space-switch' | 'logout',
+    ): boolean => {
+      const previous = noteAutosave
+      if (!previous?.isDirty()) return false
+      void previous.flush(reason).then(
+        () => {
+          // Success: the pending edit was persisted; safe to discard.
+          if (noteAutosave === previous) noteAutosave = null
+        },
+        () => {
+          // Failure: the controller re-pended the edit.  Keep it attached so
+          // a later flush can retry it instead of dropping the draft.
+          if (noteAutosave === previous) noteAutosave = previous
+        },
+      )
+      return true
     }
 
     return {
@@ -355,8 +439,17 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
       },
 
       attachNoteRepository(repository) {
-        noteAutosave?.cancel()
-        noteAutosave = null
+        if (repository === null) {
+          // Controlled unbind: before detaching, flush any debounced edit to
+          // local persistence/outbox against the repository that captured it,
+          // so switching items/spaces or unmounting never drops a dirty Note.
+          // On failure the controller keeps the re-pended edit as a retryable
+          // draft instead of being discarded.
+          const flushing = flushPendingNoteBestEffort('unmount')
+          if (!flushing) noteAutosave = null
+        } else {
+          noteAutosave = null
+        }
         set({ noteRepository: repository, selectedNote: null, noteConflict: null })
       },
 
@@ -369,17 +462,45 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             repository.readConflict(workItemId),
           ])
           if (get().selectedWorkItemId !== workItemId) return
-          set({ selectedNote, noteConflict, error: null })
+          // Recover a durable failed-flush draft (survived reload / space
+          // rebinding / logout).  retryDraft re-applies it through the NEW
+          // repository and clears it on success; on failure it stays durable.
+          const recovered = await repository.retryDraft(workItemId)
+          if (get().selectedWorkItemId !== workItemId) return
+          set({
+            selectedNote: recovered ?? selectedNote,
+            noteConflict: recovered ? null : noteConflict,
+            error: null,
+          })
         } catch (error) {
-          set({ error: (error as Error).message })
+          set({ error: resolveTaskSpaceNoteError(error).message })
         }
       },
 
       updateNoteDocument(document) {
         const current = get().selectedNote
         if (!current) throw new Error('work_item_note_not_loaded')
+        const repository = get().noteRepository
+        if (!repository) throw new Error('task_space_note_repository_not_ready')
         const now = canonicalNow()
         const nextRevision = current.localRevision + 1
+        const operationId = crypto.randomUUID()
+        // Synchronously persist a lightweight durable draft BEFORE the debounce
+        // flush, so a hard reload inside the 800ms window still recovers the
+        // edit on the next load (see note-draft-store).  This is best-effort
+        // and never touches the note row or outbox semantics; a successful
+        // saveLocal clears the draft.
+        try {
+          repository.persistDraft({
+            workItemId: current.workItemId,
+            expectedLocalRevision: current.localRevision,
+            document,
+            operationId,
+            now,
+          })
+        } catch {
+          // draft persistence is best-effort; the in-memory autosave remains
+        }
         set({
           selectedNote: {
             ...current,
@@ -394,8 +515,9 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           workItemId: current.workItemId,
           expectedLocalRevision: current.localRevision,
           document,
-          operationId: crypto.randomUUID(),
+          operationId,
           now,
+          repository,
         })
       },
 
@@ -403,7 +525,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
         try {
           await noteAutosave?.flush(reason)
         } catch (error) {
-          set({ error: (error as Error).message })
+          set({ error: resolveTaskSpaceNoteError(error).message })
           throw error
         }
       },
@@ -416,7 +538,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           await repository.dispatchReplace(workItemId)
           await get().loadNote(workItemId)
         } catch (error) {
-          set({ error: (error as Error).message })
+          set({ error: resolveTaskSpaceNoteError(error).message })
           throw error
         }
       },
@@ -428,7 +550,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           await repository.resolveReloadRemote(workItemId)
           await get().loadNote(workItemId)
         } catch (error) {
-          set({ error: (error as Error).message })
+          set({ error: resolveTaskSpaceNoteError(error).message })
           throw error
         }
       },
@@ -440,7 +562,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           await repository.resolveOverwriteLocal(workItemId)
           await get().loadNote(workItemId)
         } catch (error) {
-          set({ error: (error as Error).message })
+          set({ error: resolveTaskSpaceNoteError(error).message })
           throw error
         }
       },
@@ -459,7 +581,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             error: null,
           }))
         } catch (error) {
-          set({ error: (error as Error).message })
+          set({ error: resolveTaskSpaceMutationError(error).message })
         }
       },
 
@@ -543,6 +665,41 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
         }
       },
 
+      async createRoot(input = {}) {
+        beginMutation('__root__', 'work_item_root_creation_in_flight')
+        const repository = get().repository
+        const state = get()
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          if (!state.selectedProjectId) throw new Error('task_space_project_not_selected')
+          // The repository already supports parentId=null; this is the explicit
+          // root-item entry for an empty project.
+          const created = await repository.createWorkItem({
+            projectId: state.selectedProjectId,
+            title: input.title?.trim() || 'New work item',
+            description: input.description ?? null,
+            parentId: null,
+            typeDefinitionId: input.typeDefinitionId ?? definitionId(state.definitions, 'types'),
+            statusDefinitionId: input.statusDefinitionId ?? definitionId(state.definitions, 'statuses'),
+            priority: input.priority ?? null,
+          })
+          set((current) => ({
+            workItems: [...current.workItems, created],
+            selectedWorkItemId: created.id,
+            selectedLevel2WorkItemId: created.depth === 2 ? created.id : current.selectedLevel2WorkItemId,
+            error: null,
+            mutationError: null,
+          }))
+          return created
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: '__root__', code: mapped.code } })
+          throw error
+        } finally {
+          endMutation('__root__')
+        }
+      },
+
       async updateWorkItem(workItemId, input) {
         beginMutation(workItemId, 'work_item_mutation_in_flight')
         const repository = get().repository
@@ -567,7 +724,7 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
         }
       },
 
-      async moveWorkItem(workItemId, newParentId, childRank = 0) {
+      async moveWorkItem(workItemId, newParentId) {
         beginMutation(workItemId, 'work_item_mutation_in_flight')
         const repository = get().repository
         const state = get()
@@ -575,11 +732,12 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
         try {
           if (!repository) throw new Error('task_space_repository_not_ready')
           if (!item) throw new Error('work_item_not_loaded')
+          // child_rank is never client-supplied online: the server assigns the
+          // authoritative append-only rank for the target parent.
           const moved = await repository.moveWorkItem({
             projectId: item.projectId,
             workItemId,
             newParentId,
-            childRank,
           })
           set((current) => ({
             workItems: current.workItems.map((candidate) => candidate.id === moved.id ? moved : candidate),
@@ -620,8 +778,12 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
       reset() {
         hydrationSequence += 1
         mutationGuards.clear()
-        noteAutosave?.cancel()
-        noteAutosave = null
+        // Flush any debounced edit before clearing so logout/reset never drops
+        // a dirty Note.  The page-level before-switch listener already flushed
+        // this while the space DB was still open; on failure the controller
+        // keeps the re-pended edit as a retryable draft.
+        const flushing = flushPendingNoteBestEffort('logout')
+        if (!flushing) noteAutosave = null
         set(initialState())
       },
     }

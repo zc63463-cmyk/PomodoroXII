@@ -100,3 +100,18 @@ export function bootstrapSyncEngine(spaceId: string): void {
   // 5. 首周期 sync（fire-and-forget；engine 内 since==='' → full）
   void engine.sync()
 }
+
+// Wave 2C: reconnect trigger.  Offline edits are enqueued to the outbox with
+// transportState 'awaiting_s4' (Note edits, FocusSession clock commands, …),
+// and enqueueOutbox now marks the engine dirty — but a debounced sync that
+// fires while offline is skipped by the engine.  Reconnecting must re-trigger
+// a sync so those rows are admitted and pushed to the server.  The listener is
+// registered once; `syncEngine` is a live binding, so it always drives the
+// current per-space engine (or the no-op stub when no space is bootstrapped).
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    void syncEngine.sync().catch((error) => {
+      console.error('reconnect sync failed:', error)
+    })
+  })
+}

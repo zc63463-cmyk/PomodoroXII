@@ -106,6 +106,15 @@ export const workItemNoteSchema = z.object({
   updatedAt: utc,
 }).strict()
 export const workItemNoteCommandPostImageSchema = workItemNoteSchema.omit({ spaceId: true })
+// The S4 sync wire post-image uses the server catalog's snake_case fields.
+export const workItemNoteSyncPostImageSchema = z.object({
+  id: entityId,
+  work_item_id: entityId,
+  document_json: z.string(),
+  version: z.number().int().positive(),
+  created_at: utc,
+  updated_at: utc,
+}).strict()
 
 export const statusDefinitionSchema = z.object({
   id: entityId,
@@ -213,8 +222,18 @@ export function taskSpaceEntityBusinessPayloadForHash(
       }
     }
     case 'workItemNote': {
-      const row = workItemNoteCommandPostImageSchema.parse(postImage)
-      return { document: row.document }
+      const camel = workItemNoteCommandPostImageSchema.safeParse(postImage)
+      if (camel.success) return { document: camel.data.document }
+      // S4 sync wire form is the server catalog's snake_case post-image; the
+      // business payload for the hash is still just the document object.
+      const wire = workItemNoteSyncPostImageSchema.parse(postImage)
+      let parsedDocument: unknown
+      try {
+        parsedDocument = JSON.parse(wire.document_json)
+      } catch {
+        throw new Error('note_document_json_invalid')
+      }
+      return { document: parsedDocument as JsonValue }
     }
     default: {
       const exhaustive: never = entityType

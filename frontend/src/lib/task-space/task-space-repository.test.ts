@@ -62,6 +62,9 @@ async function fixture() {
     createWorkItem: vi.fn(),
     moveWorkItem: vi.fn(),
     transitionWorkItem: vi.fn(),
+    listProjects: vi.fn(),
+    listWorkItems: vi.fn(),
+    listDefinitions: vi.fn(),
   }
   return { db, api, spaceId: db.spaceId }
 }
@@ -122,13 +125,13 @@ describe('TaskSpaceRepository', () => {
     })
     const repository = new TaskSpaceRepository(db, spaceId, api)
     const moved = await repository.moveWorkItem({
-      projectId: 'project-1', workItemId: 'work-1', newParentId: 'l2', childRank: 3,
+      projectId: 'project-1', workItemId: 'work-1', newParentId: 'l2',
     })
     expect(moved).toMatchObject({ id: 'work-1', parentId: 'l2', childRank: 3, version: 2 })
     expect(await db.workItems.get('work-1')).toMatchObject({ id: 'work-1', parentId: 'l2', childRank: 3, version: 2 })
     expect((await db.directCommandIntents.toArray())[0]).toMatchObject({ state: 'terminal' })
     expect(api.moveWorkItem).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: 'project-1', workItemId: 'work-1', newParentId: 'l2', childRank: 3,
+      projectId: 'project-1', workItemId: 'work-1', newParentId: 'l2',
       expectedVersion: 1, operationId: expect.any(String),
     }))
   })
@@ -160,7 +163,7 @@ describe('TaskSpaceRepository', () => {
     api.moveWorkItem.mockRejectedValue(conflict)
     const repository = new TaskSpaceRepository(db, spaceId, api)
     await expect(repository.moveWorkItem({
-      projectId: 'project-1', workItemId: 'work-1', newParentId: 'l2', childRank: 0,
+      projectId: 'project-1', workItemId: 'work-1', newParentId: 'l2',
     })).rejects.toThrow()
     const cached = await db.workItems.get('work-1')
     expect(cached).toMatchObject({ version: 1, parentId: null })
@@ -175,7 +178,7 @@ describe('TaskSpaceRepository', () => {
       kind: 'move_work_item', spaceId, targetId: 'work-1',
       request: {
         projectId: 'project-1', workItemId: 'work-1', expectedVersion: 1,
-        newParentId: 'l2', childRank: 3, spaceId,
+        newParentId: 'l2', spaceId,
       },
       now: canonicalNow(),
     }, 'fixed-recon-op')
@@ -212,9 +215,56 @@ describe('TaskSpaceRepository', () => {
     })
     const repositoryA = new TaskSpaceRepository(dbA, spaceA, api)
     new TaskSpaceRepository(dbB, spaceB, api)
-    await repositoryA.moveWorkItem({ projectId: 'project-1', workItemId: 'work-1', newParentId: 'l2', childRank: 0 })
+    await repositoryA.moveWorkItem({ projectId: 'project-1', workItemId: 'work-1', newParentId: 'l2' })
 
     expect(await dbA.workItems.get('work-1')).toMatchObject({ parentId: 'l2', version: 2 })
     expect(await dbB.workItems.get('work-1')).toMatchObject({ parentId: null, version: 1 })
+  })
+
+  it('deletes stale cached Project/WorkItem rows after a full remote pagination', async () => {
+    const { db, api, spaceId } = await fixture()
+    // Seed stale cache (camelCase cached shape): a project that no longer
+    // exists remotely and stale work items (one in a gone project, one in a
+    // kept project).
+    await db.projects.bulkPut([
+      { id: 'project-a', key: 'A', name: 'A', rank: 0, version: 1, createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z' },
+      { id: 'project-gone', key: 'GONE', name: 'Gone', rank: 1, version: 1, createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z' },
+    ] as never)
+    await db.workItems.bulkPut([
+      { id: 'work-kept', projectId: 'project-a', version: 1 },
+      { id: 'work-gone', projectId: 'project-gone', version: 1 },
+      { id: 'work-stale', projectId: 'project-a', version: 1 },
+    ] as never)
+    api.listProjects.mockResolvedValue({ items: [projectWire('project-a')], nextCursor: null })
+    api.listWorkItems.mockResolvedValue({ items: [workItemWire('work-kept', 'project-a')], nextCursor: null })
+    api.listDefinitions.mockResolvedValue({ statuses: [], types: [], labels: [] })
+    const repository = new TaskSpaceRepository(db, spaceId, api)
+
+    const overview = await repository.refreshOverview()
+
+    expect(overview.projects.map((project) => project.id)).toEqual(['project-a'])
+    expect(overview.workItems.map((item) => item.id)).toEqual(['work-kept'])
+    expect(await db.projects.get('project-gone')).toBeUndefined()
+    expect(await db.workItems.get('work-gone')).toBeUndefined()
+    expect(await db.workItems.get('work-stale')).toBeUndefined()
+    expect(await db.workItems.get('work-kept')).toMatchObject({ id: 'work-kept' })
+  })
+
+  it('never deletes rows of another space during a project-scoped reconcile', async () => {
+    const { db: dbA, api: apiA, spaceId: spaceA } = await fixture()
+    const { db: dbB, spaceId: spaceB } = await fixture()
+    expect(spaceA).not.toBe(spaceB)
+    // Both DBs carry a work item with the same id for the same project.
+    await dbA.workItems.put({ id: 'work-x', projectId: 'project-a', version: 1 } as never)
+    await dbB.workItems.put({ id: 'work-x', projectId: 'project-a', version: 1 } as never)
+    // Remote no longer returns work-x in space A.
+    apiA.listWorkItems.mockResolvedValue({ items: [], nextCursor: null })
+    const repositoryA = new TaskSpaceRepository(dbA, spaceA, apiA)
+
+    await repositoryA.hydrate('project-a')
+
+    expect(await dbA.workItems.get('work-x')).toBeUndefined()
+    // Space B's copy is untouched.
+    expect(await dbB.workItems.get('work-x')).toMatchObject({ id: 'work-x' })
   })
 })

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CachedProject, CachedWorkItem } from '@/types'
 import type { CachedWorkItemNote, WorkItemNoteConflictRow } from '@/types'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
-import { selectMoveCandidates, useTaskSpaceStore, type TaskSpaceNoteRepositoryLike, type TaskSpaceRepositoryLike } from './task-space-store'
+import { resolveTaskSpaceNoteError, selectMoveCandidates, useTaskSpaceStore, type TaskSpaceNoteRepositoryLike, type TaskSpaceRepositoryLike } from './task-space-store'
 
 const workItem = (id: string, parentId: string | null, depth: 1 | 2 | 3): CachedWorkItem => ({
   id,
@@ -134,6 +134,8 @@ function noteRepositoryFixture(overrides: Partial<TaskSpaceNoteRepositoryLike> =
     resolveReloadRemote: vi.fn().mockResolvedValue(undefined),
     resolveOverwriteLocal: vi.fn().mockResolvedValue(undefined),
     readConflict: vi.fn().mockResolvedValue(null),
+    retryDraft: vi.fn().mockResolvedValue(null),
+    persistDraft: vi.fn(),
     ...overrides,
   }
 }
@@ -241,6 +243,23 @@ describe('task-space-store projection', () => {
     expect(noteRepository.dispatchReplace).toHaveBeenCalledWith('l2')
   })
 
+  it('persists a lightweight durable draft synchronously on edit (before the debounce flush)', async () => {
+    const repository = repositoryFixture()
+    const noteRepository = noteRepositoryFixture()
+    useTaskSpaceStore.setState({ repository, spaceId: 'space-a', selectedWorkItemId: 'l2' })
+    useTaskSpaceStore.getState().attachNoteRepository(noteRepository)
+
+    await useTaskSpaceStore.getState().loadNote('l2')
+    useTaskSpaceStore.getState().updateNoteDocument(noteDocument('Edited'))
+    expect(noteRepository.persistDraft).toHaveBeenCalledWith(expect.objectContaining({
+      workItemId: 'l2',
+      expectedLocalRevision: 0,
+      document: noteDocument('Edited'),
+      operationId: expect.any(String),
+      now: expect.any(String),
+    }))
+  })
+
   it('hydrates a conflict and exposes only repository-owned resolution actions', async () => {
     const repository = repositoryFixture()
     const noteRepository = noteRepositoryFixture({ readConflict: vi.fn().mockResolvedValue(conflict()) })
@@ -282,6 +301,78 @@ describe('task-space-store projection', () => {
     expect(useTaskSpaceStore.getState().selectedNote?.document).toEqual(noteDocument('Second'))
   })
 
+  it('flushes a pending debounced edit before detaching the note repository', async () => {
+    const repository = repositoryFixture()
+    const noteRepository = noteRepositoryFixture()
+    useTaskSpaceStore.setState({ repository, spaceId: 'space-a', selectedWorkItemId: 'l2' })
+    useTaskSpaceStore.getState().attachNoteRepository(noteRepository)
+    await useTaskSpaceStore.getState().loadNote('l2')
+
+    // Edit within the debounce window, then detach (space switch/unmount).
+    useTaskSpaceStore.getState().updateNoteDocument(noteDocument('Dirty'))
+    useTaskSpaceStore.getState().attachNoteRepository(null)
+
+    // The pending edit must be persisted to local storage before unbinding.
+    await vi.waitFor(() => expect(noteRepository.saveLocal).toHaveBeenCalled())
+    expect(noteRepository.saveLocal).toHaveBeenCalledWith(expect.objectContaining({
+      workItemId: 'l2',
+      document: noteDocument('Dirty'),
+    }))
+  })
+
+  it('retains a retryable draft and never leaks raw text when the unbind flush fails', async () => {
+    const repository = repositoryFixture()
+    const saveLocal = vi.fn()
+      .mockRejectedValueOnce(new Error('QuotaExceededError'))
+      .mockImplementation(async (input: { document: WorkItemNoteDocument }) => ({
+        ...note(), document: input.document, localRevision: 1, syncState: 'dirty',
+      }))
+    const noteRepository = noteRepositoryFixture({ saveLocal })
+    useTaskSpaceStore.setState({ repository, spaceId: 'space-a', selectedWorkItemId: 'l2' })
+    useTaskSpaceStore.getState().attachNoteRepository(noteRepository)
+    await useTaskSpaceStore.getState().loadNote('l2')
+
+    useTaskSpaceStore.getState().updateNoteDocument(noteDocument('Dirty'))
+    // Detach (space switch/unmount): the controlled flush fails once, but the
+    // controller retains the re-pended edit as a retryable draft.
+    useTaskSpaceStore.getState().attachNoteRepository(null)
+    await vi.waitFor(() => expect(saveLocal).toHaveBeenCalledTimes(1))
+
+    // A later flush retries the retained draft against its captured repository.
+    await useTaskSpaceStore.getState().flushNote('blur')
+    expect(saveLocal).toHaveBeenCalledTimes(2)
+    expect(useTaskSpaceStore.getState().error ?? '').not.toMatch(/QuotaExceededError/)
+  })
+
+  it('maps note-autosave failures to closed messages without leaking error text', () => {
+    expect(resolveTaskSpaceNoteError(new Error('QuotaExceededError')).message).not.toMatch(/Quota/)
+    expect(resolveTaskSpaceNoteError(new Error('version_conflict')).message).toMatch(/其他设备|刷新/)
+    expect(resolveTaskSpaceNoteError({ response: { status: 409, data: { detail: { code: 'version_conflict' } } } }).message).toMatch(/其他设备|刷新/)
+  })
+
+  it('recovers a durable failed-flush draft through a NEW repository on load (space switch back / re-login)', async () => {
+    const repository = repositoryFixture()
+    const recovered = note('Recovered', 2)
+    // A brand-new repository instance (no shared closure with the one that
+    // failed the flush) re-applies the durable draft via retryDraft.
+    const freshNoteRepository = noteRepositoryFixture({
+      retryDraft: vi.fn().mockResolvedValue(recovered),
+    })
+    useTaskSpaceStore.setState({ repository, spaceId: 'space-a', selectedWorkItemId: 'l2' })
+    useTaskSpaceStore.getState().attachNoteRepository(freshNoteRepository)
+
+    await useTaskSpaceStore.getState().loadNote('l2')
+
+    expect(freshNoteRepository.retryDraft).toHaveBeenCalledWith('l2')
+    expect(useTaskSpaceStore.getState().selectedNote).toMatchObject({
+      noteId: 'note-1',
+      localRevision: 2,
+      document: noteDocument('Recovered'),
+    })
+    expect(useTaskSpaceStore.getState().noteConflict).toBeNull()
+    expect(useTaskSpaceStore.getState().error).toBeNull()
+  })
+
   it('has no Note Item promotion action or WorkItem-reference projection', () => {
     const files = [
       'src/stores/task-space-store.ts',
@@ -311,10 +402,10 @@ describe('task-space-store mutation lifecycle', () => {
       workItems: [workItem('l1', null, 1)],
     })
 
-    const first = useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 0)
+    const first = useTaskSpaceStore.getState().moveWorkItem('l1', 'l2')
     expect(useTaskSpaceStore.getState().pendingMutations).toMatchObject({ l1: true })
     await expect(
-      useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 0),
+      useTaskSpaceStore.getState().moveWorkItem('l1', 'l2'),
     ).rejects.toThrow('work_item_mutation_in_flight')
     expect(moveWorkItem).toHaveBeenCalledTimes(1)
 
@@ -331,7 +422,7 @@ describe('task-space-store mutation lifecycle', () => {
       repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1)],
     })
 
-    await useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 3)
+    await useTaskSpaceStore.getState().moveWorkItem('l1', 'l2')
     expect(useTaskSpaceStore.getState().workItems.find((item) => item.id === 'l1')).toEqual(moved)
     expect(useTaskSpaceStore.getState().error).toBeNull()
     expect(useTaskSpaceStore.getState().mutationError).toBeNull()
@@ -344,7 +435,7 @@ describe('task-space-store mutation lifecycle', () => {
       repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1)],
     })
 
-    await expect(useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 0)).rejects.toThrow()
+    await expect(useTaskSpaceStore.getState().moveWorkItem('l1', 'l2')).rejects.toThrow()
     expect(useTaskSpaceStore.getState().workItems.find((item) => item.id === 'l1')).toMatchObject({
       version: 1, parentId: null,
     })
@@ -365,8 +456,8 @@ describe('task-space-store mutation lifecycle', () => {
       repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1), workItem('l2', 'l1', 2)],
     })
 
-    const first = useTaskSpaceStore.getState().moveWorkItem('l1', 'l2', 0)
-    await useTaskSpaceStore.getState().moveWorkItem('l2', null, 0)
+    const first = useTaskSpaceStore.getState().moveWorkItem('l1', 'l2')
+    await useTaskSpaceStore.getState().moveWorkItem('l2', null)
     expect(moveWorkItem).toHaveBeenCalledTimes(2)
     pendingA.resolve({ ...workItem('l1', null, 1), version: 2 })
     await first
@@ -390,6 +481,37 @@ describe('task-space-store mutation lifecycle', () => {
 
     pending.resolve({ ...workItem('l3', 'l2', 3) })
     await first
+  })
+
+  it('creates a root work item for an empty project (parentId=null)', async () => {
+    const created = workItem('root-new', null, 1)
+    const createWorkItem = vi.fn().mockResolvedValue(created)
+    const repository = repositoryFixture({ createWorkItem })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', selectedProjectId: 'project-1', workItems: [],
+    })
+
+    const result = await useTaskSpaceStore.getState().createRoot({ title: 'New root' })
+
+    expect(createWorkItem).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'project-1', title: 'New root', parentId: null,
+    }))
+    expect(result).toEqual(created)
+    expect(useTaskSpaceStore.getState().workItems).toEqual([created])
+    expect(useTaskSpaceStore.getState().selectedWorkItemId).toBe('root-new')
+  })
+
+  it('maps a failed root creation to a stable code without leaking axios text', async () => {
+    const repository = repositoryFixture({
+      createWorkItem: vi.fn().mockRejectedValue(axiosError(409, 'version_conflict')),
+    })
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a', selectedProjectId: 'project-1',
+    })
+
+    await expect(useTaskSpaceStore.getState().createRoot()).rejects.toThrow()
+    expect(useTaskSpaceStore.getState().mutationError).toEqual({ targetId: '__root__', code: 'version_conflict' })
+    expect(useTaskSpaceStore.getState().error).not.toMatch(/Request failed/)
   })
 
   it('maps transition failure to a stable code and keeps the previous status', async () => {
@@ -419,8 +541,10 @@ describe('selectMoveCandidates', () => {
     ]
     // Moving l2: its descendant l3 must not be offered; l1 and other remain.
     expect(selectMoveCandidates(items, 'l2').map((item) => item.id).sort()).toEqual(['l1', 'other'])
-    // Moving l1: the whole subtree l2/l3 is excluded.
-    expect(selectMoveCandidates(items, 'l1').map((item) => item.id)).toEqual(['other'])
+    // Moving l1 would push its l1→l2→l3 subtree to depth 4 under ANY parent,
+    // so no candidate may be offered (the backend rejects with
+    // invalid_work_item_tree).
+    expect(selectMoveCandidates(items, 'l1')).toEqual([])
     // No selection yields no candidates.
     expect(selectMoveCandidates(items, null)).toEqual([])
   })
@@ -434,5 +558,36 @@ describe('selectMoveCandidates', () => {
     // A depth-3 item can never be a new parent for anyone.
     expect(selectMoveCandidates(items, 'leaf').map((item) => item.id)).toEqual(['root', 'mid'])
     expect(selectMoveCandidates(items, 'mid').map((item) => item.id)).toEqual(['root'])
+  })
+
+  it('never offers a sibling L2 as a new parent for an L2 carrying an L3 child', () => {
+    const items = [
+      workItem('root', null, 1),
+      workItem('l2-a', 'root', 2),
+      workItem('l2-b', 'root', 2),
+      workItem('l3', 'l2-a', 3),
+    ]
+    // Moving l2-a (subtreeMaxDepth=3) under l2-b would create depth 4:
+    // 2 + 1 + (3 - 2) = 4 > 3.  Only root (depth 1) fits.
+    expect(selectMoveCandidates(items, 'l2-a').map((item) => item.id)).toEqual(['root'])
+    // A leaf L3 may still move under an L1 root (a legal move); its current
+    // parent l2-a remains offered as a no-op target.
+    expect(selectMoveCandidates(items, 'l3').map((item) => item.id).sort()).toEqual(['l2-a', 'l2-b', 'root'])
+  })
+
+  it('offers legal three-level moves only', () => {
+    const items = [
+      workItem('root-a', null, 1),
+      workItem('root-b', null, 1),
+      workItem('l2', 'root-a', 2),
+      workItem('l3', 'l2', 3),
+    ]
+    // Moving the leaf l3 under root-b is legal (2 <= 3); under root-a too;
+    // its current parent l2 is offered as a no-op target.
+    expect(selectMoveCandidates(items, 'l3').map((item) => item.id).sort()).toEqual(['l2', 'root-a', 'root-b'])
+    // Moving l2 (with its leaf l3, subtreeMaxDepth=3) under another root is
+    // legal (1 + 1 + (3-2) = 3); root-a is l2's current parent (a no-op move,
+    // still within 3 levels) and remains offered like the backend allows.
+    expect(selectMoveCandidates(items, 'l2').map((item) => item.id).sort()).toEqual(['root-a', 'root-b'])
   })
 })

@@ -1,6 +1,7 @@
 import { canonicalize } from 'json-canonicalize'
 import Dexie from 'dexie'
 import { canonicalNow } from '@/lib/direct-command-intents'
+import { parseNoteDocument } from '@/lib/contracts/task-space'
 import type { MetaDB } from '@/services/meta-database'
 import {
   INITIAL_S4_OUTBOX_FIELDS,
@@ -10,7 +11,7 @@ import type {
   SyncPendingPushBatch,
   SyncTerminalApplicationEvidence,
 } from '@/services/database'
-import type { OutboxEvent } from '@/types'
+import type { OutboxEvent, WorkItemNoteConflictRow } from '@/types'
 import type { ApiSyncV2PushResponse, RetainedLwwSyncEntityType } from './types'
 import { ENTITY_TYPE_TO_TABLE } from './types'
 import { requireCanonicalStoredTimestamp } from './response-schema'
@@ -36,6 +37,18 @@ import {
 } from './space-authority-fence'
 import { resolveTransportTerminal } from './provisional-operation-authority'
 
+/**
+ * Normalize an entity-type token for cross-wire comparison.
+ *
+ * The client outbox rows use the catalog's camelCase sync keys (e.g.
+ * `workItemNote`, `quickNote`), while the server's push response carries the
+ * catalog NAME (snake_case, e.g. `work_item_note`).  Both identify the same
+ * entity; compare them case-insensitively ignoring underscores.
+ */
+export function normalizeSyncEntityType(value: string): string {
+  return value.replaceAll('_', '').toLowerCase()
+}
+
 export function requireExactTerminalCoverage(
   selected: PushSelection,
   result: ApiSyncV2PushResponse,
@@ -57,7 +70,9 @@ export function requireExactTerminalCoverage(
   )
   for (const outcome of outcomes) {
     const frozen = frozenByOperation.get(outcome.operation_id)
-    if (!frozen || outcome.entity_type !== frozen.entityType ||
+    if (!frozen ||
+        normalizeSyncEntityType(outcome.entity_type) !==
+          normalizeSyncEntityType(frozen.entityType) ||
         outcome.entity_id !== frozen.entityId) {
       throw new PushAuthorityIntegrityError('terminal_entity_identity_mismatch')
     }
@@ -266,6 +281,25 @@ export async function applyTerminalResultTwoPhase(
   for (const tableName of appliedEntityTables) {
     transactionTables.push(db.table(tableName))
   }
+  // A successfully pushed Note must leave the note repository's local-pending
+  // state (syncState 'clean', localRevision 0), otherwise the next pull's
+  // pre-push dirty check raises a FALSE conflict for content the server
+  // already accepted.
+  if (result.applied.some((item) =>
+    normalizeSyncEntityType(item.entity_type) === 'workitemnote')) {
+    transactionTables.push(db.workItemNotes)
+  }
+  // A workItemNote version_conflict must surface a UI-reviewable conflict
+  // (same row the direct dispatch path writes via preserveConflict), not just a
+  // terminal outbox marker: the Note conflict panel reads workItemNoteConflicts
+  // by workItemId, and the note row must be pinned to 'conflict' so a later
+  // pull cannot silently overwrite the local edit.
+  const hasNoteConflict = result.conflicts.some((item) =>
+    normalizeSyncEntityType(item.entity_type) === 'workitemnote')
+  if (hasNoteConflict) {
+    transactionTables.push(db.workItemNotes)
+    transactionTables.push(db.workItemNoteConflicts)
+  }
   await db.transaction(
     'rw', transactionTables,
     async () => {
@@ -291,24 +325,67 @@ export async function applyTerminalResultTwoPhase(
         if (tableName) {
           await db.table(tableName).update(frozen.entityId, { _dirty: false })
         }
+        if (normalizeSyncEntityType(frozen.entityType) === 'workitemnote') {
+          const noteRow = await db.workItemNotes.get(frozen.entityId)
+          if (noteRow) {
+            await db.workItemNotes.update(frozen.entityId, {
+              syncState: 'clean', localRevision: 0,
+            })
+          }
+        }
       }
       const rejected = [...result.conflicts, ...result.errors]
-      for (const outcome of rejected) {
-        const frozen = selected.frozenRows.find((row) => row.operationId === outcome.operation_id)
-        if (!frozen) throw new PushAuthorityIntegrityError('terminal_rejection_row_missing')
-        const current = await db.outbox.get(frozen.durableKey)
-        if (!current) throw new PushAuthorityIntegrityError('terminal_rejection_row_missing')
-        const canonicalOutcome = canonicalize(outcome)
-        if (canonicalOutcome === undefined) throw new PushAuthorityIntegrityError('terminal_outcome_not_canonical')
-        await db.outbox.update(frozen.durableKey, {
-          transportState: result.conflicts.some((item) => item.operation_id === outcome.operation_id)
-            ? 'terminal_conflict' : 'terminal_error',
-          serverOutcomeCanonicalBase64: encodeBase64(new TextEncoder().encode(canonicalOutcome)),
-          retryable: 'retryable' in outcome ? outcome.retryable : false,
-          nextAttemptAt: 'retryable' in outcome && outcome.retryable
-            ? deterministicTerminalNextAttempt(frozen.attemptCount, terminalizedAt) : null,
-        } satisfies Partial<OutboxEvent>)
+  for (const outcome of rejected) {
+    const frozen = selected.frozenRows.find((row) => row.operationId === outcome.operation_id)
+    if (!frozen) throw new PushAuthorityIntegrityError('terminal_rejection_row_missing')
+    const current = await db.outbox.get(frozen.durableKey)
+    if (!current) throw new PushAuthorityIntegrityError('terminal_rejection_row_missing')
+    const canonicalOutcome = canonicalize(outcome)
+    if (canonicalOutcome === undefined) throw new PushAuthorityIntegrityError('terminal_outcome_not_canonical')
+    const isConflict = result.conflicts.some((item) => item.operation_id === outcome.operation_id)
+    await db.outbox.update(frozen.durableKey, {
+      transportState: isConflict ? 'terminal_conflict' : 'terminal_error',
+      serverOutcomeCanonicalBase64: encodeBase64(new TextEncoder().encode(canonicalOutcome)),
+      retryable: 'retryable' in outcome ? outcome.retryable : false,
+      nextAttemptAt: 'retryable' in outcome && outcome.retryable
+        ? deterministicTerminalNextAttempt(frozen.attemptCount, terminalizedAt) : null,
+    } satisfies Partial<OutboxEvent>)
+    // QN-S8b: a snapshot-aware workItemNote version_conflict carries the
+    // authoritative remote post-image; persist the reviewable conflict row and
+    // pin the note to 'conflict' so resolveReloadRemote / resolveOverwriteLocal
+    // can act on real data (and a subsequent pull won't clobber the local edit).
+    if (isConflict && normalizeSyncEntityType(frozen.entityType) === 'workitemnote') {
+      const noteRow = await db.workItemNotes.get(frozen.entityId) as
+        | (Record<string, unknown> & { workItemId?: string; document?: unknown; localRevision?: number })
+        | undefined
+      if (noteRow?.workItemId) {
+        const remoteSnapshot = (outcome as { snapshot?: Record<string, unknown> | null }).snapshot
+        const remoteDocumentValue = remoteSnapshot?.document_json ?? remoteSnapshot?.document
+        let remoteDocument: unknown = noteRow.document
+        if (remoteDocumentValue !== undefined) {
+          try { remoteDocument = parseNoteDocument(remoteDocumentValue) } catch { remoteDocument = noteRow.document }
+        }
+        const remoteVersion = typeof remoteSnapshot?.version === 'number'
+          ? remoteSnapshot.version
+          : ((outcome as { version?: number | null }).version ?? (noteRow as Record<string, unknown>).version as number)
+        const conflictRow: WorkItemNoteConflictRow & { id: string } = {
+          id: noteRow.workItemId,
+          spaceId,
+          workItemId: noteRow.workItemId,
+          noteId: frozen.entityId,
+          localDocument: noteRow.document as never,
+          localRevision: typeof noteRow.localRevision === 'number' ? noteRow.localRevision : 0,
+          baseVersion: typeof frozen.expectedVersion === 'number' ? frozen.expectedVersion : (noteRow as Record<string, unknown>).version as number,
+          remoteDocument: remoteDocument as never,
+          remoteVersion: remoteVersion as number,
+          detectedAt: canonicalNow(),
+        }
+        await db.workItemNoteConflicts.put(conflictRow as unknown as Record<string, unknown>)
+        await db.workItemNotes.update(frozen.entityId, { syncState: 'conflict' })
+        await db.outbox.update(frozen.durableKey, { transportState: 'blocked_conflict' })
       }
+    }
+  }
       const activeReceipt = await loadAndValidateActiveReceiptInCurrentTransaction(db)
       if (activeReceipt) {
         requireReceiptMatchesFrozenAuthority(activeReceipt, selected)
