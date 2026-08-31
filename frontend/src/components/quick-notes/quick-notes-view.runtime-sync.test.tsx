@@ -36,11 +36,22 @@ function findQuickNoteButton(name: RegExp) {
 vi.mock('lucide-react', () => ({
   ArchiveRestoreIcon: () =>
     createElement('span', { 'data-testid': 'archive-restore-icon' }),
+  BoldIcon: () => createElement('span', { 'data-testid': 'bold-icon' }),
+  CodeIcon: () => createElement('span', { 'data-testid': 'code-icon' }),
   FileTextIcon: () => createElement('span', { 'data-testid': 'file-text-icon' }),
   GitMergeIcon: () => createElement('span', { 'data-testid': 'merge-icon' }),
+  HashIcon: () => createElement('span', { 'data-testid': 'hash-icon' }),
+  Heading1Icon: () => createElement('span', { 'data-testid': 'heading1-icon' }),
+  ItalicIcon: () => createElement('span', { 'data-testid': 'italic-icon' }),
+  LinkIcon: () => createElement('span', { 'data-testid': 'link-icon' }),
+  ListIcon: () => createElement('span', { 'data-testid': 'list-icon' }),
+  ListOrderedIcon: () => createElement('span', { 'data-testid': 'list-ordered-icon' }),
+  ListTodoIcon: () => createElement('span', { 'data-testid': 'list-todo-icon' }),
   PinIcon: () => createElement('span', { 'data-testid': 'pin-icon' }),
   PlusIcon: () => createElement('span', { 'data-testid': 'plus-icon' }),
   SearchIcon: () => createElement('span', { 'data-testid': 'search-icon' }),
+  StrikethroughIcon: () => createElement('span', { 'data-testid': 'strike-icon' }),
+  TextQuoteIcon: () => createElement('span', { 'data-testid': 'text-quote-icon' }),
   Trash2Icon: () => createElement('span', { 'data-testid': 'trash-icon' }),
   XIcon: () => createElement('span', { 'data-testid': 'x-icon' }),
 }))

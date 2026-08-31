@@ -7,11 +7,22 @@ import { db, spaceDBManager } from '@/services/space-db'
 vi.mock('lucide-react', () => ({
   ArchiveRestoreIcon: () =>
     createElement('span', { 'data-testid': 'archive-restore-icon' }),
+  BoldIcon: () => createElement('span', { 'data-testid': 'bold-icon' }),
+  CodeIcon: () => createElement('span', { 'data-testid': 'code-icon' }),
   FileTextIcon: () => createElement('span', { 'data-testid': 'file-text-icon' }),
   GitMergeIcon: () => createElement('span', { 'data-testid': 'merge-icon' }),
+  HashIcon: () => createElement('span', { 'data-testid': 'hash-icon' }),
+  Heading1Icon: () => createElement('span', { 'data-testid': 'heading1-icon' }),
+  ItalicIcon: () => createElement('span', { 'data-testid': 'italic-icon' }),
+  LinkIcon: () => createElement('span', { 'data-testid': 'link-icon' }),
+  ListIcon: () => createElement('span', { 'data-testid': 'list-icon' }),
+  ListOrderedIcon: () => createElement('span', { 'data-testid': 'list-ordered-icon' }),
+  ListTodoIcon: () => createElement('span', { 'data-testid': 'list-todo-icon' }),
   PinIcon: () => createElement('span', { 'data-testid': 'pin-icon' }),
   PlusIcon: () => createElement('span', { 'data-testid': 'plus-icon' }),
   SearchIcon: () => createElement('span', { 'data-testid': 'search-icon' }),
+  StrikethroughIcon: () => createElement('span', { 'data-testid': 'strike-icon' }),
+  TextQuoteIcon: () => createElement('span', { 'data-testid': 'text-quote-icon' }),
   Trash2Icon: () => createElement('span', { 'data-testid': 'trash-icon' }),
   XIcon: () => createElement('span', { 'data-testid': 'x-icon' }),
 }))
@@ -1760,7 +1771,7 @@ describe('QuickNotesView', () => {
     })
   })
 
-  it('enters focus-edit as a single editor column without explorer or timeline controls', async () => {
+  it('enters focus-edit as an in-place editor that grows to the bottom, clipping the timeline', async () => {
     storeMocks.state.quickNotes = [
       makeQuickNote({
         id: 'focus-edit-note',
@@ -1785,18 +1796,17 @@ describe('QuickNotesView', () => {
     )
     expect(screen.getByLabelText('小记内容')).toHaveAttribute('rows', '12')
     expect(screen.getByLabelText('小记内容')).toHaveFocus()
-    expect(screen.getByLabelText('小记内容')).toHaveClass(
-      'h-[clamp(20rem,calc(100dvh-23rem),26rem)]',
-    )
-    expect(screen.getByLabelText('小记内容')).toHaveClass('max-h-[26rem]')
+    expect(screen.getByLabelText('小记内容')).toHaveClass('min-h-40')
+    expect(screen.getByLabelText('小记内容')).toHaveClass('lg:min-h-0')
+    expect(screen.getByLabelText('小记内容')).toHaveClass('resize-none')
     expect(screen.getByLabelText('小记内容')).toHaveClass('overflow-y-auto')
     expect(screen.getByLabelText('小记内容')).not.toHaveClass(
-      'min-h-[max(32rem,calc(100svh-12rem))]',
+      'h-[clamp(20rem,calc(100dvh-23rem),26rem)]',
     )
     expect(screen.getByText(/专注写作中/)).toHaveClass(
       'text-[color:var(--qn-muted)]',
     )
-    expect(screen.queryByLabelText('小记探索')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('小记探索')).toBeInTheDocument()
     expect(screen.queryByLabelText('小记时间线')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /给专注模式一点背景/ })).not.toBeInTheDocument()
   })

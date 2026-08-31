@@ -377,6 +377,25 @@ export function QuickNotesWorkspace({
     searchQuery,
     disabledInteractions: isFocusEditing,
   })
+  // 双滑轨：桌面端 composer 固定在顶部，历史/回收站/反馈走独立滚动滑轨。
+  // 专注模式 = 编辑器一口气长到底（composer 占满 stage 高度），
+  // 笔记历史与回收站被挤出视口（条件卸载，终态即隐藏）。
+  const mainRail = isFocusEditing
+    ? createElement(FeedbackBlocks, { previewError, error })
+    : createElement(
+        'div',
+        { className: quickNoteStyles.mainRail },
+        createElement(FeedbackBlocks, { previewError, error }),
+        showTrash
+          ? createElement(TrashPanel, {
+              notes: trashedQuickNotes,
+              onRestore,
+              onPurge,
+              pendingById: trashPendingById,
+            })
+          : null,
+        timeline,
+      )
   const explorer = createElement(QuickNoteExplorer, {
     notes: allQuickNotes,
     selectedTagFilters,
@@ -436,16 +455,7 @@ export function QuickNotesWorkspace({
           '专注写作中：Ctrl/Cmd + Enter 保存，Esc 返回工作台。',
         )
       : null,
-    createElement(FeedbackBlocks, { previewError, error }),
-    !isFocusEditing && showTrash
-      ? createElement(TrashPanel, {
-          notes: trashedQuickNotes,
-          onRestore,
-          onPurge,
-          pendingById: trashPendingById,
-        })
-      : null,
-    isFocusEditing ? null : timeline,
+    mainRail,
   )
 
   return createElement(
@@ -454,13 +464,9 @@ export function QuickNotesWorkspace({
     createElement(
       'div',
       {
-        className: isFocusEditing
-          ? quickNoteStyles.focusEditGrid
-          : quickNoteStyles.workspaceGrid,
+        className: quickNoteStyles.workspaceGrid,
       },
-      isFocusEditing
-        ? null
-        : createElement('div', { className: 'hidden lg:block' }, explorer),
+      createElement('div', { className: quickNoteStyles.explorerRail }, explorer),
       mainColumn,
       mobileFiltersOpen
         ? createElement(

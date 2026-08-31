@@ -124,7 +124,10 @@ export function QuickNotesView() {
   return createElement(
     'main',
     {
-      className: quickNoteStyles.page,
+      className:
+        focusMode === 'detail-read'
+          ? quickNoteStyles.page
+          : `${quickNoteStyles.page} ${quickNoteStyles.pageViewport}`,
       'data-quicknote-visual-style': 'apple-notes',
     },
     createElement(

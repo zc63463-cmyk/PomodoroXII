@@ -4,6 +4,10 @@ import { createElement, FormEvent, KeyboardEvent, useEffect, useId, useMemo, use
 import { PlusIcon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { QuickNoteEditorStatusLine } from '@/components/quick-notes/quick-note-editor-status-line'
+import {
+  QuickNoteEditorToolbar,
+  type QuickNoteToolbarInsert,
+} from '@/components/quick-notes/quick-note-editor-toolbar'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
 import {
   applyQuickNoteTagAutocomplete,
@@ -103,6 +107,20 @@ export function QuickNoteComposer({
     textareaRef.current?.focus()
   }, [isFocusMode])
 
+  // 生长式 textarea（移植自原版 MemoEditorTextarea）：compact 态随内容
+  // 自动生长（CSS max-h-72 封顶后转内滚）；进入专注态清空内联高度，交给
+  // flex 链条一次性撑到底（把下方笔记挤出视口 = 隐藏）。
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    if (isFocusMode) {
+      textarea.style.height = ''
+      return
+    }
+    textarea.style.height = 'auto'
+    textarea.style.height = `${textarea.scrollHeight}px`
+  }, [draft, isFocusMode])
+
   useEffect(() => {
     if (!draft.trim() || editingNote) setDiscardArmed(false)
   }, [draft, editingNote])
@@ -157,8 +175,7 @@ export function QuickNoteComposer({
     syncCaretFromTextarea(event)
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault()
       event.currentTarget.form?.requestSubmit()
       return
@@ -227,6 +244,37 @@ export function QuickNoteComposer({
     onDraftChange(nextDraft.value)
   }
 
+  // 快捷编辑工具栏（对齐原版 MemoEditorToolbar 的 insert 机制）：
+  // wrap 模式包裹选中文本（无选中时用占位符），line 模式在光标所在行首插入前缀。
+  function handleToolbarInsert(insert: QuickNoteToolbarInsert) {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    const selectionStart = textarea.selectionStart ?? draft.length
+    const selectionEnd = textarea.selectionEnd ?? selectionStart
+    const selected = draft.slice(selectionStart, selectionEnd)
+
+    if (insert.mode === 'wrap') {
+      const body = selected || insert.placeholder
+      const next =
+        draft.slice(0, selectionStart) +
+        insert.before +
+        body +
+        (insert.after ?? '') +
+        draft.slice(selectionEnd)
+      const bodyEnd = selectionStart + insert.before.length + body.length
+      setPendingCaretIndex(bodyEnd)
+      onDraftChange(next)
+      textarea.focus()
+      return
+    }
+
+    const lineStart = draft.lastIndexOf('\n', Math.max(selectionStart - 1, 0)) + 1
+    const next = draft.slice(0, lineStart) + insert.before + draft.slice(lineStart)
+    setPendingCaretIndex(selectionEnd + insert.before.length)
+    onDraftChange(next)
+    textarea.focus()
+  }
+
   return createElement(
     'section',
     {
@@ -237,10 +285,19 @@ export function QuickNoteComposer({
     },
     createElement(
       'form',
-      { onSubmit, className: 'flex flex-col gap-3' },
+      {
+        onSubmit,
+        className: isFocusMode
+          ? quickNoteStyles.composerFocusForm
+          : 'flex flex-col gap-3',
+      },
       createElement(
         'div',
-        { className: quickNoteStyles.tagAutocompleteAnchor },
+        {
+          className: isFocusMode
+            ? quickNoteStyles.composerFocusAnchor
+            : quickNoteStyles.tagAutocompleteAnchor,
+        },
         createElement('textarea', {
           ref: textareaRef,
           value: draft,
@@ -294,6 +351,7 @@ export function QuickNoteComposer({
             )
           : null,
       ),
+      createElement(QuickNoteEditorToolbar, { onInsert: handleToolbarInsert }),
       createElement(
         'div',
         { className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between' },
