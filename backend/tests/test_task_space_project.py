@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,15 @@ from app.task_space.module import (
     _business_payload,
     build_task_space_request,
 )
+
+
+def _wire_value(value):
+    """Deep-convert frozen mutation values to plain JSON-equivalent dicts."""
+    if isinstance(value, Mapping):
+        return {str(key): _wire_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_wire_value(item) for item in value]
+    return value
 
 
 def test_task_space_policy_owns_virtual_and_real_catalog_types() -> None:
@@ -169,7 +179,7 @@ async def test_work_item_allocation_is_atomic_and_retry_returns_same_key(task_sp
         event.entity_type: event.payload for event in allocation_events
     } == {
         "project": stored_project,
-        "workItem": first.value,
+        "workItem": _wire_value(first.value),
     }
 
 

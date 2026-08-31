@@ -28,6 +28,7 @@ def _canonical_spec(spec: EntitySpec) -> dict[str, Any]:
         "sync_enabled": spec.sync_enabled,
         "soft_delete": spec.soft_delete,
         "primary_key": spec.primary_key,
+        "composite_primary_key": spec.composite_primary_key,
         "fields": [field.__dict__ for field in spec.fields],
         "sync_entity_type": spec.sync_entity_type,
         "pull_key": spec.pull_key,
@@ -118,6 +119,20 @@ class CompiledEntityCatalog:
                 raise CatalogCompilationError(f"unknown delete strategy: {spec.delete_strategy}")
             if spec.primary_key not in spec.field_names:
                 raise CatalogCompilationError(f"primary key missing: {spec.primary_key}")
+            if spec.composite_primary_key is not None:
+                if len(spec.composite_primary_key) < 2:
+                    raise CatalogCompilationError(
+                        f"composite primary key needs at least two fields: {spec.name}"
+                    )
+                missing = [
+                    field_name
+                    for field_name in spec.composite_primary_key
+                    if field_name not in spec.field_names
+                ]
+                if missing:
+                    raise CatalogCompilationError(
+                        f"composite primary key field missing: {spec.name}.{','.join(missing)}"
+                    )
             if spec.junction_endpoints is not None:
                 for field_name, endpoint_type in spec.junction_endpoints:
                     if field_name not in spec.field_names:

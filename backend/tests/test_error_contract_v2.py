@@ -276,6 +276,8 @@ EXPECTED_TS1_COMPILER_REJECTION_CODES = frozenset({
     "invalid_note_document",
     "work_item_structure_changed",
     "offline_formal_creation_forbidden",
+    # D5 Y: label definition CRUD owns the unique-name conflict.
+    "label_name_conflict",
 })
 
 

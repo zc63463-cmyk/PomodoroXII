@@ -17,6 +17,9 @@ export interface WorkItemDetailProps {
   onUpdate?: (input: { title: string; description: string | null; priority: string | null }) => Promise<unknown> | unknown
   onTransition?: (statusDefinitionId: string) => Promise<unknown> | unknown
   onMove?: (parentId: string | null) => Promise<unknown> | unknown
+  /** D5 Y: toggle one label on the work item (add=true converges to the
+   * union; add=false removes it). Idempotent set semantics server side. */
+  onToggleLabel?: (labelId: string, add: boolean) => Promise<unknown> | unknown
 }
 
 function definitionLabel(
@@ -55,6 +58,7 @@ export function WorkItemDetail({
   onUpdate,
   onTransition,
   onMove,
+  onToggleLabel,
 }: WorkItemDetailProps) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -111,6 +115,30 @@ export function WorkItemDetail({
       // Stable error is surfaced by the store; keep the previous tree.
     }
   }
+
+  const toggleLabel = async (labelId: string, add: boolean) => {
+    if (!onToggleLabel) return
+    try {
+      await onToggleLabel(labelId, add)
+    } catch {
+      // Stable error is surfaced by the store; keep the current label set.
+    }
+  }
+
+  // D5 Y: labels render as removable chips plus an add-select over the
+  // Space-scoped definitions (archived definitions stay selectable only as
+  // already-applied chips).
+  const labels = definitions?.labels ?? []
+  const applied = labels.filter((label) => (
+    typeof label.id === 'string' && workItem.labelIds.includes(label.id)
+  ))
+  const available = labels.filter((label) => (
+    typeof label.id === 'string'
+    && !workItem.labelIds.includes(label.id)
+    && (label.archived_at ?? label.archivedAt) == null
+  ))
+  const labelName = (label: Record<string, unknown>): string =>
+    String(label.name ?? label.label ?? label.id ?? '')
 
   return createElement(
     'article',
@@ -244,6 +272,50 @@ export function WorkItemDetail({
       timing('Hard deadline', workItem.hardDeadline),
       timing('Created', workItem.createdAt),
       timing('Updated', workItem.updatedAt),
+    ),
+    createElement(
+      'section',
+      { 'aria-label': 'Work item labels', className: 'grid gap-2 border-b py-4' },
+      createElement('h2', { className: 'text-sm font-medium text-muted-foreground' }, 'Labels'),
+      createElement(
+        'div',
+        { className: 'flex flex-wrap items-center gap-1.5' },
+        applied.map((label) => {
+          const labelId = String(label.id)
+          return createElement(
+            'span',
+            { key: labelId, className: 'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs' },
+            labelName(label),
+            !readonly && onToggleLabel
+              ? createElement('button', {
+                  type: 'button',
+                  'aria-label': `Remove label ${labelName(label)}`,
+                  disabled: pending,
+                  className: 'text-muted-foreground hover:text-destructive',
+                  onClick: () => void toggleLabel(labelId, false),
+                }, '×')
+              : null,
+          )
+        }),
+        createElement(
+          'select',
+          {
+            'aria-label': 'Add label',
+            className: 'h-8 rounded-md border bg-background px-2 text-xs outline-none',
+            defaultValue: '',
+            disabled: pending || readonly || !onToggleLabel || available.length === 0,
+            onChange: (event: React.ChangeEvent<HTMLSelectElement>) => {
+              const labelId = event.target.value
+              if (labelId) void toggleLabel(labelId, true)
+              event.target.value = ''
+            },
+          },
+          createElement('option', { value: '' }, available.length === 0 ? 'No labels' : 'Add label…'),
+          available.map((label) => (
+            createElement('option', { key: String(label.id), value: String(label.id) }, labelName(label))
+          )),
+        ),
+      ),
     ),
     createElement(
       'section',

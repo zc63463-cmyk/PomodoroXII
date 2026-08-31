@@ -25,6 +25,7 @@ def build_v1_router() -> APIRouter:
     from app.routes.v1.focus_sessions import router as focus_sessions_router
     from app.routes.v1.folders import router as folders_router
     from app.routes.v1.habits import router as habits_router
+    from app.routes.v1.labels import router as labels_router
     from app.routes.v1.meta import router as meta_router
     from app.routes.v1.notes import router as notes_router
     from app.routes.v1.projects import router as projects_router
@@ -69,6 +70,7 @@ def build_v1_router() -> APIRouter:
 
     # Task Space contract routers (space token required).
     router.include_router(projects_router, prefix="/projects", tags=["projects"])
+    router.include_router(labels_router, prefix="/labels", tags=["labels"])
     router.include_router(work_items_router, prefix="/work-items", tags=["work-items"])
     router.include_router(
         work_item_notes_router, prefix="/work-items", tags=["work-item-notes"]

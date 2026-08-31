@@ -59,6 +59,7 @@ export default function TasksPage() {
   const updateWorkItem = useTaskSpaceStore((state) => state.updateWorkItem)
   const moveWorkItem = useTaskSpaceStore((state) => state.moveWorkItem)
   const transitionWorkItem = useTaskSpaceStore((state) => state.transitionWorkItem)
+  const toggleWorkItemLabel = useTaskSpaceStore((state) => state.toggleWorkItemLabel)
   const pendingMutations = useTaskSpaceStore((state) => state.pendingMutations)
   const mutationError = useTaskSpaceStore((state) => state.mutationError)
   const [createTarget, setCreateTarget] = useState<{ kind: 'child'; parentId: string } | { kind: 'root' } | null>(null)
@@ -255,6 +256,7 @@ export default function TasksPage() {
             onUpdate={(input) => updateWorkItem(selectedWorkItemId ?? '', input)}
             onTransition={(statusDefinitionId) => transitionWorkItem(selectedWorkItemId ?? '', statusDefinitionId)}
             onMove={(parentId) => moveWorkItem(selectedWorkItemId ?? '', parentId)}
+            onToggleLabel={(labelId, add) => toggleWorkItemLabel(selectedWorkItemId ?? '', labelId, add)}
             noteEditor={selectedNote ? (
               <WorkItemNoteEditor
                 document={selectedNote.document}

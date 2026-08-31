@@ -607,6 +607,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/labels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Label
+         * @description Create a label definition.
+         */
+        post: operations["create_label_api_v1_labels_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/labels/{label_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Archive Label
+         * @description Archive (soft-delete) a label definition via a DELETE command body.
+         *
+         *     A DELETE carrying a command envelope is intentionally used so removals
+         *     get the same idempotency + CAS + payload-hash guarantees as every other
+         *     Task Space mutation.
+         */
+        delete: operations["archive_label_api_v1_labels__label_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Label
+         * @description Update mutable fields of a label definition.
+         */
+        patch: operations["update_label_api_v1_labels__label_id__patch"];
+        trace?: never;
+    };
     "/api/v1/meta/entities": {
         parameters: {
             query?: never;
@@ -1562,6 +1610,46 @@ export interface paths {
         patch: operations["update_work_item_api_v1_work_items__work_item_id__patch"];
         trace?: never;
     };
+    "/api/v1/work-items/{work_item_id}/labels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add Work Item Labels
+         * @description Converge the work item's label set to the declared full target set.
+         */
+        post: operations["add_work_item_labels_api_v1_work_items__work_item_id__labels_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}/labels/{label_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Work Item Label
+         * @description Remove one label by declaring the post-removal full target set.
+         */
+        delete: operations["remove_work_item_label_api_v1_work_items__work_item_id__labels__label_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/work-items/{work_item_id}/move": {
         parameters: {
             query?: never;
@@ -1810,10 +1898,37 @@ export interface components {
             /** Sessionid */
             sessionId: string;
         };
+        /**
+         * AddWorkItemLabelsRequest
+         * @description Add labels: declare the full target label_ids set after this mutation.
+         */
+        AddWorkItemLabelsRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Labelids */
+            labelIds: string[];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /** AppendBlocksRequest */
         AppendBlocksRequest: {
             /** Blocks */
             blocks: (components["schemas"]["ParagraphBlock"] | components["schemas"]["ChecklistBlock-Input"])[];
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
+        /** ArchiveLabelRequest */
+        ArchiveLabelRequest: {
             /** Commandid */
             commandId: string;
             /** Expectedversion */
@@ -1934,6 +2049,19 @@ export interface components {
         ConflictSideIdentity: {
             /** Sessionid */
             sessionId: string;
+            /** Spaceid */
+            spaceId: string;
+        };
+        /** CreateLabelRequest */
+        CreateLabelRequest: {
+            /** Color */
+            color?: string | null;
+            /** Commandid */
+            commandId: string;
+            /** Name */
+            name: string;
+            /** Payloadhash */
+            payloadHash: string;
             /** Spaceid */
             spaceId: string;
         };
@@ -3364,6 +3492,24 @@ export interface components {
             /** Sessionid */
             sessionId: string;
         };
+        /**
+         * RemoveWorkItemLabelsRequest
+         * @description Remove labels: declare the full target label_ids set after this
+         *     mutation (the caller computed it from its local row; the server read-
+         *     modify-writes the junction to the declared set with idempotent semantics).
+         */
+        RemoveWorkItemLabelsRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Labelids */
+            labelIds: string[];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /** ReplaceDocumentRequest */
         ReplaceDocumentRequest: {
             /** Commandid */
@@ -4407,6 +4553,21 @@ export interface components {
             /** Sessionid */
             sessionId: string;
         };
+        /** UpdateLabelRequest */
+        UpdateLabelRequest: {
+            /** Color */
+            color?: string | null;
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Name */
+            name?: string | null;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /** UpdateWorkItemRequest */
         UpdateWorkItemRequest: {
             /** Commandid */
@@ -4534,6 +4695,8 @@ export interface components {
             hardDeadline: string | null;
             /** Id */
             id: string;
+            /** Labelids */
+            labelIds: string[];
             /** Markedasattention */
             markedAsAttention: boolean;
             /** Parentid */
@@ -5888,6 +6051,127 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_label_api_v1_labels_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateLabelRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    archive_label_api_v1_labels__label_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                label_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArchiveLabelRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    update_label_api_v1_labels__label_id__patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                label_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateLabelRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
                 };
             };
             /** @description Domain or request validation error */
@@ -8228,6 +8512,89 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["UpdateWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    add_work_item_labels_api_v1_work_items__work_item_id__labels_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddWorkItemLabelsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    remove_work_item_label_api_v1_work_items__work_item_id__labels__label_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+                label_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoveWorkItemLabelsRequest"];
             };
         };
         responses: {

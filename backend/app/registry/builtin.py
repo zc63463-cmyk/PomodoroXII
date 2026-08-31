@@ -442,6 +442,10 @@ REGISTRY.register(EntitySpec(
     soft_delete=False,
     sync_conflict_policy="strict_cas",
     primary_key="work_item_id",
+    # D5 Y: the junction is a projection source, never a sync entity.  The
+    # mutation pipeline addresses rows by the complete composite key while
+    # ``primary_key`` above keeps the single-column catalog/sync contract.
+    composite_primary_key=("work_item_id", "label_id"),
     fields=(
         FieldSpec("work_item_id", "string", nullable=False, indexed=True),
         FieldSpec("label_id", "string", nullable=False, indexed=True),

@@ -65,6 +65,22 @@ def main() -> int:
     work_item_props = schemas.get("WorkItemResponse", {}).get("properties", {})
     if "childRank" not in work_item_props:
         failures.append("WorkItemResponse lost its childRank read projection.")
+    # D5 Y: the label_ids projection is a first-class read/wire field while
+    # the junction itself never enters the sync runtime directory.
+    if "labelIds" not in work_item_props:
+        failures.append("WorkItemResponse lost its labelIds read projection.")
+    for label_schema in (
+        "CreateLabelRequest",
+        "UpdateLabelRequest",
+        "ArchiveLabelRequest",
+        "AddWorkItemLabelsRequest",
+        "RemoveWorkItemLabelsRequest",
+    ):
+        if label_schema not in schemas:
+            failures.append(
+                f"{label_schema} is missing from the OpenAPI; rerun "
+                "`npm run generate:api`."
+            )
 
     registry = build_sync_registry()
     if "workItemLabel" in registry:
@@ -88,8 +104,10 @@ def main() -> int:
     print("OPENAPI DRIFT OK")
     print(
         "WorkItemLabel final semantics: runtime sync directory = NOT sync-enabled "
-        "(composite PK); OpenAPI = no label route/schema; frontend type union "
-        "keeps 'workItemLabel' as a SyncEntityType name only (empty channel)."
+        "(composite PK); the junction is delivered through the work_item post-image "
+        "labelIds projection (D5 Y), and label definition CRUD routes are open. "
+        "The frontend type union keeps 'workItemLabel' as a SyncEntityType name "
+        "only (empty channel)."
     )
     return 0
 

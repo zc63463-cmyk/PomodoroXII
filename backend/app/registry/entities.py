@@ -84,6 +84,12 @@ class EntitySpec:
     soft_delete: bool  # supports trashed_at soft-delete column
     fields: tuple[FieldSpec, ...]
     primary_key: str = "id"
+    # D5 Y: composite-primary-key entities (e.g. work_item_labels junction).
+    # ``primary_key`` remains a single registered column for catalog/sync
+    # introspection, while mutation plans must address rows by this complete
+    # key set. None => single-column primary_key semantics (the historical
+    # contract for every other registered entity).
+    composite_primary_key: tuple[str, ...] | None = None
     description: str = ""
     # P1.2 + P2.1: sync protocol metadata.
     # sync_entity_type uses camelCase for legacy client compatibility

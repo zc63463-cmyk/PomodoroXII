@@ -565,6 +565,8 @@ class TestTaskSpaceIntegration:
             "reviewPoint", "hardDeadline", "effortEstimateLowerSeconds",
             "effortEstimateUpperSeconds", "effortActualSeconds", "confidence",
             "completedAt", "cancelledAt", "archivedAt", "markedAsAttention",
+            # D5 Y: read-only labelIds projection on work item reads.
+            "labelIds",
             "version", "createdAt", "updatedAt",
         }
         assert work_item_value["spaceId"] == space_id

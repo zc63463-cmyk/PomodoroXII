@@ -11,6 +11,11 @@ export interface TransitionWorkItemInput extends SpaceCommandBase { workItemId: 
 export interface ReplaceNoteInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; document: WorkItemNoteDocument }
 export interface AppendBlocksInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; blocks: WorkItemNoteDocument['blocks'] }
 export interface ToggleChecklistInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; blockId: string; itemId: string; checked: boolean }
+export interface AddWorkItemLabelsInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; labelIds: string[] }
+export interface RemoveWorkItemLabelsInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; labelIds: string[] }
+export interface CreateLabelInput extends SpaceCommandBase { name: string; color?: string | null }
+export interface UpdateLabelInput extends SpaceCommandBase { labelId: string; expectedVersion: number; name?: string; color?: string | null }
+export interface ArchiveLabelInput extends SpaceCommandBase { labelId: string; expectedVersion: number }
 
 type AxiosConfig = { headers?: { 'Idempotency-Key'?: string } }
 
@@ -113,6 +118,47 @@ export const taskSpaceApi = {
       { expectedVersion: input.expectedVersion, statusDefinitionId: input.statusDefinitionId },
       { status_definition_id: input.statusDefinitionId },
       (body, options) => spaceApi.post(`/work-items/${encodeURIComponent(input.workItemId)}/transition`, body, options),
+    )
+  },
+  // D5 Y: label-set mutations declare the FULL target label_ids set after the
+  // mutation (labels-as-state); the server read-modify-writes the junction.
+  async addWorkItemLabels(input: AddWorkItemLabelsInput) {
+    const labelIds = [...input.labelIds].sort()
+    return command(input.operationId, input.spaceId,
+      { expectedVersion: input.expectedVersion, labelIds },
+      { label_ids: labelIds },
+      (body, options) => spaceApi.post(`/work-items/${encodeURIComponent(input.workItemId)}/labels`, body, options),
+    )
+  },
+  async removeWorkItemLabels(input: RemoveWorkItemLabelsInput) {
+    const labelIds = [...input.labelIds].sort()
+    return command(input.operationId, input.spaceId,
+      { expectedVersion: input.expectedVersion, labelIds },
+      { label_ids: labelIds },
+      (body, options) => spaceApi.request({ method: 'DELETE', url: `/work-items/${encodeURIComponent(input.workItemId)}/labels/${encodeURIComponent(input.labelIds[0] ?? '')}`, data: body, ...options }),
+    )
+  },
+  async createLabel(input: CreateLabelInput) {
+    const name = input.name.trim()
+    const color = input.color ?? null
+    return command(input.operationId, input.spaceId,
+      { name, color }, { name, color },
+      (body, options) => spaceApi.post('/labels', body, options),
+    )
+  },
+  async updateLabel(input: UpdateLabelInput) {
+    const wire: Record<string, unknown> = { expectedVersion: input.expectedVersion }
+    const internal: Record<string, unknown> = {}
+    if (input.name !== undefined) { wire.name = input.name.trim(); internal.name = input.name.trim() }
+    if (input.color !== undefined) { wire.color = input.color; internal.color = input.color }
+    return command(input.operationId, input.spaceId, wire, internal,
+      (body, options) => spaceApi.patch(`/labels/${encodeURIComponent(input.labelId)}`, body, options),
+    )
+  },
+  async archiveLabel(input: ArchiveLabelInput) {
+    return command(input.operationId, input.spaceId,
+      { expectedVersion: input.expectedVersion }, {},
+      (body, options) => spaceApi.request({ method: 'DELETE', url: `/labels/${encodeURIComponent(input.labelId)}`, data: body, ...options }),
     )
   },
   async replaceNote(input: ReplaceNoteInput) {

@@ -1,4 +1,4 @@
-import { acceptedMutationSchema, assertResponseSpace, definitionsSchema, projectSchema, workItemSchema, type TaskSpaceDefinitions, type WorkItem } from '@/lib/contracts/task-space'
+import { acceptedMutationSchema, assertResponseSpace, definitionsSchema, labelSchema, projectSchema, workItemSchema, type TaskSpaceDefinitions, type WorkItem } from '@/lib/contracts/task-space'
 import type { JsonValue } from '@/lib/contracts/payload-hash'
 import {
   canonicalNow,
@@ -9,7 +9,7 @@ import {
 } from '@/lib/direct-command-intents'
 import type { PomodoroXIDB } from '@/services/database'
 import { taskSpaceApi } from '@/services/task-space-api'
-import type { CachedProject, CachedWorkItem, DirectCommandIntentRow } from '@/types'
+import type { CachedProject, CachedWorkItem, CachedLabel, DirectCommandIntentRow } from '@/types'
 
 export interface CreateWorkItemInput {
   projectId: string
@@ -105,11 +105,29 @@ function mapWorkItem(value: unknown, spaceId: string): CachedWorkItem {
     cancelledAt: field(raw, 'cancelledAt', 'cancelled_at') ?? null,
     archivedAt: field(raw, 'archivedAt', 'archived_at') ?? null,
     markedAsAttention: field(raw, 'markedAsAttention', 'marked_as_attention'),
+    // D5 Y: labelIds is a first-class wire projection; defaults to empty for
+    // rows produced before the projection existed.
+    labelIds: Array.isArray(field(raw, 'labelIds', 'label_ids'))
+      ? (field(raw, 'labelIds', 'label_ids') as string[])
+      : [],
     version: field(raw, 'version'),
     createdAt: field(raw, 'createdAt', 'created_at'),
     updatedAt: field(raw, 'updatedAt', 'updated_at'),
   })
   return withoutSpace(assertResponseSpace(parsed, spaceId))
+}
+
+function mapLabel(value: unknown): CachedLabel {
+  const raw = primaryValue(value, ['label'])
+  return labelSchema.parse({
+    id: field(raw, 'id'),
+    name: field(raw, 'name'),
+    color: field(raw, 'color') ?? null,
+    archivedAt: field(raw, 'archivedAt', 'archived_at') ?? null,
+    version: field(raw, 'version'),
+    createdAt: field(raw, 'createdAt', 'created_at'),
+    updatedAt: field(raw, 'updatedAt', 'updated_at'),
+  })
 }
 
 function mapDefinitions(value: unknown): TaskSpaceDefinitions {
@@ -315,6 +333,67 @@ export class TaskSpaceRepository {
       .then((result) => result.workItem)
   }
 
+  // D5 Y: label-set mutation — the target label_ids set is computed client
+  // side as the full post-mutation union, then converged server side by
+  // read-modify-write inside one CAS-guarded command.
+  async addWorkItemLabels(input: { workItemId: string; labelIds: string[] }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const cached = await this.db.workItems.get(input.workItemId)
+    if (!cached) throw new Error('work_item_not_loaded')
+    const target = [...new Set([...(cached as CachedWorkItem).labelIds, ...input.labelIds])]
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'add_work_item_labels', spaceId: this.spaceId, targetId: input.workItemId,
+      request: { workItemId: input.workItemId, expectedVersion: (cached as CachedWorkItem).version, labelIds: target, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeWorkItemIntent(intent, (request) => this.api.addWorkItemLabels(request as never))
+      .then((result) => result.workItem)
+  }
+
+  async removeWorkItemLabel(input: { workItemId: string; labelId: string }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const cached = await this.db.workItems.get(input.workItemId)
+    if (!cached) throw new Error('work_item_not_loaded')
+    const target = (cached as CachedWorkItem).labelIds.filter((id) => id !== input.labelId)
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'remove_work_item_labels', spaceId: this.spaceId, targetId: input.workItemId,
+      request: { workItemId: input.workItemId, expectedVersion: (cached as CachedWorkItem).version, labelIds: target, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeWorkItemIntent(intent, (request) => this.api.removeWorkItemLabels(request as never))
+      .then((result) => result.workItem)
+  }
+
+  // D5 Y: label definition lifecycle.
+  async createLabel(input: { name: string; color?: string | null }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'create_label', spaceId: this.spaceId, targetId: null,
+      request: { ...input, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeLabelIntent(intent, (request) => this.api.createLabel(request as never))
+  }
+
+  async updateLabel(input: { labelId: string; name?: string; color?: string | null }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const cached = await this.db.labels.get(input.labelId)
+    if (!cached) throw new Error('label_not_loaded')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'update_label', spaceId: this.spaceId, targetId: input.labelId,
+      request: { ...input, expectedVersion: (cached as CachedLabel).version, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeLabelIntent(intent, (request) => this.api.updateLabel(request as never))
+  }
+
+  async archiveLabel(input: { labelId: string }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const cached = await this.db.labels.get(input.labelId)
+    if (!cached) throw new Error('label_not_loaded')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'archive_label', spaceId: this.spaceId, targetId: input.labelId,
+      request: { ...input, expectedVersion: (cached as CachedLabel).version, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeLabelIntent(intent, (request) => this.api.archiveLabel(request as never))
+  }
+
   async resumePendingDirectCommandIntents(): Promise<DirectCommandResumeResult> {
     return resumePendingDirectCommandIntents(this.db, {
       create_project: { executeExact: (intent) => this.executeProjectIntent(intent) },
@@ -322,6 +401,11 @@ export class TaskSpaceRepository {
       update_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.updateWorkItem(request as never)).then(() => undefined) },
       move_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.moveWorkItem(request as never)).then(() => undefined) },
       transition_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.transitionWorkItem(request as never)).then(() => undefined) },
+      add_work_item_labels: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.addWorkItemLabels(request as never)).then(() => undefined) },
+      remove_work_item_labels: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.removeWorkItemLabels(request as never)).then(() => undefined) },
+      create_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.createLabel(request as never)).then(() => undefined) },
+      update_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.updateLabel(request as never)).then(() => undefined) },
+      archive_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.archiveLabel(request as never)).then(() => undefined) },
       submit_review: { executeExact: async () => { throw new Error('submit_review_handler_not_bound') } },
     })
   }
@@ -348,6 +432,19 @@ export class TaskSpaceRepository {
         await this.db.workItems.put(result.workItem)
         if (result.project) await this.db.projects.put(result.project)
       },
+      now: canonicalNow,
+    })
+  }
+
+  private executeLabelIntent(
+    intent: DirectCommandIntentRow,
+    send: (request: Record<string, JsonValue>) => Promise<unknown>,
+  ) {
+    return executeDurableDirectCommand({
+      db: this.db, intent, businessTables: [this.db.labels, this.db.workItems],
+      sendExactRequest: send,
+      parseResult: (value) => mapLabel(value),
+      applyResult: async (label) => { await this.db.labels.put(label) },
       now: canonicalNow,
     })
   }

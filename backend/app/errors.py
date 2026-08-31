@@ -64,6 +64,7 @@ RESERVED_TS_CODES = frozenset(
         "command_result_unknown",
         "active_session_recovery_required",
         "work_item_structure_changed",
+        "label_name_conflict",
     }
 )
 RESERVED_S4_MAPPING_CODES = frozenset(
@@ -121,6 +122,7 @@ MUTATION_REJECTION_SPECS = MappingProxyType(
             True,
         ),
         "work_item_structure_changed": _spec(409, "Work item structure changed", "conflict"),
+        "label_name_conflict": _spec(409, "Label name conflict", "conflict"),
         "entity_not_sync_enabled": _spec(
             422, "Entity type is not sync-enabled", "validation_error"
         ),

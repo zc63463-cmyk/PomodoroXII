@@ -18,6 +18,7 @@ from app.runtime.space import SpaceRuntimeHandle
 from app.task_space.contracts import (
     CreateProject,
     CreateWorkItem,
+    LabelCommand,
     MutateWorkItem,
     NoteCommandKind,
     TaskSpaceAccepted,
@@ -36,6 +37,15 @@ WORK_ITEM_REQUEST_NAMES = {
     "update": "UpdateWorkItem",
     "move": "MoveWorkItem",
     "transition": "TransitionWorkItem",
+    # D5 Y: idempotent set mutations; the target label_ids set travels in the
+    # payload and the compiler read-modify-writes the junction table.
+    "add_labels": "AddWorkItemLabels",
+    "remove_labels": "RemoveWorkItemLabels",
+}
+LABEL_REQUEST_NAMES = {
+    "create": "CreateLabel",
+    "update": "UpdateLabel",
+    "archive": "ArchiveLabel",
 }
 
 
@@ -66,7 +76,15 @@ def _business_payload(command: TaskSpaceCommand) -> Mapping[str, object]:
             # cannot smuggle child_rank through the payload hash either.
             payload.pop("project_id", None)
             payload.pop("child_rank", None)
+        if operation in {"add_labels", "remove_labels"}:
+            # The label_ids set is the whole business payload: the hash covers
+            # "labels as state", exactly what the compiler converges the
+            # junction to.  Sorted, so the canonical hash is order-stable.
+            payload["label_ids"] = sorted(payload["label_ids"])
         return payload
+    if isinstance(command, LabelCommand):
+        # create/update carry the definition fields; archive carries none.
+        return dict(command.payload)
     if isinstance(command, WorkItemNoteCommand):
         return {
             key: value
@@ -112,7 +130,17 @@ def build_task_space_request(command: TaskSpaceCommand) -> MutationRequest:
         entity_id = command.work_item_id
         expected_version = command.expected_version
         payload = {"work_item_id": command.work_item_id, **command.payload}
-    else:  # closed TS0 union; fail loudly if its contract changes
+    elif isinstance(command, LabelCommand):
+        operation = command.operation
+        request_name = LABEL_REQUEST_NAMES[operation]
+        entity_id = (
+            command.command_id if operation == "create" else command.label_id
+        )
+        expected_version = (
+            None if operation == "create" else command.expected_version
+        )
+        payload = dict(command.payload)
+    else:  # closed TS0/TS2 union; fail loudly if its contract changes
         raise TypeError(f"unsupported TaskSpaceCommand: {type(command).__name__}")
 
     return MutationRequest.from_payload(
@@ -137,6 +165,7 @@ def _accepted(command: TaskSpaceCommand, value: Mapping[str, object]) -> TaskSpa
     entity_type = (
         "project" if isinstance(command, CreateProject)
         else "work_item" if isinstance(command, (CreateWorkItem, MutateWorkItem))
+        else "label" if isinstance(command, LabelCommand)
         else "work_item_note"
     )
     return TaskSpaceAccepted(

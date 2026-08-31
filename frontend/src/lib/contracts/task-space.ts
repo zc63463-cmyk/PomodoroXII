@@ -91,6 +91,9 @@ export const workItemSchema = z.object({
   cancelledAt: utc.nullable(),
   archivedAt: utc.nullable(),
   markedAsAttention: z.boolean(),
+  // D5 Y: read-only labelIds projection sourced from the work_item
+  // post-image (the junction table itself never syncs standalone reads).
+  labelIds: z.array(entityId).default([]),
   version: z.number().int().positive(),
   createdAt: utc,
   updatedAt: utc,
@@ -219,6 +222,9 @@ export function taskSpaceEntityBusinessPayloadForHash(
         effort_actual_seconds: row.effortActualSeconds, confidence: row.confidence,
         completed_at: row.completedAt, cancelled_at: row.cancelledAt,
         archived_at: row.archivedAt, marked_as_attention: row.markedAsAttention,
+        // D5 Y: the label_ids projection participates in the canonical work
+        // item business hash exactly like every other sync post-image field.
+        label_ids: row.labelIds,
       }
     }
     case 'workItemNote': {
@@ -260,6 +266,7 @@ export type Project = z.infer<typeof projectSchema>
 export type ProjectView = Project
 export type WorkItem = z.infer<typeof workItemSchema>
 export type WorkItemView = WorkItem
+export type Label = z.infer<typeof labelSchema>
 export type WorkItemNote = z.infer<typeof workItemNoteSchema>
 export type WorkItemNoteView = WorkItemNote
 export type TaskSpaceDefinitions = z.infer<typeof definitionsSchema>

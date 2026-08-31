@@ -10,7 +10,12 @@ from sqlalchemy import select
 from app.errors import NotFoundError
 from app.models.project import Project
 from app.models.work_item import WorkItem
-from app.models.work_item_definition import Label, StatusDefinition, TypeDefinition
+from app.models.work_item_definition import (
+    Label,
+    StatusDefinition,
+    TypeDefinition,
+    WorkItemLabel,
+)
 from app.models.work_item_note import WorkItemNote
 from app.runtime.space import SpaceRuntimeHandle
 from app.task_space.contracts import (
@@ -23,6 +28,24 @@ from app.task_space.contracts import (
 
 def _row(model) -> dict[str, object]:
     return {column.name: getattr(model, column.name) for column in model.__table__.columns}
+
+
+async def _project_label_ids(session, work_item_id: str) -> list[str]:
+    """D5 Y: read-only label_ids projection from the junction table."""
+    rows = tuple(
+        (await session.execute(
+            select(WorkItemLabel.label_id).where(
+                WorkItemLabel.work_item_id == work_item_id
+            )
+        )).scalars()
+    )
+    return sorted(str(label_id) for label_id in rows)
+
+
+def _work_item_row(model, label_ids: list[str]) -> dict[str, object]:
+    row = _row(model)
+    row["label_ids"] = label_ids
+    return row
 
 
 def _page(rows: tuple[Mapping[str, object], ...], query: TaskSpacePageQuery) -> TaskSpacePage:
@@ -91,33 +114,34 @@ class DefaultTaskSpaceQueryModule:
         self, scope: SpaceRuntimeHandle, query: TaskSpacePageQuery
     ) -> TaskSpacePage:
         project_id = query.filters.get("project_id")
+        rows: list[dict[str, object]] = []
         async with scope.session_factory() as session:
             statement = select(WorkItem)
             if project_id is not None:
                 statement = statement.where(WorkItem.project_id == str(project_id))
-            rows = tuple(
-                _row(row)
-                for row in (
-                    await session.execute(
-                        statement.order_by(
-                            WorkItem.parent_id.isnot(None),
-                            WorkItem.parent_id.asc(),
-                            WorkItem.child_rank.asc(),
-                            WorkItem.id.asc(),
-                        )
-                    )
-                ).scalars()
+            result = await session.execute(
+                statement.order_by(
+                    WorkItem.parent_id.isnot(None),
+                    WorkItem.parent_id.asc(),
+                    WorkItem.child_rank.asc(),
+                    WorkItem.id.asc(),
+                )
             )
-        return _page(rows, query)
+            for row in result.scalars():
+                rows.append(
+                    _work_item_row(row, await _project_label_ids(session, str(row.id)))
+                )
+        return _page(tuple(rows), query)
 
     async def get_work_item(
         self, scope: SpaceRuntimeHandle, work_item_id: str
     ) -> TaskSpaceView:
         async with scope.session_factory() as session:
             row = await session.get(WorkItem, work_item_id)
-        if row is None:
-            raise NotFoundError("WorkItem not found")
-        return TaskSpaceView(_row(row))
+            if row is None:
+                raise NotFoundError("WorkItem not found")
+            value = _work_item_row(row, await _project_label_ids(session, work_item_id))
+        return TaskSpaceView(value)
 
     async def read_note(
         self: "DefaultTaskSpaceQueryModule",

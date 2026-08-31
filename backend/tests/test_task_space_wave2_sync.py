@@ -28,6 +28,15 @@ from app.task_space.contracts import MutateWorkItem, TaskSpaceRejected
 from app.task_space.module import build_task_space_request
 
 
+def _wire_value(value):
+    """Deep-convert frozen mutation values to plain JSON-equivalent dicts."""
+    if isinstance(value, Mapping):
+        return {str(key): _wire_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_wire_value(item) for item in value]
+    return value
+
+
 @pytest.mark.asyncio
 async def test_same_batch_creates_under_one_parent_get_distinct_authoritative_ranks(
     task_space_fixture,
@@ -161,7 +170,7 @@ async def test_sync_move_replay_applies_source_rank_against_diverged_target(
         operation_id="sync-replay-diverged-op"
     )
     assert len(events) == 1
-    assert events[0].payload == result.value
+    assert events[0].payload == _wire_value(result.value)
 
 
 @pytest.mark.asyncio
@@ -268,7 +277,7 @@ async def test_outbox_duplicate_delivery_replays_idempotently(task_space_fixture
     assert second.value["title"] == "Synced exactly once"
     events = await task_space_fixture.visible_events(operation_id=operation_id)
     assert len(events) == 1
-    assert events[0].payload == first.value
+    assert events[0].payload == _wire_value(first.value)
 
 
 @pytest.mark.asyncio
@@ -295,7 +304,7 @@ async def test_outbox_post_image_carries_authoritative_rank_after_move(
     events = await task_space_fixture.visible_events(operation_id="pi-move")
     assert len(events) == 1
     assert events[0].entity_type == "workItem"
-    assert events[0].payload == moved.value
+    assert events[0].payload == _wire_value(moved.value)
     assert events[0].payload["child_rank"] == 0
     assert events[0].payload["parent_id"] == root_a.value["id"]
 
@@ -311,7 +320,10 @@ async def test_outbox_post_image_carries_authoritative_rank_after_move(
 def _sync_fields_subset(mapping: Mapping[str, object]) -> dict[str, object]:
     from app.task_space.compiler import WORK_ITEM_SYNC_FIELDS
 
-    return {field: mapping[field] for field in sorted(WORK_ITEM_SYNC_FIELDS)}
+    return {
+        field: _wire_value(mapping[field])
+        for field in sorted(WORK_ITEM_SYNC_FIELDS)
+    }
 
 
 async def _replay_scalar_update(task_space_fixture, prefix: str, title: str) -> dict:
@@ -357,7 +369,7 @@ async def test_sync_scalar_replay_preserves_every_sync_field_verbatim(
     client_updated_at = candidate["updated_at"]
 
     expected = _sync_fields_subset(candidate)
-    assert data["result"].value == candidate
+    assert _wire_value(data["result"].value) == _wire_value(candidate)
     assert set(data["result"].value) == set(candidate)
     row = await task_space_fixture.read_work_item(str(data["item"]["id"]))
     assert _sync_fields_subset(row) == expected
@@ -366,7 +378,7 @@ async def test_sync_scalar_replay_preserves_every_sync_field_verbatim(
 
     events = await task_space_fixture.visible_events(operation_id="scalar-fidelity-op")
     assert len(events) == 1
-    assert events[0].payload == candidate
+    assert events[0].payload == _wire_value(candidate)
 
 
 @pytest.mark.asyncio
@@ -415,7 +427,7 @@ async def test_sync_move_replay_preserves_source_rank_and_timestamp_verbatim(
         task_space_fixture.scope, request, "move-fidelity-op"
     )
 
-    assert result.value == candidate
+    assert _wire_value(result.value) == _wire_value(candidate)
     assert result.value["child_rank"] == 0  # verbatim, not max(1,-1)+1 = 2
     row = await task_space_fixture.read_work_item(str(item["id"]))
     assert _sync_fields_subset(row) == _sync_fields_subset(candidate)
@@ -423,7 +435,7 @@ async def test_sync_move_replay_preserves_source_rank_and_timestamp_verbatim(
     assert row["updated_at"] == client_updated_at
     events = await task_space_fixture.visible_events(operation_id="move-fidelity-op")
     assert len(events) == 1
-    assert events[0].payload == candidate
+    assert events[0].payload == _wire_value(candidate)
 
 
 @pytest.mark.asyncio
@@ -460,7 +472,7 @@ async def test_sync_status_replay_preserves_completed_at_cancelled_at_verbatim(
         task_space_fixture.scope, request, "status-fidelity-op"
     )
 
-    assert result.value == candidate
+    assert _wire_value(result.value) == _wire_value(candidate)
     row = await task_space_fixture.read_work_item(str(item["id"]))
     assert _sync_fields_subset(row) == _sync_fields_subset(candidate)
     assert row["status_definition_id"] == completed_id
@@ -469,7 +481,7 @@ async def test_sync_status_replay_preserves_completed_at_cancelled_at_verbatim(
     assert row["updated_at"] == client_updated_at
     events = await task_space_fixture.visible_events(operation_id="status-fidelity-op")
     assert len(events) == 1
-    assert events[0].payload == candidate
+    assert events[0].payload == _wire_value(candidate)
 
 
 @pytest.mark.asyncio

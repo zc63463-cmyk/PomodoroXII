@@ -515,7 +515,7 @@ export type SyncedTimeBlock = TimeBlock & SyncFields
 
 // Final Task Space / FocusSession cache rows. Wire space identity is checked
 // before persistence and omitted from per-Space business rows.
-import type { WorkItemNoteDocument, Project, WorkItem } from '@/lib/contracts/task-space'
+import type { WorkItemNoteDocument, Project, WorkItem, Label } from '@/lib/contracts/task-space'
 import type {
   FocusSessionView,
   SessionAttributionRevisionView,
@@ -527,6 +527,10 @@ import type {
 
 export type CachedProject = Omit<Project, 'spaceId'>
 export type CachedWorkItem = Omit<WorkItem, 'spaceId'>
+// Label definitions are Space-scoped in the backend but the wire view does not
+// repeat space identity (shared definitions endpoint); keep the cached row
+// shape identical to the label contract.
+export type CachedLabel = Label
 export interface CachedWorkItemNote {
   noteId: string
   workItemId: string
@@ -612,7 +616,7 @@ export interface SessionActivationApplicationReceiptRow {
 
 export interface DirectCommandIntentRow {
   operationId: string
-  kind: 'create_project' | 'create_work_item' | 'update_work_item' | 'move_work_item' | 'transition_work_item' | 'submit_review'
+  kind: 'create_project' | 'create_work_item' | 'update_work_item' | 'move_work_item' | 'transition_work_item' | 'submit_review' | 'create_label' | 'update_label' | 'archive_label' | 'add_work_item_labels' | 'remove_work_item_labels'
   spaceId: string
   targetId: string | null
   requestJson: string

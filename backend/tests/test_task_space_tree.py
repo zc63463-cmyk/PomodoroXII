@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 
 import pytest
 
@@ -12,6 +13,16 @@ from app.mutation.journal import MutationJournal
 from app.mutation.types import MutationRequest, MutationState, canonical_payload_hash
 from app.task_space.compiler import WORK_ITEM_SYNC_FIELDS, _stable_id
 from app.task_space.contracts import TaskSpacePageQuery, TaskSpaceRejected
+
+
+def _wire_value(value):
+    """Deep-convert frozen mutation values to plain JSON-equivalent dicts."""
+    if isinstance(value, Mapping):
+        return {str(key): _wire_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_wire_value(item) for item in value]
+    return value
+
 
 WORK_ITEM_POST_IMAGE_FIELDS = {
     "id",
@@ -39,6 +50,8 @@ WORK_ITEM_POST_IMAGE_FIELDS = {
     "created_at",
     "updated_at",
     "version",
+    # D5 Y: virtual label_ids projection travels in every workItem post-image.
+    "label_ids",
 }
 
 
@@ -177,7 +190,7 @@ async def test_same_payload_with_distinct_command_ids_allocates_distinct_work_it
     events = await task_space_fixture.visible_events(operation_id=second_command_id)
     work_item_events = [event for event in events if event.entity_type == "workItem"]
     assert len(work_item_events) == 1
-    assert work_item_events[0].payload == second.value
+    assert work_item_events[0].payload == _wire_value(second.value)
     assert set(work_item_events[0].payload) == WORK_ITEM_POST_IMAGE_FIELDS
 
 
@@ -285,10 +298,10 @@ async def test_update_and_detail_query_share_the_same_post_image(task_space_fixt
         operation_id="update-detail-command"
     )
 
-    assert fetched.value == updated.value
+    assert _wire_value(fetched.value) == _wire_value(updated.value)
     assert len(events) == 1
     assert events[0].entity_type == "workItem"
-    assert events[0].payload == updated.value
+    assert events[0].payload == _wire_value(updated.value)
     assert set(events[0].payload) == WORK_ITEM_POST_IMAGE_FIELDS
 
 
@@ -343,7 +356,7 @@ async def test_sync_work_item_action_matrix_is_policy_owned(
         events = await task_space_fixture.visible_events(operation_id=operation_id)
         assert len(events) == 1
         assert events[0].entity_type == "workItem"
-        assert events[0].payload == result.value
+        assert events[0].payload == _wire_value(result.value)
     else:
         with pytest.raises(MutationRejectedError) as caught:
             await task_space_fixture.uow.execute(
@@ -566,7 +579,7 @@ async def test_sync_work_item_accepted_move_matches_typed_post_image(task_space_
     events = await task_space_fixture.visible_events(operation_id="sync-accepted-move")
     assert len(events) == 1
     assert events[0].entity_type == "workItem"
-    assert events[0].payload == result.value
+    assert events[0].payload == _wire_value(result.value)
     assert set(events[0].payload) == WORK_ITEM_POST_IMAGE_FIELDS
 
 
@@ -618,7 +631,7 @@ async def test_sync_work_item_move_applies_authoritative_rank_verbatim(task_spac
         operation_id="sync-authoritative-rank-op"
     )
     assert len(events) == 1
-    assert events[0].payload == result.value
+    assert events[0].payload == _wire_value(result.value)
 
 
 @pytest.mark.asyncio
@@ -657,7 +670,7 @@ async def test_sync_work_item_accepted_transition_matches_typed_post_image(task_
     events = await task_space_fixture.visible_events(operation_id="sync-accepted-transition")
     assert len(events) == 1
     assert events[0].entity_type == "workItem"
-    assert events[0].payload == result.value
+    assert events[0].payload == _wire_value(result.value)
 
 
 # -- WorkItem Sync version and client_updated_at validation ------------------

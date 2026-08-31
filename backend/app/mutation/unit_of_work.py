@@ -84,6 +84,20 @@ class SyncEventPlanFactory(Protocol):
     def delete(self, row: object, *, deleted_at: str) -> SyncEventPlan: ...
 
 
+def _pk_field_set(spec: EntitySpec) -> tuple[str, ...]:
+    """Complete key fields: the registered composite key or the single PK."""
+    return spec.composite_primary_key or (spec.primary_key,)
+
+
+def _pk_values(
+    spec: EntitySpec, row: Mapping[str, object]
+) -> object:
+    """One hashable authority identity per row (tuple for composite keys)."""
+    fields = _pk_field_set(spec)
+    values = tuple(row[field] for field in fields)
+    return values if len(fields) > 1 else values[0]
+
+
 class _CatalogRowFactory:
     def __init__(self, catalog: CompiledEntityCatalog) -> None:
         self.catalog = catalog
@@ -326,7 +340,7 @@ class AuthorityOverlay:
                 row = require_frozen_object(
                     {column.key: getattr(item, column.key) for column in mapper.columns}
                 )
-                rows[(spec.name, row[spec.primary_key])] = row
+                rows[(spec.name, _pk_values(spec, row))] = row
 
         file_system = scope.file_system
         if file_system is None or not hasattr(file_system, "snapshot_projection_authority"):
@@ -404,9 +418,10 @@ class AuthorityOverlay:
         reserved = set(self._reserved_paths)
         for plan in command.db_plans:
             spec = self._spec_by_table.get(plan.table)
-            if spec is None or set(plan.primary_key) != {spec.primary_key}:
+            if spec is None or set(plan.primary_key) != set(_pk_field_set(spec)):
                 raise SpaceRecoveryRequiredError("mutation plan is not owned by the compiled catalog")
-            identity = plan.primary_key[spec.primary_key]
+            pk_fields = _pk_field_set(spec)
+            identity = _pk_values(spec, plan.primary_key)
             key = (spec.name, identity)
             current = rows.get(key)
 
@@ -416,7 +431,10 @@ class AuthorityOverlay:
                 if (
                     row is None
                     or set(row) != set(spec.field_names)
-                    or row.get(spec.primary_key) != identity
+                    or any(
+                        row.get(field) != plan.primary_key[field]
+                        for field in pk_fields
+                    )
                 ):
                     raise SpaceRecoveryRequiredError(
                         f"mutation plan has no complete {label} image"
@@ -889,15 +907,18 @@ def _validate_persisted_plan_against_catalog(
 ) -> EntitySpec:
     for spec in catalog.list():
         if spec.table_name == plan.table:
-            if set(plan.primary_key) != {spec.primary_key}:
+            if set(plan.primary_key) != set(_pk_field_set(spec)):
                 raise SpaceRecoveryRequiredError(
                     "persisted mutation primary key conflicts with the catalog"
                 )
-            identity = plan.primary_key[spec.primary_key]
+            pk_fields = _pk_field_set(spec)
             for row in (plan.before_row, plan.after_row):
                 if row is not None and (
                     set(row) != set(spec.field_names)
-                    or row.get(spec.primary_key) != identity
+                    or any(
+                        row.get(field) != plan.primary_key[field]
+                        for field in pk_fields
+                    )
                 ):
                     raise SpaceRecoveryRequiredError(
                         "persisted mutation row conflicts with the catalog"
@@ -944,6 +965,10 @@ def _validate_sync_event_against_catalog(
         expected_fields = set(spec.field_names)
         if spec.name == "note":
             expected_fields.add("content")
+        if spec.name == "work_item":
+            # D5 Y: label_ids is a virtual post-image projection sourced from
+            # the junction table — carried in the sync event, never a column.
+            expected_fields.add("label_ids")
         valid_payload = (
             set(event.payload) == expected_fields
             and str(event.payload.get(spec.primary_key)) == event.entity_id
@@ -957,11 +982,14 @@ def _validate_sync_event_against_catalog(
                 == event.payload.get("content_hash")
             )
     else:
+        expected_fields = {"deleted_at"}
         valid_payload = event.payload == {"deleted_at": event.created_at}
     if not valid_payload:
-        raise SpaceRecoveryRequiredError(
-            "persisted sync event conflicts with the catalog"
-        )
+            raise SpaceRecoveryRequiredError(
+                "persisted sync event conflicts with the catalog: "
+                f"{event.entity_type}/{event.entity_id} action={event.action} "
+                f"payload_ids={sorted(set(event.payload).union(expected_fields))}"
+            )
     return spec
 
 
@@ -1555,6 +1583,10 @@ def _validate_compiled_command(
                 event_after = dict(event.payload)
                 if spec.name == "note":
                     event_after.pop("content", None)
+                if spec.name == "work_item":
+                    # D5 Y: label_ids is a virtual projection — present in the
+                    # sync event post-image, never in the database after image.
+                    event_after.pop("label_ids", None)
                 if (
                     event_after != plan.after_row
                     or plan.after_row is None
@@ -1863,15 +1895,23 @@ class DbMutationInterpreter:
 
     def _model_for_plan(self, plan: DbMutationPlan):
         spec = self._spec_for_plan(plan)
-        return self.catalog.model_for(spec.name), spec.primary_key
+        return self.catalog.model_for(spec.name), spec
+
+    def _identity_for_plan(self, plan: DbMutationPlan):
+        spec = self._spec_for_plan(plan)
+        return (
+            dict(plan.primary_key)
+            if spec.composite_primary_key is not None
+            else plan.primary_key[spec.primary_key]
+        )
 
     async def apply(
         self, session: AsyncSession, plans: Sequence[DbMutationPlan]
     ) -> tuple[Mapping[str, object], ...]:
         applied: list[Mapping[str, object]] = []
         for plan in plans:
-            model, primary_key = self._model_for_plan(plan)
-            identity = plan.primary_key[primary_key]
+            model, spec = self._model_for_plan(plan)
+            identity = self._identity_for_plan(plan)
             if plan.operation == "insert":
                 if plan.after_row is None:
                     raise SpaceRecoveryRequiredError("insert plan has no after image")
@@ -1897,8 +1937,8 @@ class DbMutationInterpreter:
 
     async def restore_before(self, session: AsyncSession, plans: Sequence[DbMutationPlan]) -> None:
         for plan in reversed(tuple(plans)):
-            model, primary_key = self._model_for_plan(plan)
-            identity = plan.primary_key[primary_key]
+            model, spec = self._model_for_plan(plan)
+            identity = self._identity_for_plan(plan)
             row = await session.get(model, identity)
             if plan.operation == "insert":
                 if row is not None:

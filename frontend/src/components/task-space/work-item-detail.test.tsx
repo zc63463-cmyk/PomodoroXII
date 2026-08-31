@@ -34,6 +34,7 @@ const item = (overrides: Partial<CachedWorkItem> = {}): CachedWorkItem => ({
   cancelledAt: null,
   archivedAt: null,
   markedAsAttention: false,
+  labelIds: [],
   version: 1,
   createdAt: '2026-07-15T08:00:00.000Z',
   updatedAt: '2026-07-15T08:00:00.000Z',

@@ -106,7 +106,7 @@ class TaskSpaceCompiler:
 # -- read-only sync entity rejection -----------------------------------------
 
 READ_ONLY_SYNC_TYPES = frozenset({
-    "project", "status_definition", "type_definition", "label",
+    "project", "status_definition", "type_definition",
     "work_item_label",
 })
 ENTITY_ACTIONS = frozenset({"entity.create", "entity.update", "entity.delete"})
@@ -199,7 +199,7 @@ WORK_ITEM_SYNC_FIELDS = frozenset({
     "review_point", "hard_deadline", "effort_estimate_lower_seconds",
     "effort_estimate_upper_seconds", "effort_actual_seconds", "confidence",
     "completed_at", "cancelled_at", "archived_at", "marked_as_attention",
-    "created_at", "updated_at", "version",
+    "created_at", "updated_at", "version", "label_ids",
 })
 WORK_ITEM_SCALAR_FIELDS = frozenset({
     "title", "description", "type_definition_id", "priority",
@@ -212,6 +212,9 @@ WORK_ITEM_MOVE_FIELDS = frozenset({"project_id", "parent_id", "child_rank"})
 WORK_ITEM_STATUS_FIELDS = frozenset({
     "status_definition_id", "completed_at", "cancelled_at",
 })
+# D5 Y: the label_ids projection is a virtual post-image field (never a DB
+# column).  The junction table is the server-side projection source.
+WORK_ITEM_LABELS_FIELDS = frozenset({"label_ids"})
 WORK_ITEM_IMMUTABLE_FIELDS = frozenset({
     "display_key", "effort_actual_seconds", "created_at",
 })
@@ -248,11 +251,17 @@ def _work_item_update_command(context, request, before, after, timestamp):
         before,
         after,
     )
+    # D5 Y: every workItem post-image carries the label_ids projection (the
+    # junction table is the projection source; the DB row never has the field).
+    post = {
+        **after,
+        "label_ids": _label_ids_for_work_item(context.authority, str(before["id"])),
+    }
     event = SyncEventPlan(
         "work_item",
         str(before["id"]),
         "update",
-        after,
+        post,
         int(after["version"]),
         timestamp,
     )
@@ -260,7 +269,7 @@ def _work_item_update_command(context, request, before, after, timestamp):
         request=request,
         db_plans=(plan,),
         sync_events=(event,),
-        value=after,
+        value=post,
     )
 
 
@@ -278,6 +287,20 @@ def _require_row(overlay, entity_type: str, entity_id: str) -> dict[str, object]
             retryable=False,
         )
     return dict(row)
+
+
+def _label_ids_for_work_item(overlay, work_item_id: str) -> tuple[str, ...]:
+    """Server-authoritative label_ids projection for one work item.
+
+    The junction table is the projection source: rows are read from the
+    locked authority overlay (composite-key keyed), never from the sync
+    protocol.  The emitted projection is a sorted tuple of label ids.
+    """
+    return tuple(sorted(
+        str(row["label_id"])
+        for row in overlay.rows("work_item_label")
+        if str(row["work_item_id"]) == work_item_id
+    ))
 
 
 def _parent_depth(overlay, parent_id: str | None, project_id: str) -> int:
@@ -434,18 +457,21 @@ async def _compile_CreateWorkItem(self, context, request):
             "work_items", {"id": work_item_id}, "insert", None, None, item_after,
         ),
     )
+    # D5 Y: even the create post-image carries the (empty) label_ids
+    # projection so every workItem wire image has a uniform shape.
+    post = {**item_after, "label_ids": []}
     events = (
         SyncEventPlan(
             "project", str(project["id"]), "update",
             project_after, int(project_after["version"]), now,
         ),
-        SyncEventPlan("work_item", work_item_id, "create", item_after, 1, now),
+        SyncEventPlan("work_item", work_item_id, "create", post, 1, now),
     )
     return context.command(
         request=request,
         db_plans=plans,
         sync_events=events,
-        value=item_after,
+        value=post,
     )
 
 
@@ -679,10 +705,18 @@ async def _compile_sync_work_item(self, context, request):
 
     before = _require_row(context.authority, "work_item", request.entity_id)
     candidate = _full_work_item_sync_candidate(request, before)
+    # The before image is the DB row (no label_ids column); project the
+    # server-authoritative junction labels onto it for change detection.
+    before_projected = {
+        **before,
+        "label_ids": _label_ids_for_work_item(
+            context.authority, request.entity_id
+        ),
+    }
     semantic_changes = {
         field
         for field in WORK_ITEM_SYNC_FIELDS - {"id", "version", "updated_at"}
-        if candidate[field] != before[field]
+        if candidate[field] != before_projected[field]
     }
     immutable_changes = semantic_changes & WORK_ITEM_IMMUTABLE_FIELDS
     if immutable_changes:
@@ -693,8 +727,10 @@ async def _compile_sync_work_item(self, context, request):
     scalar_changes = semantic_changes & WORK_ITEM_SCALAR_FIELDS
     move_changes = semantic_changes & WORK_ITEM_MOVE_FIELDS
     status_changes = semantic_changes & WORK_ITEM_STATUS_FIELDS
+    labels_changes = semantic_changes & WORK_ITEM_LABELS_FIELDS
     known = (
-        scalar_changes | move_changes | status_changes | WORK_ITEM_IMMUTABLE_FIELDS
+        scalar_changes | move_changes | status_changes | labels_changes
+        | WORK_ITEM_IMMUTABLE_FIELDS
     )
     unknown = semantic_changes - known
     if unknown:
@@ -707,6 +743,7 @@ async def _compile_sync_work_item(self, context, request):
             ("scalar", scalar_changes),
             ("move", move_changes),
             ("status", status_changes),
+            ("labels", labels_changes),
         )
         if fields
     )
@@ -716,6 +753,7 @@ async def _compile_sync_work_item(self, context, request):
         )
 
     family = families[0]
+    junction_plans: tuple[DbMutationPlan, ...] = ()
     if family == "scalar":
         typed = _typed_sync_request(
             context,
@@ -743,7 +781,7 @@ async def _compile_sync_work_item(self, context, request):
         # Shared constraint validation (cross-project, cycle, subtree depth,
         # rank validity) — the replayed rank is taken from the candidate below.
         await _compile_MoveWorkItem(self, context, typed)
-    else:
+    elif family == "status":
         typed = _typed_sync_request(
             context,
             request,
@@ -753,21 +791,152 @@ async def _compile_sync_work_item(self, context, request):
         # Shared constraint validation (status machine, active-child conflict,
         # envelope claim).  completed_at/cancelled_at are adopted verbatim.
         await _compile_TransitionWorkItem(self, context, typed)
+    else:
+        # D5 Y labels family: the candidate carries the full label_ids
+        # projection; replay diffs the junction table (present -> insert,
+        # absent -> delete) inside the same transaction.
+        declared_raw = candidate["label_ids"]
+        if (
+            not isinstance(declared_raw, (list, tuple))
+            or not all(isinstance(value, str) for value in declared_raw)
+            or sorted(declared_raw) != list(declared_raw)
+        ):
+            _reject_work_item_sync(
+                "label_ids_must_be_sorted_unique_ids", label_ids=declared_raw
+            )
+        declared = list(declared_raw)
+        for label_id in declared:
+            _require_row(context.authority, "label", label_id)
+        current = set(_label_ids_for_work_item(context.authority, request.entity_id))
+        after_ids = set(declared)
+        labels_plans: list[DbMutationPlan] = []
+        for label_id in sorted(after_ids - current):
+            row = {"work_item_id": request.entity_id, "label_id": label_id}
+            labels_plans.append(
+                DbMutationPlan("work_item_labels", dict(row), "insert", None, None, row)
+            )
+        for label_id in sorted(current - after_ids):
+            row = {"work_item_id": request.entity_id, "label_id": label_id}
+            labels_plans.append(
+                DbMutationPlan("work_item_labels", dict(row), "delete", None, row, None)
+            )
+        junction_plans = tuple(labels_plans)
 
     # The validated candidate is the authoritative result of a sync replay:
     # every WORK_ITEM_SYNC_FIELDS value is adopted verbatim.  The typed
     # compilers above share the constraint validation but MUST NOT share the
     # "regenerate the result" behavior — online commands generate authoritative
     # server timestamps, replay never re-derives updated_at / completed_at /
-    # cancelled_at / child_rank.
-    after = dict(candidate)
+    # cancelled_at / child_rank.  label_ids is a virtual projection field: it
+    # travels in the sync event post-image but never in a work_items row.
+    after = {key: value for key, value in candidate.items() if key != "label_ids"}
     plan = DbMutationPlan(
         "work_items", {"id": after["id"]}, "update",
         request.expected_version, before, after,
     )
     event = SyncEventPlan(
-        "work_item", str(after["id"]), "update", after,
+        "work_item", str(after["id"]), "update", dict(candidate),
         int(after["version"]), str(after["updated_at"]),
+    )
+    return context.command(
+        request=request,
+        db_plans=(plan, *junction_plans),
+        sync_events=(event,),
+        value=dict(candidate),
+    )
+
+
+TaskSpaceCompiler.compile_sync_work_item = _compile_sync_work_item
+
+
+# -- Label definition lifecycle (D5 Y) ---------------------------------------
+
+
+def _require_unique_label_name(overlay, name: str, *, excluding_id: str | None = None) -> None:
+    """labels.name is globally unique (unique constraint) per Space."""
+    from app.mutation.types import MutationRuleViolation
+
+    for row in overlay.rows("label"):
+        if str(row["name"]) == name and (
+            excluding_id is None or str(row["id"]) != excluding_id
+        ):
+            raise MutationRuleViolation(
+                "label_name_conflict", {"name": name}, retryable=False
+            )
+
+
+async def _compile_CreateLabel(self, context, request):
+    overlay = context.authority
+    name = str(request.payload["name"]).strip()
+    if not name:
+        from app.mutation.types import MutationRuleViolation
+
+        raise MutationRuleViolation(
+            "label_name_conflict",
+            {"name": "", "reason": "name_required"},
+            retryable=False,
+        )
+    _require_unique_label_name(overlay, name)
+    label_id = _stable_id("label", str(request.payload["command_id"]))
+    now = self.now_iso_ms()
+    after = {
+        "id": label_id,
+        "name": name,
+        "color": request.payload.get("color"),
+        "archived_at": None,
+        "created_at": now,
+        "updated_at": now,
+        "version": 1,
+    }
+    plan = DbMutationPlan("labels", {"id": label_id}, "insert", None, None, after)
+    event = SyncEventPlan("label", label_id, "create", after, 1, now)
+    return context.command(
+        request=request,
+        db_plans=(plan,),
+        sync_events=(event,),
+        value=after,
+    )
+
+
+async def _compile_UpdateLabel(self, context, request):
+    overlay = context.authority
+    label = _require_row(overlay, "label", request.entity_id)
+    _require_expected_version(label, request.expected_version)
+    patch = {
+        key: request.payload[key]
+        for key in ("name", "color")
+        if key in request.payload
+    }
+    if not patch:
+        # No-op update: return the authoritative unchanged post-image.
+        return context.command(
+            request=request, db_plans=(), sync_events=(), value=label
+        )
+    if "name" in patch:
+        from app.mutation.types import MutationRuleViolation
+
+        name = str(patch["name"]).strip()
+        if not name:
+            raise MutationRuleViolation(
+                "label_name_conflict",
+                {"name": "", "reason": "name_required"},
+                retryable=False,
+            )
+        _require_unique_label_name(overlay, name, excluding_id=str(label["id"]))
+        patch["name"] = name
+    now = _monotonic_updated_at(str(label["updated_at"]), self.now_iso_ms())
+    after = {
+        **label,
+        **patch,
+        "updated_at": now,
+        "version": int(label["version"]) + 1,
+    }
+    plan = DbMutationPlan(
+        "labels", {"id": label["id"]}, "update",
+        request.expected_version, label, after,
+    )
+    event = SyncEventPlan(
+        "label", str(label["id"]), "update", after, int(after["version"]), now,
     )
     return context.command(
         request=request,
@@ -777,7 +946,116 @@ async def _compile_sync_work_item(self, context, request):
     )
 
 
-TaskSpaceCompiler.compile_sync_work_item = _compile_sync_work_item
+async def _compile_ArchiveLabel(self, context, request):
+    overlay = context.authority
+    label = _require_row(overlay, "label", request.entity_id)
+    _require_expected_version(label, request.expected_version)
+    now = _monotonic_updated_at(str(label["updated_at"]), self.now_iso_ms())
+    after = {
+        **label,
+        "archived_at": now,
+        "updated_at": now,
+        "version": int(label["version"]) + 1,
+    }
+    plan = DbMutationPlan(
+        "labels", {"id": label["id"]}, "update",
+        request.expected_version, label, after,
+    )
+    event = SyncEventPlan(
+        "label", str(label["id"]), "update", after, int(after["version"]), now,
+    )
+    return context.command(
+        request=request,
+        db_plans=(plan,),
+        sync_events=(event,),
+        value=after,
+    )
+
+
+TaskSpaceCompiler.compile_CreateLabel = _compile_CreateLabel
+TaskSpaceCompiler.compile_UpdateLabel = _compile_UpdateLabel
+TaskSpaceCompiler.compile_ArchiveLabel = _compile_ArchiveLabel
+
+
+# -- WorkItem label-set mutations (D5 Y) -------------------------------------
+
+
+def _compile_label_set_mutation(self, context, request, *, remove: bool):
+    """One atomic AddWorkItemLabels / RemoveWorkItemLabels command.
+
+    The caller declares the target label_ids set it expects AFTER this
+    mutation.  The server read-modify-write converges the junction table to
+    that set inside one mutation command, bumping only the work_item version
+    when the set actually changes (idempotent no-op otherwise).  Stale
+    expected_versions fail with version_conflict — never a silent merge — and
+    a refreshed retry converges to the union.
+    """
+    overlay = context.authority
+    entity_id = str(request.entity_id)
+    item = _require_row(overlay, "work_item", entity_id)
+    _require_expected_version(item, request.expected_version)
+    declared = set(map(str, request.payload["label_ids"]))
+    for label_id in declared:
+        _require_row(overlay, "label", label_id)
+    current = set(_label_ids_for_work_item(overlay, entity_id))
+    after_ids = (current - declared) if remove else (current | declared)
+    value_ids = sorted(after_ids)
+    if after_ids == current:
+        # Idempotent set semantics: nothing changed -> no version bump, no
+        # sync event; the command is a zero-effect receipt (retry-safe).
+        return context.command(
+            request=request,
+            db_plans=(),
+            sync_events=(),
+            value={**item, "label_ids": value_ids},
+        )
+    now = _monotonic_updated_at(str(item["updated_at"]), self.now_iso_ms())
+    item_after = {
+        **item,
+        "updated_at": now,
+        "version": int(item["version"]) + 1,
+    }
+    junction_plans: list[DbMutationPlan] = []
+    for label_id in sorted(after_ids - current):
+        row = {"work_item_id": entity_id, "label_id": label_id}
+        junction_plans.append(
+            DbMutationPlan("work_item_labels", dict(row), "insert", None, None, row)
+        )
+    for label_id in sorted(current - after_ids):
+        row = {"work_item_id": entity_id, "label_id": label_id}
+        junction_plans.append(
+            DbMutationPlan("work_item_labels", dict(row), "delete", None, row, None)
+        )
+    plans = (
+        DbMutationPlan(
+            "work_items", {"id": entity_id}, "update",
+            request.expected_version, item, item_after,
+        ),
+        *junction_plans,
+    )
+    event_payload = {**item_after, "label_ids": value_ids}
+    event = SyncEventPlan(
+        "work_item", entity_id, "update", event_payload,
+        int(item_after["version"]), now,
+    )
+    return context.command(
+        request=request,
+        db_plans=plans,
+        sync_events=(event,),
+        value=event_payload,
+    )
+
+
+async def _compile_AddWorkItemLabels(self, context, request):
+    return _compile_label_set_mutation(self, context, request, remove=False)
+
+
+async def _compile_RemoveWorkItemLabels(self, context, request):
+    return _compile_label_set_mutation(self, context, request, remove=True)
+
+
+TaskSpaceCompiler.compile_AddWorkItemLabels = _compile_AddWorkItemLabels
+TaskSpaceCompiler.compile_RemoveWorkItemLabels = _compile_RemoveWorkItemLabels
 
 
 # -- WorkItemNote canonical row loading and post-image compilation -------------

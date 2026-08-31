@@ -23,8 +23,10 @@ from app.routes.v1.contract_dependencies import (
     require_space_identity,
 )
 from app.schemas.task_space import (
+    AddWorkItemLabelsRequest,
     CreateWorkItemRequest,
     MoveWorkItemRequest,
+    RemoveWorkItemLabelsRequest,
     TaskSpaceAcceptedResponse,
     TransitionWorkItemRequest,
     UpdateWorkItemRequest,
@@ -126,6 +128,7 @@ def _work_item_response(value, space_id: str, depth: int) -> WorkItemResponse:
         cancelled_at=value["cancelled_at"],
         archived_at=value["archived_at"],
         marked_as_attention=bool(value["marked_as_attention"]),
+        label_ids=sorted(str(item) for item in value.get("label_ids", [])),
         version=int(value["version"]),
         created_at=str(value["created_at"]),
         updated_at=str(value["updated_at"]),
@@ -275,6 +278,85 @@ async def transition_work_item(
             "operation": "transition",
             "status_definition_id": body.status_definition_id,
         },
+    )
+    outcome = await command_module.execute(scope, command)
+    return await _map_work_item_outcome(outcome, scope, query_module)
+
+
+# --------------------------------------------------------------------------- #
+# D5 Y label junction routes — MUST be declared before /{work_item_id}
+# --------------------------------------------------------------------------- #
+
+
+def _labels_command(
+    *,
+    operation: str,
+    command_id: str,
+    space_id: str,
+    work_item_id: str,
+    expected_version: int,
+    payload_hash: str,
+    label_ids: list[str],
+) -> MutateWorkItem:
+    business = {"label_ids": sorted(label_ids)}
+    return MutateWorkItem(
+        command_id=command_id,
+        space_id=space_id,
+        work_item_id=work_item_id,
+        expected_version=expected_version,
+        payload_hash=payload_hash,
+        payload={"operation": operation, **business},
+    )
+
+
+@router.post("/{work_item_id}/labels", response_model=TaskSpaceAcceptedResponse)
+async def add_work_item_labels(
+    work_item_id: str,
+    body: AddWorkItemLabelsRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    command_module=Depends(get_task_space_command_module),
+    query_module=Depends(get_task_space_query_module),
+    scope=Depends(get_space_runtime_handle),
+) -> TaskSpaceAcceptedResponse:
+    """Converge the work item's label set to the declared full target set."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
+    command = _labels_command(
+        operation="add_labels",
+        command_id=body.command_id,
+        space_id=body.space_id,
+        work_item_id=work_item_id,
+        expected_version=body.expected_version,
+        payload_hash=body.payload_hash,
+        label_ids=body.label_ids,
+    )
+    outcome = await command_module.execute(scope, command)
+    return await _map_work_item_outcome(outcome, scope, query_module)
+
+
+@router.delete(
+    "/{work_item_id}/labels/{label_id}", response_model=TaskSpaceAcceptedResponse
+)
+async def remove_work_item_label(
+    work_item_id: str,
+    label_id: str,
+    body: RemoveWorkItemLabelsRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    command_module=Depends(get_task_space_command_module),
+    query_module=Depends(get_task_space_query_module),
+    scope=Depends(get_space_runtime_handle),
+) -> TaskSpaceAcceptedResponse:
+    """Remove one label by declaring the post-removal full target set."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
+    command = _labels_command(
+        operation="remove_labels",
+        command_id=body.command_id,
+        space_id=body.space_id,
+        work_item_id=work_item_id,
+        expected_version=body.expected_version,
+        payload_hash=body.payload_hash,
+        label_ids=body.label_ids,
     )
     outcome = await command_module.execute(scope, command)
     return await _map_work_item_outcome(outcome, scope, query_module)

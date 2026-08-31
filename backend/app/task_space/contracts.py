@@ -31,6 +31,12 @@ class NoteCommandKind(StrEnum):
     TOGGLE_CHECKLIST_ITEM = "toggle_checklist_item"
 
 
+class LabelOperation(StrEnum):
+    CREATE = "create"
+    UPDATE = "update"
+    ARCHIVE = "archive"
+
+
 SYSTEM_STATUS_IDS: Mapping[str, str] = {
     "not_started": "sys-status-not-started",
     "in_progress": "sys-status-in-progress",
@@ -104,7 +110,33 @@ class MutateWorkItem:
     payload: Mapping[str, object]
 
 
-TaskSpaceCommand: TypeAlias = CreateProject | CreateWorkItem | MutateWorkItem | WorkItemNoteCommand
+@dataclass(frozen=True)
+class LabelCommand:
+    """Label definition lifecycle: create / update / archive.
+
+    ``label_id`` is required for update/archive (oracle identity); create
+    leaves it None because the server derives the label id from command_id.
+    """
+    operation: str
+    command_id: str
+    space_id: str
+    label_id: str | None
+    expected_version: int | None
+    payload_hash: str
+    payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if self.operation not in {item.value for item in LabelOperation}:
+            raise ValueError(f"unsupported label operation: {self.operation}")
+        if self.operation != "create" and (
+            self.label_id is None or self.expected_version is None
+        ):
+            raise ValueError("label update/archive requires label_id and expected_version")
+
+
+TaskSpaceCommand: TypeAlias = (
+    CreateProject | CreateWorkItem | MutateWorkItem | WorkItemNoteCommand | LabelCommand
+)
 
 
 @dataclass(frozen=True)

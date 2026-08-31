@@ -101,6 +101,33 @@ class WorkItemCreate(WireModel):
     priority: str | None = Field(default=None, max_length=32)
 
 
+class LabelCreate(WireModel):
+    """Payload for creating a label definition."""
+
+    name: str = Field(min_length=1, max_length=100)
+    color: str | None = Field(default=None, max_length=32)
+
+
+class LabelResponse(WireResponseModel):
+    """Label definition view returned by query/CRUD routes."""
+
+    id: str
+    name: str
+    color: str | None
+    archived_at: str | None
+    version: int = Field(ge=1)
+    created_at: str
+    updated_at: str
+
+
+class WorkItemLabelsRequest(WireModel):
+    """D5 Y: declare the FULL target label_ids set expected after this
+    mutation (labels-as-state).  The server read-modify-writes the junction
+    table to that set inside one command; idempotent set semantics apply."""
+
+    label_ids: list[str] = Field(min_length=0, max_length=256)
+
+
 class WorkItemResponse(WireResponseModel):
     """Work item view returned by query routes."""
 
@@ -128,6 +155,8 @@ class WorkItemResponse(WireResponseModel):
     cancelled_at: str | None
     archived_at: str | None
     marked_as_attention: bool
+    # D5 Y: read-only label_ids projection sourced from the junction table.
+    label_ids: list[str]
     version: int = Field(ge=1)
     created_at: str
     updated_at: str
@@ -192,6 +221,52 @@ class TransitionWorkItemRequest(WireModel):
     expected_version: int = Field(ge=0)
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     status_definition_id: str = Field(min_length=1, max_length=64)
+
+
+class AddWorkItemLabelsRequest(WireModel):
+    """Add labels: declare the full target label_ids set after this mutation."""
+
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    label_ids: list[str] = Field(min_length=0, max_length=256)
+
+
+class RemoveWorkItemLabelsRequest(WireModel):
+    """Remove labels: declare the full target label_ids set after this
+    mutation (the caller computed it from its local row; the server read-
+    modify-writes the junction to the declared set with idempotent semantics)."""
+
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    label_ids: list[str] = Field(min_length=0, max_length=256)
+
+
+class CreateLabelRequest(WireModel):
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    name: str = Field(min_length=1, max_length=100)
+    color: str | None = Field(default=None, max_length=32)
+
+
+class UpdateLabelRequest(WireModel):
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    color: str | None = Field(default=None, max_length=32)
+
+
+class ArchiveLabelRequest(WireModel):
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 # --------------------------------------------------------------------------- #

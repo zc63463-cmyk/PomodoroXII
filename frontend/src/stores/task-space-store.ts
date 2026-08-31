@@ -4,7 +4,7 @@ import { canonicalNow } from '@/lib/direct-command-intents'
 import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
 import { NoteAutosaveController, type FlushReason } from '@/lib/task-space/note-autosave-controller'
-import type { CachedProject, CachedWorkItem, CachedWorkItemNote, WorkItemNoteConflictRow } from '@/types'
+import type { CachedProject, CachedWorkItem, CachedWorkItemNote, WorkItemNoteConflictRow, CachedLabel } from '@/types'
 
 export interface CreateChildInput {
   title?: string
@@ -59,6 +59,12 @@ export interface TaskSpaceRepositoryLike {
     workItemId: string
     statusDefinitionId: string
   }) => Promise<CachedWorkItem>
+  // D5 Y: label-set mutations (idempotent set semantics + server CAS).
+  addWorkItemLabels: (input: { workItemId: string; labelIds: string[] }) => Promise<CachedWorkItem>
+  removeWorkItemLabel: (input: { workItemId: string; labelId: string }) => Promise<CachedWorkItem>
+  createLabel: (input: { name: string; color?: string | null }) => Promise<CachedLabel>
+  updateLabel: (input: { labelId: string; name?: string; color?: string | null }) => Promise<CachedLabel>
+  archiveLabel: (input: { labelId: string }) => Promise<CachedLabel>
   resumePendingDirectCommandIntents: () => Promise<{ failed: Array<{ operationId: string; code: string }> }>
 }
 
@@ -135,6 +141,8 @@ export interface TaskSpaceActions {
   }) => Promise<CachedWorkItem>
   moveWorkItem: (workItemId: string, newParentId: string | null) => Promise<CachedWorkItem>
   transitionWorkItem: (workItemId: string, statusDefinitionId: string) => Promise<CachedWorkItem>
+  // D5 Y: converge the work item label set (add=true union, false removal).
+  toggleWorkItemLabel: (workItemId: string, labelId: string, add: boolean) => Promise<CachedWorkItem>
   reset: () => void
 }
 
@@ -766,6 +774,31 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             mutationError: null,
           }))
           return transitioned
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
+          throw error
+        } finally {
+          endMutation(workItemId)
+        }
+      },
+
+      // D5 Y: converge the label set idempotently; stale CAS surfaces a
+      // stable version_conflict for manual retry (never a silent merge).
+      async toggleWorkItemLabel(workItemId: string, labelId: string, add: boolean) {
+        beginMutation(workItemId, 'work_item_mutation_in_flight')
+        const repository = get().repository
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          const updated = add
+            ? await repository.addWorkItemLabels({ workItemId, labelIds: [labelId] })
+            : await repository.removeWorkItemLabel({ workItemId, labelId })
+          set((state) => ({
+            workItems: state.workItems.map((item) => item.id === updated.id ? updated : item),
+            error: null,
+            mutationError: null,
+          }))
+          return updated
         } catch (error) {
           const mapped = resolveTaskSpaceMutationError(error)
           set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })

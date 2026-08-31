@@ -36,6 +36,7 @@ const item = (id: string, title: string, parentId: string | null, depth: 1 | 2 |
   cancelledAt: null,
   archivedAt: null,
   markedAsAttention: false,
+  labelIds: [],
   version: 1,
   createdAt: '2026-07-15T08:00:00.000Z',
   updatedAt: '2026-07-15T08:00:00.000Z',

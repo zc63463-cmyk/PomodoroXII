@@ -40,6 +40,11 @@ function noopHandlers(executeProject: (intent: DirectCommandIntentRow) => Promis
     update_work_item: { executeExact: async () => undefined },
     move_work_item: { executeExact: async () => undefined },
     transition_work_item: { executeExact: async () => undefined },
+    add_work_item_labels: { executeExact: async () => undefined },
+    remove_work_item_labels: { executeExact: async () => undefined },
+    create_label: { executeExact: async () => undefined },
+    update_label: { executeExact: async () => undefined },
+    archive_label: { executeExact: async () => undefined },
     submit_review: { executeExact: async () => undefined },
   }
 }
@@ -89,6 +94,11 @@ describe('durable direct command intents', () => {
       update_work_item: { executeExact: async () => undefined },
       move_work_item: { executeExact: async () => undefined },
       transition_work_item: { executeExact: async () => undefined },
+      add_work_item_labels: { executeExact: async () => undefined },
+      remove_work_item_labels: { executeExact: async () => undefined },
+      create_label: { executeExact: async () => undefined },
+      update_label: { executeExact: async () => undefined },
+      archive_label: { executeExact: async () => undefined },
       submit_review: { executeExact: async () => undefined },
     })
 
