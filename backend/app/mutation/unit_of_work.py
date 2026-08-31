@@ -969,8 +969,18 @@ def _validate_sync_event_against_catalog(
             # D5 Y: label_ids is a virtual post-image projection sourced from
             # the junction table — carried in the sync event, never a column.
             expected_fields.add("label_ids")
+        payload_fields = set(event.payload)
+        # D5 Y upgrade path: events persisted before the label_ids projection
+        # shipped exist legitimately without it (the junction was necessarily
+        # empty then).  Treat the absent field as an empty projection instead
+        # of failing recovery — a strict equality here would fail-closed
+        # every pre-D5-Y database at restart/recovery.
+        legacy_without_labels = (
+            spec.name == "work_item"
+            and payload_fields == expected_fields - {"label_ids"}
+        )
         valid_payload = (
-            set(event.payload) == expected_fields
+            (payload_fields == expected_fields or legacy_without_labels)
             and str(event.payload.get(spec.primary_key)) == event.entity_id
             and event.payload.get("version") == event.version
         )
