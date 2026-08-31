@@ -538,6 +538,7 @@ class TestTypedResponseSchemas:
             "hardDeadline", "effortEstimateLowerSeconds",
             "effortEstimateUpperSeconds", "effortActualSeconds", "confidence",
             "completedAt", "cancelledAt", "archivedAt", "markedAsAttention",
+            "labelIds",
             "version", "createdAt", "updatedAt",
         }
         assert set(component["required"]) == props

@@ -149,6 +149,7 @@ def test_ts0_error_codes_are_exact() -> None:
         "command_result_unknown",
         "active_session_recovery_required",
         "work_item_structure_changed",
+        "label_name_conflict",
     }
     assert RESERVED_TS_CODES <= set(MUTATION_REJECTION_SPECS)
 

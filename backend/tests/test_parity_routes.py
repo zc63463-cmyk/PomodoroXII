@@ -22,6 +22,7 @@ EXPECTED_NON_ENTITY_PREFIXES = {
     "/auth",
     "/active-session",
     "/focus-sessions",
+    "/labels",
     "/meta",
     "/projects",
     "/trash",
