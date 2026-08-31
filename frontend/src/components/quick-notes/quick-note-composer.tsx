@@ -1,6 +1,6 @@
 'use client'
 
-import { createElement, FormEvent, KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { createElement, FormEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { PlusIcon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { QuickNoteEditorStatusLine } from '@/components/quick-notes/quick-note-editor-status-line'
@@ -201,14 +201,14 @@ export function QuickNoteComposer({
     )
   }
 
-  function handleKeyUp(event: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleKeyUp(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) {
       return
     }
     syncCaretFromTextarea(event)
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault()
       event.currentTarget.form?.requestSubmit()
       return
@@ -320,7 +320,7 @@ export function QuickNoteComposer({
       'form',
       {
         onSubmit,
-        onKeyDown: (event: KeyboardEvent<HTMLFormElement>) => {
+        onKeyDown: (event: ReactKeyboardEvent<HTMLFormElement>) => {
           // 长按 peek：按下 peek 键立即进入预览（preventDefault 防止 Alt
           // 松开触发浏览器菜单；e.repeat 忽略长按重复；IME 组合中忽略）。
           if (
@@ -328,7 +328,7 @@ export function QuickNoteComposer({
             !isPreview &&
             matchesPeekKey(event, peekKey) &&
             !event.repeat &&
-            !event.isComposing
+            !event.nativeEvent.isComposing
           ) {
             event.preventDefault()
             setIsPeeking(true)
@@ -343,7 +343,7 @@ export function QuickNoteComposer({
             else setIsPreview(false)
           }
         },
-        onKeyUp: (event: KeyboardEvent<HTMLFormElement>) => {
+        onKeyUp: (event: ReactKeyboardEvent<HTMLFormElement>) => {
           // 兜底：textarea 仍在 DOM 时（偶发未卸载）keyup 也会冒泡到这里。
           if (isPeeking && matchesPeekKey(event, peekKey)) {
             setIsPeeking(false)
