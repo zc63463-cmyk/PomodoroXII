@@ -69,6 +69,8 @@ export function QuickNoteComposer({
   const [pendingCaretIndex, setPendingCaretIndex] = useState<number | null>(null)
   const [discardArmed, setDiscardArmed] = useState(false)
   const [isPreview, setIsPreview] = useState(false)
+  const [isPeeking, setIsPeeking] = useState(false)
+  const [peekKey] = useState<QuickNotePeekKey>(readPeekKey)
   const discardArmedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewTags = extractQuickNoteTags(draft)
   const draftTags = new Set(previewTags)
@@ -93,6 +95,8 @@ export function QuickNoteComposer({
     saveState,
     draftSaveState,
   })
+  // 预览可见性 = 手动切换态 ∪ 长按 peek 态（两者正交，Esc 只关当前层）。
+  const previewVisible = isFocusMode && (isPreview || isPeeking)
 
   useEffect(() => {
     if (pendingCaretIndex === null) return
@@ -111,8 +115,30 @@ export function QuickNoteComposer({
 
   // 预览是专注态的瞬时视角：退出专注即复位为编辑态（对齐原版 isPreview watch）。
   useEffect(() => {
-    if (!isFocusMode && isPreview) setIsPreview(false)
-  }, [isFocusMode, isPreview])
+    if (!isFocusMode) {
+      setIsPreview(false)
+      setIsPeeking(false)
+    }
+  }, [isFocusMode])
+
+  // 长按 peek：松开后 textarea 重新挂载，自动收回焦点，打字零中断。
+  useEffect(() => {
+    if (previewVisible) return
+    if (!isFocusMode) return
+    textareaRef.current?.focus()
+  }, [previewVisible, isFocusMode])
+
+  // peek 打开期间监听 window keyup（textarea 已卸载，keyup 只会到 window）。
+  useEffect(() => {
+    if (!isPeeking) return
+    function onKeyUp(event: KeyboardEvent) {
+      if (!matchesPeekKey(event, peekKey)) return
+      event.preventDefault()
+      setIsPeeking(false)
+    }
+    window.addEventListener('keyup', onKeyUp)
+    return () => window.removeEventListener('keyup', onKeyUp)
+  }, [isPeeking, peekKey])
 
   // 生长式 textarea（移植自原版 MemoEditorTextarea）：compact 态随内容
   // 自动生长（CSS max-h-72 封顶后转内滚）；进入专注态清空内联高度，交给
@@ -295,12 +321,32 @@ export function QuickNoteComposer({
       {
         onSubmit,
         onKeyDown: (event: KeyboardEvent<HTMLFormElement>) => {
-          // 预览态的 Esc 渐进退出：第一层先回编辑态（preventDefault 阻断
-          // workspace 的全局 Esc 退出专注），第二层才真正退出专注。
-          if (event.key === 'Escape' && isPreview) {
+          // 长按 peek：按下 peek 键立即进入预览（preventDefault 防止 Alt
+          // 松开触发浏览器菜单；e.repeat 忽略长按重复；IME 组合中忽略）。
+          if (
+            !isPeeking &&
+            !isPreview &&
+            matchesPeekKey(event, peekKey) &&
+            !event.repeat &&
+            !event.isComposing
+          ) {
+            event.preventDefault()
+            setIsPeeking(true)
+            return
+          }
+          // Esc 渐进退出：peek 优先关闭，其次退出手动预览，最后才轮到
+          // workspace 的全局 Esc 退出专注（preventDefault 阻断）。
+          if (event.key === 'Escape' && previewVisible) {
             event.preventDefault()
             event.stopPropagation()
-            setIsPreview(false)
+            if (isPeeking) setIsPeeking(false)
+            else setIsPreview(false)
+          }
+        },
+        onKeyUp: (event: KeyboardEvent<HTMLFormElement>) => {
+          // 兜底：textarea 仍在 DOM 时（偶发未卸载）keyup 也会冒泡到这里。
+          if (isPeeking && matchesPeekKey(event, peekKey)) {
+            setIsPeeking(false)
           }
         },
         className: isFocusMode
@@ -314,7 +360,7 @@ export function QuickNoteComposer({
             ? quickNoteStyles.composerFocusAnchor
             : quickNoteStyles.tagAutocompleteAnchor,
         },
-        isFocusMode && isPreview
+        isFocusMode && previewVisible
           ? createElement(
               'div',
               {
@@ -326,6 +372,13 @@ export function QuickNoteComposer({
                 content: draft,
                 variant: 'preview',
               }),
+              isPeeking && !isPreview
+                ? createElement(
+                    'div',
+                    { className: quickNoteStyles.metaText },
+                    '松开返回编辑',
+                  )
+                : null,
             )
           : createElement('textarea', {
               ref: textareaRef,
@@ -383,9 +436,9 @@ export function QuickNoteComposer({
       createElement(QuickNoteEditorToolbar, {
         onInsert: handleToolbarInsert,
         showPreviewToggle: isFocusMode,
-        previewActive: isPreview,
+        previewActive: previewVisible,
         onTogglePreview: () => setIsPreview((value) => !value),
-        insertsDisabled: isPreview,
+        insertsDisabled: previewVisible,
       }),
       createElement(
         'div',
@@ -514,6 +567,31 @@ export function QuickNoteComposer({
 function draftIncludesTagText(draft: string, tag: string): boolean {
   if (!tag) return false
   return draft.toLowerCase().split(/\s+/).includes(`#${tag}`)
+}
+
+// ---- 长按 peek 快捷键（默认 Alt，localStorage 可配置）----
+// 设置页 UI 待 P1 接入；当前可通过控制台切换：
+//   localStorage.setItem('pxii_quick_note_peek_key', 'backslash' | 'alt')
+const PEEK_KEY_STORAGE_KEY = 'pxii_quick_note_peek_key'
+export const QUICK_NOTE_PEEK_KEY_STORAGE = PEEK_KEY_STORAGE_KEY
+
+export type QuickNotePeekKey = 'alt' | 'backslash'
+
+function readPeekKey(): QuickNotePeekKey {
+  try {
+    const value = localStorage.getItem(PEEK_KEY_STORAGE_KEY)
+    if (value === 'alt' || value === 'backslash') return value
+  } catch {
+    // storage 不可用（隐私模式等）时用默认值
+  }
+  return 'alt'
+}
+
+function matchesPeekKey(
+  event: { key: string },
+  peekKey: QuickNotePeekKey,
+): boolean {
+  return peekKey === 'alt' ? event.key === 'Alt' : event.key === '\\'
 }
 
 function getComposerStatus({
