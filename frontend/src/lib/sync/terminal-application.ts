@@ -12,7 +12,7 @@ import type {
   SyncTerminalApplicationEvidence,
 } from '@/services/database'
 import type { OutboxEvent, WorkItemNoteConflictRow } from '@/types'
-import type { ApiSyncV2PushResponse, RetainedLwwSyncEntityType } from './types'
+import type { ApiSyncV2PushResponse } from './types'
 import { ENTITY_TYPE_TO_TABLE } from './types'
 import { requireCanonicalStoredTimestamp } from './response-schema'
 import {
@@ -270,9 +270,21 @@ export async function applyTerminalResultTwoPhase(
   // QN-S2 补强：applied 的 RetainedLWW 实体行收敛 _dirty=false（仅限 LWW 实体，避开 TS3/S4）
   const appliedIds = new Set(result.applied.map((item) => item.operation_id))
   const appliedEntityTables = new Set<string>()
+  // 服务端 push 响应的 entity_type 是 snake_case（如 quick_note），而
+  // ENTITY_TYPE_TO_TABLE 的键是 outbox 行的 camelCase（如 quickNote）。
+  // 必须归一化后再查表，否则多词实体（quickNote/habitCheckIn/timeBlock/
+  // memoComment/scheduleQuickNote）会漏加进事务表清单，后续
+  // db.table(tableName).update(...) 在事务内触发 Dexie NotFoundError
+  // （object store not found），导致整笔 terminal 应用回滚、outbox 永不收敛。
+  const normalizedEntityTypeToTable = new Map(
+    Object.entries(ENTITY_TYPE_TO_TABLE).map(([key, table]) => [
+      normalizeSyncEntityType(key), table,
+    ]),
+  )
   for (const outcome of result.applied) {
-    const tableName =
-      ENTITY_TYPE_TO_TABLE[outcome.entity_type as RetainedLwwSyncEntityType]
+    const tableName = normalizedEntityTypeToTable.get(
+      normalizeSyncEntityType(outcome.entity_type),
+    )
     if (tableName) appliedEntityTables.add(tableName)
   }
   const transactionTables: Array<string | Dexie.Table> = [
@@ -320,8 +332,9 @@ export async function applyTerminalResultTwoPhase(
         )
         if (!appliedIds.has(frozen.operationId)) continue
         await db.outbox.delete(frozen.durableKey)
-        const tableName =
-          ENTITY_TYPE_TO_TABLE[frozen.entityType as RetainedLwwSyncEntityType]
+        const tableName = normalizedEntityTypeToTable.get(
+          normalizeSyncEntityType(frozen.entityType),
+        )
         if (tableName) {
           await db.table(tableName).update(frozen.entityId, { _dirty: false })
         }

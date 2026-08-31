@@ -268,6 +268,51 @@ describe('terminal application coverage', () => {
     })).toThrow(PushAuthorityIntegrityError)
   })
 
+  it('converges _dirty for multi-word LWW entities when the server returns snake_case entity_type', async () => {
+    // 回归：服务端 push 响应 entity_type 是 snake_case（quick_note），而
+    // outbox 行是 camelCase（quickNote）。修复前 ENTITY_TYPE_TO_TABLE 用原始
+    // snake_case 查表返回 undefined，quickNotes 表未加入事务清单，事务内
+    // db.table('quickNotes').update(...) 抛 Dexie NotFoundError，小记同步永不收敛。
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: new FakeLockManager() })
+    const spaceId = `terminal-qn-snake-${crypto.randomUUID()}`
+    const db = await openPomodoroXIDB(spaceId)
+    const meta = new MetaDB(`terminal-qn-snake-meta-${crypto.randomUUID()}`)
+    await meta.open()
+    databases.push(db, meta)
+    const createdAt = '2026-07-14T10:00:00.000Z'
+    await db.quickNotes.put({
+      id: 'quick-1', content: 'hello', mood: null, tags: [], pinned: false,
+      created_at: createdAt, updated_at: createdAt, _dirty: true,
+    } as never)
+    const payload = {
+      id: 'quick-1', content: 'hello', mood: 'normal', tags: [], pinned: false,
+      archived_at: null, archive_file_path: null, folder_id: null,
+      trashed_at: null, migrated_to_note_id: null,
+      created_at: createdAt, updated_at: createdAt,
+    }
+    await db.outbox.add({
+      id: 1, spaceId, entityType: 'quickNote', entityId: 'quick-1', action: 'create',
+      payload: JSON.stringify(payload), payloadHash: await hashCommandPayload(payload),
+      operationId: 'op-qn', compoundOperationId: null, compoundOrder: null,
+      expectedVersion: null, requiresVersionRebase: false, transportState: 'ready', createdAt,
+      synced: false, lastError: null, lastErrorCode: null, failedAt: null,
+      attemptCount: 0, ...INITIAL_S4_OUTBOX_FIELDS,
+    })
+    await withSpaceAuthorityFence(spaceId, async (token) => {
+      const selected = await selectOneAuthorityUnit(db)
+      expect(selected).not.toBeNull()
+      await applyTerminalResultTwoPhase(db, meta, spaceId, token, selected!, {
+        batch_id: selected!.authority.batchId,
+        applied: [{ operation_id: 'op-qn', entity_type: 'quick_note', entity_id: 'quick-1', version: 1, resolution: null }],
+        conflicts: [],
+        errors: [],
+      }, 'push_response')
+    })
+    expect(await db.outbox.get(1)).toBeUndefined()
+    expect((await db.quickNotes.get('quick-1'))?._dirty).toBe(false)
+    expect(await db.syncPushBatches.count()).toBe(0)
+  })
+
   it('reconciles a space-committed compound terminal after a crash', async () => {
     Object.defineProperty(navigator, 'locks', { configurable: true, value: new FakeLockManager() })
     const spaceId = `terminal-${crypto.randomUUID()}`
