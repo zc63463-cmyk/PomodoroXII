@@ -122,10 +122,15 @@ export function QuickNoteComposer({
   }, [isFocusMode])
 
   // 长按 peek：松开后 textarea 重新挂载，自动收回焦点，打字零中断。
+  // 光标锁定到内容末尾——peek 多发生在打字中途，回来直接续写。
   useEffect(() => {
     if (previewVisible) return
     if (!isFocusMode) return
-    textareaRef.current?.focus()
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.focus()
+    const end = textarea.value.length
+    textarea.setSelectionRange(end, end)
   }, [previewVisible, isFocusMode])
 
   // peek 打开期间监听 window keyup（textarea 已卸载，keyup 只会到 window）。

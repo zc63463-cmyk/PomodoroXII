@@ -1853,11 +1853,16 @@ describe('QuickNotesView', () => {
     expect(preview).toHaveTextContent('长按预览的草稿内容')
     expect(screen.getByText('松开返回编辑')).toBeInTheDocument()
 
-    // 松开 Alt（keyup 走 window 监听，textarea 卸载后焦点在 body）：回编辑态
+    // 松开 Alt（keyup 走 window 监听，textarea 卸载后焦点在 body）：回编辑态，
+    // 光标锁定到内容末尾（peek 多发生在打字中途，回来直接续写）
     fireEvent.keyUp(window, { key: 'Alt' })
     expect(screen.queryByTestId('quick-note-composer-preview')).not.toBeInTheDocument()
-    expect(screen.getByLabelText('小记内容')).toBeInTheDocument()
-    expect(screen.getByLabelText('小记内容')).toHaveValue('长按预览的草稿内容')
+    const textarea = screen.getByLabelText('小记内容')
+    expect(textarea).toBeInTheDocument()
+    expect(textarea).toHaveFocus()
+    expect(textarea.selectionStart).toBe(textarea.value.length)
+    expect(textarea.selectionEnd).toBe(textarea.value.length)
+    expect(textarea).toHaveValue('长按预览的草稿内容')
 
     // Ctrl+Enter 提交链路未被 peek 破坏：退出专注后正常
     fireEvent.keyDown(screen.getByLabelText('小记内容'), { key: 'Escape' })
