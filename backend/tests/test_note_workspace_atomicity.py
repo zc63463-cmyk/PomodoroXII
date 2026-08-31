@@ -54,6 +54,46 @@ if TYPE_CHECKING:
     from app.knowledge.store import KnowledgeStore
 
 
+def test_work_item_legacy_sync_event_without_label_ids_is_accepted() -> None:
+    """Pre-D5-Y WorkItem events have no virtual labels projection."""
+    from app.mutation.unit_of_work import _validate_sync_event_against_catalog
+
+    spec = CATALOG.get("work_item")
+    payload = {field: None for field in spec.field_names}
+    payload.update({"id": "legacy-work-item", "version": 3})
+    event = SyncEventPlan(
+        entity_type="work_item",
+        entity_id="legacy-work-item",
+        action="update",
+        payload=payload,
+        version=3,
+        created_at="2026-08-31T00:00:00.000Z",
+    )
+
+    assert _validate_sync_event_against_catalog(event, CATALOG) is spec
+
+
+def test_work_item_sync_event_missing_non_label_field_remains_rejected() -> None:
+    """The D5-Y legacy exception must not weaken catalog validation."""
+    from app.mutation.unit_of_work import _validate_sync_event_against_catalog
+
+    spec = CATALOG.get("work_item")
+    payload = {field: None for field in spec.field_names}
+    payload.update({"id": "incomplete-work-item", "version": 3, "label_ids": []})
+    del payload["title"]
+    event = SyncEventPlan(
+        entity_type="work_item",
+        entity_id="incomplete-work-item",
+        action="update",
+        payload=payload,
+        version=3,
+        created_at="2026-08-31T00:00:00.000Z",
+    )
+
+    with pytest.raises(SpaceRecoveryRequiredError, match="conflicts with the catalog"):
+        _validate_sync_event_against_catalog(event, CATALOG)
+
+
 def test_knowledge_commands_preserve_note_body_as_canonical_intent() -> None:
     from app.knowledge.commands import KnowledgeCommands
 
