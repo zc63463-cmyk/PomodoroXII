@@ -28,4 +28,43 @@ describe('QuickNoteEditorToolbar', () => {
       before: '- [ ] ', placeholder: '任务', mode: 'line',
     })
   })
+
+  it('hides the preview toggle by default', () => {
+    render(createElement(QuickNoteEditorToolbar, { onInsert: vi.fn() }))
+    expect(screen.queryByRole('button', { name: '预览' })).not.toBeInTheDocument()
+  })
+
+  it('renders the preview toggle and disables inserts while previewing', () => {
+    const onInsert = vi.fn()
+    const onTogglePreview = vi.fn()
+    const { rerender } = render(
+      createElement(QuickNoteEditorToolbar, {
+        onInsert,
+        showPreviewToggle: true,
+        previewActive: false,
+        onTogglePreview,
+      }),
+    )
+    const previewButton = screen.getByRole('button', { name: '预览' })
+    expect(previewButton).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByRole('button', { name: '粗体' })).toBeEnabled()
+
+    fireEvent.click(previewButton)
+    expect(onTogglePreview).toHaveBeenCalledTimes(1)
+
+    rerender(
+      createElement(QuickNoteEditorToolbar, {
+        onInsert,
+        showPreviewToggle: true,
+        previewActive: true,
+        onTogglePreview,
+        insertsDisabled: true,
+      }),
+    )
+    const editButton = screen.getByRole('button', { name: '返回编辑' })
+    expect(editButton).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: '粗体' })).toBeDisabled()
+    fireEvent.click(editButton)
+    expect(onTogglePreview).toHaveBeenCalledTimes(2)
+  })
 })

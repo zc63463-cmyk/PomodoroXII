@@ -31,7 +31,11 @@ export const quickNoteStyles = {
     'flex flex-wrap items-center gap-0.5 rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-panel-muted)] px-1 py-1',
   toolbarButton:
     'inline-flex size-8 items-center justify-center rounded-md disabled:cursor-not-allowed disabled:opacity-40',
+  toolbarButtonActive:
+    'bg-[color:var(--qn-accent-soft)] text-[color:var(--qn-accent-readable)] ring-1 ring-[color:var(--qn-selection-ring)] hover:bg-[color:var(--qn-accent-soft)] hover:text-[color:var(--qn-accent-readable)]',
   toolbarIcon: 'size-4',
+  previewPane:
+    'min-h-40 overflow-y-auto rounded-md border border-[color:var(--qn-border)] bg-[color:var(--qn-field)] px-5 py-4 text-lg leading-8 text-[color:var(--qn-text-strong)] outline-none lg:min-h-0',
   focusEditTimelineSink:
     'quick-note-focus-timeline-sink pointer-events-none select-none transition-[opacity,transform] duration-300 ease-out',
   metaText: 'text-xs text-[color:var(--qn-muted)]',

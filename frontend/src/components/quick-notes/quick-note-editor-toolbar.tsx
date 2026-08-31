@@ -4,6 +4,7 @@ import { createElement, ElementType } from 'react'
 import {
   Bold as BoldIcon,
   Code as CodeIcon,
+  Eye as EyeIcon,
   Hash as HashIcon,
   Heading1 as Heading1Icon,
   Italic as ItalicIcon,
@@ -11,6 +12,7 @@ import {
   List as ListIcon,
   ListOrdered as ListOrderedIcon,
   ListTodo as ListTodoIcon,
+  PencilLine as PencilLineIcon,
   Strikethrough as StrikethroughIcon,
   TextQuote as TextQuoteIcon,
 } from 'lucide-react'
@@ -51,27 +53,66 @@ const BUTTONS: ToolbarButton[] = [
 export function QuickNoteEditorToolbar({
   onInsert,
   label = '快捷编辑',
+  showPreviewToggle = false,
+  previewActive = false,
+  onTogglePreview,
+  insertsDisabled = false,
 }: {
   onInsert: (insert: QuickNoteToolbarInsert) => void
   label?: string
+  /** 渲染预览切换键（专注模式专用）。 */
+  showPreviewToggle?: boolean
+  /** 预览态激活中：切换键高亮，插入键全部禁用（预览时无光标概念，插入有歧义）。 */
+  previewActive?: boolean
+  onTogglePreview?: () => void
+  insertsDisabled?: boolean
 }) {
+  const insertButtons = BUTTONS.map((button) =>
+    createElement(
+      'button',
+      {
+        key: button.key,
+        type: 'button',
+        'data-toolbar-key': button.key,
+        title: button.title,
+        'aria-label': button.title,
+        disabled: insertsDisabled,
+        className: cn(quickNoteStyles.ghostButton, quickNoteStyles.toolbarButton),
+        onClick: () => onInsert(button.insert),
+      },
+      createElement(button.icon, { className: quickNoteStyles.toolbarIcon }),
+    ),
+  )
+
+  const previewToggle =
+    showPreviewToggle && onTogglePreview
+      ? createElement(
+          'button',
+          {
+            key: 'preview-toggle',
+            type: 'button',
+            'data-toolbar-key': 'preview',
+            title: previewActive ? '返回编辑' : '预览',
+            'aria-label': previewActive ? '返回编辑' : '预览',
+            'aria-pressed': previewActive,
+            className: cn(
+              quickNoteStyles.ghostButton,
+              quickNoteStyles.toolbarButton,
+              previewActive ? quickNoteStyles.toolbarButtonActive : null,
+            ),
+            onClick: onTogglePreview,
+          },
+          createElement(
+            previewActive ? PencilLineIcon : EyeIcon,
+            { className: quickNoteStyles.toolbarIcon },
+          ),
+        )
+      : null
+
   return createElement(
     'div',
     { className: quickNoteStyles.toolbar, role: 'toolbar', 'aria-label': label },
-    BUTTONS.map((button) =>
-      createElement(
-        'button',
-        {
-          key: button.key,
-          type: 'button',
-          'data-toolbar-key': button.key,
-          title: button.title,
-          'aria-label': button.title,
-          className: cn(quickNoteStyles.ghostButton, quickNoteStyles.toolbarButton),
-          onClick: () => onInsert(button.insert),
-        },
-        createElement(button.icon, { className: quickNoteStyles.toolbarIcon }),
-      ),
-    ),
+    previewToggle,
+    insertButtons,
   )
 }

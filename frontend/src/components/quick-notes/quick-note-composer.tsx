@@ -8,6 +8,7 @@ import {
   QuickNoteEditorToolbar,
   type QuickNoteToolbarInsert,
 } from '@/components/quick-notes/quick-note-editor-toolbar'
+import { QuickNoteMarkdown } from '@/components/quick-notes/quick-note-markdown'
 import { quickNoteStyles } from '@/components/quick-notes/quick-note-styles'
 import {
   applyQuickNoteTagAutocomplete,
@@ -67,6 +68,7 @@ export function QuickNoteComposer({
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0)
   const [pendingCaretIndex, setPendingCaretIndex] = useState<number | null>(null)
   const [discardArmed, setDiscardArmed] = useState(false)
+  const [isPreview, setIsPreview] = useState(false)
   const discardArmedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewTags = extractQuickNoteTags(draft)
   const draftTags = new Set(previewTags)
@@ -106,6 +108,11 @@ export function QuickNoteComposer({
     if (!isFocusMode) return
     textareaRef.current?.focus()
   }, [isFocusMode])
+
+  // 预览是专注态的瞬时视角：退出专注即复位为编辑态（对齐原版 isPreview watch）。
+  useEffect(() => {
+    if (!isFocusMode && isPreview) setIsPreview(false)
+  }, [isFocusMode, isPreview])
 
   // 生长式 textarea（移植自原版 MemoEditorTextarea）：compact 态随内容
   // 自动生长（CSS max-h-72 封顶后转内滚）；进入专注态清空内联高度，交给
@@ -287,6 +294,15 @@ export function QuickNoteComposer({
       'form',
       {
         onSubmit,
+        onKeyDown: (event: KeyboardEvent<HTMLFormElement>) => {
+          // 预览态的 Esc 渐进退出：第一层先回编辑态（preventDefault 阻断
+          // workspace 的全局 Esc 退出专注），第二层才真正退出专注。
+          if (event.key === 'Escape' && isPreview) {
+            event.preventDefault()
+            event.stopPropagation()
+            setIsPreview(false)
+          }
+        },
         className: isFocusMode
           ? quickNoteStyles.composerFocusForm
           : 'flex flex-col gap-3',
@@ -298,25 +314,38 @@ export function QuickNoteComposer({
             ? quickNoteStyles.composerFocusAnchor
             : quickNoteStyles.tagAutocompleteAnchor,
         },
-        createElement('textarea', {
-          ref: textareaRef,
-          value: draft,
-          onChange: handleDraftChange,
-          onClick: syncCaretFromTextarea,
-          onKeyUp: handleKeyUp,
-          onKeyDown: handleKeyDown,
-          placeholder: isFocusMode ? '专注写作，把这一段想法完整落下来...' : '随手写下正在想的事...',
-          rows: variant === 'focus' ? 12 : editingNote ? 5 : 4,
-          className:
-            variant === 'focus'
-              ? quickNoteStyles.textareaFocus
-              : quickNoteStyles.textarea,
-          'aria-label': '小记内容',
-          'aria-autocomplete': 'list',
-          'aria-controls': isAutocompleteVisible ? listboxId : undefined,
-          'aria-expanded': isAutocompleteVisible,
-          'aria-activedescendant': activeOptionId,
-        }),
+        isFocusMode && isPreview
+          ? createElement(
+              'div',
+              {
+                'data-testid': 'quick-note-composer-preview',
+                className: quickNoteStyles.previewPane,
+                'aria-label': '小记预览',
+              },
+              createElement(QuickNoteMarkdown, {
+                content: draft,
+                variant: 'preview',
+              }),
+            )
+          : createElement('textarea', {
+              ref: textareaRef,
+              value: draft,
+              onChange: handleDraftChange,
+              onClick: syncCaretFromTextarea,
+              onKeyUp: handleKeyUp,
+              onKeyDown: handleKeyDown,
+              placeholder: isFocusMode ? '专注写作，把这一段想法完整落下来...' : '随手写下正在想的事...',
+              rows: variant === 'focus' ? 12 : editingNote ? 5 : 4,
+              className:
+                variant === 'focus'
+                  ? quickNoteStyles.textareaFocus
+                  : quickNoteStyles.textarea,
+              'aria-label': '小记内容',
+              'aria-autocomplete': 'list',
+              'aria-controls': isAutocompleteVisible ? listboxId : undefined,
+              'aria-expanded': isAutocompleteVisible,
+              'aria-activedescendant': activeOptionId,
+            }),
         isAutocompleteVisible
           ? createElement(
               'div',
@@ -351,7 +380,13 @@ export function QuickNoteComposer({
             )
           : null,
       ),
-      createElement(QuickNoteEditorToolbar, { onInsert: handleToolbarInsert }),
+      createElement(QuickNoteEditorToolbar, {
+        onInsert: handleToolbarInsert,
+        showPreviewToggle: isFocusMode,
+        previewActive: isPreview,
+        onTogglePreview: () => setIsPreview((value) => !value),
+        insertsDisabled: isPreview,
+      }),
       createElement(
         'div',
         { className: 'flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between' },

@@ -4,27 +4,10 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import type { QuickNote } from '@/types'
 import { db, spaceDBManager } from '@/services/space-db'
 
-vi.mock('lucide-react', () => ({
-  ArchiveRestoreIcon: () =>
-    createElement('span', { 'data-testid': 'archive-restore-icon' }),
-  BoldIcon: () => createElement('span', { 'data-testid': 'bold-icon' }),
-  CodeIcon: () => createElement('span', { 'data-testid': 'code-icon' }),
-  FileTextIcon: () => createElement('span', { 'data-testid': 'file-text-icon' }),
-  GitMergeIcon: () => createElement('span', { 'data-testid': 'merge-icon' }),
-  HashIcon: () => createElement('span', { 'data-testid': 'hash-icon' }),
-  Heading1Icon: () => createElement('span', { 'data-testid': 'heading1-icon' }),
-  ItalicIcon: () => createElement('span', { 'data-testid': 'italic-icon' }),
-  LinkIcon: () => createElement('span', { 'data-testid': 'link-icon' }),
-  ListIcon: () => createElement('span', { 'data-testid': 'list-icon' }),
-  ListOrderedIcon: () => createElement('span', { 'data-testid': 'list-ordered-icon' }),
-  ListTodoIcon: () => createElement('span', { 'data-testid': 'list-todo-icon' }),
-  PinIcon: () => createElement('span', { 'data-testid': 'pin-icon' }),
-  PlusIcon: () => createElement('span', { 'data-testid': 'plus-icon' }),
-  SearchIcon: () => createElement('span', { 'data-testid': 'search-icon' }),
-  StrikethroughIcon: () => createElement('span', { 'data-testid': 'strike-icon' }),
-  TextQuoteIcon: () => createElement('span', { 'data-testid': 'text-quote-icon' }),
-  Trash2Icon: () => createElement('span', { 'data-testid': 'trash-icon' }),
-  XIcon: () => createElement('span', { 'data-testid': 'x-icon' }),
+vi.mock('lucide-react', async (importOriginal) => ({
+  // 展开真实导出：图标在 jsdom 下渲染为普通 SVG，测试无需桩替；
+  // 避免每新增一个图标都要手工补 mock 键（Hash/HashIcon 别名坑）。
+  ...(await importOriginal<object>()),
 }))
 
 const toastMock = vi.hoisted(() =>
@@ -1809,6 +1792,49 @@ describe('QuickNotesView', () => {
     expect(screen.getByLabelText('小记探索')).toBeInTheDocument()
     expect(screen.queryByLabelText('小记时间线')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /给专注模式一点背景/ })).not.toBeInTheDocument()
+  })
+
+  it('toggles a markdown preview inside focus mode and Esc returns to editing first', async () => {
+    storeMocks.state.quickNotes = [
+      makeQuickNote({
+        id: 'focus-preview-note',
+        content: '# 预览标题\n\n**加粗** 与 _斜体_',
+      }),
+    ]
+
+    const { rerender } = render(createElement(QuickNotesView))
+    fireEvent.click(screen.getByRole('button', { name: '专注' }))
+    storeMocks.state.focusMode = 'focus-edit'
+    rerender(createElement(QuickNotesView))
+
+    expect(screen.queryByTestId('quick-note-composer-preview')).not.toBeInTheDocument()
+
+    // 先写入草稿，再切换预览
+    fireEvent.change(screen.getByLabelText('小记内容'), {
+      target: { value: '# 预览标题\n\n**加粗** 与 _斜体_' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '预览' }))
+    const preview = screen.getByTestId('quick-note-composer-preview')
+    expect(preview).toHaveTextContent('预览标题')
+    expect(preview).toHaveTextContent('加粗')
+    // 预览态下 textarea 被替换，插入按钮禁用
+    expect(screen.queryByLabelText('小记内容')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '粗体' })).toBeDisabled()
+
+    // Esc 第一层：退出预览回到编辑态，不退出专注
+    fireEvent.keyDown(screen.getByTestId('quick-note-composer-preview'), {
+      key: 'Escape',
+    })
+    expect(screen.queryByTestId('quick-note-composer-preview')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '退出专注' })).toBeInTheDocument()
+    expect(screen.getByLabelText('小记内容')).toBeInTheDocument()
+
+    // 第二层 Esc：退出专注
+    fireEvent.keyDown(window, { key: 'Escape' })
+    storeMocks.state.focusMode = 'normal'
+    rerender(createElement(QuickNotesView))
+    expect(screen.queryByRole('button', { name: '退出专注' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('小记时间线')).toBeInTheDocument()
   })
 
   it('returns to normal after a successful focus-edit submit', async () => {
