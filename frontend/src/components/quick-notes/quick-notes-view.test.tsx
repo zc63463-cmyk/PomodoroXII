@@ -1857,7 +1857,7 @@ describe('QuickNotesView', () => {
     // 光标锁定到内容末尾（peek 多发生在打字中途，回来直接续写）
     fireEvent.keyUp(window, { key: 'Alt' })
     expect(screen.queryByTestId('quick-note-composer-preview')).not.toBeInTheDocument()
-    const textarea = screen.getByLabelText('小记内容')
+    const textarea = screen.getByLabelText('小记内容') as HTMLTextAreaElement
     expect(textarea).toBeInTheDocument()
     expect(textarea).toHaveFocus()
     expect(textarea.selectionStart).toBe(textarea.value.length)
