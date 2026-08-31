@@ -30,3 +30,31 @@ archived without being promoted to approved status.
 | `sources/pomodoroxi-legacy/PRD-v1.1.md` | `E:\Development\MyAwesomeApp\pomodoroxi\docs\PRD-v1.1.md` | Pomodoroxi | PomodoroXI PRD v1.1 / 2026-06-07 | Product requirements v1.1 | tracked | legacy-reference | `3d1d18f26729c3242a6df0dd223983bd1d5f621865b0bd84d59a01643a7e6f17` | Consolidated legacy Timer-Task-Session loop, routes, fields, UI sketch, and confirmed decisions. |
 | `sources/pomodoroxi-legacy/migration-map.md` | `E:\Development\MyAwesomeApp\pomodoroxi\docs\migration-map.md` | Pomodoroxi | PomodoroX to PomodoroXI migration map v1.0 / 2026-06-06 | Migration map | tracked | legacy-reference | `b5b09b6f7e8dad05de1c0afe3f18a4f00607bd2d0467714a020e16eb716c503a` | Provides concrete Timer/Task/Session component and field lineage. |
 | `sources/pomodoroxi-legacy/phase2-design.md` | `E:\Development\MyAwesomeApp\pomodoroxi\docs\phase2-design.md` | Pomodoroxi | Phase 2 semantic enhancement design v1.0 | Phase 2 design | tracked | legacy-reference | `473bd2ff0f7929e65c562ba1ab6ee358b5c3f8f41a1fb62446142dc44be70c83` | Preserves legacy Tag and TaskRelation choices that differ from WorkItem contracts. |
+
+## 第二批入库（2026-08-31，14 份 / 3604 行）
+
+来源：E:////Development////MyAwesomeApp////tip-tip-phase14c-l2-webgl-192b9a7////docs（上游母库共 21 份，此前仅入库 12 份，本次补齐剩余 14 份）
+
+| 文件 | 行数 | 与任务空间的关系 |
+|---|---:|---|
+| WORKITEM_V1_IMPLEMENTATION_PLAN.md | 706 | **上游实施计划**：Phase 0-6 阶段划分；§5.4 Projection 模块管派生信号（可删可重建、不存用户事实）；Phase 3「柔性计划与重排闭环」交付 reviewDue/needsReplan/lowConfidenceAttention |
+| SAVED_VIEW_QUERY_AST_V10.md | 484 | 查询 AST：§5 布尔字段表含 isBlocked / hasProgressAnomaly / hasIncompleteLevel3（均限定仅 L2）——智能层信号的查询载体 |
+| SAVED_VIEW_QUERY_AST_ACCEPTANCE_V10.md | 177 | AST 验收 |
+| SAVED_VIEW_V10.md | 226 | §边界：待处理区管系统派生问题与处置，Saved View 只能复制条件 |
+| PROJECT_ACTIVITY_V10.md | 292 | Project 活动叙事投影（v1.2 §14 详情布局 Activity 区） |
+| ACTIVITY_RULE_TABLE_V10.md | 345 | 活动规则表 |
+| ACTIVITY_ACCEPTANCE_DATASET_V10.md | 266 | 活动验收数据集 |
+| FINAL_REVIEW_AND_ACTION_GUIDE_2026-07-11.md | 175 | 终审与行动指南 |
+| PRODUCT_DESIGN_DEEP_REVIEW_2026-07-11.md | 357 | 产品设计深评 |
+| MODULE_VIEW_ACTIVITY_P0_REVIEW.md | 93 | Module 视图活动 P0 评审 |
+| CYCLE_CAPACITY_REVIEW.md | 323 | Cycle 容量评审（CYCLE 域 Non-goal 的评审依据） |
+| CYCLE_REVIEW_INDEX.md | (cycle-review/REVIEW_INDEX) | Cycle 评审索引 |
+| REVIEW_INDEX.md | 70 | tiptip-next-review 总索引 |
+| AGENT_RECOMMENDATIONS.md | 90 | 上游 Agent 建议（与 Agent 接入战略相关） |
+
+### 关键结论
+
+1. **智能层在上游已有完整契约 + 实施阶段**：不是从零设计，而是「补契约 + 按规则表实现」
+2. **我们的实施顺序与上游相反**：上游 Phase 3 = 柔性计划与信号，Phase 4 = 三层树；我们做了树（Phase 4）与同步，信号（Phase 3）为零
+3. **待处理区无独立契约**：由 v1.2 §13 信号 + Session §14 + AST 查询组合而成，UI 层需自定（边界见 SAVED_VIEW_V10 §边界表）
+4. **上游实施计划比 v1.2 契约更细**：多出 lowConfidenceAttention 信号、动态复盘点、投入档位解析
