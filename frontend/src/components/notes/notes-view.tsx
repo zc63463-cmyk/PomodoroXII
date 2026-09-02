@@ -14,12 +14,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { QuickNoteMarkdown } from '@/components/quick-notes/quick-note-markdown'
 import { Button } from '@/components/ui/button'
+import {
+  buildFolderTree,
+  countUnfiledNotes,
+  flattenFolderTree,
+} from '@/lib/folders/folder-selectors'
 import { getNoteSummary, getNoteTitle } from '@/lib/notes/note-selectors'
+import { useFolderStore } from '@/stores/folder-store'
 import { useNoteStore } from '@/stores/note-store'
-import type { Note } from '@/types'
+import type { FolderTreeNode, Note } from '@/types'
 
 /** 自动保存防抖：既避免每次按键都入队，也不会让用户等太久。 */
 const AUTOSAVE_DELAY_MS = 600
+
+/** 「未归类」是 folder_id 为 null 的笔记，用一个不可能与真实 id 冲突的哨兵。 */
+const UNFILED = '__unfiled__'
 
 export function NotesView() {
   const notes = useNoteStore((s) => s.notes)
@@ -31,10 +40,16 @@ export function NotesView() {
   const updateNote = useNoteStore((s) => s.updateNote)
   const deleteNote = useNoteStore((s) => s.deleteNote)
 
+  const folders = useFolderStore((s) => s.folders)
+  const loadFolders = useFolderStore((s) => s.loadFolders)
+  const createFolder = useFolderStore((s) => s.createFolder)
+
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [isPreview, setIsPreview] = useState(false)
   const [saveState, setSaveState] = useState<'idle' | 'pending' | 'saved'>('idle')
+  /** null = 全部；'__unfiled__' = 未归类；其余 = 文件夹 id */
+  const [activeFolder, setActiveFolder] = useState<string | null>(null)
 
   // 编辑中的草稿。切笔记时用它重置编辑器，避免把 A 的内容写进 B。
   const editingIdRef = useRef<string | null>(null)
@@ -46,7 +61,19 @@ export function NotesView() {
 
   useEffect(() => {
     void loadNotes()
-  }, [loadNotes])
+    void loadFolders()
+  }, [loadNotes, loadFolders])
+
+  const folderTree = useMemo(() => buildFolderTree(folders, notes), [folders, notes])
+  const unfiledCount = useMemo(() => countUnfiledNotes(notes), [notes])
+  const folderOptions = useMemo(() => flattenFolderTree(folderTree), [folderTree])
+
+  // 按选中的文件夹筛选。字段是 folder_id，未归类即 null。
+  const visibleNotes = useMemo(() => {
+    if (activeFolder === null) return notes
+    if (activeFolder === UNFILED) return notes.filter((n) => n.folder_id == null)
+    return notes.filter((n) => n.folder_id === activeFolder)
+  }, [notes, activeFolder])
 
   // 切换笔记时把服务端/本地的最新内容载入编辑器。
   useEffect(() => {
@@ -102,13 +129,61 @@ export function NotesView() {
           </Button>
         </div>
 
+        <div className="max-h-1/2 min-h-0 shrink-0 overflow-y-auto border-b">
+          <div className="flex items-center justify-between px-3 py-2">
+            <span className="text-xs font-medium uppercase text-muted-foreground">
+              文件夹
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void createFolder(namingFolderName(folders.length))}
+            >
+              +
+            </Button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setActiveFolder(null)}
+            className={rowClass(activeFolder === null)}
+          >
+            <span className="block truncate text-sm">全部笔记</span>
+            <span className="block text-xs text-muted-foreground">{notes.length}</span>
+          </button>
+
+          {folderTree.map((node) => (
+            <FolderTreeRow
+              key={node.folder.id}
+              node={node}
+              activeFolder={activeFolder}
+              onSelect={setActiveFolder}
+            />
+          ))}
+
+          {unfiledCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setActiveFolder(UNFILED)}
+              className={rowClass(activeFolder === UNFILED)}
+            >
+              <span className="block truncate text-sm text-muted-foreground">
+                未归类
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                {unfiledCount}
+              </span>
+            </button>
+          )}
+        </div>
+
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {notes.length === 0 && !isLoading && (
+          {visibleNotes.length === 0 && !isLoading && (
             <p className="px-3 py-6 text-sm text-muted-foreground">
-              还没有笔记，点「新建」开始。
+              {notes.length === 0 ? '还没有笔记，点「新建」开始。' : '这个文件夹里没有笔记。'}
             </p>
           )}
-          {notes.map((note) => (
+          {visibleNotes.map((note) => (
             <NoteListItem
               key={note.id}
               note={note}
@@ -140,6 +215,22 @@ export function NotesView() {
                 onChange={(e) => setTitle(e.target.value)}
               />
               <SaveIndicator state={saveState} />
+              <select
+                className="max-w-[10rem] border bg-background px-2 py-1 text-xs"
+                value={current.folder_id ?? ''}
+                onChange={(e) => {
+                  const folderId = e.target.value || null
+                  void updateNote(current.id, { folder_id: folderId })
+                }}
+                aria-label="归入文件夹"
+              >
+                <option value="">未归类</option>
+                {folderOptions.map(({ folder, depth }) => (
+                  <option key={folder.id} value={folder.id}>
+                    {`${'　'.repeat(depth)}${folder.name}`}
+                  </option>
+                ))}
+              </select>
               <Button
                 size="sm"
                 variant="ghost"
@@ -206,5 +297,51 @@ function SaveIndicator({ state }: { state: 'idle' | 'pending' | 'saved' }) {
     <span className="text-xs text-muted-foreground">
       {state === 'pending' ? '保存中…' : '已保存'}
     </span>
+  )
+}
+
+/** 新建文件夹的默认名，避免一堆同名文件夹。 */
+function namingFolderName(existingCount: number): string {
+  return `新文件夹 ${existingCount + 1}`
+}
+
+function rowClass(active: boolean): string {
+  return active
+    ? 'block w-full border-l-2 border-primary bg-muted px-3 py-2 text-left'
+    : 'block w-full border-l-2 border-transparent px-3 py-2 text-left hover:bg-muted/50'
+}
+
+function FolderTreeRow({
+  node,
+  activeFolder,
+  onSelect,
+  depth = 0,
+}: {
+  node: FolderTreeNode
+  activeFolder: string | null
+  onSelect: (id: string) => void
+  depth?: number
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => onSelect(node.folder.id)}
+        className={rowClass(activeFolder === node.folder.id)}
+        style={{ paddingLeft: `${12 + depth * 14}px` }}
+      >
+        <span className="block truncate text-sm">{node.folder.name}</span>
+        <span className="block text-xs text-muted-foreground">{node.noteCount}</span>
+      </button>
+      {node.children.map((child) => (
+        <FolderTreeRow
+          key={child.folder.id}
+          node={child}
+          activeFolder={activeFolder}
+          onSelect={onSelect}
+          depth={depth + 1}
+        />
+      ))}
+    </>
   )
 }
