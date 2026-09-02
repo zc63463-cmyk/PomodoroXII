@@ -14,6 +14,7 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import type { Folder } from '@/types'
+import { collectFolderSubtree } from '@/lib/folders/folder-selectors'
 import {
   createFolder as createFolderLocally,
   listFolders,
@@ -21,7 +22,7 @@ import {
   renameFolder as renameFolderLocally,
   trashFolder,
 } from '@/lib/folders/folder-repository'
-import { listNotes } from '@/lib/notes/note-repository'
+import { listNotes, updateNote } from '@/lib/notes/note-repository'
 
 interface FolderState {
   folders: Folder[]
@@ -43,7 +44,7 @@ type FolderStore = FolderState & FolderActions
 
 export const useFolderStore = create<FolderStore>()(
   devtools(
-    (set) => ({
+    (set, get) => ({
       folders: [],
       noteCounts: {},
       isLoading: false,
@@ -80,6 +81,18 @@ export const useFolderStore = create<FolderStore>()(
 
       deleteFolder: async (id) => {
         await trashFolder(id)
+
+        // 必须把子树内的笔记改为未归类。服务端 FolderDomainPolicy 会拒绝
+        // folder_id 指向已回收文件夹的笔记（relation_endpoint_missing），
+        // 不清的话这些笔记在之后每次同步都会被拒 —— 等于永久失联。
+        const affected = collectFolderSubtree(get().folders, id)
+        const notes = await listNotes()
+        for (const note of notes) {
+          if (note.folder_id == null) continue
+          if (!affected.has(note.folder_id)) continue
+          await updateNote(note.id, { folder_id: null })
+        }
+
         set({ folders: await listFolders() })
       },
 

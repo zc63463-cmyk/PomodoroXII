@@ -47,6 +47,8 @@ describe('folder-store', () => {
     useFolderStore.getState().reset()
     vi.restoreAllMocks()
     vi.spyOn(folderRepository, 'listFolders').mockResolvedValue([])
+    // deleteFolder 会读笔记以清空其 folder_id，默认给空列表
+    vi.spyOn(noteRepository, 'listNotes').mockResolvedValue([])
   })
 
   it('loadFolders 填充列表', async () => {
@@ -96,6 +98,34 @@ describe('folder-store', () => {
 
     expect(trash).toHaveBeenCalledWith('f1')
     expect(purge).not.toHaveBeenCalled()
+  })
+
+  it('删除文件夹时把子树内的笔记改为未归类', async () => {
+    // 服务端 FolderDomainPolicy 会拒绝 folder_id 指向已回收文件夹的笔记
+    // （relation_endpoint_missing），不清则这些笔记永久无法同步。
+    vi.spyOn(folderRepository, 'trashFolder').mockResolvedValue(folder())
+    const updateNote = vi.spyOn(noteRepository, 'updateNote').mockResolvedValue(note())
+    vi.spyOn(noteRepository, 'listNotes').mockResolvedValue([
+      note({ id: 'n1', folder_id: 'a' }), // 直接在该文件夹
+      note({ id: 'n2', folder_id: 'b' }), // 在子文件夹 —— 也必须清
+      note({ id: 'n3', folder_id: 'z' }), // 无关文件夹 —— 不动
+      note({ id: 'n4', folder_id: null }), // 本就未归类 —— 不动
+    ])
+
+    useFolderStore.setState({
+      folders: [
+        folder({ id: 'a' }),
+        folder({ id: 'b', parent_id: 'a' }),
+        folder({ id: 'z' }),
+      ],
+    })
+
+    await useFolderStore.getState().deleteFolder('a')
+
+    expect(updateNote).toHaveBeenCalledTimes(2)
+    expect(updateNote).toHaveBeenCalledWith('n1', { folder_id: null })
+    expect(updateNote).toHaveBeenCalledWith('n2', { folder_id: null })
+    expect(updateNote).not.toHaveBeenCalledWith('n3', { folder_id: null })
   })
 
   it('refreshNoteCounts 只数未回收且已归类的笔记', async () => {

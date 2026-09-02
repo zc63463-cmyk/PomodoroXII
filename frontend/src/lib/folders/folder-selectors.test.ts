@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildFolderTree,
+  collectFolderSubtree,
   countUnfiledNotes,
   flattenFolderTree,
 } from './folder-selectors'
@@ -123,6 +124,39 @@ describe('buildFolderTree', () => {
     )
 
     expect(tree[0].noteCount).toBe(2)
+  })
+})
+
+describe('collectFolderSubtree', () => {
+  it('收集自身与后代', () => {
+    const ids = collectFolderSubtree(
+      [
+        folder({ id: 'a' }),
+        folder({ id: 'b', parent_id: 'a' }),
+        folder({ id: 'c', parent_id: 'b' }),
+        folder({ id: 'other' }),
+      ],
+      'a',
+    )
+
+    expect([...ids].sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('成环时不死循环', () => {
+    const ids = collectFolderSubtree(
+      [
+        folder({ id: 'a', parent_id: 'b' }),
+        folder({ id: 'b', parent_id: 'a' }),
+      ],
+      'a',
+    )
+
+    expect([...ids].sort()).toEqual(['a', 'b'])
+  })
+
+  it('孤儿的父引用不影响收集', () => {
+    const ids = collectFolderSubtree([folder({ id: 'solo' })], 'solo')
+    expect([...ids]).toEqual(['solo'])
   })
 })
 

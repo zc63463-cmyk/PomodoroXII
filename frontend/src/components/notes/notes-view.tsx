@@ -43,6 +43,8 @@ export function NotesView() {
   const folders = useFolderStore((s) => s.folders)
   const loadFolders = useFolderStore((s) => s.loadFolders)
   const createFolder = useFolderStore((s) => s.createFolder)
+  const renameFolder = useFolderStore((s) => s.renameFolder)
+  const deleteFolder = useFolderStore((s) => s.deleteFolder)
 
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
@@ -119,6 +121,19 @@ export function NotesView() {
     await deleteNote(current.id)
   }
 
+  const handleRenameFolder = (id: string, name: string) => {
+    void renameFolder(id, name)
+  }
+
+  const handleDeleteFolder = (id: string, name: string) => {
+    // 软删除（可恢复），且只动文件夹本身 —— 其中的笔记会变为未归类，不级联删除。
+    const ok = window.confirm(
+      `删除文件夹「${name}」？\n其中的笔记不会被删除，会变为未归类。`,
+    )
+    if (!ok) return
+    void deleteFolder(id)
+  }
+
   return (
     <div className="flex min-h-full min-w-0 flex-1">
       <aside className="flex w-64 shrink-0 flex-col border-r">
@@ -158,6 +173,8 @@ export function NotesView() {
               node={node}
               activeFolder={activeFolder}
               onSelect={setActiveFolder}
+              onRename={handleRenameFolder}
+              onDelete={handleDeleteFolder}
             />
           ))}
 
@@ -315,30 +332,103 @@ function FolderTreeRow({
   node,
   activeFolder,
   onSelect,
+  onRename,
+  onDelete,
   depth = 0,
 }: {
   node: FolderTreeNode
   activeFolder: string | null
   onSelect: (id: string) => void
+  onRename: (id: string, name: string) => void
+  onDelete: (id: string, name: string) => void
   depth?: number
 }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(node.folder.name)
+
+  const commit = () => {
+    const next = draft.trim()
+    setEditing(false)
+    if (!next || next === node.folder.name) {
+      setDraft(node.folder.name)
+      return
+    }
+    onRename(node.folder.id, next)
+  }
+
   return (
     <>
-      <button
-        type="button"
-        onClick={() => onSelect(node.folder.id)}
-        className={rowClass(activeFolder === node.folder.id)}
+      <div
+        className="group relative flex items-center hover:bg-muted/50"
         style={{ paddingLeft: `${12 + depth * 14}px` }}
       >
-        <span className="block truncate text-sm">{node.folder.name}</span>
-        <span className="block text-xs text-muted-foreground">{node.noteCount}</span>
-      </button>
+        {editing ? (
+          <input
+            className="my-1 mr-2 w-full border bg-background px-1 py-0.5 text-sm outline-none"
+            value={draft}
+            autoFocus
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commit()
+              if (e.key === 'Escape') {
+                setDraft(node.folder.name)
+                setEditing(false)
+              }
+            }}
+            aria-label={`重命名 ${node.folder.name}`}
+          />
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => onSelect(node.folder.id)}
+              className={
+                activeFolder === node.folder.id
+                  ? 'min-w-0 flex-1 border-l-2 border-primary bg-muted py-2 pl-2 pr-1 text-left'
+                  : 'min-w-0 flex-1 border-l-2 border-transparent py-2 pl-2 pr-1 text-left'
+              }
+            >
+              <span className="block truncate text-sm">{node.folder.name}</span>
+              <span className="block text-xs text-muted-foreground">
+                {node.noteCount}
+              </span>
+            </button>
+
+            {/* 操作入口只在 hover / 聚焦时浮现，避免列表视觉噪音 */}
+            <span className="hidden shrink-0 gap-1 pr-2 group-hover:flex group-focus-within:flex">
+              <button
+                type="button"
+                className="px-1 text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => {
+                  setDraft(node.folder.name)
+                  setEditing(true)
+                }}
+                aria-label={`重命名 ${node.folder.name}`}
+              >
+                ✎
+              </button>
+              <button
+                type="button"
+                className="px-1 text-xs text-muted-foreground hover:text-destructive"
+                onClick={() => onDelete(node.folder.id, node.folder.name)}
+                aria-label={`删除 ${node.folder.name}`}
+              >
+                ×
+              </button>
+            </span>
+          </>
+        )}
+      </div>
+
       {node.children.map((child) => (
         <FolderTreeRow
           key={child.folder.id}
           node={child}
           activeFolder={activeFolder}
           onSelect={onSelect}
+          onRename={onRename}
+          onDelete={onDelete}
           depth={depth + 1}
         />
       ))}

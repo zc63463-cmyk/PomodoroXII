@@ -111,6 +111,39 @@ function sortNodes(nodes: FolderTreeNode[], systemFirst: boolean): void {
   })
 }
 
+/**
+ * 收集某个文件夹的子树 id 集合（含自身）。
+ *
+ * 为什么需要：删除文件夹时，必须把子树内所有笔记的 folder_id 清空。
+ * 服务端 FolderDomainPolicy 会拒绝 folder_id 指向已回收文件夹的笔记
+ * （relation_endpoint_missing），不清的话这些笔记将永远无法再同步。
+ *
+ * 同样做环保护，避免脏数据导致死循环。
+ */
+export function collectFolderSubtree(
+  folders: readonly Folder[],
+  rootId: string,
+): Set<string> {
+  const childrenOf = new Map<string | null, Folder[]>()
+  for (const folder of folders) {
+    const bucket = childrenOf.get(folder.parent_id)
+    if (bucket) bucket.push(folder)
+    else childrenOf.set(folder.parent_id, [folder])
+  }
+
+  const collected = new Set<string>()
+  const stack = [rootId]
+
+  while (stack.length > 0) {
+    const id = stack.pop()!
+    if (collected.has(id)) continue // 环保护
+    collected.add(id)
+    for (const child of childrenOf.get(id) ?? []) stack.push(child.id)
+  }
+
+  return collected
+}
+
 /** 未归入任何文件夹的笔记数（用于「未分类」入口）。 */
 export function countUnfiledNotes(notes: readonly Note[]): number {
   return notes.filter((n) => n.trashed_at == null && n.folder_id == null).length
