@@ -1,5 +1,5 @@
-import { PlaceholderPage } from '@/components/layout/placeholder-page'
+import { HabitsView } from '@/components/habits/habits-view'
 
 export default function HabitsPage() {
-  return <PlaceholderPage title="习惯" sprint="F3" />
+  return <HabitsView />
 }
