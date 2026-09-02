@@ -8,15 +8,27 @@ from app.models.mixins import SyncMixin
 
 
 class Note(Base, SyncMixin):
-    """Note model for lightweight knowledge-base entries.
+    """Note model — authoritative row of the only FS_DB_SPLIT entity.
 
-    Stored as structured DB records (not filesystem Markdown files).
-    Supports category-based classification and tag-based filtering.
-    No filesystem watcher or FTS5 — search uses SQL LIKE with indexed columns.
+    ``note`` is the one entity registered with ``StorageType.FS_DB_SPLIT``
+    (see ``app/registry/builtin.py``). This table is the **authority**: it holds
+    metadata plus a ``content_hash`` and a ``word_count``, and deliberately has
+    **no** ``content`` column — the Markdown body lives in ``notes/**/*.md``
+    under the space's notes directory.
 
-    The full ``content`` is stored externally (filesystem / object storage)
-    to keep the DB row small. This table keeps a ``content_hash`` for
-    integrity checks and a ``word_count`` for display/metrics.
+    Two projections are derived from this row and must never be treated as
+    authoritative:
+
+    * ``notes/**/*.md`` — the body, with self-describing YAML frontmatter.
+    * ``index.db`` — the ``notes`` index row and the ``notes_fts`` FTS5 index.
+
+    Search runs against ``notes_fts`` (FTS5 with ``tokenize='trigram'``, so
+    Chinese substrings of three or more characters match); SQL LIKE is only a
+    fallback for shorter queries.
+
+    Sync events for this entity still carry the body: it is attached after
+    compilation by ``_bind_authoritative_note_event_bodies``, so the absence of
+    a ``content`` column here does not starve incremental pull.
     """
 
     __tablename__ = "notes"
