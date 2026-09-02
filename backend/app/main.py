@@ -156,6 +156,16 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Canonical error identity is carried on response headers by every
+        # exception handler (app/errors.py::_canonical_headers).  Without an
+        # explicit expose list the browser withholds them from JS in cross-origin
+        # deployments, so clients cannot recover the stable error code from a
+        # legacy (non-canonical) error body.
+        expose_headers=[
+            "X-PomodoroXII-Error-Code",
+            "X-PomodoroXII-Retryable",
+            "X-Request-ID",
+        ],
     )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestIdMiddleware)

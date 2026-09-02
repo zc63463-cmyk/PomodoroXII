@@ -167,31 +167,152 @@ const initialState = (): TaskSpaceState => ({
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
+/**
+ * Closed, user-safe messages for server rejection codes.  Must stay in sync
+ * with the backend closed code set (app/errors.py::MUTATION_REJECTION_SPECS)
+ * plus the generic AppError subclasses a Space call can still meet.
+ */
 const MUTATION_ERROR_MESSAGES: Record<string, string> = {
+  // --- work item / project structure ---
   version_conflict: '该项目项已被其他操作更新，请刷新后重试。',
   idempotency_conflict: '该操作已被使用，请重试或刷新。',
   invalid_work_item_tree: '当前树结构不允许该操作。',
   active_child_conflict: '存在进行中的子项，无法完成该操作。',
   not_found: '项目项不存在或已被删除。',
   invalid_payload_hash: '请求校验失败，请刷新后重试。',
+  cycle_detected: '该操作会造成循环引用，无法完成。',
+  work_item_structure_changed: '项目项结构已变更，请刷新后重试。',
+  invalid_project_key: '项目标识格式不合法，请仅使用字母与数字。',
+  project_key_conflict: '项目标识已存在，请更换。',
+  // --- labels (D5) ---
+  label_name_conflict: '标签名称已存在，请更换。',
+  // --- notes ---
+  invalid_note_document: '笔记内容格式不合法，请检查后重试。',
+  unsupported_content_version: '内容版本不受支持，请更新后重试。',
+  // --- focus-session coupling ---
+  active_session_exists: '已有进行中的专注会话，请先结束后再操作。',
+  stale_session_owner: '专注会话归属已失效，请刷新后重试。',
+  session_activation_conflict: '专注会话启动冲突，请刷新后重试。',
+  active_session_recovery_required: '专注会话需要恢复，请刷新页面。',
+  // --- space / sync / transport ---
+  space_scope_mismatch: '该操作不属于当前空间，请刷新后重试。',
+  offline_formal_creation_forbidden: '离线状态下无法执行该操作，请联网后重试。',
+  command_result_unknown: '操作结果未知，请刷新页面确认。',
+  tombstone_conflict: '该项目项已被删除，无法恢复。',
+  relation_endpoint_missing: '关联的目标不存在，无法完成。',
+  entity_id_mismatch: '数据标识不一致，请刷新后重试。',
+  delete_payload_not_empty: '删除请求格式有误，请刷新后重试。',
+  entity_not_sync_enabled: '该类型数据不支持同步。',
+  payload_field_not_allowed: '请求包含不允许的字段，请刷新后重试。',
+  // --- generic AppError subclasses a Space call can still meet ---
+  auth_required: '登录状态已失效，请重新登录。',
+  forbidden: '当前账号没有执行该操作的权限。',
+  conflict: '数据存在冲突，请刷新后重试。',
+  validation_error: '请求数据校验失败，请检查后重试。',
+  space_not_found: '空间不存在或未注册。',
+  space_recovery_required: '空间需要恢复，请稍后重试。',
+  space_storage_missing: '空间存储不可用，请检查配置。',
+  cursor_expired: '同步游标已过期，请执行完整同步。',
 }
 
-const GENERIC_MUTATION_ERROR = '操作失败，请检查服务连接后重试。'
+/**
+ * Client-local guard codes.  These never reach the network — they are thrown
+ * by the single-flight guard and by pre-flight validation — so they must be
+ * resolved BEFORE the HTTP-shape extraction runs.  Otherwise they were
+ * reported as a service-connection failure.
+ */
+const LOCAL_MUTATION_ERROR_MESSAGES: Record<string, string> = {
+  work_item_mutation_in_flight: '该操作正在进行中，请稍候。',
+  work_item_child_creation_in_flight: '子项正在创建中，请稍候。',
+  work_item_root_creation_in_flight: '项目项正在创建中，请稍候。',
+  work_item_child_depth_exceeded: '项目项最多支持三层，无法继续添加子项。',
+  work_item_not_loaded: '项目项数据未加载，请刷新后重试。',
+  task_space_repository_not_ready: '任务空间尚未就绪，请稍候再试。',
+  task_space_project_not_selected: '请先选择一个项目。',
+}
+
+/**
+ * Two distinct fallbacks.  A request that never produced an HTTP response is a
+ * connectivity failure; a response whose code is absent from the closed map is
+ * a server-side failure that "checking the connection" will not fix.  Using a
+ * single message for both told users to debug their network for business
+ * rejections.
+ */
+const GENERIC_MUTATION_ERROR = '操作失败，请稍后重试。'
+const NETWORK_MUTATION_ERROR = '网络异常，请检查服务连接后重试。'
+
+/** Axios transport codes that mean "no response ever arrived". */
+const NETWORK_ERROR_CODES = new Set([
+  'ERR_NETWORK',
+  'ERR_INTERNET_DISCONNECTED',
+  'ECONNABORTED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+])
+
+/**
+ * Read a response header case-insensitively.
+ *
+ * Axios normalises header names onto an AxiosHeaders instance
+ * (``X-PomodoroXII-Error-Code``), so a lower-case index is always undefined.
+ * Prefer the typed accessor, then fall back to a case-insensitive scan.
+ */
+const readErrorHeader = (headers: Record<string, unknown>, name: string): string | null => {
+  const getter = (headers as { get?: (key: string) => unknown }).get
+  if (typeof getter === 'function') {
+    const value = getter.call(headers, name)
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  const direct = headers[name]
+  if (typeof direct === 'string' && direct.length > 0) return direct
+  const lowered = name.toLowerCase()
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() !== lowered) continue
+    const value = headers[key]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return null
+}
 
 /**
  * Map a failed mutation to a stable error code and a closed, user-safe
  * message. Never surfaces raw Axios text, exception messages, response
- * objects, tokens, or paths. Handles canonical ({code, ...}), legacy
- * ({detail: string | {code, ...}}) and error-code header shapes.
+ * objects, tokens, or paths.
+ *
+ * Resolution order: client-local guard codes, then canonical body
+ * ({code, ...}), legacy object body ({detail: {code, ...}}), then the
+ * canonical error-code response header.
  */
 export function resolveTaskSpaceMutationError(error: unknown): { code: string; message: string } {
+  // 1. Client-local guards and pre-flight validation: plain Errors carrying a
+  //    stable code as their message, with no HTTP envelope at all.
+  if (error instanceof Error && LOCAL_MUTATION_ERROR_MESSAGES[error.message]) {
+    const localCode = error.message
+    return { code: localCode, message: LOCAL_MUTATION_ERROR_MESSAGES[localCode] }
+  }
+
   const response = isRecord(error) ? error.response : undefined
+
+  // 2. No HTTP response.  A transport failure is a connectivity problem; a
+  //    local Dexie/validation throw is not, and must not claim to be one.
+  if (!isRecord(response)) {
+    const transportCode = isRecord(error) && typeof error.code === 'string' ? error.code : ''
+    const isAxios = isRecord(error) && error.isAxiosError === true
+    const isNetwork = isAxios || NETWORK_ERROR_CODES.has(transportCode)
+    return isNetwork
+      ? { code: 'network_unreachable', message: NETWORK_MUTATION_ERROR }
+      : { code: 'unknown', message: GENERIC_MUTATION_ERROR }
+  }
+
+  // 3. HTTP response: canonical body, legacy object body, then the header.
+  //    A legacy body carries {"detail": string}, which has no code, so the
+  //    header is the only recovery path when canonical negotiation is absent.
   const data = isRecord(response) ? response.data : undefined
-  const headers = isRecord(response) ? response.headers : undefined
+  const headers = isRecord(response.headers) ? response.headers : undefined
 
   let code: unknown = isRecord(data) ? data.code : undefined
   if (!code && isRecord(data) && isRecord(data.detail)) code = data.detail.code
-  if (code === undefined && isRecord(headers)) code = headers['x-pomodoroxii-error-code']
+  if (code === undefined && headers) code = readErrorHeader(headers, 'X-PomodoroXII-Error-Code')
 
   const stableCode = typeof code === 'string' && code.length > 0 ? code : 'unknown'
   return {
@@ -633,7 +754,10 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           }))
           return created
         } catch (error) {
-          set({ error: (error as Error).message })
+          // Closed message, like every other mutation: never surface raw
+          // exception text (Axios bodies, tokens, paths).
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: '__project__', code: mapped.code } })
           throw error
         }
       },

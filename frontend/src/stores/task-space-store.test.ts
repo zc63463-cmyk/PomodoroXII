@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { AxiosHeaders } from 'axios'
 import type { CachedProject, CachedWorkItem } from '@/types'
 import type { CachedWorkItemNote, WorkItemNoteConflictRow } from '@/types'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
-import { resolveTaskSpaceNoteError, selectMoveCandidates, useTaskSpaceStore, type TaskSpaceNoteRepositoryLike, type TaskSpaceRepositoryLike } from './task-space-store'
+import { resolveTaskSpaceMutationError, resolveTaskSpaceNoteError, selectMoveCandidates, useTaskSpaceStore, type TaskSpaceNoteRepositoryLike, type TaskSpaceRepositoryLike } from './task-space-store'
 
 const workItem = (id: string, parentId: string | null, depth: 1 | 2 | 3): CachedWorkItem => ({
   id,
@@ -118,10 +119,44 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve }
 }
 
+/**
+ * Canonical error body (backend: app/errors.py::DomainErrorRecord).  This is
+ * what the API returns once the request negotiates the canonical error media
+ * type — see the Accept header on the spaceApi client in services/api.ts.
+ */
 function axiosError(status: number, code: string): Error {
   return Object.assign(new Error(`Request failed with status code ${status}`), {
     isAxiosError: true,
-    response: { status, data: { detail: { code, retryable: false, details: {} } } },
+    response: {
+      status,
+      data: { code, message: `rejected: ${code}`, retryable: false, request_id: 'req-1', details: {} },
+    },
+  })
+}
+
+/**
+ * Legacy error body — returned when the caller did NOT negotiate the canonical
+ * media type.  Note that ``detail`` is a **string** here, not an object, so the
+ * code is only recoverable from the response headers.  Axios exposes those
+ * through an AxiosHeaders instance whose keys are normalised
+ * ("X-PomodoroXII-Error-Code"); a lower-case index is always undefined, which
+ * is exactly the regression these fixtures must keep catching.
+ */
+function legacyAxiosError(
+  status: number,
+  code: string,
+  options: { withHeader?: boolean } = {},
+): Error {
+  const { withHeader = true } = options
+  return Object.assign(new Error(`Request failed with status code ${status}`), {
+    isAxiosError: true,
+    response: {
+      status,
+      data: { detail: `rejected: ${code}`, error_type: 'conflict' },
+      headers: withHeader
+        ? new AxiosHeaders({ 'X-PomodoroXII-Error-Code': code })
+        : {},
+    },
   })
 }
 
@@ -595,5 +630,55 @@ describe('selectMoveCandidates', () => {
     // legal (1 + 1 + (3-2) = 3); root-a is l2's current parent (a no-op move,
     // still within 3 levels) and remains offered like the backend allows.
     expect(selectMoveCandidates(items, 'l2').map((item) => item.id).sort()).toEqual(['root-a', 'root-b'])
+  })
+})
+
+describe('resolveTaskSpaceMutationError wire shapes', () => {
+  it('reads the code from a canonical error body', () => {
+    const mapped = resolveTaskSpaceMutationError(axiosError(409, 'version_conflict'))
+    expect(mapped.code).toBe('version_conflict')
+    expect(mapped.message).toMatch(/刷新/)
+    expect(mapped.message).not.toMatch(/Request failed/)
+  })
+
+  it('recovers the code from the response header for a legacy string-detail body', () => {
+    // Regression guard: AxiosHeaders normalises header keys, so the store must
+    // never index them with a lower-case name.
+    const mapped = resolveTaskSpaceMutationError(legacyAxiosError(409, 'label_name_conflict'))
+    expect(mapped.code).toBe('label_name_conflict')
+    expect(mapped.message).toMatch(/标签/)
+  })
+
+  it('reports a neutral failure when neither body nor header carries a code', () => {
+    const mapped = resolveTaskSpaceMutationError(
+      legacyAxiosError(409, 'version_conflict', { withHeader: false }),
+    )
+    expect(mapped.code).toBe('unknown')
+    expect(mapped.message).not.toMatch(/服务连接/)
+  })
+
+  it('treats a request that never produced a response as a connectivity failure', () => {
+    const error = Object.assign(new Error('Network Error'), {
+      isAxiosError: true,
+      code: 'ERR_NETWORK',
+    })
+    const mapped = resolveTaskSpaceMutationError(error)
+    expect(mapped.code).toBe('network_unreachable')
+    expect(mapped.message).toMatch(/网络异常/)
+  })
+
+  it('does not blame the connection for a local non-HTTP failure', () => {
+    const mapped = resolveTaskSpaceMutationError(new Error('QuotaExceededError'))
+    expect(mapped.code).toBe('unknown')
+    expect(mapped.message).not.toMatch(/服务连接|网络/)
+  })
+
+  it('maps client-local guard codes before any HTTP shaping', () => {
+    expect(resolveTaskSpaceMutationError(new Error('work_item_mutation_in_flight')).message)
+      .toMatch(/进行中|稍候/)
+    expect(resolveTaskSpaceMutationError(new Error('work_item_child_depth_exceeded')).message)
+      .toMatch(/三层/)
+    expect(resolveTaskSpaceMutationError(new Error('task_space_project_not_selected')).message)
+      .toMatch(/项目/)
   })
 })

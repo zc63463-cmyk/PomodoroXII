@@ -64,9 +64,26 @@ metaApi.interceptors.response.use(
 )
 
 // ---- spaceApi (Space Token) ----
+/**
+ * Canonical error negotiation (backend: app/errors.py::_canonical_requested).
+ *
+ * The API only emits a structured error body ({code, message, retryable,
+ * request_id, details}) when the request explicitly accepts the canonical
+ * error media type.  Otherwise it answers with a legacy {"detail": string}
+ * body that carries no machine-readable code — the error-code recovery path
+ * then collapses and every caller degrades to a generic message.
+ *
+ * application/json is retained so ordinary response negotiation is unchanged;
+ * the canonical type is additive and participates in error responses only.
+ */
+const CANONICAL_ERROR_ACCEPT = 'application/vnd.pomodoroxii.error+json;version=2'
+
 export const spaceApi = axios.create({
   baseURL: API_V1_PREFIX,
-  headers: { 'Content-Type': 'application/json' },
+  headers: {
+    'Content-Type': 'application/json',
+    Accept: `application/json, ${CANONICAL_ERROR_ACCEPT}`,
+  },
 })
 
 spaceApi.interceptors.request.use((config) => {
