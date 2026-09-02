@@ -241,7 +241,27 @@ class KnowledgeProjectionBuilder:
 
 
 class KnowledgeDomainPolicy:
-    """Compile Note requests through the shared entity compiler and projections."""
+    """Compile Note requests through the shared entity compiler and projections.
+
+    Two entry points reach this policy, because ``MutationCompiler`` dispatches
+    by ``entity_type`` and ``note`` is owned here:
+
+    * REST / ``KnowledgeStore`` emits the ``knowledge.note.*`` request names.
+    * Sync v2 push emits the generic ``entity.create`` / ``entity.update`` /
+      ``entity.delete`` names produced by ``SyncCommandMapper``.
+
+    The generic names are aliased to their knowledge equivalents below so both
+    entry points share a single compilation path.
+    """
+
+    #: Sync-emitted request name -> the knowledge request it is equivalent to.
+    #: ``entity.delete`` maps to purge: sync deletion is a hard delete (DB row
+    #: + tombstone + Markdown removal), not the REST soft delete.
+    _SYNC_REQUEST_ALIASES: Mapping[str, str] = {
+        "entity.create": "knowledge.note.create",
+        "entity.update": "knowledge.note.update",
+        "entity.delete": "knowledge.note.purge",
+    }
 
     def __init__(self, builder: KnowledgeProjectionBuilder | None = None) -> None:
         self.builder = builder or KnowledgeProjectionBuilder()
@@ -253,6 +273,19 @@ class KnowledgeDomainPolicy:
     async def compile(
         self, context: MutationCompileContext, request: MutationRequest
     ) -> MutationCommand:
+        # request_hash is derived from the request name, so an alias must go
+        # through from_payload() to be recomputed -- dataclasses.replace()
+        # would carry the stale hash and fail __post_init__ validation.
+        alias = self._SYNC_REQUEST_ALIASES.get(request.name)
+        if alias is not None:
+            request = MutationRequest.from_payload(
+                name=alias,
+                entity_type=request.entity_type,
+                entity_id=request.entity_id,
+                payload=request.payload,
+                expected_version=request.expected_version,
+                client_updated_at=request.client_updated_at,
+            )
         if request.name == "knowledge.projection.rebuild":
             return self._compile_rebuild(context, request)
         if request.name == "knowledge.note.purge":
