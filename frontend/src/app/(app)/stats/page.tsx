@@ -1,5 +1,5 @@
-import { PlaceholderPage } from '@/components/layout/placeholder-page'
+import { StatsView } from '@/components/stats/stats-view'
 
 export default function StatsPage() {
-  return <PlaceholderPage title="统计" sprint="F3" />
+  return <StatsView />
 }
