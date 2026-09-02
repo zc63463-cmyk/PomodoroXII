@@ -15,6 +15,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { QuickNoteMarkdown } from '@/components/quick-notes/quick-note-markdown'
 import { Button } from '@/components/ui/button'
 import {
+  availableParents,
   buildFolderTree,
   countUnfiledNotes,
   flattenFolderTree,
@@ -22,7 +23,7 @@ import {
 import { getNoteSummary, getNoteTitle } from '@/lib/notes/note-selectors'
 import { useFolderStore } from '@/stores/folder-store'
 import { useNoteStore } from '@/stores/note-store'
-import type { FolderTreeNode, Note } from '@/types'
+import type { Folder, FolderTreeNode, Note } from '@/types'
 
 /** 自动保存防抖：既避免每次按键都入队，也不会让用户等太久。 */
 const AUTOSAVE_DELAY_MS = 600
@@ -44,6 +45,7 @@ export function NotesView() {
   const loadFolders = useFolderStore((s) => s.loadFolders)
   const createFolder = useFolderStore((s) => s.createFolder)
   const renameFolder = useFolderStore((s) => s.renameFolder)
+  const moveFolder = useFolderStore((s) => s.moveFolder)
   const deleteFolder = useFolderStore((s) => s.deleteFolder)
 
   const [title, setTitle] = useState('')
@@ -125,6 +127,10 @@ export function NotesView() {
     void renameFolder(id, name)
   }
 
+  const handleMoveFolder = (id: string, parentId: string | null) => {
+    void moveFolder(id, parentId)
+  }
+
   const handleDeleteFolder = (id: string, name: string) => {
     // 软删除（可恢复），且只动文件夹本身 —— 其中的笔记会变为未归类，不级联删除。
     const ok = window.confirm(
@@ -175,6 +181,8 @@ export function NotesView() {
               onSelect={setActiveFolder}
               onRename={handleRenameFolder}
               onDelete={handleDeleteFolder}
+              onMove={handleMoveFolder}
+              parentOptions={availableParents(folders, node.folder.id)}
             />
           ))}
 
@@ -334,6 +342,8 @@ function FolderTreeRow({
   onSelect,
   onRename,
   onDelete,
+  onMove,
+  parentOptions,
   depth = 0,
 }: {
   node: FolderTreeNode
@@ -341,9 +351,13 @@ function FolderTreeRow({
   onSelect: (id: string) => void
   onRename: (id: string, name: string) => void
   onDelete: (id: string, name: string) => void
+  onMove: (id: string, parentId: string | null) => void
+  /** 可作为新父级的文件夹，已排除自身子树（避免成环）。 */
+  parentOptions: Folder[]
   depth?: number
 }) {
   const [editing, setEditing] = useState(false)
+  const [moving, setMoving] = useState(false)
   const [draft, setDraft] = useState(node.folder.name)
 
   const commit = () => {
@@ -378,6 +392,28 @@ function FolderTreeRow({
             }}
             aria-label={`重命名 ${node.folder.name}`}
           />
+        ) : moving ? (
+          <select
+            className="my-1 mr-2 w-full border bg-background px-1 py-0.5 text-sm outline-none"
+            value={node.folder.parent_id ?? ''}
+            autoFocus
+            onBlur={() => setMoving(false)}
+            onChange={(e) => {
+              setMoving(false)
+              onMove(node.folder.id, e.target.value || null)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setMoving(false)
+            }}
+            aria-label={`移动 ${node.folder.name} 到`}
+          >
+            <option value="">（顶层）</option>
+            {parentOptions.map((parent) => (
+              <option key={parent.id} value={parent.id}>
+                {parent.name}
+              </option>
+            ))}
+          </select>
         ) : (
           <>
             <button
@@ -410,6 +446,14 @@ function FolderTreeRow({
               </button>
               <button
                 type="button"
+                className="px-1 text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => setMoving(true)}
+                aria-label={`移动 ${node.folder.name}`}
+              >
+                ⇄
+              </button>
+              <button
+                type="button"
                 className="px-1 text-xs text-muted-foreground hover:text-destructive"
                 onClick={() => onDelete(node.folder.id, node.folder.name)}
                 aria-label={`删除 ${node.folder.name}`}
@@ -429,6 +473,8 @@ function FolderTreeRow({
           onSelect={onSelect}
           onRename={onRename}
           onDelete={onDelete}
+          onMove={onMove}
+          parentOptions={parentOptions}
           depth={depth + 1}
         />
       ))}

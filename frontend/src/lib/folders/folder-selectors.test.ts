@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  availableParents,
   buildFolderTree,
   collectFolderSubtree,
   countUnfiledNotes,
@@ -157,6 +158,40 @@ describe('collectFolderSubtree', () => {
   it('孤儿的父引用不影响收集', () => {
     const ids = collectFolderSubtree([folder({ id: 'solo' })], 'solo')
     expect([...ids]).toEqual(['solo'])
+  })
+})
+
+describe('availableParents', () => {
+  const tree = [
+    folder({ id: 'a' }),
+    folder({ id: 'b', parent_id: 'a' }),
+    folder({ id: 'c', parent_id: 'b' }),
+    folder({ id: 'other' }),
+  ]
+
+  it('排除自身与后代，防止成环', () => {
+    const options = availableParents(tree, 'b')
+    expect(options.map((f) => f.id)).toEqual(['a', 'other'])
+  })
+
+  it('根节点会排除整棵子树', () => {
+    const options = availableParents(tree, 'a')
+    expect(options.map((f) => f.id)).toEqual(['other'])
+  })
+
+  it('新建时不排除任何项', () => {
+    const options = availableParents(tree, null)
+    expect(options.map((f) => f.id)).toEqual(['a', 'b', 'c', 'other'])
+  })
+
+  it('成环数据下也不会漏选项', () => {
+    const cyclic = [
+      folder({ id: 'x', parent_id: 'y' }),
+      folder({ id: 'y', parent_id: 'x' }),
+      folder({ id: 'z' }),
+    ]
+    // x 的子树含 x/y，故只剩 z
+    expect(availableParents(cyclic, 'x').map((f) => f.id)).toEqual(['z'])
   })
 })
 

@@ -144,6 +144,23 @@ export function collectFolderSubtree(
   return collected
 }
 
+/**
+ * 列出可作为 folderId 新父级的文件夹（排除自身及其后代）。
+ *
+ * 把文件夹移到自己的后代会成环。服务端 FolderDomainPolicy 也会拒绝，
+ * 但与其让用户提交后被拒，不如在选项里就不给 —— 这是防呆，不是替代校验。
+ *
+ * @param excludeId 正在被移动的文件夹自身；传 null 表示新建，不排除任何项。
+ */
+export function availableParents(
+  folders: readonly Folder[],
+  excludeId: string | null,
+): Folder[] {
+  if (excludeId == null) return [...folders]
+  const forbidden = collectFolderSubtree(folders, excludeId)
+  return folders.filter((f) => !forbidden.has(f.id))
+}
+
 /** 未归入任何文件夹的笔记数（用于「未分类」入口）。 */
 export function countUnfiledNotes(notes: readonly Note[]): number {
   return notes.filter((n) => n.trashed_at == null && n.folder_id == null).length
