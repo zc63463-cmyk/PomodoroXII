@@ -25,6 +25,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.commands import EntityCommand, FolderDomainPolicy, RelationDomainPolicy
 from app.db.base import Base as SpaceBase
 from app.errors import MutationRejectedError
+from app.knowledge.projections import KnowledgeDomainPolicy
 from app.mutation.journal import MutationJournal
 from app.mutation.recovery import MutationRecovery
 from app.mutation.staging import StageStore
@@ -81,6 +82,25 @@ _TEST_CATALOG = CompiledEntityCatalog.compile(
     [*REGISTRY.list(), _STRICT_FIXTURE_SPEC],
     version="test",
 )
+
+
+def fixture_mutation_policies() -> list:
+    """Policies the ``EntityFixture`` compiler registers.
+
+    Single source of truth, so the fixture cannot silently drift from
+    ``app.deps.build_mutation_compiler``. Guard test:
+    ``test_fixture_policy_coverage_matches_production``.
+
+    Deliberately narrower than production: ``TaskSpaceCompiler`` and
+    ``FocusSessionMutationPolicy`` are not registered here yet (they need
+    a session locator and real scopes). The guard test fails if any *other*
+    production policy goes uncovered.
+    """
+    return [
+        FolderDomainPolicy(),
+        RelationDomainPolicy(),
+        KnowledgeDomainPolicy(),
+    ]
 
 
 @dataclass
@@ -143,7 +163,11 @@ class _ConcurrentMutationScope(_MutationScope):
 
 
 class EntityFixture:
-    """End-to-end mutation fixture with FolderDomainPolicy and RelationDomainPolicy."""
+    """End-to-end mutation fixture wired with the production-relevant policies.
+
+    Policy set comes from ``fixture_mutation_policies()`` so it stays in step
+    with ``app.deps.build_mutation_compiler``.
+    """
 
     def __init__(
         self,
@@ -161,7 +185,7 @@ class EntityFixture:
         self.catalog = _TEST_CATALOG
         self.compiler = MutationCompiler(
             self.catalog,
-            policies=[FolderDomainPolicy(), RelationDomainPolicy()],
+            policies=fixture_mutation_policies(),
         )
         self.commands = EntityCommand(self.catalog)
         self.uow = MutationUnitOfWork(
@@ -643,3 +667,52 @@ async def test_unknown_payload_field_rejected_at_compile(entity_fixture):
         assert raised.value.rejection.code == "payload_field_not_allowed"
     finally:
         await scope.aclose()
+
+
+# --------------------------------------------------------------------------- #
+# Policy-wiring guard (issue #63)
+# --------------------------------------------------------------------------- #
+
+#: Production domain policies the fixture intentionally leaves out. They need a
+#: real session locator and live scopes, so covering them is a separate change.
+#: Any *other* production policy going uncovered is drift and must fail.
+_FIXTURE_UNCOVERED_POLICIES = frozenset({
+    "TaskSpaceCompiler",
+    "FocusSessionMutationPolicy",
+})
+
+
+def test_fixture_policy_coverage_matches_production() -> None:
+    """The fixture must not silently fall behind production policy wiring.
+
+    Regression guard for issue #63. The fixture used to register only
+    FolderDomainPolicy + RelationDomainPolicy, so every ``note`` request fell
+    through to the generic catalog branch and bypassed the knowledge projection
+    logic entirely -- note defects could not surface in tests at all.
+    """
+    from app.deps import build_mutation_compiler
+
+    production = build_mutation_compiler(_TEST_CATALOG)
+    fixture = MutationCompiler(_TEST_CATALOG, policies=fixture_mutation_policies())
+
+    # `note` must be owned by the same policy class as in production; this is
+    # what makes note-level defects observable from this fixture.
+    assert "note" in production._policies, "production no longer owns note"
+    assert "note" in fixture._policies, "fixture does not cover note at all"
+    assert type(fixture._policies["note"]) is type(production._policies["note"])
+
+    gaps = {
+        entity_type: type(policy).__name__
+        for entity_type, policy in production._policies.items()
+        if entity_type not in fixture._policies
+    }
+    unexpected = {
+        entity_type: name
+        for entity_type, name in gaps.items()
+        if name not in _FIXTURE_UNCOVERED_POLICIES
+    }
+    assert not unexpected, (
+        "fixture policy coverage drifted from production: "
+        f"{unexpected}. Register the policy in fixture_mutation_policies(), or "
+        "if the omission is deliberate, record it in _FIXTURE_UNCOVERED_POLICIES."
+    )
