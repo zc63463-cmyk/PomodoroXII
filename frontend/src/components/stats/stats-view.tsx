@@ -81,7 +81,8 @@ export function StatsView() {
           title="日程"
           hint={scheduleSummary ? `近 ${scheduleSummary.period_days} 天` : undefined}
         >
-          {!scheduleSummary ? (
+          {/* 全零也算「无数据」—— 显示一排 0 不如明确告诉用户还没有日程 */}
+          {!scheduleSummary || scheduleSummary.total === 0 ? (
             <Empty loaded={!isLoading} text="暂无日程数据" />
           ) : (
             <>
@@ -102,7 +103,9 @@ export function StatsView() {
         </Section>
 
         <Section title="笔记">
-          {!noteSummary ? (
+          {/* 同上：四项全零视为无数据 */}
+          {!noteSummary ||
+          noteSummary.notes + noteSummary.folders + noteSummary.trashed_notes === 0 ? (
             <Empty loaded={!isLoading} text="暂无笔记数据" />
           ) : (
             <div className="grid grid-cols-4 gap-2 text-center">
