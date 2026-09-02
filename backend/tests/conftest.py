@@ -182,11 +182,17 @@ def _isolate_env(
 
     monkeypatch.setenv("POMODOROXII_DATABASE_URL", f"sqlite+aiosqlite:///{meta_db.as_posix()}")
     monkeypatch.setenv("POMODOROXII_SPACES_DATA_DIR", str(spaces_dir))
+    monkeypatch.setenv("POMODOROXII_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("POMODOROXII_ENVIRONMENT", "development")
     monkeypatch.setenv("POMODOROXII_SECRET_KEY", "test-secret-key-not-for-production-use")
     # Normal application tests exercise isolated storage, not scheduled
     # recovery. Backup lifecycle tests opt in explicitly with a target.
     monkeypatch.setenv("POMODOROXII_BACKUP_ENABLED", "false")
+    # DATA_ROOT must be pinned alongside DATABASE_URL / SPACES_DATA_DIR:
+    # Settings.require_canonical_runtime_layout demands all three agree, and
+    # the auto-inference in app/settings.py only runs when DATA_ROOT is absent.
+    # An on-disk .env (gitignored, so CI never sees it) supplies DATA_ROOT and
+    # disables that inference, which then makes every test error at setup.
 
     # Reload only modules that capture the settings singleton at import time,
     # in dependency order so each rebinds to the fresh settings.
