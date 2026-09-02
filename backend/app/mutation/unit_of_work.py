@@ -2219,6 +2219,11 @@ class MutationUnitOfWork:
                         ],
                         separators=(",", ":"),
                     )
+            # Allocate the sync sequence for every event first, and remember
+            # the sequence of each delete event. A tombstone may only be pruned
+            # once every active client has ACKed past the deletion event that
+            # produced it, so the tombstone must carry that sequence.
+            delete_sequences: dict[tuple[str, str], int] = {}
             for operation_id, command in zip(operation_ids, commands, strict=True):
                 await MutationJournal.transition_in_transaction(
                     session, operation_id, MutationState.STAGED, MutationState.DB_COMMITTED
@@ -2227,7 +2232,7 @@ class MutationUnitOfWork:
                     spec = self.catalog.get(event.entity_type)
                     if not spec.sync_enabled:
                         raise MutationRuleViolation("not_found", {"entityType": event.entity_type})
-                    await record_sync_event(
+                    recorded = await record_sync_event(
                         session,
                         entity_type=spec.effective_sync_entity_type,
                         entity_id=event.entity_id,
@@ -2239,6 +2244,10 @@ class MutationUnitOfWork:
                         created_at=event.created_at,
                         visible=False,
                     )
+                    if event.action == "delete":
+                        delete_sequences[
+                            (spec.effective_sync_entity_type, event.entity_id)
+                        ] = recorded.id
 
             # Tombstone creation: for each delete sync_event, create a
             # tombstone in the space database. Delete any old tombstone
@@ -2261,13 +2270,17 @@ class MutationUnitOfWork:
                     )
                     await session.execute(
                         sa_text(
-                            "INSERT INTO tombstones (entity_type, entity_id, deleted_at) "
-                            "VALUES (:et, :eid, :dt)"
+                            "INSERT INTO tombstones "
+                            "(entity_type, entity_id, deleted_at, delete_sequence) "
+                            "VALUES (:et, :eid, :dt, :ds)"
                         ),
                         {
                             "et": spec.effective_sync_entity_type,
                             "eid": event.entity_id,
                             "dt": event.created_at,
+                            "ds": delete_sequences.get(
+                                (spec.effective_sync_entity_type, event.entity_id)
+                            ),
                         },
                     )
 

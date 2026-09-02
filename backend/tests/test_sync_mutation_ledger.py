@@ -230,3 +230,84 @@ async def test_rolled_back_ledger_append_is_not_visible(space_session) -> None:
             SyncOutbox.operation_id == "rolled-back-op"
         )
     ) == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_event_stamps_the_tombstone_with_its_ledger_sequence(
+    entity_fixture,
+) -> None:
+    """A tombstone must carry the sequence of the delete event that made it.
+
+    Retention may only drop a tombstone after every active client has ACKed
+    past that sequence. Before this was wired up, ``delete_sequence`` was
+    never written, so the prune predicate ``delete_sequence <= waterline``
+    could never match and tombstones accumulated forever.
+    """
+    from app.models.sync_client import SyncClient
+    from app.models.tombstone import Tombstone
+
+    await entity_fixture.seed_schedule(
+        "tombstone-schedule", version=1, updated_at=UTC
+    )
+    async with entity_fixture._sessions.begin() as session:
+        session.add(
+            SyncClient(
+                client_id="tombstone-client",
+                ack_sequence=0,
+                catalog_hash=entity_fixture.catalog.hash,
+                registered_at=UTC,
+                last_seen_at=UTC,
+                expires_at="2099-08-05T00:00:00.000Z",
+                requires_recovery=False,
+                recovery_generation=0,
+            )
+        )
+
+    scope = entity_fixture.open_mutation_scope()
+    try:
+        from app.sync.contracts import SyncEventInput
+        from app.sync.protocol import SyncProtocol
+
+        result = await SyncProtocol(
+            scope, entity_fixture.uow, catalog=entity_fixture.catalog
+        ).push(
+            "tombstone-client",
+            [
+                SyncEventInput(
+                    entity_type="schedule",
+                    entity_id="tombstone-schedule",
+                    action="delete",
+                    payload={"id": "tombstone-schedule"},
+                    expected_version=1,
+                    client_updated_at=UTC,
+                    operation_id="tombstone-op",
+                )
+            ],
+            "tombstone-batch",
+        )
+        assert [item.operation_id for item in result.applied] == ["tombstone-op"]
+
+        async with entity_fixture._sessions() as session:
+            tombstone = (
+                await session.scalars(
+                    select(Tombstone).where(
+                        Tombstone.entity_id == "tombstone-schedule"
+                    )
+                )
+            ).one_or_none()
+            event = (
+                await session.scalars(
+                    select(SyncOutbox).where(
+                        SyncOutbox.batch_id == "tombstone-batch"
+                    )
+                )
+            ).one_or_none()
+
+        assert tombstone is not None, "delete must leave exactly one tombstone"
+        assert event is not None, "delete must append one ledger event"
+        # The regression itself: this used to be NULL for every tombstone.
+        assert tombstone.delete_sequence is not None
+        assert tombstone.delete_sequence == event.id
+        assert tombstone.entity_type == event.entity_type
+    finally:
+        await scope.aclose()

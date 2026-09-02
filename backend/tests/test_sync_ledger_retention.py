@@ -313,3 +313,66 @@ async def test_expiry_maintenance_is_bounded_and_reaches_the_101st_client(
     second = await registry.expire_inactive()
     assert len(second) == 1
     assert await registry.minimum_safe_retention_sequence() is None
+
+
+@pytest.mark.asyncio
+async def test_prune_waterline_follows_the_slowest_client_not_the_fastest(
+    space_session,
+) -> None:
+    """Retention follows the *minimum* ACK, never the maximum.
+
+    A client that has been offline for a long time must hold the waterline
+    back, so every event it has not consumed yet survives the sweep. Pruning
+    to the fastest client would silently destroy unconsumed history.
+    """
+    from app.models.sync_client import SyncClient
+    from app.sync.retention import RetentionCoordinator
+
+    events = await _record_events(space_session, 10)
+    allocated_ids = sorted(event.id for event in events)
+    assert len(allocated_ids) == 10
+
+    space_session.add_all(
+        [
+            SyncClient(
+                client_id="slow-client",
+                ack_sequence=3,
+                catalog_hash="c" * 64,
+                registered_at="2026-08-01T00:00:00.000Z",
+                last_seen_at="2026-08-01T00:00:00.000Z",
+                expires_at="2099-08-01T00:00:00.000Z",
+                requires_recovery=False,
+                recovery_generation=0,
+            ),
+            SyncClient(
+                client_id="fast-client",
+                ack_sequence=9,
+                catalog_hash="c" * 64,
+                registered_at="2026-08-01T00:00:00.000Z",
+                last_seen_at="2026-08-01T00:00:00.000Z",
+                expires_at="2099-08-01T00:00:00.000Z",
+                requires_recovery=False,
+                recovery_generation=0,
+            ),
+        ]
+    )
+    await space_session.flush()
+    await space_session.commit()
+
+    result = await RetentionCoordinator("c" * 64, 30).prune(
+        _RetentionScope(space_session)
+    )
+
+    # The slow client decides the waterline, not the fast one.
+    assert result.waterline == 3
+    assert result.ledger_rows == 3
+
+    remaining = (
+        await space_session.execute(select(SyncOutbox).order_by(SyncOutbox.id))
+    ).scalars().all()
+    remaining_ids = sorted(row.id for row in remaining)
+
+    # Every event the slow client has not ACKed yet is still on disk.
+    assert remaining_ids == [event_id for event_id in allocated_ids if event_id > 3]
+    assert 4 in remaining_ids
+    assert 10 in remaining_ids

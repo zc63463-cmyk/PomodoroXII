@@ -19,6 +19,7 @@ from app.schemas.sync import (
     SyncV2PushRequest,
     SyncV2PushResponse,
     SyncV2RecoveryResponse,
+    SyncV2RetentionPruneResponse,
     SyncV2StatusResponse,
 )
 from app.settings import settings
@@ -34,6 +35,7 @@ from app.sync.operations import (
     validate_status_call,
 )
 from app.sync.protocol import SyncProtocol, protocol_for_call
+from app.sync.retention import RetentionCoordinator
 
 router = APIRouter()
 
@@ -244,6 +246,63 @@ async def status_v2(
     del client_id
     result = await protocol.status(call.client_id)
     return SyncV2StatusResponse.model_validate(to_wire_json(result))
+
+
+async def _retention_scope(
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> AsyncIterator[tuple[Any, RetentionCoordinator]]:
+    """Open one Space runtime handle for a scheduled retention sweep.
+
+    Retention is maintenance, not a client sync call, so it opens the Space
+    scope directly instead of routing through ``protocol_for_call``.
+    """
+    if user.get("type") != "space" or not user.get("space_id"):
+        from app.errors import AuthorizationError
+
+        raise AuthorizationError("Space token required")
+    services = getattr(request.app.state, "runtime_services", None)
+    if services is None:
+        raise RuntimeError("RuntimeServices are not installed")
+    space_id = str(user["space_id"])
+    principal = Principal(
+        subject=str(user["sub"]),
+        token_type="space",
+        space_id=space_id,
+        epoch=int(user.get("epoch", 0)),
+        expires_at=user.get("exp") if isinstance(user.get("exp"), int) else None,
+    )
+    handle = await services.scope.open(principal, space_id, "write")
+    async with handle:
+        yield handle, RetentionCoordinator(
+            catalog=services.catalog,
+            ttl_days=settings.sync_client_ttl_days,
+            space_id=space_id,
+        )
+
+
+@router.post(
+    "/v2/retention/prune",
+    response_model=SyncV2RetentionPruneResponse,
+    tags=["sync"],
+    summary="Prune the sync ledger and tombstones to the client ACK waterline",
+)
+async def retention_prune_v2(
+    retention: tuple[Any, RetentionCoordinator] = Depends(_retention_scope),
+) -> SyncV2RetentionPruneResponse:
+    """Scheduled retention entry point.
+
+    Requires a Space token. Nothing is pruned until every active client has
+    ACKed past the event, so a client that is offline for a long time holds
+    the waterline back rather than losing unconsumed events.
+    """
+    scope, coordinator = retention
+    result = await coordinator.prune(scope)
+    return SyncV2RetentionPruneResponse(
+        waterline=result.waterline,
+        ledger_rows=result.ledger_rows,
+        tombstones=result.tombstones,
+    )
 
 
 __all__ = ["ValidatedSyncCall", "router"]

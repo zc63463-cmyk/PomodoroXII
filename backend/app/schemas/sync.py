@@ -222,6 +222,20 @@ class SyncV2StatusResponse(BaseModel):
     recovery_client_count: SafeNonnegativeInt
 
 
+class SyncV2RetentionPruneResponse(BaseModel):
+    """Outcome of one scheduled ledger/tombstone retention sweep.
+
+    ``waterline`` is ``None`` when no durable ACK waterline exists yet, which
+    means nothing may be pruned.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    waterline: SafeNonnegativeInt | None
+    ledger_rows: SafeNonnegativeInt
+    tombstones: SafeNonnegativeInt
+
+
 class SyncV2OperationQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
