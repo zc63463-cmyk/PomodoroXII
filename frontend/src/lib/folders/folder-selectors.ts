@@ -1,0 +1,130 @@
+/**
+ * Folder selectors —— 把扁平的文件夹列表组装成树。
+ *
+ * 刻意做成纯函数（不碰 Dexie、不异步）：树的形状、排序、笔记计数都是
+ * 容易出错又极好测试的逻辑，纯函数让单测零成本。
+ *
+ * 三个必须处理的边界（都由测试覆盖）：
+ * 1. **孤儿文件夹**：parent_id 指向不存在的文件夹 → 提到根层级，不能直接丢弃
+ * 2. **环**：A.parent = B 且 B.parent = A → 必须中断，否则递归爆栈
+ * 3. **计数**：只数未回收的笔记
+ */
+
+import type { Folder, FolderTreeNode, Note } from '@/types'
+
+export interface BuildFolderTreeOptions {
+  /** 是否把 is_system 的文件夹排在同级最前。默认 true。 */
+  systemFirst?: boolean
+}
+
+/**
+ * 组装文件夹树。
+ *
+ * 返回的根节点按 sort_order → name 排序；孤儿与环上的节点会被提升到根层级，
+ * 保证任何输入都不会丢节点、也不会无限递归。
+ */
+export function buildFolderTree(
+  folders: readonly Folder[],
+  notes: readonly Note[] = [],
+  options: BuildFolderTreeOptions = {},
+): FolderTreeNode[] {
+  const systemFirst = options.systemFirst ?? true
+
+  // 只统计未回收的笔记
+  const counts = new Map<string | null, number>()
+  for (const note of notes) {
+    if (note.trashed_at != null) continue
+    const key = note.folder_id ?? null
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+
+  const nodes = new Map<string, FolderTreeNode>(
+    folders.map((folder) => [
+      folder.id,
+      { folder, children: [], noteCount: counts.get(folder.id) ?? 0 },
+    ]),
+  )
+
+  const roots: FolderTreeNode[] = []
+  const attached = new Set<string>()
+
+  for (const folder of folders) {
+    const node = nodes.get(folder.id)!
+    const parentId = folder.parent_id
+
+    // 无父、或父不存在（孤儿）→ 归到根层级
+    if (parentId == null || !nodes.has(parentId) || parentId === folder.id) {
+      roots.push(node)
+      continue
+    }
+
+    // 环检测：从 parent 往上走，若回到自己则说明成环 → 断链提到根层级
+    if (leadsBackTo(parentId, folder.id, nodes, folders)) {
+      roots.push(node)
+      continue
+    }
+
+    nodes.get(parentId)!.children.push(node)
+    attached.add(folder.id)
+  }
+
+  // 未被挂上的（理论上只有环上的残余）也补进根层级，确保不丢节点
+  for (const [id, node] of nodes) {
+    if (!attached.has(id) && !roots.includes(node)) roots.push(node)
+  }
+
+  sortNodes(roots, systemFirst)
+  for (const node of nodes.values()) sortNodes(node.children, systemFirst)
+
+  return roots
+}
+
+/** 从 startId 沿 parent 链向上走，判断是否会回到 targetId。 */
+function leadsBackTo(
+  startId: string,
+  targetId: string,
+  nodes: Map<string, FolderTreeNode>,
+  folders: readonly Folder[],
+): boolean {
+  const parentOf = new Map(folders.map((f) => [f.id, f.parent_id]))
+  const seen = new Set<string>()
+  let cursor: string | null | undefined = startId
+
+  while (cursor != null) {
+    if (cursor === targetId) return true
+    if (seen.has(cursor)) return true // 已在别处成环
+    seen.add(cursor)
+    if (!nodes.has(cursor)) return false
+    cursor = parentOf.get(cursor)
+  }
+  return false
+}
+
+function sortNodes(nodes: FolderTreeNode[], systemFirst: boolean): void {
+  nodes.sort((a, b) => {
+    if (systemFirst && a.folder.is_system !== b.folder.is_system) {
+      return a.folder.is_system ? -1 : 1
+    }
+    const byOrder = a.folder.sort_order - b.folder.sort_order
+    if (byOrder !== 0) return byOrder
+    return a.folder.name.localeCompare(b.folder.name)
+  })
+}
+
+/** 未归入任何文件夹的笔记数（用于「未分类」入口）。 */
+export function countUnfiledNotes(notes: readonly Note[]): number {
+  return notes.filter((n) => n.trashed_at == null && n.folder_id == null).length
+}
+
+/** 把树压平成带缩进层级的列表，供扁平渲染（如 <select>）使用。 */
+export function flattenFolderTree(
+  tree: readonly FolderTreeNode[],
+  depth = 0,
+): Array<{ folder: Folder; depth: number; noteCount: number }> {
+  const out: Array<{ folder: Folder; depth: number; noteCount: number }> = []
+  for (const node of tree) {
+    out.push({ folder: node.folder, depth, noteCount: node.noteCount })
+    out.push(...flattenFolderTree(node.children, depth + 1))
+  }
+  return out
+}
