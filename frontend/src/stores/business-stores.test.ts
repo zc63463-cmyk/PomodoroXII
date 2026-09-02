@@ -197,18 +197,29 @@ describe('business stores reset', () => {
     expect(useReflectionStore.getState().isLoading).toBe(false)
   })
 
-  it('stats-store reset restores overview, focusTrend, taskDistribution, isLoading', () => {
+  it('stats-store reset restores the three summary blocks and isLoading', () => {
+    // 后端只有 habit / schedule / note 三个 summary 端点，
+    // 原 stub 的 overview/focusTrend/taskDistribution 并不存在，已移除。
     useStatsStore.setState({
-      overview: { totalSessions: 10 } as never,
-      focusTrend: [{ date: '2026-01-01' } as never],
-      taskDistribution: [{ status: 'done', count: 5 } as never],
+      habitSummary: { habits: [], period_days: 30 },
+      scheduleSummary: {
+        total: 1,
+        completed: 1,
+        pending: 0,
+        overdue: 0,
+        period_days: 30,
+        completion_rate: 1,
+      },
+      noteSummary: { notes: 1, folders: 1, trashed_notes: 0, trashed_folders: 0 },
       isLoading: true,
+      error: 'boom',
     })
     useStatsStore.getState().reset()
-    expect(useStatsStore.getState().overview).toBeNull()
-    expect(useStatsStore.getState().focusTrend).toEqual([])
-    expect(useStatsStore.getState().taskDistribution).toEqual([])
+    expect(useStatsStore.getState().habitSummary).toBeNull()
+    expect(useStatsStore.getState().scheduleSummary).toBeNull()
+    expect(useStatsStore.getState().noteSummary).toBeNull()
     expect(useStatsStore.getState().isLoading).toBe(false)
+    expect(useStatsStore.getState().error).toBeNull()
   })
 
   it('search-store reset restores query, results, isSearching, searchScope', () => {
