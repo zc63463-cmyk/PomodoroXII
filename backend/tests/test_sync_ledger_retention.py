@@ -376,3 +376,68 @@ async def test_prune_waterline_follows_the_slowest_client_not_the_fastest(
     assert remaining_ids == [event_id for event_id in allocated_ids if event_id > 3]
     assert 4 in remaining_ids
     assert 10 in remaining_ids
+
+
+# --------------------------------------------------------------------------- #
+# HTTP surface: POST /api/v1/sync/v2/retention/prune
+# --------------------------------------------------------------------------- #
+
+
+async def _space_headers(client) -> dict[str, str]:
+    """Bootstrap auth, create a space, return space-token headers."""
+    resp = await client.post(
+        "/api/v1/auth/setup", json={"password": "test-password-123"}
+    )
+    assert resp.status_code in (200, 201), resp.text
+    resp = await client.post(
+        "/api/v1/auth/login", json={"password": "test-password-123"}
+    )
+    assert resp.status_code == 200, resp.text
+    master = {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+    resp = await client.post(
+        "/api/v1/spaces", json={"name": "Retention Space"}, headers=master
+    )
+    assert resp.status_code == 201, resp.text
+    space_id = resp.json()["id"]
+
+    resp = await client.post(f"/api/v1/spaces/{space_id}/token", headers=master)
+    assert resp.status_code == 200, resp.text
+    return {"Authorization": f"Bearer {resp.json()['space_token']}"}
+
+
+@pytest.mark.provisioned_space_storage
+class TestRetentionPruneHTTP:
+    """The scheduled retention entry point.
+
+    Coordinator-level pruning is covered above. These cover the **HTTP
+    contract** that an external scheduler depends on
+    (``scripts/prune_sync_ledgers.py``): status code, response shape,
+    auth requirement, and idempotency — none of which the coordinator
+    tests exercise.
+    """
+
+    async def test_prune_returns_expected_shape(self, client) -> None:
+        headers = await _space_headers(client)
+
+        resp = await client.post("/api/v1/sync/v2/retention/prune", headers=headers)
+
+        assert resp.status_code == 200, resp.text
+        # An empty ledger prunes nothing, but must still report a coherent shape.
+        assert {"waterline", "ledger_rows", "tombstones"} <= set(resp.json())
+
+    async def test_prune_is_idempotent(self, client) -> None:
+        """Running prune twice in a row must be safe — schedulers will."""
+        headers = await _space_headers(client)
+
+        first = await client.post("/api/v1/sync/v2/retention/prune", headers=headers)
+        second = await client.post("/api/v1/sync/v2/retention/prune", headers=headers)
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert first.json() == second.json()
+
+    async def test_prune_requires_space_token(self, client) -> None:
+        resp = await client.post("/api/v1/sync/v2/retention/prune")
+
+        assert resp.status_code in (401, 403), resp.text
