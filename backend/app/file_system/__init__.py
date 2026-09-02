@@ -15,8 +15,6 @@ from app.file_system.interfaces import (
 )
 from app.file_system.schema import (
     Base,
-    NoteLink,
-    NotePathHistory,
     NoteVersion,
     init_database,
 )
@@ -38,8 +36,6 @@ __all__ = [
     "Base",
     "NoteORM",
     "FolderORM",
-    "NotePathHistory",
     "NoteVersion",
-    "NoteLink",
     "init_database",
 ]

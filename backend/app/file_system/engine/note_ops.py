@@ -202,12 +202,8 @@ class NoteOpsMixin:
                         "WHERE note_id = ?",
                         (target_folder_id, new_rel_path, now, note_id),
                     )
-                    # Record path history with correct new_path
-                    conn.execute(
-                        "INSERT INTO note_paths (note_id, old_path, new_path, changed_at) "
-                        "VALUES (?, ?, ?, ?)",
-                        (note_id, old_path, new_rel_path, now),
-                    )
+                    # note_paths 表已于 2026-09-02 移除（零消费方，issue #70）：
+                    # 投影管线从不写它，仅此 legacy 路径写，且无人读取。
                     conn.commit()
                     # Re-read updated row
                     row = conn.execute(
@@ -309,12 +305,7 @@ class NoteOpsMixin:
                                 self._rename_file(old_path, new_rel_path)
                             updates.append("current_path = ?")
                             params.append(new_rel_path)
-                            # 记录路径历史
-                            conn.execute(
-                                "INSERT INTO note_paths (note_id, old_path, new_path, changed_at) "
-                                "VALUES (?, ?, ?, ?)",
-                                (note_id, old_path, new_rel_path, now),
-                            )
+                            # note_paths 表已于 2026-09-02 移除（零消费方，issue #70）
                         updates.append("title = ?")
                         params.append(title)
                     if tags is not None:

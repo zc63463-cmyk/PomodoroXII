@@ -77,16 +77,13 @@ class FolderModel(Base):
     )
 
 
-class NotePathHistory(Base):
-    """笔记路径历史 — 追踪移动/重命名。"""
-    __tablename__ = "note_paths"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    note_id: Mapped[str] = mapped_column(String(15), ForeignKey("notes.note_id"), index=True)
-    old_path: Mapped[str] = mapped_column(String(500))
-    new_path: Mapped[str] = mapped_column(String(500))
-    changed_at: Mapped[str] = mapped_column(String(32))
-    # index=True on note_id auto-generates ix_note_paths_note_id — no explicit Index needed
+# 2026-09-02: 移除 NotePathHistory(note_paths) 与 NoteLink(note_links) 两个模型。
+# 两者均为零消费方的死表：投影管线从不写 note_paths，note_links 从未有任何 INSERT，
+# 且全仓无 SELECT、无 REST 端点、前端零命中。保留它们会让 index.db 看起来比实际更完整，
+# 并误导后续维护者以为存在路径历史或知识图谱能力。详见 issue #70。
+#
+# 存量库中已存在的这两张表不受影响 —— _inspect_status 只校验「缺失表」，
+# 不会因多出表而判定异常，故无需数据迁移。
 
 
 class NoteVersion(Base):
@@ -99,22 +96,6 @@ class NoteVersion(Base):
     change_summary: Mapped[str] = mapped_column(String(500))
     created_at: Mapped[str] = mapped_column(String(32))
     # index=True on note_id auto-generates ix_versions_note_id — no explicit Index needed
-
-
-class NoteLink(Base):
-    """笔记关联 — 知识图谱基础。"""
-    __tablename__ = "note_links"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    from_note_id: Mapped[str] = mapped_column(String(15), ForeignKey("notes.note_id"), index=True)
-    to_note_id: Mapped[str] = mapped_column(String(15), ForeignKey("notes.note_id"), index=True)
-    link_type: Mapped[str] = mapped_column(String(20), default="reference")
-    strength: Mapped[float] = mapped_column(default=1.0)
-    created_at: Mapped[str] = mapped_column(String(32))
-
-    __table_args__ = (
-        UniqueConstraint("from_note_id", "to_note_id", "link_type", name="uq_note_links"),
-    )
 
 
 # FTS5 虚拟表 — 独立存储（content=notes 模式不适用，因为 notes 表无 content 列，正文存在 .md 文件中）

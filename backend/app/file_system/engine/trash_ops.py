@@ -5,7 +5,8 @@
 
 B3: restore 只允许恢复已软删除的笔记 (is_deleted=1)
 R4: purge 只允许清除已软删除的笔记
-R2: empty_trash 清理 note_links 避免孤儿外键引用
+R2: empty_trash 清理子表避免孤儿外键引用
+    （原 note_paths / note_links 已于 2026-09-02 移除 —— 零消费方，issue #70）
 """
 from __future__ import annotations
 
@@ -105,10 +106,8 @@ class TrashOpsMixin:
                     if self._file_exists(trash_path):
                         self._unlink_file(trash_path)
                     # Delete child tables first (FK references notes.note_id)
-                    conn.execute("DELETE FROM note_paths WHERE note_id = ?", (note_id,))
+                    # note_paths / note_links 已于 2026-09-02 移除（零消费方，issue #70）
                     conn.execute("DELETE FROM note_versions WHERE note_id = ?", (note_id,))
-                    conn.execute("DELETE FROM note_links WHERE from_note_id = ? OR to_note_id = ?",
-                                 (note_id, note_id))
                     # Delete parent last
                     conn.execute("DELETE FROM notes WHERE note_id = ?", (note_id,))
                     conn.commit()
@@ -132,13 +131,8 @@ class TrashOpsMixin:
                             if self._file_exists(trash_path):
                                 self._unlink_file(trash_path)
                         # Delete child tables first (FK references notes.note_id)
-                        conn.execute("DELETE FROM note_paths WHERE note_id = ?", (note_id,))
+                        # note_paths / note_links 已于 2026-09-02 移除（零消费方，issue #70）
                         conn.execute("DELETE FROM note_versions WHERE note_id = ?", (note_id,))
-                        # R2: 清理 note_links 避免孤儿外键引用
-                        conn.execute(
-                            "DELETE FROM note_links WHERE from_note_id = ? OR to_note_id = ?",
-                            (note_id, note_id),
-                        )
                         # Delete parent last
                         conn.execute("DELETE FROM notes WHERE note_id = ?", (note_id,))
                     conn.commit()

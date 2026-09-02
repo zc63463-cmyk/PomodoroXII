@@ -22,7 +22,9 @@ from app.file_system.schema import (
 from app.runtime.sqlite_vfs import BoundSQLiteTarget, MaintenanceOptions
 
 INDEX_SCHEMA_VERSION = 2
-EXPECTED_TABLES = {"notes", "folders", "note_paths", "note_versions", "note_links", "schema_meta", "sync_audit_log"}
+# 2026-09-02: 移除 note_paths / note_links —— 零消费方的死表（issue #70）。
+# 只校验「缺失表」，故存量库中仍存在这两张表不会判定异常，无需数据迁移。
+EXPECTED_TABLES = {"notes", "folders", "note_versions", "schema_meta", "sync_audit_log"}
 EXPECTED_FTS = {"notes_fts", "notes_fts_insert", "notes_fts_update", "notes_fts_delete"}
 
 

@@ -651,16 +651,11 @@ class StorageBase:
             if action.blob is None:
                 receipt.assert_current()
                 # Cascade delete child tables when purging a note.
+                # note_paths / note_links 已于 2026-09-02 移除（零消费方，issue #70）。
                 if table.name == "notes":
-                    for child_sql, child_params in (
-                        (
-                            "DELETE FROM note_links WHERE from_note_id = ? OR to_note_id = ?",
-                            (identity, identity),
-                        ),
-                        ("DELETE FROM note_paths WHERE note_id = ?", (identity,)),
-                        ("DELETE FROM note_versions WHERE note_id = ?", (identity,)),
-                    ):
-                        connection.execute(child_sql, child_params)
+                    connection.execute(
+                        "DELETE FROM note_versions WHERE note_id = ?", (identity,)
+                    )
                 connection.execute(
                     f"DELETE FROM {quoted_table} WHERE {quoted_primary_key} = ?",
                     (identity,),

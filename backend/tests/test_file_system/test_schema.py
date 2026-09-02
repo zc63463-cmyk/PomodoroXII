@@ -21,7 +21,8 @@ class TestInitDatabase:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
-        expected = {"notes", "folders", "note_paths", "note_versions", "note_links",
+        # note_paths / note_links 已于 2026-09-02 移除（零消费方，issue #70）
+        expected = {"notes", "folders", "note_versions",
                      "notes_fts", "schema_meta", "sync_audit_log"}
         assert expected.issubset(tables), f"Missing tables: {expected - tables}"
 
