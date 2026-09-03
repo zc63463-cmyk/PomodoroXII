@@ -16,7 +16,7 @@
  * 并额外提供速记没有的表格与图片。
  */
 
-import { useCallback, useDeferredValue, useMemo, useRef, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { EditorSelection, Prec, type ChangeSpec } from '@codemirror/state'
@@ -28,6 +28,11 @@ export interface NoteEditorProps {
   onChange: (value: string) => void
   /** Cmd/Ctrl+S 立即保存（跳过防抖）。不传则该快捷键无动作。 */
   onSave?: () => void
+  /**
+   * 编辑器滚动位置（0..1）。用于让预览跟随滚动。
+   * 只在开启预览同步时才需要传。
+   */
+  onScrollPercent?: (percent: number) => void
   placeholder?: string
   ariaLabel?: string
 }
@@ -198,10 +203,18 @@ export default function NoteEditor({
   value,
   onChange,
   onSave,
+  onScrollPercent,
   placeholder = '用 Markdown 写点什么…',
   ariaLabel = '笔记正文',
 }: NoteEditorProps) {
   const viewRef = useRef<EditorView | null>(null)
+  // 滚动监听器只挂一次，用 ref 拿最新回调，避免闭包捕获旧值
+  const scrollCbRef = useRef<((p: number) => void) | undefined>(onScrollPercent)
+  scrollCbRef.current = onScrollPercent
+
+  // 卸载时移除监听器（CodeMirror 的 DOM 由库自己销毁，这里只解绑事件）
+  const detachRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => detachRef.current?.(), [])
   const [showOutline, setShowOutline] = useState(false)
 
   // ★ 大纲与统计不能跟着每次按键同步重算。
@@ -273,6 +286,16 @@ export default function NoteEditor({
             aria-label={ariaLabel}
             onCreateEditor={(view) => {
               viewRef.current = view
+
+              const scroller = view.scrollDOM
+              const handleScroll = () => {
+                const max = scroller.scrollHeight - scroller.clientHeight
+                scrollCbRef.current?.(max > 0 ? scroller.scrollTop / max : 0)
+              }
+              scroller.addEventListener('scroll', handleScroll, { passive: true })
+              detachRef.current = () => {
+                scroller.removeEventListener('scroll', handleScroll)
+              }
             }}
             basicSetup={{
               lineNumbers: false,

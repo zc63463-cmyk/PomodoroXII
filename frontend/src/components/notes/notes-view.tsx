@@ -11,7 +11,7 @@
  * 带来第二套渲染逻辑。等需要语法高亮时再单独评估。
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { QuickNoteMarkdown } from '@/components/quick-notes/quick-note-markdown'
 import { Button } from '@/components/ui/button'
 import {
@@ -70,11 +70,33 @@ export function NotesView() {
 
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
-  const [isPreview, setIsPreview] = useState(false)
+  /**
+   * 视图模式。原先用 isPreview 布尔在「编辑 / 预览」间切换，
+   * 但两者互斥显示 —— 同一时刻只看到一个，滚动同步无从谈起。
+   * 分屏模式（左写右看）才是滚动同步真正有意义的场景。
+   */
+  const [viewMode, setViewMode] = useState<'edit' | 'split' | 'preview'>('edit')
   const [showVersions, setShowVersions] = useState(false)
   /** 按标签筛选。与文件夹筛选互斥：选中标签时以标签为准。 */
   const [activeTag, setActiveTag] = useState<string | null>(null)
   const [sortBy, setSortBy] = useState<NoteSortKey>('updated')
+  const previewRef = useRef<HTMLDivElement | null>(null)
+
+  /**
+   * 编辑器滚动 → 预览跟随。
+   *
+   * ★ 用「滚动百分比」而非行号映射：后者更精确，但要建立
+   *   源码行 ↔ 渲染后 DOM 位置的对应关系，成本高一个量级。
+   *   百分比映射对纯文本为主的笔记足够，且实现简单可靠。
+   *   局限：正文里图片/代码块较多导致两侧高度差异大时，会有偏移。
+   */
+  const syncPreviewScroll = useCallback((percent: number) => {
+    const el = previewRef.current
+    if (!el) return
+    const max = el.scrollHeight - el.clientHeight
+    if (max <= 0) return
+    el.scrollTop = percent * max
+  }, [])
   const [saveState, setSaveState] = useState<'idle' | 'pending' | 'saved'>('idle')
   /** null = 全部；'__unfiled__' = 未归类；其余 = 文件夹 id */
   const [activeFolder, setActiveFolder] = useState<string | null>(null)
@@ -132,7 +154,7 @@ export function NotesView() {
     setTitle(current.title)
     setContent(current.content)
     setSaveState('idle')
-    setIsPreview(false)
+    setViewMode('edit')
   }, [current])
 
   // 防抖自动保存。outbox 会合并同一实体的连续变更，所以频繁保存
@@ -427,13 +449,22 @@ export function NotesView() {
                   </option>
                 ))}
               </select>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setIsPreview((v) => !v)}
-              >
-                {isPreview ? '编辑' : '预览'}
-              </Button>
+              {(
+                [
+                  { key: 'edit', label: '编辑' },
+                  { key: 'split', label: '分屏' },
+                  { key: 'preview', label: '预览' },
+                ] as Array<{ key: typeof viewMode; label: string }>
+              ).map((mode) => (
+                <Button
+                  key={mode.key}
+                  size="sm"
+                  variant={viewMode === mode.key ? 'default' : 'ghost'}
+                  onClick={() => setViewMode(mode.key)}
+                >
+                  {mode.label}
+                </Button>
+              ))}
               <Button size="sm" variant="ghost" onClick={handleDelete}>
                 删除
               </Button>
@@ -471,17 +502,32 @@ export function NotesView() {
             )}
 
             <div className="flex min-h-0 flex-1">
-              {isPreview ? (
-                <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-                  <QuickNoteMarkdown content={content} />
-                </div>
-              ) : (
+              {/* 编辑 / 分屏 都显示编辑器 */}
+              {viewMode !== 'preview' && (
                 <div className="min-h-0 flex-1 overflow-hidden">
                   <NoteEditor
-                  value={content}
-                  onChange={setContent}
-                  onSave={handleSaveNow}
-                />
+                    value={content}
+                    onChange={setContent}
+                    onSave={handleSaveNow}
+                    // 只在分屏时同步滚动 —— 编辑模式下预览不可见，同步无意义
+                    onScrollPercent={
+                      viewMode === 'split' ? syncPreviewScroll : undefined
+                    }
+                  />
+                </div>
+              )}
+
+              {/* 分屏 / 预览 都显示渲染结果 */}
+              {viewMode !== 'edit' && (
+                <div
+                  ref={previewRef}
+                  className={
+                    viewMode === 'split'
+                      ? 'min-h-0 flex-1 overflow-y-auto border-l px-4 py-3'
+                      : 'min-h-0 flex-1 overflow-y-auto px-4 py-3'
+                  }
+                >
+                  <QuickNoteMarkdown content={content} />
                 </div>
               )}
 
