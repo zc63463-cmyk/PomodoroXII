@@ -55,3 +55,36 @@ export async function searchNotes(
   })
   return res.data
 }
+
+/** 版本历史条目（后端 GET /notes/{id}/versions）。 */
+export interface NoteVersion {
+  version_id: string
+  note_id: string
+  content_hash: string
+  changed_at: string
+  change_summary: string
+}
+
+/** 列出笔记的历史版本。后端已有该能力，此前前端未接。 */
+export async function listNoteVersions(
+  noteId: string,
+  signal?: AbortSignal,
+): Promise<NoteVersion[]> {
+  const res = await spaceApi.get<NoteVersion[]>(`/notes/${noteId}/versions`, {
+    ...(signal ? { signal } : {}),
+  })
+  return res.data
+}
+
+/** 读取某个历史版本的正文。 */
+export async function fetchNoteVersion(
+  noteId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const res = await spaceApi.get<string>(
+    `/notes/${noteId}/versions/${versionId}`,
+    { ...(signal ? { signal } : {}) },
+  )
+  return res.data
+}

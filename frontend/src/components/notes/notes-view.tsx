@@ -37,6 +37,10 @@ const NoteEditor = dynamic(() => import('./note-editor'), {
   loading: () => <div className="p-4 text-sm text-muted-foreground">编辑器加载中…</div>,
 })
 
+const NoteVersionPanel = dynamic(() => import('./note-version-panel'), {
+  loading: () => <div className="w-64 shrink-0 border-l p-3 text-xs text-muted-foreground">历史加载中…</div>,
+})
+
 export function NotesView() {
   const notes = useNoteStore((s) => s.notes)
   const currentNoteId = useNoteStore((s) => s.currentNoteId)
@@ -57,6 +61,7 @@ export function NotesView() {
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [isPreview, setIsPreview] = useState(false)
+  const [showVersions, setShowVersions] = useState(false)
   const [saveState, setSaveState] = useState<'idle' | 'pending' | 'saved'>('idle')
   /** null = 全部；'__unfiled__' = 未归类；其余 = 文件夹 id */
   const [activeFolder, setActiveFolder] = useState<string | null>(null)
@@ -184,6 +189,13 @@ export function NotesView() {
 
   const handleMoveFolder = (id: string, parentId: string | null) => {
     void moveFolder(id, parentId)
+  }
+
+  /** 恢复历史版本：走普通内容更新，会照常生成新备份，故恢复本身可再恢复。 */
+  const handleRestoreVersion = async (restored: string) => {
+    if (!current) return
+    await updateNote(current.id, { content: restored })
+    setContent(restored)
   }
 
   const handleDeleteFolder = (id: string, name: string) => {
@@ -338,17 +350,34 @@ export function NotesView() {
               <Button size="sm" variant="ghost" onClick={handleDelete}>
                 删除
               </Button>
+              <Button
+                size="sm"
+                variant={showVersions ? 'default' : 'ghost'}
+                onClick={() => setShowVersions((v) => !v)}
+              >
+                历史
+              </Button>
             </div>
 
-            {isPreview ? (
-              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-                <QuickNoteMarkdown content={content} />
-              </div>
-            ) : (
-              <div className="min-h-0 flex-1 overflow-hidden">
-                <NoteEditor value={content} onChange={setContent} />
-              </div>
-            )}
+            <div className="flex min-h-0 flex-1">
+              {isPreview ? (
+                <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+                  <QuickNoteMarkdown content={content} />
+                </div>
+              ) : (
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <NoteEditor value={content} onChange={setContent} />
+                </div>
+              )}
+
+              {showVersions && current && (
+                <NoteVersionPanel
+                  noteId={current.id}
+                  onRestore={handleRestoreVersion}
+                  onClose={() => setShowVersions(false)}
+                />
+              )}
+            </div>
           </>
         )}
       </section>
