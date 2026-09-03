@@ -16,11 +16,12 @@
  * 并额外提供速记没有的表格与图片。
  */
 
-import { useCallback, useRef } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { EditorSelection, type ChangeSpec } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
+import { countWords, parseOutline, type OutlineItem } from '@/lib/notes/note-outline'
 
 export interface NoteEditorProps {
   value: string
@@ -155,9 +156,28 @@ export default function NoteEditor({
   ariaLabel = '笔记正文',
 }: NoteEditorProps) {
   const viewRef = useRef<EditorView | null>(null)
+  const [showOutline, setShowOutline] = useState(false)
+
+  // 大纲与统计都是纯函数，随正文变化重算即可
+  const outline = useMemo(() => parseOutline(value), [value])
+  const stats = useMemo(() => countWords(value), [value])
 
   const run = useCallback((action: (view: EditorView) => void) => {
     if (viewRef.current) action(viewRef.current)
+  }, [])
+
+  /** 跳到指定行：把光标放上去并滚动到可见区域。 */
+  const jumpToLine = useCallback((line: number) => {
+    const view = viewRef.current
+    if (!view) return
+    const doc = view.state.doc
+    if (line >= doc.lines) return
+    const pos = doc.line(line + 1).from // parseOutline 的 line 是 0 基
+    view.dispatch({
+      selection: EditorSelection.cursor(pos),
+      effects: EditorView.scrollIntoView(pos, { y: 'start' }),
+    })
+    view.focus()
   }, [])
 
   return (
@@ -175,37 +195,99 @@ export default function NoteEditor({
             {item.label}
           </button>
         ))}
+
+        <button
+          type="button"
+          title="大纲"
+          aria-label="大纲"
+          onClick={() => setShowOutline((v) => !v)}
+          className={
+            showOutline
+              ? 'ml-auto rounded bg-muted px-1.5 py-1 text-xs text-foreground'
+              : 'ml-auto rounded px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground'
+          }
+        >
+          大纲
+        </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-hidden px-4 py-3">
-        <CodeMirror
-          value={value}
-          onChange={onChange}
-          theme={editorTheme}
-          height="100%"
-          placeholder={placeholder}
-          aria-label={ariaLabel}
-          onCreateEditor={(view) => {
-            viewRef.current = view
-          }}
-          basicSetup={{
-            lineNumbers: false,
-            foldGutter: true,
-            highlightActiveLine: false,
-            highlightActiveLineGutter: false,
-            searchKeymap: true,
-            bracketMatching: true,
-            closeBrackets: true,
-            autocompletion: true,
-          }}
-          extensions={[
-            // 未接 @codemirror/language-data：它包含全部语言、体积很大，
-            // 而代码块内高亮对笔记写作是次要需求。
-            markdown({ base: markdownLanguage }),
-            EditorView.lineWrapping,
-          ]}
-        />
+      <div className="flex min-h-0 flex-1">
+        <div className="min-h-0 flex-1 overflow-hidden px-4 py-3">
+          <CodeMirror
+            value={value}
+            onChange={onChange}
+            theme={editorTheme}
+            height="100%"
+            placeholder={placeholder}
+            aria-label={ariaLabel}
+            onCreateEditor={(view) => {
+              viewRef.current = view
+            }}
+            basicSetup={{
+              lineNumbers: false,
+              foldGutter: true,
+              highlightActiveLine: false,
+              highlightActiveLineGutter: false,
+              searchKeymap: true,
+              bracketMatching: true,
+              closeBrackets: true,
+              autocompletion: true,
+            }}
+            extensions={[
+              // 未接 @codemirror/language-data：它包含全部语言、体积很大，
+              // 而代码块内高亮对笔记写作是次要需求。
+              markdown({ base: markdownLanguage }),
+              EditorView.lineWrapping,
+            ]}
+          />
+        </div>
+
+        {showOutline && <OutlinePanel items={outline} onJump={jumpToLine} />}
+      </div>
+
+      <div className="flex shrink-0 items-center gap-3 border-t px-3 py-1 text-xs text-muted-foreground">
+        <span>{stats.words} 词</span>
+        <span>{stats.characters} 字</span>
+        <span>约 {stats.readingMinutes} 分钟</span>
       </div>
     </div>
+  )
+}
+
+/** 大纲面板：按层级缩进，点击跳转。 */
+function OutlinePanel({
+  items,
+  onJump,
+}: {
+  items: OutlineItem[]
+  onJump: (line: number) => void
+}) {
+  if (items.length === 0) {
+    return (
+      <aside className="w-48 shrink-0 overflow-y-auto border-l px-3 py-3">
+        <p className="text-xs text-muted-foreground">还没有标题</p>
+      </aside>
+    )
+  }
+
+  return (
+    <aside className="w-48 shrink-0 overflow-y-auto border-l px-3 py-3">
+      <div className="mb-2 text-xs font-medium uppercase text-muted-foreground">大纲</div>
+      <ul className="flex flex-col gap-1">
+        {items.map((item, index) => (
+          <li key={`${item.line}-${index}`}>
+            <button
+              type="button"
+              onClick={() => onJump(item.line)}
+              className="block w-full truncate text-left text-xs text-muted-foreground hover:text-foreground"
+              style={{ paddingLeft: `${(item.level - 1) * 12}px` }}
+              title={item.text}
+            >
+              {item.text || '(无标题)'}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </aside>
   )
 }
