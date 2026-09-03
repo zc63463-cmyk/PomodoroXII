@@ -16,16 +16,18 @@
  * 并额外提供速记没有的表格与图片。
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useDeferredValue, useMemo, useRef, useState } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { EditorSelection, type ChangeSpec } from '@codemirror/state'
-import { EditorView } from '@codemirror/view'
+import { EditorSelection, Prec, type ChangeSpec } from '@codemirror/state'
+import { EditorView, keymap } from '@codemirror/view'
 import { countWords, parseOutline, type OutlineItem } from '@/lib/notes/note-outline'
 
 export interface NoteEditorProps {
   value: string
   onChange: (value: string) => void
+  /** Cmd/Ctrl+S 立即保存（跳过防抖）。不传则该快捷键无动作。 */
+  onSave?: () => void
   placeholder?: string
   ariaLabel?: string
 }
@@ -147,20 +149,69 @@ const TOOLBAR: ToolbarItem[] = [
   { key: 'image', title: '图片', label: '🖼', action: (v) => insertBlock(v, '![描述](图片地址)') },
 ]
 
+/**
+ * 快捷键。用 Prec.highest 确保覆盖 CodeMirror 自身的绑定 ——
+ * 尤其是 Mod-s，浏览器默认会弹出「保存网页」。
+ */
+function buildKeymap(onSave?: () => void) {
+  return Prec.highest(
+    keymap.of([
+      {
+        key: 'Mod-s',
+        preventDefault: true,
+        run: () => {
+          onSave?.()
+          return true
+        },
+      },
+      {
+        key: 'Mod-b',
+        preventDefault: true,
+        run: (view) => {
+          wrapSelection(view, '**', '**', '粗体')
+          return true
+        },
+      },
+      {
+        key: 'Mod-i',
+        preventDefault: true,
+        run: (view) => {
+          wrapSelection(view, '*', '*', '斜体')
+          return true
+        },
+      },
+      {
+        key: 'Mod-k',
+        preventDefault: true,
+        run: (view) => {
+          wrapSelection(view, '[', '](https://)', '链接文字')
+          return true
+        },
+      },
+    ]),
+  )
+}
+
 // --------------------------------------------------------------------------- //
 
 export default function NoteEditor({
   value,
   onChange,
+  onSave,
   placeholder = '用 Markdown 写点什么…',
   ariaLabel = '笔记正文',
 }: NoteEditorProps) {
   const viewRef = useRef<EditorView | null>(null)
   const [showOutline, setShowOutline] = useState(false)
 
-  // 大纲与统计都是纯函数，随正文变化重算即可
-  const outline = useMemo(() => parseOutline(value), [value])
-  const stats = useMemo(() => countWords(value), [value])
+  // ★ 大纲与统计不能跟着每次按键同步重算。
+  //   两者都是对整篇正文的全量扫描（parseOutline 遍历所有行、
+  //   countWords 做一串正则替换），万字级笔记下每次输入都会卡顿。
+  //   useDeferredValue 让这两项在浏览器空闲时更新 —— 输入保持即时响应，
+  //   大纲与字数稍一拍跟上。比手写 setTimeout 防抖更贴合 React 的调度语义。
+  const deferredValue = useDeferredValue(value)
+  const outline = useMemo(() => parseOutline(deferredValue), [deferredValue])
+  const stats = useMemo(() => countWords(deferredValue), [deferredValue])
 
   const run = useCallback((action: (view: EditorView) => void) => {
     if (viewRef.current) action(viewRef.current)

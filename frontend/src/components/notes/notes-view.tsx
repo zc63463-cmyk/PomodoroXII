@@ -142,6 +142,12 @@ export function NotesView() {
     useNoteStore.setState({ currentNoteId: note.id })
   }
 
+  /** Cmd/Ctrl+S：立即保存，跳过防抖。 */
+  const handleSaveNow = () => {
+    if (!current) return
+    void updateNote(current.id, { title, content })
+  }
+
   const handleDelete = async () => {
     if (!current) return
     await deleteNote(current.id)
@@ -392,7 +398,11 @@ export function NotesView() {
                 </div>
               ) : (
                 <div className="min-h-0 flex-1 overflow-hidden">
-                  <NoteEditor value={content} onChange={setContent} />
+                  <NoteEditor
+                  value={content}
+                  onChange={setContent}
+                  onSave={handleSaveNow}
+                />
                 </div>
               )}
 
