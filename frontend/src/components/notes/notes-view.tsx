@@ -37,6 +37,10 @@ const NoteEditor = dynamic(() => import('./note-editor'), {
   loading: () => <div className="p-4 text-sm text-muted-foreground">编辑器加载中…</div>,
 })
 
+const NoteSearch = dynamic(() => import('./note-search'), {
+  loading: () => <div className="border-b px-3 py-2 text-xs text-muted-foreground">…</div>,
+})
+
 const NoteVersionPanel = dynamic(() => import('./note-version-panel'), {
   loading: () => <div className="w-64 shrink-0 border-l p-3 text-xs text-muted-foreground">历史加载中…</div>,
 })
@@ -198,6 +202,22 @@ export function NotesView() {
     setContent(restored)
   }
 
+  /**
+   * 选中搜索命中的笔记。
+   *
+   * ★ 注意边界：搜索结果可能不在当前筛选的列表里。若正按某文件夹筛选，
+   *   而该笔记不属于它，选中后 current 取不到（右侧会空白）——
+   *   此时清掉筛选，回到全部。
+   */
+  const handleSelectSearchHit = (noteId: string) => {
+    const hit = notes.find((n) => n.id === noteId)
+    if (!hit) return
+    useNoteStore.setState({ currentNoteId: noteId })
+    if (activeFolder !== null && hit.folder_id !== activeFolder) {
+      setActiveFolder(null)
+    }
+  }
+
   const handleDeleteFolder = (id: string, name: string) => {
     // 软删除（可恢复），且只动文件夹本身 —— 其中的笔记会变为未归类，不级联删除。
     const ok = window.confirm(
@@ -216,6 +236,12 @@ export function NotesView() {
             新建
           </Button>
         </div>
+
+        {/* 全文搜索走服务端 FTS5：正文在 .md 里，本地查不了 */}
+        <NoteSearch
+          folderId={activeFolder === UNFILED ? null : activeFolder}
+          onSelect={handleSelectSearchHit}
+        />
 
         <div className="max-h-1/2 min-h-0 shrink-0 overflow-y-auto border-b">
           <div className="flex items-center justify-between px-3 py-2">
