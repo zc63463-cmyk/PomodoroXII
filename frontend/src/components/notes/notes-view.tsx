@@ -345,7 +345,7 @@ export function NotesView() {
                 <QuickNoteMarkdown content={content} />
               </div>
             ) : (
-              <div className="min-h-0 flex-1 overflow-hidden px-4 py-3">
+              <div className="min-h-0 flex-1 overflow-hidden">
                 <NoteEditor value={content} onChange={setContent} />
               </div>
             )}
