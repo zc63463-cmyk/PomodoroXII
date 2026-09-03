@@ -21,6 +21,7 @@ import {
   flattenFolderTree,
 } from '@/lib/folders/folder-selectors'
 import dynamic from 'next/dynamic'
+import { mergeTags, sameTags } from '@/lib/notes/note-tags'
 import { getNoteSummary, getNoteTitle } from '@/lib/notes/note-selectors'
 import { useFolderStore } from '@/stores/folder-store'
 import { useNoteStore } from '@/stores/note-store'
@@ -66,6 +67,8 @@ export function NotesView() {
   const [content, setContent] = useState('')
   const [isPreview, setIsPreview] = useState(false)
   const [showVersions, setShowVersions] = useState(false)
+  /** 按标签筛选。与文件夹筛选互斥：选中标签时以标签为准。 */
+  const [activeTag, setActiveTag] = useState<string | null>(null)
   const [saveState, setSaveState] = useState<'idle' | 'pending' | 'saved'>('idle')
   /** null = 全部；'__unfiled__' = 未归类；其余 = 文件夹 id */
   const [activeFolder, setActiveFolder] = useState<string | null>(null)
@@ -89,11 +92,15 @@ export function NotesView() {
   const folderOptions = useMemo(() => flattenFolderTree(folderTree), [folderTree])
 
   // 按选中的文件夹筛选。字段是 folder_id，未归类即 null。
+  // 标签筛选优先级更高：选中标签时以标签为准（两者同时生效会让用户困惑）。
   const visibleNotes = useMemo(() => {
+    if (activeTag !== null) {
+      return notes.filter((n) => (n.tags ?? []).includes(activeTag))
+    }
     if (activeFolder === null) return notes
     if (activeFolder === UNFILED) return notes.filter((n) => n.folder_id == null)
     return notes.filter((n) => n.folder_id === activeFolder)
-  }, [notes, activeFolder])
+  }, [notes, activeFolder, activeTag])
 
   // 切换笔记时把服务端/本地的最新内容载入编辑器。
   useEffect(() => {
@@ -121,6 +128,7 @@ export function NotesView() {
   const currentId = current?.id ?? null
   const savedTitle = current?.title
   const savedContent = current?.content
+  const savedTags = current?.tags
 
   useEffect(() => {
     if (currentId == null) return
@@ -128,14 +136,21 @@ export function NotesView() {
 
     setSaveState('pending')
     const timer = setTimeout(() => {
-      void updateNote(currentId, { title, content }).then(
+      // 标签由正文的 #hashtag 推导，与速记规则一致。
+      // 只在标签确实变化时才写入 —— 否则每次保存都无谓地自增 version，
+      // 进而多产生一次同步事件。
+      const patch: Partial<Note> = { title, content }
+      const nextTags = mergeTags(savedTags, content)
+      if (!sameTags(nextTags, savedTags ?? [])) patch.tags = nextTags
+
+      void updateNote(currentId, patch).then(
         () => setSaveState('saved'),
         () => setSaveState('idle'),
       )
     }, AUTOSAVE_DELAY_MS)
 
     return () => clearTimeout(timer)
-  }, [currentId, savedTitle, savedContent, title, content, updateNote])
+  }, [currentId, savedTitle, savedContent, savedTags, title, content, updateNote])
 
   const handleCreate = async () => {
     const note = await createNote({ title: '', content: '' })
@@ -390,6 +405,30 @@ export function NotesView() {
                 历史
               </Button>
             </div>
+
+            {/* 标签由正文的 #hashtag 推导。点击可切到按该标签筛选，
+                再点一次取消 —— 与文件夹筛选互斥，标签优先。 */}
+            {current.tags && current.tags.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1 border-b px-3 py-1.5">
+                {activeTag !== null && (
+                  <span className="mr-1 text-xs text-muted-foreground">按标签筛选中</span>
+                )}
+                {current.tags.map((tag) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => setActiveTag(activeTag === tag ? null : tag)}
+                    className={
+                      activeTag === tag
+                        ? 'rounded bg-primary px-1.5 py-0.5 text-xs text-primary-foreground'
+                        : 'rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground'
+                    }
+                  >
+                    #{tag}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div className="flex min-h-0 flex-1">
               {isPreview ? (
