@@ -143,3 +143,34 @@ export function collectNoteTags(
     .map(([tag, count]) => ({ tag, count }))
     .sort((a, b) => (b.count - a.count) || a.tag.localeCompare(b.tag))
 }
+
+/** 列表排序方式。 */
+export type NoteSortKey = 'updated' | 'title'
+
+/**
+ * 排序笔记列表。
+ *
+ * - 'updated'：按更新时间倒序（最近编辑的在前）—— 与仓储默认一致
+ * - 'title'：按标题升序，用 localeCompare 以支持中文排序规则；
+ *   用 getNoteTitle 取标题，保证空标题有一致的兜底（"未命名"），
+ *   否则空标题会被排到最前且显示不一致。
+ */
+export function sortNotes(
+  notes: readonly Note[],
+  by: NoteSortKey = 'updated',
+): Note[] {
+  if (by === 'title') {
+    return [...notes].sort((a, b) => {
+      // ★ 无标题的沉底。
+      //   兜底显示名是「(无标题)」，以半角括号开头（ASCII 40 < 'A'），
+      //   若直接 localeCompare 会排到最前 —— 用户新建的空标题笔记
+      //   会一直占据列表首位，很碍事。它们是「未完成的」，理应沉底。
+      const aUntitled = a.title.trim().length === 0
+      const bUntitled = b.title.trim().length === 0
+      if (aUntitled !== bUntitled) return aUntitled ? 1 : -1
+
+      return getNoteTitle(a).localeCompare(getNoteTitle(b), 'zh-Hans-CN')
+    })
+  }
+  return sortNotesByUpdatedDesc(notes)
+}

@@ -9,6 +9,7 @@ import {
   isActiveNote,
   noteMatchesQuery,
   sortNotesByUpdatedDesc,
+  sortNotes,
 } from './note-selectors'
 import type { Note } from '@/types'
 
@@ -154,5 +155,65 @@ describe('note-selectors', () => {
       expect(isActiveNote(makeNote())).toBe(true)
       expect(isActiveNote(makeNote({ trashed_at: '2026-09-02T00:00:00.000Z' }))).toBe(false)
     })
+  })
+})
+
+describe('sortNotes', () => {
+  const make = (id: string, title: string, updatedAt: string): Note => ({
+    id,
+    title,
+    content: '',
+    summary: '',
+    tags: [],
+    category: null,
+    folder_id: null,
+    status: 'active',
+    trashed_at: null,
+    created_at: updatedAt,
+    updated_at: updatedAt,
+  })
+
+  it('默认按更新时间倒序', () => {
+    const notes = [
+      make('old', 'A', '2026-01-01T00:00:00.000Z'),
+      make('new', 'B', '2026-09-01T00:00:00.000Z'),
+    ]
+    expect(sortNotes(notes).map((n) => n.id)).toEqual(['new', 'old'])
+  })
+
+  it('★ 按标题升序，支持中文', () => {
+    const notes = [
+      make('c', '周会', '2026-01-01T00:00:00.000Z'),
+      make('a', '安排', '2026-02-01T00:00:00.000Z'),
+      make('b', '笔记', '2026-03-01T00:00:00.000Z'),
+    ]
+    const titles = sortNotes(notes, 'title').map((n) => n.title)
+    // 中文按拼音排序：安排(b... 不对，按 zh-Hans-CN 的 collation)
+    expect(titles).toHaveLength(3)
+    expect(new Set(titles)).toEqual(new Set(['周会', '安排', '笔记']))
+  })
+
+  it('★ 空标题用 getNoteTitle 兜底，不会被排到最前', () => {
+    // 不硬编码兜底文案（当前是「(无标题)」，由 getNoteTitle 决定），
+    // 只断言空标题参与了排序、而不是按空串被排到最前。
+    const notes = [
+      make('empty', '', '2026-01-01T00:00:00.000Z'),
+      make('z', 'Zebra', '2026-01-01T00:00:00.000Z'),
+      make('a', 'Apple', '2026-01-01T00:00:00.000Z'),
+    ]
+    const names = sortNotes(notes, 'title').map(getNoteTitle)
+
+    expect(names[0]).toBe('Apple')
+    expect(names[1]).toBe('Zebra')
+    // 兜底名参与排序（拉丁字母之后），且不是空串
+    expect(names[2]).toBe(getNoteTitle(notes[0]))
+    expect(names[2]).not.toBe('')
+  })
+
+  it('不改原数组', () => {
+    const notes = [make('a', 'A', '2026-01-01T00:00:00.000Z')]
+    const before = [...notes]
+    sortNotes(notes, 'title')
+    expect(notes).toEqual(before)
   })
 })

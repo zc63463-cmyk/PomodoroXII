@@ -22,7 +22,12 @@ import {
 } from '@/lib/folders/folder-selectors'
 import dynamic from 'next/dynamic'
 import { mergeTags, sameTags } from '@/lib/notes/note-tags'
-import { getNoteSummary, getNoteTitle } from '@/lib/notes/note-selectors'
+import {
+  getNoteSummary,
+  getNoteTitle,
+  sortNotes,
+  type NoteSortKey,
+} from '@/lib/notes/note-selectors'
 import { useFolderStore } from '@/stores/folder-store'
 import { useNoteStore } from '@/stores/note-store'
 import type { Folder, FolderTreeNode, Note } from '@/types'
@@ -69,6 +74,7 @@ export function NotesView() {
   const [showVersions, setShowVersions] = useState(false)
   /** 按标签筛选。与文件夹筛选互斥：选中标签时以标签为准。 */
   const [activeTag, setActiveTag] = useState<string | null>(null)
+  const [sortBy, setSortBy] = useState<NoteSortKey>('updated')
   const [saveState, setSaveState] = useState<'idle' | 'pending' | 'saved'>('idle')
   /** null = 全部；'__unfiled__' = 未归类；其余 = 文件夹 id */
   const [activeFolder, setActiveFolder] = useState<string | null>(null)
@@ -97,10 +103,20 @@ export function NotesView() {
     if (activeTag !== null) {
       return notes.filter((n) => (n.tags ?? []).includes(activeTag))
     }
-    if (activeFolder === null) return notes
-    if (activeFolder === UNFILED) return notes.filter((n) => n.folder_id == null)
-    return notes.filter((n) => n.folder_id === activeFolder)
-  }, [notes, activeFolder, activeTag])
+    if (activeFolder === null) {
+      return sortNotes(notes, sortBy)
+    }
+    if (activeFolder === UNFILED) {
+      return sortNotes(
+        notes.filter((n) => n.folder_id == null),
+        sortBy,
+      )
+    }
+    return sortNotes(
+      notes.filter((n) => n.folder_id === activeFolder),
+      sortBy,
+    )
+  }, [notes, activeFolder, activeTag, sortBy])
 
   // 切换笔记时把服务端/本地的最新内容载入编辑器。
   useEffect(() => {
@@ -314,6 +330,30 @@ export function NotesView() {
               </span>
             </button>
           )}
+        </div>
+
+        {/* 排序切换。无标题笔记在按标题排序时会沉底（见 sortNotes）。 */}
+        <div className="flex items-center gap-1 border-b px-3 py-1.5">
+          <span className="mr-1 text-xs text-muted-foreground">排序</span>
+          {(
+            [
+              { key: 'updated', label: '更新时间' },
+              { key: 'title', label: '标题' },
+            ] as Array<{ key: NoteSortKey; label: string }>
+          ).map((option) => (
+            <button
+              key={option.key}
+              type="button"
+              onClick={() => setSortBy(option.key)}
+              className={
+                sortBy === option.key
+                  ? 'rounded bg-muted px-1.5 py-0.5 text-xs text-foreground'
+                  : 'rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground'
+              }
+            >
+              {option.label}
+            </button>
+          ))}
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
