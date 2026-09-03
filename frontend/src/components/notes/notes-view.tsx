@@ -54,6 +54,7 @@ export function NotesView() {
   const [saveState, setSaveState] = useState<'idle' | 'pending' | 'saved'>('idle')
   /** null = 全部；'__unfiled__' = 未归类；其余 = 文件夹 id */
   const [activeFolder, setActiveFolder] = useState<string | null>(null)
+  const [seeding, setSeeding] = useState(false)
 
   // 编辑中的草稿。切笔记时用它重置编辑器，避免把 A 的内容写进 B。
   const editingIdRef = useRef<string | null>(null)
@@ -135,6 +136,46 @@ export function NotesView() {
     void renameFolder(id, name)
   }
 
+  /**
+   * 铺一批示例数据，只为让文件夹层级与列表形态可见。
+   * 刻意做成「两级文件夹 + 跨层级笔记」，缩进与计数一眼能看出来。
+   * 仅在整个库为空时从空态触发，有数据后按钮自动消失。
+   */
+  const handleSeed = async () => {
+    setSeeding(true)
+    try {
+      const work = await createFolder('工作')
+      const meetings = await createFolder('会议记录', work.id)
+      const reading = await createFolder('读书笔记')
+
+      await Promise.all([
+        createNote({
+          title: '周会 0902',
+          content: '# 周会 0902\n\n- [x] 同步进度\n- [ ] 确认排期\n',
+          folder_id: meetings.id,
+        }),
+        createNote({
+          title: 'One-on-One',
+          content: '# One-on-One\n\n聊了职业发展和下季度目标。\n',
+          folder_id: meetings.id,
+        }),
+        createNote({
+          title: '《深度工作》笔记',
+          content:
+            '# 《深度工作》\n\n> 专注是一种可以被训练的能力。\n\n## 要点\n\n1. 减少上下文切换\n2. 设定固定时段\n',
+          folder_id: reading.id,
+        }),
+        createNote({
+          title: '灵感速记',
+          content: '# 灵感速记\n\n想到一个改进同步体验的点子。\n',
+          folder_id: null,
+        }),
+      ])
+    } finally {
+      setSeeding(false)
+    }
+  }
+
   const handleMoveFolder = (id: string, parentId: string | null) => {
     void moveFolder(id, parentId)
   }
@@ -212,9 +253,26 @@ export function NotesView() {
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           {visibleNotes.length === 0 && !isLoading && (
-            <p className="px-3 py-6 text-sm text-muted-foreground">
-              {notes.length === 0 ? '还没有笔记，点「新建」开始。' : '这个文件夹里没有笔记。'}
-            </p>
+            <div className="px-3 py-6">
+              <p className="text-sm text-muted-foreground">
+                {notes.length === 0
+                  ? '还没有笔记，点「新建」开始。'
+                  : '这个文件夹里没有笔记。'}
+              </p>
+              {/* 空的库看不出文件夹层级，给一条一键铺示例的路。
+                  仅在整个库为空时出现，有数据后自动消失。 */}
+              {notes.length === 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-3"
+                  disabled={seeding}
+                  onClick={() => void handleSeed()}
+                >
+                  {seeding ? '生成中…' : '填充示例数据'}
+                </Button>
+              )}
+            </div>
           )}
           {visibleNotes.map((note) => (
             <NoteListItem
