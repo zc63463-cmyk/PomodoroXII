@@ -98,20 +98,28 @@ export function NotesView() {
 
   // 防抖自动保存。outbox 会合并同一实体的连续变更，所以频繁保存
   // 不会堆出大量待推事件。
+  //
+  // ★ 依赖必须是**原始值**而不是 current 对象：current 每次 notes 变化
+  //   都是新对象引用，把它放进依赖会让 effect 反复重跑、把防抖 timer
+  //   重置 —— 表现为「一直在保存中」甚至永不落库。
+  const currentId = current?.id ?? null
+  const savedTitle = current?.title
+  const savedContent = current?.content
+
   useEffect(() => {
-    if (!current) return
-    if (title === current.title && content === current.content) return
+    if (currentId == null) return
+    if (title === savedTitle && content === savedContent) return
 
     setSaveState('pending')
     const timer = setTimeout(() => {
-      void updateNote(current.id, { title, content }).then(
+      void updateNote(currentId, { title, content }).then(
         () => setSaveState('saved'),
         () => setSaveState('idle'),
       )
     }, AUTOSAVE_DELAY_MS)
 
     return () => clearTimeout(timer)
-  }, [title, content, current, updateNote])
+  }, [currentId, savedTitle, savedContent, title, content, updateNote])
 
   const handleCreate = async () => {
     const note = await createNote({ title: '', content: '' })

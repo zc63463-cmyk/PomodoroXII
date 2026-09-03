@@ -3,9 +3,9 @@ import * as scheduleRepo from '@/lib/schedules/schedule-repository'
 import * as timeBlockRepo from '@/lib/schedules/time-block-repository'
 import { useScheduleStore } from '@/stores/schedule-store'
 import { useTimeBlockStore } from '@/stores/time-block-store'
-import type { SyncedSchedule, SyncedTimeBlock } from '@/types'
+import type { CachedSchedule, SyncedTimeBlock } from '@/types'
 
-function schedule(overrides: Partial<SyncedSchedule> = {}): SyncedSchedule {
+function schedule(overrides: Partial<CachedSchedule> = {}): CachedSchedule {
   const now = '2026-09-02T00:00:00.000Z'
   return {
     id: 's1',

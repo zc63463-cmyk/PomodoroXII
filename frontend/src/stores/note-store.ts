@@ -95,15 +95,27 @@ export const useNoteStore = create<NoteStore>()(
       updateNote: async (id, data) => {
         set({ error: null })
         try {
-          // 正文与元数据分两条写入，对应服务端 PATCH /{id} 与 PUT /{id}/content。
+          // ★ 正文与元数据**必须分开写**，不能图省事合并成一次。
+          //   服务端只有在 `knowledge.note.update_content` 时才生成版本备份
+          //   （projections.py:361-378 的 version_projections）。
+          //   合并成 update 虽然正文仍会写入 .md（body 照常传），
+          //   但会**静默丢掉版本历史** —— 为省一次写入牺牲数据不可接受。
           const { content, ...metadata } = data
+          let updated: Note | null = null
+
           if (content !== undefined) {
-            await updateNoteContent(id, content)
+            updated = await updateNoteContent(id, content)
           }
           if (Object.keys(metadata).length > 0) {
-            await updateNoteMetadata(id, metadata)
+            updated = await updateNoteMetadata(id, metadata)
           }
-          set({ notes: await listNotes() })
+          if (updated === null) return
+
+          // 保存后**不做 listNotes()** —— 那会全表 toArray + filter + sort
+          // 并让整个列表重渲染。改为用返回值原地替换当前行。
+          set((state) => ({
+            notes: state.notes.map((note) => (note.id === id ? updated! : note)),
+          }))
         } catch (error) {
           set({ error: toMessage(error) })
           throw error
