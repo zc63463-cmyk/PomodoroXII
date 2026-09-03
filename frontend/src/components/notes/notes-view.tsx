@@ -20,6 +20,7 @@ import {
   countUnfiledNotes,
   flattenFolderTree,
 } from '@/lib/folders/folder-selectors'
+import dynamic from 'next/dynamic'
 import { getNoteSummary, getNoteTitle } from '@/lib/notes/note-selectors'
 import { useFolderStore } from '@/stores/folder-store'
 import { useNoteStore } from '@/stores/note-store'
@@ -30,6 +31,11 @@ const AUTOSAVE_DELAY_MS = 600
 
 /** 「未归类」是 folder_id 为 null 的笔记，用一个不可能与真实 id 冲突的哨兵。 */
 const UNFILED = '__unfiled__'
+
+const NoteEditor = dynamic(() => import('./note-editor'), {
+  ssr: false, // CodeMirror 构造 EditorView 需要 DOM，SSR 阶段会报错
+  loading: () => <div className="p-4 text-sm text-muted-foreground">编辑器加载中…</div>,
+})
 
 export function NotesView() {
   const notes = useNoteStore((s) => s.notes)
@@ -339,12 +345,9 @@ export function NotesView() {
                 <QuickNoteMarkdown content={content} />
               </div>
             ) : (
-              <textarea
-                className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 font-mono text-sm outline-none"
-                placeholder="用 Markdown 写点什么…"
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-              />
+              <div className="min-h-0 flex-1 overflow-hidden px-4 py-3">
+                <NoteEditor value={content} onChange={setContent} />
+              </div>
             )}
           </>
         )}

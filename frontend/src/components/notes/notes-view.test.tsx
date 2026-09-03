@@ -59,9 +59,11 @@ describe('NotesView', () => {
 
     fireEvent.click(screen.getByText('待办'))
 
+    // CodeMirror 不用 placeholder 属性（自行渲染占位提示），
+    // 故按 aria-label 定位，并断言其 contenteditable 的内容而非 value。
     await waitFor(() => {
-      const editor = screen.getByPlaceholderText(/Markdown/) as HTMLTextAreaElement
-      expect(editor.value).toBe('买牛奶')
+      const editor = screen.getByLabelText('笔记正文')
+      expect(editor.textContent).toContain('买牛奶')
     })
   })
 
