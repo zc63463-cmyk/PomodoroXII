@@ -18,10 +18,14 @@ from app.mutation.types import (
 from app.mutation.unit_of_work import MutationCompileContext
 from app.services.time import utc_now_iso_ms
 from app.task_space.contracts import (
+    BLOCKING_RELATION_TYPES,
+    RELATION_TYPES,
     SYSTEM_STATUS_IDS,
     SYSTEM_TYPE_ID,
     format_work_item_display_key,
+    relation_id,
 )
+from app.task_space.cycle_detector import detect_cycle_incremental
 from app.task_space.document import InvalidNoteDocument, UnsupportedContentVersion
 
 TASK_SPACE_POLICY_ENTITY_TYPES = frozenset({
@@ -632,6 +636,245 @@ async def _compile_TransitionWorkItem(self, context, request):
 
 
 TaskSpaceCompiler.compile_TransitionWorkItem = _compile_TransitionWorkItem
+
+
+# -- TrashWorkItem / RestoreWorkItem (archived_at lifecycle) ------------------
+
+
+def _compile_archived_at_mutation(self, context, request, *, trashed: bool):
+    """One atomic TrashWorkItem / RestoreWorkItem command.
+
+    ``archived_at`` is the single soft-delete projection of a WorkItem and is
+    already part of ``WORK_ITEM_SCALAR_FIELDS``, so the sync replay path
+    carries it through the generic update family.  The typed commands exist so
+    the online API can flip it **without letting a caller choose the
+    timestamp**: the server always stamps ``archived_at`` from its own
+    monotonic clock, and the external schema carries no ``archived_at`` field
+    at all (``extra="forbid"`` rejects any attempt to smuggle one in).
+
+    Both directions are idempotent.  Re-trashing an already-trashed item (or
+    restoring a live one) is a zero-effect receipt: no version bump, no sync
+    event, no DB write.  That keeps a double-click or a resumed intent from
+    producing a spurious version bump that would invalidate every other
+    pending client CAS.
+    """
+    overlay = context.authority
+    item = _require_row(overlay, "work_item", request.entity_id)
+    _require_expected_version(item, request.expected_version)
+    if (item["archived_at"] is not None) == trashed:
+        return context.command(
+            request=request,
+            db_plans=(),
+            sync_events=(),
+            value={
+                **item,
+                "label_ids": _label_ids_for_work_item(overlay, str(item["id"])),
+            },
+        )
+    now = _monotonic_updated_at(str(item["updated_at"]), self.now_iso_ms())
+    after = {
+        **item,
+        "archived_at": now if trashed else None,
+        "updated_at": now,
+        "version": int(item["version"]) + 1,
+    }
+    return _work_item_update_command(context, request, item, after, now)
+
+
+async def _compile_TrashWorkItem(self, context, request):
+    return _compile_archived_at_mutation(self, context, request, trashed=True)
+
+
+async def _compile_RestoreWorkItem(self, context, request):
+    return _compile_archived_at_mutation(self, context, request, trashed=False)
+
+
+TaskSpaceCompiler.compile_TrashWorkItem = _compile_TrashWorkItem
+TaskSpaceCompiler.compile_RestoreWorkItem = _compile_RestoreWorkItem
+
+
+# -- Relation (dependency domain) commands ------------------------------------
+
+
+def _relation_rows(overlay, space_id: str) -> tuple[Mapping[str, object], ...]:
+    """Every relation row of THIS Space, read from the locked overlay.
+
+    Cross-Space edges are impossible by construction: the authority overlay
+    only ever holds rows of the Space the command was authorised against, so
+    a forged ``space_id`` cannot reach another Space's rows.
+    """
+    return tuple(
+        row for row in overlay.rows("relation")
+        if str(row["space_id"]) == space_id
+    )
+
+
+def _blocking_edges(rows) -> list[tuple[str, str]]:
+    """Canonical ``(from, to)`` pairs that participate in blocking.
+
+    Only ``depends_on`` / ``blocks`` close a dependency cycle; ``relates_to``
+    is a non-blocking association and is deliberately excluded.
+    """
+    return [
+        (str(row["from_work_item_id"]), str(row["to_work_item_id"]))
+        for row in rows
+        if str(row["relation_type"]) in BLOCKING_RELATION_TYPES
+    ]
+
+
+def _require_relation_endpoints(overlay, from_id: str, to_id: str) -> None:
+    """Both endpoints must exist in this Space and must not be archived.
+
+    D17: archived items keep their history but become immutable — no edge may
+    be created that touches one, in either direction.
+    """
+    for work_item_id in (from_id, to_id):
+        row = _require_row(overlay, "work_item", work_item_id)
+        if row["archived_at"] is not None:
+            from app.mutation.types import MutationRuleViolation
+
+            raise MutationRuleViolation(
+                "archived_work_item_immutable",
+                {"workItemId": work_item_id},
+                retryable=False,
+            )
+
+
+def _relation_identity(request: MutationRequest) -> tuple[str, str, str, str, str]:
+    space_id = str(request.payload["space_id"])
+    from_id = str(request.payload["from_work_item_id"])
+    to_id = str(request.payload["to_work_item_id"])
+    relation_type = str(request.payload["relation_type"])
+    return (
+        space_id,
+        from_id,
+        to_id,
+        relation_type,
+        relation_id(space_id, from_id, to_id, relation_type),
+    )
+
+
+async def _compile_CreateRelation(self, context, request):
+    from app.mutation.types import MutationRuleViolation
+
+    overlay = context.authority
+    space_id, from_id, to_id, relation_type, edge_id = _relation_identity(request)
+    if relation_type not in RELATION_TYPES:
+        raise MutationRuleViolation(
+            "payload_field_not_allowed",
+            {"field": "relation_type", "value": relation_type},
+            retryable=False,
+        )
+
+    # Existence + immutability BEFORE the self-loop check, so a caller that
+    # points at a missing item gets not_found rather than a confusing cycle.
+    _require_relation_endpoints(overlay, from_id, to_id)
+
+    if from_id == to_id:
+        raise MutationRuleViolation(
+            "cycle_detected",
+            {
+                "cycle_path": [from_id, from_id],
+                "conflicting_edge": [from_id, to_id],
+                "reason": "self_loop",
+            },
+            retryable=False,
+        )
+
+    existing = overlay.row("relation", edge_id)
+    if existing is not None:
+        # D11/D15: the deterministic id makes a duplicate create a zero-effect
+        # receipt instead of a constraint violation.  Two offline devices that
+        # independently declared the same edge converge on one row.
+        return context.command(
+            request=request, db_plans=(), sync_events=(), value=dict(existing),
+        )
+
+    # D13: the detector runs against the SAME overlay the insert will be
+    # compiled into — never a detached read at the route layer, which would
+    # be a ToCTOU race against a concurrent command.
+    has_cycle, cycle_path = detect_cycle_incremental(
+        _blocking_edges(_relation_rows(overlay, space_id)),
+        (from_id, to_id),
+    )
+    if has_cycle:
+        raise MutationRuleViolation(
+            "cycle_detected",
+            {
+                "cycle_path": cycle_path,
+                "conflicting_edge": [from_id, to_id],
+            },
+            retryable=False,
+        )
+
+    now = self.now_iso_ms()
+    after = {
+        "id": edge_id,
+        "space_id": space_id,
+        "from_work_item_id": from_id,
+        "to_work_item_id": to_id,
+        "relation_type": relation_type,
+        "created_at": now,
+        "updated_at": now,
+        "version": 1,
+    }
+    plan = DbMutationPlan(
+        "relations", {"id": edge_id}, "insert", None, None, after,
+    )
+    event = SyncEventPlan("relation", edge_id, "create", after, 1, now)
+    return context.command(
+        request=request, db_plans=(plan,), sync_events=(event,), value=after,
+    )
+
+
+async def _compile_RemoveRelation(self, context, request):
+    overlay = context.authority
+    space_id, from_id, to_id, relation_type, edge_id = _relation_identity(request)
+    row = overlay.row("relation", edge_id)
+    if row is None:
+        # Removing an edge that does not exist is a hard error, not a no-op:
+        # an unknown id almost always means the caller is stale.  Replays of a
+        # *successful* remove are handled upstream by the operation journal,
+        # which returns the stored result without recompiling.
+        from app.mutation.types import MutationRuleViolation
+
+        raise MutationRuleViolation(
+            "not_found", {"entity_type": "relation", "id": edge_id},
+            retryable=False,
+        )
+    before = dict(row)
+    _require_expected_version(before, request.expected_version)
+    # D17: the edge is history for archived endpoints; it may not be rewritten.
+    _require_relation_endpoints(overlay, from_id, to_id)
+
+    now = self.now_iso_ms()
+    plan = DbMutationPlan(
+        "relations",
+        {"id": edge_id},
+        "delete",
+        before["version"],
+        before,
+        None,
+    )
+    # A delete sync event is what makes the UoW write the tombstone
+    # (unit_of_work.py: tombstones.add on action == "delete"), which is how
+    # other devices learn the edge is gone.  The compiler never calls
+    # TombstoneService itself — that would mean a second write outside the plan.
+    event = SyncEventPlan(
+        "relation",
+        edge_id,
+        "delete",
+        {"deleted_at": now},
+        int(before["version"]) + 1,
+        now,
+    )
+    return context.command(
+        request=request, db_plans=(plan,), sync_events=(event,), value=before,
+    )
+
+
+TaskSpaceCompiler.compile_CreateRelation = _compile_CreateRelation
+TaskSpaceCompiler.compile_RemoveRelation = _compile_RemoveRelation
 
 
 # -- WorkItem Sync entity compilation -----------------------------------------

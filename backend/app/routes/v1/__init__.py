@@ -21,6 +21,7 @@ def build_v1_router() -> APIRouter:
 
     # Sub-routers (alphabetically sorted; mounted in groups below).
     from app.routes.v1.active_session import router as active_session_router
+    from app.routes.v1.assets import router as assets_router
     from app.routes.v1.auth import router as auth_router
     from app.routes.v1.focus_sessions import router as focus_sessions_router
     from app.routes.v1.folders import router as folders_router
@@ -31,6 +32,7 @@ def build_v1_router() -> APIRouter:
     from app.routes.v1.projects import router as projects_router
     from app.routes.v1.quick_notes import router as quick_notes_router
     from app.routes.v1.reflections import router as reflections_router
+    from app.routes.v1.relations import router as relations_router
     from app.routes.v1.schedules import router as schedules_router
     from app.routes.v1.settings import router as settings_router
     from app.routes.v1.spaces import router as spaces_router
@@ -48,6 +50,8 @@ def build_v1_router() -> APIRouter:
 
     # Space-scoped entities (space token required).
     router.include_router(notes_router, prefix="/notes", tags=["notes"])
+    # S1：本地资源（图片/PDF），不进同步协议
+    router.include_router(assets_router, prefix="/assets", tags=["assets"])
     router.include_router(folders_router, prefix="/folders", tags=["folders"])
     router.include_router(
         focus_sessions_router, prefix="/focus-sessions", tags=["focus-sessions"]
@@ -72,6 +76,7 @@ def build_v1_router() -> APIRouter:
     router.include_router(projects_router, prefix="/projects", tags=["projects"])
     router.include_router(labels_router, prefix="/labels", tags=["labels"])
     router.include_router(work_items_router, prefix="/work-items", tags=["work-items"])
+    router.include_router(relations_router, prefix="/relations", tags=["relations"])
     router.include_router(
         work_item_notes_router, prefix="/work-items", tags=["work-item-notes"]
     )

@@ -37,6 +37,31 @@ class LabelOperation(StrEnum):
     ARCHIVE = "archive"
 
 
+class RelationOperation(StrEnum):
+    CREATE = "create"
+    REMOVE = "remove"
+
+
+class RelationType(StrEnum):
+    """Edge semantics (依赖域合同 D12: 单边存储，双向解释).
+
+    ``depends_on`` / ``blocks`` are the two readings of ONE canonical edge;
+    the DB always stores ``from = blocked side``, ``to = upstream blocker``.
+    Only these two participate in blocking; ``relates_to`` is a non-blocking
+    association and is deliberately excluded from cycle detection.
+    """
+
+    DEPENDS_ON = "depends_on"
+    BLOCKS = "blocks"
+    RELATES_TO = "relates_to"
+
+
+BLOCKING_RELATION_TYPES = frozenset(
+    {RelationType.DEPENDS_ON.value, RelationType.BLOCKS.value}
+)
+RELATION_TYPES = frozenset(item.value for item in RelationType)
+
+
 SYSTEM_STATUS_IDS: Mapping[str, str] = {
     "not_started": "sys-status-not-started",
     "in_progress": "sys-status-in-progress",
@@ -54,6 +79,32 @@ def normalize_project_key(value: str) -> str:
     if PROJECT_KEY_PATTERN.fullmatch(normalized) is None:
         raise ValueError("project_key")
     return normalized
+
+
+def relation_id(
+    space_id: str,
+    from_work_item_id: str,
+    to_work_item_id: str,
+    relation_type: str,
+) -> str:
+    """Deterministically derive a relation id (依赖域合同 D11 / D15).
+
+    ``"rel_" + sha256(canonical(space_id, from, to, type))[:32]``
+
+    Consequence: the same logical edge created independently on two offline
+    devices converges on ONE row instead of producing duplicates.  It also
+    makes the online API naturally idempotent — a replayed create hits the
+    same primary key.
+    """
+    from app.mutation.types import canonical_payload_hash
+
+    digest = canonical_payload_hash({
+        "space_id": space_id,
+        "from_work_item_id": from_work_item_id,
+        "to_work_item_id": to_work_item_id,
+        "relation_type": relation_type,
+    })
+    return f"rel_{digest[:32]}"
 
 
 def format_work_item_display_key(project_key: str, number: int) -> str:
@@ -134,8 +185,41 @@ class LabelCommand:
             raise ValueError("label update/archive requires label_id and expected_version")
 
 
+@dataclass(frozen=True)
+class RelationCommand:
+    """Create or remove one dependency edge.
+
+    ``relation_id`` is derived (never client-chosen) and doubles as the CAS
+    target: remove carries ``expected_version``; create does not (the row
+    either exists or it does not).
+    """
+
+    operation: str
+    command_id: str
+    space_id: str
+    relation_id: str
+    from_work_item_id: str
+    to_work_item_id: str
+    relation_type: str
+    expected_version: int | None
+    payload_hash: str
+
+    def __post_init__(self) -> None:
+        if self.operation not in {item.value for item in RelationOperation}:
+            raise ValueError(f"unsupported relation operation: {self.operation}")
+        if not self.relation_id.startswith("rel_"):
+            raise ValueError("relation id must be deterministically derived")
+        if self.operation == RelationOperation.REMOVE.value and self.expected_version is None:
+            raise ValueError("relation remove requires expected_version")
+
+
 TaskSpaceCommand: TypeAlias = (
-    CreateProject | CreateWorkItem | MutateWorkItem | WorkItemNoteCommand | LabelCommand
+    CreateProject
+    | CreateWorkItem
+    | MutateWorkItem
+    | WorkItemNoteCommand
+    | LabelCommand
+    | RelationCommand
 )
 
 

@@ -43,6 +43,8 @@ SPACE_TABLES = {
     "work_item_labels",
     "work_items",
     "work_item_notes",
+    "assets",
+    "relations",
     "focus_sessions",
     "session_task_contexts",
     "session_attribution_revisions",

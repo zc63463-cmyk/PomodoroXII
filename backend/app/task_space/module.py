@@ -21,6 +21,7 @@ from app.task_space.contracts import (
     LabelCommand,
     MutateWorkItem,
     NoteCommandKind,
+    RelationCommand,
     TaskSpaceAccepted,
     TaskSpaceCommand,
     TaskSpaceOutcome,
@@ -37,6 +38,10 @@ WORK_ITEM_REQUEST_NAMES = {
     "update": "UpdateWorkItem",
     "move": "MoveWorkItem",
     "transition": "TransitionWorkItem",
+    # archived_at lifecycle: the caller never supplies the timestamp, so the
+    # business payload is empty and the server stamps its own monotonic clock.
+    "trash": "TrashWorkItem",
+    "restore": "RestoreWorkItem",
     # D5 Y: idempotent set mutations; the target label_ids set travels in the
     # payload and the compiler read-modify-writes the junction table.
     "add_labels": "AddWorkItemLabels",
@@ -46,6 +51,10 @@ LABEL_REQUEST_NAMES = {
     "create": "CreateLabel",
     "update": "UpdateLabel",
     "archive": "ArchiveLabel",
+}
+RELATION_REQUEST_NAMES = {
+    "create": "CreateRelation",
+    "remove": "RemoveRelation",
 }
 
 
@@ -85,6 +94,15 @@ def _business_payload(command: TaskSpaceCommand) -> Mapping[str, object]:
     if isinstance(command, LabelCommand):
         # create/update carry the definition fields; archive carries none.
         return dict(command.payload)
+    if isinstance(command, RelationCommand):
+        # The endpoints ARE the business payload: the hash covers the logical
+        # edge (from, to, type), never the derived relation_id (which is a
+        # pure function of those three plus the space).
+        return {
+            "from_work_item_id": command.from_work_item_id,
+            "to_work_item_id": command.to_work_item_id,
+            "relation_type": command.relation_type,
+        }
     if isinstance(command, WorkItemNoteCommand):
         return {
             key: value
@@ -130,6 +148,16 @@ def build_task_space_request(command: TaskSpaceCommand) -> MutationRequest:
         entity_id = command.work_item_id
         expected_version = command.expected_version
         payload = {"work_item_id": command.work_item_id, **command.payload}
+    elif isinstance(command, RelationCommand):
+        operation = command.operation
+        request_name = RELATION_REQUEST_NAMES[operation]
+        entity_id = command.relation_id
+        expected_version = command.expected_version
+        payload = {
+            "from_work_item_id": command.from_work_item_id,
+            "to_work_item_id": command.to_work_item_id,
+            "relation_type": command.relation_type,
+        }
     elif isinstance(command, LabelCommand):
         operation = command.operation
         request_name = LABEL_REQUEST_NAMES[operation]
@@ -164,6 +192,7 @@ def _accepted(command: TaskSpaceCommand, value: Mapping[str, object]) -> TaskSpa
         raise TypeError("Task Space result requires one primary post-image")
     entity_type = (
         "project" if isinstance(command, CreateProject)
+        else "relation" if isinstance(command, RelationCommand)
         else "work_item" if isinstance(command, (CreateWorkItem, MutateWorkItem))
         else "label" if isinstance(command, LabelCommand)
         else "work_item_note"

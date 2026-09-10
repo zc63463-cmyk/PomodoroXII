@@ -718,23 +718,27 @@ async def test_status_returns_all_22_pull_keys_in_one_query(space_session):
 # C8: ENTITY_REGISTRY validation
 # --------------------------------------------------------------------------- #
 
-def test_entity_registry_has_21_entities():
-    """ENTITY_REGISTRY should contain exactly 21 final entity types.
+def test_entity_registry_has_22_entities():
+    """ENTITY_REGISTRY should contain exactly 22 final entity types.
 
     work_item_label was removed from the generic sync directory: its real
     primary key is composite, so it is delivered by neither the legacy nor
     the derived sync registry.
+
+    ★ 21 -> 22: ``relation`` (dependency domain) joins the directory — it has
+    a single-column deterministic primary key, so the generic post-image
+    protocol carries it natively.
     """
     from app.services.sync import ENTITY_REGISTRY
 
-    assert len(ENTITY_REGISTRY) == 21
+    assert len(ENTITY_REGISTRY) == 22
     expected_keys = {
         "focusSession", "folder", "habit", "habitCheckIn", "label",
         "memoComment", "note", "project", "quickNote", "reflection",
         "schedule", "scheduleQuickNote", "sessionAttributionRevision",
         "sessionTaskContext", "sessionWorkItemOutcome", "sessionWorkItemPlan",
         "statusDefinition", "timeBlock", "typeDefinition", "workItem",
-        "workItemNote",
+        "workItemNote", "relation",
     }
     assert set(ENTITY_REGISTRY.keys()) == expected_keys
 

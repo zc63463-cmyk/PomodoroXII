@@ -7,7 +7,7 @@ remain stable as the project evolves.
 
 Any new ORM model added to ``app/models`` or ``app/db/models/meta.py``
 MUST be accompanied by a registration in ``app/registry/builtin.py``;
-otherwise ``test_registry_has_31_entities`` will fail and surface the
+otherwise ``test_registry_has_32_entities`` will fail and surface the
 omission before it reaches Phase C sync or the meta API.
 """
 from __future__ import annotations
@@ -18,18 +18,24 @@ from app.registry import REGISTRY
 from app.registry.entities import EntityCategory, StorageType
 
 
-def test_registry_has_31_entities():
-    """Registry must contain exactly 31 entities.
+def test_registry_has_33_entities():
+    """Registry must contain exactly 33 entities.
 
     Breakdown:
-    - 22 BUSINESS (first-class + junctions)
+    - 24 BUSINESS (first-class + junctions + asset + relation)
     - 5 SYNC_INFRA (tombstone, sync_outbox, sync_audit_log,
       session_command_envelope, session_command_receipt)
     - 3 META (space, meta_setting, active_session_locator)
     - 1 SETTING (setting)
+
+    ★ 31 -> 32：新增 ``asset``（笔记图片/附件，S1 本地存储）。
+      它是 BUSINESS 但 ``sync_enabled=False`` —— 二进制还没有传输通道，
+      S2/S3 接入同步时记得同步更新这里的计数。
+    ★ 32 -> 33：新增 ``relation``（任务空间第二阶段依赖域）。
+      它是 BUSINESS 且 ``sync_enabled=True``（单列主键确定性 relationId）。
     """
-    assert len(REGISTRY) == 31, (
-        f"Expected 31 entities, got {len(REGISTRY)}. "
+    assert len(REGISTRY) == 33, (
+        f"Expected 33 entities, got {len(REGISTRY)}. "
         "Did you add a new model without registering it in builtin.py?"
     )
 
@@ -39,13 +45,16 @@ def test_registry_has_31_entities():
         "habit", "habit_check_in", "schedule", "time_block", "memo_comment",
         "schedule_quick_note",
         "project", "status_definition", "type_definition", "label",
-        "work_item_label", "work_item", "work_item_note",
+        "work_item_label", "work_item", "work_item_note", "relation",
         "focus_session", "session_task_context", "session_attribution_revision",
         "session_work_item_plan", "session_work_item_outcome",
         "tombstone", "sync_outbox", "sync_audit_log",
         "session_command_envelope", "session_command_receipt",
         "space", "meta_setting", "active_session_locator",
         "setting",
+        # S1：笔记资源（图片/PDF）。BUSINESS 但 sync_enabled=False ——
+        # 二进制传输通道还没建，S2/S3 接入后记得把它加进上面的 sync 断言。
+        "asset",
     }
     actual_names = {s.name for s in REGISTRY.list()}
     missing = expected_names - actual_names
@@ -87,21 +96,26 @@ def test_registry_categorization_and_classifications():
     - ``trash.py._resolve_model`` (list_soft_delete)
     """
     # Category counts.
-    assert len(REGISTRY.list_by_category(EntityCategory.BUSINESS)) == 22
+    # ★ BUSINESS 22 -> 23：新增 asset（S1 本地资源，见下方 sync 说明）
+    # ★ 23 -> 24：新增 relation（依赖域，sync_enabled=True）
+    assert len(REGISTRY.list_by_category(EntityCategory.BUSINESS)) == 24
     assert len(REGISTRY.list_by_category(EntityCategory.SYNC_INFRA)) == 5
     assert len(REGISTRY.list_by_category(EntityCategory.META)) == 3
     assert len(REGISTRY.list_by_category(EntityCategory.SETTING)) == 1
 
-    # Sync eligibility: 21 of the 22 business entities participate in sync.
-    # work_item_label (composite (work_item_id, label_id) primary key) is the
-    # deliberate exception — see the builtin.py declaration comment.
+    # Sync eligibility: 22 of the **24** business entities participate in sync.
+    # Exceptions:
+    #   - work_item_label: composite (work_item_id, label_id) primary key,
+    #     see the builtin.py declaration comment.
+    #   - asset: S1 只做本地存储，二进制传输通道还没建（S3 做）。
+    #     加入同步时这里要补 "asset"。
     sync_names = {s.name for s in REGISTRY.list_sync_enabled()}
     assert sync_names == {
         "note", "folder", "quick_note", "reflection",
         "habit", "habit_check_in", "schedule", "time_block", "memo_comment",
         "schedule_quick_note",
         "project", "status_definition", "type_definition", "label",
-        "work_item", "work_item_note",
+        "work_item", "work_item_note", "relation",
         "focus_session", "session_task_context", "session_attribution_revision",
         "session_work_item_plan", "session_work_item_outcome",
     }
@@ -242,3 +256,33 @@ def test_build_sync_registry_excludes_work_item_label():
     registry = build_sync_registry()
     assert "workItemLabel" not in registry
     assert "workItemLabels" not in {entry["pull_key"] for entry in registry.values()}
+
+
+def test_all_registered_models_reach_base_metadata():
+    """★ 防重演 assets 的 "no such table"。
+
+    根因：model 文件写了、但**没在 ``app/models/__init__.py`` 导出** ——
+    于是它不在 ``Base.metadata`` 里，而 ``init_database`` 是照 metadata
+    来 CREATE TABLE 的，结果表就漏建了：代码看着全对，运行才炸。
+
+    这里**只导入 ``app.models`` 包**（模拟应用启动时的注册路径），
+    逐个核对注册表里的 table_name 是否都在 metadata 中。
+    """
+    import app.models  # noqa: F401  触发包级注册
+    from app.db.base import Base
+
+    import app.registry.builtin  # noqa: F401
+
+    missing = [
+        f"{spec.name}({spec.table_name})"
+        for spec in REGISTRY.list()
+        # ★ META 类别（spaces / meta_settings / active_session_locator）建在
+        #   meta.db，用的是另一套 Base，不能拿 space 的 metadata 去要求它们。
+        if spec.table_name
+        and spec.category is not EntityCategory.META
+        and spec.table_name not in Base.metadata.tables
+    ]
+    assert not missing, (
+        "以下表不在 Base.metadata，检查 app/models/__init__.py 是否导出了对应 model："
+        + ", ".join(missing)
+    )

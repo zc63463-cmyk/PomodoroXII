@@ -18,7 +18,12 @@ LEGACY_ENTITY_TYPES = (
 )
 LEGACY_TABLES = ("tasks", "sessions", "task_quick_notes", "session_quick_notes")
 SAFE_MUTATION_TERMINALS = ("FINALIZED", "ABORTED", "COMPENSATED")
-TASK_SPACE_TARGET_HEAD = "space_011_sync_clients_streaming"
+# ★★ 加 space 迁移时必须同步更新这个值。
+#    它是 fleet preflight 的锚点：bootstrap 用它比对 alembic head，
+#    不一致就直接拒绝启动（防止有人偷偷改了迁移链）。
+#    忘了更新的症状是启动时报
+#    "fleet preflight policy targets a different revision"（assets 踩过一次）。
+TASK_SPACE_TARGET_HEAD = "space_013_relations"
 
 
 def _contains_removed_authority(value: object) -> bool:

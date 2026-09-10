@@ -456,6 +456,41 @@ REGISTRY.register(EntitySpec(
     junction_endpoints=(("work_item_id", "work_item"), ("label_id", "label")),
 ))
 
+# --------------------------------------------------------------------------- #
+# Note assets (S1: local only)
+# --------------------------------------------------------------------------- #
+
+REGISTRY.register(EntitySpec(
+    name="asset",
+    model_path="app.models.asset.Asset",
+    table_name="assets",
+    # ★ 故意用 DB_ONLY：元数据进 DB，二进制由 AssetService 自己落到磁盘。
+    #   若标成 FS_DB_SPLIT，`unit_of_work.py:855` 会要求注册 Domain Policy，
+    #   否则同步入口抛 SpaceRecoveryRequiredError。S1 阶段不打算动同步。
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    # ★ S1 不同步：二进制还没有传输通道（S3 做）。这里只求本机可用。
+    #   S2 改成 True 时需同时补 AssetDomainPolicy + 处理 entity.* 三件套。
+    sync_enabled=False,
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("filename", "string", nullable=False, default="",
+                  description="Original filename, display only — never used as a path"),
+        FieldSpec("mime", "string", nullable=False, default="application/octet-stream",
+                  description="Normalised MIME type, whitelisted on upload"),
+        FieldSpec("size", "integer", nullable=False, default=0,
+                  description="Size in bytes"),
+        FieldSpec("sha256", "string", nullable=False, default="", indexed=True,
+                  description="Content hash — content-addressed dedup key"),
+        FieldSpec("storage_key", "string", nullable=False, default="",
+                  description="Path relative to the space root, e.g. assets/ab/<sha>.png"),
+    ),
+    pull_key="assets",
+    route_enabled=False,
+    description="Binary asset attached to notes (image/PDF); content lives on disk, meta in DB",
+))
+
 REGISTRY.register(EntitySpec(
     name="work_item",
     model_path="app.models.work_item.WorkItem",
@@ -509,6 +544,46 @@ REGISTRY.register(EntitySpec(
     sync_entity_type="workItemNote",
     pull_key="workItemNotes",
     description="Work item note document; sync payload is full document_json post-image",
+))
+
+REGISTRY.register(EntitySpec(
+    name="relation",
+    model_path="app.models.relation.Relation",
+    table_name="relations",
+    storage_type=StorageType.DB_ONLY,
+    category=EntityCategory.BUSINESS,
+    # 单列主键，天然支持通用 post-image 同步（D11/D15 的确定性 relationId
+    # 让离线多端独立建边收敛成同一行，不会产生重复）。
+    sync_enabled=True,
+    # 物理删除：依赖关系是事实而非内容，删掉就是删掉；墓碑由
+    # TombstoneService 记录，列本身不存 deleted 标记。
+    soft_delete=False,
+    sync_conflict_policy="strict_cas",
+    fields=_sync_fields() + (
+        FieldSpec("space_id", "string", nullable=False, indexed=True),
+        FieldSpec(
+            "from_work_item_id", "string", nullable=False, indexed=True,
+            description="被阻塞方（下游 / 依赖者）—— 规范边的起点",
+        ),
+        FieldSpec(
+            "to_work_item_id", "string", nullable=False, indexed=True,
+            description="上游 blocker（被依赖者）—— 规范边的终点",
+        ),
+        FieldSpec(
+            "relation_type", "string", nullable=False,
+            description="depends_on|blocks 参与阻塞；relates_to 不阻塞",
+        ),
+    ),
+    sync_entity_type="relation",
+    pull_key="relations",
+    junction_endpoints=(
+        ("from_work_item_id", "work_item"),
+        ("to_work_item_id", "work_item"),
+    ),
+    description=(
+        "Work item dependency edge (single-sided storage, dual-view projection). "
+        "from = blocked side, to = upstream blocker."
+    ),
 ))
 
 REGISTRY.register(EntitySpec(

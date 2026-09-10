@@ -17,6 +17,7 @@ FINAL_TABLES = {
     "work_item_labels",
     "work_items",
     "work_item_notes",
+    "relations",
     "focus_sessions",
     "session_task_contexts",
     "session_attribution_revisions",
@@ -47,7 +48,7 @@ def test_space_head_creates_exact_final_tables_and_seeds(tmp_path) -> None:
         ).fetchone() == (SYSTEM_TYPE_ID,)
         assert conn.execute(
             "SELECT version_num FROM alembic_version_space"
-        ).fetchone() == ("space_011_sync_clients_streaming",)
+        ).fetchone() == ("space_013_relations",)
         for table_name, removed in {
             "quick_notes": {"session_id"},
             "time_blocks": {"task_id"},
@@ -93,7 +94,7 @@ def test_space_head_downgrade_rejects_non_seed_rows(tmp_path: Path) -> None:
     with sqlite3.connect(path) as conn:
         assert conn.execute(
             "SELECT version_num FROM alembic_version_space"
-        ).fetchone() == ("space_011_sync_clients_streaming",)
+        ).fetchone() == ("space_013_relations",)
 
 
 def _preflight_tables(connection) -> None:
