@@ -100,6 +100,49 @@ describe('schedule-store', () => {
 
     expect(del).toHaveBeenCalledWith('s1')
   })
+
+  it('loadSchedules(range) 把范围透传给仓储并记住', async () => {
+    const load = vi.spyOn(scheduleRepo, 'listSyncedSchedules').mockResolvedValue([])
+    const range = { from: '2026-09-01', to: '2026-09-30' }
+
+    await useScheduleStore.getState().loadSchedules(range)
+
+    expect(load).toHaveBeenCalledWith(range)
+    expect(useScheduleStore.getState().range).toEqual(range)
+  })
+
+  it('未传范围时按全量加载（range 记为 null）', async () => {
+    const load = vi.spyOn(scheduleRepo, 'listSyncedSchedules').mockResolvedValue([])
+
+    await useScheduleStore.getState().loadSchedules()
+
+    expect(load).toHaveBeenCalledWith(undefined)
+    expect(useScheduleStore.getState().range).toBeNull()
+  })
+
+  it('★ 写操作后按已记住的范围重载，不退回全量', async () => {
+    const load = vi.spyOn(scheduleRepo, 'listSyncedSchedules').mockResolvedValue([])
+    vi.spyOn(scheduleRepo, 'completeSchedule').mockResolvedValue(schedule())
+    const range = { from: '2026-09-01', to: '2026-09-30' }
+
+    await useScheduleStore.getState().loadSchedules(range)
+    load.mockClear()
+
+    await useScheduleStore.getState().completeSchedule('s1')
+
+    // 若这里退回全量，月视图一次「完成」就会把全部历史灌进列表
+    expect(load).toHaveBeenCalledWith(range)
+  })
+
+  it('reset 清空范围', async () => {
+    vi.spyOn(scheduleRepo, 'listSyncedSchedules').mockResolvedValue([])
+    await useScheduleStore.getState().loadSchedules({ from: '2026-09-01' })
+    expect(useScheduleStore.getState().range).not.toBeNull()
+
+    useScheduleStore.getState().reset()
+
+    expect(useScheduleStore.getState().range).toBeNull()
+  })
 })
 
 describe('time-block-store', () => {

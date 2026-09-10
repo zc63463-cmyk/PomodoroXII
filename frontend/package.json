@@ -11,10 +11,16 @@
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "generate:api": "uv run --project ../backend python ../backend/scripts/export_openapi.py --output openapi.json && openapi-typescript openapi.json -o src/types/api-generated.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:full": "node scripts/test-full.mjs",
+    "test:lib": "vitest run src/lib --reporter=dot",
+    "test:components": "vitest run src/components --reporter=dot",
+    "test:stores": "vitest run src/stores --reporter=dot",
+    "verify:table-preview": "node scripts/verify-table-preview.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
+    "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/lang-markdown": "^6.5.2",
     "@codemirror/state": "^6.7.2",
     "@codemirror/view": "^6.43.10",

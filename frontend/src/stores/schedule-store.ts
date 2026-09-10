@@ -17,15 +17,23 @@ import {
   deleteSchedule as deleteScheduleLocally,
   listSyncedSchedules,
   updateSchedule as updateScheduleLocally,
+  type ScheduleRange,
 } from '@/lib/schedules/schedule-repository'
 
 interface ScheduleState {
   schedules: CachedSchedule[]
   isLoading: boolean
+  /**
+   * 当前加载范围。
+   *
+   * 写操作后会重新拉取列表 —— 必须按**同一个范围**拉，否则一次「完成」
+   * 就会把全量历史灌进来，把月视图的按月筛选冲掉。
+   */
+  range: ScheduleRange | null
 }
 
 interface ScheduleActions {
-  loadSchedules: (range?: { from?: string; to?: string }) => Promise<void>
+  loadSchedules: (range?: ScheduleRange) => Promise<void>
   createSchedule: (data: Partial<Schedule>) => Promise<Schedule>
   updateSchedule: (id: string, data: Partial<Schedule>) => Promise<void>
   completeSchedule: (id: string) => Promise<void>
@@ -37,14 +45,15 @@ type ScheduleStore = ScheduleState & ScheduleActions
 
 export const useScheduleStore = create<ScheduleStore>()(
   devtools(
-    (set) => ({
+    (set, get) => ({
       schedules: [],
       isLoading: false,
+      range: null,
 
-      loadSchedules: async () => {
-        set({ isLoading: true })
+      loadSchedules: async (range) => {
+        set({ isLoading: true, range: range ?? null })
         try {
-          set({ schedules: await listSyncedSchedules(), isLoading: false })
+          set({ schedules: await listSyncedSchedules(range), isLoading: false })
         } catch {
           set({ isLoading: false })
         }
@@ -61,26 +70,26 @@ export const useScheduleStore = create<ScheduleStore>()(
           start_time: data.start_time,
           end_time: data.end_time,
         })
-        set({ schedules: await listSyncedSchedules() })
+        set({ schedules: await listSyncedSchedules(get().range ?? undefined) })
         return schedule
       },
 
       updateSchedule: async (id, data) => {
         await updateScheduleLocally(id, data)
-        set({ schedules: await listSyncedSchedules() })
+        set({ schedules: await listSyncedSchedules(get().range ?? undefined) })
       },
 
       completeSchedule: async (id) => {
         await completeScheduleLocally(id)
-        set({ schedules: await listSyncedSchedules() })
+        set({ schedules: await listSyncedSchedules(get().range ?? undefined) })
       },
 
       deleteSchedule: async (id) => {
         await deleteScheduleLocally(id)
-        set({ schedules: await listSyncedSchedules() })
+        set({ schedules: await listSyncedSchedules(get().range ?? undefined) })
       },
 
-      reset: () => set({ schedules: [], isLoading: false }),
+      reset: () => set({ schedules: [], isLoading: false, range: null }),
     }),
     { name: 'schedule-store' },
   ),

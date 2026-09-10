@@ -250,6 +250,44 @@
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 交互基础层                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 焦点环。
+ *
+ * 全局 base 层已经用 `outline-ring/50` 给所有元素设了 outline 颜色，
+ * 所以**没写 outline-none 的元素保留浏览器默认焦点环**。
+ * 这个 utility 是给那些**显式移除 outline 的元素**补回可见反馈的 ——
+ * 否则键盘用户看不到焦点落在哪（WCAG 2.4.7 Focus Visible）。
+ * 这类元素往往是输入框，恰恰最需要反馈。
+ */
+@utility focus-ring {
+  &:focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+/**
+ * 内嵌焦点环（不改变布局）。
+ * 用于输入框、以及列表项这类**满宽且处于滚动容器内**的元素 ——
+ * 带 offset 的外扩环会被容器的 overflow 裁掉，看起来像没生效。
+ */
+@utility focus-ring-inset {
+  &:focus-visible {
+    @apply outline-none ring-2 ring-inset ring-ring;
+  }
+}
+
+/**
+ * 颜色类状态过渡的统一时长。
+ * 150ms 是微交互的甜点值：再快感知不到，再慢开始有拖沓感。
+ */
+@utility transition-ui {
+  @apply transition-colors duration-150;
+}
+
 @layer components {
   .quick-notes-surface {
     --qn-page-text: #1d1d1f;
@@ -615,6 +653,195 @@
       opacity: 1;
       transform: translateY(0) scale(1);
     }
+  }
+
+  /* ================================================================ *
+   * 表格 Live Preview（CodeMirror 块级 widget）
+   * 见 src/lib/editor/table-preview.ts —— 光标离开表格时渲染成 <table>。
+   *
+   * ★ 类名一律带 cm-table- 前缀：编辑器内容区不受 CSS Modules 约束，
+   *   不前缀会跟笔记正文/应用里的表格样式互相污染。
+   * ★ 颜色只用主题变量（:root / .dark / .midnight 三套都定义了同一组变量），
+   *   不写死具体色值 —— 否则换主题就有一档读不了。
+   * ================================================================ */
+
+  .cm-table-widget {
+    /* 块级替换装饰会顶掉原来那几行的行距，上下留白得自己补 */
+    margin: 0.15rem 0 0.4rem;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .cm-table {
+    border-collapse: collapse;
+    /* 单元格里可能是长链接/长英文，别把编辑器撑出横向滚动 */
+    table-layout: auto;
+    width: auto;
+    max-width: 100%;
+    font-size: 0.9em;
+    line-height: 1.5;
+  }
+
+  .cm-table-cell {
+    border: 1px solid var(--border);
+    padding: 0.25rem 0.55rem;
+    vertical-align: top;
+    /* 空单元格塌成一条线会很难点，给它一个下限高度 */
+    min-height: 1.75rem;
+  }
+
+  .cm-table thead .cm-table-cell {
+    background: var(--muted);
+    color: var(--foreground);
+    font-weight: 600;
+  }
+
+  .cm-table-cell[data-align='center'] {
+    text-align: center;
+  }
+
+  .cm-table-cell[data-align='right'] {
+    text-align: right;
+  }
+
+  /* 加行/加列按钮所在的格子：必须无边框无内边距，
+     否则看起来像表格真的多了一行一列。 */
+  .cm-table-adjunct {
+    border: none;
+    padding: 0;
+    background: transparent;
+  }
+
+  .cm-table-adjunct-row {
+    height: 1.5rem;
+  }
+
+  /* 单元格文本：单独一个 span，好让删列按钮做它的兄弟节点，
+     也让取文本时不被按钮的符号污染。 */
+  .cm-table-cell-text {
+    display: inline;
+  }
+
+  /* 图片 Live Preview（image-preview.ts） */
+  .cm-image-preview {
+    display: inline-block;
+    max-width: 100%;
+    /* 高度上限：避免一张竖图把整屏顶开 */
+    max-height: 24rem;
+    width: auto;
+    height: auto;
+    border-radius: var(--radius-sm, 4px);
+    vertical-align: middle;
+  }
+
+  /* 加载失败的降级提示（不显示破图） */
+  .cm-image-preview-missing {
+    display: inline-block;
+    padding: 2px 6px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm, 4px);
+    color: var(--muted-foreground);
+    font-size: 0.85em;
+  }
+
+  /* 就地编辑的输入框：撑满所在格，视觉上"就是"这个单元格在变 */
+  .cm-table-cell-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0;
+    margin: 0;
+    border: none;
+    /* 用 1px 实色底边提示"正在编辑"，不撑开布局（避免列宽跳动） */
+    border-bottom: 1px solid var(--ring);
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    outline: none;
+  }
+
+  /* 控件按钮的公共部分。
+     ★ 加（＋/≡）与删（－）的可见性策略不同，别合并成一个类：
+       加是"发现型"功能 —— 藏起来用户根本不知道能加，所以常驻（淡）；
+       删是"危险"操作 —— 常驻会误触，所以只在 hover 时出现。 */
+  .cm-table-ctl {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--muted-foreground);
+    font: inherit;
+    font-size: 0.8rem;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      opacity 0.15s,
+      background 0.15s,
+      color 0.15s,
+      border-color 0.15s;
+  }
+
+  .cm-table-ctl:hover,
+  .cm-table-ctl:focus-visible {
+    opacity: 1;
+    background: var(--accent);
+    color: var(--accent-foreground);
+    border-color: var(--border);
+    outline: none;
+  }
+
+  /* 加行 / 加列 / 对齐：常驻但很淡 */
+  .cm-table-add {
+    opacity: 0.4;
+  }
+
+  /* 删行：整行 hover 才浮现 */
+  .cm-table-del {
+    opacity: 0;
+    /* ★★ opacity:0 的元素仍然会拦截点击！必须 pointer-events:none，
+       否则在渲染态点表头格里"看不见的删列按钮"会误删列 */
+    pointer-events: none;
+  }
+
+  .cm-table tbody tr:hover > .cm-table-adjunct > .cm-table-del {
+    opacity: 0.55;
+    pointer-events: auto;
+  }
+
+  /* 删列：悬停表头那一格才浮现（放在格内右侧，不挡文本） */
+  .cm-table thead .cm-table-cell:hover > .cm-table-del {
+    opacity: 0.55;
+    pointer-events: auto;
+  }
+
+  /* ★ 绝对定位是必需的：若让这个按钮占据正常流，每一列都会被它撑宽
+     1.25rem，表头与表体就会错位。脱离文档流后列宽只由内容决定。
+     代价是 hover 时它会压在文本尾部 —— 转瞬即逝，且这是常见做法。 */
+  .cm-table thead .cm-table-cell {
+    position: relative;
+  }
+
+  .cm-table thead .cm-table-cell > .cm-table-del {
+    position: absolute;
+    top: 50%;
+    right: 2px;
+    transform: translateY(-50%);
+  }
+
+  .cm-table tbody tr:hover > .cm-table-adjunct > .cm-table-del:hover,
+  .cm-table thead .cm-table-cell:hover > .cm-table-del:hover {
+    opacity: 1;
+  }
+
+  /* 键盘可达：Tab 聚焦到删按钮时也要看得见、可点 */
+  .cm-table-del:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   @media (prefers-reduced-motion: reduce) {

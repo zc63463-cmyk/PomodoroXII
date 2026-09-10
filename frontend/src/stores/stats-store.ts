@@ -11,9 +11,11 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
 import {
+  fetchFocusSummary,
   fetchHabitSummary,
   fetchNoteSummary,
   fetchScheduleSummary,
+  type FocusSummary,
   type HabitSummary,
   type NoteSummary,
   type ScheduleSummary,
@@ -23,6 +25,7 @@ interface StatsState {
   habitSummary: HabitSummary | null
   scheduleSummary: ScheduleSummary | null
   noteSummary: NoteSummary | null
+  focusSummary: FocusSummary | null
   isLoading: boolean
   error: string | null
 }
@@ -31,7 +34,8 @@ interface StatsActions {
   loadHabitSummary: (days?: number) => Promise<void>
   loadScheduleSummary: (days?: number) => Promise<void>
   loadNoteSummary: () => Promise<void>
-  /** 一次性拉齐三块，页面首屏用。 */
+  loadFocusSummary: (days?: number) => Promise<void>
+  /** 一次性拉齐四块，页面首屏用。 */
   loadAll: (days?: number) => Promise<void>
   reset: () => void
 }
@@ -44,6 +48,7 @@ export const useStatsStore = create<StatsStore>()(
       habitSummary: null,
       scheduleSummary: null,
       noteSummary: null,
+      focusSummary: null,
       isLoading: false,
       error: null,
 
@@ -74,22 +79,36 @@ export const useStatsStore = create<StatsStore>()(
         }
       },
 
+      loadFocusSummary: async (days = 30) => {
+        set({ isLoading: true, error: null })
+        try {
+          set({ focusSummary: await fetchFocusSummary(days), isLoading: false })
+        } catch (error) {
+          set({ isLoading: false, error: toMessage(error) })
+        }
+      },
+
       loadAll: async (days = 30) => {
         set({ isLoading: true, error: null })
         try {
-          // 三块互不依赖，并发拉取；任一失败只丢那一块，不牵连其余
-          const [habit, schedule, note] = await Promise.allSettled([
+          // 四块互不依赖，并发拉取；任一失败只丢那一块，不牵连其余
+          const [habit, schedule, note, focus] = await Promise.allSettled([
             fetchHabitSummary(days),
             fetchScheduleSummary(days),
             fetchNoteSummary(),
+            fetchFocusSummary(days),
           ])
           set({
             habitSummary: habit.status === 'fulfilled' ? habit.value : null,
             scheduleSummary: schedule.status === 'fulfilled' ? schedule.value : null,
             noteSummary: note.status === 'fulfilled' ? note.value : null,
+            focusSummary: focus.status === 'fulfilled' ? focus.value : null,
             isLoading: false,
             error:
-              habit.status === 'rejected' || schedule.status === 'rejected' || note.status === 'rejected'
+              habit.status === 'rejected' ||
+              schedule.status === 'rejected' ||
+              note.status === 'rejected' ||
+              focus.status === 'rejected'
                 ? '部分统计加载失败'
                 : null,
           })
@@ -103,6 +122,7 @@ export const useStatsStore = create<StatsStore>()(
           habitSummary: null,
           scheduleSummary: null,
           noteSummary: null,
+          focusSummary: null,
           isLoading: false,
           error: null,
         }),

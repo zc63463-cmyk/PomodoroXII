@@ -245,3 +245,9 @@ frontend/e2e/debug-*.spec.ts
 backend/.data.runtime/
 frontend/.codebase-memory/
 frontend/.playwright-cli/
+
+# --- 2026-09-10: 非产品产物（落袋治理）---------------------------------------
+# 方案 A 架构图的视觉核对快照（一次性验收产物，可重新生成）
+/方案A-*.visual-check.*
+# 个人笔记（不进公开仓库）
+/灵感培育日志/

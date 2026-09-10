@@ -347,6 +347,77 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/assets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Assets
+         * @description 列出本 space 的资源（S1 仅本地）。
+         */
+        get: operations["list_assets_api_v1_assets_get"];
+        put?: never;
+        /**
+         * Upload Asset
+         * @description 上传一个资源，返回可写进笔记的引用信息。
+         */
+        post: operations["upload_asset_api_v1_assets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assets/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Asset Content By Path
+         * @description 按 storage_key 读回二进制。
+         *
+         *     ★ 为什么要有这个（而不是只用 /{id}/content）
+         *       笔记正文里存的是**相对路径**而不是 asset id —— 换设备/换后端地址都不失效。
+         *       编辑器渲染图片时手上只有路径、没有 id，若必须先查表拿 id 就得走异步，
+         *       decoration 会变得很别扭。这里让后端直接吃路径，前端渲染变成纯字符串拼接。
+         *
+         *     安全：`AssetService.read` 会解析后校验目标仍在 space 目录内（防 `../`）。
+         */
+        get: operations["get_asset_content_by_path_api_v1_assets_content_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assets/{asset_id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Asset Content
+         * @description 读回资源的二进制内容。
+         */
+        get: operations["get_asset_content_api_v1_assets__asset_id__content_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/login": {
         parameters: {
             query?: never;
@@ -1086,6 +1157,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/relations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Relations
+         * @description Dual-view projection of one work item's dependency edges.
+         */
+        get: operations["list_relations_api_v1_relations_get"];
+        put?: never;
+        /**
+         * Create Relation
+         * @description Declare one dependency edge (idempotent: deterministic relation id).
+         */
+        post: operations["create_relation_api_v1_relations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/relations/blocked-map": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Blocked Map
+         * @description Derived-only blocking projection for the tree (never persisted).
+         */
+        get: operations["blocked_map_api_v1_relations_blocked_map_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/relations/{relation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Relation
+         * @description Remove one dependency edge (tombstone propagates through sync).
+         */
+        delete: operations["remove_relation_api_v1_relations__relation_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/schedules": {
         parameters: {
             query?: never;
@@ -1258,6 +1393,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stats/focus-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stats Focus Summary
+         * @description Return focus-session quality by hour of day, plus estimate accuracy.
+         *
+         *     The hourly distribution is the point of this endpoint: it answers
+         *     "which hours produce uninterrupted sessions" rather than "how many
+         *     sessions did I do", which is the least informative number available.
+         */
+        get: operations["stats_focus_summary_api_v1_stats_focus_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/stats/habit-summary": {
         parameters: {
             query?: never;
@@ -1397,6 +1556,30 @@ export interface paths {
         get: operations["recover_v2_api_v1_sync_v2_recover_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sync/v2/retention/prune": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Prune the sync ledger and tombstones to the client ACK waterline
+         * @description Scheduled retention entry point.
+         *
+         *     Requires a Space token. Nothing is pruned until every active client has
+         *     ACKed past the event, so a client that is offline for a long time holds
+         *     the waterline back rather than losing unconsumed events.
+         */
+        post: operations["retention_prune_v2_api_v1_sync_v2_retention_prune_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1734,6 +1917,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/work-items/{work_item_id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore Work Item
+         * @description Undo a soft delete (clear ``archived_at``).
+         */
+        post: operations["restore_work_item_api_v1_work_items__work_item_id__restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/work-items/{work_item_id}/transition": {
         parameters: {
             query?: never;
@@ -1748,6 +1951,26 @@ export interface paths {
          * @description Transition a work item to a new status.
          */
         post: operations["transition_work_item_api_v1_work_items__work_item_id__transition_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/work-items/{work_item_id}/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trash Work Item
+         * @description Soft-delete a work item (server-stamped ``archived_at``).
+         */
+        post: operations["trash_work_item_api_v1_work_items__work_item_id__trash_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1977,6 +2200,23 @@ export interface components {
             valid: boolean;
         };
         /**
+         * BlockedMapResponse
+         * @description Derived-only projection for the tree (never persisted, never synced).
+         */
+        BlockedMapResponse: {
+            /** Items */
+            items: {
+                [key: string]: {
+                    [key: string]: boolean;
+                };
+            };
+        };
+        /** Body_upload_asset_api_v1_assets_post */
+        Body_upload_asset_api_v1_assets_post: {
+            /** File */
+            file: string;
+        };
+        /**
          * CanonicalErrorResponse
          * @description Opt-in canonical error envelope shared by REST and MCP adapters.
          */
@@ -2079,6 +2319,28 @@ export interface components {
             payloadHash: string;
             /** Spaceid */
             spaceId: string;
+        };
+        /**
+         * CreateRelationRequest
+         * @description Declare one dependency edge. ``from``/``to`` are work item ids.
+         *
+         *     The edge is stored single-sided and canonically: ``from_work_item_id``
+         *     is the BLOCKED side, ``to_work_item_id`` the upstream blocker.  A caller
+         *     that thinks in "blocks" terms just swaps the two ids.
+         */
+        CreateRelationRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Fromworkitemid */
+            fromWorkItemId: string;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Relationtype */
+            relationType: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Toworkitemid */
+            toWorkItemId: string;
         };
         /** CreateWorkItemRequest */
         CreateWorkItemRequest: {
@@ -2257,6 +2519,22 @@ export interface components {
              */
             unique: boolean;
         };
+        /**
+         * FocusHourBucket
+         * @description One hour-of-day bucket of focus sessions.
+         */
+        FocusHourBucket: {
+            /** Focused Seconds */
+            focused_seconds: number;
+            /** Hour */
+            hour: number;
+            /** Interrupted */
+            interrupted: number;
+            /** Sessions */
+            sessions: number;
+            /** Valid */
+            valid: number;
+        };
         /** FocusSessionAggregateResponse */
         FocusSessionAggregateResponse: {
             attribution: components["schemas"]["SessionAttributionRevisionResponse"];
@@ -2334,6 +2612,31 @@ export interface components {
             validityReason: string | null;
             /** Version */
             version: number;
+        };
+        /**
+         * FocusSummaryResponse
+         * @description Focus-session statistics for a requested period.
+         *
+         *     ``by_hour`` 固定 24 项（含全零的小时），便于前端直接画热力图。
+         *     ``estimate_accuracy`` 为 focused/planned 的整体比值，1.0 表示估算准确。
+         */
+        FocusSummaryResponse: {
+            /** By Hour */
+            by_hour: components["schemas"]["FocusHourBucket"][];
+            /** Estimate Accuracy */
+            estimate_accuracy: number;
+            /** Focused Seconds */
+            focused_seconds: number;
+            /** Interrupted Sessions */
+            interrupted_sessions: number;
+            /** Period Days */
+            period_days: number;
+            /** Planned Seconds */
+            planned_seconds: number;
+            /** Total Sessions */
+            total_sessions: number;
+            /** Valid Sessions */
+            valid_sessions: number;
         };
         /**
          * FolderCreate
@@ -3465,6 +3768,49 @@ export interface components {
             /** Registry Loaded */
             registry_loaded: boolean;
         };
+        /**
+         * RelationEdgeView
+         * @description One edge plus the *other* endpoint's minimal projection.
+         */
+        RelationEdgeView: {
+            relation: components["schemas"]["RelationResponse"];
+            workItem: components["schemas"]["WorkItemMinimalProjection"];
+        };
+        /**
+         * RelationResponse
+         * @description One canonical dependency edge (D12: from = blocked side).
+         */
+        RelationResponse: {
+            /** Createdat */
+            createdAt: string;
+            /** Fromworkitemid */
+            fromWorkItemId: string;
+            /** Id */
+            id: string;
+            /** Relationtype */
+            relationType: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Toworkitemid */
+            toWorkItemId: string;
+            /** Updatedat */
+            updatedAt: string;
+            /** Version */
+            version: number;
+        };
+        /**
+         * RelationSetResponse
+         * @description Dual-view projection of one work item's dependency edges.
+         *
+         *     ``blockers`` = upstream items this one waits for (edge.to).
+         *     ``blocking`` = downstream items waiting for this one (edge.from).
+         */
+        RelationSetResponse: {
+            /** Blockers */
+            blockers: components["schemas"]["RelationEdgeView"][];
+            /** Blocking */
+            blocking: components["schemas"]["RelationEdgeView"][];
+        };
         /** RemovePlanItemPayload */
         RemovePlanItemPayload: {
             /** Expectedplanversion */
@@ -3491,6 +3837,23 @@ export interface components {
             payloadHash: string;
             /** Sessionid */
             sessionId: string;
+        };
+        /** RemoveRelationRequest */
+        RemoveRelationRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Fromworkitemid */
+            fromWorkItemId: string;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Relationtype */
+            relationType: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Toworkitemid */
+            toWorkItemId: string;
         };
         /**
          * RemoveWorkItemLabelsRequest
@@ -3574,6 +3937,21 @@ export interface components {
             payloadHash: string;
             /** Sessionid */
             sessionId: string;
+        };
+        /**
+         * RestoreWorkItemRequest
+         * @description Undo a soft delete (clear ``archived_at``).  Same server-owned
+         *     timestamp rule as :class:`TrashWorkItemRequest`.
+         */
+        RestoreWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
         };
         /** ResumeActiveSessionRequest */
         ResumeActiveSessionRequest: {
@@ -4288,6 +4666,21 @@ export interface components {
             /** Waterline Cursor */
             waterline_cursor: string;
         };
+        /**
+         * SyncV2RetentionPruneResponse
+         * @description Outcome of one scheduled ledger/tombstone retention sweep.
+         *
+         *     ``waterline`` is ``None`` when no durable ACK waterline exists yet, which
+         *     means nothing may be pruned.
+         */
+        SyncV2RetentionPruneResponse: {
+            /** Ledger Rows */
+            ledger_rows: number;
+            /** Tombstones */
+            tombstones: number;
+            /** Waterline */
+            waterline: number | null;
+        };
         /** SyncV2StatusResponse */
         SyncV2StatusResponse: {
             /** Active Client Count */
@@ -4530,6 +4923,25 @@ export interface components {
             /** Title */
             title: string;
         };
+        /**
+         * TrashWorkItemRequest
+         * @description Soft-delete one work item (set ``archived_at``).
+         *
+         *     The wire model deliberately carries **no** ``archived_at`` field: the
+         *     timestamp is server-owned, so a caller cannot forge an audit time.  The
+         *     business payload is therefore empty and ``payloadHash`` is the canonical
+         *     hash of ``{}``.
+         */
+        TrashWorkItemRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+        };
         /** UpdateActiveSessionNotePayload */
         UpdateActiveSessionNotePayload: {
             /** Expectedversion */
@@ -4604,6 +5016,27 @@ export interface components {
             note_id: string;
             /** Version Id */
             version_id: string;
+        };
+        /**
+         * WorkItemMinimalProjection
+         * @description Cross-project leak guard (Phase D).
+         *
+         *     A dependency may span projects, but the dependent view must never carry
+         *     another project's note bodies or session history.  This is the ONLY shape
+         *     a foreign endpoint is ever projected into: id, display key, project id,
+         *     title, status — nothing else.
+         */
+        WorkItemMinimalProjection: {
+            /** Displaykey */
+            displayKey: string;
+            /** Id */
+            id: string;
+            /** Projectid */
+            projectId: string;
+            /** Statusdefinitionid */
+            statusDefinitionId: string;
+            /** Title */
+            title: string;
         };
         /** WorkItemNoteDocumentV1 */
         "WorkItemNoteDocumentV1-Input": {
@@ -5351,6 +5784,147 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ActiveSessionResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    list_assets_api_v1_assets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    upload_asset_api_v1_assets_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_asset_api_v1_assets_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_asset_content_by_path_api_v1_assets_content_get: {
+        parameters: {
+            query: {
+                /** @description storage_key, e.g. assets/ab/<sha>.png */
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    get_asset_content_api_v1_assets__asset_id__content_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Domain or request validation error */
@@ -7272,6 +7846,156 @@ export interface operations {
             };
         };
     };
+    list_relations_api_v1_relations_get: {
+        parameters: {
+            query: {
+                workItemId: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RelationSetResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    create_relation_api_v1_relations_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateRelationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    blocked_map_api_v1_relations_blocked_map_get: {
+        parameters: {
+            query?: {
+                projectId?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BlockedMapResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    remove_relation_api_v1_relations__relation_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                relation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoveRelationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
     list_schedules_api_v1_schedules_get: {
         parameters: {
             query?: {
@@ -7701,6 +8425,42 @@ export interface operations {
             };
         };
     };
+    stats_focus_summary_api_v1_stats_focus_summary_get: {
+        parameters: {
+            query?: {
+                /** @description Period in days */
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FocusSummaryResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
     stats_habit_summary_api_v1_stats_habit_summary_get: {
         parameters: {
             query?: {
@@ -7896,6 +8656,7 @@ export interface operations {
                 client_id: string;
                 cursor?: string | null;
                 limit?: string;
+                scope?: string;
             };
             header?: never;
             path?: never;
@@ -8010,6 +8771,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SyncV2RecoveryResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    retention_prune_v2_api_v1_sync_v2_retention_prune_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncV2RetentionPruneResponse"];
                 };
             };
             /** @description Domain or request validation error */
@@ -8821,6 +9615,47 @@ export interface operations {
             };
         };
     };
+    restore_work_item_api_v1_work_items__work_item_id__restore_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
     transition_work_item_api_v1_work_items__work_item_id__transition_post: {
         parameters: {
             query?: never;
@@ -8835,6 +9670,47 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["TransitionWorkItemRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    trash_work_item_api_v1_work_items__work_item_id__trash_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                work_item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TrashWorkItemRequest"];
             };
         };
         responses: {

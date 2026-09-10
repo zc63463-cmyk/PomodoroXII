@@ -15,7 +15,9 @@ Create Date: 2026-09-08
   ``B blocks A`` 是同一条边，查询时提供双视角投影。
 
 ★ 约束
-  - ``relations_no_self_loop``：物理禁止自环（A -> A）。
+  - ``ck_relations_self_loop``：物理禁止自环（A -> A）。名字要与 ORM 的
+  命名约定解析结果一致：ck 模板为 `ck_%(table_name)s_%(constraint_name)s`，
+  故 ORM 侧声明 `name="self_loop"`。
   - ``uq_relations_edge``：逻辑唯一（space, from, to, type），与确定性
     ``relationId`` 一起保证离线多端独立建边能自动收敛、不产生重复行。
 
@@ -55,7 +57,7 @@ def upgrade() -> None:
             --   两侧必须逐列一致（见 012_assets.py 的同类说明）。
             version INTEGER NOT NULL,
             CONSTRAINT pk_relations PRIMARY KEY (id),
-            CONSTRAINT relations_no_self_loop CHECK (from_work_item_id <> to_work_item_id),
+            CONSTRAINT ck_relations_self_loop CHECK (from_work_item_id <> to_work_item_id),
             CONSTRAINT uq_relations_edge UNIQUE (space_id, from_work_item_id, to_work_item_id, relation_type),
             CONSTRAINT fk_relations_from_work_item FOREIGN KEY(from_work_item_id) REFERENCES work_items (id),
             CONSTRAINT fk_relations_to_work_item FOREIGN KEY(to_work_item_id) REFERENCES work_items (id)
