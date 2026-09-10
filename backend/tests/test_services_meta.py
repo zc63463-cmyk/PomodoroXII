@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from app.errors import NotFoundError, ValidationError
+from app.registry.builtin import REGISTRY
 from app.registry.entities import EntityCategory, StorageType
 from app.services.meta import MetaService
 
@@ -19,7 +20,7 @@ def test_meta_service_list_by_category():
     svc = MetaService()
 
     business = svc.list_entities(category=EntityCategory.BUSINESS)
-    assert len(business) == 22
+    assert len(business) == 24
     assert all(s.category == EntityCategory.BUSINESS for s in business)
 
     sync_infra = svc.list_entities(category=EntityCategory.SYNC_INFRA)
@@ -31,16 +32,16 @@ def test_meta_service_list_by_category():
     setting = svc.list_entities(category=EntityCategory.SETTING)
     assert len(setting) == 1
 
-    # No filter -> all 31 entities.
+    # No filter -> every registered entity (count derived, never literal).
     all_entities = svc.list_entities()
-    assert len(all_entities) == 31
+    assert len(all_entities) == len(REGISTRY.list())
 
 
 def test_meta_service_list_with_string_category():
     """list_entities accepts a string category and coerces it."""
     svc = MetaService()
     business = svc.list_entities(category="business")
-    assert len(business) == 22
+    assert len(business) == 24
 
 
 def test_meta_service_list_invalid_category_raises_validation_error():
@@ -104,9 +105,9 @@ def test_meta_service_health_returns_correct_structure():
     svc = MetaService()
     h = svc.health()
     assert h["registry_loaded"] is True
-    assert h["entity_count"] == 31
+    assert h["entity_count"] == len(REGISTRY.list())
     assert isinstance(h["categories"], dict)
-    assert h["categories"]["business"] == 22
+    assert h["categories"]["business"] == 24
     assert h["categories"]["sync_infra"] == 5
     assert h["categories"]["meta"] == 3
     assert h["categories"]["setting"] == 1
@@ -133,13 +134,13 @@ def test_meta_service_list_sync_enabled_and_soft_delete():
     """
     svc = MetaService()
     sync_enabled = svc.list_sync_enabled()
-    assert len(sync_enabled) == 21
+    assert len(sync_enabled) == 22
     assert {s.name for s in sync_enabled} == {
         "note", "folder", "quick_note", "reflection",
         "habit", "habit_check_in", "schedule", "time_block",
         "memo_comment", "schedule_quick_note",
         "project", "status_definition", "type_definition", "label",
-        "work_item", "work_item_note",
+        "work_item", "work_item_note", "relation",
         "focus_session", "session_task_context",
         "session_attribution_revision", "session_work_item_plan",
         "session_work_item_outcome",

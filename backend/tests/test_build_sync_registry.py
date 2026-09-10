@@ -15,7 +15,7 @@ def test_build_sync_registry_returns_21_entries():
     from app.registry.sync_registry import build_sync_registry
 
     registry = build_sync_registry()
-    assert len(registry) == 21
+    assert len(registry) == 22
     assert "workItemLabel" not in registry
 
 

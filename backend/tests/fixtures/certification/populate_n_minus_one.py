@@ -187,6 +187,12 @@ async def populate_fixture(
     environment = {
         "POMODOROXII_DATABASE_URL": f"sqlite+aiosqlite:///{meta_db.as_posix()}",
         "POMODOROXII_SPACES_DATA_DIR": str(spaces_dir),
+        # ★ 必须显式给出，否则会从本机 `backend/.env` 读到**真实** data root，
+        #   与上面的临时 meta_db 撞上 require_canonical_runtime_layout
+        #   → ValidationError。`_reload_settings_graph()` 会重建 Settings 类，
+        #   所以 conftest 里的 `_env_file=None` 补丁在这一步已经失效，
+        #   只能靠这里把三元组补全（环境变量优先级高于 dotenv）。
+        "POMODOROXII_DATA_ROOT": str(data_root),
         "POMODOROXII_ENVIRONMENT": "development",
         "POMODOROXII_BACKUP_ENABLED": "false",
         "POMODOROXII_SECRET_KEY": (

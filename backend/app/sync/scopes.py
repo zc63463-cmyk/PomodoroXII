@@ -46,6 +46,10 @@ SYNC_SCOPES: dict[str, tuple[str, ...]] = {
         "label",
         "workItem",
         "workItemNote",
+        # 依赖边（依赖域 D11/D15）：单列确定性主键，协议原生支持。
+        # 归入 tasks 而非独立作用域 —— 依赖边脱离工作项没有意义，
+        # 两者必须同进同出，否则会出现「有边没节点」的孤儿窗口。
+        "relation",
     ),
     # 专注会话
     "focus": (

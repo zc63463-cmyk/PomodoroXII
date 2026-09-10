@@ -21,6 +21,7 @@ import os
 import re
 import tempfile
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,6 +47,35 @@ def pytest_configure(config: pytest.Config) -> None:
         "provisioned_space_storage: explicitly provision storage for Spaces "
         "created through the test HTTP client",
     )
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_backend_dotenv() -> Iterator[None]:
+    """让测试不读 `backend/.env`，只认「进程环境变量 + monkeypatch」。
+
+    ★ 为什么必须有这个隔离
+      本地开发目录里存在 `backend/.env`（指向真实 data root）。它会被
+      pydantic-settings 自动加载，于是任何**不经过主 fixture**、而是自己
+      `Settings(...)` 的用例都会拿到 `.env` 里的 `DATABASE_URL` /
+      `SPACES_DATA_DIR`，再和用例临时给的 `data_root` 撞上
+      `require_canonical_runtime_layout` → 成片 ValidationError。
+      典型表现：`test_n_minus_one_fixture` / `test_settings` 本地红、CI 绿
+      （CI 没有 `.env`），于是「本地全量」长期不可用。
+      `_env_file=None` 只影响测试进程，显式传入 `_env_file=` 的调用不受影响。
+    """
+    from app.settings import Settings
+
+    original_init = Settings.__init__
+
+    def _init_without_dotenv(self: object, **kwargs: object) -> None:
+        kwargs.setdefault("_env_file", None)
+        original_init(self, **kwargs)  # type: ignore[misc]
+
+    Settings.__init__ = _init_without_dotenv  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        Settings.__init__ = original_init  # type: ignore[method-assign]
 
 
 def _resolve_artifacts_root(configured_root: str | Path | None = None) -> Path:

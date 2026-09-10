@@ -10,6 +10,25 @@ from typing import Literal, Mapping
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _STAGING_PROOF_ID_RE = re.compile(r"[0-9a-f]{32}")
+
+def _registry_entry_count() -> int:
+    """当前构建实际注册的实体数（catalog 的唯一真相）。"""
+    # 延迟 import：app.registry 会加载全部 EntitySpec，放在模块顶层会让
+    # recovery 契约在部分轻量场景下被迫拉起整张注册表。
+    from app.registry import REGISTRY
+
+    return len(REGISTRY.list())
+
+
+#: ★ S5 闭集 catalog 的条目数 —— **单一真相，从注册表派生，绝不写死数字**。
+#:
+#: 这里曾经是 `Literal[31]` + 三处 `!= 31` 字面量。新增 assets 与 relation 两个实体后，
+#: 该常量被 test_recovery_cutover / test_recovery / test_recovery_scheduler 共享，
+#: 一次性打爆 **213 个用例**（占当时全量失败的 83%）。
+#: 门禁真正要断言的是「快照 catalog 与当前注册表一致」，不是「等于某个数字」；
+#: 用派生值就能让新增实体自动通过，而 FORBIDDEN_LEGACY_CATALOG_TYPES 仍然守住
+#: 「不许混入历史遗留类型」这条真正的约束。
+S5_CATALOG_ENTRY_COUNT: int = _registry_entry_count()
 _SNAPSHOT_KINDS = frozenset({"meta_db", "space_db", "index_db", "note", "index_asset"})
 _FORBIDDEN_IDENTIFIER_CHARS = frozenset("/\\:\x00")
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
@@ -210,7 +229,7 @@ class SnapshotManifest:
     created_at: str
     source_fence: int
     catalog_hash: str
-    catalog_entry_count: Literal[31]
+    catalog_entry_count: int
     catalog_entity_types: tuple[str, ...]
     meta: MetaSnapshot
     spaces: tuple[SpaceSnapshot, ...]
@@ -221,7 +240,7 @@ class SnapshotManifest:
             type(self.schema_version) is not int
             or self.schema_version != 1
             or type(self.catalog_entry_count) is not int
-            or self.catalog_entry_count != 31
+            or self.catalog_entry_count != S5_CATALOG_ENTRY_COUNT
         ):
             raise ValueError("unsupported snapshot manifest")
         object.__setattr__(self, "source_fence", _validated_int(self.source_fence, "source fence"))

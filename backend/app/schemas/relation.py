@@ -12,9 +12,14 @@
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from app.schemas.task_space import CommandId, WireModel, WireResponseModel
+
+#: 首版开放的三类边。``relates_to`` 不参与阻塞计算与环检测（D12/D13）。
+RelationTypeLiteral = Literal["depends_on", "blocks", "relates_to"]
 
 
 class WorkItemMinimalProjection(WireResponseModel):
@@ -90,7 +95,9 @@ class CreateRelationRequest(WireModel):
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     from_work_item_id: str = Field(min_length=1, max_length=64)
     to_work_item_id: str = Field(min_length=1, max_length=64)
-    relation_type: str = Field(min_length=1, max_length=20)
+    # ★ 用枚举而非裸字符串：非法类型在**路由层**就以 422 拒掉，
+    #   编译器的同名校验降级为直接调用者（测试 / 同步入口）的纵深防御。
+    relation_type: RelationTypeLiteral
 
 
 class RemoveRelationRequest(WireModel):
@@ -100,4 +107,6 @@ class RemoveRelationRequest(WireModel):
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     from_work_item_id: str = Field(min_length=1, max_length=64)
     to_work_item_id: str = Field(min_length=1, max_length=64)
-    relation_type: str = Field(min_length=1, max_length=20)
+    # ★ 用枚举而非裸字符串：非法类型在**路由层**就以 422 拒掉，
+    #   编译器的同名校验降级为直接调用者（测试 / 同步入口）的纵深防御。
+    relation_type: RelationTypeLiteral

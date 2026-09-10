@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from app.registry.builtin import REGISTRY
+
 
 async def _get_master_token(client) -> str:
     """Set up admin password and return a fresh master token."""
@@ -66,7 +68,7 @@ async def test_registry_loaded_in_app(client):
     body = resp.json()
     # If builtin.py never ran, entity_count would be 0.
     assert body["registry_loaded"] is True
-    assert body["entity_count"] == 31
+    assert body["entity_count"] == len(REGISTRY.list())
 
 
 @pytest.mark.asyncio

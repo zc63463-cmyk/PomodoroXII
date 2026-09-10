@@ -21,10 +21,16 @@ from app.routes.v1 import build_v1_router
 EXPECTED_NON_ENTITY_PREFIXES = {
     "/auth",
     "/active-session",
+    # 笔记资源（图片/PDF）：手工挂载的流式取件路由，不走 registry 的
+    # route_prefix 声明（元数据实体由 AssetService 自己管，路由只做 content 分发）。
+    "/assets",
     "/focus-sessions",
     "/labels",
     "/meta",
     "/projects",
+    # 依赖域：与 /work-items 同属 Task Space 契约路由，手工挂载，
+    # 因此不走 registry 的 route_prefix 声明（见 registry/builtin.py 注释）。
+    "/relations",
     "/trash",
     "/stats",
     "/sync",

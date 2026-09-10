@@ -276,13 +276,16 @@ EXPECTED_TS1_COMPILER_REJECTION_CODES = frozenset({
     "invalid_note_document",
     "work_item_structure_changed",
     "offline_formal_creation_forbidden",
+    "cycle_detected",
+    "archived_work_item_immutable",
+    "payload_field_not_allowed",
     # D5 Y: label definition CRUD owns the unique-name conflict.
     "label_name_conflict",
 })
 
 
 def test_ts1_compiler_rejection_producer_set_is_exact() -> None:
-    """The Task Space compiler file must produce exactly the 11 expected
+    """The Task Space compiler file must produce exactly the expected
     rejection codes — no filtering, no exclusions, no additions.
 
     The raw set from ``literal_exception_codes`` on ``compiler.py`` is

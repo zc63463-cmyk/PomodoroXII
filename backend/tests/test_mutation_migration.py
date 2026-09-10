@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from alembic import command
 
+from app.task_space.migration_preflight import TASK_SPACE_TARGET_HEAD
 from tests.migrations import run_bound_command
 
 
@@ -60,7 +61,7 @@ def test_space_008_upgrades_through_task_space_and_preserves_legacy_visibility(
     } <= observed["tables"]
     assert {"operation_id", "batch_id", "version", "visible"} <= observed["columns"]
     assert observed["legacy"] == (None, None, None, 1)
-    assert observed["head"] == "space_011_sync_clients_streaming"
+    assert observed["head"] == TASK_SPACE_TARGET_HEAD
 
 
 def test_bound_after_callback_commits_or_rolls_back_and_closes(tmp_path: Path) -> None:

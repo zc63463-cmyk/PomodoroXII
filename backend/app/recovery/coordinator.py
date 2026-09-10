@@ -27,6 +27,7 @@ from app.focus_session.recovery_authority import (
 )
 
 from .contracts import (
+    S5_CATALOG_ENTRY_COUNT,
     CutoverResult,
     MetaSnapshot,
     PublishedSnapshotReceipt,
@@ -712,11 +713,11 @@ class RecoveryCoordinator:
                 )
             )
         )
-        if len(types) != 31 or FORBIDDEN_LEGACY_CATALOG_TYPES & set(
+        if len(types) != S5_CATALOG_ENTRY_COUNT or FORBIDDEN_LEGACY_CATALOG_TYPES & set(
             types
         ):
             raise DomainFailure("snapshot_invalid", "catalog is not the S5 catalog")
-        entry_count = 31
+        entry_count = S5_CATALOG_ENTRY_COUNT
         if self.recovery_view_factory is None:
             raise DomainFailure("snapshot_invalid", "recovery view factory is unavailable")
         try:
@@ -960,7 +961,7 @@ class RecoveryCoordinator:
             failures.append("manifest_inventory")
         if "meta/meta.db" not in {item.relative_path for item in manifest.files}:
             failures.append("meta_missing")
-        if manifest.catalog_entry_count != 31 or FORBIDDEN_LEGACY_CATALOG_TYPES & set(
+        if manifest.catalog_entry_count != S5_CATALOG_ENTRY_COUNT or FORBIDDEN_LEGACY_CATALOG_TYPES & set(
             manifest.catalog_entity_types
         ):
             failures.append("catalog_invalid")
@@ -2517,7 +2518,7 @@ class RecoveryCoordinator:
                 "cutover_invalid",
                 "staged catalog hash does not match coordinator configuration",
             )
-        if manifest.catalog_entry_count != 31:
+        if manifest.catalog_entry_count != S5_CATALOG_ENTRY_COUNT:
             raise DomainFailure(
                 "cutover_invalid", "staged catalog entry count is invalid"
             )

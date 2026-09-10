@@ -1,3 +1,6 @@
+from app.recovery.contracts import S5_CATALOG_ENTRY_COUNT
+from app.task_space.migration_preflight import TASK_SPACE_TARGET_HEAD
+
 """S5 Task 2 Step 2: fenced rollback-preserving cutover.
 
 Every test exercises the production path: real ``_coordinator`` fixtures from
@@ -280,13 +283,15 @@ def _manifest_payload(coordinator) -> dict[str, object]:
             for spec in (coordinator.catalog.list() or ())
         )
     )
-    assert len(types) == 31, "catalog must expose the closed 31-type S5 catalog"
+    assert len(types) == S5_CATALOG_ENTRY_COUNT, (
+        "catalog must expose exactly the registered entity set"
+    )
     return {
         "schema_version": 1,
         "created_at": "2026-08-12T00:00:00.000Z",
         "source_fence": 3,
         "catalog_hash": coordinator.catalog.hash,
-        "catalog_entry_count": 31,
+        "catalog_entry_count": S5_CATALOG_ENTRY_COUNT,
         "catalog_entity_types": list(types),
         "meta": {
             "schema_head": "meta_002_active_session_locator",
@@ -299,7 +304,7 @@ def _manifest_payload(coordinator) -> dict[str, object]:
         "spaces": [
             {
                 "space_id": "alpha",
-                "space_head": "space_011_sync_clients_streaming",
+                "space_head": TASK_SPACE_TARGET_HEAD,
                 "index_schema_version": 2,
                 "sync_waterline": "2026-07-14T00:00:00.000Z",
                 "entity_counts": {},

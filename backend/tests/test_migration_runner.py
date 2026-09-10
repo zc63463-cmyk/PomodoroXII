@@ -11,6 +11,8 @@ import pytest
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
 
+from app.task_space.migration_preflight import TASK_SPACE_TARGET_HEAD
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -178,7 +180,7 @@ async def test_coordinator_replaces_managed_space_007_under_bound_authority(
     result = await coordinator.upgrade("space", path)
     assert result.changed is True
     assert result.previous_revision == "space_007_session_mood_check"
-    assert result.head == "space_011_sync_clients_streaming"
+    assert result.head == TASK_SPACE_TARGET_HEAD
     status = await coordinator.verify("space", path)
     assert status.at_head and status.integrity_ok
 
@@ -874,6 +876,8 @@ SPACE_TABLES = {
     "work_item_labels",
     "work_items",
     "work_item_notes",
+    "assets",
+    "relations",
     "focus_sessions",
     "session_task_contexts",
     "session_attribution_revisions",
@@ -1086,7 +1090,7 @@ def test_managed_space_007_upgrades_to_008_with_existing_outbox_cursor(tmp_path:
                 connection.execute(
                     text("SELECT version_num FROM alembic_version_space")
                 ).scalar_one()
-                == "space_011_sync_clients_streaming"
+                == TASK_SPACE_TARGET_HEAD
             )
     finally:
         engine.dispose()
@@ -1128,7 +1132,7 @@ def test_space_legacy_adoption_runs_timestamp_data_migration(tmp_path: Path) -> 
                 connection.execute(
                     text("SELECT version_num FROM alembic_version_space")
                 ).scalar_one()
-                == "space_011_sync_clients_streaming"
+                == TASK_SPACE_TARGET_HEAD
             )
     finally:
         engine.dispose()
@@ -1172,7 +1176,7 @@ def test_exact_space_legacy_adoption_backfills_outbox_visibility(tmp_path: Path)
             ).one() == (None, None, None, 1)
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version_space")
-            ).scalar_one() == "space_011_sync_clients_streaming"
+            ).scalar_one() == TASK_SPACE_TARGET_HEAD
     finally:
         engine.dispose()
 

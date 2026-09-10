@@ -33,22 +33,32 @@ class Relation(Base, SyncMixin):
     #   建复合索引 —— 环检测与派生阻塞都是"按 Space 内的某个端点"扫全表，
     #   单列索引在复合条件下退化。`updated_at` 的索引由 SyncMixin 提供。
     __table_args__ = (
+        # ★ 名字必须让「命名约定解析后的结果」与迁移 DDL 完全一致
+        #   （`test_parity_alembic_metadata` 逐约束比对）：
+        #   ck 的模板是 `ck_%(table_name)s_%(constraint_name)s`，
+        #   所以这里给 `self_loop`、最终落成 `ck_relations_self_loop`。
         CheckConstraint(
-            "from_work_item_id <> to_work_item_id", name="relations_no_self_loop"
+            "from_work_item_id <> to_work_item_id", name="self_loop"
         ),
         UniqueConstraint(
             "space_id", "from_work_item_id", "to_work_item_id", "relation_type",
             name="uq_relations_edge",
         ),
+        # ★ 外键名显式给出：不给名字时约定会拼成
+        #   `fk_relations_from_work_item_id_work_items`，与迁移里的短名不符。
         Index("ix_relations_from", "space_id", "from_work_item_id"),
         Index("ix_relations_to", "space_id", "to_work_item_id"),
     )
 
     space_id: Mapped[str] = mapped_column(String(36), nullable=False)
     from_work_item_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("work_items.id"), nullable=False
+        String(36),
+        ForeignKey("work_items.id", name="fk_relations_from_work_item"),
+        nullable=False,
     )
     to_work_item_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("work_items.id"), nullable=False
+        String(36),
+        ForeignKey("work_items.id", name="fk_relations_to_work_item"),
+        nullable=False,
     )
     relation_type: Mapped[str] = mapped_column(String(20), nullable=False)

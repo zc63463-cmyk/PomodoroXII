@@ -269,9 +269,8 @@ def test_all_registered_models_reach_base_metadata():
     逐个核对注册表里的 table_name 是否都在 metadata 中。
     """
     import app.models  # noqa: F401  触发包级注册
-    from app.db.base import Base
-
     import app.registry.builtin  # noqa: F401
+    from app.db.base import Base
 
     missing = [
         f"{spec.name}({spec.table_name})"

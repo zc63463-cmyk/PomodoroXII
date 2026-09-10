@@ -10,6 +10,7 @@ import pytest
 from alembic import command
 from sqlalchemy import Inspector, MetaData, inspect
 
+from app.task_space.migration_preflight import TASK_SPACE_TARGET_HEAD
 from tests.migrations import migration_engine, run_bound_command
 
 LEGACY_CUTOVER_TABLES = frozenset(
@@ -138,7 +139,7 @@ def test_space_alembic_unique_head_is_sync_clients_streaming() -> None:
     assert len(heads) == 1, (
         f"Space Alembic must have exactly one head, got {len(heads)}: {heads}"
     )
-    assert heads[0] == "space_011_sync_clients_streaming", (
-        f"Space Alembic head must be 'space_011_sync_clients_streaming', "
+    assert heads[0] == TASK_SPACE_TARGET_HEAD, (
+        f"Space Alembic head must be TASK_SPACE_TARGET_HEAD, "
         f"got {heads[0]!r}"
     )

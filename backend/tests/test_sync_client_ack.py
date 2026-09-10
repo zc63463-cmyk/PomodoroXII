@@ -10,6 +10,7 @@ import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
 
+from app.task_space.migration_preflight import TASK_SPACE_TARGET_HEAD
 from tests.migrations import alembic_config, run_bound_command
 
 
@@ -376,7 +377,7 @@ async def test_recovery_ack_rejects_manifest_waterline_mismatch(space_session) -
     assert row.requires_recovery is True
 
 SPACE_010 = "space_010_task_space_focus_session"
-SPACE_011 = "space_011_sync_clients_streaming"
+SPACE_011 = TASK_SPACE_TARGET_HEAD
 
 
 def _upgrade(path: Path, revision: str) -> None:

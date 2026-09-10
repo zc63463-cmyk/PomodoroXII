@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from app.db.migrations import run_migrations
+from app.task_space.migration_preflight import TASK_SPACE_TARGET_HEAD
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "collect_g0_m_evidence.py"
 
@@ -50,7 +51,7 @@ def test_g0m_evidence_on_fresh_space_snapshot(tmp_path) -> None:
     assert evidence["instance_id"] == "test-synthetic"
     assert evidence["snapshot_id"] == "snap-1"
     assert evidence["app_version"] == "0.1.0"
-    assert evidence["space_revision"] == "space_011_sync_clients_streaming"
+    assert evidence["space_revision"] == TASK_SPACE_TARGET_HEAD
     # The cutover dropped the legacy tables entirely: counts are None (absent).
     assert all(count is None for count in evidence["legacy_table_counts"].values())
     assert evidence["mutation_journal"] == {
@@ -155,7 +156,7 @@ def test_g0m_evidence_records_missing_real_inputs_as_evidence(tmp_path) -> None:
     assert evidence["instance_id"] is None
     assert evidence["snapshot_id"] is not None  # defaults to the file SHA-256
     assert evidence["app_version"] == "0.1.0"
-    assert evidence["space_revision"] == "space_011_sync_clients_streaming"
+    assert evidence["space_revision"] == TASK_SPACE_TARGET_HEAD
     # Absent inputs that cannot be derived stay None and are reported.
     assert evidence["status"] == "evidence_collected"
     assert evidence["preflight"]["decision"] == "passes"

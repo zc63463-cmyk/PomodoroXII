@@ -289,6 +289,8 @@ class TestOpenAPIContractGate:
             ("GET", "/api/v1/sync/v2/recover"),
             ("POST", "/api/v1/sync/v2/ack"),
             ("GET", "/api/v1/sync/v2/status"),
+            # 保留期修剪：幂等、需 space token，属 v2 运维面。
+            ("POST", "/api/v1/sync/v2/retention/prune"),
         }
 
     def test_error_status_detection_covers_numeric_and_range_keys(self):

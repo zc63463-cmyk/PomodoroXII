@@ -65,6 +65,7 @@ async def test_space_db_has_all_business_tables(_isolate_env, space_session):
         # Task Space and FocusSession entities (12)
         "projects", "status_definitions", "type_definitions", "labels",
         "work_item_labels", "work_items", "work_item_notes",
+        "assets", "relations",
         "focus_sessions", "session_task_contexts",
         "session_attribution_revisions", "session_work_item_plans",
         "session_work_item_outcomes",
@@ -81,7 +82,7 @@ async def test_space_db_has_all_business_tables(_isolate_env, space_session):
     actual_business = set(tables) - {"spaces", "meta_settings", "alembic_version_space", "alembic_version_meta"}
     missing = expected_business_tables - actual_business
     assert not missing, f"Space DB missing business tables: {missing}"
-    assert len(actual_business) == 36, (
-        f"Space DB has {len(actual_business)} business tables, expected 36: "
+    assert len(actual_business) == 38, (
+        f"Space DB has {len(actual_business)} business tables, expected 38: "
         f"extra={actual_business - expected_business_tables}"
     )

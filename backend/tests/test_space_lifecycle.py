@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.task_space.migration_preflight import TASK_SPACE_TARGET_HEAD
+
 
 class _FakeLease:
     def __init__(self, scope: str, *, fence: int = 3) -> None:
@@ -114,7 +116,7 @@ async def test_provision_is_at_space_011_and_index_v2_before_meta_visibility(
             )
         async with handle.scope.containment.open_verified() as opens:
             migration = await runtime.migrations.verify_open("space", opens.database_target)
-            assert migration.revision == "space_011_sync_clients_streaming"
+            assert migration.revision == TASK_SPACE_TARGET_HEAD
             assert runtime.index_schema.verify_open(opens.index_target).version == 2
         assert not (settings.spaces_data_dir / "space-new" / "notes" / ".mutations").exists()
     finally:

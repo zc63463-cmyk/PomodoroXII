@@ -98,6 +98,14 @@ def _event() -> dict[str, object]:
     }
 
 
+#: v2 的**运维面**端点：不属于 SYNC_OPERATIONS 定义的协议操作集，因此
+#: 既不要求 MCP 工具对齐，也不参与「REST == 协议操作」的相等断言。
+#: 保留期修剪由服务端策略驱动，客户端从不调用，故没有对应的 MCP 工具。
+SYNC_V2_MAINTENANCE_OPERATIONS = {
+    ("/api/v1/sync/v2/retention/prune", "POST"),
+}
+
+
 @pytest.mark.asyncio
 async def test_sync_operation_catalog_matches_rest_and_mcp() -> None:
     from app.main import app
@@ -108,7 +116,7 @@ async def test_sync_operation_catalog_matches_rest_and_mcp() -> None:
         for path, operations in app.openapi()["paths"].items()
         for method in operations
         if path.startswith("/api/v1/sync/v2/")
-    }
+    } - SYNC_V2_MAINTENANCE_OPERATIONS
     tools = {tool.name for tool in await mcp.list_tools()}
 
     assert rest == {(spec.rest_path, spec.rest_method) for spec in SYNC_OPERATIONS}

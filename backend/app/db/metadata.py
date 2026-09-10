@@ -41,6 +41,14 @@ FINAL_TASK_SPACE_TABLES = frozenset(
         "sync_recovery_chunks",
     }
 )
+# ★ 首版 TS0 cutover **之后**才新增的实体表。
+#   legacy 快照描述的是 cutover 之前的老库形态，这些表当年并不存在，
+#   必须一并排除。曾经漏掉 `relations` 的后果：它被复制进 legacy 元数据，
+#   而它的外键目标 `work_items` 恰好在 FINAL_TASK_SPACE_TABLES 排除集里 ——
+#   `create_all` 直接抛 NoReferencedTableError，打爆 4 个 legacy 采纳用例。
+#   新增实体时**务必同步这里**。
+POST_CUTOVER_SPACE_TABLES = frozenset({"assets", "relations"})
+
 REMOVED_LEGACY_SPACE_COLUMNS = {
     "quick_notes": frozenset({"session_id"}),
     "time_blocks": frozenset({"task_id"}),
@@ -217,7 +225,10 @@ def get_legacy_space_metadata() -> MetaData:
     source = SpaceBase.metadata
     legacy = MetaData(naming_convention=source.naming_convention)
     for table in source.tables.values():
-        if table.name not in FINAL_TASK_SPACE_TABLES:
+        if (
+            table.name not in FINAL_TASK_SPACE_TABLES
+            and table.name not in POST_CUTOVER_SPACE_TABLES
+        ):
             copied = table.to_metadata(legacy)
             _restore_legacy_columns(copied, legacy)
     _restore_removed_legacy_tables(legacy)

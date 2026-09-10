@@ -15,7 +15,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.recovery import DomainFailure
+from app.recovery.contracts import S5_CATALOG_ENTRY_COUNT
 from app.recovery.manifest import canonical_json
+from app.task_space.migration_preflight import TASK_SPACE_TARGET_HEAD
 
 BODY = "note body"
 CONTENT_HASH = hashlib.sha256(BODY.encode("utf-8")).hexdigest()
@@ -309,7 +311,7 @@ def _make_space_db(
         with connection:
             connection.execute("CREATE TABLE alembic_version_space(version_num TEXT NOT NULL)")
             connection.execute(
-                "INSERT INTO alembic_version_space VALUES ('space_011_sync_clients_streaming')"
+                f"INSERT INTO alembic_version_space VALUES ('{TASK_SPACE_TARGET_HEAD}')"
             )
             connection.execute(
                 """
@@ -577,9 +579,9 @@ async def test_snapshot_covers_complete_inventory_and_uses_one_fence(tmp_path: P
         NOTE_RELATIVE,
         "spaces/alpha/space.db",
     }
-    assert receipt.manifest.catalog_entry_count == 31
+    assert receipt.manifest.catalog_entry_count == S5_CATALOG_ENTRY_COUNT
     assert receipt.manifest.catalog_hash == coordinator.catalog.hash
-    assert receipt.manifest.spaces[0].space_head == "space_011_sync_clients_streaming"
+    assert receipt.manifest.spaces[0].space_head == TASK_SPACE_TARGET_HEAD
     assert receipt.manifest.spaces[0].index_schema_version == 2
     assert receipt.manifest.spaces[0].sync_waterline == "2026-07-14T00:00:00.000Z"
     verified = await coordinator.verify(receipt)
@@ -1432,7 +1434,7 @@ def test_snapshot_contracts_deep_frozen() -> None:
         "created_at": "2026-07-14T00:00:00.000Z",
         "source_fence": 1,
         "catalog_hash": "a" * 64,
-        "catalog_entry_count": 31,
+        "catalog_entry_count": S5_CATALOG_ENTRY_COUNT,
         "catalog_entity_types": ["a"],
         "meta": {
             "schema_head": "meta_002_active_session_locator",
@@ -1470,7 +1472,7 @@ def test_parse_manifest_rejects_noncanonical_bytes() -> None:
         "created_at": "2026-07-14T00:00:00.000Z",
         "source_fence": 1,
         "catalog_hash": "a" * 64,
-        "catalog_entry_count": 31,
+        "catalog_entry_count": S5_CATALOG_ENTRY_COUNT,
         "catalog_entity_types": ["a"],
         "meta": {
             "schema_head": "meta_002_active_session_locator",
@@ -1585,7 +1587,7 @@ def _manifest_with(replacement: str) -> bytes:
         "created_at": "2026-07-14T00:00:00.000Z",
         "source_fence": 1,
         "catalog_hash": "a" * 64,
-        "catalog_entry_count": 31,
+        "catalog_entry_count": S5_CATALOG_ENTRY_COUNT,
         "catalog_entity_types": ["a"],
         "meta": {
             "schema_head": "meta_002_active_session_locator",
@@ -1607,7 +1609,7 @@ def _manifest_with_file(files_json: str) -> bytes:
         "created_at": "2026-07-14T00:00:00.000Z",
         "source_fence": 1,
         "catalog_hash": "a" * 64,
-        "catalog_entry_count": 31,
+        "catalog_entry_count": S5_CATALOG_ENTRY_COUNT,
         "catalog_entity_types": ["a"],
         "meta": {
             "schema_head": "meta_002_active_session_locator",

@@ -31,6 +31,11 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
+    # ★ 门禁可执行性：全量 2970 个用例串行跑要 1-3 小时（实测 13 分钟只推进
+    #   约 55 个），等于没有门禁。xdist 把实测耗时压到 ~33 分钟；
+    #   timeout 让挂起的用例失败而不是把整条 CI 拖死。
+    "pytest-xdist>=3.8",
+    "pytest-timeout>=2.4",
     "httpx>=0.28",
     "ruff>=0.8",
     "scikit-build-core==0.11.6",
@@ -60,6 +65,18 @@ sdist.include = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+# ★ 挂起保护：单例超过 5 分钟即判失败，避免整条 CI 被一个卡死的用例拖住。
+#   Windows 没有 SIGALRM，必须显式用 thread 方式。
+timeout = 300
+timeout_method = "thread"
+# ★ 并行分片按**文件**切（loadfile），不要用默认的 load ——
+#   本项目的测试大量依赖模块级 fixture（建库 + 跑迁移），
+#   同一文件的用例共享这些 fixture，拆到不同 worker 会重复建库并放大 I/O 争抢。
+#
+#   用法（`--dist`/`-n` 是命令行选项，**不能**写进 ini_options，
+#   写在这里 pytest 会告警 "Unknown config option"）：
+#       pytest -n 8 --dist loadfile
+#   -n 不写进 addopts：单文件调试时不该拉起 8 个 worker。
 
 [tool.ruff]
 line-length = 100

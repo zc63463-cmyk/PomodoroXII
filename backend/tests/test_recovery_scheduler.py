@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.recovery.contracts import S5_CATALOG_ENTRY_COUNT
 from tests.test_recovery import _coordinator
 from tests.test_recovery_local_service import _add_effort_projection_tables
 
@@ -28,13 +29,13 @@ def _manifest_payload(coordinator, *, created_at: str) -> dict[str, object]:
             for spec in (coordinator.catalog.list() or ())
         )
     )
-    assert len(types) == 31
+    assert len(types) == S5_CATALOG_ENTRY_COUNT
     return {
         "schema_version": 1,
         "created_at": created_at,
         "source_fence": 3,
         "catalog_hash": coordinator.catalog.hash,
-        "catalog_entry_count": 31,
+        "catalog_entry_count": S5_CATALOG_ENTRY_COUNT,
         "catalog_entity_types": list(types),
         "meta": {
             "schema_head": "meta_002_active_session_locator",

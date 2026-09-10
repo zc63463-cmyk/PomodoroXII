@@ -65,7 +65,14 @@ RESERVED_TS_CODES = frozenset(
         "active_session_recovery_required",
         "work_item_structure_changed",
         "label_name_conflict",
+        # 依赖域（D13/D17）：环拒绝与归档项不可篡改，均由 Task Space 编译器产出。
+        "cycle_detected",
         "archived_work_item_immutable",
+        # ★ 归属重叠（有意）：`payload_field_not_allowed` 名义上是 S4 同步映射码，
+        #   但依赖域编译器也用它拒绝非法的 `relation_type` —— 这属于**载荷契约**校验，
+        #   与映射层是同一语义。两个集合都登记，闭集不变（并集去重）。
+        #   路由层已用枚举先行拦下，编译器这层是直接调用者的纵深防御。
+        "payload_field_not_allowed",
     }
 )
 RESERVED_S4_MAPPING_CODES = frozenset(

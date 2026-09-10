@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import pytest
 
+from app.registry.builtin import REGISTRY
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -44,8 +46,8 @@ async def test_meta_health(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["registry_loaded"] is True
-    assert body["entity_count"] == 31
-    assert body["categories"]["business"] == 22
+    assert body["entity_count"] == len(REGISTRY.list())
+    assert body["categories"]["business"] == 24
     assert body["categories"]["sync_infra"] == 5
     assert body["categories"]["meta"] == 3
     assert body["categories"]["setting"] == 1
@@ -64,8 +66,8 @@ async def test_meta_list_entities(client):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["total"] == 31
-    assert len(body["entities"]) == 31
+    assert body["total"] == len(REGISTRY.list())
+    assert len(body["entities"]) == len(REGISTRY.list())
     names = {e["name"] for e in body["entities"]}
     assert "note" in names
     assert "work_item" in names
@@ -85,7 +87,7 @@ async def test_meta_list_entities_filter_category(client):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["total"] == 22
+    assert body["total"] == 24
     assert all(e["category"] == "business" for e in body["entities"])
 
     # sync_infra filter

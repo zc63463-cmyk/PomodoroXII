@@ -56,4 +56,15 @@ STAT_SPECS: tuple[StatSpec, ...] = (
         route_path="/note-summary",
         mcp_tool="get_note_summary",
     ),
+    StatSpec(
+        name="focus_summary",
+        service_method="focus_summary",
+        route_path="/focus-summary",
+        mcp_tool="get_focus_summary",
+        # 仅 REST：这是「按时段的专注质量分布」——面向图表的分桶载荷，
+        # 把它塞进 agent 面等于把展示模型当数据模型暴露，分析收益为零。
+        # 番茄统计的核心价值（chronotype map）由 UI 承载，不进 MCP。
+        mcp_enabled=False,
+        params={"days": {"default": 30, "ge": 1, "le": 365}},
+    ),
 )

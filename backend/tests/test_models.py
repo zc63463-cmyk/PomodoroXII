@@ -18,6 +18,7 @@ class TestModelRegistration:
             # Task Space business entities (12)
             "projects", "status_definitions", "type_definitions", "labels",
             "work_item_labels", "work_items", "work_item_notes",
+            "assets", "relations",
             "focus_sessions", "session_task_contexts",
             "session_attribution_revisions", "session_work_item_plans",
             "session_work_item_outcomes",
@@ -37,7 +38,7 @@ class TestModelRegistration:
         }
         assert space_tables == expected_space_tables
         assert meta_tables.isdisjoint(space_tables)
-        assert len(meta_tables | space_tables) == 40
+        assert len(meta_tables | space_tables) == 42
 
     def test_all_models_import_from_db_base(self):
         """No model should import from app.database — only app.db.base."""
