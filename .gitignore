@@ -201,3 +201,47 @@ docs/task-space-design/sources/*
 !docs/task-space-design/sources/upstream-tip-tip/**
 
 !docs/task-space-design/MANIFEST.md
+
+# --- 2026-09-10: 探针/临时产物（落袋治理，A 阶段）---------------------------
+# 这些是排查过程中留下的临时文件，不属于产品代码；留在工作树但不入库。
+/tmp/
+/tmp-*.txt
+/snap6.yaml
+# 调试用 Playwright 规格：只允许 focus-offline / task-space 两个正式用例
+frontend/e2e/tmp-*.spec.ts
+frontend/e2e/debug-*.spec.ts
+
+# --- 2026-09-10: 运行时数据根与依赖目录（落袋治理，A 阶段）-------------------
+# ★★★ 最高优先：/data 是真实运行数据根（meta.db + 各 Space 的 space.db），
+#   里面有真实工作项与笔记；下方只忽略了 backend/data，根级 /data 此前是**裸露**的，
+#   一次 `git add -A` 就会把个人数据推上公开仓库。
+/data/
+/node_modules/
+
+# 本机 AI/编辑器工具的工作目录（非产品代码）
+/.archify/
+/.codebase-memory/
+/.codex/
+/.data.runtime/
+/.kc-stage/
+/.playwright-cli/
+
+# 探针残留
+/nul
+/--title
+/book.yaml
+/canvas-*.yaml
+/snap*.yaml
+
+# --- 2026-09-10: 环境变量与密钥备份（落袋治理）-------------------------------
+# ★★★ backend/.env.bak-20260831 内含真实密钥且此前**未忽略** —— 一次
+#   `git add -A` 就会把它推上公开仓库。下面把整族备份名一并封死。
+.env
+.env.*
+!.env.example
+!*.env.example
+!.env.local.example
+*.env.bak-*
+backend/.data.runtime/
+frontend/.codebase-memory/
+frontend/.playwright-cli/
