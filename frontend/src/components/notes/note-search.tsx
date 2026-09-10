@@ -76,7 +76,7 @@ export default function NoteSearch({ onSelect, folderId = null }: NoteSearchProp
         onChange={(e) => setQuery(e.target.value)}
         placeholder="搜索笔记全文…"
         aria-label="搜索笔记"
-        className="w-full rounded border bg-background px-2 py-1 text-sm outline-none placeholder:text-muted-foreground"
+        className="focus-ring-inset transition-ui w-full rounded border bg-background px-2 py-1 text-sm outline-none placeholder:text-muted-foreground"
       />
 
       {error && <p className="mt-1 text-xs text-destructive">{error}</p>}

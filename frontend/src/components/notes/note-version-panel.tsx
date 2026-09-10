@@ -145,7 +145,7 @@ export default function NoteVersionPanel({
               type="button"
               onClick={() => void handleSelect(version)}
               disabled={busyId !== null}
-              className="block w-full px-3 py-2 text-left hover:bg-muted/50 disabled:opacity-50"
+              className="focus-ring-inset transition-ui block w-full px-3 py-2 text-left hover:bg-muted/50 disabled:opacity-50"
             >
               <span className="block truncate text-xs">{formatTime(version.changed_at)}</span>
               <span className="block truncate text-xs text-muted-foreground">

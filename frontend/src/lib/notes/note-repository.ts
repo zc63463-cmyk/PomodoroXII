@@ -16,11 +16,14 @@
 
 import { db, spaceDBManager } from '@/services/space-db'
 import type { PomodoroXIDB } from '@/services/database'
+import { hashCommandPayload } from '@/lib/contracts/payload-hash'
+import { syncEngine } from '@/lib/sync'
 import { buildOutboxIdentity, enqueueOutbox } from '@/lib/sync/outbox'
+import { parseRetainedLwwOutboxPostImage } from '@/lib/sync/response-schema'
 import type { SpaceAuthorityToken } from '@/lib/sync/space-authority-fence'
 import { withSpaceAuthorityFence } from '@/lib/sync/space-authority-fence'
 import type { OutboxAction, SyncEntityType } from '@/lib/sync/types'
-import type { CachedNote, Note } from '@/types'
+import type { CachedNote, Note, OutboxEvent } from '@/types'
 
 /** 发给后端的 payload —— 剔除客户端同步 plumbing 字段，但保留 content。 */
 type NotePayload = Note | { id: string }
@@ -60,11 +63,153 @@ export interface NoteUpdateInput {
 }
 
 // --------------------------------------------------------------------------- //
+// 遗留行归一化与 post-image 白名单
+//
+// 2026-09-01 前的旧版笔记实现以 camelCase 模型（createdAt/folderId/trashedAt/
+// updatedAt）+ 派生元数据（contentHash/wordCount/spaceId）落库。这类行一旦被
+// 现行 `updateNote` 的 `...existing` 展开继承，会把非法 payload 塞进 outbox ——
+// 同步周期的 S4 admission 校验（freezeOutboxIdentity → strictObject）随即抛
+// ZodError，每个周期都在**任何网络请求之前**失败，状态栏永久"同步出错"。
+// --------------------------------------------------------------------------- //
+
+/** 同步 post-image 白名单 —— 与 response-schema 的 note strictObject 一一对齐。 */
+function toNotePostImage(note: Note): Note {
+  return {
+    id: note.id,
+    title: note.title,
+    content: note.content,
+    summary: note.summary,
+    tags: note.tags,
+    category: note.category,
+    folder_id: note.folder_id,
+    status: note.status,
+    trashed_at: note.trashed_at,
+    created_at: note.created_at,
+    updated_at: note.updated_at,
+  }
+}
+
+function isLegacyNoteRow(row: Record<string, unknown>): boolean {
+  return 'createdAt' in row || 'contentHash' in row
+    || 'wordCount' in row || 'folderId' in row || 'trashedAt' in row
+}
+
+function asStringOrNull(value: unknown): string | null {
+  if (typeof value === 'string') return value
+  return null
+}
+
+/** 旧版 camelCase 行 → 现行 snake_case CachedNote（丢弃派生元数据）。 */
+function normalizeLegacyNoteRow(row: Record<string, unknown>): CachedNote {
+  const read = (snake: string, camel: string): unknown =>
+    row[snake] !== undefined ? row[snake] : row[camel]
+  const fallbackIso = new Date().toISOString()
+  return {
+    id: String(row.id ?? ''),
+    title: typeof row.title === 'string' ? row.title : '',
+    content: typeof row.content === 'string' ? row.content : '',
+    summary: typeof row.summary === 'string' ? row.summary : '',
+    tags: Array.isArray(row.tags) ? (row.tags as string[]) : [],
+    category: asStringOrNull(row.category),
+    folder_id: asStringOrNull(read('folder_id', 'folderId')),
+    status: row.status === 'archived' ? 'archived' : 'active',
+    trashed_at: asStringOrNull(read('trashed_at', 'trashedAt')),
+    created_at: asStringOrNull(read('created_at', 'createdAt')) ?? fallbackIso,
+    updated_at: asStringOrNull(read('updated_at', 'updatedAt')) ?? fallbackIso,
+    content_hash: undefined,
+    deletion_state: typeof row.deletion_state === 'string'
+      ? (row.deletion_state as CachedNote['deletion_state'])
+      : 'active',
+    version: Number.isSafeInteger(row.version) ? (row.version as number) : 1,
+    _dirty: row._dirty === true,
+  }
+}
+
+/** 每个 Space 只跑一次的修复守卫。 */
+const legacyRepairDoneSpaces = new Set<string>()
+
+/**
+ * 一次性修复旧版笔记实现留下的脏数据：
+ * 1. notes 表内的 camelCase 遗留行 → 归一化为现行 snake_case 模型；
+ * 2. outbox 内 payload 不再通过 post-image schema 的未同步 note 行 →
+ *    用归一化后的本地行重写 payload 并重算 payloadHash（内容保真，身份字段
+ *    operationId/expectedVersion/attemptCount 原样保留，CAS/幂等语义不变）。
+ *
+ * 在 fence 内执行（与同步周期、笔记写入互斥），写入收拢在单个 rw 事务。
+ * 无法修复的情形（实体行缺失、attemptCount>0 的在途行）原样保留，
+ * 交由既有 fail-closed 路径暴露，绝不静默丢弃。
+ */
+export async function repairLegacyNoteSyncState(): Promise<void> {
+  const database: PomodoroXIDB = spaceDBManager.current
+  if (!database || legacyRepairDoneSpaces.has(database.spaceId)) return
+  await withSpaceAuthorityFence(database.spaceId, async () => {
+    // 1) 读取 + 计算（事务外，WebCrypto 无需阻塞 Dexie 事务）
+    const rawRows = await database.notes.toArray()
+    const normalizedById = new Map<string, CachedNote>()
+    for (const raw of rawRows as unknown as Array<Record<string, unknown>>) {
+      if (!isLegacyNoteRow(raw)) continue
+      const normalized = normalizeLegacyNoteRow(raw)
+      normalizedById.set(normalized.id, normalized)
+    }
+    const outboxRows = await database.outbox
+      .where('spaceId').equals(database.spaceId)
+      .and((e) => e.entityType === 'note' && !e.synced && e.attemptCount === 0)
+      .toArray()
+    const repairs: Array<{ row: OutboxEvent; payload: string; payloadHash: string }> = []
+    for (const row of outboxRows) {
+      try {
+        parseRetainedLwwOutboxPostImage(
+          'note', row.action, JSON.parse(String(row.payload)),
+        )
+        continue // payload 合法，不动
+      } catch {
+        // 走修复
+      }
+      const normalized = normalizedById.get(row.entityId)
+      if (!normalized) continue // 无权威本地行可依，保留原状由既有路径暴露
+      const postImage = row.action === 'delete'
+        ? { id: row.entityId }
+        : toNotePostImage(normalized)
+      repairs.push({
+        row,
+        payload: JSON.stringify(postImage),
+        payloadHash: await hashCommandPayload(postImage),
+      })
+    }
+    if (normalizedById.size === 0 && repairs.length === 0) {
+      legacyRepairDoneSpaces.add(database.spaceId)
+      return
+    }
+    // 2) 写入（单事务：notes 归一化行 + outbox payload/hash 一并落地）
+    await database.transaction('rw', database.notes, database.outbox, async () => {
+      for (const normalized of normalizedById.values()) {
+        await database.notes.put(normalized)
+      }
+      for (const repair of repairs) {
+        await database.outbox.put({
+          ...repair.row,
+          payload: repair.payload,
+          payloadHash: repair.payloadHash,
+        })
+      }
+    })
+    legacyRepairDoneSpaces.add(database.spaceId)
+    // 3) 修复改变了 outbox 内容 —— 若本轮周期已在此之前失败，补一次同步触发收敛
+    void syncEngine.sync().catch((error) => {
+      console.error('post-repair sync failed:', error)
+    })
+  })
+}
+
+// --------------------------------------------------------------------------- //
 // 读取
 // --------------------------------------------------------------------------- //
 
 /** 列出未回收的笔记，按更新时间倒序。 */
 export async function listNotes(): Promise<Note[]> {
+  void repairLegacyNoteSyncState().catch((error) => {
+    console.error('legacy note sync repair failed:', error)
+  })
   const rows = await db.notes.toArray()
   return rows
     .filter((row) => row.trashed_at == null && row.deletion_state !== 'deleted')
@@ -74,6 +219,9 @@ export async function listNotes(): Promise<Note[]> {
 
 /** 列出回收站中的笔记。 */
 export async function listTrashedNotes(): Promise<Note[]> {
+  void repairLegacyNoteSyncState().catch((error) => {
+    console.error('legacy note sync repair failed:', error)
+  })
   const rows = await db.notes.toArray()
   return rows
     .filter((row) => row.trashed_at != null && row.deletion_state !== 'deleted')
@@ -82,6 +230,9 @@ export async function listTrashedNotes(): Promise<Note[]> {
 }
 
 export async function getNote(id: string): Promise<Note | null> {
+  void repairLegacyNoteSyncState().catch((error) => {
+    console.error('legacy note sync repair failed:', error)
+  })
   const row = await db.notes.get(id)
   if (!row || row.deletion_state === 'deleted') return null
   return stripSyncFields(row)
@@ -242,6 +393,11 @@ async function runNoteMutation<T>(
       const hookPayload = written.payload ?? context.payload
 
       if (context.sync !== false && hookPayload) {
+        // post-image 白名单：无论本地行携带过什么历史字段，进入 outbox 的
+        // payload 必须与同步 schema 逐字段对齐（delete 仅需 {id}）。
+        const postImage = context.action === 'delete'
+          ? hookPayload
+          : toNotePostImage(hookPayload as Note)
         await enqueueOutbox(
           database,
           database.spaceId,
@@ -249,8 +405,8 @@ async function runNoteMutation<T>(
           'note' as SyncEntityType,
           context.entityId,
           context.action,
-          hookPayload,
-          await buildOutboxIdentity(hookPayload, {
+          postImage,
+          await buildOutboxIdentity(postImage, {
             operationId: crypto.randomUUID(),
             expectedVersion: written.expectedVersion ?? null,
             transportState: 'ready',
@@ -265,9 +421,11 @@ async function runNoteMutation<T>(
 }
 
 async function requireExistingNote(id: string): Promise<CachedNote> {
-  const row = await (spaceDBManager.current as PomodoroXIDB).notes.get(id)
+  const row = await db.notes.get(id)
   if (!row) throw new Error(`note not found: ${id}`)
-  return row
+  // 遗留 camelCase 行在此归一化：mutations 的 `...existing` 展开与
+  // 入队 payload 都以归一化结果为基，杜绝历史字段再次流入同步管道。
+  return normalizeLegacyNoteRow(row as unknown as Record<string, unknown>)
 }
 
 /** 剥离客户端同步字段；`content` 保留（服务端需要它来写 .md）。 */

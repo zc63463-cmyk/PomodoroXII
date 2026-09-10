@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db, spaceDBManager } from '@/services/space-db'
+import { INITIAL_S4_OUTBOX_FIELDS } from '@/services/database'
+import { hashCommandPayload } from '@/lib/contracts/payload-hash'
 import { parseRetainedLwwOutboxPostImage } from '@/lib/sync/response-schema'
 import {
   ENTITY_TYPE_TO_TABLE,
@@ -13,6 +15,7 @@ import {
   listTrashedNotes,
   moveNoteToTrash,
   purgeNote,
+  repairLegacyNoteSyncState,
   restoreNote,
   updateNote,
   updateNoteContent,
@@ -216,5 +219,134 @@ describe('note-repository', () => {
     // 若写行与入队被拆成两个事务，这里会拿到一条 _dirty=true 却永远推不出去的孤儿行。
     expect(await db.notes.get('n6')).toBeUndefined()
     expect(await listPendingNoteIds()).toEqual([])
+  })
+
+  // ------------------------------------------------------------------------- //
+  // 遗留 camelCase 行修复（2026-09-01 前旧版笔记实现写入的数据）
+  // ------------------------------------------------------------------------- //
+
+  const LEGACY_NOTE_ID = 'legacy-note-1'
+
+  /** 旧版笔记实现（camelCase 模型 + 派生元数据）写入的行形态。 */
+  async function seedLegacyNoteRow(): Promise<void> {
+    const createdAt = '2026-09-05T12:26:59.828Z'
+    const updatedAt = '2026-09-05T12:27:14.887Z'
+    await db.notes.put({
+      id: LEGACY_NOTE_ID,
+      title: '',
+      content: '> 摘要：测试',
+      summary: '',
+      tags: [],
+      category: null,
+      // ↓ 旧版 camelCase 键（现行 CachedNote 不存在这些字段）
+      createdAt,
+      folderId: null,
+      trashedAt: null,
+      updatedAt,
+      // ↓ 旧版派生元数据（不属于同步 post-image）
+      contentHash: '5e17d547037e2ee61c69063fe81fb351be6bc673ee1b96f695570bdb7a690fd4',
+      wordCount: 2,
+      spaceId: '2c1b5b92242544668bca19d1066aceb8',
+      // ↓ 同步 plumbing
+      version: 2,
+      _dirty: true,
+    } as unknown as Parameters<typeof db.notes.put>[0])
+    await db.outbox.put({
+      id: 1,
+      spaceId: db.spaceId,
+      entityType: 'note',
+      entityId: LEGACY_NOTE_ID,
+      action: 'update',
+      payload: JSON.stringify({
+        id: LEGACY_NOTE_ID,
+        title: '',
+        content: '> 摘要：测试',
+        summary: '',
+        tags: [],
+        category: null,
+        status: 'active',
+        contentHash: '5e17d547037e2ee61c69063fe81fb351be6bc673ee1b96f695570bdb7a690fd4',
+        createdAt,
+        folderId: null,
+        spaceId: '2c1b5b92242544668bca19d1066aceb8',
+        trashedAt: null,
+        updatedAt,
+        wordCount: 2,
+        updated_at: '2026-09-07T02:58:18.908Z',
+      }),
+      // 旧实现按当时的 payload 算的 hash —— 与现行 schema 校验后的重算值不一致
+      payloadHash: 'legacy-hash-not-recomputable',
+      operationId: 'op-legacy-note-1',
+      compoundOperationId: null,
+      compoundOrder: null,
+      expectedVersion: 1,
+      requiresVersionRebase: false,
+      transportState: 'ready',
+      createdAt: '2026-09-07T02:58:18.908Z',
+      synced: false,
+      lastError: null,
+      lastErrorCode: null,
+      failedAt: null,
+      attemptCount: 0,
+      ...INITIAL_S4_OUTBOX_FIELDS,
+    })
+  }
+
+  it('R1: repairLegacyNoteSyncState 归一化遗留行并重写中毒 outbox payload', async () => {
+    await seedLegacyNoteRow()
+
+    await repairLegacyNoteSyncState()
+
+    // 1) notes 行：camelCase 键 → snake_case，派生字段清除
+    const noteRow = (await db.notes.get(LEGACY_NOTE_ID)) as unknown as Record<string, unknown>
+    expect(noteRow.created_at).toBe('2026-09-05T12:26:59.828Z')
+    expect(noteRow.updated_at).toBeTypeOf('string')
+    expect(noteRow.folder_id).toBeNull()
+    expect(noteRow.trashed_at).toBeNull()
+    expect(noteRow.created_at).toBeDefined()
+    expect(noteRow).not.toHaveProperty('createdAt')
+    expect(noteRow).not.toHaveProperty('folderId')
+    expect(noteRow).not.toHaveProperty('trashedAt')
+    expect(noteRow).not.toHaveProperty('updatedAt')
+    expect(noteRow).not.toHaveProperty('contentHash')
+    expect(noteRow).not.toHaveProperty('wordCount')
+    expect(noteRow).not.toHaveProperty('spaceId')
+
+    // 2) outbox 行：payload 过 strictObject 校验，且 payloadHash 与 payload 一致
+    const outboxRow = (await db.outbox.get(1))!
+    const payload = JSON.parse(outboxRow.payload as string)
+    expect(() =>
+      parseRetainedLwwOutboxPostImage('note', 'update' as const, payload),
+    ).not.toThrow()
+    expect(outboxRow.payloadHash).toBe(await hashCommandPayload(payload))
+    // 内容保真：修复不丢用户的编辑
+    expect(payload.content).toBe('> 摘要：测试')
+    // 身份字段保留（CAS / 幂等不因修复而变）
+    expect(outboxRow.operationId).toBe('op-legacy-note-1')
+    expect(outboxRow.expectedVersion).toBe(1)
+  })
+
+  it('R2: 修复可重复执行（幂等）', async () => {
+    await seedLegacyNoteRow()
+    await repairLegacyNoteSyncState()
+    const first = await db.outbox.get(1)
+    await repairLegacyNoteSyncState()
+    const second = await db.outbox.get(1)
+    expect(second?.payload).toBe(first?.payload)
+    expect(second?.payloadHash).toBe(first?.payloadHash)
+  })
+
+  it('R3: 修复后遗留行上的 updateNote 产出合法 payload', async () => {
+    await seedLegacyNoteRow()
+    await repairLegacyNoteSyncState()
+
+    await updateNote(LEGACY_NOTE_ID, { title: '修复后标题' })
+
+    const row = (await db.outbox.get(1))!
+    const payload = JSON.parse(row.payload as string)
+    expect(payload.title).toBe('修复后标题')
+    expect(() =>
+      parseRetainedLwwOutboxPostImage('note', 'update' as const, payload),
+    ).not.toThrow()
   })
 })

@@ -14,7 +14,7 @@ import { DesktopSidebar } from '@/components/layout/desktop-sidebar'
 import { MobileBottomNav } from '@/components/layout/mobile-bottom-nav'
 import { SpaceSwitcher } from '@/components/layout/space-switcher'
 import { SyncStatusBar } from '@/components/layout/sync-status-bar'
-import { CommandPaletteStub } from '@/components/layout/command-palette-stub'
+import { CommandPalette } from '@/components/layout/command-palette'
 import { ShortcutHelpDialog } from '@/components/layout/shortcut-help-dialog'
 import { ConflictPanel } from '@/components/sync/conflict-panel'
 import { Button } from '@/components/ui/button'
@@ -73,7 +73,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <MobileBottomNav />
 
       {/* S0-4: Dialog stubs — state from ui-store */}
-      <CommandPaletteStub
+      <CommandPalette
         open={isCommandPaletteOpen}
         onOpenChange={setCommandPaletteOpen}
       />
