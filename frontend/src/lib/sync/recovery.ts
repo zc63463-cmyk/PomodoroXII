@@ -189,7 +189,19 @@ export async function runFullRecovery(
       cursor: state!.waterlineCursor,
       pendingAck: state!.waterlineCursor,
       catalogHash: state!.catalogHash,
-      requiresFullRecovery: true,
+      /**
+       * ★ 恢复**已完成**：记录已落地、游标与 pendingAck 都已写入，
+       *   这里必须是 false。
+       *
+       *   设为 true 会造成死锁：`runPullLoopV2` 开头就
+       *   `if (meta.requiresFullRecovery) throw`，而把这个标记清成 false 的代码
+       *   在 pull 成功之后 —— 一旦标记为 true，pull 永远不执行，标记永远清不掉，
+       *   状态栏就永久显示"同步出错"（且不会发出任何同步请求，后端日志是空的）。
+       *
+       *   触发场景：服务端 catalog_hash 变化（如新增实体）→ 要求 full recovery
+       *   → 前端恢复完 → 若标记 true 就再也同步不了了。
+       */
+      requiresFullRecovery: false,
     })
     await db.syncRecoveryChunks.where('recoveryId').equals(state!.recoveryId).delete()
     await db.syncRecoveryState.delete('active')

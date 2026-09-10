@@ -195,9 +195,13 @@ async def pull_v2(
     client_id: str = Query(...),
     cursor: str | None = Query(None),
     limit: str = Query("100"),
+    # 作用域订阅（可选）。留空 = 全量，与加作用域之前的行为完全一致。
+    scope: str = Query(""),
 ) -> SyncV2PullResponse:
-    del client_id, cursor, limit
-    result = await protocol.pull(call.client_id or "", call.cursor, call.limit or 100)
+    del client_id, cursor, limit, scope
+    result = await protocol.pull(
+        call.client_id or "", call.cursor, call.limit or 100, call.scope or ""
+    )
     return SyncV2PullResponse.model_validate(to_wire_json(result))
 
 

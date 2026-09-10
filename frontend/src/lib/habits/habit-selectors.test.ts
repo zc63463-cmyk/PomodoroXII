@@ -6,9 +6,11 @@ import {
   isCompletedOn,
   isRestDay,
   lastNDateKeys,
+  longestStreak,
   shiftDateKey,
   todayProgress,
   toDateKey,
+  toDateKeyWithBoundary,
   weekdayOf,
 } from './habit-selectors'
 import type { Habit, HabitCheckIn } from '@/types'
@@ -149,6 +151,134 @@ describe('computeStreak', () => {
     const h = habit({ target_count: 3 })
     const list = [{ ...checkInsOn('h1', ['2026-09-01'])[0], count: 2 }]
     expect(computeStreak(h, list, '2026-09-02')).toBe(0)
+  })
+})
+
+describe('longestStreak', () => {
+  it('无任何打卡记录 → 0', () => {
+    expect(longestStreak(habit(), [], '2026-09-02')).toBe(0)
+  })
+
+  it('单段连续三天 → 3', () => {
+    const h = habit()
+    const list = checkInsOn('h1', ['2026-08-31', '2026-09-01', '2026-09-02'])
+    expect(longestStreak(h, list, '2026-09-02')).toBe(3)
+  })
+
+  it('★ 取最长的一段，而不是当前这一段', () => {
+    const h = habit()
+    // 8/20–8/21 连 2 天，中断，8/25–8/28 连 4 天，再中断，今天 9/2 单独 1 天
+    const list = checkInsOn('h1', [
+      '2026-08-20',
+      '2026-08-21',
+      '2026-08-25',
+      '2026-08-26',
+      '2026-08-27',
+      '2026-08-28',
+      '2026-09-02',
+    ])
+    expect(longestStreak(h, list, '2026-09-02')).toBe(4)
+    // 对照：当前连续只有今天这一天
+    expect(computeStreak(h, list, '2026-09-02')).toBe(1)
+  })
+
+  it('★ 当前连续已断，历史最长仍然保留', () => {
+    const h = habit()
+    // 8/30–9/1 连 3 天，9/2（今天）没打
+    const list = checkInsOn('h1', ['2026-08-30', '2026-08-31', '2026-09-01'])
+    expect(computeStreak(h, list, '2026-09-02')).toBe(3) // 今天未打卡不算断
+    expect(longestStreak(h, list, '2026-09-02')).toBe(3)
+    // 再空一天后：当前连续归零，但历史最长不变
+    expect(computeStreak(h, list, '2026-09-04')).toBe(0)
+    expect(longestStreak(h, list, '2026-09-04')).toBe(3)
+  })
+
+  it('★ 休息日跳过而非中断（需开启 rest_day_protection）', () => {
+    // 2026-09-06 是周日
+    const h = habit({ rest_day_protection: true, rest_days: [0] })
+    const list = checkInsOn('h1', ['2026-09-04', '2026-09-05', '2026-09-07'])
+    expect(longestStreak(h, list, '2026-09-07')).toBe(3)
+  })
+
+  it('未开启保护时，休息日照样中断', () => {
+    const h = habit({ rest_day_protection: false, rest_days: [0] })
+    const list = checkInsOn('h1', ['2026-09-04', '2026-09-05', '2026-09-07'])
+    expect(longestStreak(h, list, '2026-09-07')).toBe(2)
+  })
+
+  it('★ 未来日期的记录不计入（上界是 today）', () => {
+    const h = habit()
+    const list = checkInsOn('h1', ['2026-09-10', '2026-09-11', '2026-09-12'])
+    expect(longestStreak(h, list, '2026-09-02')).toBe(0)
+  })
+
+  it('target_count 未达标算断，达标才算数', () => {
+    const h = habit({ target_count: 3 })
+    const list = [
+      { ...checkInsOn('h1', ['2026-08-31'])[0], count: 3 },
+      { ...checkInsOn('h1', ['2026-09-01'])[0], id: 'cx', count: 2 },
+      { ...checkInsOn('h1', ['2026-09-02'])[0], id: 'cy', count: 3 },
+    ]
+    // 9/1 只打了 2 次未达标 → 两段各 1 天
+    expect(longestStreak(h, list, '2026-09-02')).toBe(1)
+  })
+
+  it('同一天多次打卡会累加，达标即计入', () => {
+    const h = habit({ target_count: 3 })
+    const list = [
+      { ...checkInsOn('h1', ['2026-09-01'])[0], count: 1 },
+      { ...checkInsOn('h1', ['2026-09-01'])[0], id: 'cx', count: 2 },
+      { ...checkInsOn('h1', ['2026-09-02'])[0], id: 'cy', count: 3 },
+    ]
+    expect(longestStreak(h, list, '2026-09-02')).toBe(2)
+  })
+
+  it('★ 全是休息日且从未打卡 → 能停下来（上限保护）', () => {
+    const h = habit({ rest_day_protection: true, rest_days: [0, 1, 2, 3, 4, 5, 6] })
+    expect(longestStreak(h, [], '2026-09-07')).toBe(0)
+  })
+})
+
+describe('toDateKeyWithBoundary（跨午夜日界）', () => {
+  it('cutoff=0 时与 toDateKey 完全等价（默认行为不变）', () => {
+    const date = new Date('2026-09-15T01:00:00.000Z')
+    expect(toDateKeyWithBoundary(date)).toBe(toDateKey(date))
+    expect(toDateKeyWithBoundary(date, 0)).toBe('2026-09-15')
+  })
+
+  it('★ 凌晨 1 点在 cutoff=3 下归入前一天', () => {
+    // 01:00 往前推 3 小时 = 昨晚 22:00 → 昨天的日期键
+    expect(toDateKeyWithBoundary(new Date('2026-09-15T01:00:00.000Z'), 3)).toBe('2026-09-14')
+  })
+
+  it('过了日界就算新的一天', () => {
+    // 04:00 往前推 3 小时 = 01:00，仍在今天
+    expect(toDateKeyWithBoundary(new Date('2026-09-15T04:00:00.000Z'), 3)).toBe('2026-09-15')
+  })
+
+  it('★ 跨月边界正确（不用手工算日期）', () => {
+    // 10/01 凌晨 1 点，cutoff=3 → 退到 9/30
+    expect(toDateKeyWithBoundary(new Date('2026-10-01T01:00:00.000Z'), 3)).toBe('2026-09-30')
+  })
+
+  it('★ 跨年边界正确', () => {
+    expect(toDateKeyWithBoundary(new Date('2027-01-01T02:00:00.000Z'), 3)).toBe('2026-12-31')
+  })
+
+  it('超出取值范围会被 clamp', () => {
+    const date = new Date('2026-09-15T01:00:00.000Z')
+    expect(toDateKeyWithBoundary(date, 99)).toBe(toDateKeyWithBoundary(date, 6))
+    expect(toDateKeyWithBoundary(date, -5)).toBe(toDateKeyWithBoundary(date, 0))
+  })
+
+  it('★ 日界只影响日期键的生成，streak 逻辑无需感知', () => {
+    // 凌晨 1 点打卡，cutoff=3 → 记到昨天；昨天 + 前天都打了 → 连续 2 天
+    const h = habit()
+    const earlyMorning = toDateKeyWithBoundary(new Date('2026-09-15T01:00:00.000Z'), 3)
+    expect(earlyMorning).toBe('2026-09-14')
+
+    const list = checkInsOn('h1', ['2026-09-13', '2026-09-14'])
+    expect(computeStreak(h, list, earlyMorning)).toBe(2)
   })
 })
 

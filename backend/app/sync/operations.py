@@ -50,6 +50,8 @@ class ValidatedSyncCall:
     cursor: str | None = None
     page_token: str | None = None
     limit: int | None = None
+    # 作用域订阅（空 = 全量）。只有 pull 会用到，其余操作保持空值。
+    scope: str = ""
 
 
 def _invalid_input(exc: Exception) -> SyncInputError:
@@ -140,8 +142,13 @@ def _query_values(
 
 def validate_pull_call(pairs: Sequence[tuple[str, str]]) -> ValidatedSyncCall:
     try:
-        values = _query_values(pairs, allowed={"client_id", "cursor", "limit"})
-        if set(values) not in (
+        values = _query_values(
+            pairs, allowed={"client_id", "cursor", "limit", "scope"}
+        )
+        # scope 是可选的订阅参数：不参与下面的组合校验，
+        # 这样既保留了「未知参数一律拒绝」的严格性，又不破坏既有组合。
+        core = set(values) - {"scope"}
+        if core not in (
             {"client_id"},
             {"client_id", "cursor"},
             {"client_id", "limit"},
@@ -158,9 +165,15 @@ def validate_pull_call(pairs: Sequence[tuple[str, str]]) -> ValidatedSyncCall:
         limit = int(raw_limit)
         if not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
+        raw_scope = values.get("scope", "")
+        if raw_scope:
+            # 作用域名走与空间/客户端标识同一套字符集，防畸形值进到协议层
+            validate_client_id(raw_scope)
     except (KeyError, SyncInputError, TypeError, ValueError) as exc:
         raise _invalid_input(exc) from exc
-    return ValidatedSyncCall("pull", client_id, cursor=cursor, limit=limit)
+    return ValidatedSyncCall(
+        "pull", client_id, cursor=cursor, limit=limit, scope=raw_scope
+    )
 
 
 def validate_recover_call(pairs: Sequence[tuple[str, str]]) -> ValidatedSyncCall:

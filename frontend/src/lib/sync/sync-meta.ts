@@ -24,11 +24,34 @@ export const SYNC_V2_META_KEYS = {
   REQUIRES_FULL_RECOVERY: 'sync_v2_requires_full_recovery',
 } as const
 
+/**
+ * 按作用域的游标键前缀（作用域订阅用，见 app/sync/scopes.py）。
+ *
+ * ★ 迁移策略：syncMeta 是 KV 表，所以 per-scope 游标**只新增 key**，
+ *   完全不触碰既有的 `sync_v2_cursor`。老客户端/老数据照常工作 ——
+ *   全量订阅的游标与作用域订阅的游标各存各的，互不干扰。
+ *
+ * ★ 为什么要分开存：全量游标是**全局语义**的，直接拿去当某个作用域的游标会
+ *   丢其它作用域的事件（被越过的 id 拿不回来）。所以启用作用域订阅时，
+ *   该作用域的游标必须从空开始（服务端会签发新游标），不能复用全量游标。
+ */
+export const SYNC_SCOPE_CURSOR_PREFIX = 'sync_v2_cursor_scope_'
+
+/** 前端已知的作用域清单，需与后端 `app/sync/scopes.py` 的 SYNC_SCOPES 保持一致。 */
+export const SYNC_SCOPES = ['planning', 'notes', 'tasks', 'focus'] as const
+export type SyncScope = (typeof SYNC_SCOPES)[number]
+
+export function scopeCursorKey(scope: string): string {
+  return `${SYNC_SCOPE_CURSOR_PREFIX}${scope}`
+}
+
 export interface SyncV2MetaSnapshot {
   cursor: string | null
   pendingAck: string | null
   catalogHash: string | null
   requiresFullRecovery: boolean
+  /** 按作用域的游标。空对象 = 尚未启用作用域订阅（默认）。 */
+  scopeCursors: Record<string, string>
 }
 
 function optionalOpaqueMetaValue(value: string | undefined, label: string): string | null {
@@ -46,7 +69,22 @@ function requireValidSyncV2Meta(value: SyncV2MetaSnapshot): SyncV2MetaSnapshot {
   if (value.pendingAck !== null && value.pendingAck !== value.cursor) {
     throw new Error('pending ACK must equal the durably installed cursor')
   }
+  for (const [scope, cursor] of Object.entries(value.scopeCursors)) {
+    if (typeof scope !== 'string' || scope === '' || typeof cursor !== 'string' || cursor === '') {
+      throw new Error('invalid scope cursor')
+    }
+  }
   return value
+}
+
+async function loadScopeCursors(db: PomodoroXIDB): Promise<Record<string, string>> {
+  const rows = await db.syncMeta.bulkGet(SYNC_SCOPES.map(scopeCursorKey))
+  const out: Record<string, string> = {}
+  SYNC_SCOPES.forEach((scope, index) => {
+    const value = rows[index]?.value
+    if (value !== undefined && value !== '') out[scope] = value
+  })
+  return out
 }
 
 export async function loadSyncV2Meta(db: PomodoroXIDB): Promise<SyncV2MetaSnapshot> {
@@ -67,6 +105,7 @@ export async function loadSyncV2Meta(db: PomodoroXIDB): Promise<SyncV2MetaSnapsh
     catalogHash: optionalOpaqueMetaValue(
       values.get(SYNC_V2_META_KEYS.CATALOG_HASH), 'catalog hash'),
     requiresFullRecovery: recovery === undefined ? true : recovery === 'true',
+    scopeCursors: await loadScopeCursors(db),
   })
 }
 
@@ -79,6 +118,7 @@ export async function persistSyncV2MetaInCurrentTransaction(
   requireSpaceAuthorityToken(token, spaceId)
   requireSpaceDatabaseBinding(db, spaceId)
   const next = requireValidSyncV2Meta({ ...await loadSyncV2Meta(db), ...patch })
+  const scopeCursors = next.scopeCursors ?? {}
   await db.syncMeta.bulkPut([
     { key: SYNC_V2_META_KEYS.CURSOR, value: next.cursor ?? '' },
     { key: SYNC_V2_META_KEYS.PENDING_ACK, value: next.pendingAck ?? '' },
@@ -87,6 +127,11 @@ export async function persistSyncV2MetaInCurrentTransaction(
       key: SYNC_V2_META_KEYS.REQUIRES_FULL_RECOVERY,
       value: String(next.requiresFullRecovery),
     },
+    // per-scope 游标：只写已知作用域，空值写成空串（等价于「该作用域尚无游标」）
+    ...SYNC_SCOPES.map((scope) => ({
+      key: scopeCursorKey(scope),
+      value: scopeCursors[scope] ?? '',
+    })),
   ])
   return next
 }

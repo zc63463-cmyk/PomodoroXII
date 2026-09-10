@@ -27,6 +27,8 @@ describe('Sync v2 protocol metadata', () => {
     db = await openPomodoroXIDB(`sync-meta-${crypto.randomUUID()}`)
     await expect(loadSyncV2Meta(db)).resolves.toEqual({
       cursor: null, pendingAck: null, catalogHash: null, requiresFullRecovery: true,
+      // 作用域订阅未启用时的默认形态
+      scopeCursors: {},
     })
   })
 
@@ -57,6 +59,56 @@ describe('Sync v2 protocol metadata', () => {
     await withSpaceAuthorityFence(db.spaceId, (token) =>
       sendPendingAck(db!, spaceApi, db!.spaceId, 'client-a', token))
     await expect(loadSyncV2Meta(db)).resolves.toMatchObject({ pendingAck: null })
+  })
+
+  it('★ 作用域游标独立存取，不干扰全量游标', async () => {
+    db = await openPomodoroXIDB(`sync-meta-${crypto.randomUUID()}`)
+    await withSpaceAuthorityFence(db.spaceId, (token) => writeSyncV2Meta(
+      db!, db!.spaceId, token,
+      { cursor: 'cursor-full', scopeCursors: { planning: 'cursor-planning' } },
+    ))
+
+    const meta = await loadSyncV2Meta(db)
+    // 两条游标各存各的 —— 全量游标是全局语义，不能当作用域游标用
+    expect(meta.cursor).toBe('cursor-full')
+    expect(meta.scopeCursors).toEqual({ planning: 'cursor-planning' })
+  })
+
+  it('★ 只更新作用域游标时，全量游标保持不变', async () => {
+    db = await openPomodoroXIDB(`sync-meta-${crypto.randomUUID()}`)
+    await withSpaceAuthorityFence(db.spaceId, (token) => writeSyncV2Meta(
+      db!, db!.spaceId, token, { cursor: 'cursor-full' },
+    ))
+    await withSpaceAuthorityFence(db.spaceId, (token) => writeSyncV2Meta(
+      db!, db!.spaceId, token, { scopeCursors: { notes: 'cursor-notes' } },
+    ))
+
+    const meta = await loadSyncV2Meta(db)
+    expect(meta.cursor).toBe('cursor-full')
+    expect(meta.scopeCursors).toEqual({ notes: 'cursor-notes' })
+  })
+
+  it('未启用作用域订阅时读到空对象（老数据路径）', async () => {
+    db = await openPomodoroXIDB(`sync-meta-${crypto.randomUUID()}`)
+    await withSpaceAuthorityFence(db.spaceId, (token) => writeSyncV2Meta(
+      db!, db!.spaceId, token, { cursor: 'cursor-only' },
+    ))
+
+    // 库里从来没有 scope key —— 这是升级上来的老数据的形态
+    expect((await loadSyncV2Meta(db)).scopeCursors).toEqual({})
+    expect((await loadSyncV2Meta(db)).cursor).toBe('cursor-only')
+  })
+
+  it('作用域游标为空串时会读成「没有游标」', async () => {
+    db = await openPomodoroXIDB(`sync-meta-${crypto.randomUUID()}`)
+    await withSpaceAuthorityFence(db.spaceId, (token) => writeSyncV2Meta(
+      db!, db!.spaceId, token, { scopeCursors: { planning: 'cursor-a' } },
+    ))
+    await withSpaceAuthorityFence(db.spaceId, (token) => writeSyncV2Meta(
+      db!, db!.spaceId, token, { scopeCursors: {} },
+    ))
+
+    expect((await loadSyncV2Meta(db)).scopeCursors).toEqual({})
   })
 
   it('creates and reuses one stable client ID', async () => {

@@ -27,8 +27,10 @@ from app.schemas.task_space import (
     CreateWorkItemRequest,
     MoveWorkItemRequest,
     RemoveWorkItemLabelsRequest,
+    RestoreWorkItemRequest,
     TaskSpaceAcceptedResponse,
     TransitionWorkItemRequest,
+    TrashWorkItemRequest,
     UpdateWorkItemRequest,
     WorkItemPageResponse,
     WorkItemResponse,
@@ -278,6 +280,84 @@ async def transition_work_item(
             "operation": "transition",
             "status_definition_id": body.status_definition_id,
         },
+    )
+    outcome = await command_module.execute(scope, command)
+    return await _map_work_item_outcome(outcome, scope, query_module)
+
+
+# --------------------------------------------------------------------------- #
+# archived_at lifecycle routes — MUST be declared before /{work_item_id}
+# --------------------------------------------------------------------------- #
+
+
+def _archived_at_command(
+    *,
+    operation: str,
+    command_id: str,
+    space_id: str,
+    work_item_id: str,
+    expected_version: int,
+    payload_hash: str,
+) -> MutateWorkItem:
+    """Trash / Restore share an empty business payload.
+
+    ``archived_at`` is server-owned: the compiler stamps it from its own
+    monotonic clock, so neither the wire schema nor the command payload
+    accepts a caller-supplied timestamp (``extra="forbid"`` rejects it).
+    """
+    return MutateWorkItem(
+        command_id=command_id,
+        space_id=space_id,
+        work_item_id=work_item_id,
+        expected_version=expected_version,
+        payload_hash=payload_hash,
+        payload={"operation": operation},
+    )
+
+
+@router.post("/{work_item_id}/trash", response_model=TaskSpaceAcceptedResponse)
+async def trash_work_item(
+    work_item_id: str,
+    body: TrashWorkItemRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    command_module=Depends(get_task_space_command_module),
+    query_module=Depends(get_task_space_query_module),
+    scope=Depends(get_space_runtime_handle),
+) -> TaskSpaceAcceptedResponse:
+    """Soft-delete a work item (server-stamped ``archived_at``)."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
+    command = _archived_at_command(
+        operation="trash",
+        command_id=body.command_id,
+        space_id=body.space_id,
+        work_item_id=work_item_id,
+        expected_version=body.expected_version,
+        payload_hash=body.payload_hash,
+    )
+    outcome = await command_module.execute(scope, command)
+    return await _map_work_item_outcome(outcome, scope, query_module)
+
+
+@router.post("/{work_item_id}/restore", response_model=TaskSpaceAcceptedResponse)
+async def restore_work_item(
+    work_item_id: str,
+    body: RestoreWorkItemRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    command_module=Depends(get_task_space_command_module),
+    query_module=Depends(get_task_space_query_module),
+    scope=Depends(get_space_runtime_handle),
+) -> TaskSpaceAcceptedResponse:
+    """Undo a soft delete (clear ``archived_at``)."""
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
+    command = _archived_at_command(
+        operation="restore",
+        command_id=body.command_id,
+        space_id=body.space_id,
+        work_item_id=work_item_id,
+        expected_version=body.expected_version,
+        payload_hash=body.payload_hash,
     )
     outcome = await command_module.execute(scope, command)
     return await _map_work_item_outcome(outcome, scope, query_module)

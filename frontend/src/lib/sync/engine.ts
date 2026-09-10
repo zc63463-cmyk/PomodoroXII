@@ -15,7 +15,7 @@ import { spaceApi } from '@/services/api'
 import { runPullLoopV2 } from './pull-loop'
 import { pushAllPendingUnderFence } from './push-batch'
 import { admitTs3AwaitingS4 } from './admission'
-import { loadSyncV2Meta } from './sync-meta'
+import { loadSyncV2Meta, writeSyncV2Meta } from './sync-meta'
 import { countUnsyncedOutbox } from './outbox'
 import { getOrCreateClientId } from './client-registry'
 import { runFullRecovery } from './recovery'
@@ -36,6 +36,23 @@ import {
 import { normalizeSyncEntityType } from './terminal-application'
 
 const SYNC_DEBOUNCE_MS = 5000
+
+/**
+ * 服务端 canonical 409 拒绝（{code, message, retryable, request_id, details}）。
+ * cursor_expired 表示客户端游标与服务端状态失配（catalog 变化 / retention 裁剪 /
+ * client 与 cursor 内嵌 client 不一致），唯一出路是以当前 client 重新全量恢复。
+ */
+function isCursorExpiredRejection(err: unknown): boolean {
+  const e = err as {
+    response?: {
+      status?: number
+      data?: { code?: string; details?: { recovery_action?: string } }
+    }
+  }
+  if (e?.response?.status !== 409) return false
+  return e.response.data?.code === 'cursor_expired' ||
+    e.response.data?.details?.recovery_action === 'full_recovery'
+}
 
 export class RealSyncEngine implements SyncEngine {
   private db: PomodoroXIDB
@@ -303,8 +320,17 @@ export class RealSyncEngine implements SyncEngine {
     this.listeners.syncComplete.forEach((cb) => cb())
   }
 
-  /** Shared fenced kernel for incremental and full synchronization. */
-  private async runSyncCycle(isFull: boolean, token: SpaceAuthorityToken): Promise<void> {
+  /**
+   * Shared fenced kernel for incremental and full synchronization.
+   *
+   * `isHealRetry`：cursor_expired 自愈重试标记 —— 仅允许一次同周期重试，
+   * 避免服务端持续 409 时形成无限循环（后续失败走正常 error 终态）。
+   */
+  private async runSyncCycle(
+    isFull: boolean,
+    token: SpaceAuthorityToken,
+    isHealRetry = false,
+  ): Promise<void> {
     if (this.destroyed) return
     this.isSyncing = true
     this.setStatus('syncing')
@@ -346,6 +372,39 @@ export class RealSyncEngine implements SyncEngine {
       this.fireSyncComplete()
     } catch (err) {
       // DR-8：5xx / Network → infra-error；其余 → error
+      // ★ 诊断：此前这里完全吞掉异常（无任何日志），状态栏只显示"同步出错"，
+      //   无法定位真实失败点。任何非 5xx/非 Network 的异常（4xx 响应、zod 解析
+      //   失败、S4 admission 断言、游标协议断言…）都会走到这里，必须留下证据。
+      //   ZodError 的 issues 数组是多行的，console 工具会把换行压扁导致截断，
+      //   因此单行结构化输出 path/code/message。
+      if (err instanceof Error && 'issues' in err) {
+        console.error('[sync] cycle failed ZodError:',
+          JSON.stringify((err as unknown as { issues: Array<{ path: unknown[]; code: string; message: string }> })
+            .issues?.map((issue) => ({
+              path: Array.isArray(issue.path) ? issue.path.join('.') : String(issue.path),
+              code: issue.code,
+              message: issue.message?.slice(0, 300),
+            }))))
+      } else {
+        console.error('[sync] cycle failed:', err)
+      }
+      // ★ 自愈：被服务端以 409 cursor_expired 拒绝时，持久化 requiresFullRecovery=true，
+      //   并**在同一周期内**以当前 client 立即重试一次（全量恢复 + 重新 ACK 收敛）。
+      //   此前没有任何路径写这个标记 —— 一旦 client 与 cursor 内嵌 client 错位
+      //   （如 bootstrap wipe 竞态换掉了 clientId），每个周期 pull 都 409，
+      //   状态栏永久卡在"同步出错"。token 仍在 fence 内，可直接复用。
+      if (isCursorExpiredRejection(err)) {
+        try {
+          await writeSyncV2Meta(this.db, this.spaceId, token, {
+            requiresFullRecovery: true,
+          })
+        } catch (metaErr) {
+          console.error('[sync] failed to flag requiresFullRecovery:', metaErr)
+        }
+        if (!isHealRetry && !this.destroyed) {
+          return this.runSyncCycle(isFull, token, true)
+        }
+      }
       const axiosErr = err as { response?: { status?: number }; message?: string }
       const status = axiosErr?.response?.status
       const isInfra =

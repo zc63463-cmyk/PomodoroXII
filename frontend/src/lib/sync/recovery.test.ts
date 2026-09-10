@@ -80,6 +80,8 @@ describe('Sync v2 recovery byte authority', () => {
       expect(await db.syncRecoveryChunks.count()).toBe(0)
       expect(await loadSyncV2Meta(db)).toEqual({
         cursor: waterline, pendingAck: null, catalogHash, requiresFullRecovery: false,
+        // 作用域订阅未启用时的默认形态
+        scopeCursors: {},
       })
     } finally {
       await db.delete()

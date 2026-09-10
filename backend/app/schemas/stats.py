@@ -39,3 +39,30 @@ class NoteSummaryResponse(BaseModel):
     folders: int
     trashed_notes: int
     trashed_folders: int
+
+
+class FocusHourBucket(BaseModel):
+    """One hour-of-day bucket of focus sessions."""
+
+    hour: int
+    sessions: int
+    valid: int
+    interrupted: int
+    focused_seconds: int
+
+
+class FocusSummaryResponse(BaseModel):
+    """Focus-session statistics for a requested period.
+
+    ``by_hour`` 固定 24 项（含全零的小时），便于前端直接画热力图。
+    ``estimate_accuracy`` 为 focused/planned 的整体比值，1.0 表示估算准确。
+    """
+
+    period_days: int
+    total_sessions: int
+    valid_sessions: int
+    interrupted_sessions: int
+    focused_seconds: int
+    planned_seconds: int
+    estimate_accuracy: float
+    by_hour: list[FocusHourBucket]

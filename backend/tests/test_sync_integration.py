@@ -66,20 +66,42 @@ def _make_event(
     }
 
 
-async def _push(client, headers, client_id: str, events):
-    response = await client.post(
-        "/api/v1/sync/v2/push",
-        json={"client_id": client_id, "batch_id": f"batch-{uuid.uuid4().hex}", "events": events},
-        headers=headers,
+async def _push(client, headers, client_id: str, events, *, batch_id: str | None = None):
+    """推送一批事件。batch_id 不传则新生成 —— 重放必须显式传回原 batch_id。"""
+    response = await _push_raw(
+        client,
+        headers,
+        client_id,
+        events,
+        batch_id=batch_id or f"batch-{uuid.uuid4().hex}",
     )
     assert response.status_code == 200, response.text
     return response.json()
 
 
-async def _pull(client, headers, client_id: str, *, cursor: str | None = None, limit: int = 100):
+async def _push_raw(client, headers, client_id: str, events, *, batch_id: str):
+    """不断言状态码，供需要检查 409 等拒绝响应的用例使用。"""
+    return await client.post(
+        "/api/v1/sync/v2/push",
+        json={"client_id": client_id, "batch_id": batch_id, "events": events},
+        headers=headers,
+    )
+
+
+async def _pull(
+    client,
+    headers,
+    client_id: str,
+    *,
+    cursor: str | None = None,
+    limit: int = 100,
+    scope: str = "",
+):
     params = {"client_id": client_id, "limit": str(limit)}
     if cursor is not None:
         params["cursor"] = cursor
+    if scope:
+        params["scope"] = scope
     response = await client.get("/api/v1/sync/v2/pull", params=params, headers=headers)
     assert response.status_code == 200, response.text
     return response.json()
@@ -364,6 +386,81 @@ async def test_sync_push_rejects_stale_update_with_lww_conflict(client):
     assert conflict["details"]["entityId"] == entity_id
 
 
+async def test_pull_scope_returns_only_that_scope(client):
+    """★ 按作用域订阅：只返回该作用域内的实体类型。
+
+    这里只推一条 habit（属 planning），用「订阅 planning 拿得到、
+    订阅 notes 拿不到」来证明过滤生效 —— 比推两个实体更聚焦，
+    也避开了各实体 payload 必填字段的差异。
+    """
+    headers, client_id = await _setup_sync_client(client)
+    habit_id = uuid.uuid4().hex
+    await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(
+                entity_id=habit_id,
+                payload={"id": habit_id, "title": "Habit"},
+            )
+        ],
+    )
+
+    # planning 含 habit
+    planning = await _pull(client, headers, client_id, scope="planning")
+    assert {event["entity_type"] for event in planning["events"]} == {"habit"}
+
+    # notes 不含 habit → 空页，但游标照常签发（不报错）
+    notes = await _pull(client, headers, client_id, scope="notes")
+    assert notes["events"] == []
+
+    # 不带 scope → 全量，与加作用域之前的行为一致
+    everything = await _pull(client, headers, client_id)
+    assert {event["entity_type"] for event in everything["events"]} == {"habit"}
+
+
+async def test_cursor_bound_to_one_scope_is_rejected_elsewhere(client):
+    """★ 作用域与游标是绑定的：拿 planning 的游标去拉 notes 必须被拒。
+
+    否则就会出现「越过未订阅事件且无法找回」的静默丢数据
+    （见《同步作用域切片-实施方案》第 1 节）。
+    """
+    headers, client_id = await _setup_sync_client(client)
+    habit_id = uuid.uuid4().hex
+    await _push(
+        client,
+        headers,
+        client_id,
+        [
+            _make_event(
+                entity_type="habit",
+                entity_id=habit_id,
+                payload={"id": habit_id, "title": "Habit"},
+            )
+        ],
+    )
+
+    planning = await _pull(client, headers, client_id, scope="planning")
+    planning_cursor = planning["next_cursor"]
+    assert planning_cursor
+
+    # 同一个游标换到别的作用域 → 要求重新全量恢复（而不是悄悄返回错误数据）
+    cross = await client.get(
+        "/api/v1/sync/v2/pull",
+        params={"client_id": client_id, "cursor": planning_cursor, "scope": "notes"},
+        headers=headers,
+    )
+    assert cross.status_code == 409, cross.text
+    assert cross.json()["error_type"] == "sync_cursor_expired", cross.text
+
+    # 但用在它自己的作用域上是正常的（已消费完 → 空页）
+    again = await _pull(
+        client, headers, client_id, cursor=planning_cursor, scope="planning"
+    )
+    assert again["events"] == []
+
+
 async def test_cursor_advances_without_duplicates_for_tied_timestamps(client):
     headers, client_id = await _setup_sync_client(client)
     entity_ids = [uuid.uuid4().hex for _ in range(3)]
@@ -385,3 +482,105 @@ async def test_cursor_advances_without_duplicates_for_tied_timestamps(client):
     returned_ids = [event["entity_id"] for event in (*first["events"], *second["events"])]
     assert set(returned_ids) == set(entity_ids)
     assert len(returned_ids) == len(set(returned_ids))
+
+
+async def test_push_replay_with_same_batch_id_writes_ledger_once(client):
+    """★ 持据重放（相同 batch_id + 相同 operation_id）：账本只写一次。
+
+    这是「客户端推送后未收到应答 → 重放」的正确性基础。服务端按 batch_id
+    找回既有批次 receipt，校验请求哈希一致后**返回原结果**，而不是再写一遍
+    账本 —— 否则一次网络抖动就会让实体 version 自增、下游收到重复事件。
+
+    ★ 关键：幂等键是 **batch_id**，不是单个 operation_id。见下一条测试。
+    """
+    headers, client_id = await _setup_sync_client(client)
+    entity_id = uuid.uuid4().hex
+    batch_id = f"batch-replay-{uuid.uuid4().hex}"
+
+    event = _make_event(entity_id=entity_id, payload={"id": entity_id, "title": "Replay"})
+
+    first = await _push(client, headers, client_id, [event], batch_id=batch_id)
+    assert first["applied"], first
+    assert not first["errors"], first
+
+    baseline = await _pull(client, headers, client_id)
+    created = [item for item in baseline["events"] if item["entity_id"] == entity_id]
+    assert len(created) == 1, baseline
+
+    # 完全相同的批次再推一次 —— 模拟客户端没收到应答而持据重放
+    replay = await _push(client, headers, client_id, [dict(event)], batch_id=batch_id)
+    assert replay["applied"], replay
+    assert not replay["errors"], replay
+
+    # 重放后不应产生新的账本事件，实体版本也不应前进
+    after = await _pull(client, headers, client_id, cursor=baseline["next_cursor"])
+    assert [item for item in after["events"] if item["entity_id"] == entity_id] == [], after
+    assert {item["version"] for item in created} == {1}, created
+
+
+async def test_push_same_operation_id_under_different_batch_is_rejected(client):
+    """★ 同一 operation_id 挂到**不同** batch_id → 409 idempotency_conflict。
+
+    这不是缺陷，是有意的防误用：一个 operation_id 只能属于一个批次。
+    若允许它跨批次漂移，重放就会变成「同一操作被两个批次各写一次」，
+    幂等键形同虚设。客户端重放必须复用原 batch_id（见 createPendingPushBatchAfterUnknown）。
+    """
+    headers, client_id = await _setup_sync_client(client)
+    entity_id = uuid.uuid4().hex
+    operation_id = f"op-bound-{uuid.uuid4().hex}"
+    first_batch = f"batch-first-{uuid.uuid4().hex}"
+    second_batch = f"batch-second-{uuid.uuid4().hex}"
+
+    event = _make_event(entity_id=entity_id, payload={"id": entity_id, "title": "Bound"})
+    event["operation_id"] = operation_id
+
+    created = await _push(client, headers, client_id, [event], batch_id=first_batch)
+    assert created["applied"], created
+
+    # 同一个 operation_id、换一个 batch_id → 必须被拒绝
+    replay = await _push_raw(
+        client, headers, client_id, [dict(event)], batch_id=second_batch
+    )
+    assert replay.status_code == 409, replay.text
+    assert replay.json()["error_type"] == "conflict", replay.text
+
+    # 拒绝不应影响已写入的数据
+    pulled = await _pull(client, headers, client_id)
+    matches = [item for item in pulled["events"] if item["entity_id"] == entity_id]
+    assert len(matches) == 1, pulled
+
+
+async def test_push_replay_after_intervening_mutation_keeps_single_ledger_entry(client):
+    """★ 重放发生在「实体已被后续操作改过」之后，也不能新增账本条目。
+
+    比上一条更苛刻：重放时实体已经到 version 2，若服务端把重放当成一次
+    新的 create，就会把 title 打回 "Original"（数据倒退）。
+    """
+    headers, client_id = await _setup_sync_client(client)
+    entity_id = uuid.uuid4().hex
+    create_batch = f"batch-create-{uuid.uuid4().hex}"
+
+    create_event = _make_event(
+        entity_id=entity_id, payload={"id": entity_id, "title": "Original"}
+    )
+    await _push(client, headers, client_id, [create_event], batch_id=create_batch)
+
+    # 一次真实的后续变更（新批次）
+    update_event = _make_event(
+        entity_id=entity_id,
+        action="update",
+        payload={"id": entity_id, "title": "Updated"},
+        expected_version=1,
+        client_updated_at="2026-07-16T11:00:00.000Z",
+    )
+    update_push = await _push(client, headers, client_id, [update_event])
+    assert update_push["applied"], update_push
+
+    baseline = await _pull(client, headers, client_id)
+
+    # 此时重放最初那条 create（相同 batch_id）—— 不该新增账本，也不该回退数据
+    replay = await _push(client, headers, client_id, [dict(create_event)], batch_id=create_batch)
+    assert not replay["errors"], replay
+
+    after = await _pull(client, headers, client_id, cursor=baseline["next_cursor"])
+    assert [item for item in after["events"] if item["entity_id"] == entity_id] == [], after

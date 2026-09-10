@@ -46,8 +46,9 @@ from app.sync.contracts import (
     validate_pull_limit,
     validate_sync_push_inputs,
 )
-from app.sync.cursor import CursorPosition, SyncCursorCodec
+from app.sync.cursor import FULL_SCOPE, CursorPosition, SyncCursorCodec
 from app.sync.operations import SYNC_OPERATION_BY_NAME, SyncOperationName
+from app.sync.scopes import entity_types_for_scopes, is_known_scope
 from app.sync.snapshot import (
     SyncPageTokenCodec,
     SyncSnapshotSerializer,
@@ -170,12 +171,20 @@ async def read_visible_event_page_bounded(
     page_envelope: PullPageEnvelope,
     max_canonical_page_bytes: int = MAX_DECODED_CANONICAL_PAGE_BYTES,
     fetch_chunk_size: int = 32,
+    entity_types: tuple[str, ...] = (),
 ) -> BoundedPullPage:
     """Read visible ledger rows without materializing a limit+1 page.
 
     The reader uses keyset chunks and budgets the complete wire envelope before
     accepting a row.  A row that does not fit remains untouched for the next
     cursor page.
+
+    ``entity_types`` 为空元组（默认）时**不过滤**，行为与本函数历史行为完全一致。
+    传入非空元组则只读取这些实体类型的账本行。
+
+    ★ 注意：本函数**不负责**游标与作用域的配对。调用方若要按作用域订阅，
+      必须为该作用域维护独立的游标 —— 共用游标会让被过滤掉的事件 id 被越过，
+      将来扩展订阅时拿不回来。见 `app/sync/scopes.py` 的模块说明。
     """
     if type(after_sequence) is not int or after_sequence < 0:
         raise ValueError("after_sequence must be a nonnegative integer")
@@ -184,6 +193,10 @@ async def read_visible_event_page_bounded(
         raise ValueError("fetch_chunk_size must be between 1 and 32")
     if type(max_canonical_page_bytes) is not int or max_canonical_page_bytes <= 0:
         raise ValueError("max_canonical_page_bytes must be positive")
+    if not isinstance(entity_types, tuple) or not all(
+        isinstance(item, str) and item for item in entity_types
+    ):
+        raise ValueError("entity_types must be a tuple of non-empty strings")
 
     selected: list[SyncEventRecord] = []
     last_sequence = after_sequence
@@ -191,19 +204,32 @@ async def read_visible_event_page_bounded(
     exhausted = False
     while len(selected) < max_events and not exhausted:
         chunk_size = min(fetch_chunk_size, max_events - len(selected))
-        rows = list(
-            (
-                await session.execute(
-                    select(SyncOutbox)
-                    .where(
-                        SyncOutbox.visible.is_(True),
-                        SyncOutbox.id > last_sequence,
-                    )
-                    .order_by(SyncOutbox.id)
-                    .limit(chunk_size)
+        # ★ 这里刻意写成两个显式分支，而不是把条件收集成列表再 `.where(*filters)`：
+        #   `scripts/check_backend_authority.py` 用 AST 静态检查每个 SyncOutbox 读取
+        #   必须带 `visible.is_(True)` 作为**顶层 AND 合取项**（防读到未提交的账本事件）。
+        #   解包调用会让 AST 看不到该谓词，护栏会直接判定违规并拒绝启动。
+        if entity_types:
+            chunk_stmt = (
+                select(SyncOutbox)
+                .where(
+                    SyncOutbox.visible.is_(True),
+                    SyncOutbox.id > last_sequence,
+                    SyncOutbox.entity_type.in_(entity_types),
                 )
-            ).scalars()
-        )
+                .order_by(SyncOutbox.id)
+                .limit(chunk_size)
+            )
+        else:
+            chunk_stmt = (
+                select(SyncOutbox)
+                .where(
+                    SyncOutbox.visible.is_(True),
+                    SyncOutbox.id > last_sequence,
+                )
+                .order_by(SyncOutbox.id)
+                .limit(chunk_size)
+            )
+        rows = list((await session.execute(chunk_stmt)).scalars())
         if not rows:
             exhausted = True
             break
@@ -250,8 +276,19 @@ async def read_visible_event_page_bounded(
     if deferred:
         has_more = True
     elif len(selected) == max_events:
-        has_more = (
-            await session.scalar(
+        if entity_types:
+            more_stmt = (
+                select(SyncOutbox.id)
+                .where(
+                    SyncOutbox.visible.is_(True),
+                    SyncOutbox.id > last_sequence,
+                    SyncOutbox.entity_type.in_(entity_types),
+                )
+                .order_by(SyncOutbox.id)
+                .limit(1)
+            )
+        else:
+            more_stmt = (
                 select(SyncOutbox.id)
                 .where(
                     SyncOutbox.visible.is_(True),
@@ -260,7 +297,7 @@ async def read_visible_event_page_bounded(
                 .order_by(SyncOutbox.id)
                 .limit(1)
             )
-        ) is not None
+        has_more = (await session.scalar(more_stmt)) is not None
     else:
         has_more = False
 
@@ -520,10 +557,27 @@ class SyncProtocol:
         outcome = await self.uow.execute_prepared_batch(self.scope, mapped.items, batch_id)
         return PushResult.from_uow(batch_id, parsed_events, outcome.applied, outcome.rejected)
 
-    async def pull(self, client_id: str, opaque_cursor: str | None, limit: int) -> PullPage:
+    async def pull(
+        self,
+        client_id: str,
+        opaque_cursor: str | None,
+        limit: int,
+        scope: str = FULL_SCOPE,
+    ) -> PullPage:
+        """Pull one page of ledger events, optionally restricted to one scope.
+
+        ``scope`` 为空（默认）时行为与改动前完全一致：全量订阅。
+        非空则只返回该作用域的实体类型，且**游标与作用域绑定** ——
+        若传入的游标属于别的作用域，一律按 expired 处理（要求重新全量恢复），
+        因为混用游标会越过未订阅的事件且无法找回（见 app/sync/scopes.py）。
+        """
         client_id = validate_client_id(client_id)
         if opaque_cursor is not None:
             validate_cursor_token(opaque_cursor)
+        entity_types = entity_types_for_scopes((scope,) if scope else ())
+        if scope:
+            if not is_known_scope(scope):
+                raise SyncCursorExpiredError(recovery_action="full_recovery")
         limit = validate_pull_limit(limit)
         async with self._exclusive("sync-pull") as lease:
             await self._recover(lease)
@@ -551,6 +605,7 @@ class SyncProtocol:
                                     _space_id(self.scope),
                                     client_id,
                                     registration.recovery_generation,
+                                    scope,
                                 )
                             )
                         except AppError as exc:
@@ -560,6 +615,8 @@ class SyncProtocol:
                             or position.space_id != _space_id(self.scope)
                             or position.client_id != client_id
                             or position.generation != registration.recovery_generation
+                            # ★ 作用域必须匹配：不同作用域的游标混用会越过事件且无法找回
+                            or position.scope != scope
                         ):
                             pending = SyncCursorExpiredError(recovery_action="full_recovery")
                         retention_floor = await get_retention_floor(session)
@@ -575,6 +632,7 @@ class SyncProtocol:
                                 _space_id(self.scope),
                                 client_id,
                                 registration.recovery_generation,
+                                scope,
                             )
                             page = (
                                 await read_visible_event_page_bounded(
@@ -582,6 +640,7 @@ class SyncProtocol:
                                     after_sequence=position.sequence,
                                     max_events=limit,
                                     page_envelope=envelope,
+                                    entity_types=entity_types,
                                 )
                             ).page
             if pending is not None:

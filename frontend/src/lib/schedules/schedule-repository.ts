@@ -16,6 +16,7 @@ import type { SpaceAuthorityToken } from '@/lib/sync/space-authority-fence'
 import { withSpaceAuthorityFence } from '@/lib/sync/space-authority-fence'
 import type { OutboxAction } from '@/lib/sync/types'
 import type { CachedSchedule, Schedule } from '@/types'
+import { dateKeyOfISO } from './schedule-selectors'
 
 type Payload = Schedule | { id: string }
 
@@ -51,12 +52,41 @@ export async function getSchedule(id: string): Promise<Schedule | null> {
   return toWire(row)
 }
 
-/** 带同步字段的原始行，供 store 展示同步状态。 */
-export async function listSyncedSchedules(): Promise<CachedSchedule[]> {
+/** 按「本地日期键」筛选日程的范围，两端都包含。 */
+export interface ScheduleRange {
+  /** YYYY-MM-DD */
+  from?: string
+  /** YYYY-MM-DD */
+  to?: string
+}
+
+/**
+ * 带同步字段的原始行，供 store 展示同步状态。
+ *
+ * range 可选：不传就是全量。月视图按月份传首尾日期，避免每次切月都把
+ * 全部历史读进内存 —— 注意这里是**应用层过滤**（Dexie 没给 due_at 建
+ * 日期索引），数据量到万级才需要考虑加索引或换成分片订阅。
+ */
+export async function listSyncedSchedules(
+  range?: ScheduleRange,
+): Promise<CachedSchedule[]> {
   const rows = await (spaceDBManager.current as PomodoroXIDB).schedules.toArray()
   return rows
     .filter((row) => row.deletion_state !== 'deleted')
+    .filter((row) => inScheduleRange(row, range))
     .sort((a, b) => a.due_at.localeCompare(b.due_at))
+}
+
+/**
+ * 日期键一律用 YYYY-MM-DD 字符串比较（字典序即时间序）。
+ * 取本地日期键必须走 dateKeyOfISO —— toISOString().slice(0,10) 是 UTC，会跨日。
+ */
+function inScheduleRange(row: CachedSchedule, range?: ScheduleRange): boolean {
+  if (!range) return true
+  const key = dateKeyOfISO(row.due_at)
+  if (range.from != null && key < range.from) return false
+  if (range.to != null && key > range.to) return false
+  return true
 }
 
 export async function createSchedule(input: CreateScheduleInput): Promise<Schedule> {

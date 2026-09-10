@@ -1,5 +1,5 @@
-import { PlaceholderPage } from '@/components/layout/placeholder-page'
+import { SchedulesView } from '@/components/schedules/schedules-view'
 
 export default function SchedulesPage() {
-  return <PlaceholderPage title="日程" sprint="F3" />
+  return <SchedulesView />
 }

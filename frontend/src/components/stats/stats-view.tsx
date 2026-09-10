@@ -13,6 +13,7 @@
 
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import type { FocusSummary } from '@/lib/stats/stats-api'
 import { useStatsStore } from '@/stores/stats-store'
 
 const PERIODS = [7, 30, 90] as const
@@ -21,6 +22,7 @@ export function StatsView() {
   const habitSummary = useStatsStore((s) => s.habitSummary)
   const scheduleSummary = useStatsStore((s) => s.scheduleSummary)
   const noteSummary = useStatsStore((s) => s.noteSummary)
+  const focusSummary = useStatsStore((s) => s.focusSummary)
   const isLoading = useStatsStore((s) => s.isLoading)
   const error = useStatsStore((s) => s.error)
   const loadAll = useStatsStore((s) => s.loadAll)
@@ -56,6 +58,80 @@ export function StatsView() {
       )}
 
       <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-4">
+        {/* 专注放在最前：这是产品名里的那个东西，此前统计页完全看不到它 */}
+        <Section
+          title="专注"
+          hint={focusSummary ? `近 ${focusSummary.period_days} 天` : undefined}
+        >
+          {!focusSummary || focusSummary.total_sessions === 0 ? (
+            <Empty loaded={!isLoading} text="暂无专注数据" />
+          ) : (
+            <>
+              <div className="grid grid-cols-4 gap-2 text-center">
+                <Stat label="会话" value={focusSummary.total_sessions} />
+                <Stat label="有效" value={focusSummary.valid_sessions} />
+                <Stat
+                  label="被打断"
+                  value={focusSummary.interrupted_sessions}
+                  tone="warn"
+                />
+                <Stat
+                  label="专注时长"
+                  value={`${(focusSummary.focused_seconds / 3600).toFixed(1)} h`}
+                />
+              </div>
+
+              {/* ★ 按小时的热力图 —— 比"总共做了几个番茄"有用得多：
+                  它回答"哪些时段是完整无中断的"，也就是该把难活排在什么时候。 */}
+              <div className="mt-4">
+                <div className="mb-1 text-xs text-muted-foreground">
+                  按时段的专注分布
+                </div>
+                <div className="flex gap-0.5">
+                  {focusSummary.by_hour.map((bucket) => (
+                    <div
+                      key={bucket.hour}
+                      className="min-w-0 flex-1"
+                      // data 属性供测试稳定定位（不依赖 title 文案的排版细节）
+                      data-heat-hour={bucket.hour}
+                      title={`${bucket.hour}:00 · ${bucket.sessions} 场（完整 ${bucket.valid}、被打断 ${bucket.interrupted}）`}
+                    >
+                      <div
+                        className="h-8 rounded-sm bg-primary"
+                        style={{
+                          opacity: heatOpacity(bucket.sessions, maxSessions(focusSummary)),
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+                  <span>0</span>
+                  <span>6</span>
+                  <span>12</span>
+                  <span>18</span>
+                  <span>23</span>
+                </div>
+              </div>
+
+              {/* 估算准确度：计划时长 vs 实际专注时长。1.0 = 估得准。 */}
+              {focusSummary.planned_seconds > 0 && (
+                <div className="mt-4">
+                  <div className="mb-1 text-xs text-muted-foreground">
+                    估算准确度 {Math.round(focusSummary.estimate_accuracy * 100)}%
+                    <span className="ml-1">
+                      （计划 {(focusSummary.planned_seconds / 3600).toFixed(1)} h ·
+                      实际 {(focusSummary.focused_seconds / 3600).toFixed(1)} h）
+                    </span>
+                  </div>
+                  {/* 可能 >1（超时），这里按 0..1 夹取，避免撑破进度条 */}
+                  <Bar value={focusSummary.estimate_accuracy} />
+                </div>
+              )}
+            </>
+          )}
+        </Section>
+
         <Section title="习惯" hint={habitSummary ? `近 ${habitSummary.period_days} 天` : undefined}>
           {!habitSummary || habitSummary.habits.length === 0 ? (
             <Empty loaded={!isLoading} text="暂无习惯数据" />
@@ -121,6 +197,23 @@ export function StatsView() {
   )
 }
 
+/** 时段热力图的最大小时会话数（用于归一化）。全零时返回 0。 */
+function maxSessions(summary: FocusSummary): number {
+  return summary.by_hour.reduce((max, bucket) => Math.max(max, bucket.sessions), 0)
+}
+
+/**
+ * 热力图的不透明度。
+ *
+ * 保留 0.12 的底色，让"有过专注但很少"的时段仍然可见 ——
+ * 若从 0 开始，1 场的时段在浅色背景上几乎看不见。
+ */
+function heatOpacity(sessions: number, max: number): number {
+  if (sessions === 0) return 0
+  if (max <= 1) return 0.75
+  return 0.12 + 0.88 * (sessions / max)
+}
+
 function Section({
   title,
   hint,
@@ -146,15 +239,16 @@ function Stat({
   value,
   tone,
 }: {
+  /** 数值或已格式化好的文案（如 "2.5 h"） */
+  value: number | string
   label: string
-  value: number
   tone?: 'warn'
 }) {
   return (
     <div>
       <div
         className={
-          tone === 'warn' && value > 0
+            tone === 'warn' && value !== 0 && value !== '0'
             ? 'text-lg font-medium text-destructive'
             : 'text-lg font-medium'
         }

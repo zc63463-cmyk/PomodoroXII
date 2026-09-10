@@ -10,10 +10,13 @@
  */
 
 import { queryClient } from '@/lib/query-client'
+import type { PomodoroXIDB } from '@/services/database'
 import { spaceDBManager } from '@/services/space-db'
 import { useQuickNoteStore } from '@/stores/quick-note-store'
 import { useSyncStore } from '@/stores/sync-store'
 import { RealSyncEngine } from './engine'
+import { loadSyncV2Meta } from './sync-meta'
+import { withSpaceAuthorityFence } from './space-authority-fence'
 import { syncEngineStub, type SyncEngine } from './types'
 
 export let syncEngine: SyncEngine = syncEngineStub
@@ -80,6 +83,37 @@ export function wireSyncEngineToStore(
 }
 
 /**
+ * 客户端"未初始化好"（cursor 为 null）时，清掉所有 push/admission 相关残留。
+ * 这些状态只对"旧协议的 push 流程"有意义，一旦客户端需要从头 recover，它们是
+ * 脏数据 —— `assertS4AdmissionReady` 等检查会持续抛错，状态栏卡在"同步出错"，
+ * 反复 full recovery 也救不回来。把客户端当作"新设备"重新跑 recover + push。
+ *
+ * ★ 必须 fence 互斥：与 engine.sync() 用同一把 Web Lock，且在锁内**复查 cursor**。
+ *   此前这是 fire-and-forget、与首轮周期并发跑 —— `syncMeta.clear()` 会删掉
+ *   周期 1 正在使用的 client_id（以及刚装好的 cursor），而引擎拿着内存里的旧
+ *   clientId 继续完成恢复并写入游标 → 持久化后 client 与 cursor 内嵌 client
+ *   永久错位，之后每个 pull 都被 409 cursor_expired 拒绝。
+ *   锁保证了两种交错顺序都安全：
+ *   - wipe 先拿锁：清完再轮到周期 1，全新一致状态；
+ *   - 周期 1 先拿锁：装好 cursor 后 wipe 在锁内复查到 cursor ≠ null，直接跳过。
+ */
+export async function wipeUninitializedSyncMeta(
+  db: PomodoroXIDB,
+  spaceId: string,
+): Promise<void> {
+  await withSpaceAuthorityFence(spaceId, async () => {
+    const meta = await loadSyncV2Meta(db)
+    if (meta.cursor !== null) return // 已初始化好，别乱清（锁内复查）
+    await Promise.all([
+      db.syncMeta.clear(),
+      db.syncPushBatches.clear(),
+      db.syncRecoveryState.clear(),
+      db.syncRecoveryChunks.clear(),
+    ])
+  })
+}
+
+/**
  * 创建/替换 RealSyncEngine（F1 §7.1 ⑥）。
  * 调用方：SpaceSwitchProvider ④ reset 之后；SpaceBootstrap hydrate 成功之后。
  */
@@ -89,6 +123,11 @@ export function bootstrapSyncEngine(spaceId: string): void {
 
   // 2. db 必须已就绪（switchTo 在前）
   if (!spaceDBManager.hasSpace) return
+
+  // 2b. 清理未初始化残留（fenced，见函数注释；尽力而为，失败不阻塞引导）
+  wipeUninitializedSyncMeta(spaceDBManager.current, spaceId).catch((err) => {
+    console.error('sync bootstrap wipe failed:', err)
+  })
 
   // 3. 新引擎
   const engine = new RealSyncEngine(spaceDBManager.current, spaceId)

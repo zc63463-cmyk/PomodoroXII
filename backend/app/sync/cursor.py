@@ -22,14 +22,26 @@ _CATALOG_HASH = re.compile(r"^[0-9a-f]{64}$")
 _MIN_TOKEN_BYTES = 16
 _MAX_TOKEN_BYTES = 2048
 _CURSOR_FIELDS = frozenset(
-    {"catalog_hash", "client_id", "generation", "sequence", "space_id", "version"}
+    {"catalog_hash", "client_id", "generation", "scope", "sequence", "space_id", "version"}
 )
+# 老格式没有 scope 字段。解码时按「无 scope ⇒ 全量」处理，保证既有游标继续可用。
+_CURSOR_FIELDS_LEGACY = frozenset(_CURSOR_FIELDS - {"scope"})
+
+# 空字符串代表「全量订阅」—— 也是老游标解码后的取值
+FULL_SCOPE = ""
 
 
 def _validate_identifier(value: object, *, field: str) -> str:
     if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
         raise ValueError(f"{field} is invalid")
     return value
+
+
+def _validate_scope(value: object) -> str:
+    """空字符串=全量；非空则必须是一个合法的作用域名。"""
+    if value == FULL_SCOPE:
+        return FULL_SCOPE
+    return _validate_identifier(value, field="scope")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +53,13 @@ class CursorPosition:
     space_id: str
     client_id: str
     generation: int
+    """订阅的作用域。空字符串 = 全量（老游标与默认行为）。
+
+    ★ 为什么必须绑进游标：作用域与游标是**一对**的。同一个游标在不同作用域间
+      混用会让被过滤掉的事件 id 被越过且无法找回（见 app/sync/scopes.py 说明）。
+      该字段受 HMAC 保护，客户端改不了 —— 篡改即 cursor_expired。
+    """
+    scope: str = FULL_SCOPE
 
     def __post_init__(self) -> None:
         if type(self.sequence) is not int or self.sequence < 0:
@@ -53,6 +72,7 @@ class CursorPosition:
         _validate_identifier(self.client_id, field="client_id")
         if type(self.generation) is not int or self.generation < 0:
             raise ValueError("generation must be a nonnegative integer")
+        _validate_scope(self.scope)
 
 
 def _decode_base64url_segment(segment: str) -> bytes:
@@ -88,11 +108,13 @@ class SyncCursorCodec:
     def encode(self, position: CursorPosition) -> str:
         if not isinstance(position, CursorPosition):
             raise TypeError("position must be a CursorPosition")
+        scope = FULL_SCOPE if position.scope is None else position.scope
         payload = json.dumps(
             {
                 "catalog_hash": position.catalog_hash,
                 "client_id": position.client_id,
                 "generation": position.generation,
+                "scope": scope,
                 "sequence": position.sequence,
                 "space_id": position.space_id,
                 "version": 2,
@@ -126,7 +148,15 @@ class SyncCursorCodec:
             if not hmac.compare_digest(signature, expected):
                 raise ValueError("signature")
             data = json.loads(payload.decode("ascii"))
-            if not isinstance(data, dict) or set(data) != _CURSOR_FIELDS:
+            if not isinstance(data, dict):
+                raise ValueError("fields")
+            fields = set(data)
+            if fields == _CURSOR_FIELDS_LEGACY:
+                # 老游标（加 scope 之前签发的）：签名仍然有效，按全量语义处理
+                scope = FULL_SCOPE
+            elif fields == _CURSOR_FIELDS:
+                scope = data["scope"]
+            else:
                 raise ValueError("fields")
             if type(data["version"]) is not int or data["version"] != 2:
                 raise ValueError("version")
@@ -144,6 +174,7 @@ class SyncCursorCodec:
                 _validate_identifier(data["space_id"], field="space_id"),
                 _validate_identifier(data["client_id"], field="client_id"),
                 data["generation"],
+                _validate_scope(scope),
             )
         except (
             binascii.Error,

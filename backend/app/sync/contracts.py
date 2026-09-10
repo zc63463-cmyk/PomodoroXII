@@ -674,12 +674,22 @@ class PullPageEnvelope:
     space_id: str
     client_id: str
     generation: int
+    # 空字符串 = 全量订阅，与 app/sync/cursor.py 的 FULL_SCOPE 同义
+    #（这里写字面量是为了避免模块级循环导入）
+    scope: str = ""
 
     def cursor_for(self, sequence: int) -> str:
         from app.sync.cursor import CursorPosition
 
         return self.cursor.encode(
-            CursorPosition(sequence, self.catalog_hash, self.space_id, self.client_id, self.generation)
+            CursorPosition(
+                sequence,
+                self.catalog_hash,
+                self.space_id,
+                self.client_id,
+                self.generation,
+                self.scope,
+            )
         )
 
 

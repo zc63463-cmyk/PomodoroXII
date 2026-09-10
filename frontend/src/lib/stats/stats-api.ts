@@ -4,11 +4,15 @@
  * ★ 本域最大的一个坑（2026-09-02 核对）
  *   stats-store 原本的 stub 接口是 loadOverview / loadFocusTrend /
  *   loadTaskDistribution，但**后端根本没有这些端点**。
- *   `GET /api/v1/stats/*` 实际只有三个：habit-summary / schedule-summary /
+ *   `GET /api/v1/stats/*` 当时只有三个：habit-summary / schedule-summary /
  *   note-summary，分别是习惯打卡率、日程完成率、笔记与文件夹计数。
  *
  *   所以这里照**真实端点**建模，不去凑那个 stub 的形状 ——
  *   否则前端会去请求一个不存在的路径，或在本地伪造后端给不出的指标。
+ *
+ * ★ 2026-09-04 新增第四个端点 focus-summary（番茄钟统计）：
+ *   在此之前，一个叫 PomodoroXII 的产品，统计页看不到任何番茄数据。
+ *   它的核心输出是按小时的分布，而不是会话总数 —— 理由见下面 FocusSummary 的注释。
  *
  * 只读：这些端点背后只有 SELECT，前端不做任何本地聚合，也不缓存到 Dexie
  * （缓存统计值会引入与源数据不一致的第二个真相）。
@@ -51,6 +55,38 @@ export interface NoteSummary {
   trashed_folders: number
 }
 
+/**
+ * GET /stats/focus-summary —— 番茄钟（专注会话）统计。
+ *
+ * ★ 刻意不把「总会话数」当作核心指标：那是最容易被刷、也最没信息量的数字
+ *   （同样是 8 个会话，可能全是深度工作，也可能全是碎片）。
+ *   真正有用的是 **by_hour**：哪个时段产出的是完整无中断的会话 ——
+ *   它接近一份个人 chronotype map，能直接指导「把最难的工作排在什么时候」。
+ */
+export interface FocusHourBucket {
+  /** 0..23 */
+  hour: number
+  sessions: number
+  /** validity == 'valid' 的会话数 */
+  valid: number
+  /** 有过暂停（paused_seconds > 0）的会话数 */
+  interrupted: number
+  focused_seconds: number
+}
+
+export interface FocusSummary {
+  period_days: number
+  total_sessions: number
+  valid_sessions: number
+  interrupted_sessions: number
+  focused_seconds: number
+  planned_seconds: number
+  /** focused / planned。1.0 = 估得准；>1 超时，<1 提前结束。 */
+  estimate_accuracy: number
+  /** 固定 24 项（含全零的小时），便于直接画热力图 */
+  by_hour: FocusHourBucket[]
+}
+
 export async function fetchHabitSummary(
   days = 30,
   signal?: AbortSignal,
@@ -75,6 +111,17 @@ export async function fetchScheduleSummary(
 
 export async function fetchNoteSummary(signal?: AbortSignal): Promise<NoteSummary> {
   const res = await spaceApi.get<NoteSummary>('/stats/note-summary', {
+    ...(signal ? { signal } : {}),
+  })
+  return res.data
+}
+
+export async function fetchFocusSummary(
+  days = 30,
+  signal?: AbortSignal,
+): Promise<FocusSummary> {
+  const res = await spaceApi.get<FocusSummary>('/stats/focus-summary', {
+    params: { days },
     ...(signal ? { signal } : {}),
   })
   return res.data

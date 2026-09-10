@@ -164,4 +164,66 @@ describe('schedule-repository', () => {
 
     expect(await db.schedules.get('s6')).toBeUndefined()
   })
+
+  describe('listSyncedSchedules 的 range 筛选', () => {
+    /** 铺三条跨月日程：8/31、9/15、10/01。 */
+    async function seedThree() {
+      const { createSchedule } = await repo()
+      await createSchedule({ id: 'aug', title: '八月末', due_at: '2026-08-31T10:00:00.000Z' })
+      await flushOutbox()
+      await createSchedule({ id: 'sep', title: '九月中', due_at: '2026-09-15T10:00:00.000Z' })
+      await flushOutbox()
+      await createSchedule({ id: 'oct', title: '十月初', due_at: '2026-10-01T10:00:00.000Z' })
+    }
+
+    it('不传 range → 全量', async () => {
+      const { listSyncedSchedules } = await repo()
+      await seedThree()
+
+      expect((await listSyncedSchedules()).map((s) => s.id)).toEqual([
+        'aug',
+        'sep',
+        'oct',
+      ])
+    })
+
+    it('★ 按月份筛选，只返回当月的', async () => {
+      const { listSyncedSchedules } = await repo()
+      await seedThree()
+
+      const september = await listSyncedSchedules({ from: '2026-09-01', to: '2026-09-30' })
+      expect(september.map((s) => s.id)).toEqual(['sep'])
+    })
+
+    it('★ 两端都包含（闭区间）', async () => {
+      const { listSyncedSchedules } = await repo()
+      await seedThree()
+
+      // 9/15 与 10/01 都要命中 —— 边界日不能被排除
+      const span = await listSyncedSchedules({ from: '2026-09-15', to: '2026-10-01' })
+      expect(span.map((s) => s.id)).toEqual(['sep', 'oct'])
+
+      // 只给一端也应生效
+      const fromOnly = await listSyncedSchedules({ from: '2026-09-01' })
+      expect(fromOnly.map((s) => s.id)).toEqual(['sep', 'oct'])
+      const toOnly = await listSyncedSchedules({ to: '2026-09-30' })
+      expect(toOnly.map((s) => s.id)).toEqual(['aug', 'sep'])
+    })
+
+    it('范围内无数据 → 空数组', async () => {
+      const { listSyncedSchedules } = await repo()
+      await seedThree()
+
+      expect(await listSyncedSchedules({ from: '2025-01-01', to: '2025-12-31' })).toEqual([])
+    })
+
+    it('软删除的行即便在范围内也要排除', async () => {
+      const { createSchedule, deleteSchedule, listSyncedSchedules } = await repo()
+      await createSchedule({ id: 'gone', title: 'X', due_at: '2026-09-15T10:00:00.000Z' })
+      await flushOutbox()
+      await deleteSchedule('gone')
+
+      expect(await listSyncedSchedules({ from: '2026-09-01', to: '2026-09-30' })).toEqual([])
+    })
+  })
 })

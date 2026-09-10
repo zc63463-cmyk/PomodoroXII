@@ -97,12 +97,23 @@ export async function syncV2PushCanonical(
 
 export async function syncV2Pull(
   api: AxiosInstance,
-  params: { client_id: string; cursor: string | null; limit?: number },
+  params: {
+    client_id: string
+    cursor: string | null
+    limit?: number
+    /** 作用域订阅。空/不传 = 全量，与加作用域之前完全一致。 */
+    scope?: string
+  },
   config: AxiosRequestConfig = {},
 ): Promise<AxiosResponse<ApiSyncV2PullResponse>> {
+  // 空 scope 一律不落到 query 上 —— 后端的 pull 参数校验是白名单式的，
+  // 多传一个空参数没有意义，也让「未启用」的请求与历史请求逐字一致。
+  const { scope, ...rest } = params
+  const query: Record<string, string | number | null> = { ...rest }
+  if (scope) query.scope = scope
   const response = await api.get(SYNC_V2_PATHS.pull, syncV2RequestConfig({
     ...config,
-    params: { ...(config.params as object | undefined), ...params },
+    params: { ...(config.params as object | undefined), ...query },
   }))
   return parsedResponse(response, parseSyncV2PullResponse(response.data))
 }

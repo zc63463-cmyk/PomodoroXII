@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_space_context, get_space_db
 from app.schemas.stats import (
+    FocusSummaryResponse,
     HabitSummaryResponse,
     NoteSummaryResponse,
     ScheduleSummaryResponse,
@@ -47,3 +48,18 @@ async def stats_note_summary(
 ):
     """Return note and folder counts (active + trashed)."""
     return await StatsService(db).note_summary()
+
+
+@router.get("/focus-summary", response_model=FocusSummaryResponse)
+async def stats_focus_summary(
+    days: int = Query(30, ge=1, le=365, description="Period in days"),
+    db: AsyncSession = Depends(get_space_db),
+    ctx: dict = Depends(get_space_context),
+):
+    """Return focus-session quality by hour of day, plus estimate accuracy.
+
+    The hourly distribution is the point of this endpoint: it answers
+    "which hours produce uninterrupted sessions" rather than "how many
+    sessions did I do", which is the least informative number available.
+    """
+    return await StatsService(db).focus_summary(days=days)

@@ -6,6 +6,7 @@ Endpoints:
   - habit_summary: habit check-in rates and streaks
   - schedule_summary: schedule completion rates by period
   - note_summary: note/folder counts
+  - focus_summary: focus-session quality by hour + estimate accuracy
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from datetime import timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.focus_session import FocusSession
 from app.models.folder import Folder
 from app.models.habit import Habit
 from app.models.habit_check_in import HabitCheckIn
@@ -202,3 +204,103 @@ class StatsService:
             "trashed_notes": trashed_notes,
             "trashed_folders": trashed_folders,
         }
+
+    # ----------------------------------------------------------------- #
+
+    async def focus_summary(self, days: int = 30) -> dict:
+        """Return focus-session statistics for the last *days* days.
+
+        ★ 为什么按小时聚合：番茄钟数据里**最没用的数字是每日会话数**（易刷、
+          信息量低），最有价值的是「一天里哪些时段产出的会话是完整无中断的、
+          哪些是碎片化的」——这接近一份个人 chronotype map，可以直接指导
+          「把最难的工作排在什么时候」。
+
+        ★ 为什么在 Python 里聚合而不是用 SQL 的 substr：`started_at` 是 ISO
+          字符串，毫秒精度在不同写入路径下长度不一致（`...00Z` 与 `...000Z`），
+          用固定偏移的 SQL 字符串函数很脆。个人量级的会话数很小，取回来解析
+          更简单也更好测。超过 MAX_SESSIONS 时截断，避免极端数据把内存吃光。
+
+        Returns ``{"period_days", "total_sessions", "valid_sessions",
+        "interrupted_sessions", "focused_seconds", "planned_seconds",
+        "estimate_accuracy", "by_hour": [{hour, sessions, valid, interrupted,
+        focused_seconds}] * 24}``.
+        """
+        now_dt = utc_now()
+        start_date = (now_dt - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
+
+        rows = (
+            await self.db.execute(
+                select(
+                    FocusSession.started_at,
+                    FocusSession.planned_seconds,
+                    FocusSession.focused_seconds,
+                    FocusSession.paused_seconds,
+                    FocusSession.validity,
+                )
+                .where(FocusSession.started_at >= start_date)
+                .limit(MAX_FOCUS_SESSIONS)
+            )
+        ).all()
+
+        by_hour: list[dict] = [
+            {"hour": h, "sessions": 0, "valid": 0, "interrupted": 0, "focused_seconds": 0}
+            for h in range(24)
+        ]
+        total = len(rows)
+        valid = 0
+        interrupted = 0
+        focused_total = 0
+        planned_total = 0
+
+        for started_at, planned, focused, paused, validity in rows:
+            focused_total += focused or 0
+            planned_total += planned or 0
+            interrupted_flag = (paused or 0) > 0
+            if interrupted_flag:
+                interrupted += 1
+            if validity == "valid":
+                valid += 1
+
+            hour = parse_iso_hour(started_at)
+            if hour is None:
+                # 时间戳格式异常时不进小时分布，但仍计入上面的总量
+                continue
+            bucket = by_hour[hour]
+            bucket["sessions"] += 1
+            bucket["focused_seconds"] += focused or 0
+            if validity == "valid":
+                bucket["valid"] += 1
+            if interrupted_flag:
+                bucket["interrupted"] += 1
+
+        # 估算准确度：整体 focused / planned。1.0 = 估得准；>1 超时，<1 提前结束。
+        accuracy = round(focused_total / planned_total, 4) if planned_total > 0 else 0.0
+
+        return {
+            "period_days": days,
+            "total_sessions": total,
+            "valid_sessions": valid,
+            "interrupted_sessions": interrupted,
+            "focused_seconds": focused_total,
+            "planned_seconds": planned_total,
+            "estimate_accuracy": accuracy,
+            "by_hour": by_hour,
+        }
+
+
+MAX_FOCUS_SESSIONS = 10_000
+
+
+def parse_iso_hour(value: str | None) -> int | None:
+    """从 ISO 时间戳里取小时（0–23）。格式异常时返回 None。
+
+    `YYYY-MM-DDTHH:MM:SSZ` 与 `YYYY-MM-DDTHH:MM:SS.mmmZ` 都能处理 —— 取 `T`
+    之后的头两位，不受毫秒段长度影响。
+    """
+    if not value or len(value) < 13 or value[10] != "T":
+        return None
+    try:
+        hour = int(value[11:13])
+    except ValueError:
+        return None
+    return hour if 0 <= hour <= 23 else None
