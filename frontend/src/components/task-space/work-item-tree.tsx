@@ -17,6 +17,11 @@ export interface WorkItemTreeProps {
   isLoading?: boolean
   error?: string | null
   pendingMutations?: Record<string, boolean>
+  /**
+   * Derived dependency signal per work item id.  Only ``isBlocked`` true
+   * renders the lock; ``openBlockerCount`` feeds the hover hint.
+   */
+  blockedSignals?: Record<string, { isBlocked: boolean; openBlockerCount?: number }>
   /** Parent-driven move: the component validates the drop target first. */
   onMove?: (workItemId: string, newParentId: string | null) => void
   /** Monotonic signal from the page shortcuts: collapse or expand every branch. */
@@ -48,6 +53,7 @@ export function WorkItemTree({
   isLoading = false,
   error = null,
   pendingMutations = {},
+  blockedSignals = {},
   onMove,
   collapseSignal = null,
 }: WorkItemTreeProps) {
@@ -152,6 +158,11 @@ export function WorkItemTree({
     children.get(parentId)?.map((item) => {
       const collapsed = collapsedIds.has(item.id)
       const droppable = onMove !== null && level < 3
+      const blocked = blockedSignals[item.id]?.isBlocked === true
+      const openBlockers = blockedSignals[item.id]?.openBlockerCount ?? 0
+      const blockedHint = blocked
+        ? `被 ${openBlockers} 个未完成依赖项阻塞`
+        : undefined
       return createElement(
         'li',
         {
@@ -217,9 +228,25 @@ export function WorkItemTree({
             {
               type: 'button',
               className: 'min-w-0 flex-1 truncate py-1 text-left text-sm',
-              'aria-label': `${item.displayKey} ${item.title}`,
+              'aria-label': blocked
+                ? `${item.displayKey} ${item.title}（${blockedHint}）`
+                : `${item.displayKey} ${item.title}`,
               onClick: () => onSelect(item.id),
             },
+            blocked
+              ? createElement(
+                  'span',
+                  {
+                    'aria-hidden': true,
+                    role: 'img',
+                    'aria-label': blockedHint,
+                    title: blockedHint,
+                    'data-blocked-lock': true,
+                    className: 'mr-1 text-xs',
+                  },
+                  '🔒',
+                )
+              : null,
             createElement('span', { className: 'mr-1 font-mono text-xs text-muted-foreground' }, item.displayKey),
             createElement('span', null, item.title),
             createElement(

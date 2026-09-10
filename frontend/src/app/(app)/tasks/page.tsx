@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -14,17 +14,30 @@ import { Label } from '@/components/ui/label'
 import { ProjectRail } from '@/components/task-space/project-rail'
 import { LaunchSessionButton } from '@/components/task-space/launch-session-button'
 import { WorkItemDetail } from '@/components/task-space/work-item-detail'
+import { ActiveChildConflictDialog } from '@/components/task-space/active-child-conflict-dialog'
+import { WorkItemRelationsCard } from '@/components/task-space/work-item-relations-card'
+import { BlockerAckModal } from '@/components/task-space/blocker-ack-modal'
 import { WorkItemTree } from '@/components/task-space/work-item-tree'
 import { WorkItemNoteEditor } from '@/components/task-space/work-item-note-editor'
 import { TaskSpaceRepository } from '@/lib/task-space/task-space-repository'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
 import { syncEngine } from '@/lib/sync'
 import { useTaskSpaceShortcuts } from '@/hooks/use-task-space-shortcuts'
-import { selectMoveCandidates, selectProjectTree, resolveTaskSpaceMutationError, useTaskSpaceStore } from '@/stores/task-space-store'
+import {
+  ActiveChildConflictError,
+  selectBlockedMap,
+  selectLevel2RelocationTargets,
+  selectMoveCandidates,
+  selectProjectTree,
+  selectRelationCandidates,
+  resolveTaskSpaceMutationError,
+  useTaskSpaceStore,
+} from '@/stores/task-space-store'
+import { countOpenBlockers } from '@/lib/task-space/relation-selectors'
 import { useSpaceStore } from '@/stores/space-store'
 import { spaceDBManager } from '@/services/space-db'
 import { PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
-import type { WorkItemNoteConflictRow } from '@/types'
+import type { CachedWorkItem, WorkItemNoteConflictRow } from '@/types'
 
 type NoteRepositoryWithConflict = {
   conflict: (workItemId: string) => Promise<WorkItemNoteConflictRow | undefined>
@@ -60,11 +73,178 @@ export default function TasksPage() {
   const moveWorkItem = useTaskSpaceStore((state) => state.moveWorkItem)
   const transitionWorkItem = useTaskSpaceStore((state) => state.transitionWorkItem)
   const toggleWorkItemLabel = useTaskSpaceStore((state) => state.toggleWorkItemLabel)
+  const trashWorkItem = useTaskSpaceStore((state) => state.trashWorkItem)
+  const restoreWorkItem = useTaskSpaceStore((state) => state.restoreWorkItem)
   const pendingMutations = useTaskSpaceStore((state) => state.pendingMutations)
   const mutationError = useTaskSpaceStore((state) => state.mutationError)
   const [createTarget, setCreateTarget] = useState<{ kind: 'child'; parentId: string } | { kind: 'root' } | null>(null)
   const [childTitle, setChildTitle] = useState('')
   const [collapseSignal, setCollapseSignal] = useState<{ seq: number; mode: 'collapse' | 'expand' }>({ seq: 0, mode: 'expand' })
+  const relations = useTaskSpaceStore((state) => state.relations)
+  const loadRelations = useTaskSpaceStore((state) => state.loadRelations)
+  const loadBlockedMap = useTaskSpaceStore((state) => state.loadBlockedMap)
+  const createRelation = useTaskSpaceStore((state) => state.createRelation)
+  const removeRelation = useTaskSpaceStore((state) => state.removeRelation)
+  const [conflict, setConflict] = useState<{ parentId: string; childIds: string[] } | null>(null)
+  const [resolvingConflict, setResolvingConflict] = useState(false)
+  const [blockedLaunch, setBlockedLaunch] = useState<CachedWorkItem | null>(null)
+
+  // Status ids are Space-scoped definitions, never hardcoded: the backend
+  // owns the status machine and a Space may rename or re-categorise entries.
+  const statusIdByCategory = (category: 'completed' | 'cancelled'): string | null => {
+    for (const status of definitions?.statuses ?? []) {
+      const record = status as Record<string, unknown>
+      if (record.category === category && typeof record.id === 'string') return record.id
+    }
+    return null
+  }
+  const completedStatusIds = new Set(
+    (definitions?.statuses ?? [])
+      .filter((status) => (status as Record<string, unknown>).category === 'completed')
+      .map((status) => String((status as Record<string, unknown>).id)),
+  )
+
+  const blockedParent = conflict
+    ? (workItems.find((item) => item.id === conflict.parentId) ?? null)
+    : null
+  const relocationTargets = selectLevel2RelocationTargets(
+    workItems,
+    conflict?.parentId ?? null,
+    completedStatusIds,
+  )
+
+  // Status categories come from Space-scoped definitions, never hardcoded.
+  const categoryById = useMemo(() => {
+    const statusCategoryById = new Map(
+      (definitions?.statuses ?? []).map((status) => {
+        const record = status as Record<string, unknown>
+        return [String(record.id), typeof record.category === 'string' ? record.category : undefined]
+      }),
+    )
+    return Object.fromEntries(
+      workItems.map((item) => [item.id, statusCategoryById.get(item.statusDefinitionId)]),
+    ) as Record<string, string | undefined>
+  }, [workItems, definitions])
+
+  // Derived blocking signal: recomputed locally so an edge that arrived before
+  // its work item (network reordering) still blocks instead of silently
+  // clearing.  Falls back to the server projection when present.
+  const blockedSignals = useMemo(() => {
+    const derived = selectBlockedMap(workItems, relations, categoryById)
+    const withCounts: Record<string, { isBlocked: boolean; openBlockerCount: number }> = {}
+    for (const item of workItems) {
+      const signal = derived[item.id]
+      if (!signal) continue
+      withCounts[item.id] = {
+        isBlocked: signal.isBlocked,
+        openBlockerCount: countOpenBlockers(relations, item.id, categoryById),
+      }
+    }
+    return withCounts
+  }, [workItems, relations, categoryById])
+
+  // NOTE: resolved here rather than reusing ``selectedWorkItem`` below — that
+  // const is declared further down, and this block feeds hooks that run first.
+  const selectedItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
+  const selectedIsBlocked = selectedItem
+    ? blockedSignals[selectedItem.id]?.isBlocked === true
+    : false
+  const selectedBlockers = useMemo(() => (
+    selectedItem
+      ? relations.filter((edge) => {
+          if (edge.fromWorkItemId !== selectedItem.id) return false
+          const upstream = workItems.find((item) => item.id === edge.toWorkItemId)
+          const category = upstream ? categoryById[upstream.id] : undefined
+          return category !== 'completed' && category !== 'cancelled'
+        })
+      : []
+  ), [selectedItem, relations, workItems, categoryById])
+
+  useEffect(() => {
+    if (!selectedWorkItemId) return
+    void loadRelations(selectedWorkItemId)
+  }, [loadRelations, selectedWorkItemId])
+
+  useEffect(() => {
+    if (!selectedProjectId) return
+    void loadBlockedMap(selectedProjectId)
+  }, [loadBlockedMap, selectedProjectId])
+
+  const relationCandidates = selectedItem
+    ? selectRelationCandidates(workItems, selectedItem.id, relations)
+    : []
+  const candidateItems = workItems.filter((item) => relationCandidates.includes(item.id))
+
+  const handleAddRelation = async (input: { toWorkItemId: string; relationType: string }) => {
+    if (!selectedWorkItemId) return
+    await createRelation({
+      fromWorkItemId: selectedWorkItemId,
+      toWorkItemId: input.toWorkItemId,
+      relationType: input.relationType,
+    })
+  }
+
+  const handleRemoveRelation = async (input: {
+    fromWorkItemId: string
+    toWorkItemId: string
+    relationType: string
+  }) => {
+    await removeRelation(input)
+  }
+
+  const handleTransition = async (statusDefinitionId: string) => {
+    if (!selectedWorkItemId) return
+    try {
+      await transitionWorkItem(selectedWorkItemId, statusDefinitionId)
+    } catch (error) {
+      // A blocked completion is not a dead end: open the four-way resolution
+      // panel so the user can unblock it in one flow.
+      if (error instanceof ActiveChildConflictError) {
+        setConflict({ parentId: error.workItemId, childIds: error.conflictChildIds })
+      }
+    }
+  }
+
+  const closeConflict = () => {
+    setConflict(null)
+    setResolvingConflict(false)
+  }
+
+  const cancelChildrenAndComplete = async () => {
+    if (!conflict) return
+    const cancelledStatusId = statusIdByCategory('cancelled')
+    const completedStatusId = statusIdByCategory('completed')
+    if (!cancelledStatusId || !completedStatusId) return
+    setResolvingConflict(true)
+    try {
+      // Sequential: each child transition is a CAS-guarded command, so a
+      // parallel fan-out would trip the store's per-target single-flight
+      // guard and race the version chain.
+      for (const childId of conflict.childIds) {
+        await transitionWorkItem(childId, cancelledStatusId)
+      }
+      await transitionWorkItem(conflict.parentId, completedStatusId)
+      closeConflict()
+    } finally {
+      setResolvingConflict(false)
+    }
+  }
+
+  const moveChildrenAndComplete = async (targetParentId: string) => {
+    if (!conflict) return
+    const completedStatusId = statusIdByCategory('completed')
+    if (!completedStatusId) return
+    setResolvingConflict(true)
+    try {
+      for (const childId of conflict.childIds) {
+        await moveWorkItem(childId, targetParentId)
+      }
+      await transitionWorkItem(conflict.parentId, completedStatusId)
+      closeConflict()
+    } finally {
+      setResolvingConflict(false)
+    }
+  }
 
   useEffect(() => {
     if (!spaceId) {
@@ -161,6 +341,24 @@ export default function TasksPage() {
   // its descendants, or a depth-3 node (all rejected by the backend anyway).
   const availableParents = selectMoveCandidates(visibleItems, selectedWorkItemId)
 
+  // BlockerAck: starting focus on a blocked item is allowed, but only after an
+  // explicit, recorded decision.  "Cancel" walks the user to the upstream.
+  const handleLaunchBlocked = (workItem: CachedWorkItem) => {
+    setBlockedLaunch(workItem)
+  }
+  const handleBlockerAckProceed = useCallback(() => {
+    setBlockedLaunch(null)
+  }, [])
+  const handleBlockerAckCancel = useCallback(() => {
+    const first = selectedBlockers[0]
+    setBlockedLaunch(null)
+    if (!first) return
+    if (selectedWorkItemId && selectedWorkItemId !== first.toWorkItemId) {
+      void dispatchNote(selectedWorkItemId).catch(() => undefined)
+    }
+    selectWorkItem(first.toWorkItemId)
+  }, [selectedBlockers, selectedWorkItemId, dispatchNote, selectWorkItem])
+
   const submitChild = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!createTarget) return
@@ -234,6 +432,7 @@ export default function TasksPage() {
               isLoading={isLoading}
               error={error}
               pendingMutations={pendingMutations}
+              blockedSignals={blockedSignals}
               onMove={handleTreeMove}
               collapseSignal={collapseSignal}
             />
@@ -244,7 +443,11 @@ export default function TasksPage() {
         <div className="flex min-w-0 flex-col">
           <div className="flex items-center justify-between border-b px-3 py-2">
             <h2 className="text-sm font-semibold">Work item</h2>
-            <LaunchSessionButton workItem={selectedWorkItem} />
+            <LaunchSessionButton
+              workItem={selectedWorkItem}
+              blocked={selectedIsBlocked}
+              onBlocked={handleLaunchBlocked}
+            />
           </div>
           <WorkItemDetail
             workItem={selectedWorkItem}
@@ -254,9 +457,25 @@ export default function TasksPage() {
             error={error}
             availableParents={availableParents}
             onUpdate={(input) => updateWorkItem(selectedWorkItemId ?? '', input)}
-            onTransition={(statusDefinitionId) => transitionWorkItem(selectedWorkItemId ?? '', statusDefinitionId)}
+            onTransition={(statusDefinitionId) => handleTransition(statusDefinitionId)}
             onMove={(parentId) => moveWorkItem(selectedWorkItemId ?? '', parentId)}
+            onTrash={() => trashWorkItem(selectedWorkItemId ?? '')}
+            onRestore={() => restoreWorkItem(selectedWorkItemId ?? '')}
             onToggleLabel={(labelId, add) => toggleWorkItemLabel(selectedWorkItemId ?? '', labelId, add)}
+            relationsCard={selectedWorkItem ? (
+              <WorkItemRelationsCard
+                workItem={selectedWorkItem}
+                relations={relations.filter((edge) => (
+                  edge.fromWorkItemId === selectedWorkItem.id
+                  || edge.toWorkItemId === selectedWorkItem.id
+                ))}
+                candidates={candidateItems}
+                definitions={definitions ?? null}
+                pending={selectedWorkItem ? pendingMutations[selectedWorkItem.id] === true : false}
+                onAdd={(input) => handleAddRelation(input).catch(() => undefined)}
+                onRemove={(input) => handleRemoveRelation(input).catch(() => undefined)}
+              />
+            ) : undefined}
             noteEditor={selectedNote ? (
               <WorkItemNoteEditor
                 document={selectedNote.document}
@@ -271,6 +490,31 @@ export default function TasksPage() {
           />
         </div>
       </div>
+      {blockedLaunch ? (
+        <BlockerAckModal
+          open
+          workItem={blockedLaunch}
+          blockers={selectedBlockers
+            .map((edge) => workItems.find((item) => item.id === edge.toWorkItemId))
+            .filter((item): item is CachedWorkItem => item !== undefined)}
+          onProceed={handleBlockerAckProceed}
+          onCancel={handleBlockerAckCancel}
+        />
+      ) : null}
+      {conflict && blockedParent ? (
+        <ActiveChildConflictDialog
+          open
+          parentItem={blockedParent}
+          conflictChildIds={conflict.childIds}
+          conflictChildren={workItems.filter((item) => conflict.childIds.includes(item.id))}
+          availableLevel2Parents={relocationTargets}
+          busy={resolvingConflict}
+          onClose={closeConflict}
+          onCancelChildrenAndComplete={cancelChildrenAndComplete}
+          onMoveChildrenAndComplete={moveChildrenAndComplete}
+          onKeepActive={closeConflict}
+        />
+      ) : null}
       <Dialog
         open={createTarget !== null}
         onOpenChange={(open) => {

@@ -298,6 +298,9 @@ export class PomodoroXIDB extends Dexie {
   statusDefinitions!: Table<Record<string, unknown>>
   typeDefinitions!: Table<Record<string, unknown>>
   labels!: Table<Record<string, unknown>>
+  // v20: dependency domain — relation edges are sync-enabled, so they need a
+  // local table for the derived blocking computation to work offline.
+  relations!: Table<Record<string, unknown>>
   workItemLabels!: Table<Record<string, unknown>>
 
   syncAdmissionState!: Table<SyncAdmissionState, 'active'>
@@ -493,6 +496,21 @@ export class PomodoroXIDB extends Dexie {
         readyRootSetSha256: null,
         errorCode: null,
       })
+    })
+
+    // version(20): dependency domain. ``relations`` is sync-enabled with a
+    // deterministic single-column id, so it needs its own local table for the
+    // derived blocking computation to work offline.  No data migration: an
+    // absent edge simply means "not blocked", and the first pull backfills it.
+    this.version(20).stores({
+      ...toDexieStoreStrings(V18_STORE_DEFINITIONS),
+      syncAdmissionState: 'key, state',
+      syncRecoveryState: 'key, spaceId, state',
+      syncRecoveryChunks: '[recoveryId+index], spaceId, recoveryId, index',
+      syncPushBatches: 'key, batchId, clientId, receiptCreatedAt',
+      syncTerminalApplications:
+        'evidenceId, spaceId, state, compoundOperationId, resultSha256',
+      relations: 'id, spaceId, fromWorkItemId, toWorkItemId, updatedAt',
     })
   }
 }

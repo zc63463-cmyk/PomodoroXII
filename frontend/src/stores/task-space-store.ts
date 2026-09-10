@@ -4,7 +4,22 @@ import { canonicalNow } from '@/lib/direct-command-intents'
 import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
 import { NoteAutosaveController, type FlushReason } from '@/lib/task-space/note-autosave-controller'
+import {
+  ACTIVE_CHILD_CONFLICT_CODE,
+  ActiveChildConflictError,
+  extractActiveChildConflictIds,
+} from '@/lib/task-space/active-child-conflict'
+import {
+  deriveBlockedSignals,
+  selectRelationCandidates,
+  type BlockedSignals,
+} from '@/lib/task-space/relation-selectors'
+
+// Re-exported so callers keep importing the conflict signal from the store
+// while the class identity stays owned by the leaf module (no import cycle).
+export { ACTIVE_CHILD_CONFLICT_CODE, ActiveChildConflictError, extractActiveChildConflictIds }
 import type { CachedProject, CachedWorkItem, CachedWorkItemNote, WorkItemNoteConflictRow, CachedLabel } from '@/types'
+import type { BlockedMap, CachedRelation, RelationSet } from '@/lib/contracts/task-space'
 
 export interface CreateChildInput {
   title?: string
@@ -59,6 +74,13 @@ export interface TaskSpaceRepositoryLike {
     workItemId: string
     statusDefinitionId: string
   }) => Promise<CachedWorkItem>
+  trashWorkItem: (input: { workItemId: string }) => Promise<CachedWorkItem>
+  restoreWorkItem: (input: { workItemId: string }) => Promise<CachedWorkItem>
+  // Dependency domain.
+  listRelations: (workItemId: string) => Promise<RelationSet>
+  listBlockedMap: (projectId?: string) => Promise<BlockedMap>
+  createRelation: (input: { fromWorkItemId: string; toWorkItemId: string; relationType: string }) => Promise<CachedRelation>
+  removeRelation: (input: { fromWorkItemId: string; toWorkItemId: string; relationType: string }) => Promise<CachedRelation>
   // D5 Y: label-set mutations (idempotent set semantics + server CAS).
   addWorkItemLabels: (input: { workItemId: string; labelIds: string[] }) => Promise<CachedWorkItem>
   removeWorkItemLabel: (input: { workItemId: string; labelId: string }) => Promise<CachedWorkItem>
@@ -115,6 +137,12 @@ export interface TaskSpaceState {
   pendingMutations: Record<string, boolean>
   /** Stable, user-safe code of the last failed mutation (never raw Axios text). */
   mutationError: { targetId: string; code: string } | null
+  // Dependency domain.  ``relations`` is the synced fact table; ``blockedMap``
+  // is the derived projection (never persisted locally either — it is always
+  // recomputed from relations + work items).
+  relations: CachedRelation[]
+  relationsForWorkItemId: string | null
+  blockedMap: Record<string, BlockedSignals>
 }
 
 export interface TaskSpaceActions {
@@ -141,6 +169,22 @@ export interface TaskSpaceActions {
   }) => Promise<CachedWorkItem>
   moveWorkItem: (workItemId: string, newParentId: string | null) => Promise<CachedWorkItem>
   transitionWorkItem: (workItemId: string, statusDefinitionId: string) => Promise<CachedWorkItem>
+  /** Soft-delete / undo.  Both are idempotent server side. */
+  trashWorkItem: (workItemId: string) => Promise<CachedWorkItem>
+  restoreWorkItem: (workItemId: string) => Promise<CachedWorkItem>
+  // Dependency domain.
+  loadRelations: (workItemId: string) => Promise<void>
+  loadBlockedMap: (projectId?: string) => Promise<void>
+  createRelation: (input: {
+    fromWorkItemId: string
+    toWorkItemId: string
+    relationType: string
+  }) => Promise<CachedRelation>
+  removeRelation: (input: {
+    fromWorkItemId: string
+    toWorkItemId: string
+    relationType: string
+  }) => Promise<CachedRelation>
   // D5 Y: converge the work item label set (add=true union, false removal).
   toggleWorkItemLabel: (workItemId: string, labelId: string, add: boolean) => Promise<CachedWorkItem>
   reset: () => void
@@ -151,6 +195,9 @@ const initialState = (): TaskSpaceState => ({
   projects: [],
   definitions: null,
   workItems: [],
+  relations: [],
+  relationsForWorkItemId: null,
+  blockedMap: {},
   selectedProjectId: null,
   selectedWorkItemId: null,
   selectedLevel2WorkItemId: null,
@@ -180,7 +227,9 @@ const MUTATION_ERROR_MESSAGES: Record<string, string> = {
   active_child_conflict: '存在进行中的子项，无法完成该操作。',
   not_found: '项目项不存在或已被删除。',
   invalid_payload_hash: '请求校验失败，请刷新后重试。',
-  cycle_detected: '该操作会造成循环引用，无法完成。',
+  cycle_detected: '该操作会造成循环依赖，无法完成。',
+  archived_work_item_immutable: '已归档的工作项不能再建立或解除依赖关系。',
+  relation_not_loaded: '依赖关系数据未加载，请刷新后重试。',
   work_item_structure_changed: '项目项结构已变更，请刷新后重试。',
   invalid_project_key: '项目标识格式不合法，请仅使用字母与数字。',
   project_key_conflict: '项目标识已存在，请更换。',
@@ -417,6 +466,56 @@ export function selectMoveCandidates(items: CachedWorkItem[], selectedWorkItemId
     && item.depth + 1 + (subtreeMaxDepth - selected.depth) <= 3
   ))
 }
+
+/**
+ * Candidate level-2 destinations for the "move the active children elsewhere"
+ * resolution of an active-child conflict.
+ *
+ * A candidate must be a sibling-level container in the SAME project, must not
+ * be the blocked parent itself, must not be archived, and must not already be
+ * completed (moving work onto a finished item would immediately re-block it).
+ * Depth is capped at 2 because the children being relocated are level 3.
+ */
+export function selectLevel2RelocationTargets(
+  items: CachedWorkItem[],
+  blockedParentId: string | null,
+  completedStatusIds: ReadonlySet<string>,
+): CachedWorkItem[] {
+  if (!blockedParentId) return []
+  const blocked = items.find((item) => item.id === blockedParentId)
+  if (!blocked) return []
+  return items
+    .filter((item) => (
+      item.projectId === blocked.projectId
+      && item.depth === 2
+      && item.id !== blockedParentId
+      && item.archivedAt === null
+      && !completedStatusIds.has(item.statusDefinitionId)
+    ))
+    .sort((left, right) => (
+      left.childRank - right.childRank || left.displayKey.localeCompare(right.displayKey)
+    ))
+}
+
+/**
+ * Locally derived blocking projection for the tree.
+ *
+ * The server also exposes ``/relations/blocked-map``, but the client must be
+ * able to recompute it from its own rows: an edge that arrives before its work
+ * item (network reordering) must still show as blocking, and an offline client
+ * has no server to ask.  Orphan edges are treated as OPEN — never as resolved.
+ */
+export function selectBlockedMap(
+  workItems: CachedWorkItem[],
+  relations: CachedRelation[],
+  statusCategoryById: Record<string, string | undefined>,
+): Record<string, BlockedSignals> {
+  const depthById: Record<string, number | undefined> = {}
+  for (const item of workItems) depthById[item.id] = item.depth
+  return deriveBlockedSignals(relations, statusCategoryById, depthById)
+}
+
+export { selectRelationCandidates }
 
 export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
   devtools((set, get) => {
@@ -900,10 +999,140 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           return transitioned
         } catch (error) {
           const mapped = resolveTaskSpaceMutationError(error)
+          // An active-child block is not a toast: the UI must offer the four
+          // resolution paths, so rethrow a structured error carrying the
+          // conflicting child ids and leave the generic banner untouched.
+          if (mapped.code === ACTIVE_CHILD_CONFLICT_CODE) {
+            set({ error: null, mutationError: null })
+            throw new ActiveChildConflictError(workItemId, extractActiveChildConflictIds(error))
+          }
           set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
           throw error
         } finally {
           endMutation(workItemId)
+        }
+      },
+
+      async trashWorkItem(workItemId) {
+        beginMutation(workItemId, 'work_item_mutation_in_flight')
+        const repository = get().repository
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          const trashed = await repository.trashWorkItem({ workItemId })
+          set((state) => ({
+            workItems: state.workItems.map((item) => item.id === trashed.id ? trashed : item),
+            error: null,
+            mutationError: null,
+          }))
+          return trashed
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
+          throw error
+        } finally {
+          endMutation(workItemId)
+        }
+      },
+
+      async restoreWorkItem(workItemId) {
+        beginMutation(workItemId, 'work_item_mutation_in_flight')
+        const repository = get().repository
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          const restored = await repository.restoreWorkItem({ workItemId })
+          set((state) => ({
+            workItems: state.workItems.map((item) => item.id === restored.id ? restored : item),
+            error: null,
+            mutationError: null,
+          }))
+          return restored
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId: workItemId, code: mapped.code } })
+          throw error
+        } finally {
+          endMutation(workItemId)
+        }
+      },
+
+      async loadRelations(workItemId) {
+        const repository = get().repository
+        if (!repository) return
+        try {
+          // NOTE: never name this ``set`` — it shadows Zustand's setter.
+          const relationSet = await repository.listRelations(workItemId)
+          if (get().selectedWorkItemId !== workItemId) return
+          set((state) => ({
+            // Replace only this item's edges; other items' rows stay cached.
+            relations: [
+              ...state.relations.filter((edge) => (
+                edge.fromWorkItemId !== workItemId && edge.toWorkItemId !== workItemId
+              )),
+              ...relationSet.blockers.map((entry) => entry.relation),
+              ...relationSet.blocking.map((entry) => entry.relation),
+            ],
+            relationsForWorkItemId: workItemId,
+          }))
+        } catch (error) {
+          set({ error: resolveTaskSpaceMutationError(error).message })
+        }
+      },
+
+      async loadBlockedMap(projectId) {
+        const repository = get().repository
+        if (!repository) return
+        try {
+          const map = await repository.listBlockedMap(projectId)
+          set({ blockedMap: map.items })
+        } catch (error) {
+          set({ error: resolveTaskSpaceMutationError(error).message })
+        }
+      },
+
+      async createRelation(input) {
+        const targetId = input.fromWorkItemId
+        beginMutation(targetId, 'work_item_mutation_in_flight')
+        const repository = get().repository
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          const created = await repository.createRelation(input)
+          set((state) => ({
+            relations: [
+              ...state.relations.filter((edge) => edge.id !== created.id),
+              created,
+            ],
+            error: null,
+            mutationError: null,
+          }))
+          return created
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId, code: mapped.code } })
+          throw error
+        } finally {
+          endMutation(targetId)
+        }
+      },
+
+      async removeRelation(input) {
+        const targetId = input.fromWorkItemId
+        beginMutation(targetId, 'work_item_mutation_in_flight')
+        const repository = get().repository
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          const removed = await repository.removeRelation(input)
+          set((state) => ({
+            relations: state.relations.filter((edge) => edge.id !== removed.id),
+            error: null,
+            mutationError: null,
+          }))
+          return removed
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId, code: mapped.code } })
+          throw error
+        } finally {
+          endMutation(targetId)
         }
       },
 

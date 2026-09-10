@@ -161,12 +161,70 @@ export const workItemLabelSchema = z.object({
   labelId: entityId,
 }).strict()
 
+// ---- Dependency domain (Relation) -----------------------------------------
+
+/** Only these two readings block; ``relates_to`` is a non-blocking link. */
+export const BLOCKING_RELATION_TYPES = ['depends_on', 'blocks'] as const
+export const RELATION_TYPES = ['depends_on', 'blocks', 'relates_to'] as const
+
+export const relationSchema = z.object({
+  id: entityId,
+  spaceId: entityId,
+  fromWorkItemId: entityId,
+  toWorkItemId: entityId,
+  relationType: z.enum(RELATION_TYPES),
+  version: z.number().int().positive(),
+  createdAt: utc,
+  updatedAt: utc,
+}).strict()
+
+/**
+ * Cross-project leak guard: a foreign endpoint is projected into FIVE fields
+ * only — never note bodies, never session history.
+ */
+export const workItemMinimalSchema = z.object({
+  id: entityId,
+  displayKey: z.string(),
+  projectId: entityId,
+  title: z.string(),
+  statusDefinitionId: entityId,
+}).strict()
+
+export type Relation = z.infer<typeof relationSchema>
+export type WorkItemMinimal = z.infer<typeof workItemMinimalSchema>
+
+export const relationEdgeSchema = z.object({
+  relation: relationSchema,
+  workItem: workItemMinimalSchema,
+}).strict()
+
+export const relationSetSchema = z.object({
+  blockers: z.array(relationEdgeSchema),
+  blocking: z.array(relationEdgeSchema),
+}).strict()
+
+export const blockedMapSchema = z.object({
+  items: z.record(z.string(), z.object({
+    blockedByDependency: z.boolean(),
+    isBlocked: z.boolean(),
+  }).strict()),
+}).strict()
+
+export type RelationEdge = z.infer<typeof relationEdgeSchema>
+export type RelationSet = z.infer<typeof relationSetSchema>
+export type BlockedMap = z.infer<typeof blockedMapSchema>
+
 type TaskSpaceSyncEntityType = Extract<SyncEntityType,
   'project' | 'statusDefinition' | 'typeDefinition' | 'label' |
-  'workItemLabel' | 'workItem' | 'workItemNote'>
+  'workItemLabel' | 'workItem' | 'workItemNote' | 'relation'>
 
 const cachedProjectSchema = projectSchema.omit({ spaceId: true })
 const cachedWorkItemSchema = workItemSchema.omit({ spaceId: true })
+const cachedRelationSchema = relationSchema.omit({ spaceId: true })
+
+/** Local (Dexie) row shape: the cached relation never repeats space identity. */
+export type CachedRelation = z.infer<typeof cachedRelationSchema>
+export { cachedRelationSchema }
 const genericDeleteSchema = z.strictObject({ id: entityId })
 
 export function taskSpaceEntityBusinessPayloadForHash(
@@ -240,6 +298,17 @@ export function taskSpaceEntityBusinessPayloadForHash(
         throw new Error('note_document_json_invalid')
       }
       return { document: parsedDocument as JsonValue }
+    }
+    case 'relation': {
+      const row = cachedRelationSchema.parse(postImage)
+      // The derived relation id is NOT part of the business payload: it is a
+      // pure function of space + endpoints + type, which the server already
+      // holds.  Hashing it would make the envelope self-referential.
+      return {
+        from_work_item_id: row.fromWorkItemId,
+        to_work_item_id: row.toWorkItemId,
+        relation_type: row.relationType,
+      }
     }
     default: {
       const exhaustive: never = entityType

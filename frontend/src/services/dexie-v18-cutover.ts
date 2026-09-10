@@ -3,6 +3,16 @@ import { DEXIE_V17_NATIVE_VERSION, DEXIE_V18_NATIVE_VERSION, V18_REMOVED_STORE_N
 
 export const REMOVED_V18_TABLES = V18_REMOVED_STORE_NAMES
 export const DEXIE_V19_NATIVE_VERSION = 190
+/** v20 adds the ``relations`` store (dependency domain). */
+export const DEXIE_V20_NATIVE_VERSION = 200
+/**
+ * Accepted native versions after the cutover.  19 predates the dependency
+ * domain and must keep opening (it is upgraded in place by Dexie to 20).
+ */
+const ACCEPTED_POST_CUTOVER_NATIVE_VERSIONS = new Set<number>([
+  DEXIE_V19_NATIVE_VERSION,
+  DEXIE_V20_NATIVE_VERSION,
+])
 
 const LEGACY_REFERENCE_PATHS = new Map<string, readonly string[]>([
   ['quickNotes', ['session_id']],
@@ -215,7 +225,7 @@ export async function readExistingNativeIndexedDbVersionWithoutUpgrade(
 
 async function requireAlreadyCompletedV19AfterVersionError(dbName: string): Promise<void> {
   const version = await readExistingNativeIndexedDbVersionWithoutUpgrade(dbName)
-  if (version !== DEXIE_V19_NATIVE_VERSION) {
+  if (!ACCEPTED_POST_CUTOVER_NATIVE_VERSIONS.has(version)) {
     throw new Error(`unsupported_client_schema:${version}`)
   }
 }
@@ -243,7 +253,9 @@ export async function openPomodoroXIDB(spaceId: string) {
   const { PomodoroXIDB } = await import('./database')
   const database = new PomodoroXIDB(spaceId, dbName)
   await database.open()
-  if (database.name !== dbName || database.spaceId !== spaceId || database.verno !== 19) {
+  // ``verno`` is Dexie's schema version (19 or 20), NOT the native IndexedDB
+  // version (190/200) — a freshly upgraded database reports 20 here.
+  if (database.name !== dbName || database.spaceId !== spaceId || database.verno < 19) {
     database.close()
     throw new Error('space_database_open_identity_mismatch')
   }

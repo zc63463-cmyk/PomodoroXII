@@ -78,7 +78,7 @@ export type RetainedLwwSyncEntityType =
 export const FINAL_SYNC_ENTITY_TYPES = [
   ...RETAINED_LWW_SYNC_ENTITY_TYPES,
   'project', 'statusDefinition', 'typeDefinition', 'label', 'workItemLabel',
-  'workItem', 'workItemNote', 'focusSession', 'sessionTaskContext',
+  'workItem', 'workItemNote', 'relation', 'focusSession', 'sessionTaskContext',
   'sessionAttributionRevision', 'sessionWorkItemPlan', 'sessionWorkItemOutcome',
 ] as const
 export type SyncEntityType = typeof FINAL_SYNC_ENTITY_TYPES[number]
@@ -123,6 +123,7 @@ export const TS3_LOCAL_ENTITY_TO_TABLE = {
   workItemLabel: 'workItemLabels',
   workItem: 'workItems',
   workItemNote: 'workItemNotes',
+  relation: 'relations',
   focusSession: 'focusSessions',
   sessionTaskContext: 'sessionTaskContexts',
   sessionAttributionRevision: 'sessionAttributionRevisions',

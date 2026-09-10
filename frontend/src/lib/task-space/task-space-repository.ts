@@ -1,4 +1,5 @@
-import { acceptedMutationSchema, assertResponseSpace, definitionsSchema, labelSchema, projectSchema, workItemSchema, type TaskSpaceDefinitions, type WorkItem } from '@/lib/contracts/task-space'
+import { acceptedMutationSchema, assertResponseSpace, definitionsSchema, labelSchema, projectSchema, relationSchema, workItemSchema, type CachedRelation, type RelationSet, type TaskSpaceDefinitions, type WorkItem } from '@/lib/contracts/task-space'
+import { relationId } from '@/lib/task-space/relation-id'
 import type { JsonValue } from '@/lib/contracts/payload-hash'
 import {
   canonicalNow,
@@ -10,6 +11,18 @@ import {
 import type { PomodoroXIDB } from '@/services/database'
 import { taskSpaceApi } from '@/services/task-space-api'
 import type { CachedProject, CachedWorkItem, CachedLabel, DirectCommandIntentRow } from '@/types'
+
+export interface CreateRelationInput {
+  fromWorkItemId: string
+  toWorkItemId: string
+  relationType: string
+}
+
+export interface RemoveRelationInput {
+  fromWorkItemId: string
+  toWorkItemId: string
+  relationType: string
+}
 
 export interface CreateWorkItemInput {
   projectId: string
@@ -132,6 +145,22 @@ function mapLabel(value: unknown): CachedLabel {
 
 function mapDefinitions(value: unknown): TaskSpaceDefinitions {
   return definitionsSchema.parse(value)
+}
+
+/** Cached relation row: the local copy never repeats space identity. */
+function mapRelation(value: unknown): CachedRelation {
+  const raw = primaryValue(value, ['relation'])
+  const parsed = relationSchema.parse({
+    id: field(raw, 'id'),
+    spaceId: field(raw, 'spaceId', 'space_id'),
+    fromWorkItemId: field(raw, 'fromWorkItemId', 'from_work_item_id'),
+    toWorkItemId: field(raw, 'toWorkItemId', 'to_work_item_id'),
+    relationType: field(raw, 'relationType', 'relation_type'),
+    version: field(raw, 'version'),
+    createdAt: field(raw, 'createdAt', 'created_at'),
+    updatedAt: field(raw, 'updatedAt', 'updated_at'),
+  })
+  return withoutSpace(assertResponseSpace(parsed, parsed.spaceId))
 }
 
 interface WorkItemMutationResult {
@@ -333,6 +362,68 @@ export class TaskSpaceRepository {
       .then((result) => result.workItem)
   }
 
+  /** archived_at lifecycle: the server stamps the timestamp, so the request
+   * carries no business value at all. */
+  async trashWorkItem(input: { workItemId: string }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const cached = await this.db.workItems.get(input.workItemId)
+    if (!cached) throw new Error('work_item_not_loaded')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'trash_work_item', spaceId: this.spaceId, targetId: input.workItemId,
+      request: { ...input, expectedVersion: (cached as CachedWorkItem).version, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeWorkItemIntent(intent, (request) => this.api.trashWorkItem(request as never))
+      .then((result) => result.workItem)
+  }
+
+  async restoreWorkItem(input: { workItemId: string }) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const cached = await this.db.workItems.get(input.workItemId)
+    if (!cached) throw new Error('work_item_not_loaded')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'restore_work_item', spaceId: this.spaceId, targetId: input.workItemId,
+      request: { ...input, expectedVersion: (cached as CachedWorkItem).version, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeWorkItemIntent(intent, (request) => this.api.restoreWorkItem(request as never))
+      .then((result) => result.workItem)
+  }
+
+  // ---- Dependency domain -------------------------------------------------
+
+  async listRelations(workItemId: string): Promise<RelationSet> {
+    return this.api.listRelations(this.spaceId, workItemId)
+  }
+
+  async listBlockedMap(projectId?: string) {
+    return this.api.listBlockedMap(this.spaceId, projectId)
+  }
+
+  async createRelation(input: CreateRelationInput) {
+    if (!online()) throw new Error('offline_formal_creation_forbidden')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'create_relation', spaceId: this.spaceId, targetId: null,
+      request: { ...input, spaceId: this.spaceId }, now: canonicalNow(),
+    })
+    return this.executeRelationIntent(intent, (request) => this.api.createRelation(request as never))
+  }
+
+  async removeRelation(input: RemoveRelationInput) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const relationKey = await relationId(
+      this.spaceId, input.fromWorkItemId, input.toWorkItemId, input.relationType,
+    )
+    const cached = await this.db.relations.get(relationKey)
+    const expectedVersion = (cached as { version?: number } | undefined)?.version
+    if (typeof expectedVersion !== 'number') throw new Error('relation_not_loaded')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'remove_relation', spaceId: this.spaceId, targetId: relationKey,
+      request: {
+        ...input, relationId: relationKey, expectedVersion, spaceId: this.spaceId,
+      }, now: canonicalNow(),
+    })
+    return this.executeRelationIntent(intent, (request) => this.api.removeRelation(request as never))
+  }
+
   // D5 Y: label-set mutation — the target label_ids set is computed client
   // side as the full post-mutation union, then converged server side by
   // read-modify-write inside one CAS-guarded command.
@@ -401,6 +492,10 @@ export class TaskSpaceRepository {
       update_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.updateWorkItem(request as never)).then(() => undefined) },
       move_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.moveWorkItem(request as never)).then(() => undefined) },
       transition_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.transitionWorkItem(request as never)).then(() => undefined) },
+      trash_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.trashWorkItem(request as never)).then(() => undefined) },
+      restore_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.restoreWorkItem(request as never)).then(() => undefined) },
+      create_relation: { executeExact: (intent) => this.executeRelationIntent(intent, (request) => this.api.createRelation(request as never)).then(() => undefined) },
+      remove_relation: { executeExact: (intent) => this.executeRelationIntent(intent, (request) => this.api.removeRelation(request as never)).then(() => undefined) },
       add_work_item_labels: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.addWorkItemLabels(request as never)).then(() => undefined) },
       remove_work_item_labels: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.removeWorkItemLabels(request as never)).then(() => undefined) },
       create_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.createLabel(request as never)).then(() => undefined) },
@@ -432,6 +527,19 @@ export class TaskSpaceRepository {
         await this.db.workItems.put(result.workItem)
         if (result.project) await this.db.projects.put(result.project)
       },
+      now: canonicalNow,
+    })
+  }
+
+  private executeRelationIntent(
+    intent: DirectCommandIntentRow,
+    send: (request: Record<string, JsonValue>) => Promise<unknown>,
+  ) {
+    return executeDurableDirectCommand({
+      db: this.db, intent, businessTables: [this.db.relations],
+      sendExactRequest: send,
+      parseResult: (value) => mapRelation(value),
+      applyResult: async (relation) => { await this.db.relations.put(relation) },
       now: canonicalNow,
     })
   }

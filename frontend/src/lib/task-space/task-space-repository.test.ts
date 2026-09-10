@@ -62,6 +62,8 @@ async function fixture() {
     createWorkItem: vi.fn(),
     moveWorkItem: vi.fn(),
     transitionWorkItem: vi.fn(),
+    trashWorkItem: vi.fn(),
+    restoreWorkItem: vi.fn(),
     listProjects: vi.fn(),
     listWorkItems: vi.fn(),
     listDefinitions: vi.fn(),
@@ -266,5 +268,49 @@ describe('TaskSpaceRepository', () => {
     expect(await dbA.workItems.get('work-x')).toBeUndefined()
     // Space B's copy is untouched.
     expect(await dbB.workItems.get('work-x')).toMatchObject({ id: 'work-x' })
+  })
+
+  it('trash: sends the empty business payload and caches the archived post-image', async () => {
+    const { db, api, spaceId } = await fixture()
+    await db.workItems.put({ id: 'work-1', projectId: 'project-1', version: 1 } as never)
+    api.trashWorkItem.mockResolvedValue({
+      commandId: 'trash-op', entityType: 'work_item', entityId: 'work-1', version: 2,
+      value: { ...workItemWire('work-1', 'project-1'), archived_at: '2026-07-15T09:00:00.000Z', version: 2 },
+    })
+    const repository = new TaskSpaceRepository(db, spaceId, api)
+
+    const trashed = await repository.trashWorkItem({ workItemId: 'work-1' })
+
+    expect(trashed).toMatchObject({ id: 'work-1', archivedAt: '2026-07-15T09:00:00.000Z', version: 2 })
+    expect(await db.workItems.get('work-1')).toMatchObject({ archivedAt: '2026-07-15T09:00:00.000Z' })
+    expect((await db.directCommandIntents.toArray())[0]).toMatchObject({ state: 'terminal', kind: 'trash_work_item' })
+    // archived_at is server-owned: no timestamp travels in the request.
+    expect(api.trashWorkItem).toHaveBeenCalledWith(expect.objectContaining({
+      workItemId: 'work-1', expectedVersion: 1, operationId: expect.any(String),
+    }))
+    expect(api.trashWorkItem.mock.calls[0][0]).not.toHaveProperty('archivedAt')
+  })
+
+  it('restore: clears archived_at and marks the intent terminal', async () => {
+    const { db, api, spaceId } = await fixture()
+    await db.workItems.put({ id: 'work-1', projectId: 'project-1', version: 2 } as never)
+    api.restoreWorkItem.mockResolvedValue({
+      commandId: 'restore-op', entityType: 'work_item', entityId: 'work-1', version: 3,
+      value: { ...workItemWire('work-1', 'project-1'), version: 3 },
+    })
+    const repository = new TaskSpaceRepository(db, spaceId, api)
+
+    const restored = await repository.restoreWorkItem({ workItemId: 'work-1' })
+
+    expect(restored).toMatchObject({ id: 'work-1', archivedAt: null, version: 3 })
+    expect(await db.workItems.get('work-1')).toMatchObject({ archivedAt: null })
+    expect((await db.directCommandIntents.toArray())[0]).toMatchObject({ state: 'terminal', kind: 'restore_work_item' })
+  })
+
+  it('rejects trash/restore for an unloaded work item', async () => {
+    const { db, api, spaceId } = await fixture()
+    const repository = new TaskSpaceRepository(db, spaceId, api)
+    await expect(repository.trashWorkItem({ workItemId: 'missing' })).rejects.toThrow('work_item_not_loaded')
+    await expect(repository.restoreWorkItem({ workItemId: 'missing' })).rejects.toThrow('work_item_not_loaded')
   })
 })

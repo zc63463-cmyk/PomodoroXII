@@ -223,6 +223,38 @@ class TransitionWorkItemRequest(WireModel):
     status_definition_id: str = Field(min_length=1, max_length=64)
 
 
+class TrashWorkItemRequest(WireModel):
+    """Soft-delete one work item (set ``archived_at``).
+
+    The wire model deliberately carries **no** ``archived_at`` field: the
+    timestamp is server-owned, so a caller cannot forge an audit time.  The
+    business payload is therefore empty and ``payloadHash`` is the canonical
+    hash of ``{}``.
+    """
+
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RestoreWorkItemRequest(WireModel):
+    """Undo a soft delete (clear ``archived_at``).  Same server-owned
+    timestamp rule as :class:`TrashWorkItemRequest`."""
+
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+# Dependency-domain schemas live in their own module so the registry/schema
+# parity gate (`tests/test_parity_registry_schemas.py`) sees a real
+# ``app.schemas.relation``.  Import them from there:
+#     from app.schemas.relation import RelationResponse, CreateRelationRequest, ...
+# The dependency direction is one-way (relation -> task_space) to avoid a cycle.
+
+
 class AddWorkItemLabelsRequest(WireModel):
     """Add labels: declare the full target label_ids set after this mutation."""
 

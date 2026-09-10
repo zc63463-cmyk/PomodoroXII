@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { CachedWorkItem } from '@/types'
 import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
+import { ActiveChildConflictError } from '@/lib/task-space/active-child-conflict'
 
 vi.mock('lucide-react', () => ({}))
 vi.mock('@/components/ui/button', () => ({
@@ -217,5 +218,105 @@ describe('WorkItemDetail', () => {
     }))
     expect(screen.getByLabelText('Title')).toHaveValue('New title')
     expect(screen.getByRole('heading', { name: 'New title' })).toBeInTheDocument()
+  })
+
+  it('offers a trash action for a live item and never for an archived one', async () => {
+    const onTrash = vi.fn().mockResolvedValue(undefined)
+    const { rerender } = render(createElement(WorkItemDetail, {
+      workItem: item(),
+      definitions,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+      onTrash,
+    }))
+    fireEvent.click(screen.getByRole('button', { name: 'Move work item to trash' }))
+    await waitFor(() => expect(onTrash).toHaveBeenCalledTimes(1))
+
+    rerender(createElement(WorkItemDetail, {
+      workItem: item({ archivedAt: '2026-08-01T00:00:00.000Z' }),
+      definitions,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+      onTrash,
+      onRestore: vi.fn(),
+    }))
+    expect(screen.queryByRole('button', { name: 'Move work item to trash' })).toBeNull()
+  })
+
+  it('shows the recycle-bin banner and a restore action for an archived item', async () => {
+    const onRestore = vi.fn().mockResolvedValue(undefined)
+    render(createElement(WorkItemDetail, {
+      workItem: item({ archivedAt: '2026-08-01T00:00:00.000Z' }),
+      definitions,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+      onRestore,
+    }))
+    expect(screen.getByText('该工作项已在回收站中。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Restore work item' }))
+    await waitFor(() => expect(onRestore).toHaveBeenCalledTimes(1))
+  })
+
+  it('lets a structured active-child conflict bubble up to the page', async () => {
+    const onTransition = vi.fn().mockRejectedValue(
+      new ActiveChildConflictError('l2', ['l3a', 'l3b']),
+    )
+    let caught: unknown = null
+    render(createElement(WorkItemDetail, {
+      workItem: item({ depth: 2, statusDefinitionId: 'status-open' }),
+      definitions,
+      onUpdate: vi.fn(),
+      onTransition: (statusDefinitionId: string) => Promise.resolve(onTransition(statusDefinitionId)).catch((error: unknown) => { caught = error }),
+      onMove: vi.fn(),
+    }))
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'status-done' } })
+
+    await waitFor(() => expect(caught).toBeInstanceOf(ActiveChildConflictError))
+    expect(caught).toMatchObject({ workItemId: 'l2', conflictChildIds: ['l3a', 'l3b'] })
+  })
+
+  it('still swallows ordinary transition failures', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (event: Event) => unhandled.push((event as PromiseRejectionEvent).reason)
+    window.addEventListener('unhandledrejection', onUnhandled)
+    const onTransition = vi.fn().mockRejectedValue(new Error('version_conflict'))
+    render(createElement(WorkItemDetail, {
+      workItem: item({ statusDefinitionId: 'status-open' }),
+      definitions,
+      onUpdate: vi.fn(),
+      onTransition,
+      onMove: vi.fn(),
+    }))
+    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'status-done' } })
+
+    await waitFor(() => expect(onTransition).toHaveBeenCalledWith('status-done'))
+    // Let the microtask queue drain so a swallowed rejection would surface.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    window.removeEventListener('unhandledrejection', onUnhandled)
+    expect(unhandled).toHaveLength(0)
+  })
+
+  it('surfaces the effort review for level-2 items and hides it for containers', () => {
+    const { rerender } = render(createElement(WorkItemDetail, {
+      workItem: item({ depth: 2, effortActualSeconds: 3600, effortEstimateUpperSeconds: 7200 }),
+      definitions,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+    }))
+    expect(document.querySelector('[data-effort-status="normal"]')).not.toBeNull()
+    expect(screen.getByText('投入复核')).toBeInTheDocument()
+
+    rerender(createElement(WorkItemDetail, {
+      workItem: item({ depth: 1, effortActualSeconds: 3600, effortEstimateUpperSeconds: 7200 }),
+      definitions,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+    }))
+    expect(document.querySelector('[data-effort-status]')).toBeNull()
   })
 })

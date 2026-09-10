@@ -616,7 +616,7 @@ export interface SessionActivationApplicationReceiptRow {
 
 export interface DirectCommandIntentRow {
   operationId: string
-  kind: 'create_project' | 'create_work_item' | 'update_work_item' | 'move_work_item' | 'transition_work_item' | 'submit_review' | 'create_label' | 'update_label' | 'archive_label' | 'add_work_item_labels' | 'remove_work_item_labels'
+  kind: 'create_project' | 'create_work_item' | 'update_work_item' | 'move_work_item' | 'transition_work_item' | 'trash_work_item' | 'restore_work_item' | 'create_relation' | 'remove_relation' | 'submit_review' | 'create_label' | 'update_label' | 'archive_label' | 'add_work_item_labels' | 'remove_work_item_labels'
   spaceId: string
   targetId: string | null
   requestJson: string

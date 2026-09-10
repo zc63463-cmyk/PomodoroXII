@@ -277,12 +277,12 @@ describe('held provisional compound authority', () => {
 })
 
 describe('sync entity table inventory', () => {
-  it('contains exactly the 22 final Sync v2 entity keys', () => {
+  it('contains exactly the 23 final Sync v2 entity keys', () => {
     expect(FINAL_SYNC_ENTITY_TYPES).toEqual([
       'note', 'folder', 'quickNote', 'reflection', 'habit', 'habitCheckIn',
       'schedule', 'timeBlock', 'memoComment', 'scheduleQuickNote',
       'project', 'statusDefinition', 'typeDefinition', 'label', 'workItemLabel',
-      'workItem', 'workItemNote', 'focusSession', 'sessionTaskContext',
+      'workItem', 'workItemNote', 'relation', 'focusSession', 'sessionTaskContext',
       'sessionAttributionRevision', 'sessionWorkItemPlan', 'sessionWorkItemOutcome',
     ])
     expect(Object.keys(FINAL_SYNC_ENTITY_TO_TABLE)).toEqual(FINAL_SYNC_ENTITY_TYPES)

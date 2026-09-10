@@ -274,3 +274,30 @@ describe('WorkItemTree drag & drop move', () => {
     expect(onMove).not.toHaveBeenCalled()
   })
 })
+
+describe('WorkItemTree blocking indicator', () => {
+  it('renders a lock with a hover hint for a blocked item', () => {
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Root', null, 1), item('l2', 'Blocked', 'l1', 2)],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      blockedSignals: { l2: { isBlocked: true, openBlockerCount: 2 } },
+    }))
+    const lock = document.querySelector('[data-blocked-lock]')
+    expect(lock).not.toBeNull()
+    expect(lock?.getAttribute('title')).toBe('被 2 个未完成依赖项阻塞')
+    expect(lock?.textContent).toBe('🔒')
+  })
+
+  it('renders no lock when nothing is blocked', () => {
+    render(createElement(WorkItemTree, {
+      items: [item('l1', 'Root', null, 1)],
+      selectedId: null,
+      onSelect: vi.fn(),
+      onCreateChild: vi.fn(),
+      blockedSignals: { l1: { isBlocked: false, openBlockerCount: 0 } },
+    }))
+    expect(document.querySelector('[data-blocked-lock]')).toBeNull()
+  })
+})

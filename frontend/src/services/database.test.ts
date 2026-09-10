@@ -56,7 +56,7 @@ describe('PomodoroXIDB v18 schema', () => {
 
     expect(database.spaceId).toBe(spaceId)
     expect(database.name).toBe(dexieDbNameForSpace(spaceId))
-    expect(database.verno).toBe(19)
+    expect(database.verno).toBe(20)
     expect(database.tables.map((table) => table.name)).toEqual(expect.arrayContaining(
       expectedV18SchemaInventory().map((store) => store.name),
     ))
@@ -72,7 +72,7 @@ describe('PomodoroXIDB v18 schema', () => {
     old.close()
 
     const database = await openPomodoroXIDB(spaceId)
-    expect(database.verno).toBe(19)
+    expect(database.verno).toBe(20)
     expect(database.quickNotes.schema.indexes.map((index) => index.name))
       .not.toContain('session_id')
     expect(database.timeBlocks.schema.indexes.map((index) => index.name))
@@ -143,7 +143,7 @@ describe('PomodoroXIDB v19 Sync protocol staging', () => {
     const database = new PomodoroXIDB(spaceId)
     await database.open()
 
-    expect(database.verno).toBe(19)
+    expect(database.verno).toBe(20)
     expect(database.tables.map((table) => table.name)).toEqual(expect.arrayContaining([
       ...expectedV18SchemaInventory().map((store) => store.name),
       'syncAdmissionState',

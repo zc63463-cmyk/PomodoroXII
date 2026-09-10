@@ -2,7 +2,7 @@ import Dexie from 'dexie'
 import { describe, expect, it } from 'vitest'
 import { dexieDbNameForSpace } from '@/lib/platform'
 import {
-  DEXIE_V19_NATIVE_VERSION,
+  DEXIE_V20_NATIVE_VERSION,
   atomicDexieV18Cutover,
   openPomodoroXIDB,
 } from './dexie-v18-cutover'
@@ -28,7 +28,7 @@ describe('Dexie v18 native cutover', () => {
   it('opens a clean Space with the final v18 business inventory layered into v19', async () => {
     const spaceId = `v18-clean-${crypto.randomUUID()}`
     const db = await openPomodoroXIDB(spaceId)
-    expect(db.verno).toBe(19)
+    expect(db.verno).toBe(20)
     const names = db.tables.map((table) => table.name).sort()
     expect(names).toEqual(expect.arrayContaining(
       expectedV18SchemaInventory().map((entry) => entry.name),
@@ -63,14 +63,14 @@ describe('Dexie v18 native cutover', () => {
 
     const reopened = await openPomodoroXIDB(spaceId)
 
-    expect(reopened.verno).toBe(DEXIE_V19_NATIVE_VERSION / 10)
+    expect(reopened.verno).toBe(DEXIE_V20_NATIVE_VERSION / 10)
     await reopened.delete()
   })
 
   it('rejects a future native database version without rewriting it', async () => {
     const spaceId = `v19-future-${crypto.randomUUID()}`
     const name = dexieDbNameForSpace(spaceId)
-    const request = indexedDB.open(name, DEXIE_V19_NATIVE_VERSION + 10)
+    const request = indexedDB.open(name, DEXIE_V20_NATIVE_VERSION + 10)
     request.onupgradeneeded = () => request.result.createObjectStore('future', { keyPath: 'id' })
     await new Promise<void>((resolve, reject) => {
       request.onsuccess = () => { request.result.close(); resolve() }
@@ -78,7 +78,7 @@ describe('Dexie v18 native cutover', () => {
     })
 
     await expect(openPomodoroXIDB(spaceId)).rejects.toThrow(
-      `unsupported_client_schema:${DEXIE_V19_NATIVE_VERSION + 10}`,
+      `unsupported_client_schema:${DEXIE_V20_NATIVE_VERSION + 10}`,
     )
     await Dexie.delete(name)
   })

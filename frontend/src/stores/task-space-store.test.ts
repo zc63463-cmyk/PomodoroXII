@@ -5,7 +5,17 @@ import { AxiosHeaders } from 'axios'
 import type { CachedProject, CachedWorkItem } from '@/types'
 import type { CachedWorkItemNote, WorkItemNoteConflictRow } from '@/types'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
-import { resolveTaskSpaceMutationError, resolveTaskSpaceNoteError, selectMoveCandidates, useTaskSpaceStore, type TaskSpaceNoteRepositoryLike, type TaskSpaceRepositoryLike } from './task-space-store'
+import {
+  ActiveChildConflictError,
+  extractActiveChildConflictIds,
+  resolveTaskSpaceMutationError,
+  resolveTaskSpaceNoteError,
+  selectLevel2RelocationTargets,
+  selectMoveCandidates,
+  useTaskSpaceStore,
+  type TaskSpaceNoteRepositoryLike,
+  type TaskSpaceRepositoryLike,
+} from './task-space-store'
 
 const workItem = (id: string, parentId: string | null, depth: 1 | 2 | 3): CachedWorkItem => ({
   id,
@@ -71,6 +81,20 @@ function repositoryFixture(overrides: Partial<TaskSpaceRepositoryLike> = {}): Ta
     updateWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     moveWorkItem: vi.fn().mockResolvedValue(workItem('l3', 'l1', 2)),
     transitionWorkItem: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
+    listRelations: vi.fn().mockResolvedValue({ blockers: [], blocking: [] }),
+    listBlockedMap: vi.fn().mockResolvedValue({ items: {} }),
+    createRelation: vi.fn().mockResolvedValue({
+      id: 'rel-1', fromWorkItemId: 'l2', toWorkItemId: 'l1',
+      relationType: 'depends_on', version: 1,
+      createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z',
+    }),
+    removeRelation: vi.fn().mockResolvedValue({
+      id: 'rel-1', fromWorkItemId: 'l2', toWorkItemId: 'l1',
+      relationType: 'depends_on', version: 1,
+      createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z',
+    }),
+    trashWorkItem: vi.fn().mockResolvedValue({ ...workItem('l1', null, 1), archivedAt: '2026-07-15T09:00:00.000Z', version: 2 }),
+    restoreWorkItem: vi.fn().mockResolvedValue({ ...workItem('l1', null, 1), archivedAt: null, version: 3 }),
     addWorkItemLabels: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     removeWorkItemLabel: vi.fn().mockResolvedValue(workItem('l1', null, 1)),
     createLabel: vi.fn().mockResolvedValue({ id: 'label-1', name: 'Focus', color: null, archivedAt: null, version: 1, createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z' }),
@@ -680,5 +704,111 @@ describe('resolveTaskSpaceMutationError wire shapes', () => {
       .toMatch(/三层/)
     expect(resolveTaskSpaceMutationError(new Error('task_space_project_not_selected')).message)
       .toMatch(/项目/)
+  })
+})
+
+describe('task space trash / restore', () => {
+  beforeEach(() => useTaskSpaceStore.getState().reset())
+
+  it('trashes a work item and adopts the server archived post-image', async () => {
+    const repository = repositoryFixture()
+    useTaskSpaceStore.setState({ repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1)] })
+
+    await useTaskSpaceStore.getState().trashWorkItem('l1')
+
+    expect(repository.trashWorkItem).toHaveBeenCalledWith({ workItemId: 'l1' })
+    const stored = useTaskSpaceStore.getState().workItems.find((item) => item.id === 'l1')
+    expect(stored?.archivedAt).toBe('2026-07-15T09:00:00.000Z')
+    expect(stored?.version).toBe(2)
+  })
+
+  it('restores an archived work item and clears archivedAt', async () => {
+    const repository = repositoryFixture()
+    const archived = { ...workItem('l1', null, 1), archivedAt: '2026-07-15T09:00:00.000Z', version: 2 }
+    useTaskSpaceStore.setState({ repository, spaceId: 'space-a', workItems: [archived] })
+
+    await useTaskSpaceStore.getState().restoreWorkItem('l1')
+
+    expect(repository.restoreWorkItem).toHaveBeenCalledWith({ workItemId: 'l1' })
+    const stored = useTaskSpaceStore.getState().workItems.find((item) => item.id === 'l1')
+    expect(stored?.archivedAt).toBeNull()
+  })
+
+  it('surfaces a stable failure code without leaking transport text', async () => {
+    const repository = repositoryFixture({
+      trashWorkItem: vi.fn().mockRejectedValue(axiosError(409, 'version_conflict')),
+    })
+    useTaskSpaceStore.setState({ repository, spaceId: 'space-a', workItems: [workItem('l1', null, 1)] })
+
+    await expect(useTaskSpaceStore.getState().trashWorkItem('l1')).rejects.toBeTruthy()
+    expect(useTaskSpaceStore.getState().mutationError).toEqual({ targetId: 'l1', code: 'version_conflict' })
+    expect(useTaskSpaceStore.getState().error).toMatch(/刷新后重试/)
+    expect(useTaskSpaceStore.getState().pendingMutations.l1).toBeUndefined()
+  })
+
+  it('rejects a trash call when no repository is attached', async () => {
+    await expect(useTaskSpaceStore.getState().trashWorkItem('l1')).rejects.toThrow('task_space_repository_not_ready')
+  })
+})
+
+describe('active child conflict', () => {
+  beforeEach(() => useTaskSpaceStore.getState().reset())
+
+  it('throws a structured error carrying the conflicting child ids', async () => {
+    const repository = repositoryFixture({
+      transitionWorkItem: vi.fn().mockRejectedValue(
+        Object.assign(axiosError(409, 'active_child_conflict'), {
+          response: {
+            status: 409,
+            data: {
+              code: 'active_child_conflict',
+              message: 'An active child prevents this mutation',
+              retryable: false,
+              details: { work_item_ids: ['l3a', 'l3b'] },
+            },
+          },
+        }),
+      ),
+    })
+    useTaskSpaceStore.setState({ repository, spaceId: 'space-a', workItems: [workItem('l2', 'l1', 2)] })
+
+    const caught = await useTaskSpaceStore.getState()
+      .transitionWorkItem('l2', 'status-done')
+      .catch((error: unknown) => error)
+
+    expect(caught).toBeInstanceOf(ActiveChildConflictError)
+    expect(caught).toMatchObject({ workItemId: 'l2', conflictChildIds: ['l3a', 'l3b'] })
+    // The dialog owns the messaging; no duplicate toast is left behind.
+    expect(useTaskSpaceStore.getState().mutationError).toBeNull()
+    expect(useTaskSpaceStore.getState().error).toBeNull()
+  })
+
+  it('reads camelCase details too and degrades to an empty list', () => {
+    expect(extractActiveChildConflictIds({
+      response: { data: { code: 'active_child_conflict', details: { workItemIds: ['x'] } } },
+    })).toEqual(['x'])
+    expect(extractActiveChildConflictIds(new Error('boom'))).toEqual([])
+    expect(extractActiveChildConflictIds({ response: { data: { details: { work_item_ids: 'nope' } } } })).toEqual([])
+  })
+
+  it('offers only live, non-completed, same-project level-2 destinations', () => {
+    const items = [
+      workItem('l1', null, 1),
+      { ...workItem('l2', 'l1', 2), statusDefinitionId: 'status-done' },
+      workItem('l2b', 'l1', 2),
+      workItem('l2c', 'l1', 2),
+      { ...workItem('l2d', 'l1', 2), archivedAt: '2026-08-01T00:00:00.000Z' },
+      { ...workItem('l2e', 'other-project', 2), projectId: 'project-2' },
+      workItem('l3', 'l2', 3),
+    ]
+
+    const targets = selectLevel2RelocationTargets(items, 'l2', new Set(['status-done']))
+
+    expect(targets.map((item) => item.id)).toEqual(['l2b', 'l2c'])
+  })
+
+  it('returns no destination when the blocked parent is unknown', () => {
+    expect(selectLevel2RelocationTargets([workItem('l2', 'l1', 2)], 'missing', new Set())).toEqual([])
+    expect(selectLevel2RelocationTargets([workItem('l2', 'l1', 2)], null, new Set())).toEqual([])
   })
 })

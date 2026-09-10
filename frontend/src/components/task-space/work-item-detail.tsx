@@ -4,11 +4,15 @@ import { createElement, useEffect, useState, type ReactNode } from 'react'
 import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
 import type { CachedWorkItem } from '@/types'
 import { Button } from '@/components/ui/button'
+import { EffortReviewCard } from '@/components/task-space/effort-review-card'
+import { ActiveChildConflictError } from '@/lib/task-space/active-child-conflict'
 
 export interface WorkItemDetailProps {
   workItem?: CachedWorkItem | null
   definitions?: TaskSpaceDefinitions | null
   noteEditor?: ReactNode
+  /** Dependency management card (rendered between the form and the note). */
+  relationsCard?: ReactNode
   pendingMutations?: Record<string, boolean>
   mutationError?: { targetId: string; code: string } | null
   error?: string | null
@@ -17,6 +21,9 @@ export interface WorkItemDetailProps {
   onUpdate?: (input: { title: string; description: string | null; priority: string | null }) => Promise<unknown> | unknown
   onTransition?: (statusDefinitionId: string) => Promise<unknown> | unknown
   onMove?: (parentId: string | null) => Promise<unknown> | unknown
+  /** Soft-delete / undo the work item (idempotent server side). */
+  onTrash?: () => Promise<unknown> | unknown
+  onRestore?: () => Promise<unknown> | unknown
   /** D5 Y: toggle one label on the work item (add=true converges to the
    * union; add=false removes it). Idempotent set semantics server side. */
   onToggleLabel?: (labelId: string, add: boolean) => Promise<unknown> | unknown
@@ -51,6 +58,7 @@ export function WorkItemDetail({
   workItem,
   definitions,
   noteEditor,
+  relationsCard,
   pendingMutations = {},
   mutationError = null,
   error = null,
@@ -58,6 +66,8 @@ export function WorkItemDetail({
   onUpdate,
   onTransition,
   onMove,
+  onTrash,
+  onRestore,
   onToggleLabel,
 }: WorkItemDetailProps) {
   const [name, setName] = useState('')
@@ -102,7 +112,10 @@ export function WorkItemDetail({
     if (!onTransition || statusDefinitionId === workItem.statusDefinitionId) return
     try {
       await onTransition(statusDefinitionId)
-    } catch {
+    } catch (error) {
+      // A blocked completion is a resolvable state, not a dead end: let the
+      // structured signal reach the page so it can open the four-way dialog.
+      if (error instanceof ActiveChildConflictError) throw error
       // Stable error is surfaced by the store; keep the previous status.
     }
   }
@@ -113,6 +126,24 @@ export function WorkItemDetail({
       await onMove(parentId === '' ? null : parentId)
     } catch {
       // Stable error is surfaced by the store; keep the previous tree.
+    }
+  }
+
+  const trash = async () => {
+    if (!onTrash) return
+    try {
+      await onTrash()
+    } catch {
+      // Stable error is surfaced by the store; the item stays live.
+    }
+  }
+
+  const restore = async () => {
+    if (!onRestore) return
+    try {
+      await onRestore()
+    } catch {
+      // Stable error is surfaced by the store; the item stays archived.
     }
   }
 
@@ -152,8 +183,49 @@ export function WorkItemDetail({
         createElement('p', { className: 'font-mono text-xs text-muted-foreground' }, workItem.displayKey),
         createElement('h1', { className: 'truncate text-xl font-semibold' }, workItem.title),
       ),
-      createElement('span', { className: 'shrink-0 text-xs text-muted-foreground' }, `v${workItem.version}`),
+      createElement(
+        'div',
+        { className: 'flex shrink-0 items-center gap-2' },
+        createElement('span', { className: 'text-xs text-muted-foreground' }, `v${workItem.version}`),
+        readonly && onRestore
+          ? createElement(
+              Button,
+              {
+                type: 'button',
+                variant: 'outline',
+                size: 'sm',
+                disabled: pending,
+                'aria-label': 'Restore work item',
+                ...({ 'data-work-item-restore': true } as unknown as Record<string, never>),
+                onClick: () => void restore(),
+              },
+              '恢复',
+            )
+          : null,
+        !readonly && onTrash
+          ? createElement(
+              Button,
+              {
+                type: 'button',
+                variant: 'ghost',
+                size: 'sm',
+                disabled: pending,
+                'aria-label': 'Move work item to trash',
+                ...({ 'data-work-item-trash': true } as unknown as Record<string, never>),
+                onClick: () => void trash(),
+              },
+              '移至回收站',
+            )
+          : null,
+      ),
     ),
+    readonly
+      ? createElement(
+          'p',
+          { role: 'status', className: 'border-b bg-muted/40 py-2 text-sm text-muted-foreground', 'data-archived-banner': true },
+          '该工作项已在回收站中。',
+        )
+      : null,
     visibleError
       ? createElement('p', { role: 'alert', className: 'border-b py-3 text-sm text-destructive' }, visibleError)
       : null,
@@ -317,6 +389,16 @@ export function WorkItemDetail({
         ),
       ),
     ),
+    relationsCard ?? null,
+    // Effort review sits between the basic form and the note editor: level-2
+    // items are the review unit (highlighted), level-3 items show it muted.
+    workItem.depth >= 2
+      ? createElement(EffortReviewCard, {
+          key: `effort-${workItem.id}`,
+          workItem,
+          highlighted: workItem.depth === 2,
+        })
+      : null,
     createElement(
       'section',
       {

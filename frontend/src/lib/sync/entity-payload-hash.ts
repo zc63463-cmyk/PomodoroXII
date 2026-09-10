@@ -14,7 +14,7 @@ import {
 
 const TASK_SPACE_KEY_LIST = [
   'project', 'statusDefinition', 'typeDefinition', 'label', 'workItemLabel',
-  'workItem', 'workItemNote',
+  'workItem', 'workItemNote', 'relation',
 ] as const satisfies readonly SyncEntityType[]
 const FOCUS_SESSION_KEY_LIST = [
   'focusSession', 'sessionTaskContext', 'sessionAttributionRevision',

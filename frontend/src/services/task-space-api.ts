@@ -1,4 +1,4 @@
-import { assertResponseSpace, acceptedMutationSchema, parseDefinitions, parseNoteDocument, parseProject, parseWorkItem, parseWorkItemNote, projectSchema, workItemSchema, type Project, type TaskSpaceDefinitions, type WorkItem, type WorkItemNote, type WorkItemNoteDocument } from '@/lib/contracts/task-space'
+import { assertResponseSpace, acceptedMutationSchema, parseDefinitions, parseNoteDocument, parseProject, parseWorkItem, parseWorkItemNote, projectSchema, relationSetSchema, blockedMapSchema, workItemSchema, type BlockedMap, type Project, type RelationSet, type TaskSpaceDefinitions, type WorkItem, type WorkItemNote, type WorkItemNoteDocument } from '@/lib/contracts/task-space'
 import { buildCommandFields, hashCommandPayload } from '@/lib/contracts/payload-hash'
 import { spaceApi } from './api'
 
@@ -11,6 +11,10 @@ export interface TransitionWorkItemInput extends SpaceCommandBase { workItemId: 
 export interface ReplaceNoteInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; document: WorkItemNoteDocument }
 export interface AppendBlocksInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; blocks: WorkItemNoteDocument['blocks'] }
 export interface ToggleChecklistInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; blockId: string; itemId: string; checked: boolean }
+export interface TrashWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number }
+export interface RestoreWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number }
+export interface CreateRelationInput extends SpaceCommandBase { fromWorkItemId: string; toWorkItemId: string; relationType: string }
+export interface RemoveRelationInput extends SpaceCommandBase { relationId: string; expectedVersion: number; fromWorkItemId: string; toWorkItemId: string; relationType: string }
 export interface AddWorkItemLabelsInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; labelIds: string[] }
 export interface RemoveWorkItemLabelsInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; labelIds: string[] }
 export interface CreateLabelInput extends SpaceCommandBase { name: string; color?: string | null }
@@ -120,6 +124,21 @@ export const taskSpaceApi = {
       (body, options) => spaceApi.post(`/work-items/${encodeURIComponent(input.workItemId)}/transition`, body, options),
     )
   },
+  // archived_at is server-owned: the business payload is empty, so the
+  // canonical hash is the hash of {} and a caller can never forge an audit
+  // timestamp (the wire schema is extra="forbid").
+  async trashWorkItem(input: TrashWorkItemInput) {
+    return command(input.operationId, input.spaceId,
+      { expectedVersion: input.expectedVersion }, {},
+      (body, options) => spaceApi.post(`/work-items/${encodeURIComponent(input.workItemId)}/trash`, body, options),
+    )
+  },
+  async restoreWorkItem(input: RestoreWorkItemInput) {
+    return command(input.operationId, input.spaceId,
+      { expectedVersion: input.expectedVersion }, {},
+      (body, options) => spaceApi.post(`/work-items/${encodeURIComponent(input.workItemId)}/restore`, body, options),
+    )
+  },
   // D5 Y: label-set mutations declare the FULL target label_ids set after the
   // mutation (labels-as-state); the server read-modify-writes the junction.
   async addWorkItemLabels(input: AddWorkItemLabelsInput) {
@@ -159,6 +178,50 @@ export const taskSpaceApi = {
     return command(input.operationId, input.spaceId,
       { expectedVersion: input.expectedVersion }, {},
       (body, options) => spaceApi.request({ method: 'DELETE', url: `/labels/${encodeURIComponent(input.labelId)}`, data: body, ...options }),
+    )
+  },
+  async listRelations(_spaceId: string, workItemId: string): Promise<RelationSet> {
+    const response = await spaceApi.get('/relations', { params: { workItemId } })
+    return relationSetSchema.parse(response.data)
+  },
+  async listBlockedMap(_spaceId: string, projectId?: string): Promise<BlockedMap> {
+    const response = await spaceApi.get('/relations/blocked-map', { params: { projectId } })
+    return blockedMapSchema.parse(response.data)
+  },
+  async createRelation(input: CreateRelationInput) {
+    return command(input.operationId, input.spaceId,
+      {
+        fromWorkItemId: input.fromWorkItemId,
+        toWorkItemId: input.toWorkItemId,
+        relationType: input.relationType,
+      },
+      {
+        from_work_item_id: input.fromWorkItemId,
+        to_work_item_id: input.toWorkItemId,
+        relation_type: input.relationType,
+      },
+      (body, options) => spaceApi.post('/relations', body, options),
+    )
+  },
+  async removeRelation(input: RemoveRelationInput) {
+    return command(input.operationId, input.spaceId,
+      {
+        expectedVersion: input.expectedVersion,
+        fromWorkItemId: input.fromWorkItemId,
+        toWorkItemId: input.toWorkItemId,
+        relationType: input.relationType,
+      },
+      {
+        from_work_item_id: input.fromWorkItemId,
+        to_work_item_id: input.toWorkItemId,
+        relation_type: input.relationType,
+      },
+      (body, options) => spaceApi.request({
+        method: 'DELETE',
+        url: `/relations/${encodeURIComponent(input.relationId)}`,
+        data: body,
+        ...options,
+      }),
     )
   },
   async replaceNote(input: ReplaceNoteInput) {
