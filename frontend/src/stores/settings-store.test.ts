@@ -57,6 +57,9 @@ describe('settings-store 全键读回（工单③）', () => {
   const PERSISTED_SETTINGS: Array<{ storageKey: string; raw: string; stateKey: string; expected: unknown }> = [
     // ★ theme 是唯一的**裸串**键（next-themes 与本 store 双写，皆裸串，不是 JSON）。
     //   此处 raw 必须是 'midnight'，绝不能写成 '"midnight"'。
+    // ★ 本表是"写入面"的镜像：persistSetting 会写的每个键都必须在此出现。
+    //   上一次修复恰好漏掉了 theme（唯一裸串键），格式回归因此漏网 —— 新增键时同步补这里，
+    //   保证"读回面"与"写入面"对齐。
     { storageKey: 'theme', raw: 'midnight', stateKey: 'theme', expected: 'midnight' },
     { storageKey: 'pxii_settings_pomodoroDuration', raw: '50', stateKey: 'pomodoroDuration', expected: 50 },
     { storageKey: 'pxii_settings_shortBreakDuration', raw: '10', stateKey: 'shortBreakDuration', expected: 10 },
