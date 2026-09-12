@@ -1667,6 +1667,7 @@ async def test_alembic_upgrade_head_uses_bound_async_engine(tmp_path: Path) -> N
     await target.aclose()
 
 
+@pytest.mark.serial
 def test_cross_process_writer_lock_is_exclusive_and_recovers(tmp_path: Path) -> None:
     from app.runtime.sqlite_vfs import (
         MaintenanceOptions,

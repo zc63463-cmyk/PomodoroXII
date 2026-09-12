@@ -90,6 +90,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
           PYTHONUNBUFFERED: "1"
         run: |
+          # ★ 两段式门禁·并行通道（2026-09-12）：跨进程锁/租约用例标了
+          #   @pytest.mark.serial，在 -n 下与其他 worker 争抢机器级锁必假红，
+          #   并行通道排除它们，由下一步骤串行独占运行。原因见 backend/pyproject.toml。
           $pytestArgs = @(
             'tests/',
             '--no-header',
@@ -101,6 +104,7 @@ jobs:
             #   按文件分片并行；timeout 已由 pyproject 的 ini 提供（单例 300s）。
             '-n', '4',
             '--dist=loadfile',
+            '-m', 'not serial',
             "--junitxml=$env:POMODOROXII_CI_RESULTS_DIR/junit.xml",
             '--cov=app',
             '--cov-branch',
@@ -108,6 +112,26 @@ jobs:
             '--cov-report=term'
           )
           & uv run pytest @pytestArgs 2>&1 | Tee-Object -FilePath "$env:POMODOROXII_CI_RESULTS_DIR/pytest.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run serial-channel tests (machine-level locks, no xdist)
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          # ★ 两段式门禁·串行通道：@pytest.mark.serial 用例（跨进程写锁/租约）
+          #   必须无并发独占运行，不带 -n。证据单独落盘，不覆盖并行通道产物
+          #   （verify_test_artifacts 只要求并行通道的四个文件）。
+          $pytestArgs = @(
+            '-m', 'serial',
+            '--no-header',
+            '-q',
+            '--tb=short',
+            '-p', 'no:cacheprovider',
+            "--junitxml=$env:POMODOROXII_CI_RESULTS_DIR/junit-serial.xml"
+          )
+          & uv run pytest @pytestArgs 2>&1 | Tee-Object -FilePath "$env:POMODOROXII_CI_RESULTS_DIR/pytest-serial.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify backend test evidence

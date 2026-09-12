@@ -730,6 +730,7 @@ async def test_cancel_during_portal_acquire_joins_and_compensates(
     await lease.release()
 
 
+@pytest.mark.serial
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ["global", "space"])
 async def test_cross_process_writer_turnstile_blocks_late_reader(

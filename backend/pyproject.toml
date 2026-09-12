@@ -75,8 +75,18 @@ timeout_method = "thread"
 #
 #   用法（`--dist`/`-n` 是命令行选项，**不能**写进 ini_options，
 #   写在这里 pytest 会告警 "Unknown config option"）：
-#       pytest -n 8 --dist loadfile
+#       pytest -n 8 --dist loadfile -m "not serial"   # 并行通道
+#       pytest -m serial                              # 串行通道（机器级锁独占）
 #   -n 不写进 addopts：单文件调试时不该拉起 8 个 worker。
+#
+# ★ 为什么必须两段式（2026-09-12）：标了 serial 的用例争用**机器级**文件锁/
+#   租约（跨进程写锁、租约闸门），--dist loadfile 只保证"同文件同 worker"，
+#   不隔离跨文件并发 —— 它们与其他 worker 的用例并发时会互相干扰必假红
+#   （实测 -n auto 全量 3 failed，三条单跑全绿）。xdist_group 也不行：同组
+#   只是同 worker，仍与其他 worker 并发，锁竞争依旧。
+markers = [
+    "serial: 机器级锁/跨进程用例，必须在无并发通道运行（-n 下必假红）",
+]
 
 [tool.ruff]
 line-length = 100
