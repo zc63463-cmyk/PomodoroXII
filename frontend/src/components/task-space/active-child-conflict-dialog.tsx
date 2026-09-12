@@ -32,6 +32,14 @@ export interface ActiveChildConflictDialogProps {
   onKeepActive?: () => void
   /** Set while one of the two mutating resolutions is in flight. */
   busy?: boolean
+  /**
+   * ★ 2026-09-11：空间可以合法地不含 cancelled / completed 类目状态
+   * （status_definitions 是空间自定义的，缺类目不是异常数据）。
+   * 非空时对应按钮禁用，并在弹窗内展示这条中文原因 —— 绝不静默空转：
+   * 旧实现只在页面 handler 里 `if (!statusId) return`，点了没反应。
+   */
+  cancelChildrenUnavailableReason?: string | null
+  moveChildrenUnavailableReason?: string | null
 }
 
 const titleOf = (item: CachedWorkItem | undefined, id: string): string => (
@@ -49,6 +57,8 @@ export function ActiveChildConflictDialog({
   onMoveChildrenAndComplete,
   onKeepActive,
   busy = false,
+  cancelChildrenUnavailableReason = null,
+  moveChildrenUnavailableReason = null,
 }: ActiveChildConflictDialogProps): ReactNode {
   const [targetParentId, setTargetParentId] = useState('')
 
@@ -61,6 +71,11 @@ export function ActiveChildConflictDialog({
 
   const byId = new Map(conflictChildren.map((child) => [child.id, child]))
   const canMove = availableLevel2Parents.length > 0 && targetParentId !== ''
+  // ★ 2026-09-11：去重后的不可用原因条 —— 同一条原因只列一次。
+  const unavailableReasons = Array.from(new Set(
+    [cancelChildrenUnavailableReason, moveChildrenUnavailableReason]
+      .filter((reason): reason is string => typeof reason === 'string' && reason.length > 0),
+  ))
 
   const run = async (action: () => Promise<void>) => {
     try {
@@ -108,6 +123,17 @@ export function ActiveChildConflictDialog({
               titleOf(byId.get(id), id),
             )),
       ),
+      unavailableReasons.length === 0
+        ? null
+        : createElement(
+            'ul',
+            {
+              role: 'status',
+              'data-resolution-unavailable': true,
+              className: 'grid gap-1 rounded-md border border-dashed p-2 text-xs text-muted-foreground',
+            },
+            unavailableReasons.map((reason) => createElement('li', { key: reason }, reason)),
+          ),
       createElement(
         'div',
         { className: 'grid gap-2' },
@@ -115,7 +141,7 @@ export function ActiveChildConflictDialog({
           Button,
           {
             type: 'button',
-            disabled: busy,
+            disabled: busy || Boolean(cancelChildrenUnavailableReason),
             ...({ 'data-resolution': 'cancel-children' } as unknown as Record<string, never>),
             onClick: () => void run(onCancelChildrenAndComplete),
           },
@@ -146,7 +172,7 @@ export function ActiveChildConflictDialog({
             {
               type: 'button',
               variant: 'outline',
-              disabled: busy || !canMove,
+              disabled: busy || !canMove || Boolean(moveChildrenUnavailableReason),
               ...({ 'data-resolution': 'move-children' } as unknown as Record<string, never>),
               onClick: () => void run(() => onMoveChildrenAndComplete(targetParentId)),
             },

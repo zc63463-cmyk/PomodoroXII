@@ -1,13 +1,16 @@
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
 from app.db.migrations import run_migrations
 from app.task_space.contracts import SYSTEM_STATUS_IDS, SYSTEM_TYPE_ID
-from tests.migrations import run_bound_command
+from app.task_space.migration_preflight import TASK_SPACE_TARGET_HEAD
+from tests.migrations import alembic_config, run_bound_command
 
 FINAL_TABLES = {
     "projects",
@@ -27,6 +30,8 @@ FINAL_TABLES = {
     "session_command_receipts",
 }
 LEGACY_TABLES = {"tasks", "sessions", "task_quick_notes", "session_quick_notes"}
+#: 最终任务空间 schema 的边界修订（降级守卫所在处）。
+SPACE_010 = "space_010_task_space_focus_session"
 
 
 def test_space_head_creates_exact_final_tables_and_seeds(tmp_path) -> None:
@@ -46,9 +51,11 @@ def test_space_head_creates_exact_final_tables_and_seeds(tmp_path) -> None:
         assert conn.execute(
             "SELECT id FROM type_definitions WHERE system = 1"
         ).fetchone() == (SYSTEM_TYPE_ID,)
+        # ★ 2026-09-12：不再硬编码 revision —— 直接对 TASK_SPACE_TARGET_HEAD
+        #   （preflight 的同一锚点），加迁移时只改一处。
         assert conn.execute(
             "SELECT version_num FROM alembic_version_space"
-        ).fetchone() == ("space_013_relations",)
+        ).fetchone() == (TASK_SPACE_TARGET_HEAD,)
         for table_name, removed in {
             "quick_notes": {"session_id"},
             "time_blocks": {"task_id"},
@@ -91,10 +98,28 @@ def test_space_head_downgrade_rejects_non_seed_rows(tmp_path: Path) -> None:
         conn.commit()
     with pytest.raises(RuntimeError, match="space_010_downgrade_requires_empty_final_schema"):
         run_bound_command("space", path, command.downgrade, "space_009_mutation_journal")
+
+    # ★ 2026-09-12（恢复全量门禁）：原断言写死「版本必须回到 HEAD」，在 head=014
+    #   时恰好成立、head 前移后必红 —— SQLite 跨修订 DDL 非事务，且 014 的重建
+    #   内部有显式 commit()，会先把上一跳的版本戳固化；010 守卫抛出时回滚只覆盖
+    #   其后的步骤。因此断言改为**真实意图**，与 head 号解耦：
+    #   ① 未越过 010 边界（fail-closed：绝不半降级到 009 以下）；
+    #   ② 数据完好（被守卫拦下的降级不得销毁注入行）。
     with sqlite3.connect(path) as conn:
-        assert conn.execute(
+        version = conn.execute(
             "SELECT version_num FROM alembic_version_space"
-        ).fetchone() == ("space_013_relations",)
+        ).fetchone()[0]
+    directory = ScriptDirectory.from_config(alembic_config("space"))
+    chain: set[str] = set()
+    cursor: str | tuple[str, ...] | None = version
+    assert isinstance(cursor, str)
+    while cursor is not None:
+        chain.add(cursor)
+        parent = directory.get_revision(cursor)
+        cursor = parent.down_revision if parent is not None else None
+    assert SPACE_010 in chain, f"downgrade must not cross {SPACE_010}: stopped at {version}"
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT count(*) FROM projects").fetchone() == (1,)
 
 
 def _preflight_tables(connection) -> None:
@@ -133,6 +158,70 @@ def test_task_space_preflight_rejects_legacy_sync_authority(table_name: str) -> 
             connection.execute(
                 text(f'INSERT INTO "{table_name}" (entity_type) VALUES (\'task\')')
             )
+            with pytest.raises(RuntimeError, match="breaking_cutover_requires_empty_legacy"):
+                require_empty_legacy_authority(connection)
+    finally:
+        engine.dispose()
+
+
+def _insert_operation(connection, command_json: str, result_json: str | None = None) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO mutation_operations "
+            "(state, command_json, expected_versions_json, projection_set_json, "
+            "db_before_json, db_after_json, result_json) "
+            "VALUES ('FINALIZED', :command, '{}', '[]', NULL, NULL, :result)"
+        ),
+        {"command": command_json, "result": result_json},
+    )
+
+
+def test_task_space_preflight_allows_focus_session_journal_envelopes() -> None:
+    """回归（2026-09-11）：会话命令的结果信封本身就是 {"session": ...}。
+
+    真实开发库里有两条 FINALIZED 的会话命令（start / pause），其 journal
+    JSON 的键名恰好是 "session" —— 旧实现把键名也当旧权威引用，导致任何跑过
+    一次专注会话的实例都会被启动 preflight 永久拦死。键名 "session" 属于
+    当前 API 信封，不是对已移除权威的引用。
+    """
+    from app.task_space.migration_preflight import require_empty_legacy_authority
+
+    command_json = json.dumps({
+        "command_hash": "b2b4fcb0",
+        "db_plans": [{"table": "focus_sessions", "operation": "insert"}],
+        "request": {"entity_type": "focus_session"},
+        "result_value": {"session": {"focusedSeconds": 946, "plannedSeconds": 1500}},
+    })
+    result_json = json.dumps({
+        "session": {"focusedSeconds": 946, "ownershipState": "authoritative"},
+    })
+    engine = create_engine("sqlite:///:memory:")
+    try:
+        with engine.begin() as connection:
+            _preflight_tables(connection)
+            _insert_operation(connection, command_json, result_json)
+            require_empty_legacy_authority(connection)  # 不得抛错
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"entity_type": "task"},        # 值：已移除的实体类型
+        {"table": "sessions"},          # 值：已移除的表名
+        {"tasks": [{"id": "legacy"}]},  # 键：复数表名结构引用仍然拦截
+    ],
+)
+def test_task_space_preflight_still_rejects_removed_authority(payload: dict) -> None:
+    """收敛口径后，真正的旧权威引用（值 / 复数表名键）必须继续被拦截。"""
+    from app.task_space.migration_preflight import require_empty_legacy_authority
+
+    engine = create_engine("sqlite:///:memory:")
+    try:
+        with engine.begin() as connection:
+            _preflight_tables(connection)
+            _insert_operation(connection, json.dumps(payload))
             with pytest.raises(RuntimeError, match="breaking_cutover_requires_empty_legacy"):
                 require_empty_legacy_authority(connection)
     finally:

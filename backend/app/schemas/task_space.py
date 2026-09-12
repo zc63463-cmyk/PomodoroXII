@@ -12,7 +12,11 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from app.mutation.types import validate_operation_id
-from app.task_space.contracts import normalize_project_key
+from app.task_space.contracts import (
+    WorkItemConfidenceValue,
+    WorkItemPriorityValue,
+    normalize_project_key,
+)
 
 # --------------------------------------------------------------------------- #
 # Shared base models and validators
@@ -98,7 +102,9 @@ class WorkItemCreate(WireModel):
     parent_id: str | None = Field(default=None, max_length=64)
     type_definition_id: str | None = Field(default=None, max_length=64)
     status_definition_id: str | None = Field(default=None, max_length=64)
-    priority: str | None = Field(default=None, max_length=32)
+    # ★ 2026-09-11：值域与 DB CHECK / 编译器共用 contracts 常量 —— 中文或越界
+    # 值在 wire 层即 422，绝不允许穿到 DB CHECK（那里的错误是 500 且不可读）。
+    priority: WorkItemPriorityValue | None = None
 
 
 class LabelCreate(WireModel):
@@ -139,7 +145,12 @@ class WorkItemResponse(WireResponseModel):
     description: str | None
     type_definition_id: str
     status_definition_id: str
-    priority: str | None
+    # ★ 2026-09-12（ADR-0003）：等待前态（读投影事实）。默认 None：容忍手工
+    # 构造的行（历史行无该列时也必须能返回 null，不阻断响应）。
+    pre_waiting_status_definition_id: str | None = None
+    # ★ 2026-09-11：响应同样收紧到封闭值域；越界行只可能来自绕过 CHECK 的
+    # 历史数据（DB CHECK 已兜底），此时应当 fail-closed 而不是把脏值发给前端。
+    priority: WorkItemPriorityValue | None
     parent_id: str | None
     child_rank: int = Field(ge=0)
     depth: Literal[1, 2, 3]
@@ -150,7 +161,8 @@ class WorkItemResponse(WireResponseModel):
     effort_estimate_lower_seconds: int | None = Field(ge=0)
     effort_estimate_upper_seconds: int | None = Field(ge=0)
     effort_actual_seconds: int = Field(ge=0)
-    confidence: str | None
+    # ★ 2026-09-11：同上，confidence 值域与 sync post-image / 编译器共用常量。
+    confidence: WorkItemConfidenceValue | None
     completed_at: str | None
     cancelled_at: str | None
     archived_at: str | None
@@ -186,7 +198,8 @@ class CreateWorkItemRequest(WireModel):
     parent_id: str | None = Field(default=None, max_length=64)
     type_definition_id: str | None = Field(default=None, max_length=64)
     status_definition_id: str | None = Field(default=None, max_length=64)
-    priority: str | None = Field(default=None, max_length=32)
+    # ★ 2026-09-11：与 CreateWorkItem 同一封闭值域（contracts 常量）。
+    priority: WorkItemPriorityValue | None = None
 
 
 class UpdateWorkItemRequest(WireModel):
@@ -196,7 +209,8 @@ class UpdateWorkItemRequest(WireModel):
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     title: str | None = Field(default=None, min_length=1, max_length=500)
     description: str | None = Field(default=None, max_length=10_000)
-    priority: str | None = Field(default=None, max_length=32)
+    # ★ 2026-09-11：PATCH 的 priority 也必须是封闭值域（显式 null 仍可清空）。
+    priority: WorkItemPriorityValue | None = None
     type_definition_id: str | None = Field(default=None, max_length=64)
 
 

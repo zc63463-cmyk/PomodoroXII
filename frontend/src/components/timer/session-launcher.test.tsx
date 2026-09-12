@@ -38,6 +38,32 @@ describe('SessionLauncher', () => {
     expect(screen.getByLabelText('Level 2 attribution')).toBeRequired()
   })
 
+  it('explains why Start is disabled when no level-2 exists to attribute to', () => {
+    const onlyLevel1 = [
+      { id: 'l1', depth: 1, parentId: null, title: 'Project goal', displayKey: 'P-1', childRank: 0 },
+    ] as never
+    render(createElement(SessionLauncher, { items: onlyLevel1, initialWorkItemId: 'l1', onStart: vi.fn() }))
+
+    // 按钮必须仍然禁用，但页面要说明「为什么」以及「去哪补」
+    expect(screen.getByRole('button', { name: 'Start focus session' })).toBeDisabled()
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/还没有「二级工作项」/)
+    expect(status).toHaveTextContent(/任务/)
+  })
+
+  it('prompts the user to pick a level-2 when options exist but none is chosen', () => {
+    render(createElement(SessionLauncher, { items, initialWorkItemId: null, onStart: vi.fn() }))
+
+    expect(screen.getByRole('button', { name: 'Start focus session' })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent(/Level 2 attribution/)
+  })
+
+  it('shows no explanatory status once a level-2 is selected', () => {
+    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn() }))
+
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
   it('rebinds attribution when the selected WorkItem changes after mount', () => {
     const start = vi.fn()
     const view = render(createElement(SessionLauncher, { items, initialWorkItemId: null, onStart: start }))

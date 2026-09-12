@@ -114,6 +114,10 @@ def _work_item_response(value, space_id: str, depth: int) -> WorkItemResponse:
         description=value["description"],
         type_definition_id=str(value["type_definition_id"]),
         status_definition_id=str(value["status_definition_id"]),
+        # ★ 2026-09-12（ADR-0003）：等待前态走读投影（原始值直出，不做二次加工）。
+        #   .get 容忍手工构造的查询行；本函数是读路径与 accepted 响应共用的唯一
+        #   映射器（_map_work_item_outcome 也调它），一处改动两端覆盖。
+        pre_waiting_status_definition_id=value.get("pre_waiting_status_definition_id"),
         priority=value["priority"],
         parent_id=value["parent_id"],
         child_rank=int(value["child_rank"]),

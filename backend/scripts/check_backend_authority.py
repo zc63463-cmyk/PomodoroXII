@@ -861,6 +861,18 @@ def attribute_write_targets(node: ast.AST) -> tuple[ast.Attribute, ...]:
 def opens_for_write(node: ast.Call) -> bool:
     if dotted_name(node.func).rsplit(".", 1)[-1] != "open":
         return False
+    # ★ 2026-09-12（恢复全量门禁）：区分「文件 open」与「运行时句柄开启器」——
+    #   ``services.scope.open(principal, space_id, "write")`` 是**受权句柄开启器**
+    #   （sync 的裁剪端点用它开 Space 写句柄；第 2 个位置参数是 space_id 而不是
+    #   mode）。旧规则「mode 不是常量即违规（fail-closed）」把它误报成
+    #   direct write-mode open。收窄为：接收者链含 ``scope`` 且 ≥3 个位置参数
+    #   （principal, space_id, mode 三参形态）才豁免；其余 ``*.open(...)``
+    #   一律维持 fail-closed。
+    receiver_parts = {
+        part.lower() for part in dotted_name(node.func).rsplit(".", 1)[0].split(".") if part
+    }
+    if "scope" in receiver_parts and len(node.args) >= 3:
+        return False
     mode: ast.AST | None = node.args[1] if len(node.args) > 1 else None
     for keyword in node.keywords:
         if keyword.arg == "mode":

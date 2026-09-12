@@ -73,6 +73,18 @@ async def _remove(fixture, from_id: str, to_id: str, command_id: str, expected_v
     )
 
 
+async def _resolve(fixture, from_id: str, to_id: str, command_id: str, expected_version: int, relation_type: str = "depends_on"):
+    """D2：确认「已取消的上游不再需要」（幂等 CAS）。"""
+    return await fixture.module.execute(
+        fixture.scope,
+        _command(
+            fixture, operation="resolve", from_id=from_id, to_id=to_id,
+            command_id=command_id, relation_type=relation_type,
+            expected_version=expected_version,
+        ),
+    )
+
+
 async def _seed(fixture, prefix: str):
     project = await fixture.create_project(command_id=f"{prefix}-project", key=prefix[:4].upper())
     project_id = str(project.value["id"])
@@ -381,10 +393,21 @@ def test_and_semantics_requires_every_upstream_to_close() -> None:
     assert derive_blocked_by_dependency(relations, {"a": "in_progress", "b": "not_started"})["c"]
     # Only A completed -> STILL blocked (this is the classic regression trap).
     assert derive_blocked_by_dependency(relations, {"a": "completed", "b": "in_progress"})["c"]
-    # A cancelled + B completed -> unblocked (cancelled counts as terminal).
+    # ★ D2（ADR-0004）：A cancelled 未确认 = broken_requires_resolution -> 仍阻塞。
+    #   旧行为「cancelled 静默当完成」正是本次要修的病变。
+    assert derive_blocked_by_dependency(relations, {"a": "cancelled", "b": "completed"})["c"]
+    # 确认「不再需要」后该边才算 satisfied —— 只影响被确认的那条边。
+    confirmed = [
+        {**relations[0], "resolution": "confirmed_not_required"},
+        relations[1],
+    ]
     assert not derive_blocked_by_dependency(
-        relations, {"a": "cancelled", "b": "completed"}
+        confirmed, {"a": "cancelled", "b": "completed"}
     ).get("c", False)
+    # 未确认的另一条边仍然阻塞（AND 语义不受确认影响）。
+    assert derive_blocked_by_dependency(
+        confirmed, {"a": "cancelled", "b": "cancelled"}
+    )["c"]
 
 
 def test_missing_endpoint_never_silently_unblocks() -> None:
@@ -412,7 +435,8 @@ async def test_blocked_map_reflects_live_status_changes(task_space_fixture) -> N
     a_id, b_id, c_id = str(a.value["id"]), str(b.value["id"]), str(c.value["id"])
 
     await _create(fixture, c_id, a_id, "reland-c1")
-    await _create(fixture, c_id, b_id, "reland-c2")
+    edge_b = await _create(fixture, c_id, b_id, "reland-c2")
+    assert not isinstance(edge_b, TaskSpaceRejected), getattr(edge_b, "code", "")
 
     from app.task_space.contracts import MutateWorkItem
 
@@ -440,6 +464,17 @@ async def test_blocked_map_reflects_live_status_changes(task_space_fixture) -> N
     mapping = await fixture.queries.blocked_map(fixture.scope, project_id)
     assert mapping[c_id]["blockedByDependency"] is True, "AND semantics violated"
 
+    # ★ D2（ADR-0004）：cancelled 不再静默解除 —— 边进入 broken_requires_resolution。
     await transition(b_id, int(b.value["version"]), "cancelled", "reland-t-b")
+    mapping = await fixture.queries.blocked_map(fixture.scope, project_id)
+    assert mapping[c_id]["blockedByDependency"] is True, (
+        "cancelled must keep the edge broken until explicitly resolved"
+    )
+
+    # 显式确认「不再需要」后，解除才发生（该边 version 递增）。
+    resolved = await _resolve(
+        fixture, c_id, b_id, "reland-r1", int(edge_b.value["version"])
+    )
+    assert not isinstance(resolved, TaskSpaceRejected), getattr(resolved, "code", "")
     mapping = await fixture.queries.blocked_map(fixture.scope, project_id)
     assert mapping[c_id]["blockedByDependency"] is False

@@ -26,6 +26,16 @@ export interface WorkItemTreeProps {
   onMove?: (workItemId: string, newParentId: string | null) => void
   /** Monotonic signal from the page shortcuts: collapse or expand every branch. */
   collapseSignal?: { seq: number; mode: 'collapse' | 'expand' } | null
+  /**
+   * A tree filter is active: ignore the manual collapse state so deep matches
+   * are actually visible instead of hidden behind a collapsed parent.
+   */
+  filterActive?: boolean
+  /** Unfinished direct children per parent id — surfaces the parent/child
+   *  completion guard before the user walks into it. */
+  openChildCountById?: Record<string, number>
+  /** 层级编码（`1.2.3`，客户端派生）—— 显示用；稳定身份仍是 displayKey。 */
+  codeById?: Record<string, string>
 }
 
 function definitionLabel(
@@ -56,6 +66,9 @@ export function WorkItemTree({
   blockedSignals = {},
   onMove,
   collapseSignal = null,
+  filterActive = false,
+  openChildCountById = {},
+  codeById = {},
 }: WorkItemTreeProps) {
   const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(() => new Set())
   const draggedIdRef = useRef<string | null>(null)
@@ -156,13 +169,15 @@ export function WorkItemTree({
 
   const renderLevel = (parentId: string | null, level: 1 | 2 | 3): ReactNode => (
     children.get(parentId)?.map((item) => {
-      const collapsed = collapsedIds.has(item.id)
+      // 过滤激活时不理会手工折叠：命中的深层节点必须直接可见。
+      const collapsed = filterActive ? false : collapsedIds.has(item.id)
       const droppable = onMove !== null && level < 3
       const blocked = blockedSignals[item.id]?.isBlocked === true
       const openBlockers = blockedSignals[item.id]?.openBlockerCount ?? 0
       const blockedHint = blocked
         ? `被 ${openBlockers} 个未完成依赖项阻塞`
         : undefined
+      const openChildren = openChildCountById[item.id] ?? 0
       return createElement(
         'li',
         {
@@ -247,8 +262,19 @@ export function WorkItemTree({
                   '🔒',
                 )
               : null,
-            createElement('span', { className: 'mr-1 font-mono text-xs text-muted-foreground' }, item.displayKey),
+            createElement('span', { className: 'mr-1 font-mono text-xs text-muted-foreground' }, codeById[item.id] ?? item.displayKey),
             createElement('span', null, item.title),
+            openChildren > 0
+              ? createElement(
+                  'span',
+                  {
+                    'data-open-children': true,
+                    title: `${openChildren} 个未完成的直接子项`,
+                    className: 'ml-1 shrink-0 rounded-full border px-1.5 text-[10px] text-muted-foreground',
+                  },
+                  `${openChildren} 子`,
+                )
+              : null,
             createElement(
               'span',
               { className: 'ml-1 shrink-0 text-[10px] text-muted-foreground' },

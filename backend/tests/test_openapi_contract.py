@@ -535,6 +535,8 @@ class TestTypedResponseSchemas:
         assert props == {
             "id", "spaceId", "displayKey", "projectId", "title",
             "description", "typeDefinitionId", "statusDefinitionId",
+            # ★ 2026-09-12（ADR-0003）：等待前态（读投影事实，服务端自持/只出站）。
+            "preWaitingStatusDefinitionId",
             "priority", "parentId", "childRank", "depth",
             "completionWindowStart", "completionWindowEnd", "reviewPoint",
             "hardDeadline", "effortEstimateLowerSeconds",
@@ -543,9 +545,12 @@ class TestTypedResponseSchemas:
             "labelIds",
             "version", "createdAt", "updatedAt",
         }
-        assert set(component["required"]) == props
+        # preWaitingStatusDefinitionId 带默认值（None）：历史行 / 手工构造的行不
+        # 返回它也能通过响应校验，因此不在 required 里；其余字段全部必填。
+        assert set(component["required"]) == props - {"preWaitingStatusDefinitionId"}
         assert "display_key" not in props
         assert "project_id" not in props
+        assert "pre_waiting_status_definition_id" not in props
 
     def test_work_item_note_response_is_independent_schema(self) -> None:
         """WorkItemNoteResponse must be a named component with camelCase fields."""

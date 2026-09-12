@@ -19,11 +19,15 @@ from app.mutation.unit_of_work import MutationCompileContext
 from app.services.time import utc_now_iso_ms
 from app.task_space.contracts import (
     BLOCKING_RELATION_TYPES,
+    RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED,
     RELATION_TYPES,
     SYSTEM_STATUS_IDS,
     SYSTEM_TYPE_ID,
+    WORK_ITEM_CONFIDENCE_VALUES,
+    WORK_ITEM_PRIORITY_VALUES,
     format_work_item_display_key,
     relation_id,
+    require_enum_value,
 )
 from app.task_space.cycle_detector import detect_cycle_incremental
 from app.task_space.document import InvalidNoteDocument, UnsupportedContentVersion
@@ -205,6 +209,22 @@ WORK_ITEM_SYNC_FIELDS = frozenset({
     "completed_at", "cancelled_at", "archived_at", "marked_as_attention",
     "created_at", "updated_at", "version", "label_ids",
 })
+# ★ 2026-09-12（ADR-0003）：等待前态列 —— 服务端自持，**只出站**。
+#   不在 WORK_ITEM_SYNC_FIELDS（入站 push 精确相等，携带即拒 full_post_image_required）；
+#   但 DB 行 / sync 事件 payload 必须包含它（行形状校验要求 set(row) == spec.field_names）。
+#   唯一写入者 = 进入 Waiting 的那次迁移编译（见 _compile_TransitionWorkItem）。
+PRE_WAITING_STATUS_FIELD = "pre_waiting_status_definition_id"
+
+# DORMANT（2026-09-10 审查）：下列 9 个柔性计划字段
+# （completion_window_start / completion_window_end / review_point /
+#  hard_deadline / effort_estimate_lower_seconds /
+#  effort_estimate_upper_seconds / confidence / marked_as_attention，
+#  另含 effort_actual_seconds）
+# 在模型 + 迁移 + CHECK 约束 + Registry FieldSpec + WORK_ITEM_SYNC_FIELDS +
+# 本白名单中全部存在，但 CreateWorkItemRequest / UpdateWorkItemRequest 都没有
+# 暴露它们，且 _compile_CreateWorkItem 创建时把它们硬编码为 None / False。
+# ⇒ 目前没有任何 REST 通道可写，唯一写入途径是手工构造 sync post-image。
+# 激活它等于开工 Phase 3（柔性计划），应先过产品裁决。
 WORK_ITEM_SCALAR_FIELDS = frozenset({
     "title", "description", "type_definition_id", "priority",
     "completion_window_start", "completion_window_end", "review_point",
@@ -222,6 +242,34 @@ WORK_ITEM_LABELS_FIELDS = frozenset({"label_ids"})
 WORK_ITEM_IMMUTABLE_FIELDS = frozenset({
     "display_key", "effort_actual_seconds", "created_at",
 })
+
+
+def _require_work_item_enum(
+    field: str, value: object, allowed: tuple[str, ...]
+) -> None:
+    """Reject an out-of-domain WorkItem enum value before it can reach the DB.
+
+    ★ 2026-09-11：priority / confidence 的值域与 Pydantic wire schema 共用
+    contracts 常量。schema 层已 422 拦下在线请求；这里是**直接调用编译器**
+    （含 sync post-image 重放）的纵深防御，稳定错误码为
+    ``payload_field_not_allowed``、``details.reason`` 为 ``invalid_<field>``，
+    绝不允许越界值落到 work_items 的 CHECK 约束（那里只能是 500）。
+    """
+    from app.mutation.types import MutationRuleViolation
+
+    try:
+        require_enum_value(field, value, allowed)
+    except ValueError as exc:
+        raise MutationRuleViolation(
+            "payload_field_not_allowed",
+            {
+                "field": field,
+                "value": value,
+                "reason": str(exc),
+                "allowed": list(allowed),
+            },
+            retryable=False,
+        ) from exc
 
 
 def _monotonic_updated_at(previous: str, candidate: str) -> str:
@@ -385,6 +433,10 @@ def _authoritative_child_rank(
 
 
 async def _compile_CreateWorkItem(self, context, request):
+    # ★ 2026-09-11：值域校验先于一切副作用；越界 priority 直接给稳定领域错误。
+    _require_work_item_enum(
+        "priority", request.payload.get("priority"), WORK_ITEM_PRIORITY_VALUES
+    )
     overlay = context.authority
     project = _require_row(overlay, "project", str(request.payload["project_id"]))
     parent_id = request.payload.get("parent_id")
@@ -436,6 +488,7 @@ async def _compile_CreateWorkItem(self, context, request):
         "child_rank": _authoritative_child_rank(
             overlay, str(project["id"]), parent_id
         ),
+        # DORMANT：无 REST 写入通道，见上方 WORK_ITEM_SCALAR_FIELDS 注释。
         "completion_window_start": None,
         "completion_window_end": None,
         "review_point": None,
@@ -448,6 +501,10 @@ async def _compile_CreateWorkItem(self, context, request):
         "cancelled_at": now if status_category == "cancelled" else None,
         "archived_at": None,
         "marked_as_attention": False,
+        # ★ 2026-09-12（ADR-0003）：创建即 Waiting 没有「前态」——显式 None
+        #   （行键集必须完整：unit_of_work 的 require_complete_row 要求
+        #   set(row) == set(spec.field_names)）。
+        PRE_WAITING_STATUS_FIELD: None,
         "created_at": now,
         "updated_at": now,
         "version": 1,
@@ -493,6 +550,14 @@ async def _compile_UpdateWorkItem(self, context, request):
     unexpected = set(patch) - WORK_ITEM_SCALAR_FIELDS
     if unexpected:
         raise RuntimeError(f"unregistered WorkItem patch fields: {sorted(unexpected)}")
+    # ★ 2026-09-11：在线 PATCH 与 sync 重放共用这一层校验（sync 仅把它当
+    # 只读的约束检查调用，随后按 post-image 原样落库）。
+    if "priority" in patch:
+        _require_work_item_enum("priority", patch["priority"], WORK_ITEM_PRIORITY_VALUES)
+    if "confidence" in patch:
+        _require_work_item_enum(
+            "confidence", patch["confidence"], WORK_ITEM_CONFIDENCE_VALUES
+        )
     if patch.get("type_definition_id") is not None:
         _require_row(overlay, "type_definition", str(patch["type_definition_id"]))
     now = _monotonic_updated_at(str(item["updated_at"]), self.now_iso_ms())
@@ -632,6 +697,24 @@ async def _compile_TransitionWorkItem(self, context, request):
         "updated_at": now,
         "version": int(item["version"]) + 1,
     }
+    # ★ 2026-09-12（ADR-0003）：等待前态的**唯一写入者** = 进入 Waiting 的那次迁移
+    #   （sync post-image 的 status 变更经 :1092-1101 二次编译也汇聚到这里）。
+    #   - 目标类目 == waiting 且 当前类目 != waiting ⇒ 记录迁移前的状态 id（任意
+    #     非 waiting 类目；终态也记录，是否提供一键恢复由读侧按 Q8 判据决定）。
+    #   - 当前类目 == waiting（停在 / 在两个 waiting 类目状态间切换）⇒ 保留现值：
+    #     这不是一次新的进入。
+    #   - 其它（离开 Waiting、普通迁移）⇒ 不动该键（惰性保留，仅在 Waiting 时被消费）。
+    #   由构造保证：前态永远不是 waiting 类目（写入条件是当前类目 != waiting）。
+    #   当前状态定义查不到（理论不可达）⇒ 不写：无法证明前态可用时不猜。
+    current_status = overlay.row(
+        "status_definition", str(item["status_definition_id"])
+    )
+    if (
+        category == "waiting"
+        and current_status is not None
+        and str(current_status["category"]) != "waiting"
+    ):
+        after[PRE_WAITING_STATUS_FIELD] = item["status_definition_id"]
     return _work_item_update_command(context, request, item, after, now)
 
 
@@ -814,6 +897,12 @@ async def _compile_CreateRelation(self, context, request):
         "from_work_item_id": from_id,
         "to_work_item_id": to_id,
         "relation_type": relation_type,
+        # ★ 2026-09-12（D2 / ADR-0004）：新建边恒为「未确认」——显式 None
+        #   （行键集必须完整：unit_of_work 的 require_complete_row 要求
+        #   set(row) == set(spec.field_names)；sync 事件载荷同样要求精确相等）。
+        #   唯一写入点 = ResolveDependency 命令的编译。
+        "resolution": None,
+        "resolved_at": None,
         "created_at": now,
         "updated_at": now,
         "version": 1,
@@ -822,6 +911,63 @@ async def _compile_CreateRelation(self, context, request):
         "relations", {"id": edge_id}, "insert", None, None, after,
     )
     event = SyncEventPlan("relation", edge_id, "create", after, 1, now)
+    return context.command(
+        request=request, db_plans=(plan,), sync_events=(event,), value=after,
+    )
+
+
+async def _compile_ResolveDependency(self, context, request):
+    """解除确认：把「上游已取消且不再需要」落为显式用户事实（幂等 CAS）。
+
+    ★ 2026-09-12（D2 / ADR-0004）。依赖域合同 §3.4/§4.2：cancelled 不是完成，
+    不能自动解除依赖 —— 本命令是 resolution / resolved_at 的**唯一写入者**：
+
+    - 只接受阻塞型边（``relates_to`` 的确认无意义，fail-closed 拒绝）；
+    - 行不存在 → ``not_found``；expected_version 不符 → ``version_conflict``；
+    - **幂等 CAS**（先例：TrashWorkItem / RestoreWorkItem）：已确认时重复确认 =
+      零效果回执（db_plans=()、sync_events=()、无 version bump），防止双击 /
+      意图重放产生伪 version bump 使其它 pending CAS 失效；
+    - ``resolved_at`` 由服务端单调时钟打戳（防伪；外部 schema extra="forbid"
+      本就拒收调用方自带时间戳，见 schemas/relation.py::ResolveRelationRequest）。
+    """
+    from app.mutation.types import MutationRuleViolation
+
+    overlay = context.authority
+    _space_id, _from_id, _to_id, relation_type, edge_id = _relation_identity(request)
+    if relation_type not in BLOCKING_RELATION_TYPES:
+        raise MutationRuleViolation(
+            "payload_field_not_allowed",
+            {"field": "relation_type", "value": relation_type},
+            retryable=False,
+        )
+    row = overlay.row("relation", edge_id)
+    if row is None:
+        raise MutationRuleViolation(
+            "not_found", {"entity_type": "relation", "id": edge_id},
+            retryable=False,
+        )
+    before = dict(row)
+    _require_expected_version(before, request.expected_version)
+    if before["resolution"] is not None:
+        # 幂等 CAS：重复确认 = 零效果回执（无 version bump、无 sync 事件、无 DB 写）。
+        return context.command(
+            request=request, db_plans=(), sync_events=(), value=before,
+        )
+    now = _monotonic_updated_at(str(before["updated_at"]), self.now_iso_ms())
+    after = {
+        **before,
+        "resolution": RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED,
+        "resolved_at": now,
+        "updated_at": now,
+        "version": int(before["version"]) + 1,
+    }
+    plan = DbMutationPlan(
+        "relations", {"id": edge_id}, "update",
+        request.expected_version, before, after,
+    )
+    event = SyncEventPlan(
+        "relation", edge_id, "update", after, int(after["version"]), now,
+    )
     return context.command(
         request=request, db_plans=(plan,), sync_events=(event,), value=after,
     )
@@ -875,6 +1021,7 @@ async def _compile_RemoveRelation(self, context, request):
 
 TaskSpaceCompiler.compile_CreateRelation = _compile_CreateRelation
 TaskSpaceCompiler.compile_RemoveRelation = _compile_RemoveRelation
+TaskSpaceCompiler.compile_ResolveDependency = _compile_ResolveDependency
 
 
 # -- WorkItem Sync entity compilation -----------------------------------------
@@ -925,6 +1072,17 @@ def _full_work_item_sync_candidate(
             missing=sorted(expected_payload_fields - actual_fields),
             extra=sorted(actual_fields - expected_payload_fields),
         )
+    # ★ 2026-09-11：sync post-image（外部客户端 / 离线行）的 priority /
+    # confidence 也必须在编译前 fail-closed。离线设备可能带着本地自由文本
+    # （如「高」）重放；只靠 DB CHECK 会让整批同步以不可读的完整性错误收场。
+    for enum_field, allowed_values in (
+        ("priority", WORK_ITEM_PRIORITY_VALUES),
+        ("confidence", WORK_ITEM_CONFIDENCE_VALUES),
+    ):
+        try:
+            require_enum_value(enum_field, request.payload.get(enum_field), allowed_values)
+        except ValueError as exc:
+            _reject_work_item_sync(str(exc), field=enum_field)
     if int(before["version"]) != request.expected_version:
         raise MutationRuleViolation(
             "version_conflict",
@@ -997,6 +1155,11 @@ async def _compile_sync_work_item(self, context, request):
 
     family = families[0]
     junction_plans: tuple[DbMutationPlan, ...] = ()
+    # ★ 2026-09-12（ADR-0003）：pre_waiting 列是服务端自持的**只出站**列 ——
+    #   客户端上行 post-image 从不携带它（WORK_ITEM_SYNC_FIELDS 精确相等不变）。
+    #   缺省从真实前像**继承**（惰性保留：离开 Waiting / 普通迁移都不清除）；
+    #   唯一覆盖点是下面 status 家族进入 Waiting 时的 typed 编译结果。
+    pre_waiting_status = before[PRE_WAITING_STATUS_FIELD]
     if family == "scalar":
         typed = _typed_sync_request(
             context,
@@ -1033,7 +1196,13 @@ async def _compile_sync_work_item(self, context, request):
         )
         # Shared constraint validation (status machine, active-child conflict,
         # envelope claim).  completed_at/cancelled_at are adopted verbatim.
-        await _compile_TransitionWorkItem(self, context, typed)
+        # ★ 2026-09-12（ADR-0003）：typed 编译同时算出 pre_waiting 列的
+        #   服务端权威值（进入 Waiting 的那一跳才写入）—— 取它覆盖继承值；
+        #   其余字段仍按 candidate verbatim 采用（replay 不重新生成时间戳）。
+        typed_command = await _compile_TransitionWorkItem(self, context, typed)
+        pre_waiting_status = typed_command.db_plans[0].after_row[
+            PRE_WAITING_STATUS_FIELD
+        ]
     else:
         # D5 Y labels family: the candidate carries the full label_ids
         # projection; replay diffs the junction table (present -> insert,
@@ -1073,19 +1242,23 @@ async def _compile_sync_work_item(self, context, request):
     # cancelled_at / child_rank.  label_ids is a virtual projection field: it
     # travels in the sync event post-image but never in a work_items row.
     after = {key: value for key, value in candidate.items() if key != "label_ids"}
+    # ★ 2026-09-12（ADR-0003）：落库行与 sync 事件 payload 都必须携带服务端自持的
+    #   pre_waiting 列（行形状校验要求 set(row) == spec.field_names）。
+    after[PRE_WAITING_STATUS_FIELD] = pre_waiting_status
+    event_payload = {**dict(candidate), PRE_WAITING_STATUS_FIELD: pre_waiting_status}
     plan = DbMutationPlan(
         "work_items", {"id": after["id"]}, "update",
         request.expected_version, before, after,
     )
     event = SyncEventPlan(
-        "work_item", str(after["id"]), "update", dict(candidate),
+        "work_item", str(after["id"]), "update", event_payload,
         int(after["version"]), str(after["updated_at"]),
     )
     return context.command(
         request=request,
         db_plans=(plan, *junction_plans),
         sync_events=(event,),
-        value=dict(candidate),
+        value=event_payload,
     )
 
 

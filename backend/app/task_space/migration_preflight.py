@@ -23,17 +23,31 @@ SAFE_MUTATION_TERMINALS = ("FINALIZED", "ABORTED", "COMPENSATED")
 #    不一致就直接拒绝启动（防止有人偷偷改了迁移链）。
 #    忘了更新的症状是启动时报
 #    "fleet preflight policy targets a different revision"（assets 踩过一次）。
-TASK_SPACE_TARGET_HEAD = "space_013_relations"
+TASK_SPACE_TARGET_HEAD = "space_015_relation_resolution"
+
+
+# ★★ 判定口径（2026-09-11 修正，勿回退）：
+#   旧权威引用只会以「标识值」出现 —— entity_type / table 这类字段的**值**
+#   （"task"、"sessions" …）。而**键名不能全树扫**：当前代码为每条会话命令
+#   写入的结果信封本身就长这样 {"session": {...}}
+#   （focus_session/policy.py 多处 value={"session": ...}，journal 原样持久化
+#   result_value），任何实例只要跑过一次专注会话，键名 "session" 就会被误判，
+#   被启动 preflight 永久拦死（2026-09-11 实测：开发库 2c1b5b92 的两条
+#   FINALIZED start/pause 命令触发了 breaking_cutover_requires_empty_legacy）。
+#   ⇒ 值：全量扫描；键：仅扫「表名」（复数）—— 保留对 {"tasks": [...]} 这类
+#     旧结构引用的检测，同时不误伤当前 API 信封。
+REMOVED_AUTHORITY_VALUES = frozenset((*LEGACY_ENTITY_TYPES, *LEGACY_TABLES))
+REMOVED_AUTHORITY_KEYS = frozenset(LEGACY_TABLES)
 
 
 def _contains_removed_authority(value: object) -> bool:
-    """Return whether a decoded JSON tree contains a removed authority key/value."""
-    removed = frozenset((*LEGACY_ENTITY_TYPES, *LEGACY_TABLES))
+    """Return whether a decoded JSON tree contains a removed authority reference."""
     if isinstance(value, str):
-        return value in removed
+        return value in REMOVED_AUTHORITY_VALUES
     if isinstance(value, Mapping):
         return any(
-            _contains_removed_authority(key) or _contains_removed_authority(item)
+            (isinstance(key, str) and key in REMOVED_AUTHORITY_KEYS)
+            or _contains_removed_authority(item)
             for key, item in value.items()
         )
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):

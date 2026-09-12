@@ -58,6 +58,13 @@ vi.mock('@/stores/quick-note-store', () => ({
   },
 }))
 
+const mockRefreshCachedOverview = vi.fn().mockResolvedValue(undefined)
+vi.mock('@/stores/task-space-store', () => ({
+  useTaskSpaceStore: {
+    getState: () => ({ refreshCachedOverview: mockRefreshCachedOverview }),
+  },
+}))
+
 vi.mock('@/lib/query-client', () => ({
   queryClient: { invalidateQueries: vi.fn(), clear: vi.fn() },
 }))
@@ -97,6 +104,9 @@ describe('lib/sync/index', () => {
     })
     expect(mockSetState).not.toHaveBeenCalled()
     expect(mockRefreshQuickNotesFromRepository).toHaveBeenCalledTimes(1)
+    // 回归（2026-09-11）：pull 落表的远端变更（如投入物化）必须让任务空间
+    // 重读本地缓存，否则界面停留在同步前的快照。
+    expect(mockRefreshCachedOverview).toHaveBeenCalledTimes(1)
   })
 
   it('IX2-QN: wire onPushComplete → pending count + refresh QuickNote store', async () => {
@@ -113,6 +123,8 @@ describe('lib/sync/index', () => {
 
     expect(mockSetState).toHaveBeenCalledWith({ pendingCount: 3 })
     expect(mockRefreshQuickNotesFromRepository).toHaveBeenCalledTimes(1)
+    // push 阶段不重读任务空间（远端数据在 pull 落表；每周期三次重读是纯浪费）。
+    expect(mockRefreshCachedOverview).not.toHaveBeenCalled()
   })
 
   it('IX3: re-bootstrap 替换为新实例并 destroy 旧实例', async () => {
@@ -152,6 +164,8 @@ describe('lib/sync/index', () => {
       }),
     )
     expect(mockRefreshQuickNotesFromRepository).toHaveBeenCalledTimes(1)
+    // 回归（2026-09-11）：周期末同样要收敛任务空间快照。
+    expect(mockRefreshCachedOverview).toHaveBeenCalledTimes(1)
   })
 
   it('IX5: wire onSyncComplete infra-error → error 文案', async () => {

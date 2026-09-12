@@ -1,10 +1,13 @@
 'use client'
 
 import { createElement, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useRouter } from 'next/navigation'
+import { BlockerAckModal } from '@/components/task-space/blocker-ack-modal'
 import { FocusedWorkItemNote } from '@/components/timer/focused-work-item-note'
 import { SessionClock } from '@/components/timer/session-clock'
 import { SessionLauncher, type LaunchSelection } from '@/components/timer/session-launcher'
 import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
+import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/timer/session-review-completion'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
 import { deriveSessionClock } from '@/lib/focus-session/clock'
@@ -15,6 +18,9 @@ import { CommandReconciliation } from '@/lib/focus-session/command-reconciliatio
 import { focusSessionApi } from '@/services/focus-session-api'
 import { TimerNoteComposerDraftController, type TimerNoteComposerDraftDatabase } from '@/lib/task-space/timer-note-composer-draft-registry'
 import { TaskSpaceRepository } from '@/lib/task-space/task-space-repository'
+import { evaluateSessionLaunch } from '@/lib/task-space/session-launch-guard'
+import { recordBlockerAck } from '@/lib/task-space/blocker-ack-log'
+import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
 import { canonicalNow } from '@/lib/direct-command-intents'
 import { spaceDBManager } from '@/services/space-db'
@@ -67,6 +73,12 @@ export default function TimerPage() {
   const selectWorkItem = useTaskSpaceStore((state) => state.selectWorkItem)
   const hydrateTaskSpace = useTaskSpaceStore((state) => state.hydrate)
   const resetTaskSpace = useTaskSpaceStore((state) => state.reset)
+  const relations = useTaskSpaceStore((state) => state.relations)
+  const definitions = useTaskSpaceStore((state) => state.definitions)
+  const acknowledgeLaunch = useTaskSpaceStore((state) => state.acknowledgeLaunch)
+  const clearLaunchAck = useTaskSpaceStore((state) => state.clearLaunchAck)
+  const hasLaunchAck = useTaskSpaceStore((state) => state.hasLaunchAck)
+  const router = useRouter()
   const coordinator = useActiveSessionCoordinator()
   const identity = useActiveSessionIdentity()
   const provisionalLock = useActiveSessionProvisionalLock()
@@ -79,6 +91,8 @@ export default function TimerPage() {
   const installLocalProvisional = useTimerStore((state) => state.installLocalProvisional)
   const updateLocalProvisionalSession = useTimerStore((state) => state.updateLocalProvisionalSession)
   const [database, setDatabase] = useState<PomodoroXIDB | null>(null)
+  const [taskRepository, setTaskRepository] = useState<TaskSpaceRepository | null>(null)
+  const [blockedLaunch, setBlockedLaunch] = useState<{ selection: LaunchSelection; blockerIds: string[] } | null>(null)
   const [focusRepository, setFocusRepository] = useState<FocusSessionRepository | null>(null)
   const [noteRepository, setNoteRepository] = useState<WorkItemNoteRepository | null>(null)
   const [focusedNote, setFocusedNote] = useState<CachedWorkItemNote | null>(null)
@@ -94,6 +108,7 @@ export default function TimerPage() {
     if (!spaceId) {
       resetTaskSpace()
       setDatabase(null)
+      setTaskRepository(null)
       setFocusRepository(null)
       setNoteRepository(null)
       return
@@ -107,6 +122,7 @@ export default function TimerPage() {
       setDatabase(binding.database)
       setNoteRepository(notes)
       setFocusRepository(focus)
+      setTaskRepository(taskRepository)
       void hydrateTaskSpace(spaceId, taskRepository)
     } catch (cause) {
       if (!cancelled) setStableError(cause)
@@ -114,6 +130,11 @@ export default function TimerPage() {
     return () => { cancelled = true }
   }, [coordinator, hydrateTaskSpace, identity, provisionalLock, resetTaskSpace, spaceId])
 
+  // Space 作用域状态类目（与任务页共用同一份查表）—— 会话启动判定需要它。
+  const categoryById = useMemo(
+    () => deriveStatusCategoryById(definitions, workItems),
+    [definitions, workItems],
+  )
   const aggregate = localProvisional?.aggregate ?? locator?.session ?? endedAggregate
   const plans = useMemo(() => aggregate?.plan.filter((plan) => plan.removedAt === null) ?? [], [aggregate?.plan])
   const currentPlan = plans.find((plan) => plan.currentDuringSession) ?? plans[0] ?? null
@@ -297,6 +318,83 @@ export default function TimerPage() {
           spaceId, operationId, ownerDeviceId: identity.deviceId, ownerTabId: identity.tabId, aggregate: local,
         })
       }
+      // 启动成功即消费一次性放行：下一次启动同一被阻塞项必须重新确认
+      //（"never silent" 是按次成立的）。
+      clearLaunchAck(selection.level2WorkItemId)
+    } catch (cause) {
+      setStableError(cause)
+    }
+  }
+
+  /**
+   * 启动前置判定 —— 与任务页按钮**同一条规则**（session-launch-guard）。
+   *
+   * ★ 这里是此前最危险的缺口：任务页拦、/timer 不拦，规则形同虚设。
+   * ★ 任务页确认过的一次性放行（hasLaunchAck）在此生效；否则先取本地边
+   *   （Dexie，离线可用；再并入 store 里可能更新的边）判定，被阻塞就弹
+   *   BlockerAck，绝不静默放行。
+   */
+  const requestStart = async (selection: LaunchSelection) => {
+    const level2Id = selection.level2WorkItemId
+    if (!hasLaunchAck(level2Id)) {
+      const cached = taskRepository
+        ? await taskRepository.listCachedRelations(level2Id).catch(() => [])
+        : []
+      const storeEdges = relations.filter((edge) => (
+        edge.fromWorkItemId === level2Id || edge.toWorkItemId === level2Id
+      ))
+      const byId = new Map<string, (typeof storeEdges)[number]>()
+      for (const edge of [...cached, ...storeEdges]) byId.set(edge.id, edge)
+      const decision = evaluateSessionLaunch({
+        level2WorkItemId: level2Id,
+        workItems,
+        relations: [...byId.values()],
+        statusCategoryById: categoryById,
+      })
+      if (decision.status === 'blocked') {
+        setBlockedLaunch({ selection, blockerIds: decision.openBlockerIds })
+        return
+      }
+    }
+    await start(selection)
+  }
+
+  const handleBlockedProceed = () => {
+    const pending = blockedLaunch
+    if (!pending) return
+    recordBlockerAck({
+      workItemId: pending.selection.level2WorkItemId,
+      blockerIds: pending.blockerIds,
+      source: 'timer',
+    })
+    acknowledgeLaunch(pending.selection.level2WorkItemId)
+    setBlockedLaunch(null)
+    void start(pending.selection)
+  }
+
+  const handleBlockedCancel = () => {
+    const first = blockedLaunch?.blockerIds[0]
+    setBlockedLaunch(null)
+    if (!first) return
+    // 「返回处理上游」：选中上游并回到任务页 —— 与任务页弹窗的取消语义一致。
+    selectWorkItem(first)
+    router.push('/tasks')
+  }
+
+  // 只读原因要说人话：同设备=另一个标签页（关掉就成孤儿）；不同设备=另一台机器。
+  const ownerHint = locator
+    ? locator.ownerDeviceId === identity.deviceId
+      ? '该会话由另一个标签页持有 —— 若那个标签页已关闭，可在此接管继续。'
+      : '该会话由另一台设备持有 —— 接管后计时将在本设备继续。'
+    : undefined
+
+  /**
+   * 只读 → 接管（协议早已就绪，此前缺入口）：上一个标签页关掉后会话会
+   * 永久只读、既不能继续也不能结束，只能看着计时卡死。
+   */
+  const takeOverSession = async () => {
+    try {
+      await coordinator.takeover()
     } catch (cause) {
       setStableError(cause)
     }
@@ -413,25 +511,46 @@ export default function TimerPage() {
       setError('review_draft_identity_mismatch')
       return
     }
-    try {
-      reviewController.update(draft)
-      await reviewController.flush('before-submit')
-      setReviewDraft(reviewController.currentDraft())
-      const result = await focusRepository.submitReview(draft)
-      if (result.session.ownershipState === 'local_provisional' && result.session.reviewState === 'pending') {
-        // S4 has not imported this terminal provisional Session yet. Keep the
-        // exact durable draft and controller alive for post-import recovery.
-        setReviewDraft(reviewController.currentDraft())
-        return
-      }
-      const refreshed = await readLocalAggregate(database!, draft.sessionId)
-      setEndedAggregate(refreshed)
-      reviewController.dispose()
-      setReviewController(null)
-      setReviewDraft(null)
-    } catch (cause) {
-      setStableError(cause)
-    }
+    // ★ 2026-09-11：收尾动作（提交成功后刷新任务空间 + 进入完成态）抽到
+    // session-review-completion，行为不变、可单测；本处只负责注入页面依赖。
+    const controller = reviewController
+    await submitReviewWithCompletion({
+      submit: async () => {
+        controller.update(draft)
+        await controller.flush('before-submit')
+        setReviewDraft(controller.currentDraft())
+        const result = await focusRepository.submitReview(draft)
+        return {
+          ownershipState: result.session.ownershipState,
+          reviewState: result.session.reviewState,
+        }
+      },
+      // ⚠ 本地 provisional 未导入分支（S4 尚未导入该终态会话）：保留 durable
+      // 草稿与控制器供导入后恢复提交；此分支不刷新任务空间、不提供回跳
+      //（会话尚未真正落库）。
+      keepProvisionalDraft: () => setReviewDraft(controller.currentDraft()),
+      reloadAggregate: async () => {
+        setEndedAggregate(await readLocalAggregate(database!, draft.sessionId))
+      },
+      releaseDraft: () => {
+        controller.dispose()
+        setReviewController(null)
+        setReviewDraft(null)
+      },
+      onError: setStableError,
+    })
+  }
+
+  /**
+   * ★ 2026-09-11：复盘完成态的出口 —— 会话已终态、面板只读，此前只能靠浏览器
+   * 后退离开。照抄 BlockerAck 取消的写法：选中会话挂的二级项 + 回任务页。
+   */
+  const handleReturnToTasks = () => {
+    returnToTaskSpace({
+      level2WorkItemId: aggregate?.context?.level2WorkItemId ?? null,
+      selectWorkItem,
+      navigate: (href) => router.push(href),
+    })
   }
 
   const reconcileCommand = async (commandId: string, replaySafe: boolean): Promise<boolean> => {
@@ -465,6 +584,10 @@ export default function TimerPage() {
       receipts: aggregate.commandReceipts as never,
       draft: reviewDraft,
       readOnly: !reviewSession,
+      // ★ 2026-09-11：只在复盘完成态（readOnly = 无待复盘项）渲染出口；待复盘
+      // （可写）态没有回跳入口。provisional 未导入分支结构上不会进入 readOnly
+      //（早退 + 保留草稿、不重读聚合），所以那里既无刷新也无回跳。
+      onReturnToTasks: reviewSession ? undefined : handleReturnToTasks,
       onDraftChange: updateReviewDraft,
       onSubmit: submitReview,
       onReconcile: reconcileCommand,
@@ -473,6 +596,8 @@ export default function TimerPage() {
     : aggregate && session && clock ? createElement('div', { className: 'grid gap-6 p-6' },
     createElement(SessionClock, {
       session, nowMs, owner: ownershipMode === 'owner',
+      ownerHint,
+      onTakeover: ownershipMode === 'read_only' ? takeOverSession : undefined,
       onPause: (occurredAt) => clockAction('pause', occurredAt),
       onResume: (occurredAt) => clockAction('resume', occurredAt),
       onEnd: (occurredAt) => clockAction('end', occurredAt),
@@ -509,12 +634,32 @@ export default function TimerPage() {
     selectedWorkItem ? createElement('p', null, `Selected: ${selectedWorkItem.displayKey} ${selectedWorkItem.title}`) : null,
     workItems.length
       ? createElement('div', { className: 'grid gap-2', 'aria-label': 'WorkItems for focus' }, workItems.map((item) => createElement('button', { key: item.id, type: 'button', onClick: () => selectWorkItem(item.id) }, `${item.displayKey} ${item.title}`)))
-      : createElement('p', null, 'No WorkItems are available in this Space.'),
-    workItems.length ? createElement(SessionLauncher, { items: workItems, initialWorkItemId: selectedWorkItemId, onStart: start }) : null,
+      // ★ 空状态要说清「为什么空」和「去哪补」。
+      //   原来只有一句 "No WorkItems are available in this Space."，
+      //   用户无法区分「选错 Space / 同步没跑完 / 确实没建」三种情况，
+      //   于是整体被误读成"番茄钟没开发"。走查实测（2026-09-10）。
+      : createElement('div', { role: 'status', className: 'grid gap-2 text-sm text-muted-foreground' },
+        createElement('p', null, '这个 Space 里还没有工作项，所以没有东西可以投入。'),
+        createElement('p', null, '常见原因有三种，按顺序排查：'),
+        createElement('ol', { className: 'ml-5 list-decimal' },
+          createElement('li', null, '选错了 Space —— 左上角切到有数据的那个（本机内容都在名为「111」的 Space 里）。'),
+          createElement('li', null, '刚进来、首轮同步还没跑完 —— 任务页会显示 Loading；等它出树再回来。'),
+          createElement('li', null, '确实还没建 —— 去「任务」页新建项目与工作项。'),
+        ),
+        createElement('p', null, '另外：专注会话必须挂在「二级」工作项上，所以至少要有一个一级项 + 它的一个子项。'),
+      ),
+    workItems.length ? createElement(SessionLauncher, { items: workItems, initialWorkItemId: selectedWorkItemId, onStart: requestStart }) : null,
   )
 
   return createElement('main', { className: 'min-h-full' },
     error || timerError ? createElement('p', { role: 'alert', className: 'border-b bg-destructive/10 px-4 py-2 text-sm text-destructive' }, error ?? timerError) : null,
     content,
+    blockedLaunch ? createElement(BlockerAckModal, {
+      open: true,
+      workItem: workItems.find((item) => item.id === blockedLaunch.selection.level2WorkItemId) ?? null,
+      blockers: workItems.filter((item) => blockedLaunch.blockerIds.includes(item.id)),
+      onProceed: handleBlockedProceed,
+      onCancel: handleBlockedCancel,
+    }) : null,
   )
 }

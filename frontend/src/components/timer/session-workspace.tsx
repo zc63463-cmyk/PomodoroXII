@@ -72,6 +72,14 @@ export function SessionWorkspace({
         ),
         createElement('button', { type: 'button', onClick: () => void onRemovePlanItem?.(plan.id) }, `Remove ${plan.titleSnapshot} from plan`),
       )),
+      // 空计划必须说出来：此前 plans 为空时这一节标题下什么都没有 ——
+      // 用户看到「Current plan」+ 空白，只会判定"坏了"。
+      plans.length === 0
+        ? createElement('p', { role: 'status', className: 'text-sm text-muted-foreground' },
+            availableLevel3.length > 0
+              ? '还没有计划项 —— 用下面的「Add … to plan」把三级项加入本次会话。'
+              : '这次会话还没有计划项（启动时未选三级项，当前二级项下也没有可加入的三级项）。')
+        : null,
       availableLevel3.map((item) => createElement('button', { key: item.id, type: 'button', onClick: () => void onAddPlanItem?.(item.id) }, `Add ${item.title} to plan`)),
     ),
     switchError ? createElement('p', { role: 'alert' }, switchError) : null,

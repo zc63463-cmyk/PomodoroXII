@@ -33,11 +33,19 @@ const workItem = (id: string, parentId: string | null, depth: 1 | 2 | 3, statusD
   updatedAt: '2026-07-15T08:00:00.000Z',
 })
 
-const edge = (fromWorkItemId: string, toWorkItemId: string): CachedRelation => ({
+const edge = (
+  fromWorkItemId: string,
+  toWorkItemId: string,
+  relationType: CachedRelation['relationType'] = 'depends_on',
+  resolution: CachedRelation['resolution'] = null,
+): CachedRelation => ({
   id: `rel_${fromWorkItemId}_${toWorkItemId}`,
   fromWorkItemId,
   toWorkItemId,
-  relationType: 'depends_on',
+  relationType,
+  // ★ D2 / ADR-0004：确认两列（默认未确认）。
+  resolution,
+  resolvedAt: resolution === null ? null : '2026-07-15T09:00:00.000Z',
   version: 1,
   createdAt: '2026-07-15T08:00:00.000Z',
   updatedAt: '2026-07-15T08:00:00.000Z',
@@ -59,6 +67,8 @@ function repositoryFixture(overrides: Partial<TaskSpaceRepositoryLike> = {}): Ta
     listBlockedMap: vi.fn().mockResolvedValue({ items: {} }),
     createRelation: vi.fn().mockResolvedValue(edge('l2', 'up1')),
     removeRelation: vi.fn().mockResolvedValue(edge('l2', 'up1')),
+    // ★ D2 / ADR-0004：解除确认（默认回一个已确认行）。
+    resolveRelation: vi.fn().mockResolvedValue(edge('l2', 'up1', 'depends_on', 'confirmed_not_required')),
     addWorkItemLabels: vi.fn(),
     removeWorkItemLabel: vi.fn(),
     createLabel: vi.fn(),
@@ -116,6 +126,29 @@ describe('task-space store: dependency domain', () => {
 
     expect(repository.removeRelation).toHaveBeenCalled()
     expect(useTaskSpaceStore.getState().relations).toHaveLength(0)
+  })
+
+  it('resolveRelation replaces the edge with the confirmed row（store 重算为准）', async () => {
+    const repository = repositoryFixture()
+    useTaskSpaceStore.setState({
+      repository, spaceId: 'space-a',
+      relations: [edge('l2', 'up1'), edge('other', 'up9')],
+    })
+
+    await useTaskSpaceStore.getState().resolveRelation({
+      fromWorkItemId: 'l2', toWorkItemId: 'up1', relationType: 'depends_on',
+    })
+
+    expect(repository.resolveRelation).toHaveBeenCalledWith({
+      fromWorkItemId: 'l2', toWorkItemId: 'up1', relationType: 'depends_on',
+    })
+    const rows = useTaskSpaceStore.getState().relations
+    expect(rows).toHaveLength(2)
+    expect(rows.find((row) => row.id === 'rel_l2_up1')?.resolution)
+      .toBe('confirmed_not_required')
+    // 无关边不受影响。
+    expect(rows.find((row) => row.id === 'rel_other_up9')?.resolution).toBeNull()
+    expect(useTaskSpaceStore.getState().error).toBeNull()
   })
 
   it('surfaces a stable cycle message without leaking transport text', async () => {
@@ -177,9 +210,18 @@ describe('selectBlockedMap', () => {
     })
     expect(oneClosed.l2.blockedByDependency).toBe(true)
 
-    const bothClosed = selectBlockedMap(items, relations, {
+    // ★ D2（ADR-0004）：cancelled 未确认 = broken_requires_resolution → 仍阻塞。
+    const cancelledUnconfirmed = selectBlockedMap(items, relations, {
       a: 'completed', b: 'cancelled',
     })
+    expect(cancelledUnconfirmed.l2.blockedByDependency).toBe(true)
+
+    // 确认「不再需要」后才解除。
+    const bothClosed = selectBlockedMap(
+      items,
+      [edge('l2', 'a'), edge('l2', 'b', 'depends_on', 'confirmed_not_required')],
+      { a: 'completed', b: 'cancelled' },
+    )
     expect(bothClosed.l2).toBeUndefined()
   })
 

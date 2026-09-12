@@ -62,3 +62,12 @@ class Relation(Base, SyncMixin):
         nullable=False,
     )
     relation_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # ★ 2026-09-12（D2 / ADR-0004）：依赖解除确认 —— 服务端自持的两列（唯一写入者
+    #   是 ResolveDependency 命令的编译）。
+    #   - `resolution`：目前唯一合法值 `"confirmed_not_required"`（显式用户事实）；
+    #     NULL = 未确认。用字符串而不是布尔（未来可能引入其它 resolution 取值）。
+    #   - `resolved_at`：服务端单调时钟戳（防伪；不接受调用方自带时间戳）。
+    #   注意：关系的**三态**（satisfied / broken_requires_resolution / open）是纯派生，
+    #   绝不落库 —— 落库的只有这两列。
+    resolution: Mapped[str | None] = mapped_column(String(64))
+    resolved_at: Mapped[str | None] = mapped_column(String(32))

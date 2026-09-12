@@ -1,8 +1,12 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { canonicalize } from 'json-canonicalize'
 import {
   MAX_NOTE_BLOCKS, MAX_NOTE_DOCUMENT_BYTES, MAX_NOTE_ITEMS,
-  workItemNoteDocumentSchema,
+  WORK_ITEM_CONFIDENCE_VALUES, WORK_ITEM_PRIORITY_VALUES,
+  taskSpaceEntityBusinessPayloadForHash,
+  workItemNoteDocumentSchema, workItemReadSchema, workItemSchema,
 } from './task-space'
 
 const valid = {
@@ -79,5 +83,88 @@ describe('WorkItemNote document v1', () => {
     const tooLarge = structuredClone(document)
     tooLarge.blocks.at(-1)!.text += 'x'
     expect(() => workItemNoteDocumentSchema.parse(tooLarge)).toThrow(/byte/i)
+  })
+})
+
+/**
+ * ★ 2026-09-11 WorkItem 实体契约夹具（**不含 depth**）：depth 是读模型派生值，
+ * 不在实体契约 / post-image / 业务哈希里（见 workItemSchema 注释）。
+ */
+const wireItem = (priority: unknown, confidence: unknown = null) => ({
+  id: 'w1', spaceId: 's1', projectId: 'p1', displayKey: 'RM-1', title: 'Item',
+  description: null, typeDefinitionId: 't1', statusDefinitionId: 'st1',
+  priority, parentId: null, childRank: 0,
+  completionWindowStart: null, completionWindowEnd: null, reviewPoint: null,
+  hardDeadline: null, effortEstimateLowerSeconds: null, effortEstimateUpperSeconds: null,
+  effortActualSeconds: 0, confidence, completedAt: null, cancelledAt: null,
+  archivedAt: null, markedAsAttention: false, labelIds: [], version: 1,
+  createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z',
+})
+
+const backendDomain = (alias: string): string[] => {
+  // 直接读后端 contracts.py 的 Literal 声明，保证跨语言同源而非人工同步。
+  const source = readFileSync(
+    resolve(process.cwd(), '../backend/app/task_space/contracts.py'),
+    'utf8',
+  )
+  const match = new RegExp(`${alias}[^=]*=\\s*Literal\\[([^\\]]*)\\]`).exec(source)
+  if (!match) throw new Error(`missing backend enum domain: ${alias}`)
+  return [...match[1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]!)
+}
+
+describe('WorkItem enum domains', () => {
+  it('matches the backend contracts value-for-value', () => {
+    expect(WORK_ITEM_PRIORITY_VALUES).toEqual(backendDomain('WorkItemPriorityValue'))
+    expect(WORK_ITEM_CONFIDENCE_VALUES).toEqual(backendDomain('WorkItemConfidenceValue'))
+    expect(WORK_ITEM_PRIORITY_VALUES).toEqual(['low', 'medium', 'high', 'urgent'])
+    expect(WORK_ITEM_CONFIDENCE_VALUES).toEqual(['low', 'medium', 'high'])
+  })
+
+  it('accepts only canonical English values and null on the wire schema', () => {
+    for (const priority of WORK_ITEM_PRIORITY_VALUES) {
+      expect(workItemSchema.parse(wireItem(priority)).priority).toBe(priority)
+    }
+    expect(workItemSchema.parse(wireItem(null)).priority).toBeNull()
+    // 中文/大写/自由文本一律拒绝：绝不能把越界值写进业务载荷。
+    for (const dirty of ['高', 'HIGH', 'p1', 1, {}, ['high']]) {
+      expect(() => workItemSchema.parse(wireItem(dirty))).toThrow()
+    }
+  })
+
+  it('accepts only canonical confidence values and null', () => {
+    for (const confidence of WORK_ITEM_CONFIDENCE_VALUES) {
+      expect(workItemSchema.parse(wireItem(null, confidence)).confidence).toBe(confidence)
+    }
+    expect(workItemSchema.parse(wireItem('high', null)).confidence).toBeNull()
+    expect(() => workItemSchema.parse(wireItem(null, '很确定'))).toThrow()
+  })
+})
+
+/**
+ * ★ 2026-09-11 WorkItem depth 契约回归。
+ * depth 是**读模型派生值**：实体契约（post-image / 本地行 / 业务哈希）不含它，
+ * 服务端读投影（GET/list）才带它。以前前端把它当必填实体字段，导致 sync pull
+ * 落下的无 depth 行在 tree 里静默消失。
+ */
+describe('WorkItem depth contract', () => {
+  it('rejects depth on the entity contract (post-image shape)', () => {
+    expect(() => workItemSchema.parse({ ...wireItem('high'), depth: 1 })).toThrow()
+  })
+
+  it('keeps depth on the read projection only', () => {
+    expect(workItemReadSchema.parse({ ...wireItem('high'), depth: 2 }).depth).toBe(2)
+    expect(() => workItemReadSchema.parse({ ...wireItem('high'), depth: 4 })).toThrow()
+    // 读投影仍要求 depth 来自服务端；缺失时解析失败（不静默给默认值）。
+    expect(() => workItemReadSchema.parse(wireItem('high'))).toThrow()
+  })
+
+  it('excludes depth from the workItem business payload for hashing', () => {
+    // 本地业务行（cached 形状）不含 space 身份，也不含 depth。
+    const { spaceId: _spaceId, ...entity } = wireItem('high')
+    const payload = taskSpaceEntityBusinessPayloadForHash(
+      'workItem', 'update', entity as never,
+    ) as Record<string, unknown>
+    expect(payload).not.toHaveProperty('depth')
+    expect(payload).toMatchObject({ title: 'Item', parent_id: null, child_rank: 0 })
   })
 })

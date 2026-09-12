@@ -567,6 +567,9 @@ class TestTaskSpaceIntegration:
             "completedAt", "cancelledAt", "archivedAt", "markedAsAttention",
             # D5 Y: read-only labelIds projection on work item reads.
             "labelIds",
+            # ★ ADR-0003（补登：该断言随「等待前态」只读投影漏更，本单恢复全量门禁）：
+            #   读投影附带服务端自持的等待前态。
+            "preWaitingStatusDefinitionId",
             "version", "createdAt", "updatedAt",
         }
         assert work_item_value["spaceId"] == space_id

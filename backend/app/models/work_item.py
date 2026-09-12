@@ -40,6 +40,12 @@ class WorkItem(Base, SyncMixin):
     status_definition_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("status_definitions.id"), nullable=False
     )
+    # ★ 2026-09-12（ADR-0003）：最后一次进入 waiting 类目前所处的状态。
+    #   服务端自持的唯一写入者 = 进入 Waiting 的迁移编译；只走读投影，
+    #   不进 WORK_ITEM_SYNC_FIELDS。NULL = 无可信前态（绝不猜）。
+    pre_waiting_status_definition_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("status_definitions.id")
+    )
     priority: Mapped[str | None] = mapped_column(String(20))
     parent_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("work_items.id"), index=True

@@ -46,6 +46,10 @@ class RelationResponse(WireResponseModel):
     from_work_item_id: str
     to_work_item_id: str
     relation_type: str
+    # ★ 2026-09-12（D2 / ADR-0004）：解除确认两列（服务端自持）。必填可空 ——
+    #   与服务端出站逐字段对齐（前端 relationSchema 为 z.strictObject，缺字段即拒收）。
+    resolution: str | None
+    resolved_at: str | None
     version: int = Field(ge=1)
     created_at: str
     updated_at: str
@@ -109,4 +113,24 @@ class RemoveRelationRequest(WireModel):
     to_work_item_id: str = Field(min_length=1, max_length=64)
     # ★ 用枚举而非裸字符串：非法类型在**路由层**就以 422 拒掉，
     #   编译器的同名校验降级为直接调用者（测试 / 同步入口）的纵深防御。
+    relation_type: RelationTypeLiteral
+
+
+class ResolveRelationRequest(WireModel):
+    """确认「已取消的上游不再需要」（D2 / ADR-0004）。
+
+    ★ 与 Remove 同形（edge 身份 + CAS），但语义是幂等的解除确认。
+    - **不接受任何时间戳字段**：``resolved_at`` 由服务端单调时钟打戳；
+      ``extra="forbid"``（WireModel）会拒收调用方自带的时间戳 / resolution，
+      防伪与防伪造确认。
+    - 只对阻塞型边（depends_on / blocks）有意义；``relates_to`` 由编译器
+      fail-closed 拒绝。
+    """
+
+    command_id: CommandId
+    space_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(ge=0)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    from_work_item_id: str = Field(min_length=1, max_length=64)
+    to_work_item_id: str = Field(min_length=1, max_length=64)
     relation_type: RelationTypeLiteral

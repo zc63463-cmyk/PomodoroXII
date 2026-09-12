@@ -356,8 +356,9 @@ async def test_committed_recovery_vectors_reparse_and_hash_exact_bytes():
         vector["record"]["entity_type"] for vector in vectors if vector["record"] is not None
     }
     assert aliases == {spec.effective_sync_entity_type for spec in CATALOG.list_sync_enabled()}
-    # work_item_label is not sync-enabled, so the vector set covers 21 entities.
-    assert len(aliases) == 21
+    # work_item_label is not sync-enabled, so the vector set covers 22 entities.
+    # （21 → 22：relation 加入同步实体后，golden 向量与本断言一并补齐。）
+    assert len(aliases) == 22
     assert any(
         isinstance(value, dict) and "nested" in value
         for vector in vectors
@@ -401,6 +402,9 @@ async def test_serializer_covers_all_aliases_space_and_exact_note_markdown():
         for field in spec.fields:
             if field.name == spec.primary_key:
                 value = "entity-1"
+            elif field.name == "space_id":
+                # ★ 合成行必须携带 scope 的 spaceId（序列化器拒绝 foreign Space）。
+                value = "spc_test"
             elif field.type == "integer":
                 value = 0
             elif field.type == "boolean":
@@ -422,8 +426,9 @@ async def test_serializer_covers_all_aliases_space_and_exact_note_markdown():
         if spec.name == "note":
             assert payload["content"] == markdown
     assert aliases == {spec.effective_sync_entity_type for spec in CATALOG.list_sync_enabled()}
-    # work_item_label is not sync-enabled, so the serializer covers 21 aliases.
-    assert len(aliases) == 21
+    # work_item_label is not sync-enabled, so the serializer covers 22 aliases.
+    # （21 → 22：relation 加入同步实体后，本断言与 golden 向量一并补齐。）
+    assert len(aliases) == 22
 
 
 @pytest.mark.asyncio

@@ -9,9 +9,38 @@ via ``content_hash`` instead of round-tripping the full body.
 """
 
 import json
-from typing import Optional
+from typing import Literal, Optional, TypeAlias, get_args
 
 from pydantic import BaseModel, Field, field_validator
+
+# --------------------------------------------------------------------------- #
+# ★ 2026-09-11 note.status 枚举值域：单一事实来源。
+#   原因：DB CHECK / Pydantic wire schema / 编译器此前各写各的 —— schema 只限
+#   长度、sync post-image 编译器不校验值域，于是「草稿」这类越界值会穿过前后端
+#   校验，最后撞上 notes 的 CHECK 约束：HTTP 以不可读的 500 收场，并污染该
+#   Space 运行时会话（后续合法请求也一并失败）。
+#   Literal 是唯一声明：wire schema（创建/更新/响应）直接用它；编译器校验
+#   （KnowledgeDomainPolicy，REST 与 sync 共用）从常量派生。
+#   models/note.py 的 CHECK SQL 文本由 tests 逐字锁定（本轮不改 DB 迁移）。
+#   note 目前没有独立的 contracts 模块，故按约定就近落在本模块。
+# --------------------------------------------------------------------------- #
+
+NoteStatusValue: TypeAlias = Literal["active", "archived"]
+# 声明顺序即错误详情 allowed 的稳定顺序（get_args 保留声明序）。
+NOTE_STATUS_VALUES: tuple[str, ...] = get_args(NoteStatusValue)
+
+
+def require_note_status(value: object) -> str:
+    """Fail closed when status falls outside its closed domain.
+
+    与 ``task_space.contracts.require_enum_value`` 的差异（note.status 是
+    NOT NULL 列 + 默认值，而非可空自由字段）：``None`` 不合法 —— 显式传 null
+    会在 DB 触发 NOT NULL；「字段缺省」由调用方判断（创建补默认值、更新表示
+    不改动），本函数只校验「给了值」的场合。
+    """
+    if not isinstance(value, str) or value not in NOTE_STATUS_VALUES:
+        raise ValueError("invalid_status")
+    return value
 
 
 class NoteBase(BaseModel):
@@ -21,7 +50,9 @@ class NoteBase(BaseModel):
     summary: str = Field(default="", max_length=500)
     tags: list[str] = []
     folder_id: Optional[str] = Field(default=None, max_length=36)
-    status: str = Field(default="active", max_length=20)
+    # ★ 2026-09-11：值域与 DB CHECK / 编译器共用 NOTE_STATUS_VALUES —— 越界值
+    # 在 wire 层即 422，绝不允许穿到 DB CHECK（那里是 500 且不可读）。
+    status: NoteStatusValue = "active"
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -84,7 +115,9 @@ class NoteMetadataUpdate(BaseModel):
     tags: Optional[list[str]] = None
     folder_id: Optional[str] = Field(default=None, max_length=36)
     category: Optional[str] = Field(default=None, max_length=200)
-    status: Optional[str] = Field(default=None, max_length=20)
+    # ★ 2026-09-11：PATCH 的 status 同样收紧到封闭值域（与创建/响应同一常量）。
+    # 显式 null 由编译器以稳定领域码拒绝（status 是 NOT NULL 列，不能清空）。
+    status: Optional[NoteStatusValue] = None
 
     @field_validator("tags", mode="before")
     @classmethod

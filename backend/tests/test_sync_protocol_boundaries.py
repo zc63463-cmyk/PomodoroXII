@@ -152,9 +152,14 @@ def test_operation_catalog_is_the_exact_rest_and_mcp_surface() -> None:
         and isinstance(argument.value, str)
         and argument.value.startswith("/v2/")
     }
-    assert {f"/api/v1/sync{path}" for path in declared_paths} == {
-        spec.rest_path for spec in SYNC_OPERATIONS
-    }
+    # ★ 2026-09-12（恢复全量门禁）：账本裁剪是**运维/维护**端点（9c17c7f 引入），
+    #   不属于客户端同步协议目录 —— 无 MCP 工具、不进 SYNC_OPERATIONS，但已登记在
+    #   openapi / MCP parity 的路由清单里。这里显式登记同样的边界，防未登记路由蒙混。
+    maintenance_paths = {"/v2/retention/prune"}
+    assert {f"/api/v1/sync{path}" for path in declared_paths} == (
+        {spec.rest_path for spec in SYNC_OPERATIONS}
+        | {f"/api/v1/sync{path}" for path in maintenance_paths}
+    )
 
 
 def test_backend_authority_gate_covers_sync_route_and_all_outbox_reads(tmp_path: Path) -> None:

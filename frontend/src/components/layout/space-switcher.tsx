@@ -5,6 +5,11 @@
  *
  * Lists all spaces, highlights current, triggers selectSpace on click.
  * Uses base-ui DropdownMenuTrigger with render prop pattern.
+ *
+ * Refresh-on-open: previously the only loadSpaces call site was
+ * /select-space, so a space created after store hydration (or on another
+ * surface) never appeared here. Opening the dropdown now re-fetches the
+ * list; failure is silent and the stale cache stays visible.
  */
 
 import { useRouter } from 'next/navigation'
@@ -25,6 +30,7 @@ export function SpaceSwitcher() {
   const spaces = useSpaceStore((s) => s.spaces)
   const currentSpace = useSpaceStore(selectCurrentSpace)
   const selectSpace = useSpaceStore((s) => s.selectSpace)
+  const loadSpaces = useSpaceStore((s) => s.loadSpaces)
   const isLoading = useSpaceStore((s) => s.isLoading)
 
   const handleSelect = async (spaceId: string) => {
@@ -35,8 +41,15 @@ export function SpaceSwitcher() {
     }
   }
 
+  const handleOpenChange = (open: boolean) => {
+    if (!open) return
+    loadSpaces().catch(() => {
+      // best-effort refresh: keep showing the cached list on failure
+    })
+  }
+
   return (
-    <DropdownMenu>
+    <DropdownMenu onOpenChange={handleOpenChange}>
       <DropdownMenuTrigger
         render={<Button variant="ghost" size="sm" disabled={isLoading} />}
       >

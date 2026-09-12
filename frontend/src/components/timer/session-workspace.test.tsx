@@ -23,6 +23,17 @@ describe('SessionWorkspace', () => {
     expect(allocate).not.toHaveBeenCalled()
   })
 
+  it('states the empty plan instead of rendering a silent blank section', () => {
+    // 回归：plans 为空时「Current plan」下什么都没有，用户只会判定"坏了"。
+    render(createElement(SessionWorkspace, { session, plans: [] }))
+    expect(screen.getByRole('status')).toHaveTextContent('这次会话还没有计划项')
+  })
+
+  it('points at the add control when candidates exist but the plan is empty', () => {
+    render(createElement(SessionWorkspace, { session, plans: [], availableLevel3: candidates }))
+    expect(screen.getByRole('status')).toHaveTextContent('用下面的「Add … to plan」')
+  })
+
   it('keeps Session note separate from WorkItemNote', () => {
     const updateSessionNote = vi.fn()
     const updateWorkItemNote = vi.fn()

@@ -780,12 +780,15 @@ async def test_duplicate_start_same_command_id_fails_closed(client) -> None:
     assert second.json()["session"]["session"]["id"] == "fs-1"
 
 
-def _clock_hash(expected_version: int, occurred_at: str, *, action: str = "pause") -> str:
+def _clock_hash(
+    expected_version: int, occurred_at: str, *, action: str = "pause",
+    owner_device_id: str = "device-1", owner_tab_id: str = "tab-1",
+) -> str:
     # expected_version/ownership_epoch are HASH_GUARD fields and must not
     # enter the canonical hash (the frontend ownedHash omits them too).
     payload: dict[str, object] = {
         "occurred_at": occurred_at,
-        "owner_device_id": "device-1", "owner_tab_id": "tab-1",
+        "owner_device_id": owner_device_id, "owner_tab_id": owner_tab_id,
     }
     if action == "end":
         payload.update({
@@ -796,20 +799,92 @@ def _clock_hash(expected_version: int, occurred_at: str, *, action: str = "pause
 
 def _clock_body(
     command_id: str, session_id: str, expected_version: int, occurred_at: str, *, action: str = "pause",
+    ownership_epoch: int = 1, owner_device_id: str = "device-1", owner_tab_id: str = "tab-1",
 ) -> dict[str, Any]:
     payload: dict[str, object] = {
         "expectedVersion": expected_version, "occurredAt": occurred_at,
-        "ownerDeviceId": "device-1", "ownerTabId": "tab-1",
+        "ownerDeviceId": owner_device_id, "ownerTabId": owner_tab_id,
     }
     if action == "end":
         payload.update({
             "timerCompletion": "completed", "validity": "valid", "validityReason": None,
         })
     return {
-        "commandId": command_id, "sessionId": session_id, "ownershipEpoch": 1,
-        "payloadHash": _clock_hash(expected_version, occurred_at, action=action),
+        "commandId": command_id, "sessionId": session_id, "ownershipEpoch": ownership_epoch,
+        "payloadHash": _clock_hash(
+            expected_version, occurred_at, action=action,
+            owner_device_id=owner_device_id, owner_tab_id=owner_tab_id,
+        ),
         "payload": payload,
     }
+
+
+@pytest.mark.asyncio
+async def test_takeover_transfers_ownership_and_advances_epoch(client) -> None:
+    """接管必须真正转移所有权。
+
+    回归（2026-09-11 实测）：takeover 此前与 heartbeat 共走 ``_touch``，只续租、
+    不换 owner / 不涨 epoch —— 上一个标签页关闭后，前端永久只读且没有任何出路
+    （既不能继续也不能结束）。本用例锁定：owner 换成新身份、epoch +1、
+    重放幂等、新 owner 能驱动时钟。
+    """
+    from app.focus_session.commands import active_business_payload
+
+    master_headers = {"Authorization": f"Bearer {await _master_token(client)}"}
+    space = await _create_space(client, master_headers, "Takeover Space")
+    project_id = await _create_project(
+        client, space["headers"], key="TOK", space_id=space["id"]
+    )
+    wi_id = await _create_work_item(client, space["headers"], project_id, space_id=space["id"])
+
+    start = await client.post(
+        "/api/v1/active-session/start",
+        json=_start_body(space_id=space["id"], work_item_id=wi_id),
+        headers=master_headers,
+    )
+    assert start.status_code == 201, start.text
+    started = start.json()
+    session_id = started["sessionId"]
+    epoch = int(started["ownershipEpoch"])
+    version = int(started["session"]["session"]["version"])
+
+    takeover_payload = {"new_owner_device_id": "device-2", "new_owner_tab_id": "tab-2"}
+    takeover_body = {
+        "commandId": "op-takeover",
+        "sessionId": session_id,
+        "ownershipEpoch": epoch,
+        "payloadHash": canonical_payload_hash(
+            active_business_payload("takeover", takeover_payload)
+        ),
+        "payload": {"newOwnerDeviceId": "device-2", "newOwnerTabId": "tab-2"},
+    }
+    resp = await client.post(
+        "/api/v1/active-session/takeover", json=takeover_body, headers=master_headers
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["ownerDeviceId"] == "device-2"
+    assert data["ownerTabId"] == "tab-2"
+    assert data["ownershipEpoch"] == epoch + 1
+    assert data["operationId"] == "op-takeover"
+
+    # 同命令重放：幂等，epoch 不得二次上涨。
+    replay = await client.post(
+        "/api/v1/active-session/takeover", json=takeover_body, headers=master_headers
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["ownershipEpoch"] == epoch + 1
+
+    # 转移真实生效：新 owner（新 epoch）暂停成功。
+    paused = await client.post(
+        "/api/v1/active-session/pause",
+        json=_clock_body(
+            "op-takeover-pause", session_id, version, "2026-07-15T08:01:00.000Z",
+            ownership_epoch=epoch + 1, owner_device_id="device-2", owner_tab_id="tab-2",
+        ),
+        headers=master_headers,
+    )
+    assert paused.status_code == 200, paused.text
 
 
 @pytest.mark.asyncio
@@ -886,6 +961,119 @@ async def test_pause_resume_end_lifecycle_over_http(client) -> None:
 
     gone = await client.get("/api/v1/active-session", headers=master_headers)
     assert gone.status_code == 404, gone.text
+
+
+@pytest.mark.asyncio
+async def test_end_marks_session_as_awaiting_review(client) -> None:
+    """回归（2026-09-11 实测）：在线结束必须把会话标记为待复盘。
+
+    修复前在线 end 全链路（EndActiveSessionPayload / _map_end_payload /
+    _clock_transition_after）都没有 review_state：行停在 ``not_required``。
+    而计时页复盘面板以 ``reviewState === 'pending'`` 为出现条件，否则退化为
+    只读「Review not_required.」—— 用户永远提交不了有效性判定 → validity
+    停在 pending → 投入投影只累计 ``validity='valid'`` 的会话 → 任务空间
+    「投入」永远是 0（实测：会话 ed5b7e05 结束，focused_seconds=3134，
+    work_item.effort_actual_seconds 仍为 0）。
+
+    离线 endProvisional 一直本地写 ``reviewState='pending'``，在线路径必须
+    与它收敛到同一行状态。此用例使用与前端一致的 ``ended_early`` +
+    ``validity='pending'`` 组合，忠实复现事故路径。
+    """
+    master_token = await _master_token(client)
+    master_headers = {"Authorization": f"Bearer {master_token}"}
+    space = await _create_space(client, master_headers, "Review Mark Space")
+    project_id = await _create_project(
+        client, space["headers"], key="REVW", space_id=space["id"]
+    )
+    wi_id = await _create_work_item(
+        client, space["headers"], project_id, space_id=space["id"]
+    )
+    start = await client.post(
+        "/api/v1/active-session/start",
+        json=_start_body(space_id=space["id"], work_item_id=wi_id),
+        headers=master_headers,
+    )
+    assert start.status_code == 201, start.text
+    started = start.json()
+    session_id = started["sessionId"]
+    version = int(started["session"]["session"]["version"])
+
+    occurred_at = "2026-07-15T08:01:00.000Z"
+    end_fields = {
+        "timer_completion": "ended_early", "validity": "pending", "validity_reason": None,
+    }
+    end_body = {
+        "commandId": "op-review-mark-end",
+        "sessionId": session_id,
+        "ownershipEpoch": int(started["ownershipEpoch"]),
+        "payloadHash": canonical_payload_hash({
+            "occurred_at": occurred_at,
+            "owner_device_id": "device-1", "owner_tab_id": "tab-1",
+            **end_fields,
+        }),
+        "payload": {
+            "expectedVersion": version, "occurredAt": occurred_at,
+            "ownerDeviceId": "device-1", "ownerTabId": "tab-1",
+            "timerCompletion": "ended_early", "validity": "pending",
+            "validityReason": None,
+        },
+    }
+    ended = await client.post(
+        "/api/v1/active-session/end", json=end_body, headers=master_headers
+    )
+    assert ended.status_code == 200, ended.text
+    session = ended.json()["session"]["session"]
+    assert session["clockState"] == "ended", session
+    assert session["validity"] == "pending", session
+    assert session["reviewState"] == "pending", (
+        "在线结束必须标记待复盘，否则复盘面板不可写、投入永远为 0："
+        f"{session}"
+    )
+
+    # 同命令重放：幂等，待复盘标记保持。
+    replayed = await client.post(
+        "/api/v1/active-session/end", json=end_body, headers=master_headers
+    )
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["session"]["session"]["reviewState"] == "pending"
+
+    # 复盘提交必须可用（HTTP 边界）—— 回归（2026-09-11 实测）：策略层返回的
+    # aggregate 是递归冻结的（mappingproxy + tuple），路由只做顶层
+    # dict(view.value) 时 pydantic 校验全挂（7 个错误）→ 变更已提交但响应
+    # 500，前端只看到「操作失败，请检查服务连接后重试」并被假失败挡住。
+    reviewed_at = "2026-07-15T08:10:00.000Z"
+    review_payload = {
+        "validity": "valid", "review_state": "completed",
+        "reviewed_at": reviewed_at, "outcomes": [],
+    }
+    review_body = {
+        "commandId": "op-review-mark-review",
+        "spaceId": space["id"],
+        "sessionId": session_id,
+        "ownershipEpoch": None,
+        "payloadHash": canonical_payload_hash(review_payload),
+        "payload": {
+            "expectedVersion": int(session["version"]),
+            "validity": "valid", "reviewState": "completed",
+            "reviewedAt": reviewed_at, "outcomes": [],
+        },
+    }
+    reviewed = await client.post(
+        f"/api/v1/focus-sessions/{session_id}/review",
+        json=review_body, headers=space["headers"],
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    reviewed_session = reviewed.json()["session"]
+    assert reviewed_session["validity"] == "valid", reviewed_session
+    assert reviewed_session["reviewState"] == "completed", reviewed_session
+
+    # 同命令重放：幂等（服务端已有该 operation 的结果，帧必须可序列化）。
+    replayed_review = await client.post(
+        f"/api/v1/focus-sessions/{session_id}/review",
+        json=review_body, headers=space["headers"],
+    )
+    assert replayed_review.status_code == 200, replayed_review.text
+    assert replayed_review.json()["session"]["validity"] == "valid"
 
 
 # --------------------------------------------------------------------------- #

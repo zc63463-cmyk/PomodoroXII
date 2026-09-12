@@ -283,3 +283,71 @@ async def test_put_content_on_trashed_note_returns_404(client):
     )
     assert resp.status_code == 404, resp.text
     assert resp.json()["error_type"] == "not_found"
+
+
+# --------------------------------------------------------------------------- #
+# ★ 2026-09-11 note.status 封闭值域（HTTP 层）
+#   原因：status 此前只限长度，越界值（「草稿」/「archived2」）会穿过 wire
+#   schema 撞 DB CHECK，以不可读的 500 收场，并污染该 Space 运行时会话。
+#   这里锁定 wire 层 422 + 合法两值不回归。
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_create_note_rejects_out_of_domain_status_with_422(client):
+    """创建接口：越界 status 必须在 schema 层 422，绝不落到 DB CHECK 500。"""
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+
+    for dirty in ("草稿", "archived2"):
+        resp = await client.post(
+            "/api/v1/notes",
+            json={"title": "脏值", "content": "x", "status": dirty},
+            headers=headers,
+        )
+        assert resp.status_code == 422, resp.text
+        assert resp.headers["X-PomodoroXII-Error-Code"] == "validation_error"
+
+    # 合法两值全部通过；缺省仍是 active（既有行为不变）。
+    for status in ("active", "archived"):
+        resp = await client.post(
+            "/api/v1/notes",
+            json={"title": f"合法 {status}", "content": "x", "status": status},
+            headers=headers,
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["status"] == status
+
+    resp = await client.post(
+        "/api/v1/notes", json={"title": "默认值", "content": "x"}, headers=headers
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_patch_note_rejects_out_of_domain_status_with_422(client):
+    """PATCH 接口：越界 status 422；合法值仍 200。显式 null 不能清空 NOT NULL 列。"""
+    space_token, _ = await _get_space_client(client)
+    headers = _auth(space_token)
+    note = await _create_note(client, headers)
+    note_id = note["id"]
+
+    resp = await client.patch(
+        f"/api/v1/notes/{note_id}", json={"status": "草稿"}, headers=headers
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.headers["X-PomodoroXII-Error-Code"] == "validation_error"
+
+    # 显式 null：status 是 NOT NULL 列，不能清空 —— 以稳定领域码拒绝，而不是 500。
+    resp = await client.patch(
+        f"/api/v1/notes/{note_id}", json={"status": None}, headers=headers
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.headers["X-PomodoroXII-Error-Code"] == "payload_field_not_allowed"
+
+    # 合法值仍然可用（不回归既有 active/archived 行为）。
+    resp = await client.patch(
+        f"/api/v1/notes/{note_id}", json={"status": "archived"}, headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "archived"

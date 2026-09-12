@@ -66,6 +66,38 @@ export const projectSchema = z.object({
   updatedAt: utc,
 }).strict()
 
+/**
+ * ★ 2026-09-11 WorkItem 枚举值域（单一事实来源）。
+ * 与后端 `backend/app/task_space/contracts.py` 的 WORK_ITEM_PRIORITY_VALUES /
+ * WORK_ITEM_CONFIDENCE_VALUES 逐值一致（同源 DB CHECK）；存储值恒为英文
+ * 规范值，中文标签只存在于展示层，绝不写回业务载荷。
+ */
+export const WORK_ITEM_PRIORITY_VALUES = ['low', 'medium', 'high', 'urgent'] as const
+export const WORK_ITEM_CONFIDENCE_VALUES = ['low', 'medium', 'high'] as const
+export type WorkItemPriority = (typeof WORK_ITEM_PRIORITY_VALUES)[number]
+export type WorkItemConfidence = (typeof WORK_ITEM_CONFIDENCE_VALUES)[number]
+
+/**
+ * ★ 2026-09-11 WorkItem 层级上限与派生 depth 的类型。
+ * depth 是**读模型派生值**（不是实体字段，见下方 workItemSchema 注释）；
+ * 类型的唯一消费方是 UI 读模型，派生实现在 lib/task-space/work-item-read-model。
+ */
+export const WORK_ITEM_MAX_DEPTH = 3
+export type WorkItemDepth = 1 | 2 | 3
+
+/**
+ * ★ 2026-09-11 WorkItem **实体契约**：depth 被剔除。
+ *
+ * 契约判定：depth 是读模型派生值，不是实体字段 ——
+ *   - DB 无列；后端在读取时从 parent 链派生（task_space/queries.py::_depth_of）；
+ *   - sync post-image 白名单不含 depth，push 通道逐字段相等、多余字段直接拒
+ *     （compiler.py WORK_ITEM_SYNC_FIELDS + _full_work_item_sync_candidate）；
+ *   - 业务载荷哈希（REST typed command）也不覆盖它。
+ * 因此实体契约、Dexie 业务行、业务哈希都不含 depth；UI 需要的 depth 由
+ * `lib/task-space/work-item-read-model` 在读取边界派生（唯一实现）。
+ * 服务端的**读投影**（GET / work-items 响应附带 depth）由 `workItemReadSchema`
+ * 校验 —— 它是展示投影，不是实体字段。
+ */
 export const workItemSchema = z.object({
   id: entityId,
   spaceId: entityId,
@@ -75,10 +107,9 @@ export const workItemSchema = z.object({
   description: z.string().nullable(),
   typeDefinitionId: entityId,
   statusDefinitionId: entityId,
-  priority: z.string().nullable(),
+  priority: z.enum(WORK_ITEM_PRIORITY_VALUES).nullable(),
   parentId: entityId.nullable(),
   childRank: z.number().int().nonnegative(),
-  depth: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   completionWindowStart: utc.nullable(),
   completionWindowEnd: utc.nullable(),
   reviewPoint: utc.nullable(),
@@ -86,7 +117,7 @@ export const workItemSchema = z.object({
   effortEstimateLowerSeconds: z.number().int().nonnegative().nullable(),
   effortEstimateUpperSeconds: z.number().int().nonnegative().nullable(),
   effortActualSeconds: z.number().int().nonnegative(),
-  confidence: z.string().nullable(),
+  confidence: z.enum(WORK_ITEM_CONFIDENCE_VALUES).nullable(),
   completedAt: utc.nullable(),
   cancelledAt: utc.nullable(),
   archivedAt: utc.nullable(),
@@ -98,6 +129,20 @@ export const workItemSchema = z.object({
   createdAt: utc,
   updatedAt: utc,
 }).strict()
+
+/**
+ * ★ 2026-09-11 WorkItem **读投影**：GET / work-items 响应在实体之上附带服务端
+ * 派生的 depth。它只用于校验读响应（展示投影），绝不进入实体存储或业务哈希。
+ *
+ * ★ 2026-09-12（ADR-0003）：读投影还附带**等待前态**
+ * `preWaitingStatusDefinitionId`（服务端事实，只出站）。optional：
+ * 旧服务端不返回它；本地 Dexie 行一律忽略该值（见 work-item-read-model）。
+ */
+export const workItemReadSchema = workItemSchema.extend({
+  depth: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  preWaitingStatusDefinitionId: z.string().min(1).max(64).nullable().optional(),
+})
+export type WorkItemRead = z.infer<typeof workItemReadSchema>
 
 export const workItemNoteSchema = z.object({
   spaceId: entityId,
@@ -167,12 +212,25 @@ export const workItemLabelSchema = z.object({
 export const BLOCKING_RELATION_TYPES = ['depends_on', 'blocks'] as const
 export const RELATION_TYPES = ['depends_on', 'blocks', 'relates_to'] as const
 
+/**
+ * ★ 2026-09-12（D2 / ADR-0004）：依赖解除确认的取值（目前唯一合法值）。
+ * 与后端 `task_space/contracts.py::RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED`
+ * 及 `queries.py` 真值表共用闭集；新增取值必须三处同步。
+ */
+export const RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED = 'confirmed_not_required' as const
+
 export const relationSchema = z.object({
   id: entityId,
   spaceId: entityId,
   fromWorkItemId: entityId,
   toWorkItemId: entityId,
   relationType: z.enum(RELATION_TYPES),
+  // ★ 2026-09-12（D2 / ADR-0004）：解除确认两列（服务端自持，客户端只读）。
+  //   **必填可空**（不是 optional）—— 与服务端出站逐字段对齐：DB 行 / 命令
+  //   后像 / sync 事件恒携带它们（z.strictObject 缺字段即拒收）。
+  //   写入唯一通道 = POST /relations/{id}/resolve（ResolveDependency）。
+  resolution: z.enum([RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED]).nullable(),
+  resolvedAt: utc.nullable(),
   version: z.number().int().positive(),
   createdAt: utc,
   updatedAt: utc,
@@ -267,12 +325,14 @@ export function taskSpaceEntityBusinessPayloadForHash(
     case 'workItem': {
       const row = cachedWorkItemSchema.parse(postImage)
       return {
+        // ★ 2026-09-11：depth 不在业务载荷里（它是读模型派生值，后端 post-image
+        // 白名单也不含它）。以前哈希覆盖 depth，与后端 canonical 载荷不一致。
         project_id: row.projectId, display_key: row.displayKey,
         title: row.title, description: row.description,
         type_definition_id: row.typeDefinitionId,
         status_definition_id: row.statusDefinitionId,
         priority: row.priority, parent_id: row.parentId, child_rank: row.childRank,
-        depth: row.depth, completion_window_start: row.completionWindowStart,
+        completion_window_start: row.completionWindowStart,
         completion_window_end: row.completionWindowEnd,
         review_point: row.reviewPoint, hard_deadline: row.hardDeadline,
         effort_estimate_lower_seconds: row.effortEstimateLowerSeconds,
@@ -318,7 +378,8 @@ export function taskSpaceEntityBusinessPayloadForHash(
 }
 
 export const projectPageSchema = z.object({ items: z.array(projectSchema), nextCursor: z.string().nullable() }).strict()
-export const workItemPageSchema = z.object({ items: z.array(workItemSchema), nextCursor: z.string().nullable() }).strict()
+// ★ 2026-09-11：列表响应是读投影（带 depth），用 workItemReadSchema 校验。
+export const workItemPageSchema = z.object({ items: z.array(workItemReadSchema), nextCursor: z.string().nullable() }).strict()
 export const definitionsSchema = z.object({
   statuses: z.array(z.record(z.string(), z.unknown())),
   types: z.array(z.record(z.string(), z.unknown())),
@@ -333,16 +394,47 @@ export type WorkItemNoteDocument = z.infer<typeof workItemNoteDocumentSchema>
 export type NoteBlock = z.infer<typeof noteBlockSchema>
 export type Project = z.infer<typeof projectSchema>
 export type ProjectView = Project
+/** 实体（无 depth）：post-image / 本地业务行 / 业务哈希的输入。 */
 export type WorkItem = z.infer<typeof workItemSchema>
-export type WorkItemView = WorkItem
+/** 读投影（含服务端或本地派生的 depth）：UI 消费的视图。 */
+export type WorkItemView = WorkItemRead
 export type Label = z.infer<typeof labelSchema>
 export type WorkItemNote = z.infer<typeof workItemNoteSchema>
 export type WorkItemNoteView = WorkItemNote
 export type TaskSpaceDefinitions = z.infer<typeof definitionsSchema>
 
+/**
+ * ★ 2026-09-11 REST typed-command 的规范业务载荷（RFC 8785 哈希输入）。
+ *
+ * 与后端 `task_space/module.py::_business_payload` 逐字对应，并由两侧共享的
+ * fixture `task_space_session_payload_hash_vectors.json` 锁定哈希。depth 不在
+ * 其中 —— 后端 post-image 白名单也没有它（读模型派生值，不是实体字段）。
+ */
+export const workItemCreateBusinessPayload = (input: {
+  title: string
+  description: string | null
+  parent_id: string | null
+  type_definition_id: string | null
+  status_definition_id: string | null
+  priority: string | null
+}): Record<string, JsonValue> => ({
+  title: input.title,
+  description: input.description,
+  parent_id: input.parent_id,
+  type_definition_id: input.type_definition_id,
+  status_definition_id: input.status_definition_id,
+  priority: input.priority,
+})
+
+/** PATCH 的业务载荷：只含调用方显式给出的字段（显式 null 保留在哈希里）。 */
+export const workItemPatchBusinessPayload = (
+  patch: Record<string, JsonValue>,
+): Record<string, JsonValue> => ({ patch })
+
 export const parseProject = (value: unknown) => projectSchema.parse(value)
 export const parseDefinitions = (value: unknown) => definitionsSchema.parse(value)
-export const parseWorkItem = (value: unknown) => workItemSchema.parse(value)
+// ★ 2026-09-11：读接口返回读投影（带 depth），因此用 workItemReadSchema。
+export const parseWorkItem = (value: unknown) => workItemReadSchema.parse(value)
 export const parseWorkItemNote = (value: unknown) => workItemNoteSchema.parse(value)
 export const parseNoteDocument = (value: unknown) => workItemNoteDocumentSchema.parse(typeof value === 'string' ? JSON.parse(value) : value)
 

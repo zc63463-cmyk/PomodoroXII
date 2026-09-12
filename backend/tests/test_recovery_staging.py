@@ -657,6 +657,11 @@ async def test_restore_snapshot_symlink_fails_closed(tmp_path: Path) -> None:
         os.symlink(receipt.root / NOTE_RELATIVE, link)
     except (OSError, NotImplementedError):
         pytest.skip("symlink creation is not permitted in this environment")
+    if not os.path.islink(link):
+        # ★ 2026-09-12：沙箱/受限主机可能把 os.symlink **物化成普通拷贝**
+        #   （os.symlink 成功但 os.path.islink() == False）——此时快照里根本没有
+        #   符号链接，fail-closed 行为无从触发（与上层 OSError skip 同一前提）。
+        pytest.skip("host materializes symlinks as copies; fail-closed not exercisable")
 
     with pytest.raises(Exception) as excinfo:
         await coordinator.restore_to_staging(receipt)

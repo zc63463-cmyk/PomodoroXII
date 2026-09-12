@@ -5,10 +5,38 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Mapping, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Literal, Mapping, Protocol, TypeAlias, get_args
 
 if TYPE_CHECKING:
     from app.runtime.space import SpaceRuntimeHandle
+
+
+# --------------------------------------------------------------------------- #
+# ★ 2026-09-11 WorkItem 枚举值域：单一事实来源。
+#   原因：DB CHECK / Pydantic wire schema / 编译器此前各写各的 —— schema 只限
+#   长度、编译器不校验值域，于是「高」这类越界值会穿过前后端校验，最后撞上
+#   work_items 的 CHECK 约束，以不可读的 500 收场。
+#   Literal 是唯一声明：Pydantic 字段、编译器校验、DB CHECK 文本全部从它派生，
+#   任何一处改动都会同时收紧三方（tests 里有逐字一致性断言兜底）。
+# --------------------------------------------------------------------------- #
+
+WorkItemPriorityValue: TypeAlias = Literal["low", "medium", "high", "urgent"]
+WorkItemConfidenceValue: TypeAlias = Literal["low", "medium", "high"]
+# 声明顺序即 DB CHECK / 错误详情 allowed 的稳定顺序（get_args 保留声明序）。
+WORK_ITEM_PRIORITY_VALUES: tuple[str, ...] = get_args(WorkItemPriorityValue)
+WORK_ITEM_CONFIDENCE_VALUES: tuple[str, ...] = get_args(WorkItemConfidenceValue)
+
+
+def require_enum_value(field: str, value: object, allowed: tuple[str, ...]) -> None:
+    """Fail closed when a non-null value falls outside its closed domain.
+
+    ``None`` 始终合法（字段可空）；其余非成员值一律以 ``invalid_<field>``
+    拒绝，让每个入口都能在 DB CHECK 之前给出稳定的领域错误。
+    """
+    if value is None:
+        return
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError(f"invalid_{field}")
 
 
 class StatusCategory(StrEnum):
@@ -40,6 +68,9 @@ class LabelOperation(StrEnum):
 class RelationOperation(StrEnum):
     CREATE = "create"
     REMOVE = "remove"
+    # ★ 2026-09-12（D2 / ADR-0004）：解除确认 —— 「上游已取消且不再需要」的
+    #   显式用户事实（幂等 CAS，重复确认 = 零效果回执）。
+    RESOLVE = "resolve"
 
 
 class RelationType(StrEnum):
@@ -60,6 +91,11 @@ BLOCKING_RELATION_TYPES = frozenset(
     {RelationType.DEPENDS_ON.value, RelationType.BLOCKS.value}
 )
 RELATION_TYPES = frozenset(item.value for item in RelationType)
+
+# ★ 2026-09-12（D2 / ADR-0004）：依赖边的「解除确认」取值（目前唯一合法值）。
+#   单一事实来源：编译器（写入）、queries（真值表）、前端 relation-selectors.ts
+#   三方共用；新增取值必须同时更新三处（闭集，见 ADR-0004）。
+RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED = "confirmed_not_required"
 
 
 SYSTEM_STATUS_IDS: Mapping[str, str] = {
@@ -187,11 +223,11 @@ class LabelCommand:
 
 @dataclass(frozen=True)
 class RelationCommand:
-    """Create or remove one dependency edge.
+    """Create, remove, or resolve-confirm one dependency edge.
 
     ``relation_id`` is derived (never client-chosen) and doubles as the CAS
-    target: remove carries ``expected_version``; create does not (the row
-    either exists or it does not).
+    target: remove / resolve carry ``expected_version``; create does not (the
+    row either exists or it does not).
     """
 
     operation: str
@@ -209,8 +245,14 @@ class RelationCommand:
             raise ValueError(f"unsupported relation operation: {self.operation}")
         if not self.relation_id.startswith("rel_"):
             raise ValueError("relation id must be deterministically derived")
-        if self.operation == RelationOperation.REMOVE.value and self.expected_version is None:
-            raise ValueError("relation remove requires expected_version")
+        if (
+            self.operation in {
+                RelationOperation.REMOVE.value,
+                RelationOperation.RESOLVE.value,
+            }
+            and self.expected_version is None
+        ):
+            raise ValueError("relation remove/resolve requires expected_version")
 
 
 TaskSpaceCommand: TypeAlias = (

@@ -32,13 +32,16 @@ _TO = "work-to"
 _RELATION_ID = relation_id("s1", _FROM, _TO, "depends_on")
 
 
-def _relation_row() -> dict[str, object]:
+def _relation_row(*, resolution: str | None = None) -> dict[str, object]:
     return {
         "id": _RELATION_ID,
         "space_id": "s1",
         "from_work_item_id": _FROM,
         "to_work_item_id": _TO,
         "relation_type": "depends_on",
+        # ★ 2026-09-12（D2 / ADR-0004）：DB 行 / 命令后像恒携带确认两列。
+        "resolution": resolution,
+        "resolved_at": _TIMESTAMP if resolution is not None else None,
         "version": 1,
         "created_at": _TIMESTAMP,
         "updated_at": _TIMESTAMP,
@@ -61,12 +64,20 @@ class FakeRelationCommandModule:
     async def execute(self, scope: Any, command: Any) -> TaskSpaceAccepted:
         self.calls.append(command)
         self.last_command = command
+        # ★ D2：resolve 的后像携带确认两列（服务端打戳）。
+        row = _relation_row(
+            resolution=(
+                "confirmed_not_required"
+                if getattr(command, "operation", None) == "resolve"
+                else None
+            )
+        )
         return TaskSpaceAccepted(
             command_id=command.command_id,
             entity_type="relation",
             entity_id=command.relation_id,
             version=1,
-            value=_relation_row(),
+            value=row,
         )
 
 
@@ -262,3 +273,54 @@ def test_relation_wire_schemas_are_alias_only() -> None:
         "relationType": "depends_on",
     })
     assert parsed.relation_type == "depends_on"
+
+
+def test_resolve_route_delegates_the_confirmation_command(client, fake_commands) -> None:
+    """★ D2（ADR-0004）：POST /relations/{id}/resolve 委托 resolve 命令，后像带确认列。"""
+    body = {
+        "commandId": "rel-resolve-r1",
+        "spaceId": "s1",
+        "expectedVersion": 1,
+        "payloadHash": "b" * 64,
+        "fromWorkItemId": _FROM,
+        "toWorkItemId": _TO,
+        "relationType": "depends_on",
+    }
+    resp = client.post(
+        f"/api/v1/relations/{_RELATION_ID}/resolve",
+        json=body,
+        headers={"Idempotency-Key": "rel-resolve-r1"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    command = fake_commands.last_command
+    assert isinstance(command, RelationCommand)
+    assert command.operation == "resolve"
+    assert command.relation_id == _RELATION_ID
+    assert command.expected_version == 1
+    value = resp.json()["value"]
+    assert value["resolution"] == "confirmed_not_required"
+    assert value["resolvedAt"] == _TIMESTAMP
+
+
+def test_resolve_route_rejects_caller_supplied_resolution_or_timestamp(client) -> None:
+    """resolved_at / resolution 由服务端自持：extra="forbid" 一律 422 拒收。"""
+    base = {
+        "commandId": "rel-resolve-r2",
+        "spaceId": "s1",
+        "expectedVersion": 1,
+        "payloadHash": "b" * 64,
+        "fromWorkItemId": _FROM,
+        "toWorkItemId": _TO,
+        "relationType": "depends_on",
+    }
+    for extra in (
+        {"resolvedAt": _TIMESTAMP},
+        {"resolution": "confirmed_not_required"},
+    ):
+        resp = client.post(
+            f"/api/v1/relations/{_RELATION_ID}/resolve",
+            json={**base, **extra},
+            headers={"Idempotency-Key": "rel-resolve-r2"},
+        )
+        assert resp.status_code == 422, resp.text

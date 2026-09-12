@@ -37,6 +37,12 @@ class FixtureReceipt:
 _ENVIRONMENT_KEYS = (
     "POMODOROXII_DATABASE_URL",
     "POMODOROXII_SPACES_DATA_DIR",
+    # ★ 2026-09-12（恢复全量门禁）：DATA_ROOT 必须参与 save/restore ——
+    #   设置侧（environment 字典）本来就有它，但恢复侧漏登记：context 退出后
+    #   夹具的 DATA_ROOT 会**泄漏**到外层，随后 line 359 的图恢复重载会把它与
+    #   已还原的 DATABASE_URL 拼成不一致三元组 → `database_url must equal
+    #   data_root/meta.db`（本地有 .env 时必红、CI 无 .env 时偶绿）。
+    "POMODOROXII_DATA_ROOT",
     "POMODOROXII_ENVIRONMENT",
     "POMODOROXII_SECRET_KEY",
     "POMODOROXII_BACKUP_ENABLED",

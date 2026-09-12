@@ -41,7 +41,12 @@ LEGACY_ENTITY_TYPES = (
     "session_quick_note",
 )
 SAFE_TERMINALS = ("FINALIZED", "ABORTED", "COMPENSATED")
-REMOVED_AUTHORITY = frozenset((*LEGACY_ENTITY_TYPES, *LEGACY_TABLES))
+# 判定口径必须与 app/task_space/migration_preflight.py 保持一致（2026-09-11 修正）：
+#   值：全量扫描；键：仅扫复数表名。单数实体类型名（如 "session"）作为键会
+#   误伤当前会话命令的结果信封 {"session": {...}} —— 那会把「跑过一次专注
+#   会话」的库全判成阻塞态，证据统计必须与启动 preflight 同口径。
+REMOVED_AUTHORITY_VALUES = frozenset((*LEGACY_ENTITY_TYPES, *LEGACY_TABLES))
+REMOVED_AUTHORITY_KEYS = frozenset(LEGACY_TABLES)
 
 
 def _backend_version() -> str:
@@ -52,10 +57,11 @@ def _backend_version() -> str:
 
 def _contains_removed_authority(value: object) -> bool:
     if isinstance(value, str):
-        return value in REMOVED_AUTHORITY
+        return value in REMOVED_AUTHORITY_VALUES
     if isinstance(value, dict):
         return any(
-            _contains_removed_authority(key) or _contains_removed_authority(item)
+            (isinstance(key, str) and key in REMOVED_AUTHORITY_KEYS)
+            or _contains_removed_authority(item)
             for key, item in value.items()
         )
     if isinstance(value, (list, tuple)):

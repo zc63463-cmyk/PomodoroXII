@@ -871,8 +871,15 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             (_parse_timestamp(value) for value in attribution_times),
             default=_parse_timestamp(str(current.get("ended_at"))),
         )
+        # ★ 2026-09-11：第一子句只在「已有复盘」（completed/skipped）时生效。
+        #   pending 是「等待复盘」而非「已复盘」—— 在线结束现在会立即落
+        #   pending（见 _clock_transition_after 的 end 补丁），而结束之后的
+        #   无关更新（离线导入、所有权推进等）都会推进 updated_at；拿它当
+        #   首次复盘的时间下界会误拒正常复盘（实测：终止性 provisional 晋升
+        #   用例被 review_time_not_monotonic 拦下）。与归属修订时间的比较
+        #   （latest_revision_at）不受影响，仍然生效。
         if (
-            current.get("review_state") != "not_required"
+            current.get("review_state") in {"completed", "skipped"}
             and current.get("updated_at") is not None
             and isinstance(current.get("updated_at"), str)
             and _parse_timestamp(reviewed_at) <= _parse_timestamp(str(current["updated_at"]))
@@ -2768,6 +2775,19 @@ def _clock_transition_after(
             raise _MutationRuleViolation("version_conflict", {"reason": "invalid_timer_completion"})
         if after["validity"] not in {"pending", "valid", "invalid"}:
             raise _MutationRuleViolation("version_conflict", {"reason": "invalid_validity"})
+        # ★★ 结束即进入复盘态（2026-09-11 修复，勿回退）：在线权威 end 必须与
+        #   离线 endProvisional（本地总是写 reviewState:'pending'）收敛到同一
+        #   行状态 —— end → reviewing 是设计语义（复盘可延迟：pending 保留；
+        #   可显式跳过：skipped）。
+        #   此前在线 end 全链路（EndActiveSessionPayload / _map_end_payload /
+        #   本策略）都没有 review_state，行停在 not_required；而计时页的复盘
+        #   入口以 reviewState==='pending' 为出现条件（否则退化成只读
+        #   "Review not_required."，无法选有效性）→ 用户永远提交不了复盘 →
+        #   validity 停在 pending → 投入投影只累计 validity='valid' 的会话 →
+        #   任务空间「投入」永远是 0（2026-09-11 实测：会话 ed5b7e05 结束，
+        #   focused_seconds=3134，work_item.effort_actual_seconds 仍为 0）。
+        if current.get("review_state") == "not_required":
+            after["review_state"] = "pending"
     else:
         raise _MutationRuleViolation(
             "version_conflict", {"reason": "unsupported_clock_action"}

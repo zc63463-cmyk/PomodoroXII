@@ -343,6 +343,12 @@ export class RealSyncEngine implements SyncEngine {
         await runFullRecovery(this.db, this.api, this.spaceId, clientId, token)
         v2Meta = await loadSyncV2Meta(this.db)
       }
+      // DORMANT（2026-09-10 审查）：per-scope 拉取游标已实现且有双向测试
+      // （pull-loop.ts 的 per-scope 游标 + pull-loop.test.ts 的 scope 用例），
+      // 但没有任何生产调用方传入 scope —— 因此这里仍走单一全局游标，
+      // 按类型过滤从未发生，整个特性处于休眠状态。
+      // 启用前必须先确认 per-scope 游标的首次 recover 时序，否则服务端会 409
+      // （`scope cursor is not installed`）。
       const pullResult = await runPullLoopV2(this.db, this.api, this.spaceId, clientId, token)
       if (this.destroyed) return
       // S1-Hard-1：pull dirtyConflicts 统一进 addConflicts
@@ -377,6 +383,12 @@ export class RealSyncEngine implements SyncEngine {
       //   失败、S4 admission 断言、游标协议断言…）都会走到这里，必须留下证据。
       //   ZodError 的 issues 数组是多行的，console 工具会把换行压扁导致截断，
       //   因此单行结构化输出 path/code/message。
+      // ★ 2026-09-12：cursor_expired 是**设计内的自愈条件**（目录 hash 变化 —— 例如
+      //   加实体字段/改 registry —— 或 retention 裁剪会让老游标一次性失效），下面
+      //   第 402 行会立即做全量恢复重试。首轮就按 error 记录会让 Next dev overlay
+      //   把"正在自愈"渲染成故障红屏（实测：B′ 加 FieldSpec 后的第一次 pull）。
+      //   分级：首轮自愈 → warn；自愈重试后仍失败 → error（真故障才留红）。
+      const cursorExpired = isCursorExpiredRejection(err)
       if (err instanceof Error && 'issues' in err) {
         console.error('[sync] cycle failed ZodError:',
           JSON.stringify((err as unknown as { issues: Array<{ path: unknown[]; code: string; message: string }> })
@@ -385,6 +397,9 @@ export class RealSyncEngine implements SyncEngine {
               code: issue.code,
               message: issue.message?.slice(0, 300),
             }))))
+      } else if (cursorExpired && !isHealRetry) {
+        console.warn('[sync] cursor expired → 全量恢复自愈（目录/保留策略变化，一次性）:',
+          (err as { response?: { data?: unknown } })?.response?.data ?? err)
       } else {
         console.error('[sync] cycle failed:', err)
       }
@@ -393,7 +408,7 @@ export class RealSyncEngine implements SyncEngine {
       //   此前没有任何路径写这个标记 —— 一旦 client 与 cursor 内嵌 client 错位
       //   （如 bootstrap wipe 竞态换掉了 clientId），每个周期 pull 都 409，
       //   状态栏永久卡在"同步出错"。token 仍在 fence 内，可直接复用。
-      if (isCursorExpiredRejection(err)) {
+      if (cursorExpired) {
         try {
           await writeSyncV2Meta(this.db, this.spaceId, token, {
             requiresFullRecovery: true,

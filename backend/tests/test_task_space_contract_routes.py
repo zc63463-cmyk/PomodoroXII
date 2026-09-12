@@ -33,6 +33,8 @@ from app.schemas.task_space import (
     WorkItemResponse,
 )
 from app.schemas.work_item_note import WorkItemNoteDocumentV1
+# ★ 2026-09-11：depth 契约断言需要 post-image 白名单（它不含 depth）。
+from app.task_space.compiler import WORK_ITEM_SYNC_FIELDS
 from app.task_space.contracts import (
     CreateProject,
     CreateWorkItem,
@@ -260,6 +262,74 @@ def test_project_create_rejects_snake_case() -> None:
     """WireModel must reject snake_case aliases."""
     with pytest.raises(ValidationError):
         ProjectCreate.model_validate({"key": "TEST", "name": "T", "next_work_item_number": 1})
+
+
+# --------------------------------------------------------------------------- #
+# ★ 2026-09-11 WorkItem depth 契约 + 前后端哈希向量
+# --------------------------------------------------------------------------- #
+
+
+def test_work_item_business_payloads_match_cross_language_hash_vectors() -> None:
+    """同一实体的业务载荷在前后端必须算出同一个哈希（共享 fixture 锁定）。
+
+    ★ 2026-09-11：depth 是**读模型派生值** —— 实体契约（前端 workItemSchema）、
+    sync post-image 白名单（WORK_ITEM_SYNC_FIELDS）与业务载荷哈希都不含它。
+    这里用**真实构造路径**（_business_payload + build_task_space_request）对齐
+    fixture，避免「文档一致、实现漂移」；前端侧同一 fixture 由
+    frontend/src/lib/contracts/payload-hash.test.ts 用真实构造器对齐。
+    """
+    import json
+    from pathlib import Path
+
+    from app.mutation.types import canonical_payload_hash, require_payload_hash
+    from app.task_space.module import _business_payload, build_task_space_request
+
+    vectors = {
+        vector["name"]: vector
+        for vector in json.loads(
+            (
+                Path(__file__).parent
+                / "fixtures/task_space_session_payload_hash_vectors.json"
+            ).read_text(encoding="utf-8")
+        )
+    }
+
+    create_vector = vectors["workItem.create business payload (no depth)"]
+    create_command = CreateWorkItem(
+        command_id="vector-create",
+        space_id="s-vector",
+        project_id="p-vector",
+        title=create_vector["payload"]["title"],
+        description=create_vector["payload"]["description"],
+        parent_id=None,
+        type_definition_id=None,
+        status_definition_id=None,
+        priority="high",
+        payload_hash=create_vector["sha256"],
+    )
+    create_payload = _business_payload(create_command)
+    assert create_payload == create_vector["payload"]
+    assert canonical_payload_hash(create_payload) == create_vector["sha256"]
+    require_payload_hash(create_vector["sha256"], create_payload)
+    build_task_space_request(create_command)  # 哈希不一致会在这里抛错
+    # depth 不在业务载荷里（也不在 post-image 白名单里）。
+    assert "depth" not in create_payload
+    assert "depth" not in WORK_ITEM_SYNC_FIELDS
+
+    update_vector = vectors["workItem.update patch business payload (no depth)"]
+    update_command = MutateWorkItem(
+        command_id="vector-update",
+        space_id="s-vector",
+        work_item_id="w-vector",
+        expected_version=1,
+        payload_hash=update_vector["sha256"],
+        payload={"operation": "update", "patch": dict(update_vector["payload"]["patch"])},
+    )
+    update_payload = _business_payload(update_command)
+    assert update_payload == update_vector["payload"]
+    assert canonical_payload_hash(update_payload) == update_vector["sha256"]
+    build_task_space_request(update_command)
+    assert "depth" not in update_payload["patch"]
 
 
 def test_work_item_create_rejects_display_key() -> None:

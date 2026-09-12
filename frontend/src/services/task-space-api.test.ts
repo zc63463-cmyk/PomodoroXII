@@ -174,4 +174,32 @@ describe('taskSpaceApi', () => {
     expect(create[2]?.headers?.['Idempotency-Key']).toBe('cr-1')
     expect(create[1]).toMatchObject({ projectId: 'p-1', title: 'T', description: null })
   })
+
+  // ★ D2 / ADR-0004：解除确认 —— POST /relations/{id}/resolve（幂等 CAS）。
+  it('posts a resolve command to the edge resolve endpoint with the triple hash', async () => {
+    vi.mocked(spaceApi.post).mockResolvedValue({ data: accepted })
+
+    await taskSpaceApi.resolveRelation({
+      operationId: 'res-1', spaceId: 'space-a', relationId: 'rel_abc',
+      expectedVersion: 3, fromWorkItemId: 'w-1', toWorkItemId: 'w-2',
+      relationType: 'depends_on',
+    })
+
+    const call = vi.mocked(spaceApi.post).mock.calls[0]!
+    expect(call[0]).toBe('/relations/rel_abc/resolve')
+    expect(call[1]).toMatchObject({
+      expectedVersion: 3, fromWorkItemId: 'w-1', toWorkItemId: 'w-2',
+      relationType: 'depends_on',
+    })
+    expect(call[2]?.headers?.['Idempotency-Key']).toBe('res-1')
+    // 业务载荷哈希 = 逻辑边三元组（与 create/remove 同构）。
+    expect((call[1] as Record<string, unknown>).payloadHash).toBe(
+      await hashCommandPayload({
+        from_work_item_id: 'w-1', to_work_item_id: 'w-2', relation_type: 'depends_on',
+      }),
+    )
+    // resolution / resolvedAt 由服务端自持 —— wire 上不得出现（extra=forbid 会拒收）。
+    expect('resolution' in (call[1] as Record<string, unknown>)).toBe(false)
+    expect('resolvedAt' in (call[1] as Record<string, unknown>)).toBe(false)
+  })
 })

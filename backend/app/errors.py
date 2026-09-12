@@ -43,6 +43,13 @@ S3_MUTATION_REJECTION_CODES = frozenset(
         "delete_payload_not_empty",
         "invalid_note_document",
         "not_found",
+        # ★ 2026-09-12（D2 / ADR-0004）：relation 的 resolution / resolved_at 是
+        #   服务端自持列 —— 同步重放路径拒收客户端对它们的任何变更（唯一写入者
+        #   是 ResolveDependency 命令）。产出点在 app/commands/entity.py
+        #   （RelationDomainPolicy::_require_relation_resolution_untouched），属
+        #   S3 非 task_space 根的字面量集合；见 test_mutation_journal.py 的
+        #   owner-set 门禁。
+        "server_managed_field_changed",
     }
 )
 RESERVED_TS_CODES = frozenset(
@@ -141,6 +148,11 @@ MUTATION_REJECTION_SPECS = MappingProxyType(
         ),
         "payload_field_not_allowed": _spec(
             422, "Payload field is not allowed", "validation_error"
+        ),
+        # ★ 2026-09-12（D2 / ADR-0004）：客户端尝试创建/变更服务端自持列
+        #   （relation.resolution / relation.resolved_at）。fail-closed。
+        "server_managed_field_changed": _spec(
+            409, "Server-managed field cannot be changed by clients", "conflict"
         ),
     }
 )

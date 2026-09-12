@@ -4,6 +4,7 @@ import { canonicalNow } from '@/lib/direct-command-intents'
 import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
 import type { WorkItemNoteDocument } from '@/lib/contracts/task-space'
 import { NoteAutosaveController, type FlushReason } from '@/lib/task-space/note-autosave-controller'
+import { summarizeIntentFailures } from '@/lib/task-space/intent-failure-summary'
 import {
   ACTIVE_CHILD_CONFLICT_CODE,
   ActiveChildConflictError,
@@ -14,39 +15,52 @@ import {
   selectRelationCandidates,
   type BlockedSignals,
 } from '@/lib/task-space/relation-selectors'
+// ★ 2026-09-12（ADR-0003）：等待前态由服务端记录（work_items 列 + 读投影），
+//   store 不再持有任何本地"进入 Waiting 前态"的记忆 —— 本函数只做一次 CAS
+//   transition，恢复目标由页面从 wire 读投影消费。
 
 // Re-exported so callers keep importing the conflict signal from the store
 // while the class identity stays owned by the leaf module (no import cycle).
 export { ACTIVE_CHILD_CONFLICT_CODE, ActiveChildConflictError, extractActiveChildConflictIds }
 import type { CachedProject, CachedWorkItem, CachedWorkItemNote, WorkItemNoteConflictRow, CachedLabel } from '@/types'
-import type { BlockedMap, CachedRelation, RelationSet } from '@/lib/contracts/task-space'
+import type { BlockedMap, CachedRelation, RelationSet, WorkItemPriority } from '@/lib/contracts/task-space'
 
 export interface CreateChildInput {
   title?: string
   description?: string | null
   typeDefinitionId?: string | null
   statusDefinitionId?: string | null
-  priority?: string | null
+  // ★ 2026-09-11：与后端 contracts 同源的受限值域（不再是 string）。
+  priority?: WorkItemPriority | null
 }
 
 export interface TaskSpaceRepositoryLike {
+  /**
+   * ★ 2026-09-11：`unresolvedDepthItemIds` = 读边界无法从 parent 链派生层级
+   * 的 WorkItem（depth 是读模型派生值，不是实体字段）。它必须可见：
+   * store 会据此提示用户并触发一次重拉（恢复路径），绝不静默丢弃这些行。
+   */
   readCachedOverview: () => Promise<{
     projects: CachedProject[]
     workItems: CachedWorkItem[]
     definitions: TaskSpaceDefinitions | null
+    unresolvedDepthItemIds?: string[]
   }>
   refreshOverview: () => Promise<{
     projects: CachedProject[]
     workItems: CachedWorkItem[]
     definitions: TaskSpaceDefinitions
+    unresolvedDepthItemIds?: string[]
   }>
   loadTree: (projectId: string) => Promise<{
     cached: unknown[]
     remote: CachedWorkItem[]
+    unresolvedDepthItemIds?: string[]
   } | {
     projects: CachedProject[]
     workItems: CachedWorkItem[]
     definitions: TaskSpaceDefinitions
+    unresolvedDepthItemIds?: string[]
   }>
   createProject: (input: { name: string; key: string; description: string | null }) => Promise<CachedProject>
   createWorkItem: (input: {
@@ -56,13 +70,13 @@ export interface TaskSpaceRepositoryLike {
     parentId: string | null
     typeDefinitionId: string | null
     statusDefinitionId: string | null
-    priority: string | null
+    priority: WorkItemPriority | null
   }) => Promise<CachedWorkItem>
   updateWorkItem: (input: {
     workItemId: string
     title?: string
     description?: string | null
-    priority?: string | null
+    priority?: WorkItemPriority | null
     typeDefinitionId?: string | null
   }) => Promise<CachedWorkItem>
   moveWorkItem: (input: {
@@ -81,6 +95,8 @@ export interface TaskSpaceRepositoryLike {
   listBlockedMap: (projectId?: string) => Promise<BlockedMap>
   createRelation: (input: { fromWorkItemId: string; toWorkItemId: string; relationType: string }) => Promise<CachedRelation>
   removeRelation: (input: { fromWorkItemId: string; toWorkItemId: string; relationType: string }) => Promise<CachedRelation>
+  // ★ 2026-09-12（D2 / ADR-0004）：解除确认（幂等 CAS，online-only）。
+  resolveRelation: (input: { fromWorkItemId: string; toWorkItemId: string; relationType: string }) => Promise<CachedRelation>
   // D5 Y: label-set mutations (idempotent set semantics + server CAS).
   addWorkItemLabels: (input: { workItemId: string; labelIds: string[] }) => Promise<CachedWorkItem>
   removeWorkItemLabel: (input: { workItemId: string; labelId: string }) => Promise<CachedWorkItem>
@@ -143,10 +159,25 @@ export interface TaskSpaceState {
   relations: CachedRelation[]
   relationsForWorkItemId: string | null
   blockedMap: Record<string, BlockedSignals>
+  /**
+   * 一次性放行：任务页确认 BlockerAck 后写入，/timer 的启动判定消费。
+   * 纯内存态、绝不落库；每次启动只放行一次（"never silent" 是按次成立的）。
+   */
+  pendingLaunchAckId: string | null
 }
 
 export interface TaskSpaceActions {
   hydrate: (spaceId: string, repository: TaskSpaceRepositoryLike) => Promise<void>
+  /**
+   * 同步周期末从本地缓存（Dexie）重读概览。
+   *
+   * 远端变更（另一台设备、服务端派生如「投入物化」）由 sync pull 写进本地
+   * 表，但 store 里的 projects/workItems 还是同步前的快照 —— 不重读就永远
+   * 显示旧值（实测：复盘后 52 分钟已进库，任务空间「投入」仍为 0）。
+   * 只读缓存、不走网络、保持选中项；hydrate 不能用于此处（它会重置选中并
+   * 触发 refreshOverview 网络刷新）。
+   */
+  refreshCachedOverview: () => Promise<void>
   attachNoteRepository: (repository: TaskSpaceNoteRepositoryLike | null) => void
   loadNote: (workItemId: string) => Promise<void>
   updateNoteDocument: (document: WorkItemNoteDocument) => void
@@ -164,7 +195,7 @@ export interface TaskSpaceActions {
   updateWorkItem: (workItemId: string, input: {
     title?: string
     description?: string | null
-    priority?: string | null
+    priority?: WorkItemPriority | null
     typeDefinitionId?: string | null
   }) => Promise<CachedWorkItem>
   moveWorkItem: (workItemId: string, newParentId: string | null) => Promise<CachedWorkItem>
@@ -175,12 +206,22 @@ export interface TaskSpaceActions {
   // Dependency domain.
   loadRelations: (workItemId: string) => Promise<void>
   loadBlockedMap: (projectId?: string) => Promise<void>
+  /** BlockerAck 一次性放行（内存态；会话成功启动即清除）。 */
+  acknowledgeLaunch: (workItemId: string) => void
+  clearLaunchAck: (workItemId?: string) => void
+  hasLaunchAck: (workItemId: string) => boolean
   createRelation: (input: {
     fromWorkItemId: string
     toWorkItemId: string
     relationType: string
   }) => Promise<CachedRelation>
   removeRelation: (input: {
+    fromWorkItemId: string
+    toWorkItemId: string
+    relationType: string
+  }) => Promise<CachedRelation>
+  /** ★ D2（ADR-0004）：确认「已取消的上游不再需要」—— 幂等 CAS。 */
+  resolveRelation: (input: {
     fromWorkItemId: string
     toWorkItemId: string
     relationType: string
@@ -198,6 +239,7 @@ const initialState = (): TaskSpaceState => ({
   relations: [],
   relationsForWorkItemId: null,
   blockedMap: {},
+  pendingLaunchAckId: null,
   selectedProjectId: null,
   selectedWorkItemId: null,
   selectedLevel2WorkItemId: null,
@@ -253,6 +295,9 @@ const MUTATION_ERROR_MESSAGES: Record<string, string> = {
   delete_payload_not_empty: '删除请求格式有误，请刷新后重试。',
   entity_not_sync_enabled: '该类型数据不支持同步。',
   payload_field_not_allowed: '请求包含不允许的字段，请刷新后重试。',
+  // ★ 2026-09-12（D2 / ADR-0004）：relation 的 resolution / resolved_at 是
+  //   服务端自持列 —— 客户端（含同步重放）不得创建或变更它们。
+  server_managed_field_changed: '该字段由服务端维护，客户端不能修改。',
   // --- generic AppError subclasses a Space call can still meet ---
   auth_required: '登录状态已失效，请重新登录。',
   forbidden: '当前账号没有执行该操作的权限。',
@@ -413,6 +458,24 @@ const definitionId = (definitions: TaskSpaceDefinitions | null, group: 'statuses
   if (!first || typeof first !== 'object' || first === null) return null
   const id = (first as Record<string, unknown>).id
   return typeof id === 'string' && id.length > 0 ? id : null
+}
+
+/**
+ * ★ 2026-09-11 WorkItem depth 不可派生时的用户可见提示（fail-loud）。
+ *
+ * depth 是读模型派生值（实体契约 / 业务哈希 / post-image 都不含它，见
+ * `lib/task-space/work-item-read-model`）。读取边界派生不出完整 parent 链时，
+ * 必须让用户看见并触发恢复（重拉），绝不允许这些行从树里静默消失。
+ */
+const DEPTH_UNRESOLVED_MESSAGE = '部分任务的层级信息不完整，已触发重新同步；若仍缺失请刷新页面。'
+
+const hasUnresolvedDepth = (overview: { unresolvedDepthItemIds?: string[] }): boolean => (
+  (overview.unresolvedDepthItemIds?.length ?? 0) > 0
+)
+
+const warnUnresolvedDepth = (source: string, ids: string[] | undefined): void => {
+  // 稳定前缀便于诊断：日志 + UI 提示双通道，避免「数据在但看不见」。
+  console.warn(`[task-space] work item depth unresolved (${source})`, ids ?? [])
 }
 
 export function selectProjectTree(items: CachedWorkItem[], projectId: string | null): CachedWorkItem[] {
@@ -637,9 +700,16 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           // duplicate-key create) must not break the workbench: record a
           // stable recovery message and let the refresh below still rebuild
           // the view from authoritative server rows.
+          //
+          // ★ 2026-09-11：两类失败分开报 ——
+          //   ① 抛错（传输类/可重试类）：本轮中止，intent 仍 pending，下次
+          //      hydrate 会再试 ⇒「请刷新页面重试」是对的；
+          //   ② 返回的 failed 列表是**永久终态**（resume 只扫 prepared/in_flight），
+          //      刷新救不回来 ⇒ 必须说清「哪类操作没提交、去原位置重新执行」。
           let resumeFailed = false
+          let failedIntents: Array<{ code: string }> = []
           try {
-            resumeFailed = (await repository.resumePendingDirectCommandIntents()).failed.length > 0
+            failedIntents = (await repository.resumePendingDirectCommandIntents()).failed
           } catch {
             resumeFailed = true
           }
@@ -650,13 +720,22 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           )
             ? get().selectedProjectId
             : remote.projects[0]?.id ?? null
+          // ★ 2026-09-11：权威刷新后仍有无法派生层级的行 → 明确提示（fail-loud），
+          // 而不是让它们在 tree 里静默消失。
+          const depthUnresolved = hasUnresolvedDepth(remote)
+          if (depthUnresolved) warnUnresolvedDepth('hydrate', remote.unresolvedDepthItemIds)
           set({
             projects: remote.projects,
             workItems: remote.workItems,
             definitions: remote.definitions,
             selectedProjectId,
             isLoading: false,
-            error: resumeFailed ? '部分本地操作未能同步，请刷新页面重试。' : null,
+            error: resumeFailed
+              // 传输类/可重试类：intent 仍 pending，下次 hydrate 会再试 —— 刷新有效。
+              ? '部分本地操作未能同步，请刷新页面重试。'
+              // 永久判死：说清哪类操作没提交（刷新救不回来）。
+              : summarizeIntentFailures(failedIntents)
+                ?? (depthUnresolved ? DEPTH_UNRESOLVED_MESSAGE : null),
           })
         } catch (error) {
           if (sequence !== hydrationSequence || !isCurrent(get(), spaceId)) return
@@ -664,6 +743,49 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           // surface a stable message, never raw Axios text.
           set({ isLoading: false, error: resolveTaskSpaceMutationError(error).message })
         }
+      },
+
+      async refreshCachedOverview() {
+        const { repository, spaceId: currentSpaceId } = get()
+        if (!repository || !currentSpaceId) return
+        // 不递增 hydrate 序号（那是「重新初始化」的令牌）；只记录当前值：
+        // 期间若真的跑了一次 hydrate，本次结果作废，交给 hydrate 写入。
+        const sequence = hydrationSequence
+        const cached = await repository.readCachedOverview()
+        if (sequence !== hydrationSequence || !isCurrent(get(), currentSpaceId)) return
+        // ★ 2026-09-11 恢复路径：本地缓存里有无法派生层级的行（历史 wire 形状行 /
+        // 缺父行）时，主动做一次权威重拉 —— 重拉后的行带服务端读投影 depth，
+        // 能自愈的当场自愈；仍不行则给出可见提示，绝不静默丢弃。
+        if (hasUnresolvedDepth(cached)) {
+          warnUnresolvedDepth('cached-overview', cached.unresolvedDepthItemIds)
+          const remote = await repository.refreshOverview()
+          if (sequence !== hydrationSequence || !isCurrent(get(), currentSpaceId)) return
+          const stillUnresolved = hasUnresolvedDepth(remote)
+          if (stillUnresolved) warnUnresolvedDepth('refresh-recovery', remote.unresolvedDepthItemIds)
+          set((state) => ({
+            projects: remote.projects,
+            workItems: remote.workItems,
+            definitions: remote.definitions,
+            selectedProjectId: state.selectedProjectId && remote.projects.some(
+              (project) => project.id === state.selectedProjectId,
+            )
+              ? state.selectedProjectId
+              : remote.projects[0]?.id ?? null,
+            error: state.error ?? (stillUnresolved ? DEPTH_UNRESOLVED_MESSAGE : null),
+          }))
+          return
+        }
+        set((state) => ({
+          projects: cached.projects,
+          workItems: cached.workItems,
+          definitions: cached.definitions,
+          // 选中项能保持就保持（远端刷新不该把人从详情面板里踢出来）。
+          selectedProjectId: state.selectedProjectId && cached.projects.some(
+            (project) => project.id === state.selectedProjectId,
+          )
+            ? state.selectedProjectId
+            : cached.projects[0]?.id ?? null,
+        }))
       },
 
       attachNoteRepository(repository) {
@@ -804,9 +926,12 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
           const remote = 'remote' in result
             ? result.remote
             : result.workItems.filter((item) => item.projectId === projectId)
+          // ★ 2026-09-11：读边界报出无法派生层级的行 → 可见提示（fail-loud）。
+          const unresolved = hasUnresolvedDepth(result)
+          if (unresolved) warnUnresolvedDepth('load-tree', result.unresolvedDepthItemIds)
           set((state) => ({
             workItems: mergeProjectWorkItems(state.workItems, projectId, remote),
-            error: null,
+            error: unresolved ? DEPTH_UNRESOLVED_MESSAGE : null,
           }))
         } catch (error) {
           set({ error: resolveTaskSpaceMutationError(error).message })
@@ -1089,6 +1214,21 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
         }
       },
 
+      acknowledgeLaunch(workItemId) {
+        set({ pendingLaunchAckId: workItemId })
+      },
+
+      clearLaunchAck(workItemId) {
+        const current = get().pendingLaunchAckId
+        if (current === null) return
+        if (workItemId !== undefined && current !== workItemId) return
+        set({ pendingLaunchAckId: null })
+      },
+
+      hasLaunchAck(workItemId) {
+        return get().pendingLaunchAckId === workItemId
+      },
+
       async createRelation(input) {
         const targetId = input.fromWorkItemId
         beginMutation(targetId, 'work_item_mutation_in_flight')
@@ -1127,6 +1267,33 @@ export const useTaskSpaceStore = create<TaskSpaceState & TaskSpaceActions>()(
             mutationError: null,
           }))
           return removed
+        } catch (error) {
+          const mapped = resolveTaskSpaceMutationError(error)
+          set({ error: mapped.message, mutationError: { targetId, code: mapped.code } })
+          throw error
+        } finally {
+          endMutation(targetId)
+        }
+      },
+
+      // ★ 2026-09-12（D2 / ADR-0004）：解除确认。确认后仅替换该行 —— 阻塞 /
+      //   恢复提示等派生信号由 store 重算（本地重算是渲染真值），不做"乐观猜测"。
+      async resolveRelation(input) {
+        const targetId = input.fromWorkItemId
+        beginMutation(targetId, 'work_item_mutation_in_flight')
+        const repository = get().repository
+        try {
+          if (!repository) throw new Error('task_space_repository_not_ready')
+          const resolved = await repository.resolveRelation(input)
+          set((state) => ({
+            relations: [
+              ...state.relations.filter((edge) => edge.id !== resolved.id),
+              resolved,
+            ],
+            error: null,
+            mutationError: null,
+          }))
+          return resolved
         } catch (error) {
           const mapped = resolveTaskSpaceMutationError(error)
           set({ error: mapped.message, mutationError: { targetId, code: mapped.code } })

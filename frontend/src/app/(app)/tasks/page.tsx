@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -17,6 +18,10 @@ import { WorkItemDetail } from '@/components/task-space/work-item-detail'
 import { ActiveChildConflictDialog } from '@/components/task-space/active-child-conflict-dialog'
 import { WorkItemRelationsCard } from '@/components/task-space/work-item-relations-card'
 import { BlockerAckModal } from '@/components/task-space/blocker-ack-modal'
+import {
+  WaitingResumeHint,
+  type WaitingResumeTarget,
+} from '@/components/task-space/waiting-resume-hint'
 import { WorkItemTree } from '@/components/task-space/work-item-tree'
 import { WorkItemNoteEditor } from '@/components/task-space/work-item-note-editor'
 import { TaskSpaceRepository } from '@/lib/task-space/task-space-repository'
@@ -33,11 +38,27 @@ import {
   resolveTaskSpaceMutationError,
   useTaskSpaceStore,
 } from '@/stores/task-space-store'
-import { countOpenBlockers } from '@/lib/task-space/relation-selectors'
+import { buildHierarchyCodes } from '@/lib/task-space/hierarchy-code'
+import {
+  countOpenBlockers,
+  selectOpenBlockers,
+  selectWaitingResumeSuggestion,
+} from '@/lib/task-space/relation-selectors'
+import { evaluateSessionLaunch } from '@/lib/task-space/session-launch-guard'
+import { recordBlockerAck } from '@/lib/task-space/blocker-ack-log'
+import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
+import {
+  countOpenChildren,
+  EMPTY_TREE_FILTER,
+  filterWorkItemTree,
+  isTreeFilterActive,
+  type WorkItemTreeFilter,
+} from '@/lib/task-space/tree-filter'
 import { useSpaceStore } from '@/stores/space-store'
 import { spaceDBManager } from '@/services/space-db'
 import { PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
 import type { CachedWorkItem, WorkItemNoteConflictRow } from '@/types'
+import type { CachedRelation } from '@/lib/contracts/task-space'
 
 type NoteRepositoryWithConflict = {
   conflict: (workItemId: string) => Promise<WorkItemNoteConflictRow | undefined>
@@ -45,6 +66,7 @@ type NoteRepositoryWithConflict = {
 
 export default function TasksPage() {
   const spaceId = useSpaceStore((state) => state.currentSpaceId)
+  const router = useRouter()
   const projects = useTaskSpaceStore((state) => state.projects)
   const workItems = useTaskSpaceStore((state) => state.workItems)
   const definitions = useTaskSpaceStore((state) => state.definitions)
@@ -85,13 +107,16 @@ export default function TasksPage() {
   const loadBlockedMap = useTaskSpaceStore((state) => state.loadBlockedMap)
   const createRelation = useTaskSpaceStore((state) => state.createRelation)
   const removeRelation = useTaskSpaceStore((state) => state.removeRelation)
+  const resolveRelation = useTaskSpaceStore((state) => state.resolveRelation)
+  const acknowledgeLaunch = useTaskSpaceStore((state) => state.acknowledgeLaunch)
   const [conflict, setConflict] = useState<{ parentId: string; childIds: string[] } | null>(null)
   const [resolvingConflict, setResolvingConflict] = useState(false)
   const [blockedLaunch, setBlockedLaunch] = useState<CachedWorkItem | null>(null)
+  const [treeFilter, setTreeFilter] = useState<WorkItemTreeFilter>(EMPTY_TREE_FILTER)
 
   // Status ids are Space-scoped definitions, never hardcoded: the backend
   // owns the status machine and a Space may rename or re-categorise entries.
-  const statusIdByCategory = (category: 'completed' | 'cancelled'): string | null => {
+  const statusIdByCategory = (category: string): string | null => {
     for (const status of definitions?.statuses ?? []) {
       const record = status as Record<string, unknown>
       if (record.category === category && typeof record.id === 'string') return record.id
@@ -104,6 +129,21 @@ export default function TasksPage() {
       .map((status) => String((status as Record<string, unknown>).id)),
   )
 
+  // ★ 2026-09-11：缺 cancelled / completed 类目是**合法的空间状态**（空间自定义
+  //   status_definitions），不是异常数据。此前两个主按钮的 handler 直接
+  //   `if (!statusId) return` —— 点了没反应、无任何反馈。现在把原因提前算出
+  //   交给弹窗：按钮禁用 + 中文说明，绝不伪造默认状态 ID。
+  const cancelledStatusId = statusIdByCategory('cancelled')
+  const completedStatusId = statusIdByCategory('completed')
+  const cancelChildrenUnavailableReason = !cancelledStatusId
+    ? (completedStatusId
+        ? '当前空间缺少「已取消」类目的状态，无法执行此操作。'
+        : '当前空间缺少「已取消」与「已完成」类目的状态，无法执行此操作。')
+    : (completedStatusId ? null : '当前空间缺少「已完成」类目的状态，无法执行此操作。')
+  const moveChildrenUnavailableReason = completedStatusId
+    ? null
+    : '当前空间缺少「已完成」类目的状态，无法执行此操作。'
+
   const blockedParent = conflict
     ? (workItems.find((item) => item.id === conflict.parentId) ?? null)
     : null
@@ -114,17 +154,11 @@ export default function TasksPage() {
   )
 
   // Status categories come from Space-scoped definitions, never hardcoded.
-  const categoryById = useMemo(() => {
-    const statusCategoryById = new Map(
-      (definitions?.statuses ?? []).map((status) => {
-        const record = status as Record<string, unknown>
-        return [String(record.id), typeof record.category === 'string' ? record.category : undefined]
-      }),
-    )
-    return Object.fromEntries(
-      workItems.map((item) => [item.id, statusCategoryById.get(item.statusDefinitionId)]),
-    ) as Record<string, string | undefined>
-  }, [workItems, definitions])
+  // ★ 与 /timer 共用同一份查表 —— 会话启动判定在两处必须看到同一事实。
+  const categoryById = useMemo(
+    () => deriveStatusCategoryById(definitions, workItems),
+    [workItems, definitions],
+  )
 
   // Derived blocking signal: recomputed locally so an edge that arrived before
   // its work item (network reordering) still blocks instead of silently
@@ -146,19 +180,76 @@ export default function TasksPage() {
   // NOTE: resolved here rather than reusing ``selectedWorkItem`` below — that
   // const is declared further down, and this block feeds hooks that run first.
   const selectedItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
+  // ★ 会话启动判定收口到唯一入口（/timer 用同一函数）——按钮拦截与计时页
+  //   判定从此不可能漂移；孤儿上游按未完成算（与派生信号同源）。
   const selectedIsBlocked = selectedItem
-    ? blockedSignals[selectedItem.id]?.isBlocked === true
+    ? evaluateSessionLaunch({
+        level2WorkItemId: selectedItem.id,
+        workItems,
+        relations,
+        statusCategoryById: categoryById,
+      }).status === 'blocked'
     : false
-  const selectedBlockers = useMemo(() => (
-    selectedItem
-      ? relations.filter((edge) => {
-          if (edge.fromWorkItemId !== selectedItem.id) return false
-          const upstream = workItems.find((item) => item.id === edge.toWorkItemId)
-          const category = upstream ? categoryById[upstream.id] : undefined
-          return category !== 'completed' && category !== 'cancelled'
-        })
-      : []
-  ), [selectedItem, relations, workItems, categoryById])
+  // 与启动判定同源：只列真正的阻塞型边、上游去重、取消 / 完成的上游不列。
+  const selectedBlockers = useMemo(() => {
+    if (!selectedItem) return []
+    const openIds = new Set(selectOpenBlockers(relations, selectedItem.id, categoryById))
+    return relations.filter((edge) => (
+      edge.fromWorkItemId === selectedItem.id && openIds.has(edge.toWorkItemId)
+    ))
+  }, [selectedItem, relations, categoryById])
+  // 依赖解除 → 建议恢复（依赖域合同 §10 验收 9：提示但不自动切状态）。
+  // ★ 2026-09-12（ADR-0003）：恢复目标是**服务端读投影的等待前态事实**
+  //   （preWaitingStatusDefinitionId，wire 读路径才携带；本地 Dexie 行一律
+  //   忽略 —— 见 task-space-repository 的读取边界）。未命中一律降级为
+  //   「用户显式选择」：无记录 / 目标不在本空间定义中（已归档或不存在）/
+  //   目标类目不可恢复（waiting 或终态）。绝不猜、绝不自动切状态。
+  const waitingResumeSuggestion = selectedItem
+    ? selectWaitingResumeSuggestion({
+        workItemId: selectedItem.id,
+        depth: selectedItem.depth,
+        statusCategory: categoryById[selectedItem.id],
+        relations,
+        statusCategoryById: categoryById,
+      })
+    : null
+  const selectedPriorStateId = selectedItem?.preWaitingStatusDefinitionId ?? null
+  const waitingResume = useMemo<{
+    target: WaitingResumeTarget | null
+    unresolvedReason?: string
+  }>(() => {
+    const unrecoverable = (unresolvedReason: string) => ({ target: null, unresolvedReason })
+    if (!selectedPriorStateId) {
+      return unrecoverable(
+        '没有记录到进入「等待」前的状态，请在本页「状态」中自行选择要恢复到的状态。',
+      )
+    }
+    const status = (definitions?.statuses ?? []).find(
+      (candidate) => String((candidate as Record<string, unknown>).id) === selectedPriorStateId,
+    ) as Record<string, unknown> | undefined
+    // 目标已归档 / 不存在：不可恢复（已归档行在定义表里仍会返回，必须显式排除）。
+    const archivedAt = status ? (status.archived_at ?? status.archivedAt ?? null) : null
+    if (!status || archivedAt !== null && archivedAt !== undefined) {
+      return unrecoverable(
+        '记录的前态在当前空间中不可用（可能已归档或不存在），请在本页「状态」中自行选择要恢复到的状态。',
+      )
+    }
+    // 目标类目不可恢复：waiting 本身或终态（重启终态项是危险动作，不给一键）。
+    const category = typeof status.category === 'string' ? status.category : null
+    if (category === 'waiting' || category === 'completed' || category === 'cancelled') {
+      return unrecoverable(
+        '记录的前态不可恢复（进入「等待」前已是终态或等待类目），请在本页「状态」中自行选择要恢复到的状态。',
+      )
+    }
+    const name = typeof status.name === 'string' && status.name.length > 0 ? status.name : null
+    if (!name) {
+      return unrecoverable(
+        '记录的前态在当前空间中不可用（可能已归档或不存在），请在本页「状态」中自行选择要恢复到的状态。',
+      )
+    }
+    return { target: { statusDefinitionId: selectedPriorStateId, name } }
+  }, [selectedPriorStateId, definitions])
+  const waitingResumeTargetId = waitingResume.target?.statusDefinitionId ?? null
 
   useEffect(() => {
     if (!selectedWorkItemId) return
@@ -170,10 +261,20 @@ export default function TasksPage() {
     void loadBlockedMap(selectedProjectId)
   }, [loadBlockedMap, selectedProjectId])
 
-  const relationCandidates = selectedItem
-    ? selectRelationCandidates(workItems, selectedItem.id, relations)
+  // 候选默认只列**同项目**：跨项目任务与本项几乎不可同债，全量罗列只会让
+  // 选择器变成大海捞针。依赖域合同允许跨项目边（服务端 5 字段投影防泄露），
+  // 所以跨项目候选单独成组，由用户在面板里显式展开。
+  const candidateIds = selectedItem
+    ? selectRelationCandidates(workItems, selectedItem.id, relations, { projectId: selectedItem.projectId })
     : []
-  const candidateItems = workItems.filter((item) => relationCandidates.includes(item.id))
+  const crossProjectCandidateIds = selectedItem
+    ? selectRelationCandidates(workItems, selectedItem.id, relations, {
+        projectId: selectedItem.projectId,
+        includeCrossProject: true,
+      }).filter((id) => !candidateIds.includes(id))
+    : []
+  const candidateItems = workItems.filter((item) => candidateIds.includes(item.id))
+  const crossProjectCandidateItems = workItems.filter((item) => crossProjectCandidateIds.includes(item.id))
 
   const handleAddRelation = async (input: { toWorkItemId: string; relationType: string }) => {
     if (!selectedWorkItemId) return
@@ -190,6 +291,16 @@ export default function TasksPage() {
     relationType: string
   }) => {
     await removeRelation(input)
+  }
+
+  // ★ 2026-09-12（D2 / ADR-0004）：「需要解决」区块的确认 —— 幂等 CAS；
+  //   成功后 store 重算（阻塞 / 恢复提示）立即反映。
+  const handleResolveRelation = async (edge: CachedRelation) => {
+    await resolveRelation({
+      fromWorkItemId: edge.fromWorkItemId,
+      toWorkItemId: edge.toWorkItemId,
+      relationType: edge.relationType,
+    })
   }
 
   const handleTransition = async (statusDefinitionId: string) => {
@@ -212,8 +323,8 @@ export default function TasksPage() {
 
   const cancelChildrenAndComplete = async () => {
     if (!conflict) return
-    const cancelledStatusId = statusIdByCategory('cancelled')
-    const completedStatusId = statusIdByCategory('completed')
+    // 不可用时按钮已禁用、弹窗展示了中文原因（见上面 reason 计算）——
+    // 这里保留防御性早退，但用户路径上不再出现「点了没反应」。
     if (!cancelledStatusId || !completedStatusId) return
     setResolvingConflict(true)
     try {
@@ -232,7 +343,7 @@ export default function TasksPage() {
 
   const moveChildrenAndComplete = async (targetParentId: string) => {
     if (!conflict) return
-    const completedStatusId = statusIdByCategory('completed')
+    // 缺 completed 类目时按钮已禁用 + 弹窗已给出中文原因，这里仅作防御。
     if (!completedStatusId) return
     setResolvingConflict(true)
     try {
@@ -335,8 +446,53 @@ export default function TasksPage() {
     return () => unregister()
   }, [flushNote, spaceId])
 
-  const visibleItems = selectProjectTree(workItems, selectedProjectId)
+  // 层级编码（1 / 1.2 / 1.2.3）：客户端派生，不落库。父项移动会重排整棵
+  // 子树的编号 —— 这是特性（反映当前结构）；稳定身份仍是 displayKey。
+  const hierarchyCodes = useMemo(() => buildHierarchyCodes(workItems), [workItems])
+  const visibleItems = useMemo(() => {
+    const projectItems = selectProjectTree(workItems, selectedProjectId)
+    if (!isTreeFilterActive(treeFilter)) return projectItems
+    const isBlockedById: Record<string, boolean> = {}
+    for (const [id, signal] of Object.entries(blockedSignals)) isBlockedById[id] = signal.isBlocked
+    return filterWorkItemTree(projectItems, treeFilter, {
+      categoryById,
+      isBlockedById,
+      codeById: hierarchyCodes,
+    })
+  }, [workItems, selectedProjectId, treeFilter, blockedSignals, categoryById, hierarchyCodes])
+  const treeFilterActive = isTreeFilterActive(treeFilter)
+  // 父子完成护栏的前置信号：每个父项下未完成的直接子项数。
+  const openChildCountById = useMemo(
+    () => countOpenChildren(workItems, categoryById),
+    [workItems, categoryById],
+  )
+  // 依赖端点的本地名称解析：服务端最小投影（跨项目 5 字段）是权威，
+  // 但它随 relation-set 查询才到达 —— 没有本地回退时，边会渲染成裸 UUID。
+  const workItemNameById = useMemo(
+    () => Object.fromEntries(workItems.map((item) => [item.id, {
+      displayKey: item.displayKey,
+      title: item.title,
+      statusDefinitionId: item.statusDefinitionId,
+      // ★ D2（ADR-0004）：归档提示需要端点的归档事实（真值表不受影响）。
+      archivedAt: item.archivedAt,
+      code: hierarchyCodes[item.id],
+    }])),
+    [workItems, hierarchyCodes],
+  )
   const selectedWorkItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
+  // 关系图节点解析：状态类目 + 投入（节点信息密度）。
+  const resolveItem = useCallback((id: string) => {
+    const item = workItems.find((candidate) => candidate.id === id)
+    if (!item) return undefined
+    return {
+      displayKey: item.displayKey,
+      title: item.title,
+      statusCategory: categoryById[id],
+      effortActualSeconds: item.effortActualSeconds,
+      effortEstimateLowerSeconds: item.effortEstimateLowerSeconds,
+      effortEstimateUpperSeconds: item.effortEstimateUpperSeconds,
+    }
+  }, [workItems, categoryById])
   // Same-project nodes that may become a new parent: never the item itself,
   // its descendants, or a depth-3 node (all rejected by the backend anyway).
   const availableParents = selectMoveCandidates(visibleItems, selectedWorkItemId)
@@ -346,9 +502,21 @@ export default function TasksPage() {
   const handleLaunchBlocked = (workItem: CachedWorkItem) => {
     setBlockedLaunch(workItem)
   }
+  // ★ 「强制继续」必须真的继续：此前只关弹窗（不导航、不记录），而按钮在
+  //   blocked 时永远拦截 —— 用户点两次、弹两次，永远开不了会话。
+  //   现在：记一条本地 BlockerAck、放行一次（/timer 判定时消费）、去计时页。
   const handleBlockerAckProceed = useCallback(() => {
+    const target = blockedLaunch
+    if (!target) return
+    recordBlockerAck({
+      workItemId: target.id,
+      blockerIds: selectedBlockers.map((edge) => edge.toWorkItemId),
+      source: 'tasks',
+    })
+    acknowledgeLaunch(target.id)
     setBlockedLaunch(null)
-  }, [])
+    router.push('/timer')
+  }, [blockedLaunch, selectedBlockers, acknowledgeLaunch, router])
   const handleBlockerAckCancel = useCallback(() => {
     const first = selectedBlockers[0]
     setBlockedLaunch(null)
@@ -422,20 +590,80 @@ export default function TasksPage() {
             {isLoading ? <span className="text-xs text-muted-foreground">Loading</span> : null}
           </div>
           {selectedProjectId ? (
-            <WorkItemTree
-              items={visibleItems}
-              selectedId={selectedWorkItemId}
-              onSelect={selectWorkItemAndDispatch}
-              onCreateChild={(parentId) => setCreateTarget({ kind: 'child', parentId })}
-              onCreateRoot={() => setCreateTarget({ kind: 'root' })}
-              definitions={definitions}
-              isLoading={isLoading}
-              error={error}
-              pendingMutations={pendingMutations}
-              blockedSignals={blockedSignals}
-              onMove={handleTreeMove}
-              collapseSignal={collapseSignal}
-            />
+            <>
+              <div className="grid gap-2 border-b px-3 py-2">
+                <Input
+                  aria-label="搜索工作项"
+                  placeholder="搜索标题或编号…"
+                  value={treeFilter.query}
+                  onChange={(event) => setTreeFilter((current) => ({ ...current, query: event.target.value }))}
+                  className="h-8"
+                />
+                <div className="flex items-center gap-2">
+                  <select
+                    aria-label="按状态筛选"
+                    className="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-xs outline-none"
+                    value={treeFilter.status}
+                    onChange={(event) => setTreeFilter((current) => ({
+                      ...current,
+                      status: event.target.value as WorkItemTreeFilter['status'],
+                    }))}
+                  >
+                    <option value="all">全部状态</option>
+                    <option value="open">未完成</option>
+                    <option value="completed">已完成</option>
+                  </select>
+                  <label className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      aria-label="只看被阻塞"
+                      checked={treeFilter.blockedOnly}
+                      onChange={(event) => setTreeFilter((current) => ({
+                        ...current,
+                        blockedOnly: event.target.checked,
+                      }))}
+                    />
+                    只看被阻塞
+                  </label>
+                </div>
+                {treeFilterActive ? (
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span data-filter-count>命中 {visibleItems.length} 项（含父级路径）</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setTreeFilter(EMPTY_TREE_FILTER)}
+                    >
+                      清除筛选
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+              {treeFilterActive && visibleItems.length === 0 ? (
+                <p className="px-3 py-4 text-sm text-muted-foreground">
+                  没有匹配的工作项 —— 调整关键字或清除筛选。
+                </p>
+              ) : (
+                <WorkItemTree
+                  items={visibleItems}
+                  selectedId={selectedWorkItemId}
+                  onSelect={selectWorkItemAndDispatch}
+                  onCreateChild={(parentId) => setCreateTarget({ kind: 'child', parentId })}
+                  onCreateRoot={() => setCreateTarget({ kind: 'root' })}
+                  definitions={definitions}
+                  isLoading={isLoading}
+                  error={error}
+                  pendingMutations={pendingMutations}
+                  blockedSignals={blockedSignals}
+                  onMove={handleTreeMove}
+                  collapseSignal={collapseSignal}
+                  filterActive={treeFilterActive}
+                  openChildCountById={openChildCountById}
+                  codeById={hierarchyCodes}
+                />
+              )}
+            </>
           ) : (
             <p className="p-4 text-sm text-muted-foreground">Select a project</p>
           )}
@@ -462,6 +690,21 @@ export default function TasksPage() {
             onTrash={() => trashWorkItem(selectedWorkItemId ?? '')}
             onRestore={() => restoreWorkItem(selectedWorkItemId ?? '')}
             onToggleLabel={(labelId, add) => toggleWorkItemLabel(selectedWorkItemId ?? '', labelId, add)}
+            openChildCount={selectedWorkItem ? (openChildCountById[selectedWorkItem.id] ?? 0) : null}
+            statusHint={selectedWorkItem && waitingResumeSuggestion ? (
+              <WaitingResumeHint
+                upstreamCount={waitingResumeSuggestion.upstreamCount}
+                // 只有「服务端前态命中」且「目标可用」才给一键恢复；否则
+                // target 为 null，组件退化为纯说明 —— 让用户显式选择。
+                target={waitingResume.target}
+                unresolvedReason={waitingResume.unresolvedReason}
+                pending={pendingMutations[selectedWorkItem.id] === true}
+                archived={selectedWorkItem.archivedAt !== null}
+                onResume={waitingResumeTargetId
+                  ? () => void handleTransition(waitingResumeTargetId)
+                  : undefined}
+              />
+            ) : null}
             relationsCard={selectedWorkItem ? (
               <WorkItemRelationsCard
                 workItem={selectedWorkItem}
@@ -469,11 +712,19 @@ export default function TasksPage() {
                   edge.fromWorkItemId === selectedWorkItem.id
                   || edge.toWorkItemId === selectedWorkItem.id
                 ))}
+                nameById={workItemNameById}
+                codeById={hierarchyCodes}
+                resolveItem={resolveItem}
                 candidates={candidateItems}
+                crossProjectCandidates={crossProjectCandidateItems}
+                allRelations={relations}
+                currentProjectId={selectedWorkItem.projectId}
+                onSelectNode={(workItemId) => selectWorkItemAndDispatch(workItemId)}
                 definitions={definitions ?? null}
                 pending={selectedWorkItem ? pendingMutations[selectedWorkItem.id] === true : false}
                 onAdd={(input) => handleAddRelation(input).catch(() => undefined)}
                 onRemove={(input) => handleRemoveRelation(input).catch(() => undefined)}
+                onResolve={(edge) => handleResolveRelation(edge).catch(() => undefined)}
               />
             ) : undefined}
             noteEditor={selectedNote ? (
@@ -509,6 +760,8 @@ export default function TasksPage() {
           conflictChildren={workItems.filter((item) => conflict.childIds.includes(item.id))}
           availableLevel2Parents={relocationTargets}
           busy={resolvingConflict}
+          cancelChildrenUnavailableReason={cancelChildrenUnavailableReason}
+          moveChildrenUnavailableReason={moveChildrenUnavailableReason}
           onClose={closeConflict}
           onCancelChildrenAndComplete={cancelChildrenAndComplete}
           onMoveChildrenAndComplete={moveChildrenAndComplete}

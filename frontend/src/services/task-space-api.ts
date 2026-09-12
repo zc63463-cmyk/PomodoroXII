@@ -1,11 +1,12 @@
-import { assertResponseSpace, acceptedMutationSchema, parseDefinitions, parseNoteDocument, parseProject, parseWorkItem, parseWorkItemNote, projectSchema, relationSetSchema, blockedMapSchema, workItemSchema, type BlockedMap, type Project, type RelationSet, type TaskSpaceDefinitions, type WorkItem, type WorkItemNote, type WorkItemNoteDocument } from '@/lib/contracts/task-space'
-import { buildCommandFields, hashCommandPayload } from '@/lib/contracts/payload-hash'
+import { assertResponseSpace, acceptedMutationSchema, parseDefinitions, parseNoteDocument, parseProject, parseWorkItem, parseWorkItemNote, projectSchema, relationSetSchema, blockedMapSchema, workItemCreateBusinessPayload, workItemPatchBusinessPayload, workItemReadSchema, type BlockedMap, type Project, type RelationSet, type TaskSpaceDefinitions, type WorkItemNote, type WorkItemNoteDocument, type WorkItemPriority, type WorkItemView } from '@/lib/contracts/task-space'
+import { buildCommandFields, hashCommandPayload, type JsonValue } from '@/lib/contracts/payload-hash'
 import { spaceApi } from './api'
 
 export interface SpaceCommandBase { spaceId: string; operationId: string }
 export interface CreateProjectInput extends SpaceCommandBase { name: string; key: string; description?: string | null }
-export interface CreateWorkItemInput extends SpaceCommandBase { projectId: string; title: string; description: string | null; parentId: string | null; typeDefinitionId: string | null; statusDefinitionId: string | null; priority: string | null }
-export interface UpdateWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; title?: string; description?: string | null; priority?: string | null; typeDefinitionId?: string | null }
+// ★ 2026-09-11：priority 收紧到与后端同源的值域，调用方无法再传自由文本。
+export interface CreateWorkItemInput extends SpaceCommandBase { projectId: string; title: string; description: string | null; parentId: string | null; typeDefinitionId: string | null; statusDefinitionId: string | null; priority: WorkItemPriority | null }
+export interface UpdateWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; title?: string; description?: string | null; priority?: WorkItemPriority | null; typeDefinitionId?: string | null }
 export interface MoveWorkItemInput extends SpaceCommandBase { projectId: string; workItemId: string; expectedVersion: number; newParentId: string | null }
 export interface TransitionWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; statusDefinitionId: string }
 export interface ReplaceNoteInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; document: WorkItemNoteDocument }
@@ -15,6 +16,9 @@ export interface TrashWorkItemInput extends SpaceCommandBase { workItemId: strin
 export interface RestoreWorkItemInput extends SpaceCommandBase { workItemId: string; expectedVersion: number }
 export interface CreateRelationInput extends SpaceCommandBase { fromWorkItemId: string; toWorkItemId: string; relationType: string }
 export interface RemoveRelationInput extends SpaceCommandBase { relationId: string; expectedVersion: number; fromWorkItemId: string; toWorkItemId: string; relationType: string }
+// ★ 2026-09-12（D2 / ADR-0004）：解除确认（幂等 CAS；服务端打戳，客户端不传
+//   resolution / 时间戳 —— 外部 schema extra="forbid" 会拒收）。
+export interface ResolveRelationInput extends SpaceCommandBase { relationId: string; expectedVersion: number; fromWorkItemId: string; toWorkItemId: string; relationType: string }
 export interface AddWorkItemLabelsInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; labelIds: string[] }
 export interface RemoveWorkItemLabelsInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; labelIds: string[] }
 export interface CreateLabelInput extends SpaceCommandBase { name: string; color?: string | null }
@@ -61,13 +65,14 @@ export const taskSpaceApi = {
     const response = await spaceApi.get('/projects/definitions')
     return parseDefinitions(response.data)
   },
-  async listWorkItems(spaceId: string, projectId: string, cursor?: string): Promise<{ items: WorkItem[]; nextCursor: string | null }> {
+  async listWorkItems(spaceId: string, projectId: string, cursor?: string): Promise<{ items: WorkItemView[]; nextCursor: string | null }> {
     const response = await spaceApi.get('/work-items', { params: { projectId, cursor, limit: 100 } })
     const data = response.data as { items?: unknown; nextCursor?: unknown }
-    const page = workItemSchema.array().parse(data.items ?? [])
+    // ★ 2026-09-11：列表是**读投影**（服务端附带派生 depth），不是实体契约。
+    const page = workItemReadSchema.array().parse(data.items ?? [])
     return { items: page.map((item) => assertResponseSpace(item, spaceId)), nextCursor: typeof data.nextCursor === 'string' ? data.nextCursor : null }
   },
-  async getWorkItem(spaceId: string, workItemId: string): Promise<WorkItem> {
+  async getWorkItem(spaceId: string, workItemId: string): Promise<WorkItemView> {
     const response = await spaceApi.get(`/work-items/${encodeURIComponent(workItemId)}`)
     return assertResponseSpace(parseWorkItem(response.data), spaceId)
   },
@@ -86,7 +91,13 @@ export const taskSpaceApi = {
     )
   },
   async createWorkItem(input: CreateWorkItemInput) {
-    const internal = { title: input.title, description: input.description, parent_id: input.parentId, type_definition_id: input.typeDefinitionId, status_definition_id: input.statusDefinitionId, priority: input.priority }
+    // ★ 2026-09-11：业务载荷由 contracts 的共享构造器产出（与后端
+    // module._business_payload 逐字一致，哈希向量两侧锁定；不含 depth）。
+    const internal = workItemCreateBusinessPayload({
+      title: input.title, description: input.description, parent_id: input.parentId,
+      type_definition_id: input.typeDefinitionId,
+      status_definition_id: input.statusDefinitionId, priority: input.priority,
+    })
     return command(input.operationId, input.spaceId,
       { projectId: input.projectId, title: input.title, description: input.description, parentId: input.parentId, typeDefinitionId: input.typeDefinitionId, statusDefinitionId: input.statusDefinitionId, priority: input.priority },
       internal,
@@ -97,14 +108,15 @@ export const taskSpaceApi = {
     // Wire body stays flat camelCase; the canonical business payload mirrors
     // the backend compiler contract: a nested {"patch": {...}} over the exact
     // fields the caller provided (explicit null keeps the field in the hash).
-    const patch: Record<string, unknown> = {}
+    const patch: Record<string, JsonValue> = {}
     if (input.title !== undefined) patch.title = input.title
     if (input.description !== undefined) patch.description = input.description
     if (input.priority !== undefined) patch.priority = input.priority
     if (input.typeDefinitionId !== undefined) patch.type_definition_id = input.typeDefinitionId
     return command(input.operationId, input.spaceId,
       { expectedVersion: input.expectedVersion, title: input.title, description: input.description, priority: input.priority, typeDefinitionId: input.typeDefinitionId },
-      { patch },
+      // ★ 2026-09-11：共享构造器，保证与后端哈希输入逐字一致（不含 depth）。
+      workItemPatchBusinessPayload(patch),
       (body, options) => spaceApi.patch(`/work-items/${encodeURIComponent(input.workItemId)}`, body, options),
     )
   },
@@ -222,6 +234,30 @@ export const taskSpaceApi = {
         data: body,
         ...options,
       }),
+    )
+  },
+  /**
+   * ★ 2026-09-12（D2 / ADR-0004）：确认「已取消的上游不再需要」。
+   * 业务载荷 = 逻辑边三元组（与 create/remove 同构，后端 module._business_payload
+   * 对三种 operation 返回同一哈希输入）；resolution / resolved_at 由服务端自持，
+   * 客户端不得上行。
+   */
+  async resolveRelation(input: ResolveRelationInput) {
+    return command(input.operationId, input.spaceId,
+      {
+        expectedVersion: input.expectedVersion,
+        fromWorkItemId: input.fromWorkItemId,
+        toWorkItemId: input.toWorkItemId,
+        relationType: input.relationType,
+      },
+      {
+        from_work_item_id: input.fromWorkItemId,
+        to_work_item_id: input.toWorkItemId,
+        relation_type: input.relationType,
+      },
+      (body, options) => spaceApi.post(
+        `/relations/${encodeURIComponent(input.relationId)}/resolve`, body, options,
+      ),
     )
   },
   async replaceNote(input: ReplaceNoteInput) {

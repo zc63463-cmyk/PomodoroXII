@@ -507,6 +507,12 @@ REGISTRY.register(EntitySpec(
         FieldSpec("description", "text", nullable=True),
         FieldSpec("type_definition_id", "string", nullable=False),
         FieldSpec("status_definition_id", "string", nullable=False),
+        # ★ 2026-09-12（ADR-0003）：等待前态列。必须出现在 FieldSpec —— 行形状
+        #   校验要求 set(row) == set(spec.field_names)（mutation/unit_of_work.py
+        #   的完整行 / 持久化计划行 / sync 事件期望字段三处 + sync 载荷未知字段
+        #   拒绝），漏加会让带列的 DB 行在编译或恢复时报结构错误。
+        #   注意：这不等于把它加进 WORK_ITEM_SYNC_FIELDS（入站 push 仍精确相等）。
+        FieldSpec("pre_waiting_status_definition_id", "string", nullable=True),
         FieldSpec("priority", "string", nullable=True),
         FieldSpec("parent_id", "string", nullable=True, indexed=True),
         FieldSpec("child_rank", "integer", nullable=False, default=0),
@@ -572,6 +578,20 @@ REGISTRY.register(EntitySpec(
         FieldSpec(
             "relation_type", "string", nullable=False,
             description="depends_on|blocks 参与阻塞；relates_to 不阻塞",
+        ),
+        # ★ 2026-09-12（D2 / ADR-0004）：依赖解除确认的两列。必须出现在 FieldSpec ——
+        #   行形状校验要求 set(row) == set(spec.field_names)（mutation/unit_of_work.py
+        #   的完整行 / 持久化计划行 / sync 事件期望字段三处），漏加会让带列的 DB 行
+        #   在编译或恢复时报结构错误（B′ 同款坑）。
+        #   入站守卫另行拒绝客户端上行它们（RelationDomainPolicy::_guard_relation_resolution），
+        #   二者是不同层面的保护：FieldSpec 保证形状，policy 保证写入权。
+        FieldSpec(
+            "resolution", "string", nullable=True,
+            description="confirmed_not_required | NULL（服务端自持，唯一写入者 = ResolveDependency）",
+        ),
+        FieldSpec(
+            "resolved_at", "string", nullable=True,
+            description="服务端单调时钟戳（防伪，客户端不得上行）",
         ),
     ),
     sync_entity_type="relation",

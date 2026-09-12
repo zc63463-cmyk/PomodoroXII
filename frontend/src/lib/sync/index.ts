@@ -14,6 +14,7 @@ import type { PomodoroXIDB } from '@/services/database'
 import { spaceDBManager } from '@/services/space-db'
 import { useQuickNoteStore } from '@/stores/quick-note-store'
 import { useSyncStore } from '@/stores/sync-store'
+import { useTaskSpaceStore } from '@/stores/task-space-store'
 import { RealSyncEngine } from './engine'
 import { loadSyncV2Meta } from './sync-meta'
 import { withSpaceAuthorityFence } from './space-authority-fence'
@@ -52,6 +53,25 @@ function refreshQuickNotesAfterSync(): void {
     })
 }
 
+/**
+ * 任务空间列表的同步后刷新。
+ *
+ * ★ 为什么必须有（2026-09-11 实测）：pull 把远端变更（另一台设备、服务端派生
+ *   的「投入物化」effort_actual_seconds）写进本地 Dexie，但任务页的 workItems
+ *   是挂载时 hydrate 的快照，同步不会重读 —— 数据已经进库、界面却永远显示旧值
+ *   （复盘拿到 52 分钟投入，任务空间里仍是 0，用户只能靠手动刷新才发现）。
+ *   QuickNote 很早就在 pull/push 后刷新了；这里对齐同一语义。
+ *   只读缓存、不走网络；store 未 hydrate（无 repository）时是 no-op。
+ */
+function refreshTaskSpaceAfterSync(): void {
+  void useTaskSpaceStore
+    .getState()
+    .refreshCachedOverview()
+    .catch((error) => {
+      console.error('Task space sync refresh failed:', error)
+    })
+}
+
 /** 引擎事件 → sync-store 状态 + Query invalidate（F1 §6.3b / S1-4.1 重构） */
 export function wireSyncEngineToStore(
   engine: RealSyncEngine,
@@ -64,6 +84,7 @@ export function wireSyncEngineToStore(
     // F1 §6.4：pull 后仅 invalidate，不写终态（终态由 onSyncComplete 统一处理）
     queryClient.invalidateQueries({ queryKey: ['pxii', spaceId] })
     refreshQuickNotesAfterSync()
+    refreshTaskSpaceAfterSync()
   })
 
   engine.onPushComplete(() => {
@@ -79,6 +100,7 @@ export function wireSyncEngineToStore(
     // S1-4.1：周期末单一真相源 — 终态由 onSyncComplete 写
     applyEngineStateToStore(engine)
     refreshQuickNotesAfterSync()
+    refreshTaskSpaceAfterSync()
   })
 }
 

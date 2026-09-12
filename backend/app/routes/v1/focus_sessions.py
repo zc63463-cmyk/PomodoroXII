@@ -13,6 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Header
 
 from app.deps import get_space_runtime_handle
+from app.errors import thaw_json
 from app.focus_session.contracts import FocusSessionCommand
 from app.routes.v1.contract_dependencies import (
     get_focus_session_module,
@@ -101,7 +102,13 @@ async def get_focus_session(
 ) -> FocusSessionAggregateResponse:
     """Get a FocusSession by ID."""
     view = await module.get(scope, session_id)
-    return FocusSessionAggregateResponse.model_validate(dict(view.value))
+    # ★ 深转换不能省（2026-09-11 实测事故）：策略层构造的 view.value 是
+    #   递归冻结的（mappingproxy + tuple），只做顶层 dict() 的话嵌套的
+    #   session/context/attribution 仍是 mappingproxy、plan/outcomes/
+    #   envelopes/receipts 仍是 tuple —— pydantic 全部拒绝（7 个校验错误）
+    #   → 变更已提交但响应 500，前端只看到「操作失败」。thaw_json 是这套
+    #   冻结值的标准还原器（errors.py），深拷贝为 JSON 原生结构。
+    return FocusSessionAggregateResponse.model_validate(thaw_json(view.value))
 
 
 # --------------------------------------------------------------------------- #
@@ -123,7 +130,13 @@ async def submit_review(
     require_path_identity(session_id, body.session_id, "FocusSession")
     command = _make_focus_command(body, _map_review_payload(body))
     view = await module.submit_review(scope, command)
-    return FocusSessionAggregateResponse.model_validate(dict(view.value))
+    # ★ 深转换不能省（2026-09-11 实测事故）：策略层构造的 view.value 是
+    #   递归冻结的（mappingproxy + tuple），只做顶层 dict() 的话嵌套的
+    #   session/context/attribution 仍是 mappingproxy、plan/outcomes/
+    #   envelopes/receipts 仍是 tuple —— pydantic 全部拒绝（7 个校验错误）
+    #   → 变更已提交但响应 500，前端只看到「操作失败」。thaw_json 是这套
+    #   冻结值的标准还原器（errors.py），深拷贝为 JSON 原生结构。
+    return FocusSessionAggregateResponse.model_validate(thaw_json(view.value))
 
 
 # --------------------------------------------------------------------------- #
@@ -148,4 +161,10 @@ async def reconcile_commands(
     require_path_identity(session_id, body.session_id, "FocusSession")
     command = _make_focus_command(body, _map_reconcile_payload(body))
     view = await module.reconcile_commands(scope, command)
-    return FocusSessionAggregateResponse.model_validate(dict(view.value))
+    # ★ 深转换不能省（2026-09-11 实测事故）：策略层构造的 view.value 是
+    #   递归冻结的（mappingproxy + tuple），只做顶层 dict() 的话嵌套的
+    #   session/context/attribution 仍是 mappingproxy、plan/outcomes/
+    #   envelopes/receipts 仍是 tuple —— pydantic 全部拒绝（7 个校验错误）
+    #   → 变更已提交但响应 500，前端只看到「操作失败」。thaw_json 是这套
+    #   冻结值的标准还原器（errors.py），深拷贝为 JSON 原生结构。
+    return FocusSessionAggregateResponse.model_validate(thaw_json(view.value))

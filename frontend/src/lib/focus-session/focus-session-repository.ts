@@ -19,9 +19,14 @@ import {
   type ProvisionalActivationPayload,
 } from '@/lib/contracts/focus-session'
 import { hashCommandPayload, type JsonValue } from '@/lib/contracts/payload-hash'
-import { canonicalNow, executeDurableDirectCommand, prepareDirectCommandIntent } from '@/lib/direct-command-intents'
+import { canonicalNow } from '@/lib/direct-command-intents'
 import { requirePersistedExactSessionReviewDraft, type SessionReviewDraft } from './session-review-draft-registry'
-import { focusSessionApi } from '@/services/focus-session-api'
+// ★ 2026-09-11：review intent 的执行收敛到共享执行器（会话侧 / 任务侧单一来源）。
+import {
+  executeSubmitReviewIntent,
+  prepareSubmitReviewIntent,
+  type ReviewExpectedVersionMode,
+} from './review-intent-executor'
 import { TS3_LOCAL_ENTITY_TO_TABLE } from '@/lib/sync/types'
 import { boundedChildOperationId, enqueueOutbox } from '@/lib/sync/outbox'
 import {
@@ -171,25 +176,18 @@ export async function resumeImportedProvisionalReviews(
           session.validity !== 'pending' || session.reviewState !== 'pending' || outcomes !== 0) {
         continue
       }
-      intent = await prepareDirectCommandIntent(db, {
-        kind: 'submit_review', spaceId, targetId: draft.sessionId,
-        request: sessionReviewDraftSchema.parse({ ...draft, expectedVersion: session.version }),
-        now: canonicalNow(),
-      }, draft.operationId)
+      intent = await prepareSubmitReviewIntent(
+        db,
+        sessionReviewDraftSchema.parse({ ...draft, expectedVersion: session.version }),
+        draft.operationId,
+      )
     }
-    await executeDurableDirectCommand({
-      db, intent,
-      businessTables: [db.focusSessions, db.sessionWorkItemOutcomes,
-        db.sessionCommandEnvelopes, db.sessionCommandReceipts,
-        db.sessionCommandQueue, db.sessionReviewDrafts],
-      sendExactRequest: (request) => focusSessionApi.submitReview(
-        sessionReviewDraftSchema.parse(request),
-      ),
-      parseResult: (value) => focusSessionAggregateSchema.parse(value),
-      applyResult: (response) => applyAuthoritativeReviewAndClearDraft(
-        db, spaceId, draft.sessionId, intent.requestJson, 'import_rebased', response,
-      ),
-      now: canonicalNow,
+    // ★ 2026-09-11：导入重定基也走共享执行器；mode 由「绑定请求 vs 持久化草稿」
+    // 自行判定 —— 这里 expectedVersion 已被重定基，因此等价于 import_rebased。
+    await executeSubmitReviewIntent({
+      db,
+      intent,
+      applyAuthoritativeReview: applyAuthoritativeReviewAndClearDraft,
     })
   }
 }
@@ -522,8 +520,6 @@ export async function toReviewRows(
     receipts: rows.receipts,
   }
 }
-
-type ReviewExpectedVersionMode = 'exact' | 'import_rebased'
 
 function parseExactBoundReviewRequest(requestJson: string): SessionReviewDraft {
   let request: SessionReviewDraft
@@ -1072,25 +1068,12 @@ export class FocusSessionRepository {
     }
 
     await requirePersistedExactSessionReviewDraft(this.db, draft)
-    const intent = await prepareDirectCommandIntent(this.db, {
-      kind: 'submit_review', spaceId: draft.spaceId, targetId: draft.sessionId,
-      request: draft as unknown as Record<string, JsonValue>,
-      now: canonicalNow(),
-    }, draft.operationId)
-    const response = await executeDurableDirectCommand({
+    // ★ 2026-09-11：在线提交与任务侧 hydrate 续跑共用同一个执行器（单一来源）。
+    const intent = await prepareSubmitReviewIntent(this.db, draft)
+    const response = await executeSubmitReviewIntent({
       db: this.db,
       intent,
-      businessTables: [
-        this.db.focusSessions, this.db.sessionWorkItemOutcomes,
-        this.db.sessionCommandEnvelopes, this.db.sessionCommandReceipts,
-        this.db.sessionCommandQueue, this.db.sessionReviewDrafts,
-      ],
-      sendExactRequest: (request) => focusSessionApi.submitReview(request as never),
-      parseResult: (value) => focusSessionAggregateSchema.parse(value),
-      applyResult: (authoritative) => applyAuthoritativeReviewAndClearDraft(
-        this.db, this.spaceId, draft.sessionId, intent.requestJson, 'exact', authoritative,
-      ),
-      now: canonicalNow,
+      applyAuthoritativeReview: applyAuthoritativeReviewAndClearDraft,
     })
     return toReviewRows(this.db, response, this.spaceId, draft.sessionId)
   }

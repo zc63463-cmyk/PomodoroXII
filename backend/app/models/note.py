@@ -52,6 +52,10 @@ class Note(Base, SyncMixin):
     )
 
     __table_args__ = (
+        # ★ 2026-09-11：本 CHECK 文本是 note.status 的最后兜底；值域的唯一声明
+        # 在 app/schemas/note.py（NOTE_STATUS_VALUES）。tests/test_note_constraints.py
+        # 逐字断言两者一致 —— 改动值域必须同时改这里（含 DB 迁移）与 wire schema，
+        # 刻意保持字面量而不从常量拼串，避免「模型文本随常量静默漂移」。
         CheckConstraint(
             "status IN ('active', 'archived')",
             name="check_note_status",

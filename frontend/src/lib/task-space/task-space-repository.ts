@@ -1,4 +1,4 @@
-import { acceptedMutationSchema, assertResponseSpace, definitionsSchema, labelSchema, projectSchema, relationSchema, workItemSchema, type CachedRelation, type RelationSet, type TaskSpaceDefinitions, type WorkItem } from '@/lib/contracts/task-space'
+import { acceptedMutationSchema, assertResponseSpace, definitionsSchema, labelSchema, projectSchema, relationSchema, workItemSchema, type CachedRelation, type RelationSet, type TaskSpaceDefinitions, type WorkItemPriority, type WorkItemView } from '@/lib/contracts/task-space'
 import { relationId } from '@/lib/task-space/relation-id'
 import type { JsonValue } from '@/lib/contracts/payload-hash'
 import {
@@ -8,6 +8,18 @@ import {
   resumePendingDirectCommandIntents,
   type DirectCommandResumeResult,
 } from '@/lib/direct-command-intents'
+// ★ 2026-09-11：depth 是读模型派生值 —— 实体契约不含它，读取边界统一派生
+// （唯一实现），无法派生的行必须可见（unresolved + 日志 + 调用方重拉）。
+import {
+  buildWorkItemReadModel,
+  projectWorkItemEntityRow,
+  resolveWorkItemDepths,
+  type WorkItemEntityRow,
+} from '@/lib/task-space/work-item-read-model'
+// ★ 2026-09-11：submit_review 绑定共享执行器 —— 请求构造/结果应用与会话侧同一份
+// 实现，tasks 侧不再维护自己的（曾是可抛错桩）。
+import { applyAuthoritativeReviewAndClearDraft } from '@/lib/focus-session/focus-session-repository'
+import { executeSubmitReviewIntent } from '@/lib/focus-session/review-intent-executor'
 import type { PomodoroXIDB } from '@/services/database'
 import { taskSpaceApi } from '@/services/task-space-api'
 import type { CachedProject, CachedWorkItem, CachedLabel, DirectCommandIntentRow } from '@/types'
@@ -31,7 +43,8 @@ export interface CreateWorkItemInput {
   parentId: string | null
   typeDefinitionId: string | null
   statusDefinitionId: string | null
-  priority: string | null
+  // ★ 2026-09-11：值域类型与后端 contracts / zod enum 同源，杜绝自由文本。
+  priority: WorkItemPriority | null
 }
 
 export interface MoveWorkItemInput {
@@ -91,42 +104,16 @@ function mapProject(value: unknown, spaceId: string): CachedProject {
   return withoutSpace(assertResponseSpace(parsed, spaceId))
 }
 
-function mapWorkItem(value: unknown, spaceId: string): CachedWorkItem {
+/**
+ * wire / 命令响应 → **实体行**（无 depth）。
+ * ★ 2026-09-11：depth 不是实体字段，这里不再解析它；UI 所需的 depth 由读取
+ * 边界 `buildWorkItemReadModel` / `resolveWorkItemDepths` 派生（唯一实现）。
+ * 字段投影复用共享的 `projectWorkItemEntityRow`（camel/snake 双兼容），避免
+ * 「读边界」与「映射」两份字段表漂移。
+ */
+function mapWorkItem(value: unknown, spaceId: string): WorkItemEntityRow {
   const raw = primaryValue(value, ['workItem', 'work_item'])
-  const parsed = workItemSchema.parse({
-    id: field(raw, 'id'),
-    spaceId,
-    projectId: field(raw, 'projectId', 'project_id'),
-    displayKey: field(raw, 'displayKey', 'display_key'),
-    title: field(raw, 'title'),
-    description: field(raw, 'description') ?? null,
-    typeDefinitionId: field(raw, 'typeDefinitionId', 'type_definition_id'),
-    statusDefinitionId: field(raw, 'statusDefinitionId', 'status_definition_id'),
-    priority: field(raw, 'priority') as number | null,
-    parentId: (field(raw, 'parentId', 'parent_id') as string | null | undefined) ?? null,
-    childRank: field(raw, 'childRank', 'child_rank'),
-    depth: field(raw, 'depth'),
-    completionWindowStart: field(raw, 'completionWindowStart', 'completion_window_start') ?? null,
-    completionWindowEnd: field(raw, 'completionWindowEnd', 'completion_window_end') ?? null,
-    reviewPoint: field(raw, 'reviewPoint', 'review_point') ?? null,
-    hardDeadline: field(raw, 'hardDeadline', 'hard_deadline') ?? null,
-    effortEstimateLowerSeconds: field(raw, 'effortEstimateLowerSeconds', 'effort_estimate_lower_seconds') ?? null,
-    effortEstimateUpperSeconds: field(raw, 'effortEstimateUpperSeconds', 'effort_estimate_upper_seconds') ?? null,
-    effortActualSeconds: field(raw, 'effortActualSeconds', 'effort_actual_seconds'),
-    confidence: field(raw, 'confidence') ?? null,
-    completedAt: field(raw, 'completedAt', 'completed_at') ?? null,
-    cancelledAt: field(raw, 'cancelledAt', 'cancelled_at') ?? null,
-    archivedAt: field(raw, 'archivedAt', 'archived_at') ?? null,
-    markedAsAttention: field(raw, 'markedAsAttention', 'marked_as_attention'),
-    // D5 Y: labelIds is a first-class wire projection; defaults to empty for
-    // rows produced before the projection existed.
-    labelIds: Array.isArray(field(raw, 'labelIds', 'label_ids'))
-      ? (field(raw, 'labelIds', 'label_ids') as string[])
-      : [],
-    version: field(raw, 'version'),
-    createdAt: field(raw, 'createdAt', 'created_at'),
-    updatedAt: field(raw, 'updatedAt', 'updated_at'),
-  })
+  const parsed = workItemSchema.parse({ ...projectWorkItemEntityRow(raw), spaceId })
   return withoutSpace(assertResponseSpace(parsed, spaceId))
 }
 
@@ -156,6 +143,9 @@ function mapRelation(value: unknown): CachedRelation {
     fromWorkItemId: field(raw, 'fromWorkItemId', 'from_work_item_id'),
     toWorkItemId: field(raw, 'toWorkItemId', 'to_work_item_id'),
     relationType: field(raw, 'relationType', 'relation_type'),
+    // ★ 2026-09-12（D2 / ADR-0004）：服务端自持的确认两列（只读消费）。
+    resolution: field(raw, 'resolution') ?? null,
+    resolvedAt: field(raw, 'resolvedAt', 'resolved_at') ?? null,
     version: field(raw, 'version'),
     createdAt: field(raw, 'createdAt', 'created_at'),
     updatedAt: field(raw, 'updatedAt', 'updated_at'),
@@ -164,6 +154,23 @@ function mapRelation(value: unknown): CachedRelation {
 }
 
 interface WorkItemMutationResult {
+  /** ★ 2026-09-11：post-image 是实体行（无 depth）；depth 由调用方在读边界派生。 */
+  workItem: WorkItemEntityRow
+  project: CachedProject | null
+}
+
+/**
+ * ★ 2026-09-12（ADR-0003）：命令响应里的等待前态（wire 值，只在线消费）。
+ * 实体行 / 本地行不设值；落库前由 applyResult 剥离，保证 Dexie 不存。
+ */
+function readPreWaitingFromWire(value: unknown): string | null {
+  const raw = primaryValue(value, ['workItem', 'work_item'])
+  const candidate = raw.preWaitingStatusDefinitionId ?? raw.pre_waiting_status_definition_id
+  return typeof candidate === 'string' && candidate.length > 0 ? candidate : null
+}
+
+/** ★ 2026-09-11：读取边界之后的行（带派生 depth），store/UI 只消费这个形状。 */
+interface WorkItemMutationResultWithDepth {
   workItem: CachedWorkItem
   project: CachedProject | null
 }
@@ -204,6 +211,7 @@ export class TaskSpaceRepository {
     projects: CachedProject[]
     workItems: CachedWorkItem[]
     definitions: TaskSpaceDefinitions | null
+    unresolvedDepthItemIds: string[]
   }> {
     const [projects, workItems, statuses, types, labels] = await Promise.all([
       this.db.projects.toArray(), this.db.workItems.toArray(),
@@ -213,10 +221,20 @@ export class TaskSpaceRepository {
     const definitions = statuses.length || types.length || labels.length
       ? mapDefinitions({ statuses, types, labels })
       : null
+    // ★ 2026-09-11：本地行（含 sync pull 落下的 wire 形状行、历史无 depth 行）
+    // 一律在读取边界投影 + 派生 depth；缺父链的行进 unresolved（可见 + 可重拉）。
+    const readModel = buildWorkItemReadModel(workItems)
+    if (readModel.unresolvedIds.length > 0) {
+      console.warn(
+        '[task-space] work item depth unresolved on cached read',
+        readModel.unresolvedIds.length,
+      )
+    }
     return {
       projects: projects as CachedProject[],
-      workItems: workItems as CachedWorkItem[],
+      workItems: readModel.items,
       definitions,
+      unresolvedDepthItemIds: readModel.unresolvedIds,
     }
   }
 
@@ -224,18 +242,24 @@ export class TaskSpaceRepository {
     projects: CachedProject[]
     workItems: CachedWorkItem[]
     definitions: TaskSpaceDefinitions
+    unresolvedDepthItemIds: string[]
   }> {
     const [projectsWire, definitionsWire] = await Promise.all([
       allPages((cursor) => this.api.listProjects(this.spaceId, cursor)),
       this.api.listDefinitions(this.spaceId),
     ])
     const projects = projectsWire.map((item) => mapProject(item, this.spaceId))
-    const workItemsWire: WorkItem[] = []
+    const workItemsWire: WorkItemView[] = []
     for (const project of projectsWire) {
       const items = await allPages((cursor) => this.api.listWorkItems(this.spaceId, project.id, cursor))
       workItemsWire.push(...items)
     }
-    const workItems = workItemsWire.map((item) => mapWorkItem(item, this.spaceId))
+    // 落库的永远是实体行（无 depth）；返回给 UI 的是读模型行（派生 depth）。
+    const entities = workItemsWire.map((item) => mapWorkItem(item, this.spaceId))
+    // ★ 2026-09-12（ADR-0003）：只有 wire 读路径消费等待前态（本地行忽略）。
+    const readModel = buildWorkItemReadModel(workItemsWire, {
+      consumePreWaitingFromRaw: true,
+    })
     const definitions = mapDefinitions(definitionsWire)
     // Scoped reconcile after a FULL successful pagination: drop cached rows the
     // server no longer returns for this space.  The Dexie database is
@@ -243,13 +267,13 @@ export class TaskSpaceRepository {
     // whose project disappeared remotely are also removed (they are not part of
     // any remote project page).
     const remoteProjectIds = new Set(projects.map((project) => project.id))
-    const remoteWorkItemIds = new Set(workItems.map((item) => item.id))
+    const remoteWorkItemIds = new Set(entities.map((item) => item.id))
     await this.db.transaction(
       'rw', this.db.projects, this.db.workItems,
       this.db.statusDefinitions, this.db.typeDefinitions, this.db.labels,
       async () => {
         await this.db.projects.bulkPut(projects)
-        await this.db.workItems.bulkPut(workItems)
+        await this.db.workItems.bulkPut(entities)
         await this.db.projects
           .filter((row) => !remoteProjectIds.has(String(row.id)))
           .delete()
@@ -264,24 +288,42 @@ export class TaskSpaceRepository {
         await this.db.labels.bulkPut(definitions.labels as Record<string, unknown>[])
       },
     )
-    return { projects, workItems, definitions }
+    return {
+      projects,
+      workItems: readModel.items,
+      definitions,
+      unresolvedDepthItemIds: readModel.unresolvedIds,
+    }
   }
 
   async hydrate(projectId?: string) {
     if (!projectId) return this.refreshOverview()
     const page = await allPages((cursor) => this.api.listWorkItems(this.spaceId, projectId, cursor))
-    const workItems = page.map((item) => mapWorkItem(item, this.spaceId))
+    const entities = page.map((item) => mapWorkItem(item, this.spaceId))
+    // ★ 2026-09-12（ADR-0003）：remote 分支是 wire 行 ⇒ 消费等待前态；
+    // cached 分支（下方）不传 ⇒ 忽略本地值。
+    const remoteReadModel = buildWorkItemReadModel(page, {
+      consumePreWaitingFromRaw: true,
+    })
     // Project-scoped reconcile: delete cached work items for THIS project that
     // the server no longer returns.  Rows of other projects/spaces are never
     // touched.
-    const remoteIds = new Set(workItems.map((item) => item.id))
+    const remoteIds = new Set(entities.map((item) => item.id))
     await this.db.transaction('rw', this.db.workItems, async () => {
-      await this.db.workItems.bulkPut(workItems)
+      await this.db.workItems.bulkPut(entities)
       await this.db.workItems
         .filter((row) => String(row.projectId) === projectId && !remoteIds.has(String(row.id)))
         .delete()
     })
-    return { cached: await this.db.workItems.where('projectId').equals(projectId).toArray(), remote: workItems }
+    // ★ 2026-09-11：cached 分支也走读模型（wire 形状/历史行都能投影 + 派生 depth）。
+    const cachedReadModel = buildWorkItemReadModel(await this.db.workItems.toArray())
+    return {
+      cached: cachedReadModel.items.filter((item) => item.projectId === projectId),
+      remote: remoteReadModel.items,
+      unresolvedDepthItemIds: [...new Set([
+        ...cachedReadModel.unresolvedIds, ...remoteReadModel.unresolvedIds,
+      ])].sort(),
+    }
   }
 
   async hydrateProjectTree(projectId: string) {
@@ -336,7 +378,8 @@ export class TaskSpaceRepository {
     workItemId: string
     title?: string
     description?: string | null
-    priority?: string | null
+    // ★ 2026-09-11：与 create 同一受限值域。
+    priority?: WorkItemPriority | null
     typeDefinitionId?: string | null
   }) {
     if (!online()) throw new Error('offline_formal_mutation_forbidden')
@@ -394,6 +437,23 @@ export class TaskSpaceRepository {
     return this.api.listRelations(this.spaceId, workItemId)
   }
 
+  /**
+   * 本地双向边（只读 Dexie，不走网络）—— 会话启动判定必须在离线时也
+   * 成立，而 ``listRelations`` 是网络优先。relations 表是同步落地的本地
+   * 事实；个人量级全表扫描足够，不为它新增 Dexie 索引。
+   */
+  async listCachedRelations(workItemId: string): Promise<CachedRelation[]> {
+    const rows = await this.db.relations.toArray()
+    return (rows as Array<Partial<CachedRelation>>).filter(
+      (row): row is CachedRelation => (
+        typeof row.fromWorkItemId === 'string'
+        && typeof row.toWorkItemId === 'string'
+        && typeof row.relationType === 'string'
+        && (row.fromWorkItemId === workItemId || row.toWorkItemId === workItemId)
+      ),
+    )
+  }
+
   async listBlockedMap(projectId?: string) {
     return this.api.listBlockedMap(this.spaceId, projectId)
   }
@@ -422,6 +482,28 @@ export class TaskSpaceRepository {
       }, now: canonicalNow(),
     })
     return this.executeRelationIntent(intent, (request) => this.api.removeRelation(request as never))
+  }
+
+  /**
+   * ★ 2026-09-12（D2 / ADR-0004）：确认「已取消的上游不再需要」。
+   * online-only（relation 变更全部如此）；expectedVersion 从缓存行取；
+   * 幂等 CAS —— 重复确认是零效果回执，服务端不 bump version。
+   */
+  async resolveRelation(input: RemoveRelationInput) {
+    if (!online()) throw new Error('offline_formal_mutation_forbidden')
+    const relationKey = await relationId(
+      this.spaceId, input.fromWorkItemId, input.toWorkItemId, input.relationType,
+    )
+    const cached = await this.db.relations.get(relationKey)
+    const expectedVersion = (cached as { version?: number } | undefined)?.version
+    if (typeof expectedVersion !== 'number') throw new Error('relation_not_loaded')
+    const intent = await prepareDirectCommandIntent(this.db, {
+      kind: 'resolve_relation', spaceId: this.spaceId, targetId: relationKey,
+      request: {
+        ...input, relationId: relationKey, expectedVersion, spaceId: this.spaceId,
+      }, now: canonicalNow(),
+    })
+    return this.executeRelationIntent(intent, (request) => this.api.resolveRelation(request as never))
   }
 
   // D5 Y: label-set mutation — the target label_ids set is computed client
@@ -496,12 +578,24 @@ export class TaskSpaceRepository {
       restore_work_item: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.restoreWorkItem(request as never)).then(() => undefined) },
       create_relation: { executeExact: (intent) => this.executeRelationIntent(intent, (request) => this.api.createRelation(request as never)).then(() => undefined) },
       remove_relation: { executeExact: (intent) => this.executeRelationIntent(intent, (request) => this.api.removeRelation(request as never)).then(() => undefined) },
+      resolve_relation: { executeExact: (intent) => this.executeRelationIntent(intent, (request) => this.api.resolveRelation(request as never)).then(() => undefined) },
       add_work_item_labels: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.addWorkItemLabels(request as never)).then(() => undefined) },
       remove_work_item_labels: { executeExact: (intent) => this.executeWorkItemIntent(intent, (request) => this.api.removeWorkItemLabels(request as never)).then(() => undefined) },
       create_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.createLabel(request as never)).then(() => undefined) },
       update_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.updateLabel(request as never)).then(() => undefined) },
       archive_label: { executeExact: (intent) => this.executeLabelIntent(intent, (request) => this.api.archiveLabel(request as never)).then(() => undefined) },
-      submit_review: { executeExact: async () => { throw new Error('submit_review_handler_not_bound') } },
+      // ★ 2026-09-11：绑定共享执行器（此前是抛错桩，会让整批续跑在第一条
+      // submit_review 上终止）。执行走 prepare/executeDurableDirectCommand，
+      // 保持幂等与 durable 语义；失败由队列按 intent 记录并继续后续 intent。
+      submit_review: {
+        executeExact: async (intent) => {
+          await executeSubmitReviewIntent({
+            db: this.db,
+            intent,
+            applyAuthoritativeReview: applyAuthoritativeReviewAndClearDraft,
+          })
+        },
+      },
     })
   }
 
@@ -515,16 +609,41 @@ export class TaskSpaceRepository {
     }).then(() => undefined)
   }
 
-  private executeWorkItemIntent(
+  private async executeWorkItemIntent(
     intent: DirectCommandIntentRow,
     send: (request: Record<string, JsonValue>) => Promise<unknown>,
   ) {
+    // ★ 2026-09-11：命令的 post-image 不含 depth（它不是实体字段）。返回给 store
+    // 的行必须在读取边界补上派生 depth —— 否则调用方（store 的 splice / 选中
+    // 逻辑）拿到没有层级的行，UI 又会静默丢失它。
+    const localRows = (await this.db.workItems.toArray()).map(projectWorkItemEntityRow)
     return executeDurableDirectCommand({
       db: this.db, intent, businessTables: [this.db.projects, this.db.workItems],
       sendExactRequest: send,
-      parseResult: (value) => mapWorkItemMutation(value, this.spaceId),
+      parseResult: (value): WorkItemMutationResultWithDepth => {
+        const mapped = mapWorkItemMutation(value, this.spaceId)
+        const resolution = resolveWorkItemDepths([...localRows, mapped.workItem])
+        return {
+          ...mapped,
+          workItem: {
+            ...mapped.workItem,
+            // 断链/异常时按待定根（1）处理：让行可见，而不是从树里消失。
+            depth: resolution.depths.get(mapped.workItem.id) ?? 1,
+            // ★ 2026-09-12（ADR-0003）：等待前态从**本次 wire 响应**取值（与 depth
+            // 同一处补值）；落库前被 applyResult 剥离 —— 只有 wire 路径可消费。
+            preWaitingStatusDefinitionId: readPreWaitingFromWire(value),
+          },
+        }
+      },
       applyResult: async (result) => {
-        await this.db.workItems.put(result.workItem)
+        // 落库的仍是实体行（depth 与等待前态不落库：depth 是读模型派生值，
+        // 等待前态是只允许 wire 消费的服务端事实）。
+        const {
+          depth: _derivedDepth,
+          preWaitingStatusDefinitionId: _wireOnlyPriorState,
+          ...entity
+        } = result.workItem
+        await this.db.workItems.put(entity)
         if (result.project) await this.db.projects.put(result.project)
       },
       now: canonicalNow,

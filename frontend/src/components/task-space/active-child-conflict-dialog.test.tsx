@@ -118,4 +118,29 @@ describe('ActiveChildConflictDialog', () => {
     await waitFor(() => expect(onCancelChildrenAndComplete).toHaveBeenCalled())
     expect(document.querySelector('[data-active-child-conflict]')).not.toBeNull()
   })
+
+  // ★ 2026-09-11：空间可以合法地不含 cancelled / completed 类目状态。
+  //   此时两个主操作必须「可见地不可用」（按钮禁用 + 中文原因），
+  //   而不是点了没反应 —— 旧实现只在 handler 里静默 return。
+  it('disables the cancel action and explains why when the space lacks the category', () => {
+    renderDialog({
+      cancelChildrenUnavailableReason: '当前空间缺少「已取消」类目的状态，无法执行此操作。',
+    })
+    expect(screen.getByText('当前空间缺少「已取消」类目的状态，无法执行此操作。')).toBeInTheDocument()
+    expect(screen.getByText('取消未完成三级并完成').closest('button')).toBeDisabled()
+  })
+
+  it('disables the move action and explains why when the space lacks a completed category', () => {
+    renderDialog({
+      moveChildrenUnavailableReason: '当前空间缺少「已完成」类目的状态，无法执行此操作。',
+    })
+    expect(screen.getByText('当前空间缺少「已完成」类目的状态，无法执行此操作。')).toBeInTheDocument()
+    expect(screen.getByText('迁移并完成').closest('button')).toBeDisabled()
+  })
+
+  it('keeps both actions available when no reason is given (success path unchanged)', () => {
+    renderDialog()
+    expect(screen.getByText('取消未完成三级并完成').closest('button')).not.toBeDisabled()
+    expect(screen.getByText('迁移并完成').closest('button')).not.toBeDisabled()
+  })
 })

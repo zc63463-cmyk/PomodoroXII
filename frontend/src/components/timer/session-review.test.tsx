@@ -1,16 +1,33 @@
 import { createElement } from 'react'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { selectReviewSession, SessionReview } from './session-review'
+import { isReviewableEndedSession, selectReviewSession, SessionReview } from './session-review'
 
 describe('selectReviewSession', () => {
   it('keeps an older pending review discoverable when a newer session is completed', () => {
     const sessions = [
-      { id: 'newer', clockState: 'ended', reviewState: 'completed', ownershipState: 'authoritative' },
-      { id: 'older', clockState: 'ended', reviewState: 'pending', ownershipState: 'authoritative' },
+      { id: 'newer', clockState: 'ended', reviewState: 'completed', ownershipState: 'authoritative', validity: 'valid' },
+      { id: 'older', clockState: 'ended', reviewState: 'pending', ownershipState: 'authoritative', validity: 'pending' },
     ] as const
 
     expect(selectReviewSession(sessions)?.id).toBe('older')
+  })
+
+  it('recovers an ended session whose online end missed the pending review mark', () => {
+    // 回归（2026-09-11 实测）：在线 end 曾落在 review_state='not_required'
+    // 且 validity='pending' —— 时间已保存但无人判定有效性，若判为不可复盘，
+    // 投入投影（只累计 validity='valid'）永远是 0，且用户无路可走。
+    const stuck = {
+      id: 'stuck', clockState: 'ended', reviewState: 'not_required',
+      ownershipState: 'authoritative', validity: 'pending',
+    } as const
+    expect(isReviewableEndedSession(stuck)).toBe(true)
+    expect(selectReviewSession([stuck])?.id).toBe('stuck')
+
+    // 已判定有效性（valid/invalid）的 not_required 会话不重开复盘。
+    expect(isReviewableEndedSession({ ...stuck, validity: 'valid' })).toBe(false)
+    // 未结束的运行态会话照旧不可复盘。
+    expect(isReviewableEndedSession({ ...stuck, clockState: 'running' })).toBe(false)
   })
 })
 
@@ -101,6 +118,43 @@ describe('SessionReview', () => {
         workItemId: 'wi-a', result: 'completed', expectedWorkItemVersion: 9,
       })],
     }))
+  })
+
+  it('复盘完成态（readOnly）提供可点击的「返回任务空间」入口', () => {
+    const onReturnToTasks = vi.fn()
+    render(createElement(SessionReview, {
+      session: {
+        sessionId: 'fs-done', focusedSeconds: 1350, validity: 'valid',
+        reviewState: 'completed', clockState: 'ended', ownershipState: 'authoritative',
+      },
+      plans: [], outcomes: [], envelopes: [], receipts: [],
+      draft: null, readOnly: true, onDraftChange: vi.fn(), onSubmit: vi.fn(),
+      onReconcile: vi.fn(), onAbandon: vi.fn(), onReturnToTasks,
+    } as never))
+
+    const entry = screen.getByRole('button', { name: '返回任务空间' })
+    fireEvent.click(entry)
+    expect(onReturnToTasks).toHaveBeenCalledTimes(1)
+  })
+
+  it('待复盘（可写）态不显示回跳入口', () => {
+    const draft = {
+      operationId: 'review-op-3', spaceId: 'space-a', sessionId: 'fs-3', expectedVersion: 1,
+      validity: 'valid' as const, reviewState: 'completed' as const,
+      reviewedAt: '2026-07-15T09:00:00Z', outcomes: [],
+    }
+    render(createElement(SessionReview, {
+      session: {
+        sessionId: 'fs-3', focusedSeconds: 1, validity: 'pending',
+        reviewState: 'pending', clockState: 'ended', ownershipState: 'authoritative',
+      },
+      plans: [], outcomes: [], envelopes: [], receipts: [], draft,
+      onDraftChange: vi.fn(), onSubmit: vi.fn(), onReconcile: vi.fn(), onAbandon: vi.fn(),
+      onReturnToTasks: vi.fn(),
+    } as never))
+
+    expect(screen.getByRole('button', { name: 'Submit review' })).toBeVisible()
+    expect(screen.queryByRole('button', { name: '返回任务空间' })).toBeNull()
   })
 
   it('does not render a writable review for an activation conflict', () => {

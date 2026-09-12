@@ -55,6 +55,8 @@ LABEL_REQUEST_NAMES = {
 RELATION_REQUEST_NAMES = {
     "create": "CreateRelation",
     "remove": "RemoveRelation",
+    # ★ 2026-09-12（D2 / ADR-0004）：解除确认（幂等 CAS，服务端打戳）。
+    "resolve": "ResolveDependency",
 }
 
 

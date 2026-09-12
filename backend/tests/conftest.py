@@ -511,7 +511,14 @@ def mutation_fixture_factory(space_session, tmp_path):
 async def task_space_fixture(mutation_fixture_factory):
     clock = FrozenClock()
     policy = TaskSpaceCompiler(clock.now_iso_ms)
-    mutation = mutation_fixture_factory(policies=(policy,))
+    # ★ 2026-09-12（D2 / ADR-0004）：relation 的 sync 重放守卫住在
+    #   ``RelationDomainPolicy``（生产由 app.deps.build_mutation_compiler 注册）。
+    #   这里必须一并注册 —— 否则 relation 的 entity.* 重放全部落到无策略的
+    #   通用分支，B6 守卫（server_managed_field_changed）在测试里不可达、
+    #   而生产可达，形成"测试全绿但两套组合"的假阴性。
+    from app.commands.entity import RelationDomainPolicy
+
+    mutation = mutation_fixture_factory(policies=(policy, RelationDomainPolicy()))
     fixture = TaskSpaceFixture(
         mutation=mutation,
         clock=clock,

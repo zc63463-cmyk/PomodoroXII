@@ -2,7 +2,10 @@ import { createElement, type ReactNode } from 'react'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { CachedWorkItem } from '@/types'
-import type { TaskSpaceDefinitions } from '@/lib/contracts/task-space'
+import {
+  WORK_ITEM_PRIORITY_VALUES,
+  type TaskSpaceDefinitions,
+} from '@/lib/contracts/task-space'
 import { ActiveChildConflictError } from '@/lib/task-space/active-child-conflict'
 
 vi.mock('lucide-react', () => ({}))
@@ -60,7 +63,7 @@ describe('WorkItemDetail', () => {
       onTransition: vi.fn(),
       onMove: vi.fn(),
     }))
-    expect(screen.getByText('Select a work item')).toBeInTheDocument()
+    expect(screen.getByText('在左侧选择一个工作项')).toBeInTheDocument()
     expect(screen.queryByRole('textbox')).toBeNull()
   })
 
@@ -73,10 +76,10 @@ describe('WorkItemDetail', () => {
       onMove: vi.fn(),
     }))
     expect(screen.getByRole('heading', { name: 'Original title' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Title')).toHaveValue('Original title')
-    expect(screen.getByLabelText('Description')).toHaveValue('Original description')
-    expect(screen.getByLabelText('Priority')).toHaveValue('medium')
-    expect(screen.getByLabelText('Status')).toHaveValue('status-open')
+    expect(screen.getByLabelText('标题')).toHaveValue('Original title')
+    expect(screen.getByLabelText('描述')).toHaveValue('Original description')
+    expect(screen.getByLabelText('优先级')).toHaveValue('medium')
+    expect(screen.getByLabelText('状态')).toHaveValue('status-open')
   })
 
   it('submits only supported fields through onUpdate with the server version', async () => {
@@ -88,15 +91,54 @@ describe('WorkItemDetail', () => {
       onTransition: vi.fn(),
       onMove: vi.fn(),
     }))
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Edited' } })
-    fireEvent.change(screen.getByLabelText('Priority'), { target: { value: 'high' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    fireEvent.change(screen.getByLabelText('标题'), { target: { value: 'Edited' } })
+    fireEvent.change(screen.getByLabelText('优先级'), { target: { value: 'high' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存更改' }))
 
     await waitFor(() => {
       expect(onUpdate).toHaveBeenCalledWith({
         title: 'Edited',
         description: 'Original description',
         priority: 'high',
+      })
+    })
+  })
+
+  // ★ 2026-09-11：优先级从自由文本改为受限选择 —— 表单只能产出规范英文值，
+  // 中文只做展示，绝不可能把「高」写进业务载荷（那会撞 DB CHECK 报 500）。
+  it('offers exactly the canonical priority domain with Chinese labels', () => {
+    render(createElement(WorkItemDetail, {
+      workItem: item(),
+      definitions,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+    }))
+    const select = screen.getByLabelText('优先级')
+    expect(select.tagName).toBe('SELECT')
+    const options = Array.from((select as HTMLSelectElement).options)
+    // 选项值 = 共享常量（与后端 contracts 同源），没有任何自由文本输入。
+    expect(WORK_ITEM_PRIORITY_VALUES).toEqual(['low', 'medium', 'high', 'urgent'])
+    expect(options.map((option) => option.value)).toEqual(['', ...WORK_ITEM_PRIORITY_VALUES])
+    expect(options.map((option) => option.textContent)).toEqual(['未设置', '低', '中', '高', '紧急'])
+  })
+
+  it('maps the empty choice to null and canonical values verbatim', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined)
+    render(createElement(WorkItemDetail, {
+      workItem: item({ priority: 'urgent' }),
+      definitions,
+      onUpdate,
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+    }))
+    fireEvent.change(screen.getByLabelText('优先级'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存更改' }))
+    await waitFor(() => {
+      expect(onUpdate).toHaveBeenCalledWith({
+        title: 'Original title',
+        description: 'Original description',
+        priority: null,
       })
     })
   })
@@ -110,12 +152,12 @@ describe('WorkItemDetail', () => {
       onTransition: vi.fn(),
       onMove: vi.fn(),
     }))
-    expect(screen.getByLabelText('Title')).toBeDisabled()
-    expect(screen.getByLabelText('Description')).toBeDisabled()
-    expect(screen.getByLabelText('Priority')).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled()
-    expect(screen.getByLabelText('Status')).toBeDisabled()
-    expect(screen.getByLabelText('Parent')).toBeDisabled()
+    expect(screen.getByLabelText('标题')).toBeDisabled()
+    expect(screen.getByLabelText('描述')).toBeDisabled()
+    expect(screen.getByLabelText('优先级')).toBeDisabled()
+    expect(screen.getByRole('button', { name: '保存更改' })).toBeDisabled()
+    expect(screen.getByLabelText('状态')).toBeDisabled()
+    expect(screen.getByLabelText('父任务')).toBeDisabled()
   })
 
   it('keeps the draft and shows a stable alert on failure without leaking axios text', async () => {
@@ -129,14 +171,14 @@ describe('WorkItemDetail', () => {
       onTransition: vi.fn(),
       onMove: vi.fn(),
     }))
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Draft kept' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    fireEvent.change(screen.getByLabelText('标题'), { target: { value: 'Draft kept' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存更改' }))
 
     await waitFor(() => {
       expect(onUpdate).toHaveBeenCalledTimes(1)
     })
     expect(screen.getByRole('alert')).toHaveTextContent('该项目项已被其他操作更新，请刷新后重试。')
-    expect(screen.getByLabelText('Title')).toHaveValue('Draft kept')
+    expect(screen.getByLabelText('标题')).toHaveValue('Draft kept')
     expect(screen.queryByText('Request failed with status code 409')).toBeNull()
   })
 
@@ -149,7 +191,7 @@ describe('WorkItemDetail', () => {
       onTransition,
       onMove: vi.fn(),
     }))
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'status-done' } })
+    fireEvent.change(screen.getByLabelText('状态'), { target: { value: 'status-done' } })
     await waitFor(() => {
       expect(onTransition).toHaveBeenCalledWith('status-done')
     })
@@ -161,7 +203,7 @@ describe('WorkItemDetail', () => {
       onTransition,
       onMove: vi.fn(),
     }))
-    expect(screen.getByLabelText('Status')).toHaveValue('status-done')
+    expect(screen.getByLabelText('状态')).toHaveValue('status-done')
   })
 
   it('calls onMove with a parent from the same project only', async () => {
@@ -177,7 +219,7 @@ describe('WorkItemDetail', () => {
       onTransition: vi.fn(),
       onMove,
     }))
-    fireEvent.change(screen.getByLabelText('Parent'), { target: { value: 'l2' } })
+    fireEvent.change(screen.getByLabelText('父任务'), { target: { value: 'l2' } })
     await waitFor(() => {
       expect(onMove).toHaveBeenCalledWith('l2')
     })
@@ -191,11 +233,11 @@ describe('WorkItemDetail', () => {
       onTransition: vi.fn(),
       onMove: vi.fn(),
     }))
-    expect(screen.getByLabelText('Title')).toBeDisabled()
-    expect(screen.getByLabelText('Description')).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled()
-    expect(screen.getByLabelText('Status')).toBeDisabled()
-    expect(screen.getByLabelText('Parent')).toBeDisabled()
+    expect(screen.getByLabelText('标题')).toBeDisabled()
+    expect(screen.getByLabelText('描述')).toBeDisabled()
+    expect(screen.getByRole('button', { name: '保存更改' })).toBeDisabled()
+    expect(screen.getByLabelText('状态')).toBeDisabled()
+    expect(screen.getByLabelText('父任务')).toBeDisabled()
   })
 
   it('adopts the server post-image after a successful update', async () => {
@@ -206,8 +248,8 @@ describe('WorkItemDetail', () => {
       onTransition: vi.fn(),
       onMove: vi.fn(),
     }))
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New title' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    fireEvent.change(screen.getByLabelText('标题'), { target: { value: 'New title' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存更改' }))
 
     rerender(createElement(WorkItemDetail, {
       workItem: item({ title: 'New title', version: 2 }),
@@ -216,7 +258,7 @@ describe('WorkItemDetail', () => {
       onTransition: vi.fn(),
       onMove: vi.fn(),
     }))
-    expect(screen.getByLabelText('Title')).toHaveValue('New title')
+    expect(screen.getByLabelText('标题')).toHaveValue('New title')
     expect(screen.getByRole('heading', { name: 'New title' })).toBeInTheDocument()
   })
 
@@ -272,7 +314,7 @@ describe('WorkItemDetail', () => {
       onTransition: (statusDefinitionId: string) => Promise.resolve(onTransition(statusDefinitionId)).catch((error: unknown) => { caught = error }),
       onMove: vi.fn(),
     }))
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'status-done' } })
+    fireEvent.change(screen.getByLabelText('状态'), { target: { value: 'status-done' } })
 
     await waitFor(() => expect(caught).toBeInstanceOf(ActiveChildConflictError))
     expect(caught).toMatchObject({ workItemId: 'l2', conflictChildIds: ['l3a', 'l3b'] })
@@ -290,7 +332,7 @@ describe('WorkItemDetail', () => {
       onTransition,
       onMove: vi.fn(),
     }))
-    fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'status-done' } })
+    fireEvent.change(screen.getByLabelText('状态'), { target: { value: 'status-done' } })
 
     await waitFor(() => expect(onTransition).toHaveBeenCalledWith('status-done'))
     // Let the microtask queue drain so a swallowed rejection would surface.
@@ -318,5 +360,85 @@ describe('WorkItemDetail', () => {
       onMove: vi.fn(),
     }))
     expect(document.querySelector('[data-effort-status]')).toBeNull()
+  })
+
+  it('keeps the save action disabled until the draft actually differs', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined)
+    render(createElement(WorkItemDetail, {
+      workItem: item(),
+      definitions,
+      onUpdate,
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+    }))
+    const save = screen.getByRole('button', { name: '保存更改' })
+    // 未改动：按钮不可用，也不显示「未保存」提示。
+    expect(save).toBeDisabled()
+    expect(document.querySelector('[data-dirty-hint]')).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('标题'), { target: { value: 'Changed' } })
+    expect(save).toBeEnabled()
+    expect(document.querySelector('[data-dirty-hint]')).not.toBeNull()
+
+    fireEvent.click(save)
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1))
+  })
+
+  it('renders the effort in human units with the estimate when present', () => {
+    render(createElement(WorkItemDetail, {
+      workItem: item({
+        depth: 1,
+        effortActualSeconds: 3660,
+        effortEstimateLowerSeconds: 3600,
+        effortEstimateUpperSeconds: 7200,
+      }),
+      definitions,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+    }))
+    expect(screen.getByText(/1 小时 1 分钟/)).toBeInTheDocument()
+    expect(screen.getByText(/估算 1 小时 – 2 小时/)).toBeInTheDocument()
+    expect(screen.queryByText(/0s actual/)).toBeNull()
+  })
+
+  it('warns about unfinished children before the completion guard fires', () => {
+    render(createElement(WorkItemDetail, {
+      workItem: item({ depth: 2 }),
+      definitions,
+      openChildCount: 3,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+    }))
+    const hint = document.querySelector('[data-open-children-hint]')
+    expect(hint).not.toBeNull()
+    expect(hint?.textContent).toContain('还有 3 个未完成的子项')
+    expect(hint?.textContent).toContain('标记「已完成」前需要先处理')
+  })
+
+  it('states the child count without the completion rule for containers', () => {
+    render(createElement(WorkItemDetail, {
+      workItem: item({ depth: 1 }),
+      definitions,
+      openChildCount: 2,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+    }))
+    const hint = document.querySelector('[data-open-children-hint]')
+    expect(hint?.textContent).toBe('包含 2 个未完成的子项。')
+  })
+
+  it('hides the child hint when there are no open children', () => {
+    render(createElement(WorkItemDetail, {
+      workItem: item({ depth: 2 }),
+      definitions,
+      openChildCount: 0,
+      onUpdate: vi.fn(),
+      onTransition: vi.fn(),
+      onMove: vi.fn(),
+    }))
+    expect(document.querySelector('[data-open-children-hint]')).toBeNull()
   })
 })

@@ -1334,10 +1334,30 @@ class ProductionActiveSessionCoordinator:
                     f"{kind} requires an active locator",
                     code="not_found",
                 )
+            # ★ takeover 是**唯一**会转移所有权的 touch：其余（含 heartbeat）
+            #   只转动租约。重放读取前置，保证同一条接管命令重放时不会把
+            #   epoch 加两次。
+            existing = await session.get(ActiveSessionOperation, operation_id)
+            takeover_owner: tuple[str, str] | None = None
+            if kind == "takeover" and existing is None:
+                new_device = command.payload.get("new_owner_device_id")
+                new_tab = command.payload.get("new_owner_tab_id")
+                if (
+                    not isinstance(new_device, str) or not new_device
+                    or not isinstance(new_tab, str) or not new_tab
+                ):
+                    await session.rollback()
+                    raise ActiveSessionCoordinationError(
+                        "takeover requires new_owner_device_id and new_owner_tab_id"
+                    )
+                takeover_owner = (new_device, new_tab)
             result = await session.execute(
                 sa_text(
                     "UPDATE active_session_locator SET updated_at=:now, "
-                    "lease_expires_at=:lease, operation_id=:oid "
+                    "lease_expires_at=:lease, operation_id=:oid, "
+                    "owner_device_id=COALESCE(:owner_device, owner_device_id), "
+                    "owner_tab_id=COALESCE(:owner_tab, owner_tab_id), "
+                    "ownership_epoch=ownership_epoch + :epoch_bump "
                     "WHERE singleton_key='active' AND operation_id=:prev_oid"
                 ),
                 {
@@ -1345,6 +1365,9 @@ class ProductionActiveSessionCoordinator:
                     "lease": _lease_expiry(now),
                     "oid": operation_id,
                     "prev_oid": installed.operation_id,
+                    "owner_device": takeover_owner[0] if takeover_owner else None,
+                    "owner_tab": takeover_owner[1] if takeover_owner else None,
+                    "epoch_bump": 1 if takeover_owner else 0,
                 },
             )
             if result.rowcount != 1:
@@ -1358,15 +1381,25 @@ class ProductionActiveSessionCoordinator:
             installed.updated_at = now
             installed.lease_expires_at = _lease_expiry(now)
             locator = installed
+            # ★ 接管的重放豁免 epoch 比对：epoch 正是在它上次执行时前进的，
+            #   重放体仍携带旧 epoch（重试复用同一命令体）—— 已由
+            #   operation_id + payload_hash 证明是原命令，幂等返回即可。
+            replayed_takeover = kind == "takeover" and existing is not None
             if (
                 command.ownership_epoch is not None
+                and not replayed_takeover
                 and locator.ownership_epoch != command.ownership_epoch
             ):
                 await session.rollback()
                 raise ActiveSessionCoordinationError(
                     f"{kind} ownership epoch does not match the locator"
                 )
-            existing = await session.get(ActiveSessionOperation, operation_id)
+            # ★ 所有权字段在 epoch 校验之后才反射 —— 校验必须对着接管前的
+            #   epoch（即命令携带的那个值），否则接管自己会被自己拒掉。
+            if takeover_owner is not None:
+                installed.owner_device_id = takeover_owner[0]
+                installed.owner_tab_id = takeover_owner[1]
+                installed.ownership_epoch = installed.ownership_epoch + 1
             if existing is not None:
                 self._assert_replay_matches(existing, kind=kind, payload_hash=payload_hash)
                 # Idempotent replay of the same command returns the prior row.

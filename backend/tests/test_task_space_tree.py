@@ -12,7 +12,12 @@ from app.errors import MutationRejectedError
 from app.mutation.journal import MutationJournal
 from app.mutation.types import MutationRequest, MutationState, canonical_payload_hash
 from app.task_space.compiler import WORK_ITEM_SYNC_FIELDS, _stable_id
-from app.task_space.contracts import TaskSpacePageQuery, TaskSpaceRejected
+from app.task_space.contracts import (
+    WORK_ITEM_CONFIDENCE_VALUES,
+    WORK_ITEM_PRIORITY_VALUES,
+    TaskSpacePageQuery,
+    TaskSpaceRejected,
+)
 
 
 def _wire_value(value):
@@ -22,6 +27,22 @@ def _wire_value(value):
     if isinstance(value, (tuple, list)):
         return [_wire_value(item) for item in value]
     return value
+
+
+# ★ 2026-09-12（ADR-0003）：pre_waiting_status_definition_id 是**只出站**的列。
+#   - 出站（pull / full / sync 事件）按 ORM 全列模型驱动带出 ⇒ 出现在本集合；
+#   - 入站（客户端 push 的 full post-image）仍按 WORK_ITEM_SYNC_FIELDS 精确相等，
+#     携带该字段会被 full_post_image_required(extra) 拒绝。
+#   ⇒ 测试构造客户端上行 payload 时必须剔除它（见 _sync_candidate）。
+PRE_WAITING_FIELD = "pre_waiting_status_definition_id"
+
+
+def _sync_candidate(item: Mapping[str, object], **changes: object) -> dict:
+    """Client outbound workItem post-image: wire rows carry the pre-waiting column
+    but the inbound push contract stays exact — strip it here."""
+    candidate = {**item, **changes}
+    candidate.pop(PRE_WAITING_FIELD, None)
+    return candidate
 
 
 WORK_ITEM_POST_IMAGE_FIELDS = {
@@ -50,13 +71,16 @@ WORK_ITEM_POST_IMAGE_FIELDS = {
     "created_at",
     "updated_at",
     "version",
+    # ★ 2026-09-12（ADR-0003）：等待前态只在出站方向携带（模型驱动全列）。
+    PRE_WAITING_FIELD,
     # D5 Y: virtual label_ids projection travels in every workItem post-image.
     "label_ids",
 }
 
 
 def test_work_item_sync_candidate_shape_matches_every_ts0_post_image_field() -> None:
-    assert WORK_ITEM_SYNC_FIELDS == WORK_ITEM_POST_IMAGE_FIELDS
+    # 入站集合保持精确相等（不含新列）；出站集合 = 入站集合 + 等待前态。
+    assert WORK_ITEM_SYNC_FIELDS == WORK_ITEM_POST_IMAGE_FIELDS - {PRE_WAITING_FIELD}
 
 
 @pytest.mark.asyncio
@@ -318,12 +342,12 @@ async def test_sync_work_item_action_matrix_is_policy_owned(
     item = await task_space_fixture.seed_level2(f"sync-work-item-{action}")
     client_updated_at = task_space_fixture.clock.tick()
     payload = (
-        {
-            **item,
-            "title": "Accepted Sync scalar update",
-            "updated_at": client_updated_at,
-            "version": int(item["version"]) + 1,
-        }
+        _sync_candidate(
+            item,
+            title="Accepted Sync scalar update",
+            updated_at=client_updated_at,
+            version=int(item["version"]) + 1,
+        )
         if action == "update"
         else {}
     )
@@ -390,13 +414,16 @@ async def test_sync_work_item_server_managed_tamper_is_zero_effect(
 ) -> None:
     item = await task_space_fixture.seed_level2(f"sync-tamper-{field}")
     client_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **item,
-        "title": f"Accepted scalar shape for {field}",
-        "updated_at": client_updated_at,
-        "version": int(item["version"]) + 1,
-        field: replacement,
-    }
+    # dict 字面量语义：`field` 可覆盖默认的 updated_at / version（tamper 用例）。
+    candidate = _sync_candidate(
+        item,
+        **{
+            "title": f"Accepted scalar shape for {field}",
+            "updated_at": client_updated_at,
+            "version": int(item["version"]) + 1,
+            field: replacement,
+        },
+    )
     operation_id = f"sync-tamper-{field}"
     event = task_space_fixture.sync_event(
         entity_type="workItem",
@@ -437,14 +464,14 @@ async def test_sync_work_item_cross_project_move_is_rejected(task_space_fixture)
         command_id="sync-other-project", key="SCP"
     )
     client_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **item,
-        "project_id": other_project.value["id"],
-        "parent_id": None,
-        "child_rank": 0,
-        "updated_at": client_updated_at,
-        "version": int(item["version"]) + 1,
-    }
+    candidate = _sync_candidate(
+        item,
+        project_id=other_project.value["id"],
+        parent_id=None,
+        child_rank=0,
+        updated_at=client_updated_at,
+        version=int(item["version"]) + 1,
+    )
     event = task_space_fixture.sync_event(
         entity_type="workItem",
         entity_id=str(item["id"]),
@@ -474,13 +501,13 @@ async def test_sync_work_item_fourth_level_move_is_rejected(task_space_fixture) 
         str(level3["project_id"]), "Movable root", None, "sync-fourth-root"
     )
     client_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **root.value,
-        "parent_id": str(level3["id"]),
-        "child_rank": 0,
-        "updated_at": client_updated_at,
-        "version": int(root.value["version"]) + 1,
-    }
+    candidate = _sync_candidate(
+        root.value,
+        parent_id=str(level3["id"]),
+        child_rank=0,
+        updated_at=client_updated_at,
+        version=int(root.value["version"]) + 1,
+    )
     event = task_space_fixture.sync_event(
         entity_type="workItem",
         entity_id=str(root.value["id"]),
@@ -508,15 +535,15 @@ async def test_sync_work_item_move_plus_status_is_rejected(task_space_fixture) -
     item = await task_space_fixture.seed_level2("sync-move-status")
     completed_id = task_space_fixture.status_id("completed")
     client_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **item,
-        "parent_id": None,
-        "child_rank": 0,
-        "status_definition_id": completed_id,
-        "completed_at": client_updated_at,
-        "updated_at": client_updated_at,
-        "version": int(item["version"]) + 1,
-    }
+    candidate = _sync_candidate(
+        item,
+        parent_id=None,
+        child_rank=0,
+        status_definition_id=completed_id,
+        completed_at=client_updated_at,
+        updated_at=client_updated_at,
+        version=int(item["version"]) + 1,
+    )
     event = task_space_fixture.sync_event(
         entity_type="workItem",
         entity_id=str(item["id"]),
@@ -550,13 +577,13 @@ async def test_sync_work_item_accepted_move_matches_typed_post_image(task_space_
         project_id, "New parent", None, "sync-move-new-parent"
     )
     client_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **item,
-        "parent_id": str(new_parent.value["id"]),
-        "child_rank": 1,
-        "updated_at": client_updated_at,
-        "version": int(item["version"]) + 1,
-    }
+    candidate = _sync_candidate(
+        item,
+        parent_id=str(new_parent.value["id"]),
+        child_rank=1,
+        updated_at=client_updated_at,
+        version=int(item["version"]) + 1,
+    )
     event = task_space_fixture.sync_event(
         entity_type="workItem",
         entity_id=str(item["id"]),
@@ -602,13 +629,13 @@ async def test_sync_work_item_move_applies_authoritative_rank_verbatim(task_spac
         project_id, "Child 1", new_parent.value["id"], "sync-ar-c1"
     )
     client_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **item,
-        "parent_id": str(new_parent.value["id"]),
-        "child_rank": 5,
-        "updated_at": client_updated_at,
-        "version": int(item["version"]) + 1,
-    }
+    candidate = _sync_candidate(
+        item,
+        parent_id=str(new_parent.value["id"]),
+        child_rank=5,
+        updated_at=client_updated_at,
+        version=int(item["version"]) + 1,
+    )
     event = task_space_fixture.sync_event(
         entity_type="workItem",
         entity_id=str(item["id"]),
@@ -639,14 +666,14 @@ async def test_sync_work_item_accepted_transition_matches_typed_post_image(task_
     item = await task_space_fixture.seed_level2("sync-accepted-transition")
     completed_id = task_space_fixture.status_id("completed")
     client_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **item,
-        "status_definition_id": completed_id,
-        "completed_at": client_updated_at,
-        "cancelled_at": None,
-        "updated_at": client_updated_at,
-        "version": int(item["version"]) + 1,
-    }
+    candidate = _sync_candidate(
+        item,
+        status_definition_id=completed_id,
+        completed_at=client_updated_at,
+        cancelled_at=None,
+        updated_at=client_updated_at,
+        version=int(item["version"]) + 1,
+    )
     event = task_space_fixture.sync_event(
         entity_type="workItem",
         entity_id=str(item["id"]),
@@ -680,12 +707,12 @@ async def test_sync_work_item_accepted_transition_matches_typed_post_image(task_
 async def test_sync_work_item_wrong_version_is_rejected(task_space_fixture) -> None:
     item = await task_space_fixture.seed_level2("sync-wrong-version")
     client_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **item,
-        "title": "Wrong version",
-        "updated_at": client_updated_at,
-        "version": int(item["version"]) + 2,
-    }
+    candidate = _sync_candidate(
+        item,
+        title="Wrong version",
+        updated_at=client_updated_at,
+        version=int(item["version"]) + 2,
+    )
     event = task_space_fixture.sync_event(
         entity_type="workItem",
         entity_id=str(item["id"]),
@@ -711,12 +738,12 @@ async def test_sync_work_item_updated_at_not_client_timestamp_is_rejected(task_s
     item = await task_space_fixture.seed_level2("sync-bad-timestamp")
     client_updated_at = task_space_fixture.clock.tick()
     wrong_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **item,
-        "title": "Bad timestamp",
-        "updated_at": wrong_updated_at,
-        "version": int(item["version"]) + 1,
-    }
+    candidate = _sync_candidate(
+        item,
+        title="Bad timestamp",
+        updated_at=wrong_updated_at,
+        version=int(item["version"]) + 1,
+    )
     event = task_space_fixture.sync_event(
         entity_type="workItem",
         entity_id=str(item["id"]),
@@ -884,14 +911,14 @@ async def test_sync_transition_cannot_bypass_abandoned_session_envelope(
         state="abandoned",
     )
     client_updated_at = task_space_fixture.clock.tick()
-    candidate = {
-        **item,
-        "status_definition_id": completed,
-        "completed_at": client_updated_at,
-        "cancelled_at": None,
-        "updated_at": client_updated_at,
-        "version": int(item["version"]) + 1,
-    }
+    candidate = _sync_candidate(
+        item,
+        status_definition_id=completed,
+        completed_at=client_updated_at,
+        cancelled_at=None,
+        updated_at=client_updated_at,
+        version=int(item["version"]) + 1,
+    )
     request = task_space_fixture.entity_commands.from_sync_event(
         task_space_fixture.scope,
         task_space_fixture.sync_event(
@@ -1150,3 +1177,288 @@ async def test_transition_with_identity_mismatch_rejects(task_space_fixture) -> 
     await _assert_durable_rejection(
         task_space_fixture, operation_id=command_id, code="idempotency_conflict"
     )
+
+
+# --------------------------------------------------------------------------- #
+# ★ 2026-09-11 WorkItem 枚举值域（priority / confidence）三方一致回归
+#   原因：schema 只限长度、编译器不校验值域，越界值会一路穿到 DB CHECK 报 500。
+#   这里锁定「任何入口都 fail-closed」：HTTP 422、编译器稳定错误码、合法值全通过。
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture()
+def _no_backup_scheduler(monkeypatch) -> None:
+    """HTTP 生命周期测试需要关闭备份调度器（与 Task Space 路由测试同一原因）。
+
+    生产默认 ``backup_enabled=True`` 且要求显式外部目标；这里只做契约测试，
+    不验证调度器，因此必须在 app lifespan 启动前关掉。
+    """
+    import app.settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "backup_enabled", False)
+
+
+async def _http_space_headers(client) -> tuple[dict[str, str], str]:
+    """走真实 HTTP 建立 master/space 身份，返回请求头与 space_id。"""
+    setup = await client.post(
+        "/api/v1/auth/setup", json={"password": "test-password-123"}
+    )
+    assert setup.status_code == 201, setup.text
+    login = await client.post(
+        "/api/v1/auth/login", json={"password": "test-password-123"}
+    )
+    assert login.status_code == 200, login.text
+    master_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    created = await client.post(
+        "/api/v1/spaces",
+        json={"name": "WorkItem Enum Domain Space"},
+        headers=master_headers,
+    )
+    assert created.status_code == 201, created.text
+    space_id = created.json()["id"]
+    token = await client.post(
+        f"/api/v1/spaces/{space_id}/token", headers=master_headers
+    )
+    assert token.status_code == 200, token.text
+    return {"Authorization": f"Bearer {token.json()['space_token']}"}, space_id
+
+
+async def _http_project(
+    client, headers: dict[str, str], space_id: str, command_id: str, key: str
+) -> str:
+    """建一个项目；返回 project_id。key 用规范化后的大写值参与 hash。"""
+    payload = {"key": key.upper(), "name": f"Project {key.upper()}", "description": None}
+    response = await client.post(
+        "/api/v1/projects",
+        json={
+            "commandId": command_id,
+            "spaceId": space_id,
+            "payloadHash": canonical_payload_hash(payload),
+            "key": key,
+            "name": payload["name"],
+        },
+        headers={**headers, "Idempotency-Key": command_id},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["entityId"]
+
+
+def _work_item_business(title: str, priority: str | None) -> dict[str, object]:
+    """CreateWorkItem 的规范业务载荷（与 module._business_payload 完全一致）。"""
+    return {
+        "title": title,
+        "description": None,
+        "parent_id": None,
+        "type_definition_id": None,
+        "status_definition_id": None,
+        "priority": priority,
+    }
+
+
+@pytest.mark.provisioned_space_storage
+@pytest.mark.asyncio
+async def test_http_work_item_rejects_noncanonical_priority_with_422(
+    _no_backup_scheduler, client
+) -> None:
+    """中文/越界 priority 必须在 schema 层被 422 拒绝，绝不落到 DB CHECK 500。"""
+    headers, space_id = await _http_space_headers(client)
+    project_id = await _http_project(client, headers, space_id, "enum-proj", "EN")
+
+    dirty = _work_item_business("脏值任务", "高")
+    created = await client.post(
+        "/api/v1/work-items",
+        json={
+            "commandId": "enum-create-dirty",
+            "spaceId": space_id,
+            "projectId": project_id,
+            "payloadHash": canonical_payload_hash(dirty),
+            "title": dirty["title"],
+            "description": None,
+            "parentId": None,
+            "typeDefinitionId": None,
+            "statusDefinitionId": None,
+            "priority": "高",
+        },
+        headers={**headers, "Idempotency-Key": "enum-create-dirty"},
+    )
+    assert created.status_code == 422, created.text
+    assert created.headers["X-PomodoroXII-Error-Code"] == "validation_error"
+
+    clean = _work_item_business("合法任务", "low")
+    target = await client.post(
+        "/api/v1/work-items",
+        json={
+            "commandId": "enum-create-clean",
+            "spaceId": space_id,
+            "projectId": project_id,
+            "payloadHash": canonical_payload_hash(clean),
+            "title": clean["title"],
+            "description": None,
+            "parentId": None,
+            "typeDefinitionId": None,
+            "statusDefinitionId": None,
+            "priority": "low",
+        },
+        headers={**headers, "Idempotency-Key": "enum-create-clean"},
+    )
+    assert target.status_code == 201, target.text
+    work_item_id = target.json()["entityId"]
+
+    patched = await client.patch(
+        f"/api/v1/work-items/{work_item_id}",
+        json={
+            "commandId": "enum-patch-dirty",
+            "spaceId": space_id,
+            "expectedVersion": target.json()["version"],
+            "payloadHash": canonical_payload_hash({"patch": {"priority": "很高"}}),
+            "priority": "很高",
+        },
+        headers={**headers, "Idempotency-Key": "enum-patch-dirty"},
+    )
+    assert patched.status_code == 422, patched.text
+    assert patched.headers["X-PomodoroXII-Error-Code"] == "validation_error"
+
+
+@pytest.mark.provisioned_space_storage
+@pytest.mark.asyncio
+async def test_http_work_item_accepts_every_canonical_priority_value(
+    _no_backup_scheduler, client
+) -> None:
+    """四个规范英文值必须全部通过（存储值 = 规范值，不做中文转换）。"""
+    headers, space_id = await _http_space_headers(client)
+    project_id = await _http_project(client, headers, space_id, "enum-ok-proj", "EO")
+
+    for priority in WORK_ITEM_PRIORITY_VALUES:
+        business = _work_item_business(f"合法 {priority}", priority)
+        command_id = f"enum-ok-{priority}"
+        response = await client.post(
+            "/api/v1/work-items",
+            json={
+                "commandId": command_id,
+                "spaceId": space_id,
+                "projectId": project_id,
+                "payloadHash": canonical_payload_hash(business),
+                "title": business["title"],
+                "description": None,
+                "parentId": None,
+                "typeDefinitionId": None,
+                "statusDefinitionId": None,
+                "priority": priority,
+            },
+            headers={**headers, "Idempotency-Key": command_id},
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["value"]["priority"] == priority
+
+
+@pytest.mark.asyncio
+async def test_online_compiler_rejects_out_of_domain_priority_and_confidence(
+    task_space_fixture,
+) -> None:
+    """编译器层纵深防御：直接调用者也不能把越界值写进 DB。
+
+    稳定的领域错误码 + ``reason``（invalid_priority / invalid_confidence），
+    而且必须零副作用 —— 绝不留给 DB CHECK 抛 500。
+    """
+    project = await task_space_fixture.create_project(
+        command_id="enum-domain-project", key="ED"
+    )
+    item = await task_space_fixture.create_work_item(
+        project.value["id"], "合法任务", None, "enum-domain-valid"
+    )
+    assert item.value["priority"] is None
+
+    dirty_create = await task_space_fixture.module.execute(
+        task_space_fixture.scope,
+        task_space_fixture.create_work_item_command(
+            command_id="enum-domain-create",
+            project_id=project.value["id"],
+            title="脏值创建",
+            priority="高",
+        ),
+    )
+    assert isinstance(dirty_create, TaskSpaceRejected)
+    assert dirty_create.code == "payload_field_not_allowed"
+    assert dirty_create.details["reason"] == "invalid_priority"
+    assert dirty_create.details["field"] == "priority"
+
+    dirty_update = await task_space_fixture.update_work_item(
+        "enum-domain-update",
+        str(item.value["id"]),
+        int(item.value["version"]),
+        {"priority": "很高"},
+    )
+    assert isinstance(dirty_update, TaskSpaceRejected)
+    assert dirty_update.code == "payload_field_not_allowed"
+    assert dirty_update.details["reason"] == "invalid_priority"
+
+    # confidence 目前只有 sync post-image 通道可写，但编译器同样必须拒绝。
+    dirty_confidence = await task_space_fixture.update_work_item(
+        "enum-domain-confidence",
+        str(item.value["id"]),
+        int(item.value["version"]),
+        {"confidence": "very_high"},
+    )
+    assert isinstance(dirty_confidence, TaskSpaceRejected)
+    assert dirty_confidence.code == "payload_field_not_allowed"
+    assert dirty_confidence.details["reason"] == "invalid_confidence"
+
+    # 被拒后零副作用：版本不变。
+    unchanged = await task_space_fixture.read_work_item(str(item.value["id"]))
+    assert unchanged["version"] == item.value["version"]
+    assert unchanged["priority"] is None
+
+    for priority in WORK_ITEM_PRIORITY_VALUES:
+        accepted = await task_space_fixture.create_work_item(
+            project.value["id"],
+            f"合法 {priority}",
+            None,
+            f"enum-domain-{priority}",
+            priority=priority,
+        )
+        assert accepted.value["priority"] == priority
+
+
+def test_work_item_enum_domain_matches_db_check_text() -> None:
+    """共享值域常量必须与 work_items 的 DB CHECK 文本逐字一致。
+
+    常量是 schema / 编译器的单一事实来源，DB CHECK 是最后兜底；两者一旦
+    漂移就会出现「新值前端放行、编译器放行、DB 拒绝」的第三态。
+    """
+    from sqlalchemy import CheckConstraint
+
+    from app.models.work_item import WorkItem
+
+    # 约束名会被命名约定改写（ck_work_items_priority_values），所以按 SQL 文本
+    # 断言，避免把命名约定也钉死在这里。
+    check_texts = {
+        str(constraint.sqltext)
+        for constraint in WorkItem.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    priority_sql = ",".join(f"'{value}'" for value in WORK_ITEM_PRIORITY_VALUES)
+    confidence_sql = ",".join(f"'{value}'" for value in WORK_ITEM_CONFIDENCE_VALUES)
+    assert f"priority IS NULL OR priority IN ({priority_sql})" in check_texts
+    assert f"confidence IS NULL OR confidence IN ({confidence_sql})" in check_texts
+
+
+def test_work_item_enum_wire_schemas_use_the_shared_domain() -> None:
+    """请求/响应模型的值域必须来自同一常量（JSON Schema 的 enum 即证据）。"""
+    from app.schemas.task_space import (
+        CreateWorkItemRequest,
+        UpdateWorkItemRequest,
+        WorkItemCreate,
+        WorkItemResponse,
+    )
+
+    for model, field_name, expected in (
+        (WorkItemCreate, "priority", WORK_ITEM_PRIORITY_VALUES),
+        (CreateWorkItemRequest, "priority", WORK_ITEM_PRIORITY_VALUES),
+        (UpdateWorkItemRequest, "priority", WORK_ITEM_PRIORITY_VALUES),
+        (WorkItemResponse, "priority", WORK_ITEM_PRIORITY_VALUES),
+        (WorkItemResponse, "confidence", WORK_ITEM_CONFIDENCE_VALUES),
+    ):
+        property_schema = model.model_json_schema()["properties"][field_name]
+        branches = property_schema.get("anyOf", [property_schema])
+        enum_branch = next(branch for branch in branches if "enum" in branch)
+        assert tuple(enum_branch["enum"]) == expected, (model.__name__, field_name)

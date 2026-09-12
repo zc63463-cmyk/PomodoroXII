@@ -632,23 +632,40 @@ class FolderDomainPolicy:
 
 
 class RelationDomainPolicy:
-    """Domain policy for junction entities: endpoint existence check on create.
+    """Domain policy for junction / edge entities.
 
-    For ``schedule_quick_note``, verifies that both ``schedule_id`` and
-    ``quick_note_id`` refer to existing entities before delegating to
-    ``compile_catalog_entity_command``.  Junction entities are DB_ONLY and
-    do not require projections.
+    Two responsibilities, both dispatched by ``entity_type``:
+
+    * ``schedule_quick_note`` — junction endpoint existence check on create.
+    * ``relation`` — dependency edges (D2 / ADR-0004).  Besides the same
+      junction endpoint check (``from_work_item_id`` / ``to_work_item_id``
+      must exist), this policy is the **inbound guard** for the
+      server-managed resolution columns: a sync replay may neither create a
+      pre-confirmed edge nor change ``resolution`` / ``resolved_at`` — the
+      only writer is the typed ``ResolveDependency`` command.  Rejections are
+      fail-closed with the stable code ``server_managed_field_changed``.
+
+    ``compile`` must handle ALL THREE generic request names
+    (``entity.create`` / ``entity.update`` / ``entity.delete``): sync v2 push
+    emits those names, and dispatch is by ``entity_type`` — a policy that only
+    recognised custom names would brick relation sync.  Every request falls
+    through to ``compile_catalog_entity_command``; the guards are additive and
+    never replace the generic compile.
     """
 
     @property
     def entity_types(self) -> frozenset[str]:
-        return frozenset({"schedule_quick_note"})
+        return frozenset({"schedule_quick_note", "relation"})
 
     async def compile(
         self,
         context: MutationCompileContext,
         request: MutationRequest,
     ) -> MutationCommand:
+        if request.entity_type == "relation" and request.name in {
+            "entity.create", "entity.update",
+        }:
+            self._require_relation_resolution_untouched(context, request)
         endpoints = context.catalog.junction_endpoints_for(request.entity_type)
         if endpoints is not None and request.name == "entity.create":
             for field_name, endpoint_entity_type in endpoints:
@@ -667,3 +684,43 @@ class RelationDomainPolicy:
                             {"field": field_name, "entityId": str(endpoint_id)},
                         )
         return await compile_catalog_entity_command(context, request)
+
+    @staticmethod
+    def _require_relation_resolution_untouched(
+        context: MutationCompileContext,
+        request: MutationRequest,
+    ) -> None:
+        """Reject client attempts to set or change the server-managed columns.
+
+        Authoritative baseline (change detection, not presence rejection —
+        a full post-image may legitimately echo the current values):
+
+        * ``entity.create`` — a new edge is always unresolved (both ``None``);
+        * ``entity.update`` — the current authoritative row's values;
+        * ``entity.delete`` — payload must be empty; nothing to guard here.
+        """
+        baseline: dict[str, object] = {"resolution": None, "resolved_at": None}
+        if request.name == "entity.update":
+            current = context.authority.row("relation", request.entity_id)
+            if current is None:
+                # 行不存在：交给通用编译器统一给 not_found（守卫不抢答）。
+                return
+            baseline = {
+                field: current.get(field)
+                for field in ("resolution", "resolved_at")
+            }
+        changed = sorted(
+            field
+            for field in ("resolution", "resolved_at")
+            if field in request.payload and request.payload[field] != baseline[field]
+        )
+        if changed:
+            raise MutationRuleViolation(
+                "server_managed_field_changed",
+                {
+                    "entityType": "relation",
+                    "entityId": request.entity_id,
+                    "fields": changed,
+                },
+                retryable=False,
+            )

@@ -101,6 +101,11 @@ async def recovery_vectors() -> tuple[dict[str, object], ...]:
         for field in spec.fields:
             if field.name == spec.primary_key:
                 value: object = f"{spec.effective_sync_entity_type}-1"
+            elif field.name == "space_id":
+                # ★ 序列化器拒绝与 scope 不一致的 spaceId —— 合成行必须用 scope 的值。
+                #   relation 是唯一声明 space_id 的 sync-enabled 实体；此前生成在
+                #   foreign-Space 守卫处抛错，golden 向量一直停在 21 个实体（无 relation）。
+                value = "spc_test"
             elif field.type == "integer":
                 value = 0
             elif field.type == "boolean":

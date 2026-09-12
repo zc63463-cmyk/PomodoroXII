@@ -515,7 +515,7 @@ export type SyncedTimeBlock = TimeBlock & SyncFields
 
 // Final Task Space / FocusSession cache rows. Wire space identity is checked
 // before persistence and omitted from per-Space business rows.
-import type { WorkItemNoteDocument, Project, WorkItem, Label } from '@/lib/contracts/task-space'
+import type { WorkItemDepth, WorkItemNoteDocument, Project, WorkItem, Label } from '@/lib/contracts/task-space'
 import type {
   FocusSessionView,
   SessionAttributionRevisionView,
@@ -526,7 +526,23 @@ import type {
 } from '@/lib/contracts/focus-session'
 
 export type CachedProject = Omit<Project, 'spaceId'>
-export type CachedWorkItem = Omit<WorkItem, 'spaceId'>
+/**
+ * ★ 2026-09-11 本地业务行 + UI 读模型。
+ *
+ * 注意：depth **不是**实体字段（DB 无列、sync post-image 白名单不含、业务哈希
+ * 不覆盖）。这里的 depth 是读模型派生值，只能由
+ * `lib/task-space/work-item-read-model` 在读取边界填好；任何直接落库/传 wire 的
+ * 实体行都不应带它。
+ */
+export type CachedWorkItem = Omit<WorkItem, 'spaceId'> & {
+  depth: WorkItemDepth
+  /**
+   * ★ 2026-09-12（ADR-0003）等待前态：**只从 wire 读路径消费**的服务端事实。
+   * Dexie 行不存它（命令响应落库前剥离）；读取边界不得消费本地值 ——
+   * sync merge 会把它原样落库，但那是"本地行"，离线消费只会让提示时有时无。
+   */
+  preWaitingStatusDefinitionId?: string | null
+}
 // Label definitions are Space-scoped in the backend but the wire view does not
 // repeat space identity (shared definitions endpoint); keep the cached row
 // shape identical to the label contract.
@@ -616,7 +632,7 @@ export interface SessionActivationApplicationReceiptRow {
 
 export interface DirectCommandIntentRow {
   operationId: string
-  kind: 'create_project' | 'create_work_item' | 'update_work_item' | 'move_work_item' | 'transition_work_item' | 'trash_work_item' | 'restore_work_item' | 'create_relation' | 'remove_relation' | 'submit_review' | 'create_label' | 'update_label' | 'archive_label' | 'add_work_item_labels' | 'remove_work_item_labels'
+  kind: 'create_project' | 'create_work_item' | 'update_work_item' | 'move_work_item' | 'transition_work_item' | 'trash_work_item' | 'restore_work_item' | 'create_relation' | 'remove_relation' | 'resolve_relation' | 'submit_review' | 'create_label' | 'update_label' | 'archive_label' | 'add_work_item_labels' | 'remove_work_item_labels'
   spaceId: string
   targetId: string | null
   requestJson: string

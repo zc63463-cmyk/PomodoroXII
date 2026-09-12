@@ -85,13 +85,20 @@ function repositoryFixture(overrides: Partial<TaskSpaceRepositoryLike> = {}): Ta
     listBlockedMap: vi.fn().mockResolvedValue({ items: {} }),
     createRelation: vi.fn().mockResolvedValue({
       id: 'rel-1', fromWorkItemId: 'l2', toWorkItemId: 'l1',
-      relationType: 'depends_on', version: 1,
+      relationType: 'depends_on', resolution: null, resolvedAt: null, version: 1,
       createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z',
     }),
     removeRelation: vi.fn().mockResolvedValue({
       id: 'rel-1', fromWorkItemId: 'l2', toWorkItemId: 'l1',
-      relationType: 'depends_on', version: 1,
+      relationType: 'depends_on', resolution: null, resolvedAt: null, version: 1,
       createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T08:00:00.000Z',
+    }),
+    // ★ D2 / ADR-0004：解除确认（默认回一个已确认行）。
+    resolveRelation: vi.fn().mockResolvedValue({
+      id: 'rel-1', fromWorkItemId: 'l2', toWorkItemId: 'l1',
+      relationType: 'depends_on', resolution: 'confirmed_not_required',
+      resolvedAt: '2026-07-15T09:00:00.000Z', version: 2,
+      createdAt: '2026-07-15T08:00:00.000Z', updatedAt: '2026-07-15T09:00:00.000Z',
     }),
     trashWorkItem: vi.fn().mockResolvedValue({ ...workItem('l1', null, 1), archivedAt: '2026-07-15T09:00:00.000Z', version: 2 }),
     restoreWorkItem: vi.fn().mockResolvedValue({ ...workItem('l1', null, 1), archivedAt: null, version: 3 }),
@@ -256,8 +263,93 @@ describe('task-space-store projection', () => {
 
     await useTaskSpaceStore.getState().hydrate('space-a', repository)
 
-    expect(useTaskSpaceStore.getState().error).toBe('部分本地操作未能同步，请刷新页面重试。')
+    expect(useTaskSpaceStore.getState().error).toBe(
+      '有 1 项操作未能提交（项目标识冲突），请重新执行对应操作。',
+    )
     expect(repository.resumePendingDirectCommandIntents).toHaveBeenCalledTimes(1)
+  })
+
+  it('永久判死的 intent 说清哪类操作没提交（而不是无效的「刷新重试」）', async () => {
+    // 回归（2026-09-11 裁决 A）：failed 是永久终态，刷新不会让它们复活 ——
+    // 提示必须引导用户在原位置重新执行。
+    const repository = repositoryFixture({
+      resumePendingDirectCommandIntents: vi.fn().mockResolvedValue({
+        failed: [
+          { operationId: 'op-review', code: 'handler_error:submit_review' },
+          { operationId: 'op-move', code: 'handler_error:move_work_item' },
+        ],
+      }),
+    })
+
+    await useTaskSpaceStore.getState().hydrate('space-a', repository)
+
+    expect(useTaskSpaceStore.getState().error).toBe(
+      '有 2 项操作未能提交（提交复盘、移动工作项），请重新执行对应操作。',
+    )
+  })
+
+  it('续跑抛错（传输类）仍提示刷新重试 —— intent 保持 pending 下轮再试', async () => {
+    const repository = repositoryFixture({
+      resumePendingDirectCommandIntents: vi.fn().mockRejectedValue(new Error('Network Error')),
+    })
+
+    await useTaskSpaceStore.getState().hydrate('space-a', repository)
+
+    expect(useTaskSpaceStore.getState().error).toBe('部分本地操作未能同步，请刷新页面重试。')
+  })
+
+  // ★ 2026-09-11 depth 派生失败必须可见（fail-loud），绝不静默丢弃。
+  it('shows a visible message when work item depth stays unresolved after refresh', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const repository = repositoryFixture({
+      refreshOverview: vi.fn().mockResolvedValue({
+        projects: [project()],
+        workItems: [workItem('l1', null, 1)],
+        definitions: { statuses: [], types: [], labels: [] },
+        unresolvedDepthItemIds: ['ghost'],
+      }),
+    })
+
+    await useTaskSpaceStore.getState().hydrate('space-a', repository)
+
+    const state = useTaskSpaceStore.getState()
+    // 旧代码：没有 unresolved 概念 → error 为 null，行在 tree 里静默消失。
+    expect(state.error).toContain('层级信息不完整')
+    expect(state.workItems.map((item) => item.id)).toEqual(['l1'])
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('re-pulls authoritative rows when cached work item depth cannot be derived', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const repository = repositoryFixture()
+    await useTaskSpaceStore.getState().hydrate('space-a', repository)
+    expect(useTaskSpaceStore.getState().workItems.map((item) => item.id)).toEqual(['l1', 'l2'])
+
+    // 同步周期之后：Dexie 里出现无 depth 的历史/wire 形状行（读边界报 unresolved）。
+    vi.mocked(repository.readCachedOverview).mockResolvedValueOnce({
+      projects: [project()],
+      workItems: [
+        { ...workItem('l1', null, 1), depth: undefined } as unknown as CachedWorkItem,
+      ],
+      definitions: null,
+      unresolvedDepthItemIds: ['l1'],
+    })
+    vi.mocked(repository.refreshOverview).mockResolvedValueOnce({
+      projects: [project()],
+      workItems: [workItem('l1', null, 1), workItem('l2', 'l1', 2)],
+      definitions: { statuses: [], types: [], labels: [] },
+      unresolvedDepthItemIds: [],
+    })
+
+    await useTaskSpaceStore.getState().refreshCachedOverview()
+
+    // ★ 恢复路径：主动重拉一次权威行；自愈后不再提示（旧代码不会重拉）。
+    expect(repository.refreshOverview).toHaveBeenCalledTimes(2)
+    expect(useTaskSpaceStore.getState().workItems.map((item) => item.id)).toEqual(['l1', 'l2'])
+    expect(useTaskSpaceStore.getState().error).toBeNull()
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
   })
 
   it('selecting a level-3 item preserves its level-2 parent for Session launch', () => {

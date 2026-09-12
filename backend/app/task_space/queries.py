@@ -20,6 +20,7 @@ from app.models.work_item_definition import (
 from app.models.work_item_note import WorkItemNote
 from app.runtime.space import SpaceRuntimeHandle
 from app.task_space.contracts import (
+    RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED,
     TaskSpaceDefinitionsView,
     TaskSpacePage,
     TaskSpacePageQuery,
@@ -58,7 +59,47 @@ def _work_item_row(model, label_ids: list[str]) -> dict[str, object]:
 #    同步到的 relation 行本地重算（孤儿边容错也顺带在同一处处理）。
 
 BLOCKING_RELATION_TYPES = frozenset({"depends_on", "blocks"})
-TERMINAL_STATUS_CATEGORIES = frozenset({"completed", "cancelled"})
+
+# ★ 2026-09-12（D2 / ADR-0004）：单条边的三态纯派生（依赖域合同修订版 §3.4 / §4.2）。
+#   旧实现在这里用 TERMINAL_STATUS_CATEGORIES={"completed","cancelled"} 把
+#   cancelled 静默当作完成（cancelled 直接解除阻塞）—— 合同要求的是
+#   cancelled ⇒ broken_requires_resolution（阻塞且需显式解决，经
+#   ResolveDependency 确认后才算 satisfied）。该常量消费者清零后已删除，
+#   不留无人消费的字面量。
+#   `unknown_requires_resolution`（Project 归档 / 目标不可达）本期不做，
+#   仅保留取值名与判定入口（Q4 裁剪，见 ADR-0004）。
+EDGE_STATE_SATISFIED = "satisfied"
+EDGE_STATE_BROKEN_REQUIRES_RESOLUTION = "broken_requires_resolution"
+EDGE_STATE_OPEN = "open"
+# 预留（本版本不可达）：Project 归档 / 目标不可见 / 缺失的 Project 维度。
+EDGE_STATE_UNKNOWN_REQUIRES_RESOLUTION = "unknown_requires_resolution"
+
+
+def derive_relation_edge_state(
+    row: Mapping[str, object],
+    status_category_by_work_item: Mapping[str, str | None],
+) -> str:
+    """Pure per-edge state of one blocking edge D -> U (合同 §4.2 的简化实现).
+
+    ★ 与前端 ``relation-selectors.ts::deriveRelationEdgeState`` 逐条对齐。
+
+    - ``completed``             -> ``satisfied``
+    - ``cancelled`` 未确认      -> ``broken_requires_resolution``（本次要修的病变）
+    - ``cancelled`` 已确认      -> ``satisfied``（保留审计边）
+    - 其余活动类目              -> ``open``
+    - 上游行缺失（孤儿边/未水合）-> ``open``（既有语义保留：绝不静默解除）
+    """
+    upstream_id = str(row["to_work_item_id"])
+    category = status_category_by_work_item.get(upstream_id)
+    if category is None:
+        return EDGE_STATE_OPEN
+    if category == "completed":
+        return EDGE_STATE_SATISFIED
+    if category == "cancelled":
+        if str(row.get("resolution") or "") == RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED:
+            return EDGE_STATE_SATISFIED
+        return EDGE_STATE_BROKEN_REQUIRES_RESOLUTION
+    return EDGE_STATE_OPEN
 
 
 def derive_blocked_by_dependency(
@@ -67,9 +108,9 @@ def derive_blocked_by_dependency(
 ) -> dict[str, bool]:
     """Pure AND-semantics blocking map: ``{blocked_item_id: is_blocked}``.
 
-    D16 (多上游 AND 语义): an item is blocked while **any** upstream blocker
-    is still open.  Only ``depends_on`` / ``blocks`` edges block; an upstream
-    that reached ``completed``/``cancelled`` stops blocking.
+    D16 (多上游 AND 语义): an item is blocked while **any** blocking edge is
+    not satisfied —— ``blocked(D) = 存在任一边处于 {broken, open}``。
+    Only ``depends_on`` / ``blocks`` edges block; ``relates_to`` is excluded.
 
     Missing endpoints (``status_category_by_work_item`` has no entry) are
     treated as OPEN — a relation edge whose work item has not hydrated yet
@@ -79,9 +120,8 @@ def derive_blocked_by_dependency(
     for row in relations:
         if str(row["relation_type"]) not in BLOCKING_RELATION_TYPES:
             continue
-        upstream_id = str(row["to_work_item_id"])
-        category = status_category_by_work_item.get(upstream_id)
-        if category in TERMINAL_STATUS_CATEGORIES:
+        state = derive_relation_edge_state(row, status_category_by_work_item)
+        if state == EDGE_STATE_SATISFIED:
             continue
         blocked[str(row["from_work_item_id"])] = True
     return blocked

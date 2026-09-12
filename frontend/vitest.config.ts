@@ -4,7 +4,15 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   resolve: {
-    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+      // 2026-09-10：React Flow 的样式表会把 Vitest 拖进 PostCSS 管线
+      //（Tailwind v4 的 postcss 配置 Vite 读不懂）。测试不需要真实样式，
+      // 统一重定向到空桩。
+      "@xyflow/react/dist/style.css": fileURLToPath(
+        new URL("./vitest.style-stub.js", import.meta.url),
+      ),
+    },
   },
   // 2026-09-02: 挂上 react 插件，开启 JSX transform。
   // 此前 vitest 无 JSX transform（tsconfig 的 jsx:"preserve" 优先级高于
@@ -16,6 +24,8 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    // 2026-09-10：测试不处理 CSS —— 组件里 import 进来的样式表一律空过。
+    css: false,
     // 2026-09-04：曾留下 9 组孤儿进程挂了 4~21 小时（CPU 仅 0.8~1.8s、内存 19MB，
     // 即启动后立刻僵死）。显式钉死 forks 池——它是独立子进程，teardown 超时后能被
     // 真正 kill；threads 池的主线程 terminate worker 失败会导致主进程空等。

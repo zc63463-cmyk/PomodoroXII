@@ -10,5 +10,17 @@
     "payload": {"z": 1, "a": [true, null, "雪"]},
     "canonicalUtf8": "{\"a\":[true,null,\"雪\"],\"z\":1}",
     "sha256": "d625d1d0dc331b7f55c53959732d6fbe3678413b7e013655326ab86130da6559"
+  },
+  {
+    "name": "workItem.create business payload (no depth)",
+    "payload": {"title": "Ship v1", "description": "From zero to one", "parent_id": null, "type_definition_id": null, "status_definition_id": null, "priority": "high"},
+    "canonicalUtf8": "{\"description\":\"From zero to one\",\"parent_id\":null,\"priority\":\"high\",\"status_definition_id\":null,\"title\":\"Ship v1\",\"type_definition_id\":null}",
+    "sha256": "25e99d1868f32671492b7f2ada9ecffa10ddb7fde61129e448d03c095963c057"
+  },
+  {
+    "name": "workItem.update patch business payload (no depth)",
+    "payload": {"patch": {"title": "Ship v1.1", "description": null, "priority": "urgent", "type_definition_id": null}},
+    "canonicalUtf8": "{\"patch\":{\"description\":null,\"priority\":\"urgent\",\"title\":\"Ship v1.1\",\"type_definition_id\":null}}",
+    "sha256": "1429313a300e1490550d3c0b683f8b65eba964375cb280080c5c7b6e980be2c0"
   }
 ]

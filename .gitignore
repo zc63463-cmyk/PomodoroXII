@@ -202,6 +202,13 @@ docs/task-space-design/sources/*
 
 !docs/task-space-design/MANIFEST.md
 
+# --- 2026-09-12: ADR 与 agent 术语表入库（同 T6b 判据：无隐私风险 + clean checkout 可复现）---
+# 注意顺序：`:145 /*.md` 忽略根级 md；`:132-144` 的无斜杠通配作用于所有层级，
+# 故 docs/adr/** 兜底恢复整棵子树（后写优先）。docs/ 其它路径保持忽略。
+!/CONTEXT.md
+!docs/adr/
+!docs/adr/**
+
 # --- 2026-09-10: 探针/临时产物（落袋治理，A 阶段）---------------------------
 # 这些是排查过程中留下的临时文件，不属于产品代码；留在工作树但不入库。
 /tmp/
@@ -251,3 +258,6 @@ frontend/.playwright-cli/
 /方案A-*.visual-check.*
 # 个人笔记（不进公开仓库）
 /灵感培育日志/
+
+# 本地服务运行日志与 PID（2026-09-10）
+/.run-logs/

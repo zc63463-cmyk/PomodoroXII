@@ -22,6 +22,7 @@ from app.mutation.unit_of_work import (
     MutationCompileContext,
     compile_catalog_entity_command,
 )
+from app.schemas.note import NOTE_STATUS_VALUES, require_note_status
 
 
 def _json_blob(value: object) -> bytes:
@@ -301,6 +302,27 @@ class KnowledgeDomainPolicy:
         payload = dict(request.payload)
         content = payload.pop("content", None)
         payload.pop("derivation_map", None)  # popped to prevent leaking into after_row
+        # ★ 2026-09-11：status 值域 fail-closed，先于一切副作用。REST 侧 wire
+        # schema 已 422 拦下；这里覆盖 **sync post-image**（外部客户端/离线行
+        # 重放，payload 由客户端自造，不经过任何 Pydantic 模型）与直接调用
+        # 编译器的路径。稳定错误码 payload_field_not_allowed、details.reason =
+        # invalid_status；绝不允许越界值落到 notes 的 CHECK 约束（那里只能是
+        # 不可读的 500，且会污染 Space 运行时会话）。显式 null 一并拒绝：
+        # status 是 NOT NULL 列，null 会撞 NOT NULL 而不是 CHECK。
+        if "status" in payload:
+            try:
+                payload["status"] = require_note_status(payload["status"])
+            except ValueError as exc:
+                raise MutationRuleViolation(
+                    "payload_field_not_allowed",
+                    {
+                        "field": "status",
+                        "value": payload["status"],
+                        "reason": str(exc),
+                        "allowed": list(NOTE_STATUS_VALUES),
+                    },
+                    retryable=False,
+                ) from exc
         creating = request.name == "knowledge.note.create"
         if creating and not isinstance(content, str):
             raise ValueError("note create content must be a string")

@@ -33,6 +33,7 @@ from app.schemas.relation import (
     RelationResponse,
     RelationSetResponse,
     RemoveRelationRequest,
+    ResolveRelationRequest,
     WorkItemMinimalProjection,
 )
 from app.schemas.task_space import TaskSpaceAcceptedResponse
@@ -55,6 +56,10 @@ def _relation_response(value: Any) -> RelationResponse:
         from_work_item_id=str(value["from_work_item_id"]),
         to_work_item_id=str(value["to_work_item_id"]),
         relation_type=str(value["relation_type"]),
+        # ★ 2026-09-12（D2 / ADR-0004）：确认两列（DB 行 / 命令后像都必定携带；
+        #   缺失即 500 —— fail-loud，不允许静默丢字段）。
+        resolution=None if value["resolution"] is None else str(value["resolution"]),
+        resolved_at=None if value["resolved_at"] is None else str(value["resolved_at"]),
         version=int(value["version"]),
         created_at=str(value["created_at"]),
         updated_at=str(value["updated_at"]),
@@ -215,6 +220,43 @@ async def remove_relation(
     )
     # The path id is authoritative; a mismatched body would silently address
     # a different logical edge (the id is a pure function of the body).
+    if command.relation_id != relation_id:
+        from app.errors import AppError
+
+        raise AppError(
+            code="entity_id_mismatch",
+            details={"routeRelationId": relation_id, "bodyRelationId": command.relation_id},
+        )
+    outcome = await command_module.execute(scope, command)
+    return await _map_relation_outcome(outcome, scope)
+
+
+@router.post("/{relation_id}/resolve", response_model=TaskSpaceAcceptedResponse)
+async def resolve_relation(
+    relation_id: str,
+    body: ResolveRelationRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    command_module=Depends(get_task_space_command_module),
+    scope=Depends(get_space_runtime_handle),
+) -> TaskSpaceAcceptedResponse:
+    """确认「已取消的上游不再需要」（幂等 CAS；服务端打戳，见 D2 / ADR-0004）。
+
+    这是 relation 的 resolution / resolved_at 的**唯一**写入通道：客户端不能
+    选择 resolution 取值或时间戳（外部 schema extra="forbid"），重复确认是
+    零效果回执（无 version bump / 无 sync 事件）。
+    """
+    require_idempotency_key(body.command_id, idempotency_key)
+    require_space_identity(scope, body.space_id)
+    command = _command(
+        operation="resolve",
+        command_id=body.command_id,
+        space_id=body.space_id,
+        from_work_item_id=body.from_work_item_id,
+        to_work_item_id=body.to_work_item_id,
+        relation_type=body.relation_type,
+        expected_version=body.expected_version,
+        payload_hash=body.payload_hash,
+    )
     if command.relation_id != relation_id:
         from app.errors import AppError
 

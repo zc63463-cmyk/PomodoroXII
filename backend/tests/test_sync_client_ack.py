@@ -389,9 +389,24 @@ def _fresh_011(path: Path) -> None:
 
 
 def test_space_011_is_strictly_after_final_task_space_schema() -> None:
-    revision = ScriptDirectory.from_config(alembic_config("space")).get_revision(SPACE_011)
+    """HEAD（历史别名 011）必须**严格位于** 010（最终任务空间 schema）之后。
+
+    ★ 2026-09-12（恢复全量门禁）：原断言写死 ``head.down_revision == SPACE_010``，
+    只在 head 恰为 011 时成立 —— head 每次前移都会误红（012 起长期红）。改为沿
+    down_revision 链验证「010 出现在 head 的祖先链上」，与 head 的具体号无关。
+    """
+    directory = ScriptDirectory.from_config(alembic_config("space"))
+    revision = directory.get_revision(SPACE_011)
     assert revision is not None
-    assert revision.down_revision == SPACE_010
+    assert revision.revision != SPACE_010
+    seen: list[str] = []
+    cursor = revision.down_revision
+    while cursor is not None:
+        assert isinstance(cursor, str), f"unexpected merge point: {cursor}"
+        seen.append(cursor)
+        parent = directory.get_revision(cursor)
+        cursor = parent.down_revision if parent is not None else None
+    assert SPACE_010 in seen, f"HEAD ancestor chain must pass {SPACE_010}: {seen[:8]}"
 
 
 def test_space_011_adds_only_s4_columns_and_backfills_provable_tombstones(tmp_path: Path) -> None:

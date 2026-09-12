@@ -92,6 +92,25 @@ export function SessionLauncher({ items, initialWorkItemId, onStart }: SessionLa
         onChange: (event: React.ChangeEvent<HTMLInputElement>) => setPlannedSeconds(Math.max(1, Number(event.target.value) || 1) * 60),
       }),
     ),
+    // ★ 禁用原因必须可见。
+    //   此前 Start 按钮只做 `disabled: !level2Id`，但界面上没有任何一行解释
+    //   "为什么点不动" —— 用户会直接判定"番茄钟没开发"。
+    //   实测走查（2026-09-10）确认这是最容易被误读成缺陷的交互。
+    level2Items.length === 0
+      ? createElement('p', {
+          role: 'status',
+          className: 'text-sm text-muted-foreground',
+        },
+        // 没有二级项 = 结构性缺失，给出去哪里补的明确指引
+        '这个 Space 里还没有「二级工作项」（Level 2）。专注会话必须挂在二级项上（它的 Parent 就是一级项），所以现在无法启动。',
+        createElement('br', null),
+        '去「任务」页选一个一级工作项，用它的「+ 子项」建一个二级项，再回到这里。')
+      : !level2Id
+        ? createElement('p', {
+            role: 'status',
+            className: 'text-sm text-muted-foreground',
+          }, '先在上方「Level 2 attribution」里选中要投入的二级工作项，Start 才会启用。')
+        : null,
     createElement('button', { type: 'submit', disabled: !level2Id || starting }, 'Start focus session'),
   )
 }
