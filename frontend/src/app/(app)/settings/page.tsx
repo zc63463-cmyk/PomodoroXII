@@ -68,9 +68,11 @@ function applyThemeClass(theme: SettingsTheme): void {
 
 export default function SettingsPage() {
   const storedTheme = useSettingsStore((state) => state.theme)
+  const notificationEnabled = useSettingsStore((state) => state.notificationEnabled)
   const updateSetting = useSettingsStore((state) => state.update)
   const { resolvedTheme, setTheme, theme } = useTheme()
   const [mounted, setMounted] = useState(false)
+  const [deniedNotice, setDeniedNotice] = useState<string | null>(null)
 
   useEffect(() => setMounted(true), [])
 
@@ -95,6 +97,45 @@ export default function SettingsPage() {
     setTheme(nextTheme)
     applyThemeClass(nextTheme)
   }
+
+  // 浏览器规定 requestPermission 必须发生在用户手势内 —— 开关点击是全应用
+  // 唯一合法的授权时机；end-alert 运行路径只消费已授予的权限（fail-quiet）。
+  async function toggleNotificationEnabled(next: boolean) {
+    setDeniedNotice(null)
+    if (!next) {
+      await updateSetting('notificationEnabled', false)
+      return
+    }
+    const permission = typeof window !== 'undefined' && typeof window.Notification !== 'undefined'
+      ? window.Notification.permission
+      : 'unsupported'
+    if (permission === 'granted') {
+      await updateSetting('notificationEnabled', true)
+      return
+    }
+    if (permission === 'denied') {
+      setDeniedNotice('桌面通知权限已被浏览器拒绝 —— 请在浏览器的站点设置里允许后，再关闭并重新打开此开关。')
+      return
+    }
+    if (permission === 'unsupported') {
+      setDeniedNotice('此浏览器不支持桌面通知 —— 提示音仍会在计时结束时响起。')
+      return
+    }
+    const decision = await window.Notification.requestPermission()
+    if (decision === 'granted') {
+      await updateSetting('notificationEnabled', true)
+      return
+    }
+    setDeniedNotice('桌面通知权限被拒绝 —— 可稍后在浏览器的站点设置里重新允许，再关闭并重新打开此开关。')
+  }
+
+  // 开关为开但权限未授予时，必须让"为什么不会弹通知"可见（本仓交互规范：
+  // 禁用/失效原因不允许沉默，见 timer/session-launcher.tsx 的 Start 说明）。
+  const permissionHint = mounted && notificationEnabled
+    && typeof window !== 'undefined' && typeof window.Notification !== 'undefined'
+    && window.Notification.permission !== 'granted'
+    ? '已开启结束提醒，但浏览器还没有授予桌面通知权限 —— 关闭再打开此开关即可触发授权。'
+    : null
 
   return createElement(
     'main',
@@ -215,6 +256,37 @@ export default function SettingsPage() {
           )
         }),
       ),
+    ),
+    createElement(
+      'section',
+      { className: 'rounded-2xl border bg-card p-4 shadow-sm' },
+      createElement(
+        'div',
+        { className: 'mb-4 flex flex-col gap-1' },
+        createElement('h2', { className: 'text-base font-semibold text-card-foreground' }, '专注提醒'),
+        createElement(
+          'p',
+          { className: 'text-sm text-muted-foreground' },
+          '番茄计划计时结束时提醒你：桌面通知 + 合成提示音（到点只提示，不会自动结束会话）。',
+        ),
+      ),
+      createElement(
+        'label',
+        { className: 'flex items-center gap-3 text-sm text-foreground' },
+        createElement('input', {
+          type: 'checkbox',
+          'aria-label': '结束提醒',
+          checked: notificationEnabled,
+          onChange: (event: React.ChangeEvent<HTMLInputElement>) => void toggleNotificationEnabled(event.target.checked),
+        }),
+        createElement('span', null, '计时结束时发送桌面通知'),
+      ),
+      permissionHint
+        ? createElement('p', { role: 'status', className: 'mt-2 text-sm text-muted-foreground' }, permissionHint)
+        : null,
+      deniedNotice
+        ? createElement('p', { role: 'alert', className: 'mt-2 text-sm text-destructive' }, deniedNotice)
+        : null,
     ),
     createElement(
       'section',

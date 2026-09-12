@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, act } from '@testing-library/react'
 import { useSettingsStore } from '@/stores/settings-store'
 
 const setThemeMock = vi.hoisted(() => vi.fn())
@@ -91,5 +91,94 @@ describe('SettingsPage theme selection', () => {
 
     expect(link).toHaveAttribute('href', '/quick-notes')
     expect(link.getAttribute('href')).not.toContain('quickNotePreview=1')
+  })
+})
+
+function stubNotification(
+  permission: 'granted' | 'denied' | 'default',
+  requestPermission?: () => Promise<NotificationPermission>,
+): void {
+  const ctor = vi.fn(function NotificationStub(this: unknown) { /* jsdom 不需要真弹 */ })
+  Object.defineProperty(ctor, 'permission', { value: permission })
+  if (requestPermission) Object.defineProperty(ctor, 'requestPermission', { value: requestPermission })
+  vi.stubGlobal('Notification', ctor)
+}
+
+describe('SettingsPage 专注提醒开关（工单①）', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    vi.stubGlobal('matchMedia', vi.fn().mockImplementation(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })))
+    useSettingsStore.setState({ theme: 'system', language: 'zh-CN', isLoaded: false, notificationEnabled: false })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('渲染开关并如实反映 store 状态', async () => {
+    const view = render(createElement(SettingsPage))
+    const toggle = await screen.findByRole('checkbox', { name: '结束提醒' })
+    expect(toggle).not.toBeChecked()
+
+    act(() => { useSettingsStore.setState({ notificationEnabled: true, theme: 'system' }) })
+    view.rerender(createElement(SettingsPage))
+    expect(screen.getByRole('checkbox', { name: '结束提醒' })).toBeChecked()
+  })
+
+  it('权限被拒：开关回弹、store 不变、拒绝原因必须可见', async () => {
+    stubNotification('denied')
+    render(createElement(SettingsPage))
+
+    fireEvent.click(screen.getByRole('checkbox', { name: '结束提醒' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('桌面通知权限已被浏览器拒绝')
+    expect(screen.getByRole('checkbox', { name: '结束提醒' })).not.toBeChecked()
+    expect(useSettingsStore.getState().notificationEnabled).toBe(false)
+  })
+
+  it('权限已授予：点击直接开启', async () => {
+    stubNotification('granted')
+    render(createElement(SettingsPage))
+
+    fireEvent.click(screen.getByRole('checkbox', { name: '结束提醒' }))
+
+    await waitFor(() => expect(useSettingsStore.getState().notificationEnabled).toBe(true))
+  })
+
+  it('权限未决：在手势内申请授权，授予后开启', async () => {
+    const requestPermission = vi.fn().mockResolvedValue('granted')
+    stubNotification('default', requestPermission)
+    render(createElement(SettingsPage))
+
+    fireEvent.click(screen.getByRole('checkbox', { name: '结束提醒' }))
+
+    await waitFor(() => expect(requestPermission).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(useSettingsStore.getState().notificationEnabled).toBe(true))
+  })
+
+  it('权限未决但用户拒绝授权：开关回弹并说明去哪重新允许', async () => {
+    stubNotification('default', vi.fn().mockResolvedValue('denied'))
+    render(createElement(SettingsPage))
+
+    fireEvent.click(screen.getByRole('checkbox', { name: '结束提醒' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('桌面通知权限被拒绝')
+    expect(useSettingsStore.getState().notificationEnabled).toBe(false)
+  })
+
+  it('浏览器不支持 Notification API：说明提示音仍会响，store 保持关闭', async () => {
+    render(createElement(SettingsPage))
+
+    fireEvent.click(screen.getByRole('checkbox', { name: '结束提醒' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('此浏览器不支持桌面通知')
+    expect(useSettingsStore.getState().notificationEnabled).toBe(false)
   })
 })

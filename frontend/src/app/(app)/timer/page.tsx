@@ -10,6 +10,7 @@ import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/
 import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/timer/session-review-completion'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
+import { createEndAlert } from '@/lib/focus-session/end-alert'
 import { deriveSessionClock } from '@/lib/focus-session/clock'
 import { resolveTimerError } from '@/lib/focus-session/timer-error'
 import { FocusSessionRepository, readSessionCommandReceipts, type LocalFocusSessionAggregate } from '@/lib/focus-session/focus-session-repository'
@@ -37,6 +38,7 @@ import type {
   CachedWorkItemNote,
 } from '@/types'
 import { useSpaceStore } from '@/stores/space-store'
+import { useSettingsStore } from '@/stores/settings-store'
 import { useTaskSpaceStore } from '@/stores/task-space-store'
 import { useFocusSessionStore } from '@/stores/focus-session-store'
 import { useTimerStore } from '@/stores/timer-store'
@@ -65,6 +67,10 @@ function sessionIdOf(session: { id?: string; sessionId?: string }): string {
   if (!id) throw new Error('focus_session_identity_missing')
   return id
 }
+
+// 结束提醒的闩锁放在模块级单例上：跨重挂载（StrictMode dev 双挂载、热重载）
+// 也不对同一会话重复响；新会话 id 自然再次触发（end-alert 的闩锁语义）。
+const sessionEndAlert = createEndAlert()
 
 export default function TimerPage() {
   const spaceId = useSpaceStore((state) => state.currentSpaceId)
@@ -152,6 +158,21 @@ export default function TimerPage() {
     () => (session ? deriveSessionClock(session, nowMs) : null),
     [session, nowMs],
   )
+  // 结束提醒（工单①）：运行中越过计划点那一刻触发一次；fail-quiet，
+  // 到点只提示，不自动结束/切状态。
+  const notificationEnabled = useSettingsStore((state) => state.notificationEnabled)
+  const soundEnabled = useSettingsStore((state) => state.soundEnabled)
+  useEffect(() => {
+    if (!session || !clock) return
+    sessionEndAlert.check({
+      sessionId: session.sessionId,
+      clockState: session.clockState,
+      remainingSeconds: clock.remainingSeconds,
+      plannedSeconds: session.plannedSeconds,
+      notificationEnabled,
+      soundEnabled,
+    })
+  }, [clock, notificationEnabled, session, soundEnabled])
   const reviewSession = useMemo(() => {
     if (!aggregate || !spaceId || !isReviewableEndedSession(aggregate.session)) return null
     return {

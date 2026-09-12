@@ -26,6 +26,11 @@ interface SettingsState {
   autoStartPomodoros: boolean
   soundEnabled: boolean
   /**
+   * 专注结束桌面通知（工单① 2026-09-13）。提示音走 soundEnabled，二者独立。
+   * 授权（requestPermission）只在设置页的用户手势里发生，本 store 只存偏好。
+   */
+  notificationEnabled: boolean
+  /**
    * 跨午夜日界（小时）。0 = 午夜分界；3 = 凌晨 3 点前都算前一天。
    *
    * 这是**本地偏好**，不是同步实体 —— settings 属于 SYNC_PLUMBING_TABLES，
@@ -76,7 +81,8 @@ function persistSetting<K extends keyof SettingsState>(
  * 读回本地保存的日界。
  *
  * 只有 theme 原本在 load 里读回 —— 其余设置写了 localStorage 却没读，
- * 刷新即丢。这里只为日界补上读取（其余设置不在本次范围内，保持原样）。
+ * 刷新即丢。这里为日界补上读取；结束通知开关（工单①）进一步把读取
+ * 提前到初始状态（见 getInitialNotificationEnabled 的注释）。
  * localStorage 是用户可改的，脏数据一律退回默认值而不是让它崩。
  */
 function getInitialDayBoundaryHour(): number {
@@ -93,6 +99,28 @@ function getInitialDayBoundaryHour(): number {
   }
 }
 
+/**
+ * 读回结束通知开关（工单① 2026-09-13）。
+ *
+ * 与 dayBoundaryHour 只在 load() 读回不同，这里把读取放在**初始状态**里
+ *（同 getInitialTheme 的做法）：全应用目前没有任何调用 settings load() 的
+ * 引导点，只补 load() 读回的话开关在真实运行时依然是"写了不读、刷新即丢"。
+ * localStorage 是用户可改的，脏数据一律退回默认值而不是让它崩。
+ */
+function getInitialNotificationEnabled(): boolean {
+  if (typeof window === 'undefined') return true
+
+  try {
+    const raw = window.localStorage.getItem('pxii_settings_notificationEnabled')
+    if (raw === null) return true
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'boolean') return true
+    return parsed
+  } catch {
+    return true
+  }
+}
+
 export const useSettingsStore = create<SettingsStore>()(
   devtools(
     (set) => ({
@@ -103,6 +131,7 @@ export const useSettingsStore = create<SettingsStore>()(
       autoStartBreaks: false,
       autoStartPomodoros: false,
       soundEnabled: true,
+      notificationEnabled: getInitialNotificationEnabled(),
       dayBoundaryHour: DAY_BOUNDARY_MIN,
       theme: getInitialTheme(),
       language: 'zh-CN',
@@ -112,6 +141,7 @@ export const useSettingsStore = create<SettingsStore>()(
         set({
           theme: getInitialTheme(),
           dayBoundaryHour: getInitialDayBoundaryHour(),
+          notificationEnabled: getInitialNotificationEnabled(),
           isLoaded: true,
         })
       },
@@ -120,7 +150,7 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ [key]: value } as Pick<SettingsStore, typeof key>)
       },
       // Note: reset preserves theme and language (F0 R7-2)
-      reset: () => set({ pomodoroDuration: 25, shortBreakDuration: 5, longBreakDuration: 15, longBreakInterval: 4, autoStartBreaks: false, autoStartPomodoros: false, soundEnabled: true, dayBoundaryHour: DAY_BOUNDARY_MIN, isLoaded: false }),
+      reset: () => set({ pomodoroDuration: 25, shortBreakDuration: 5, longBreakDuration: 15, longBreakInterval: 4, autoStartBreaks: false, autoStartPomodoros: false, soundEnabled: true, notificationEnabled: true, dayBoundaryHour: DAY_BOUNDARY_MIN, isLoaded: false }),
     }),
     { name: 'settings-store' },
   ),
