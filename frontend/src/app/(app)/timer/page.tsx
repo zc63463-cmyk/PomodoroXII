@@ -9,6 +9,7 @@ import { SessionLauncher, type LaunchSelection } from '@/components/timer/sessio
 import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
 import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/timer/session-review-completion'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
+import { TodaySummary } from '@/components/timer/today-summary'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
 import { createEndAlert } from '@/lib/focus-session/end-alert'
 import { deriveSessionClock } from '@/lib/focus-session/clock'
@@ -667,6 +668,9 @@ export default function TimerPage() {
       note: focusedNote, spaceId: spaceId ?? '', workItemId: focusedWorkItemId,
       draftRegistry: draftController ?? undefined, onAppendBlocks: appendBlocks,
     }) : null,
+    // 底部统计栏（工单③）：准备态与运行态两处布局的底部都要有（规格 L457/L505）。
+    // 标签按服务端真实口径显示「近 1 天」，理由见 today-summary.tsx 的注释。
+    createElement(TodaySummary),
   ) : createElement('div', { className: 'grid gap-6 p-6' },
     createElement('header', null,
       createElement('p', { className: 'text-xs text-muted-foreground' }, 'Focus session'),
@@ -690,6 +694,8 @@ export default function TimerPage() {
         createElement('p', null, '另外：专注会话必须挂在「二级」工作项上，所以至少要有一个一级项 + 它的一个子项。'),
       ),
     workItems.length ? createElement(SessionLauncher, { items: workItems, initialWorkItemId: selectedWorkItemId, onStart: requestStart }) : null,
+    // 底部统计栏（工单③）：准备态布局底部（规格 L457）。
+    createElement(TodaySummary),
   )
 
   return createElement('main', { className: 'min-h-full' },

@@ -49,6 +49,11 @@ vi.mock('@/lib/task-space/timer-note-composer-draft-registry', () => ({
   },
 }))
 
+const fetchFocusSummaryMock = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/stats/stats-api', () => ({
+  fetchFocusSummary: fetchFocusSummaryMock,
+}))
+
 const coordinatorSpies = vi.hoisted(() => ({
   start: vi.fn(), pause: vi.fn(), resume: vi.fn(), end: vi.fn(),
   takeover: vi.fn(), updateSessionNote: vi.fn(), setCurrentPlanItem: vi.fn(),
@@ -81,6 +86,11 @@ const aggregate = {
 describe('TimerPage 运行中新建三级（工单②）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    fetchFocusSummaryMock.mockReset()
+    fetchFocusSummaryMock.mockResolvedValue({
+      period_days: 1, total_sessions: 3, valid_sessions: 2, interrupted_sessions: 1,
+      focused_seconds: 5400, planned_seconds: 7200, estimate_accuracy: 0.75, by_hour: [],
+    })
     useSpaceStore.setState({ currentSpaceId: 'space-1' } as never)
     useTaskSpaceStore.setState({
       workItems: [
@@ -128,6 +138,8 @@ describe('TimerPage 运行中新建三级（工单②）', () => {
       expect.objectContaining({ workItemId: 'l3-new' }),
     ))
     await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
+    // 工单③：运行态底部统计栏（标签按服务端真实口径 = 近 1 天）
+    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('近 1 天 2 个番茄 · 专注 1.5h')
   })
 
   it('创建被拒（离线禁令）：alert 呈现原因、输入保留、计划不动', async () => {
@@ -144,5 +156,17 @@ describe('TimerPage 运行中新建三级（工单②）', () => {
     expect(alerts.map((node) => node.textContent).join('\n')).toContain('offline_formal_creation_forbidden')
     expect(coordinatorSpies.addPlanItem).not.toHaveBeenCalled()
     expect(screen.getByLabelText('新三级标题')).toHaveValue('离线想建')
+  })
+
+  it('准备态布局底部同样渲染统计栏（工单③：规格 L457/L505 两处）', async () => {
+    useTimerStore.setState({
+      locator: null, session: null, localProvisional: null,
+      ownershipMode: 'none', nowMs: Date.parse('2026-09-13T08:10:00Z'), error: null,
+    } as never)
+
+    render(createElement(TimerPage))
+
+    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('近 1 天 2 个番茄 · 专注 1.5h')
+    expect(screen.getByRole('button', { name: 'Start focus session' })).toBeInTheDocument()
   })
 })
