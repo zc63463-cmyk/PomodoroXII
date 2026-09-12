@@ -66,8 +66,11 @@ const INTERVAL_MAX = 24
  * 共享的安全读取原语（工单③ 2026-09-13）。
  *
  * localStorage 是用户可改的：任何解析失败、类型不符、越界都退回到 `fallback`，
- * 绝不抛出（既有规矩）。`storageKey` 用完整键名 —— theme 存的是裸 `theme`，
- * 其余键是 `pxii_settings_<key>`。`validate` 返回 `undefined` 表示数据不合法。
+ * 绝不抛出（既有规矩）。`storageKey` 用完整键名 —— 其余键是 `pxii_settings_<key>`。
+ * `validate` 返回 `undefined` 表示数据不合法。
+ *
+ * ⚠️ 本原语按 **JSON** 解析值。`theme` 是唯一**裸串**键（键名就是裸 `theme`），
+ * 不能走这里 —— 见 readRawString。
  */
 function readPersisted<T>(
   storageKey: string,
@@ -112,15 +115,37 @@ function readBooleanSetting(storageKey: string, fallback: boolean): boolean {
   )
 }
 
+/**
+ * 裸字符串读取原语 —— **刻意不走 JSON.parse**（工单③ 回归修复 2026-09-13）。
+ *
+ * ⚠️ 格式不对称的原因（不要把 theme"统一"成 JSON）：`theme` 这个 localStorage
+ * 键由**两个写入方共用，且两边都写裸串** —— next-themes 内部是
+ * `localStorage.setItem('theme', value)`，本 store 的 persistSetting 对 theme
+ * 也是 `setItem('theme', String(value))`（见下）。其余键是我们独占的，写读都走
+ * JSON。若把 theme 也接进 readPersisted（JSON.parse），裸值 `midnight` 会直接
+ * SyntaxError 被 catch 吞掉、回落到 'system' —— 用户选过的主题会在刷新后被静默
+ * 重置回 system（settings/page.tsx:80-85 的 effect 再把它同步回 next-themes，
+ * 选择器也错误高亮"跟随系统"）。故 theme 用本原语：裸串 + 枚举校验 + 脏值回落。
+ * 对照：language 存的是 '"en"'（带引号），必须保持 JSON 语义。
+ */
+function readRawString<T extends string>(
+  storageKey: string,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  if (typeof window === 'undefined') return fallback
+
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (raw === null) return fallback
+    return allowed.find((value) => value === raw) ?? fallback
+  } catch {
+    return fallback
+  }
+}
+
 function getInitialTheme(): SettingsTheme {
-  return readPersisted<SettingsTheme>(
-    'theme',
-    (value) =>
-      SETTINGS_THEME_VALUES.some((theme) => theme === value)
-        ? (value as SettingsTheme)
-        : undefined,
-    'system',
-  )
+  return readRawString<SettingsTheme>('theme', SETTINGS_THEME_VALUES, 'system')
 }
 
 function persistSetting<K extends keyof SettingsState>(

@@ -55,6 +55,9 @@ describe('settings-store notificationEnabled（工单①）', () => {
 describe('settings-store 全键读回（工单③）', () => {
   /** 每键：localStorage 种子 → 期望从 store 读回的值。 */
   const PERSISTED_SETTINGS: Array<{ storageKey: string; raw: string; stateKey: string; expected: unknown }> = [
+    // ★ theme 是唯一的**裸串**键（next-themes 与本 store 双写，皆裸串，不是 JSON）。
+    //   此处 raw 必须是 'midnight'，绝不能写成 '"midnight"'。
+    { storageKey: 'theme', raw: 'midnight', stateKey: 'theme', expected: 'midnight' },
     { storageKey: 'pxii_settings_pomodoroDuration', raw: '50', stateKey: 'pomodoroDuration', expected: 50 },
     { storageKey: 'pxii_settings_shortBreakDuration', raw: '10', stateKey: 'shortBreakDuration', expected: 10 },
     { storageKey: 'pxii_settings_longBreakDuration', raw: '30', stateKey: 'longBreakDuration', expected: 30 },
@@ -96,6 +99,23 @@ describe('settings-store 全键读回（工单③）', () => {
     for (const item of PERSISTED_SETTINGS) {
       expect(state[item.stateKey]).toBe(item.expected)
     }
+  })
+
+  it('theme 裸串读回：种子裸值 midnight，不得回落 system（若走 JSON.parse 会 SyntaxError → system）', async () => {
+    // 回归（工单③）：getInitialTheme 一旦走 JSON.parse，本用例必然失败。
+    window.localStorage.setItem('theme', 'midnight')
+
+    await useSettingsStore.getState().load()
+
+    expect(useSettingsStore.getState().theme).toBe('midnight')
+  })
+
+  it('theme 裸串脏值：不在枚举内 → 回落 system（仍不崩）', async () => {
+    window.localStorage.setItem('theme', 'neon')
+
+    await useSettingsStore.getState().load()
+
+    expect(useSettingsStore.getState().theme).toBe('system')
   })
 
   it('脏数据退回默认值而不是崩（数值键给字符串 / 布尔键给数字 / 语言不在枚举内）', async () => {
