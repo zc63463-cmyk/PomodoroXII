@@ -1,6 +1,8 @@
 'use client'
 
 import { createElement, useEffect, useMemo, useState } from 'react'
+import { useSettingsStore } from '@/stores/settings-store'
+import { WORK_PRESETS } from '@/utils/constants'
 
 export interface LaunchItem {
   id: string
@@ -35,7 +37,12 @@ export function SessionLauncher({ items, initialWorkItemId, onStart }: SessionLa
   const initial = useMemo(() => deriveLaunchSelection(items, initialWorkItemId), [items, initialWorkItemId])
   const [level2Id, setLevel2Id] = useState<string | null>(initial.level2Id)
   const [level3Ids, setLevel3Ids] = useState<string[]>(initial.level3Ids)
-  const [plannedSeconds, setPlannedSeconds] = useState(1500)
+  // 默认时长来自设置（pomodoroDuration，分钟；工单④ / P07-a / D-4），
+  // 不再硬编码 1500s。plannedSeconds 是一次性初值，读 getState() 即可 ——
+  // 启动器挂载时设置模块早已就绪。
+  const [plannedSeconds, setPlannedSeconds] = useState(
+    () => useSettingsStore.getState().pomodoroDuration * 60,
+  )
   const [starting, setStarting] = useState(false)
   useEffect(() => {
     setLevel2Id(initial.level2Id)
@@ -91,6 +98,18 @@ export function SessionLauncher({ items, initialWorkItemId, onStart }: SessionLa
         id: 'planned-seconds', type: 'number', min: 1, value: Math.round(plannedSeconds / 60),
         onChange: (event: React.ChangeEvent<HTMLInputElement>) => setPlannedSeconds(Math.max(1, Number(event.target.value) || 1) * 60),
       }),
+    ),
+    // 时长预设（工单④ / P07-a / D-4）：当前唯一的会话种类是 work，故取
+    // WORK_PRESETS；FOCUS_PRESETS（45/60/90/120）留给未来的自由/倒计时
+    // 模式（P04 沉浸 / P07-c 声景均不在本单范围），此处刻意不消费。
+    // 自定义输入不命中任何预设时，全部按钮呈未选中态（aria-pressed）。
+    createElement('div', { role: 'group', 'aria-label': '时长预设', className: 'flex flex-wrap gap-2' },
+      ...WORK_PRESETS.map((minutes) => createElement('button', {
+        key: minutes,
+        type: 'button',
+        'aria-pressed': Math.round(plannedSeconds / 60) === minutes,
+        onClick: () => setPlannedSeconds(minutes * 60),
+      }, `${minutes} 分钟`)),
     ),
     // ★ 禁用原因必须可见。
     //   此前 Start 按钮只做 `disabled: !level2Id`，但界面上没有任何一行解释

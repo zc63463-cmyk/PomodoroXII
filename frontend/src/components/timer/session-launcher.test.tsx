@@ -1,7 +1,8 @@
 import { createElement } from 'react'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionLauncher } from './session-launcher'
+import { useSettingsStore } from '@/stores/settings-store'
 
 const items = [
   { id: 'l1', depth: 1, parentId: null, title: 'Project goal', displayKey: 'P-1', childRank: 0 },
@@ -90,5 +91,47 @@ describe('SessionLauncher', () => {
 
     release()
     await waitFor(() => expect(button).not.toBeDisabled())
+  })
+})
+
+describe('SessionLauncher 时长预设（工单④）', () => {
+  beforeEach(() => {
+    useSettingsStore.setState({ pomodoroDuration: 25 })
+  })
+
+  it('默认时长来自设置而非硬编码（45 分钟设置 → 载荷 2700s）', () => {
+    useSettingsStore.setState({ pomodoroDuration: 45 })
+    const start = vi.fn().mockResolvedValue(undefined)
+    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+
+    expect(screen.getByLabelText('Planned minutes')).toHaveValue(45)
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ plannedSeconds: 2700 }))
+  })
+
+  it('点击预设同步输入与提交载荷，命中项呈选中态（aria-pressed）', () => {
+    const start = vi.fn().mockResolvedValue(undefined)
+    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+
+    fireEvent.click(screen.getByRole('button', { name: '90 分钟' }))
+
+    expect(screen.getByLabelText('Planned minutes')).toHaveValue(90)
+    expect(screen.getByRole('button', { name: '90 分钟' })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ plannedSeconds: 5400 }))
+  })
+
+  it('自定义输入后无预设呈选中态，自定义值照常进入载荷', () => {
+    const start = vi.fn().mockResolvedValue(undefined)
+    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+
+    fireEvent.change(screen.getByLabelText('Planned minutes'), { target: { value: '30' } })
+    for (const minutes of [25, 45, 60, 90]) {
+      expect(screen.getByRole('button', { name: `${minutes} 分钟` })).toHaveAttribute('aria-pressed', 'false')
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ plannedSeconds: 1800 }))
   })
 })

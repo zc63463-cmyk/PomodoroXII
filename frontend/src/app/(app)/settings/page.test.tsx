@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { fireEvent, render, screen, waitFor, act } from '@testing-library/react'
 import { useSettingsStore } from '@/stores/settings-store'

@@ -167,7 +167,7 @@ export default function TimerPage() {
   useEffect(() => {
     if (!session || !clock) return
     sessionEndAlert.check({
-      sessionId: session.sessionId,
+      sessionId: sessionIdOf(session),
       clockState: session.clockState,
       remainingSeconds: clock.remainingSeconds,
       plannedSeconds: session.plannedSeconds,
