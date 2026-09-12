@@ -13,7 +13,9 @@ import { fetchFocusSummary } from '@/lib/stats/stats-api'
  *   days=1 实际覆盖「昨天 UTC 零点至今」：既不是本地"今日"，
  *   也不读用户日界（settings-store.dayBoundaryHour）。
  *
- *   本单红线是不扩后端，所以组件按服务端真实口径诚实标注「近 1 天」，
+ *   本单红线是不扩后端，所以组件按服务端真实口径诚实标注：days=1 用
+ *   「昨日起」而不是「近 1 天」—— 因为窗口实为 24–48h，"近 1 天"会低报最多 2×；
+ *   days>1 用「近 N 天」（误差 ≤1 天，占比小，可接受）。
  *   绝不把 period 数据谎报成"今日"（那会让数字天天对不上）。
  *   待裁决：服务端补一个按用户日界的"今日"口径后，标签与 days 语义再切换。
  *
@@ -46,6 +48,8 @@ export function TodaySummary({ days = 1 }: { days?: number }) {
   return createElement(
     'p',
     { role: 'status', 'data-testid': 'focus-summary-bar', className: 'text-sm text-muted-foreground' },
-    `近 ${days} 天 ${summary.validSessions} 个番茄 · 专注 ${hours}h`,
+    days === 1
+      ? `昨日起 ${summary.validSessions} 个番茄 · 专注 ${hours}h`
+      : `近 ${days} 天 ${summary.validSessions} 个番茄 · 专注 ${hours}h`,
   )
 }

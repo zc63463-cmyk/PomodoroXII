@@ -51,16 +51,76 @@ interface SettingsActions {
 type SettingsStore = SettingsState & SettingsActions
 
 const SETTINGS_THEME_VALUES = ['system', ...THEMES] as const
+const SETTINGS_LANGUAGE_VALUES: readonly SettingsLanguage[] = ['zh-CN', 'en']
+
+/**
+ * 数值键的防呆上下限：时长（分钟）与长休间隔。
+ * 这里是"脏数据别把 UI 弄崩"的兜底，**不是业务约束** —— 真正的业务规则在计时器侧。
+ */
+const DURATION_MIN_MINUTES = 1
+const DURATION_MAX_MINUTES = 1440
+const INTERVAL_MIN = 1
+const INTERVAL_MAX = 24
+
+/**
+ * 共享的安全读取原语（工单③ 2026-09-13）。
+ *
+ * localStorage 是用户可改的：任何解析失败、类型不符、越界都退回到 `fallback`，
+ * 绝不抛出（既有规矩）。`storageKey` 用完整键名 —— theme 存的是裸 `theme`，
+ * 其余键是 `pxii_settings_<key>`。`validate` 返回 `undefined` 表示数据不合法。
+ */
+function readPersisted<T>(
+  storageKey: string,
+  validate: (value: unknown) => T | undefined,
+  fallback: T,
+): T {
+  if (typeof window === 'undefined') return fallback
+
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (raw === null) return fallback
+    const parsed: unknown = JSON.parse(raw)
+    const valid = validate(parsed)
+    return valid === undefined ? fallback : valid
+  } catch {
+    return fallback
+  }
+}
+
+/** 整数键：类型/有限性校验 → 截断 → clamp 到防呆区间。 */
+function readIntegerSetting(
+  storageKey: string,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  return readPersisted<number>(
+    storageKey,
+    (value) => {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+      return Math.min(Math.max(Math.trunc(value), min), max)
+    },
+    fallback,
+  )
+}
+
+function readBooleanSetting(storageKey: string, fallback: boolean): boolean {
+  return readPersisted<boolean>(
+    storageKey,
+    (value) => (typeof value === 'boolean' ? value : undefined),
+    fallback,
+  )
+}
 
 function getInitialTheme(): SettingsTheme {
-  if (typeof window === 'undefined') return 'system'
-
-  const savedTheme = window.localStorage.getItem('theme')
-  if (SETTINGS_THEME_VALUES.some((theme) => theme === savedTheme)) {
-    return savedTheme as SettingsTheme
-  }
-
-  return 'system'
+  return readPersisted<SettingsTheme>(
+    'theme',
+    (value) =>
+      SETTINGS_THEME_VALUES.some((theme) => theme === value)
+        ? (value as SettingsTheme)
+        : undefined,
+    'system',
+  )
 }
 
 function persistSetting<K extends keyof SettingsState>(
@@ -78,70 +138,94 @@ function persistSetting<K extends keyof SettingsState>(
 }
 
 /**
- * 读回本地保存的日界。
+ * 偏好全键读回（工单③ 2026-09-13）。
  *
- * 只有 theme 原本在 load 里读回 —— 其余设置写了 localStorage 却没读，
- * 刷新即丢。这里为日界补上读取；结束通知开关（工单①）进一步把读取
- * 提前到初始状态（见 getInitialNotificationEnabled 的注释）。
- * localStorage 是用户可改的，脏数据一律退回默认值而不是让它崩。
+ * 此前只有 theme 在初始状态读回，notificationEnabled 在工单①补上；其余设置
+ * 写了 localStorage 却没读，刷新即丢。这里把**全部键**的读取统一放在
+ * **初始状态**（同 getInitialTheme 的做法）：全应用目前没有任何调用
+ * settings load() 的引导点，只补 load() 读回的话，真实运行时依旧是
+ * "写了不读、刷新即丢"。load() 也同步扩展为全键读回，保留 API ——
+ * 未来接服务端偏好 / 延迟加载时它是天然入口。
+ *
+ * 数值键做防呆 clamp（脏数据退回默认，不崩）；布尔键只认 boolean；
+ * language 只认枚举内取值。
  */
-function getInitialDayBoundaryHour(): number {
-  if (typeof window === 'undefined') return DAY_BOUNDARY_MIN
-
-  try {
-    const raw = window.localStorage.getItem('pxii_settings_dayBoundaryHour')
-    if (raw === null) return DAY_BOUNDARY_MIN
-    const parsed: unknown = JSON.parse(raw)
-    if (typeof parsed !== 'number' || !Number.isFinite(parsed)) return DAY_BOUNDARY_MIN
-    return Math.min(Math.max(Math.trunc(parsed), DAY_BOUNDARY_MIN), DAY_BOUNDARY_MAX)
-  } catch {
-    return DAY_BOUNDARY_MIN
-  }
+function getInitialPomodoroDuration(): number {
+  return readIntegerSetting('pxii_settings_pomodoroDuration', DURATION_MIN_MINUTES, DURATION_MAX_MINUTES, 25)
 }
 
-/**
- * 读回结束通知开关（工单① 2026-09-13）。
- *
- * 与 dayBoundaryHour 只在 load() 读回不同，这里把读取放在**初始状态**里
- *（同 getInitialTheme 的做法）：全应用目前没有任何调用 settings load() 的
- * 引导点，只补 load() 读回的话开关在真实运行时依然是"写了不读、刷新即丢"。
- * localStorage 是用户可改的，脏数据一律退回默认值而不是让它崩。
- */
-function getInitialNotificationEnabled(): boolean {
-  if (typeof window === 'undefined') return true
+function getInitialShortBreakDuration(): number {
+  return readIntegerSetting('pxii_settings_shortBreakDuration', DURATION_MIN_MINUTES, DURATION_MAX_MINUTES, 5)
+}
 
-  try {
-    const raw = window.localStorage.getItem('pxii_settings_notificationEnabled')
-    if (raw === null) return true
-    const parsed: unknown = JSON.parse(raw)
-    if (typeof parsed !== 'boolean') return true
-    return parsed
-  } catch {
-    return true
-  }
+function getInitialLongBreakDuration(): number {
+  return readIntegerSetting('pxii_settings_longBreakDuration', DURATION_MIN_MINUTES, DURATION_MAX_MINUTES, 15)
+}
+
+function getInitialLongBreakInterval(): number {
+  return readIntegerSetting('pxii_settings_longBreakInterval', INTERVAL_MIN, INTERVAL_MAX, 4)
+}
+
+function getInitialAutoStartBreaks(): boolean {
+  return readBooleanSetting('pxii_settings_autoStartBreaks', false)
+}
+
+function getInitialAutoStartPomodoros(): boolean {
+  return readBooleanSetting('pxii_settings_autoStartPomodoros', false)
+}
+
+function getInitialSoundEnabled(): boolean {
+  return readBooleanSetting('pxii_settings_soundEnabled', true)
+}
+
+function getInitialNotificationEnabled(): boolean {
+  return readBooleanSetting('pxii_settings_notificationEnabled', true)
+}
+
+function getInitialDayBoundaryHour(): number {
+  return readIntegerSetting('pxii_settings_dayBoundaryHour', DAY_BOUNDARY_MIN, DAY_BOUNDARY_MAX, DAY_BOUNDARY_MIN)
+}
+
+function getInitialLanguage(): SettingsLanguage {
+  return readPersisted<SettingsLanguage>(
+    'pxii_settings_language',
+    (value) =>
+      SETTINGS_LANGUAGE_VALUES.some((language) => language === value)
+        ? (value as SettingsLanguage)
+        : undefined,
+    'zh-CN',
+  )
 }
 
 export const useSettingsStore = create<SettingsStore>()(
   devtools(
     (set) => ({
-      pomodoroDuration: 25,
-      shortBreakDuration: 5,
-      longBreakDuration: 15,
-      longBreakInterval: 4,
-      autoStartBreaks: false,
-      autoStartPomodoros: false,
-      soundEnabled: true,
+      pomodoroDuration: getInitialPomodoroDuration(),
+      shortBreakDuration: getInitialShortBreakDuration(),
+      longBreakDuration: getInitialLongBreakDuration(),
+      longBreakInterval: getInitialLongBreakInterval(),
+      autoStartBreaks: getInitialAutoStartBreaks(),
+      autoStartPomodoros: getInitialAutoStartPomodoros(),
+      soundEnabled: getInitialSoundEnabled(),
       notificationEnabled: getInitialNotificationEnabled(),
-      dayBoundaryHour: DAY_BOUNDARY_MIN,
+      dayBoundaryHour: getInitialDayBoundaryHour(),
       theme: getInitialTheme(),
-      language: 'zh-CN',
+      language: getInitialLanguage(),
       isLoaded: false,
 
       load: async () => {
         set({
-          theme: getInitialTheme(),
-          dayBoundaryHour: getInitialDayBoundaryHour(),
+          pomodoroDuration: getInitialPomodoroDuration(),
+          shortBreakDuration: getInitialShortBreakDuration(),
+          longBreakDuration: getInitialLongBreakDuration(),
+          longBreakInterval: getInitialLongBreakInterval(),
+          autoStartBreaks: getInitialAutoStartBreaks(),
+          autoStartPomodoros: getInitialAutoStartPomodoros(),
+          soundEnabled: getInitialSoundEnabled(),
           notificationEnabled: getInitialNotificationEnabled(),
+          dayBoundaryHour: getInitialDayBoundaryHour(),
+          theme: getInitialTheme(),
+          language: getInitialLanguage(),
           isLoaded: true,
         })
       },

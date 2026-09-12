@@ -138,8 +138,8 @@ describe('TimerPage 运行中新建三级（工单②）', () => {
       expect.objectContaining({ workItemId: 'l3-new' }),
     ))
     await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
-    // 工单③：运行态底部统计栏（标签按服务端真实口径 = 近 1 天）
-    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('近 1 天 2 个番茄 · 专注 1.5h')
+    // 工单③：运行态底部统计栏（标签按服务端真实口径：days=1 = 昨日起）
+    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('昨日起 2 个番茄 · 专注 1.5h')
   })
 
   it('创建被拒（离线禁令）：alert 呈现原因、输入保留、计划不动', async () => {
@@ -166,7 +166,7 @@ describe('TimerPage 运行中新建三级（工单②）', () => {
 
     render(createElement(TimerPage))
 
-    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('近 1 天 2 个番茄 · 专注 1.5h')
+    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('昨日起 2 个番茄 · 专注 1.5h')
     expect(screen.getByRole('button', { name: 'Start focus session' })).toBeInTheDocument()
   })
 })

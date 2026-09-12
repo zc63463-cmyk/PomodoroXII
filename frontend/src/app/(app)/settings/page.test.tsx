@@ -182,3 +182,37 @@ describe('SettingsPage 专注提醒开关（工单①）', () => {
     expect(useSettingsStore.getState().notificationEnabled).toBe(false)
   })
 })
+
+describe('SettingsPage 提示音开关（工单②）', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    vi.stubGlobal('matchMedia', vi.fn().mockImplementation(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })))
+    useSettingsStore.setState({ theme: 'system', language: 'zh-CN', isLoaded: false, soundEnabled: true })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('默认选中', async () => {
+    render(createElement(SettingsPage))
+
+    expect(await screen.findByRole('checkbox', { name: '提示音' })).toBeChecked()
+  })
+
+  it('点击关闭 → store 变 false 且写穿到 localStorage', async () => {
+    render(createElement(SettingsPage))
+
+    fireEvent.click(screen.getByRole('checkbox', { name: '提示音' }))
+
+    await waitFor(() => expect(useSettingsStore.getState().soundEnabled).toBe(false))
+    expect(window.localStorage.getItem('pxii_settings_soundEnabled')).toBe('false')
+  })
+})

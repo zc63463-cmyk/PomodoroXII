@@ -15,14 +15,14 @@ describe('TodaySummary（工单③ 底部统计栏）', () => {
     fetchFocusSummaryMock.mockReset()
   })
 
-  it('按服务端真实口径渲染「近 1 天」标签与格式化数字', async () => {
+  it('按服务端真实口径渲染「昨日起」标签与格式化数字（days=1）', async () => {
     fetchFocusSummaryMock.mockResolvedValue({
       period_days: 1, total_sessions: 6, valid_sessions: 5, interrupted_sessions: 1,
       focused_seconds: 5400, planned_seconds: 7200, estimate_accuracy: 0.75, by_hour: [],
     })
     render(createElement(TodaySummary))
 
-    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('近 1 天 5 个番茄 · 专注 1.5h')
+    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('昨日起 5 个番茄 · 专注 1.5h')
     expect(fetchFocusSummaryMock).toHaveBeenCalledWith(1, expect.anything())
   })
 
@@ -33,7 +33,17 @@ describe('TodaySummary（工单③ 底部统计栏）', () => {
     })
     render(createElement(TodaySummary))
 
-    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('近 1 天 0 个番茄 · 专注 100.0h')
+    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('昨日起 0 个番茄 · 专注 100.0h')
+  })
+
+  it('days>1 用「近 N 天」（锁住分支，防止公式被改死）', async () => {
+    fetchFocusSummaryMock.mockResolvedValue({
+      period_days: 30, total_sessions: 12, valid_sessions: 10, interrupted_sessions: 2,
+      focused_seconds: 5400, planned_seconds: 7200, estimate_accuracy: 0.75, by_hour: [],
+    })
+    render(createElement(TodaySummary, { days: 30 }))
+
+    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('近 30 天 10 个番茄 · 专注 1.5h')
   })
 
   it('请求失败 fail-quiet：不渲染本栏、不抛出、只留一条 warn', async () => {

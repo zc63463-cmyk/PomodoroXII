@@ -69,6 +69,7 @@ function applyThemeClass(theme: SettingsTheme): void {
 export default function SettingsPage() {
   const storedTheme = useSettingsStore((state) => state.theme)
   const notificationEnabled = useSettingsStore((state) => state.notificationEnabled)
+  const soundEnabled = useSettingsStore((state) => state.soundEnabled)
   const updateSetting = useSettingsStore((state) => state.update)
   const { resolvedTheme, setTheme, theme } = useTheme()
   const [mounted, setMounted] = useState(false)
@@ -267,7 +268,7 @@ export default function SettingsPage() {
         createElement(
           'p',
           { className: 'text-sm text-muted-foreground' },
-          '番茄计划计时结束时提醒你：桌面通知 + 合成提示音（到点只提示，不会自动结束会话）。',
+          '番茄计划计时结束时提醒你：桌面通知 + 合成提示音（到点只提示，不会自动结束会话）。两者可分别关闭。',
         ),
       ),
       createElement(
@@ -280,6 +281,20 @@ export default function SettingsPage() {
           onChange: (event: React.ChangeEvent<HTMLInputElement>) => void toggleNotificationEnabled(event.target.checked),
         }),
         createElement('span', null, '计时结束时发送桌面通知'),
+      ),
+      // 提示音开关（工单② 2026-09-13）：soundEnabled 的第一个 UI 消费者。
+      // 合成提示音无权限概念，故不需要任何授权逻辑，也不加"试听"按钮
+      //（避免把 Web Audio 引入测试环境）。
+      createElement(
+        'label',
+        { className: 'flex items-center gap-3 text-sm text-foreground' },
+        createElement('input', {
+          type: 'checkbox',
+          'aria-label': '提示音',
+          checked: soundEnabled,
+          onChange: (event: React.ChangeEvent<HTMLInputElement>) => void updateSetting('soundEnabled', event.target.checked),
+        }),
+        createElement('span', null, '计时结束时播放提示音'),
       ),
       permissionHint
         ? createElement('p', { role: 'status', className: 'mt-2 text-sm text-muted-foreground' }, permissionHint)
