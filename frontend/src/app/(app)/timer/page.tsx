@@ -84,6 +84,7 @@ export default function TimerPage() {
   const acknowledgeLaunch = useTaskSpaceStore((state) => state.acknowledgeLaunch)
   const clearLaunchAck = useTaskSpaceStore((state) => state.clearLaunchAck)
   const hasLaunchAck = useTaskSpaceStore((state) => state.hasLaunchAck)
+  const createChild = useTaskSpaceStore((state) => state.createChild)
   const router = useRouter()
   const coordinator = useActiveSessionCoordinator()
   const identity = useActiveSessionIdentity()
@@ -481,7 +482,10 @@ export default function TimerPage() {
 
   const addPlanItem = async (workItemId: string) => {
     if (!aggregate) return
-    const item = workItems.find((candidate) => candidate.id === workItemId)
+    // ★ 工单②（运行中新建三级）：createChild 先把新项落进 store 再返回，
+    //   同一异步闭包里 hook 订阅的 workItems 还是旧数组 —— 这里必须读最新
+    //   store，否则"创建成功后立即加入计划"会静默丢步。
+    const item = useTaskSpaceStore.getState().workItems.find((candidate) => candidate.id === workItemId)
     if (!item) return
     try {
       const planRank = plans.length
@@ -500,6 +504,21 @@ export default function TimerPage() {
         await localAggregateRefresh()
       } else await coordinator.removePlanItem({ sessionId: sessionIdOf(aggregate.session), planItemId, removedAt: canonicalNow(), removalReason: 'removed from current plan' })
     } catch (cause) { setStableError(cause) }
+  }
+
+  // 运行中新建三级（工单② 2026-09-13）：规格 L645-649 把它列为首版运行态
+  // 必须覆盖的交互，S07 要求「创建正式 WorkItem 并加入计划」。沿用任务页
+  // 创建三级同一入口（task-space-store.createChild），不新开直连 API；
+  // parentId = 当前会话挂的二级项，type/status/priority 由 createChild 按
+  // 任务页同一默认补齐。创建成功即加入计划，availableLevel3 由 store 的
+  // workItems 派生自动刷新。失败不在此捕获 —— SessionWorkspace 以
+  // role="alert" 呈现原因（创建失败必须可见），不做离线排队。
+  const createPlanItem = async (title: string) => {
+    if (!aggregate) throw new Error('focus_session_not_found')
+    const level2WorkItemId = aggregate.context?.level2WorkItemId
+    if (!level2WorkItemId) throw new Error('session_level2_missing')
+    const created = await createChild(level2WorkItemId, { title })
+    await addPlanItem(created.id)
   }
 
   const appendBlocks = async (workItemId: string, blocks: NoteBlock[], operationId: string) => {
@@ -628,6 +647,7 @@ export default function TimerPage() {
       session, plans, availableLevel3,
       onSetCurrent: setCurrent, onSetCompletionDraft: setCompletion,
       onAddPlanItem: addPlanItem, onRemovePlanItem: removePlanItem,
+      onCreatePlanItem: createPlanItem,
       onUpdateSessionNote: updateSessionNote,
       onFlushWorkItemNote: async (reason) => { await draftController?.flush(reason) },
       onSwitchWorkItemNote: async (nextWorkItemId) => {

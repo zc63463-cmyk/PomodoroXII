@@ -1,5 +1,5 @@
 import { createElement } from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { SessionWorkspace } from './session-workspace'
 
@@ -88,5 +88,49 @@ describe('SessionWorkspace', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('current_item_conflict')
     expect(rollback).toHaveBeenCalledOnce()
+  })
+})
+
+describe('SessionWorkspace 运行中新建三级（工单②）', () => {
+  it('提供 onCreatePlanItem 时渲染内联新建控件，未提供时不渲染', () => {
+    const withCreate = render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: vi.fn() }))
+    expect(screen.getByRole('button', { name: '+ 新建三级' })).toBeInTheDocument()
+    withCreate.unmount()
+
+    render(createElement(SessionWorkspace, { session, plans }))
+    expect(screen.queryByRole('button', { name: '+ 新建三级' })).toBeNull()
+  })
+
+  it('提交回调携带修剪后的标题，成功后清空输入', async () => {
+    const create = vi.fn().mockResolvedValue(undefined)
+    render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: create }))
+
+    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '  写验收报告  ' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ 新建三级' }))
+
+    await waitFor(() => expect(create).toHaveBeenCalledWith('写验收报告'))
+    await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
+  })
+
+  it('失败时保留输入并以 alert 呈现原因（离线创建被禁必须可见）', async () => {
+    const create = vi.fn().mockRejectedValue(new Error('offline_formal_creation_forbidden'))
+    render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: create }))
+
+    fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '离线想建' } })
+    fireEvent.click(screen.getByRole('button', { name: '+ 新建三级' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('offline_formal_creation_forbidden')
+    expect(screen.getByLabelText('新三级标题')).toHaveValue('离线想建')
+  })
+
+  it('空标题不提交', () => {
+    const create = vi.fn()
+    render(createElement(SessionWorkspace, { session, plans, onCreatePlanItem: create }))
+
+    const submit = screen.getByRole('button', { name: '+ 新建三级' })
+    expect(submit).toBeDisabled()
+    fireEvent.click(submit)
+
+    expect(create).not.toHaveBeenCalled()
   })
 })

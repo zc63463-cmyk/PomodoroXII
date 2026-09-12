@@ -20,6 +20,13 @@ interface SessionWorkspaceProps {
   onSetCompletionDraft?: (planItemId: string, completionDraft: boolean) => void | Promise<void>
   onAddPlanItem?: (workItemId: string) => void | Promise<void>
   onRemovePlanItem?: (planItemId: string) => void | Promise<void>
+  /**
+   * 运行中新建三级（工单② 2026-09-13）：规格 L645-649 把它列为首版运行态
+   * 必须覆盖的交互，S07 要求「创建正式 WorkItem 并加入计划」。页面层沿用
+   * 任务页创建三级同一入口（task-space-store.createChild），不新开直连 API。
+   * 失败必须可见：实现方应抛出，由本组件以 role="alert" 呈现原因。
+   */
+  onCreatePlanItem?: (title: string) => Promise<void> | void
   onUpdateSessionNote?: (value: string) => void | Promise<void>
   onUpdateWorkItemNote?: (value: string) => void | Promise<void>
   onFlushWorkItemNote?: (reason: 'current-item-change') => Promise<void>
@@ -29,11 +36,14 @@ interface SessionWorkspaceProps {
 
 export function SessionWorkspace({
   session, plans, availableLevel3 = [], onSetCurrent, onSetCompletionDraft,
-  onAddPlanItem, onRemovePlanItem, onUpdateSessionNote, onUpdateWorkItemNote: _onUpdateWorkItemNote,
+  onAddPlanItem, onRemovePlanItem, onCreatePlanItem, onUpdateSessionNote,
+  onUpdateWorkItemNote: _onUpdateWorkItemNote,
   onFlushWorkItemNote, onSwitchWorkItemNote,
 }: SessionWorkspaceProps) {
   const [sessionNote, setSessionNote] = useState(session.sessionNote ?? '')
   const [switchError, setSwitchError] = useState<string | null>(null)
+  const [createdTitle, setCreatedTitle] = useState('')
+  const [createError, setCreateError] = useState<string | null>(null)
   const selectCurrent = (workItemId: string) => {
     if (!onSwitchWorkItemNote && !onFlushWorkItemNote) {
       void onSetCurrent?.(workItemId)
@@ -81,6 +91,35 @@ export function SessionWorkspace({
               : '这次会话还没有计划项（启动时未选三级项，当前二级项下也没有可加入的三级项）。')
         : null,
       availableLevel3.map((item) => createElement('button', { key: item.id, type: 'button', onClick: () => void onAddPlanItem?.(item.id) }, `Add ${item.title} to plan`)),
+      // 内联新建：提交后清空输入；失败（离线/后端拒绝）保留输入并把原因
+      // 呈现为 alert —— 用户要据此行动，不能静默（创建离线被禁是既有规则）。
+      onCreatePlanItem ? createElement('form', {
+        className: 'grid gap-2',
+        'aria-label': 'Create plan item',
+        onSubmit: (event: React.FormEvent<HTMLFormElement>) => {
+          event.preventDefault()
+          const title = createdTitle.trim()
+          if (!title) return
+          void (async () => {
+            setCreateError(null)
+            try {
+              await onCreatePlanItem(title)
+              setCreatedTitle('')
+            } catch (cause) {
+              setCreateError(cause instanceof Error ? cause.message : 'Unable to create WorkItem')
+            }
+          })()
+        },
+      },
+      createElement('input', {
+        value: createdTitle,
+        'aria-label': '新三级标题',
+        placeholder: '新建三级工作项并加入计划…',
+        onChange: (event: React.ChangeEvent<HTMLInputElement>) => setCreatedTitle(event.target.value),
+      }),
+      createElement('button', { type: 'submit', disabled: createdTitle.trim() === '' }, '+ 新建三级'),
+      ) : null,
+      createError ? createElement('p', { role: 'alert' }, createError) : null,
     ),
     switchError ? createElement('p', { role: 'alert' }, switchError) : null,
     createElement('label', { className: 'grid gap-2', htmlFor: 'session-note' },
