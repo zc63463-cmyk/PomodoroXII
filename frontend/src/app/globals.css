@@ -852,4 +852,134 @@
     }
 
   }
+
+  /* ================================================================ *
+   * Timer 环 / 数字翻转 / 庆祝粒子 / 沉浸模式（工单 B 2026-09-14）
+   * 见 src/components/timer/session-clock.tsx —— 数字是语义源，
+   * 环与粒子都是同一事实的视觉重述（均 aria-hidden）。
+   *
+   * ★ 类名一律 timer- 前缀（或 [data-immersive] 作用域）：编辑器内容区
+   *   与 QuickNote 都不受约束，不前缀会互相污染。
+   * ★ 颜色只用主题变量（:root / .dark / .midnight / .nord / .daylight
+   *   都定义了同一组变量），不写死色值 —— 否则换主题就有一档读不了。
+   * ================================================================ */
+
+  .timer-ring {
+    --timer-ring-track: var(--muted);
+    --timer-ring-progress: var(--primary);
+    --timer-ring-progress-overtime: var(--destructive);
+  }
+
+  .timer-ring-track {
+    stroke: var(--timer-ring-track);
+  }
+
+  .timer-ring-progress {
+    stroke: var(--timer-ring-progress);
+    /* 与计时器 250ms 的重绘节拍同步，环面是连续滑动而不是一跳一跳 */
+    transition: stroke-dashoffset 250ms linear;
+  }
+
+  /* 超时换色：弧长已饱和（JS 侧 fraction 封顶 1），只换颜色表达"已越过"。 */
+  .timer-ring--overtime .timer-ring-progress {
+    stroke: var(--timer-ring-progress-overtime);
+  }
+
+  /* 运行态呼吸光晕；暂停/结束没有这个类 → 冻结（不需要单独的反向规则）。 */
+  .timer-ring-live .timer-ring-progress {
+    animation: timer-ring-breathe 3.6s ease-in-out infinite;
+  }
+
+  @keyframes timer-ring-breathe {
+    0%, 100% {
+      filter: drop-shadow(0 0 0 transparent);
+      opacity: 0.92;
+    }
+    50% {
+      filter: drop-shadow(0 0 7px var(--timer-ring-progress));
+      opacity: 1;
+    }
+  }
+
+  /* 数字翻转：组件按"显示的分钟"重挂载数字容器（key={minute-N}），
+     本次挂载播一次 pop —— 纯 CSS，无逐帧 JS。 */
+  .timer-digits {
+    animation: timer-digit-pop 380ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @keyframes timer-digit-pop {
+    from {
+      opacity: 0.3;
+      transform: translateY(3px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  /* 庆祝粒子：越过计划点那一刻渲染，~1.6s 后由组件定时器移除。
+     12 向位移由组件行内 CSS 变量给定（确定性分布，不用随机）。 */
+  .timer-celebration {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .timer-celebration-particle {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 9999px;
+    background: var(--timer-ring-progress);
+    animation: timer-particle-burst 1.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+    --timer-particle-tx: 0px;
+    --timer-particle-ty: 0px;
+  }
+
+  @keyframes timer-particle-burst {
+    from {
+      opacity: 1;
+      transform: translate(-50%, -50%) translate(0, 0) scale(0.4);
+    }
+    60% {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+      transform: translate(-50%, -50%) translate(var(--timer-particle-tx), var(--timer-particle-ty)) scale(1);
+    }
+  }
+
+  /* 沉浸模式（页面级）：data-immersive 在运行态容器上，只渐隐被标记的
+     次级内容区（Workspace / Note / TodaySummary）—— 退出按钮与环不在其中，
+     所以"退出"永远可见可点。 */
+  .timer-immersive-region {
+    transition: opacity 300ms ease;
+  }
+
+  [data-immersive='true'] .timer-immersive-region {
+    opacity: 0.2;
+    pointer-events: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .timer-ring-live .timer-ring-progress,
+    .timer-digits {
+      animation: none;
+    }
+
+    /* 粒子在 reduce 下 JS 侧就不渲染；这里兜底"飞行中切 reduce"的静止残留。 */
+    .timer-celebration-particle {
+      animation: none;
+      display: none;
+    }
+
+    .timer-ring-progress,
+    .timer-immersive-region {
+      transition: none;
+    }
+  }
 }

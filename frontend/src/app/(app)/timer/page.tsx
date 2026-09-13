@@ -10,6 +10,7 @@ import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/
 import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/timer/session-review-completion'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { TodaySummary } from '@/components/timer/today-summary'
+import { Button } from '@/components/ui/button'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
 import { createEndAlert } from '@/lib/focus-session/end-alert'
 import { deriveSessionClock } from '@/lib/focus-session/clock'
@@ -175,6 +176,23 @@ export default function TimerPage() {
       soundEnabled,
     })
   }, [clock, notificationEnabled, session, soundEnabled])
+
+  // ── 沉浸模式（工单 B 2026-09-14）────────────────────────────────────────
+  // 运行态专用：只渐隐次级内容区（Workspace / Note / 统计栏），环与退出按钮常驻。
+  // 会话切换时重置 —— 上一个会话的"沉浸"不应预支到下一个会话。
+  const [immersive, setImmersive] = useState(false)
+  const activeSessionId = session ? sessionIdOf(session) : null
+  useEffect(() => {
+    setImmersive(false)
+  }, [activeSessionId])
+
+  // 二级归属（工单 B 可选步）：本会话挂在哪条二级工作项上 —— 沉浸模式下
+  // Workspace/Note 都渐隐，这行是"我在投入什么"的唯一常驻提示。
+  // 查不到就渲染空（不猜、不编造）。
+  const level2WorkItemId = aggregate?.context?.level2WorkItemId ?? null
+  const level2WorkItem = level2WorkItemId
+    ? workItems.find((item) => item.id === level2WorkItemId) ?? null
+    : null
   const reviewSession = useMemo(() => {
     if (!aggregate || !spaceId || !isReviewableEndedSession(aggregate.session)) return null
     return {
@@ -634,7 +652,27 @@ export default function TimerPage() {
       onReconcile: reconcileCommand,
       onAbandon: abandonCommand,
     })
-    : aggregate && session && clock ? createElement('div', { className: 'grid gap-6 p-6' },
+    : aggregate && session && clock ? createElement('div', {
+      className: 'grid gap-6 p-6',
+      // 沉浸模式（工单 B）：渐隐作用域由这个属性驱动（见 globals.css 的 timer 块）。
+      'data-immersive': immersive ? 'true' : 'false',
+    },
+    createElement('div', { className: 'flex items-center justify-between gap-3' },
+      // 二级归属（可选步）：查不到工作项就留空，交给右侧按钮独占行。
+      level2WorkItem
+        ? createElement('p', {
+            className: 'text-sm text-muted-foreground',
+            'data-testid': 'focus-context',
+          }, `${level2WorkItem.displayKey} ${level2WorkItem.title}`)
+        : null,
+      // 沉浸开关：永远可见可点 —— 「退出沉浸」绝不能被自己的渐隐规则吃掉。
+      // 这是结构保证（按钮不在 .timer-immersive-region 内），不是样式巧合。
+      createElement(Button, {
+        type: 'button', variant: 'ghost', size: 'sm',
+        'aria-pressed': immersive,
+        onClick: () => setImmersive((value) => !value),
+      }, immersive ? '退出沉浸' : '沉浸模式'),
+    ),
     createElement(SessionClock, {
       session, nowMs, owner: ownershipMode === 'owner',
       ownerHint,
@@ -644,33 +682,39 @@ export default function TimerPage() {
       onEnd: (occurredAt) => clockAction('end', occurredAt),
       onFlushNote: async () => { await draftController?.flush('before-append') },
     }),
-    createElement(SessionWorkspace, {
-      session, plans, availableLevel3,
-      onSetCurrent: setCurrent, onSetCompletionDraft: setCompletion,
-      onAddPlanItem: addPlanItem, onRemovePlanItem: removePlanItem,
-      onCreatePlanItem: createPlanItem,
-      onUpdateSessionNote: updateSessionNote,
-      onFlushWorkItemNote: async (reason) => { await draftController?.flush(reason) },
-      onSwitchWorkItemNote: async (nextWorkItemId) => {
-        if (draftController && spaceId) {
-          await draftController.switchTo({ spaceId, workItemId: nextWorkItemId })
-          return async () => {
-            if (focusedWorkItemId) {
-              await draftController.switchTo({ spaceId, workItemId: focusedWorkItemId })
+    // 次级内容区：沉浸时整体渐隐（opacity-20 + pointer-events-none，见 globals.css）。
+    createElement('div', {
+      className: 'timer-immersive-region grid gap-6',
+      'data-testid': 'immersive-region',
+    },
+      createElement(SessionWorkspace, {
+        session, plans, availableLevel3,
+        onSetCurrent: setCurrent, onSetCompletionDraft: setCompletion,
+        onAddPlanItem: addPlanItem, onRemovePlanItem: removePlanItem,
+        onCreatePlanItem: createPlanItem,
+        onUpdateSessionNote: updateSessionNote,
+        onFlushWorkItemNote: async (reason) => { await draftController?.flush(reason) },
+        onSwitchWorkItemNote: async (nextWorkItemId) => {
+          if (draftController && spaceId) {
+            await draftController.switchTo({ spaceId, workItemId: nextWorkItemId })
+            return async () => {
+              if (focusedWorkItemId) {
+                await draftController.switchTo({ spaceId, workItemId: focusedWorkItemId })
+              }
             }
+          } else {
+            await draftController?.flush('current-item-change')
           }
-        } else {
-          await draftController?.flush('current-item-change')
-        }
-      },
-    }),
-    focusedWorkItemId ? createElement(FocusedWorkItemNote, {
-      note: focusedNote, spaceId: spaceId ?? '', workItemId: focusedWorkItemId,
-      draftRegistry: draftController ?? undefined, onAppendBlocks: appendBlocks,
-    }) : null,
-    // 底部统计栏（工单③→工单 A 2026-09-14）：准备态与运行态两处布局的底部都要有（规格 L457/L505）。
-    // 标签「今日」= 本地日界显式窗口（服务端 start，本单 A1/A2），理由见 today-summary.tsx 的注释。
-    createElement(TodaySummary),
+        },
+      }),
+      focusedWorkItemId ? createElement(FocusedWorkItemNote, {
+        note: focusedNote, spaceId: spaceId ?? '', workItemId: focusedWorkItemId,
+        draftRegistry: draftController ?? undefined, onAppendBlocks: appendBlocks,
+      }) : null,
+      // 底部统计栏（工单③→工单 A 2026-09-14）：准备态与运行态两处布局的底部都要有（规格 L457/L505）。
+      // 标签「今日」= 本地日界显式窗口（服务端 start，本单 A1/A2），理由见 today-summary.tsx 的注释。
+      createElement(TodaySummary),
+    ),
   ) : createElement('div', { className: 'grid gap-6 p-6' },
     createElement('header', null,
       createElement('p', { className: 'text-xs text-muted-foreground' }, 'Focus session'),

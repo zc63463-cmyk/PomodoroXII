@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import TimerPage from './page'
 import { useSpaceStore } from '@/stores/space-store'
 import { useTaskSpaceStore } from '@/stores/task-space-store'
@@ -87,41 +87,47 @@ const aggregate = {
   outcomes: [], commandEnvelopes: [], commandReceipts: [],
 }
 
-describe('TimerPage 运行中新建三级（工单②）', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    fetchFocusSummaryWindowMock.mockReset()
-    fetchFocusSummaryWindowMock.mockResolvedValue({
-      period_days: 1, total_sessions: 3, valid_sessions: 2, interrupted_sessions: 1,
-      focused_seconds: 5400, planned_seconds: 7200, estimate_accuracy: 0.75, by_hour: [],
-    })
-    useSpaceStore.setState({ currentSpaceId: 'space-1' } as never)
-    useTaskSpaceStore.setState({
-      workItems: [
-        { id: 'l2-x', depth: 2, parentId: 'l1', title: 'Ship feature', displayKey: 'P-2', version: 3 },
-        { id: 'l3-a', depth: 3, parentId: 'l2-x', title: 'Verify output', displayKey: 'P-3', version: 2 },
-      ],
-      selectedWorkItemId: null,
-      selectedProjectId: 'proj-1',
-      relations: [],
-      definitions: [],
-      hydrate: vi.fn(),
-      reset: vi.fn(),
-      selectWorkItem: vi.fn(),
-      acknowledgeLaunch: vi.fn(),
-      clearLaunchAck: vi.fn(),
-      hasLaunchAck: vi.fn(() => false),
-      createChild: vi.fn(),
-    } as never)
-    useTimerStore.setState({
-      locator: { ownerDeviceId: 'dev-1', ownerTabId: 'tab-1', session: aggregate } as never,
-      session: runningSession as never,
-      localProvisional: null,
-      ownershipMode: 'owner',
-      nowMs: Date.parse('2026-09-13T08:10:00Z'),
-      error: null,
-    } as never)
+/**
+ * 运行态 store 种子（工单② 与工单 B 两个 describe 共用）。
+ * 从原 beforeEach 原样抽出 —— 行为逐行一致，只是不再复制第二份。
+ */
+function seedRunningTimerPage(): void {
+  vi.clearAllMocks()
+  fetchFocusSummaryWindowMock.mockReset()
+  fetchFocusSummaryWindowMock.mockResolvedValue({
+    period_days: 1, total_sessions: 3, valid_sessions: 2, interrupted_sessions: 1,
+    focused_seconds: 5400, planned_seconds: 7200, estimate_accuracy: 0.75, by_hour: [],
   })
+  useSpaceStore.setState({ currentSpaceId: 'space-1' } as never)
+  useTaskSpaceStore.setState({
+    workItems: [
+      { id: 'l2-x', depth: 2, parentId: 'l1', title: 'Ship feature', displayKey: 'P-2', version: 3 },
+      { id: 'l3-a', depth: 3, parentId: 'l2-x', title: 'Verify output', displayKey: 'P-3', version: 2 },
+    ],
+    selectedWorkItemId: null,
+    selectedProjectId: 'proj-1',
+    relations: [],
+    definitions: [],
+    hydrate: vi.fn(),
+    reset: vi.fn(),
+    selectWorkItem: vi.fn(),
+    acknowledgeLaunch: vi.fn(),
+    clearLaunchAck: vi.fn(),
+    hasLaunchAck: vi.fn(() => false),
+    createChild: vi.fn(),
+  } as never)
+  useTimerStore.setState({
+    locator: { ownerDeviceId: 'dev-1', ownerTabId: 'tab-1', session: aggregate } as never,
+    session: runningSession as never,
+    localProvisional: null,
+    ownershipMode: 'owner',
+    nowMs: Date.parse('2026-09-13T08:10:00Z'),
+    error: null,
+  } as never)
+}
+
+describe('TimerPage 运行中新建三级（工单②）', () => {
+  beforeEach(seedRunningTimerPage)
 
   it('创建被调用时 parentId = 会话二级项；成功后新项加入计划、输入清空', async () => {
     const createChild = vi.fn(async (parentId: string, input: { title?: string }) => {
@@ -172,5 +178,57 @@ describe('TimerPage 运行中新建三级（工单②）', () => {
 
     expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('今日 2 个番茄 · 专注 1.5h')
     expect(screen.getByRole('button', { name: 'Start focus session' })).toBeInTheDocument()
+  })
+})
+
+describe('TimerPage 沉浸模式与二级归属（工单 B 2026-09-14）', () => {
+  beforeEach(seedRunningTimerPage)
+
+  it('★ 沉浸可逆：data-immersive 翻转，「退出沉浸」不在渐隐区内（永不渐隐）', async () => {
+    render(createElement(TimerPage))
+
+    const toggle = await screen.findByRole('button', { name: '沉浸模式' })
+    const container = document.querySelector('[data-immersive]')
+    expect(container?.getAttribute('data-immersive')).toBe('false')
+    expect(toggle).toHaveAttribute('aria-pressed', 'false')
+
+    fireEvent.click(toggle)
+
+    const exit = screen.getByRole('button', { name: '退出沉浸' })
+    expect(exit).toHaveAttribute('aria-pressed', 'true')
+    expect(container?.getAttribute('data-immersive')).toBe('true')
+    // 结构保证：退出按钮不落在渐隐区里，且仍可点 —— 这是"绝不允许把退出按钮
+    // 自己渐隐掉"红线的可断言形式（jsdom 不加载 CSS，只能锁结构）。
+    expect(screen.getByTestId('immersive-region').contains(exit)).toBe(false)
+    expect(exit).toBeEnabled()
+
+    fireEvent.click(exit)
+    expect(container?.getAttribute('data-immersive')).toBe('false')
+    expect(screen.getByRole('button', { name: '沉浸模式' })).toBeInTheDocument()
+  })
+
+  it('会话切换（sessionId 变化）时沉浸模式重置为关', async () => {
+    render(createElement(TimerPage))
+    fireEvent.click(await screen.findByRole('button', { name: '沉浸模式' }))
+    expect(document.querySelector('[data-immersive]')?.getAttribute('data-immersive')).toBe('true')
+
+    act(() => {
+      useTimerStore.setState({
+        session: { ...runningSession, sessionId: 'session-b' } as never,
+      } as never)
+    })
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-immersive]')?.getAttribute('data-immersive')).toBe('false'))
+    expect(screen.getByRole('button', { name: '沉浸模式' })).toBeInTheDocument()
+  })
+
+  it('二级归属：显示会话挂的二级工作项（displayKey + 标题）；查不到则留空不编造', async () => {
+    render(createElement(TimerPage))
+
+    expect(await screen.findByTestId('focus-context')).toHaveTextContent('P-2 Ship feature')
+
+    act(() => { useTaskSpaceStore.setState({ workItems: [] } as never) })
+    expect(screen.queryByTestId('focus-context')).toBeNull()
   })
 })
