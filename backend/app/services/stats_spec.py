@@ -65,6 +65,14 @@ STAT_SPECS: tuple[StatSpec, ...] = (
         # 把它塞进 agent 面等于把展示模型当数据模型暴露，分析收益为零。
         # 番茄统计的核心价值（chronotype map）由 UI 承载，不进 MCP。
         mcp_enabled=False,
-        params={"days": {"default": 30, "ge": 1, "le": 365}},
+        params={
+            "days": {"default": 30, "ge": 1, "le": 365},
+            # 显式窗口起点（2026-09-14 工单 A1「今日」口径）：可选，提供时
+            # 覆盖 days 推导的起点；格式必须与存储同构（Z 后缀 UTC 秒精度）。
+            "start": {
+                "default": None,
+                "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+            },
+        },
     ),
 )

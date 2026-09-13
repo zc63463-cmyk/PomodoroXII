@@ -49,9 +49,13 @@ vi.mock('@/lib/task-space/timer-note-composer-draft-registry', () => ({
   },
 }))
 
-const fetchFocusSummaryMock = vi.hoisted(() => vi.fn())
+// ★ 工单 A（2026-09-14）：today-summary 已改调 fetchFocusSummaryWindow。
+//   mock 工厂必须补这个导出，否则页面测试在**模块解析期**就抛
+//   「No "fetchFocusSummaryWindow" export is defined on the mock」——
+//   不是断言失败，是整个文件炸。
+const fetchFocusSummaryWindowMock = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/stats/stats-api', () => ({
-  fetchFocusSummary: fetchFocusSummaryMock,
+  fetchFocusSummaryWindow: fetchFocusSummaryWindowMock,
 }))
 
 const coordinatorSpies = vi.hoisted(() => ({
@@ -86,8 +90,8 @@ const aggregate = {
 describe('TimerPage 运行中新建三级（工单②）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    fetchFocusSummaryMock.mockReset()
-    fetchFocusSummaryMock.mockResolvedValue({
+    fetchFocusSummaryWindowMock.mockReset()
+    fetchFocusSummaryWindowMock.mockResolvedValue({
       period_days: 1, total_sessions: 3, valid_sessions: 2, interrupted_sessions: 1,
       focused_seconds: 5400, planned_seconds: 7200, estimate_accuracy: 0.75, by_hour: [],
     })
@@ -138,8 +142,8 @@ describe('TimerPage 运行中新建三级（工单②）', () => {
       expect.objectContaining({ workItemId: 'l3-new' }),
     ))
     await waitFor(() => expect(screen.getByLabelText('新三级标题')).toHaveValue(''))
-    // 工单③：运行态底部统计栏（标签按服务端真实口径：days=1 = 昨日起）
-    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('昨日起 2 个番茄 · 专注 1.5h')
+    // 工单③→工单 A：运行态底部统计栏（标签「今日」= 本地日界显式窗口）
+    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('今日 2 个番茄 · 专注 1.5h')
   })
 
   it('创建被拒（离线禁令）：alert 呈现原因、输入保留、计划不动', async () => {
@@ -166,7 +170,7 @@ describe('TimerPage 运行中新建三级（工单②）', () => {
 
     render(createElement(TimerPage))
 
-    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('昨日起 2 个番茄 · 专注 1.5h')
+    expect(await screen.findByTestId('focus-summary-bar')).toHaveTextContent('今日 2 个番茄 · 专注 1.5h')
     expect(screen.getByRole('button', { name: 'Start focus session' })).toBeInTheDocument()
   })
 })

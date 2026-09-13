@@ -207,8 +207,8 @@ class StatsService:
 
     # ----------------------------------------------------------------- #
 
-    async def focus_summary(self, days: int = 30) -> dict:
-        """Return focus-session statistics for the last *days* days.
+    async def focus_summary(self, days: int = 30, start: str | None = None) -> dict:
+        """Return focus-session statistics for the window starting at *start*.
 
         ★ 为什么按小时聚合：番茄钟数据里**最没用的数字是每日会话数**（易刷、
           信息量低），最有价值的是「一天里哪些时段产出的会话是完整无中断的、
@@ -220,13 +220,24 @@ class StatsService:
           用固定偏移的 SQL 字符串函数很脆。个人量级的会话数很小，取回来解析
           更简单也更好测。超过 MAX_SESSIONS 时截断，避免极端数据把内存吃光。
 
+        ★ 窗口语义（2026-09-14 «今日»口径工单 A1）：
+          - 窗口 = ``[start, +∞)``，闭区间起点、无上界（过滤为字符串比较，
+            格式契约见 services/time.py：Z 后缀 UTC 秒精度，与存储同构）。
+          - ``start`` 提供时**优先**：窗口起点完全由它决定，``days`` 不再参与
+            推导（仅继续用于回显 ``period_days``，响应键集零变化）。
+            调用方由此可以表达「本地日界起的今日」这类任意窗口。
+          - ``start`` 未提供时行为与引入该参数前**逐字一致**：
+            起点 = 当前 UTC 时间回退 *days* 天、取当日零点。
+
         Returns ``{"period_days", "total_sessions", "valid_sessions",
         "interrupted_sessions", "focused_seconds", "planned_seconds",
         "estimate_accuracy", "by_hour": [{hour, sessions, valid, interrupted,
         focused_seconds}] * 24}``.
         """
-        now_dt = utc_now()
-        start_date = (now_dt - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
+        if start is not None:
+            window_start = start
+        else:
+            window_start = (utc_now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
 
         rows = (
             await self.db.execute(
@@ -237,7 +248,7 @@ class StatsService:
                     FocusSession.paused_seconds,
                     FocusSession.validity,
                 )
-                .where(FocusSession.started_at >= start_date)
+                .where(FocusSession.started_at >= window_start)
                 .limit(MAX_FOCUS_SESSIONS)
             )
         ).all()

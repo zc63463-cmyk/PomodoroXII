@@ -162,6 +162,103 @@ async def test_focus_summary_excludes_sessions_outside_period(space_session):
 
 
 @pytest.mark.asyncio
+async def test_focus_summary_start_bounds_window(space_session):
+    """★ 工单 A1：显式 ``start`` 生效 —— 窗口（含起点）之前排除、之内计入。
+
+    窗口是 ``[start, +∞)`` 的字符串比较（与存储格式同构）。
+    """
+    from app.services.stats import StatsService
+
+    now = utc_now()
+    window_start = now - timedelta(days=1)
+
+    # 窗口外（3 天前）与窗口内（1 小时前）各一条
+    await _add_session(space_session, started_at=_iso(now - timedelta(days=3)))
+    await _add_session(space_session, started_at=_iso(now - timedelta(hours=1)))
+
+    result = await StatsService(space_session).focus_summary(days=30, start=_iso(window_start))
+
+    assert result["total_sessions"] == 1
+    assert result["focused_seconds"] == 1500
+    # 排除要同时传导到小时分布（不是只砍总量）
+    assert sum(bucket["sessions"] for bucket in result["by_hour"]) == 1
+    # days 仅用于回显：响应形状与不传 start 时一致
+    assert result["period_days"] == 30
+
+
+@pytest.mark.asyncio
+async def test_focus_summary_start_overrides_days(space_session):
+    """★ 工单 A1：``start`` 提供时 ``days`` 不参与窗口推导。
+
+    对照组证明「days 更宽也不会把窗口放大」—— 同一行数据只给 days 时计入，
+    同时给 start（晚于该会话）时被排除。
+    """
+    from app.services.stats import StatsService
+
+    now = utc_now()
+    await _add_session(space_session, started_at=_iso(now - timedelta(hours=2)))
+
+    # 对照：只给 days，该会话在 30 天窗口内 → 计入
+    baseline = await StatsService(space_session).focus_summary(days=30)
+    assert baseline["total_sessions"] == 1
+
+    # 同时给 start（1 小时前）：窗口起点由 start 决定 → 该会话被排除
+    result = await StatsService(space_session).focus_summary(
+        days=30, start=_iso(now - timedelta(hours=1))
+    )
+    assert result["total_sessions"] == 0
+
+
+@pytest.mark.asyncio
+async def test_focus_summary_without_start_uses_days_window(space_session):
+    """回归：不传 ``start`` 时窗口仍由 ``days`` 推导（与引入 start 前一致）。"""
+    from app.services.stats import StatsService
+
+    now = utc_now()
+
+    # 29 天前在窗口内，31 天前在窗口外（days=30 → 起点为 30 天前的 UTC 零点）
+    await _add_session(space_session, started_at=_iso(now - timedelta(days=29)))
+    await _add_session(space_session, started_at=_iso(now - timedelta(days=31)))
+
+    result = await StatsService(space_session).focus_summary(days=30)
+
+    assert result["total_sessions"] == 1
+    assert result["period_days"] == 30
+
+
+@pytest.mark.asyncio
+async def test_focus_summary_response_shape_is_stable(space_session):
+    """★ 工单 A1 红线：新增 ``start`` 后响应键集零变化。
+
+    固定键集（services/stats.py 的 return 块与 FocusSummaryResponse 同源）：
+    start 是"输入"不是"输出"；period_days 在提供 start 时仍回显 days。
+    """
+    from app.services.stats import StatsService
+
+    expected_keys = {
+        "period_days",
+        "total_sessions",
+        "valid_sessions",
+        "interrupted_sessions",
+        "focused_seconds",
+        "planned_seconds",
+        "estimate_accuracy",
+        "by_hour",
+    }
+
+    without_start = await StatsService(space_session).focus_summary(days=30)
+    with_start = await StatsService(space_session).focus_summary(
+        days=30, start="2026-01-01T00:00:00Z"
+    )
+
+    assert set(without_start) == expected_keys
+    assert set(with_start) == expected_keys
+    # 每个小时桶的形状也不变
+    for bucket in with_start["by_hour"]:
+        assert set(bucket) == {"hour", "sessions", "valid", "interrupted", "focused_seconds"}
+
+
+@pytest.mark.asyncio
 async def test_focus_summary_tolerates_unparsable_timestamp(space_session):
     """★ 时间戳格式异常时：不进小时分布，但仍计入总量（不静默丢数据）。"""
     from app.services.stats import StatsService

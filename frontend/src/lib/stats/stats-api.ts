@@ -126,3 +126,26 @@ export async function fetchFocusSummary(
   })
   return res.data
 }
+
+/**
+ * 「今日」窗口（工单 A2 2026-09-14）：显式起点 = 本地日界零点（见 day-window.ts）。
+ *
+ * ★ 为什么单独一个函数而不是给 fetchFocusSummary 加可选参数：
+ *   两个调用面表达的是**不同口径** ——「最近 N 天」（服务端按 days 推导
+ *   UTC 零点起点）与「本地日界起的今日」（起点由客户端显式给出）。
+ *   混进同一个签名会诱导调用方以为它们可以互相替代（实测教训：
+ *   days=1 曾被当成"今日"，实际覆盖 24–48h）。
+ *
+ * days=1 固定传递：服务端在提供 start 时**忽略** days 推导，仅用于回显
+ * period_days —— 保持与既有「单日窗口」的回显数值一致。
+ */
+export async function fetchFocusSummaryWindow(
+  { start }: { start: string },
+  signal?: AbortSignal,
+): Promise<FocusSummary> {
+  const res = await spaceApi.get<FocusSummary>('/stats/focus-summary', {
+    params: { days: 1, start },
+    ...(signal ? { signal } : {}),
+  })
+  return res.data
+}

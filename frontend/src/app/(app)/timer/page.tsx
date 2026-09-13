@@ -668,8 +668,8 @@ export default function TimerPage() {
       note: focusedNote, spaceId: spaceId ?? '', workItemId: focusedWorkItemId,
       draftRegistry: draftController ?? undefined, onAppendBlocks: appendBlocks,
     }) : null,
-    // 底部统计栏（工单③）：准备态与运行态两处布局的底部都要有（规格 L457/L505）。
-    // 标签按服务端真实口径（days=1「昨日起」/ days>1「近 N 天」），理由见 today-summary.tsx 的注释。
+    // 底部统计栏（工单③→工单 A 2026-09-14）：准备态与运行态两处布局的底部都要有（规格 L457/L505）。
+    // 标签「今日」= 本地日界显式窗口（服务端 start，本单 A1/A2），理由见 today-summary.tsx 的注释。
     createElement(TodaySummary),
   ) : createElement('div', { className: 'grid gap-6 p-6' },
     createElement('header', null,

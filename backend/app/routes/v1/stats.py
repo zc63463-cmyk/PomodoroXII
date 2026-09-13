@@ -53,6 +53,15 @@ async def stats_note_summary(
 @router.get("/focus-summary", response_model=FocusSummaryResponse)
 async def stats_focus_summary(
     days: int = Query(30, ge=1, le=365, description="Period in days"),
+    # ★ 为什么用 pattern 而不是 datetime（2026-09-14 «今日»口径工单 A1）：
+    #   过滤走 SQLite 字符串比较（services/time.py 的格式契约：Z 后缀 UTC 秒精度），
+    #   `start` 必须与存储格式**同构**才能正确比较。schema 级 pattern 直接挡住
+    #   异形值（缺 Z / 毫秒 / 本地时区偏移），比运行期 datetime 转换的时区歧义更少。
+    start: str | None = Query(
+        None,
+        pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+        description="Inclusive window start (UTC, second precision)",
+    ),
     db: AsyncSession = Depends(get_space_db),
     ctx: dict = Depends(get_space_context),
 ):
@@ -61,5 +70,8 @@ async def stats_focus_summary(
     The hourly distribution is the point of this endpoint: it answers
     "which hours produce uninterrupted sessions" rather than "how many
     sessions did I do", which is the least informative number available.
+
+    ``start`` (optional) pins the window start explicitly; when omitted the
+    window is derived from ``days`` exactly as before (see StatsService).
     """
-    return await StatsService(db).focus_summary(days=days)
+    return await StatsService(db).focus_summary(days=days, start=start)
