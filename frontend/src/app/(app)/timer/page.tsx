@@ -722,7 +722,18 @@ export default function TimerPage() {
     ),
     selectedWorkItem ? createElement('p', null, `Selected: ${selectedWorkItem.displayKey} ${selectedWorkItem.title}`) : null,
     workItems.length
-      ? createElement('div', { className: 'grid gap-2', 'aria-label': 'WorkItems for focus' }, workItems.map((item) => createElement('button', { key: item.id, type: 'button', onClick: () => selectWorkItem(item.id) }, `${item.displayKey} ${item.title}`)))
+      ? createElement('div', { className: 'grid gap-2', 'aria-label': 'WorkItems for focus' }, workItems.map((item) => createElement('button', {
+          key: item.id, type: 'button',
+          // 工单④（2026-09-14）：卡片化（纯样式）。按钮的可访问名保持
+          // 「displayKey + 空格 + title」逐字不变（displayKey 与 title 之间的
+          // 空格是真实文本节点）；选中项加 border-primary 高亮。
+          className: `rounded-lg border px-3 py-2 text-left hover:bg-accent${selectedWorkItem?.id === item.id ? ' border-primary' : ''}`,
+          onClick: () => selectWorkItem(item.id),
+        },
+        createElement('span', { className: 'block text-xs text-muted-foreground' }, item.displayKey),
+        ' ',
+        createElement('span', { className: 'block' }, item.title),
+      )))
       // ★ 空状态要说清「为什么空」和「去哪补」。
       //   原来只有一句 "No WorkItems are available in this Space."，
       //   用户无法区分「选错 Space / 同步没跑完 / 确实没建」三种情况，
@@ -737,7 +748,16 @@ export default function TimerPage() {
         ),
         createElement('p', null, '另外：专注会话必须挂在「二级」工作项上，所以至少要有一个一级项 + 它的一个子项。'),
       ),
-    workItems.length ? createElement(SessionLauncher, { items: workItems, initialWorkItemId: selectedWorkItemId, onStart: requestStart }) : null,
+    // 工单③（2026-09-14）：准备态内联新建三级 —— 走任务页同一 store 入口
+    // （createChild，本组件 :89 已订阅）；直接用返回值 id，不读异步闭包里的
+    // workItems 旧快照（createChild 先落 store 再返回，结构性避开该陷阱）。
+    // 失败不吞：让 SessionLauncher 以 role="alert" 呈现（离线创建禁令必须可见）。
+    workItems.length ? createElement(SessionLauncher, {
+      items: workItems,
+      initialWorkItemId: selectedWorkItemId,
+      onStart: requestStart,
+      onCreateLevel3: async (level2Id: string, title: string) => (await createChild(level2Id, { title })).id,
+    }) : null,
     // 底部统计栏（工单③）：准备态布局底部（规格 L457）。
     createElement(TodaySummary),
   )

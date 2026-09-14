@@ -73,3 +73,16 @@ export function deriveRingProgress(session: ClockFacts, nowMs: number): RingProg
     : 0
   return { fraction, overtime: elapsedSeconds > session.plannedSeconds }
 }
+
+/**
+ * 秒数 → "分:秒"（工单① 2026-09-14 自 session-clock 提取为公共导出）。
+ *
+ * 运行态数字与准备态预览共用同一实现，避免两份格式化漂移：
+ * - padStart(2) 是**保底两位**不是封顶 —— 90 分钟 → "90:00"、
+ *   120 分钟 → "120:00"；时长预设本就含 90/120，截断会显示错数。
+ * - 原始实现逐字保留（含负值/非整数的既有行为）：调用方
+ *   （deriveSessionClock / plannedSeconds）保证传入非负整数。
+ */
+export function formatClockSeconds(seconds: number): string {
+  return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+}

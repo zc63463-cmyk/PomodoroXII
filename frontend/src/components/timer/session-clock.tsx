@@ -2,7 +2,8 @@
 
 import { createElement, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Button } from '@/components/ui/button'
-import { deriveRingProgress, deriveSessionClock, type ClockFacts } from '@/lib/focus-session/clock'
+import { deriveRingProgress, deriveSessionClock, formatClockSeconds, type ClockFacts } from '@/lib/focus-session/clock'
+import { TimerRing } from './timer-ring'
 
 interface SessionClockProps {
   session: ClockFacts
@@ -22,15 +23,6 @@ interface SessionClockProps {
    */
   onTakeover?: () => Promise<void> | void
 }
-
-const format = (seconds: number) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
-
-/**
- * 环几何（工单 B 2026-09-14）：viewBox 200×200、半径 88 —— 给 stroke 宽度
- * 与光晕留出余量。周长由半径算出，不在 CSS 里重复。
- */
-const RING_RADIUS = 88
-const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS
 
 /**
  * 庆祝粒子：固定 12 向、距离分三档 —— **确定性**优于随机：
@@ -121,31 +113,16 @@ export function SessionClock({
     await onEnd(new Date().toISOString())
   }
 
-  const ringClassName = [
-    'timer-ring relative grid place-items-center',
-    ring.overtime ? 'timer-ring--overtime' : '',
-    session.clockState === 'running' ? 'timer-ring-live' : '',
-  ].filter(Boolean).join(' ')
-
   return createElement(
     'section', { 'aria-label': 'Focus session clock', className: 'grid justify-items-center gap-4' },
-    createElement('div', { className: ringClassName, 'data-testid': 'timer-ring' },
-      // 环本体 aria-hidden：语义源是中间的数字（aria-live="off" 的 output 不变），
-      // 环只是同一事实的视觉重述，读屏重复朗读没有信息增量。
-      createElement('svg', { viewBox: '0 0 200 200', 'aria-hidden': true, className: 'h-56 w-56 -rotate-90' },
-        createElement('circle', {
-          className: 'timer-ring-track',
-          cx: 100, cy: 100, r: RING_RADIUS, fill: 'none', strokeWidth: 8,
-        }),
-        createElement('circle', {
-          className: 'timer-ring-progress',
-          cx: 100, cy: 100, r: RING_RADIUS, fill: 'none', strokeWidth: 8,
-          strokeLinecap: 'round',
-          strokeDasharray: RING_CIRCUMFERENCE,
-          strokeDashoffset: RING_CIRCUMFERENCE * (1 - ring.fraction),
-          'data-testid': 'timer-ring-progress',
-        }),
-      ),
+    // 环外壳提取为 TimerRing（工单① 2026-09-14）：类名 / testid / 几何原样搬移，
+    // 记账（fraction / overtime / live）仍在本组件推导后传入；粒子与数字仍是
+    // 本组件的 children（数字的分钟键重挂载语义不变）。
+    createElement(TimerRing, {
+      fraction: ring.fraction,
+      overtime: ring.overtime,
+      live: session.clockState === 'running',
+    },
       celebration === null
         ? null
         : createElement('div', {
@@ -163,7 +140,7 @@ export function SessionClock({
         'aria-live': 'off',
         'data-testid': 'timer-digits',
         className: 'timer-digits absolute inset-0 grid place-items-center font-mono text-5xl tabular-nums',
-      }, `${format(clock.remainingSeconds)}${clock.overtimeSeconds > 0 ? ` +${format(clock.overtimeSeconds)}` : ''}`),
+      }, `${formatClockSeconds(clock.remainingSeconds)}${clock.overtimeSeconds > 0 ? ` +${formatClockSeconds(clock.overtimeSeconds)}` : ''}`),
     ),
     createElement('div', { className: 'flex gap-2' },
       session.clockState === 'running'
