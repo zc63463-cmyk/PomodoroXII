@@ -1,0 +1,25 @@
+#!/bin/sh
+# ============================================================================
+# ADR-0006 机器防线（防线第 2 层）：.forge/ 私有知识区（docs / ideas 嵌套仓）
+# 的内容永不允许进入本仓库的任何提交。
+#
+# 依据：ADR-0006「私有知识仓库嵌套布局（逻辑隔离 + 机器防线）」：
+#   pre-commit hook：提交路径含 .forge/ 时直接拒绝（机器强制，不依赖人自觉）。
+#
+# 绕过（仅限炉长明确知情的紧急场景）：git commit --no-verify
+# ============================================================================
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+if printf '%s\n' "$staged" | grep -q '\.forge/'; then
+  echo ""
+  echo "✗ [pre-commit] 拒绝提交：暂存区包含 .forge/ 路径（ADR-0006 机器防线）。"
+  echo ""
+  echo "  以下文件属于私有知识区（docs/ideas 嵌套仓），永不进入公开仓库："
+  printf '%s\n' "$staged" | grep '\.forge/' | sed 's/^/    /'
+  echo ""
+  echo "  处理：git restore --staged <路径>"
+  exit 1
+fi
+
+exit 0
