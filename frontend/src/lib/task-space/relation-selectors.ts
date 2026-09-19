@@ -19,6 +19,11 @@ import { RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED } from '@/lib/contracts/task
  *    - 行缺失（孤儿边）/ 其余活动类目    -> open（仍阻塞）
  *    `unknown_requires_resolution`（Project 归档 / 目标不可达）本期不做，
  *    仅在此保留取值域与判定入口（Q4 裁剪，见 ADR-0004）。
+ *
+ * ★ 闭环警示：resolution 闭集变更须同步核对 backend/app/task_space/contracts.py、
+ *    compiler.py（写入）、queries.py（派生）与本文件；见 ADR-0004。
+ *    —— contracts.py 定义闭集常量，compiler.py 是 resolution 的唯一写入者
+ *    （后端写入），queries.py 与本文件分别是后端/前端派生的同一真值表。
  */
 
 export const BLOCKING_RELATION_TYPES = new Set(['depends_on', 'blocks'])
