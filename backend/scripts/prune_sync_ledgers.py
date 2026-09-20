@@ -41,7 +41,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 
@@ -50,7 +50,7 @@ API = f"{BASE_URL}/api/v1"
 TIMEOUT = 30.0
 
 
-def _die(message: str) -> "NoReturn":  # type: ignore[valid-type]
+def _die(message: str) -> NoReturn:
     print(f"prune: {message}", file=sys.stderr)
     raise SystemExit(1)
 

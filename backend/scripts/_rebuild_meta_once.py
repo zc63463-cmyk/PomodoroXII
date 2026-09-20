@@ -1,4 +1,5 @@
 """Rebuild meta DB at current schema, preserving the admin password hash."""
+import os
 import sqlite3
 import sys
 
@@ -28,6 +29,5 @@ new.commit()
 new.close()
 
 # 4. Swap in.
-import os
 os.replace(NEW, OLD)
 print("META_REBUILD_OK")

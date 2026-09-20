@@ -33,7 +33,6 @@ from app.schemas.task_space import (
     WorkItemResponse,
 )
 from app.schemas.work_item_note import WorkItemNoteDocumentV1
-# ★ 2026-09-11：depth 契约断言需要 post-image 白名单（它不含 depth）。
 from app.task_space.compiler import WORK_ITEM_SYNC_FIELDS
 from app.task_space.contracts import (
     CreateProject,
