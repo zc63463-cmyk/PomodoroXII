@@ -72,6 +72,12 @@ RESERVED_TS_CODES = frozenset(
         "active_session_recovery_required",
         "work_item_structure_changed",
         "label_name_conflict",
+        # ★ 2026-09-20（TS-02a / 裁决一）：labelIds 是「本次操作完成后的完整目标
+        #   集合」，操作方向必须由**权威集合**判定，绝不按载荷内容猜「差量还是完整
+        #   集合」。add 只允许维持/增加（current ⊆ declared），remove 只允许维持/
+        #   减少（declared ⊆ current）；越方向的声明在此码上拒绝：不落库、不 bump
+        #   版本、不产生同步事件、不写账本。
+        "label_set_direction_violated",
         # 依赖域（D13/D17）：环拒绝与归档项不可篡改，均由 Task Space 编译器产出。
         "cycle_detected",
         "archived_work_item_immutable",
@@ -138,6 +144,15 @@ MUTATION_REJECTION_SPECS = MappingProxyType(
         ),
         "work_item_structure_changed": _spec(409, "Work item structure changed", "conflict"),
         "label_name_conflict": _spec(409, "Label name conflict", "conflict"),
+        # ★ 2026-09-20（TS-02a / 裁决一）：目标集合越过操作方向 = 载荷契约错误，
+        #   与「未知操作 / 非法 relation_type」同层的 422 validation_error，而不是
+        #   409 冲突 —— 它不是并发/状态冲突，重试同一个载荷永远不会成功。
+        "label_set_direction_violated": _spec(
+            422,
+            "Declared label set crosses the operation direction",
+            "validation_error",
+        ),
+
         "archived_work_item_immutable": _spec(
             409,
             "Archived work items cannot gain or lose dependencies",

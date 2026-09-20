@@ -20,7 +20,9 @@ export interface RemoveRelationInput extends SpaceCommandBase { relationId: stri
 //   resolution / 时间戳 —— 外部 schema extra="forbid" 会拒收）。
 export interface ResolveRelationInput extends SpaceCommandBase { relationId: string; expectedVersion: number; fromWorkItemId: string; toWorkItemId: string; relationType: string }
 export interface AddWorkItemLabelsInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; labelIds: string[] }
-export interface RemoveWorkItemLabelsInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; labelIds: string[] }
+// ★ 2026-09-20（TS-02a）：remove 的 labelIds 是「移除后的完整目标集合」，
+//   labelId 是 URL 里被寻址的那一个（服务端校验它确实从集合中消失）。
+export interface RemoveWorkItemLabelsInput extends SpaceCommandBase { workItemId: string; expectedVersion: number; labelIds: string[]; labelId: string }
 export interface CreateLabelInput extends SpaceCommandBase { name: string; color?: string | null }
 export interface UpdateLabelInput extends SpaceCommandBase { labelId: string; expectedVersion: number; name?: string; color?: string | null }
 export interface ArchiveLabelInput extends SpaceCommandBase { labelId: string; expectedVersion: number }
@@ -153,6 +155,10 @@ export const taskSpaceApi = {
   },
   // D5 Y: label-set mutations declare the FULL target label_ids set after the
   // mutation (labels-as-state); the server read-modify-writes the junction.
+  // ★ 2026-09-20（TS-02a / 裁决一）：单条与批量同义 —— labelIds 是操作完成后的
+  //   完整目标集合，不是待增/待删的差量。服务端按权威集合判定操作方向：
+  //   add 只能维持/增加、remove 只能维持/减少，越方向以
+  //   label_set_direction_violated 拒绝。
   async addWorkItemLabels(input: AddWorkItemLabelsInput) {
     const labelIds = [...input.labelIds].sort()
     return command(input.operationId, input.spaceId,
@@ -161,12 +167,30 @@ export const taskSpaceApi = {
       (body, options) => spaceApi.post(`/work-items/${encodeURIComponent(input.workItemId)}/labels`, body, options),
     )
   },
+  // DELETE 的 URL 段是被**寻址**的那一个标签（服务端要求它确实从目标集合中
+  // 消失）。它必须显式传入：此前用 labelIds[0] 推断，于是「移除最后一个标签」
+  // 会发出空 URL 段 —— 而那时的 body 恰好也是空集，两端都看不出错。
+  //
+  // 该地址约束是命令契约的一部分（后端把它作为
+  // ``require_removed_label_ids`` 放进 canonical 业务载荷），因此它**参与**
+  // payloadHash：改 URL 换标签后重试是「内容变了」的新命令，不会命中旧回执。
   async removeWorkItemLabels(input: RemoveWorkItemLabelsInput) {
     const labelIds = [...input.labelIds].sort()
+    // ★ TS-02a resume 兼容：``labelId`` 是 TS-02a 才有的事实。TS-02a 之前落盘的
+    //   ``remove_work_item_labels`` intent 的 requestJson 里没有它，而 durable 路径
+    //   按 requestJson **逐字重放**。若在此静默拼出 ``undefined``，会发出
+    //   ``/labels/undefined`` —— 后端 fail-closed 拒绝并把该 intent 标 failed，
+    //   用户那次「移除标签」被无声丢弃。宁可在这里响亮失败，让恢复队列把它记为
+    //   可诊断的 handler 错误，也不要发出一个看似合法实则必然失败的请求。
+    const labelId = input.labelId
+    if (typeof labelId !== 'string' || labelId.length === 0) {
+      throw new Error('legacy_label_intent_missing_addressed_label')
+    }
+    const internal = { label_ids: labelIds, require_removed_label_ids: [labelId] }
     return command(input.operationId, input.spaceId,
       { expectedVersion: input.expectedVersion, labelIds },
-      { label_ids: labelIds },
-      (body, options) => spaceApi.request({ method: 'DELETE', url: `/work-items/${encodeURIComponent(input.workItemId)}/labels/${encodeURIComponent(input.labelIds[0] ?? '')}`, data: body, ...options }),
+      internal,
+      (body, options) => spaceApi.request({ method: 'DELETE', url: `/work-items/${encodeURIComponent(input.workItemId)}/labels/${encodeURIComponent(labelId)}`, data: body, ...options }),
     )
   },
   async createLabel(input: CreateLabelInput) {

@@ -690,6 +690,13 @@ async def test_batch_recovery_after_commit_window_fault_completes_once(
 async def test_batch_label_projection_chains_through_overlay(
     task_space_fixture,
 ) -> None:
+    """Batch label commands declare the full target set (TS-02a / 裁决一).
+
+    The batch entry reuses the single-command payload semantics: ``label_ids``
+    is the set expected AFTER the command, add may only keep/add and remove may
+    only keep/drop.  A batch-internal Add then Remove therefore ends at the
+    set the last item declared, and each receipt keeps its own step version.
+    """
     fixture = task_space_fixture
     project = await fixture.create_project(command_id="lb-project", key="LB")
     project_id = str(project.value["id"])
@@ -704,14 +711,10 @@ async def test_batch_label_projection_chains_through_overlay(
         _labels_command(
             fixture, "add_labels", "lb-add", work_item_id, 1, [label_id]
         ),
-        # ⚠ 语义分歧（已上报、本包不修）：实现是 after = current - declared
-        #   （compiler.py:1416），即 remove_labels 声明的是「待移除集合」；
-        #   而 compiler.py:1400-1408 docstring 与 schemas/task_space.py:283-285
-        #   写的是「本次变更之后的完整目标集合」。既有后端测试
-        #   （tests/test_task_space_labels.py）按实现断言，前端按文档传「存活集」。
-        #   本用例只钉住批量入口复用同一载荷语义，不表态哪一侧应改。
+        # The later item sees the set the earlier accepted item left behind
+        # ({L}) and declares the post-removal target ({}).
         _labels_command(
-            fixture, "remove_labels", "lb-remove", work_item_id, 2, [label_id]
+            fixture, "remove_labels", "lb-remove", work_item_id, 2, []
         ),
     )
     outcome = await _run_batch(fixture, "lb-batch", commands)
@@ -729,6 +732,69 @@ async def test_batch_label_projection_chains_through_overlay(
     row = await fixture.read_work_item(work_item_id)
     assert list(row["label_ids"]) == []
     assert int(row["version"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_batch_label_commands_never_cross_the_operation_direction(
+    task_space_fixture,
+) -> None:
+    """A direction-crossing item is rejected per-item; the batch keeps going."""
+    fixture = task_space_fixture
+    project = await fixture.create_project(command_id="lbd-project", key="LBD")
+    project_id = str(project.value["id"])
+    item = await fixture.create_work_item(project_id, "Seed", None, "lbd-seed")
+    work_item_id = str(item.value["id"])
+    await fixture.module.execute(
+        fixture.scope, _label_create_command(fixture, "lbd-a", "A")
+    )
+    await fixture.module.execute(
+        fixture.scope, _label_create_command(fixture, "lbd-b", "B")
+    )
+    label_a = _stable_id("label", "lbd-a")
+    label_b = _stable_id("label", "lbd-b")
+
+    commands = (
+        _labels_command(
+            fixture, "add_labels", "lbd-add", work_item_id, 1, [label_a, label_b]
+        ),
+        # Add declaring {B} would silently drop A -> refused at its own position.
+        _labels_command(
+            fixture, "add_labels", "lbd-shrink", work_item_id, 2, [label_b]
+        ),
+        # Remove declaring {A,B} keeps both -> a no-op receipt at that position.
+        _labels_command(
+            fixture, "remove_labels", "lbd-noop", work_item_id, 2, [label_a, label_b]
+        ),
+    )
+    outcome = await _run_batch(fixture, "lbd-batch", commands)
+
+    assert _receipt_shape(outcome) == [
+        ("lbd-add", "accepted"),
+        ("lbd-shrink", "label_set_direction_violated"),
+        ("lbd-noop", "accepted"),
+    ]
+    accepted = _accepted_items(outcome)
+    assert int(accepted[0].value["version"]) == 2
+    assert list(accepted[0].value["label_ids"]) == sorted([label_a, label_b])
+    # The no-op item keeps the version the accept left behind: no bump, no event.
+    assert int(accepted[1].value["version"]) == 2
+    assert list(accepted[1].value["label_ids"]) == sorted([label_a, label_b])
+    rejection = _rejected_items(outcome)[0]
+    assert rejection.retryable is False
+    assert tuple(rejection.details["would_remove"]) == (label_a,)
+    row = await fixture.read_work_item(work_item_id)
+    assert list(row["label_ids"]) == sorted([label_a, label_b])
+    assert int(row["version"]) == 2
+    # Exactly one label-bearing workItem event for the whole batch (the add):
+    # refused and no-op items contribute nothing.
+    events = await fixture.visible_events(batch_id="lbd-batch")
+    label_events = [
+        event for event in events if event.entity_type == "workItem"
+    ]
+    assert len(label_events) == 1
+    assert label_events[0].payload["label_ids"] == sorted([label_a, label_b])
+    assert await fixture.visible_events(operation_id="lbd-shrink") == ()
+    assert await fixture.visible_events(operation_id="lbd-noop") == ()
 
 
 @pytest.mark.asyncio

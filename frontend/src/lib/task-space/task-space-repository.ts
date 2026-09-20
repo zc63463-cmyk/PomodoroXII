@@ -507,8 +507,11 @@ export class TaskSpaceRepository {
   }
 
   // D5 Y: label-set mutation — the target label_ids set is computed client
-  // side as the full post-mutation union, then converged server side by
+  // side as the full post-mutation set and converged server side by a
   // read-modify-write inside one CAS-guarded command.
+  // ★ 2026-09-20（TS-02a / 裁决一）：契约是「完整目标集合」（labels-as-state），
+  //   不是差量；服务端按权威集合判定操作方向（add 只能维持/增加、remove 只能
+  //   维持/减少）。这里计算的是纯本地缓存视图，权威判定永远在服务端加锁事务内。
   async addWorkItemLabels(input: { workItemId: string; labelIds: string[] }) {
     if (!online()) throw new Error('offline_formal_mutation_forbidden')
     const cached = await this.db.workItems.get(input.workItemId)
@@ -526,10 +529,14 @@ export class TaskSpaceRepository {
     if (!online()) throw new Error('offline_formal_mutation_forbidden')
     const cached = await this.db.workItems.get(input.workItemId)
     if (!cached) throw new Error('work_item_not_loaded')
+    // Post-removal target set. When this is the LAST label the target is the
+    // empty set — the server treats the empty declaration as "drop everything",
+    // which is why the addressed label must travel separately in ``labelId``
+    // (the URL segment) instead of being inferred from the body.
     const target = (cached as CachedWorkItem).labelIds.filter((id) => id !== input.labelId)
     const intent = await prepareDirectCommandIntent(this.db, {
       kind: 'remove_work_item_labels', spaceId: this.spaceId, targetId: input.workItemId,
-      request: { workItemId: input.workItemId, expectedVersion: (cached as CachedWorkItem).version, labelIds: target, spaceId: this.spaceId }, now: canonicalNow(),
+      request: { workItemId: input.workItemId, labelId: input.labelId, expectedVersion: (cached as CachedWorkItem).version, labelIds: target, spaceId: this.spaceId }, now: canonicalNow(),
     })
     return this.executeWorkItemIntent(intent, (request) => this.api.removeWorkItemLabels(request as never))
       .then((result) => result.workItem)

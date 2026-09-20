@@ -277,6 +277,11 @@ const MUTATION_ERROR_MESSAGES: Record<string, string> = {
   project_key_conflict: '项目标识已存在，请更换。',
   // --- labels (D5) ---
   label_name_conflict: '标签名称已存在，请更换。',
+  // ★ TS-02a / 裁决一：目标集合越过了操作方向（新增声明会删、移除声明会加）。
+  //   这是**确定性、不可重试**的契约错误：原样重试同一个请求永远不会成功，
+  //   所以不能套用「请稍后重试」，必须引导用户改成正确方向的操作。
+  label_set_direction_violated:
+    '标签操作与当前标签不一致：新增只能保留或增加标签，移除只能保留或减少标签。请刷新后改为正确操作。',
   // --- notes ---
   invalid_note_document: '笔记内容格式不合法，请检查后重试。',
   unsupported_content_version: '内容版本不受支持，请更新后重试。',

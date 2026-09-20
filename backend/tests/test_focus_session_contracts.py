@@ -150,6 +150,9 @@ def test_ts0_error_codes_are_exact() -> None:
         "active_session_recovery_required",
         "work_item_structure_changed",
         "label_name_conflict",
+        # ★ 2026-09-20（TS-02a / 裁决一）：目标集合越过操作方向（add 声明会删、
+        #   remove 声明会加）。唯一产出点 = app/task_space/compiler.py。
+        "label_set_direction_violated",
         "cycle_detected",
         "archived_work_item_immutable",
         "payload_field_not_allowed",

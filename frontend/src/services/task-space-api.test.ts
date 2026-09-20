@@ -4,7 +4,7 @@ import { spaceApi } from './api'
 import { taskSpaceApi } from './task-space-api'
 
 vi.mock('./api', () => ({
-  spaceApi: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), put: vi.fn() },
+  spaceApi: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), put: vi.fn(), request: vi.fn() },
 }))
 
 const accepted = { commandId: 'op-1', entityType: 'project', entityId: 'p-1', version: 1, value: {} }
@@ -201,5 +201,74 @@ describe('taskSpaceApi', () => {
     // resolution / resolvedAt 由服务端自持 —— wire 上不得出现（extra=forbid 会拒收）。
     expect('resolution' in (call[1] as Record<string, unknown>)).toBe(false)
     expect('resolvedAt' in (call[1] as Record<string, unknown>)).toBe(false)
+  })
+
+  // ★ TS-02a / 裁决一：labelIds 是「本次操作完成后的完整目标集合」（labels-as-state）。
+  it('sends the full target label set and hashes {label_ids} only', async () => {
+    vi.mocked(spaceApi.post).mockResolvedValue({ data: accepted })
+
+    await taskSpaceApi.addWorkItemLabels({
+      operationId: 'lab-add', spaceId: 'space-a', workItemId: 'w-1',
+      expectedVersion: 2, labelIds: ['l-b', 'l-a'],
+    })
+
+    const call = vi.mocked(spaceApi.post).mock.calls[0]!
+    expect(call[0]).toBe('/work-items/w-1/labels')
+    expect(call[1]).toMatchObject({ expectedVersion: 2, labelIds: ['l-a', 'l-b'] })
+    expect(call[2]?.headers?.['Idempotency-Key']).toBe('lab-add')
+    expect((call[1] as Record<string, unknown>).payloadHash).toBe(
+      await hashCommandPayload({ label_ids: ['l-a', 'l-b'] }),
+    )
+  })
+
+  it('addresses the removed label in the DELETE URL even when the target set is empty', async () => {
+    vi.mocked(spaceApi.request).mockResolvedValue({ data: accepted })
+
+    await taskSpaceApi.removeWorkItemLabels({
+      operationId: 'lab-rm', spaceId: 'space-a', workItemId: 'w-1',
+      expectedVersion: 2, labelIds: [], labelId: 'l-a',
+    })
+
+    const call = vi.mocked(spaceApi.request).mock.calls[0]![0] as {
+      method: string; url: string; data: Record<string, unknown>
+    }
+    expect(call.method).toBe('DELETE')
+    // Removing the LAST label still addresses exactly one label: the old
+    // `labelIds[0]` inference produced a trailing empty path segment here.
+    expect(call.url).toBe('/work-items/w-1/labels/l-a')
+    expect(call.data).toMatchObject({ expectedVersion: 2, labelIds: [] })
+    // The addressed label is part of the command contract, so it is hashed.
+    expect(call.data.payloadHash).toBe(
+      await hashCommandPayload({ label_ids: [], require_removed_label_ids: ['l-a'] }),
+    )
+  })
+
+  it('keeps the addressed label distinct on the wire for the same target set', async () => {
+    vi.mocked(spaceApi.request).mockResolvedValue({ data: accepted })
+
+    for (const labelId of ['l-a', 'l-b']) {
+      await taskSpaceApi.removeWorkItemLabels({
+        operationId: `lab-${labelId}`, spaceId: 'space-a', workItemId: 'w-1',
+        expectedVersion: 2, labelIds: ['l-keep'], labelId,
+      })
+    }
+
+    const first = vi.mocked(spaceApi.request).mock.calls[0]![0] as {
+      url: string; data: Record<string, unknown>
+    }
+    const second = vi.mocked(spaceApi.request).mock.calls[1]![0] as {
+      url: string; data: Record<string, unknown>
+    }
+    // Different addressed label => different URL AND a different declared
+    // hash: the server's authority check and the caller's own retry identity
+    // both distinguish them, so switching the URL cannot hit the old receipt.
+    expect(first.url).not.toBe(second.url)
+    expect(first.data.payloadHash).not.toBe(second.data.payloadHash)
+    expect(first.data.payloadHash).toBe(
+      await hashCommandPayload({ label_ids: ['l-keep'], require_removed_label_ids: ['l-a'] }),
+    )
+    expect(second.data.payloadHash).toBe(
+      await hashCommandPayload({ label_ids: ['l-keep'], require_removed_label_ids: ['l-b'] }),
+    )
   })
 })

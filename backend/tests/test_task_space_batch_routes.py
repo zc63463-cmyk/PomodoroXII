@@ -469,6 +469,11 @@ def test_move_command_never_carries_child_rank(
 def test_labels_commands_sort_the_declared_target_set(
     batch_client, fake_batch_module
 ) -> None:
+    """``labelIds`` is the full post-command target set (TS-02a / 裁决一).
+
+    The batch route only canonicalizes order; it must never translate the
+    declaration into a delta.
+    """
     fake_batch_module.outcome = TaskSpaceBatchOutcome(
         batch_id="batch-1", items=(fake_batch_module.accept("c-labels", 0),)
     )
@@ -489,6 +494,160 @@ def test_labels_commands_sort_the_declared_target_set(
     assert response.status_code == 200
     _, commands, _ = fake_batch_module.calls[0]
     assert commands[0].payload["label_ids"] == ["l-a", "l-b"]
+    assert commands[0].payload["operation"] == "add_labels"
+    # Batch carries no address-level constraint; only the single-label DELETE
+    # route does (its URL names one label).
+    assert "require_removed_label_ids" not in commands[0].payload
+
+
+def test_remove_labels_commands_declare_the_target_set_not_a_delta(
+    batch_client, fake_batch_module
+) -> None:
+    fake_batch_module.outcome = TaskSpaceBatchOutcome(
+        batch_id="batch-1", items=(fake_batch_module.accept("c-rm", 0),)
+    )
+    response = _post(
+        batch_client,
+        [
+            {
+                "kind": "work_item.remove_labels",
+                "commandId": "c-rm",
+                "spaceId": SPACE_ID,
+                "workItemId": "w1",
+                "expectedVersion": 4,
+                "payloadHash": "0" * 64,
+                # Removing A from {A,B}: the declared post-state is {B}.
+                "labelIds": ["l-b"],
+            }
+        ],
+    )
+    assert response.status_code == 200
+    _, commands, _ = fake_batch_module.calls[0]
+    assert commands[0].payload["operation"] == "remove_labels"
+    assert commands[0].payload["label_ids"] == ["l-b"]
+
+
+def test_single_and_batch_label_requests_produce_identical_domain_commands() -> None:
+    """Single REST and batch REST agree on the same logical declaration.
+
+    Both entry points build the domain command for "remove A from {A,B}"; the
+    resulting canonical payload (and therefore the payload hash a caller must
+    declare) is compared directly.
+    """
+    from app.routes.v1.task_space_commands import _domain_command
+    from app.routes.v1.work_items import _labels_command
+    from app.schemas.task_space import RemoveWorkItemLabelsRequest
+    from app.schemas.task_space_batch import BatchRemoveWorkItemLabelsCommand
+    from app.task_space.module import build_task_space_request
+
+    wire = {
+        "commandId": "agree-batch",
+        "spaceId": SPACE_ID,
+        "workItemId": "w1",
+        "expectedVersion": 4,
+        "payloadHash": "0" * 64,
+        "labelIds": ["l-b"],
+    }
+    # The single REST schema addresses the work item by path, so the shared
+    # envelope is the same minus ``workItemId`` — and the batch union is the
+    # single schema plus the in-band target plus the kind discriminator.
+    single_envelope = {key: value for key, value in wire.items() if key != "workItemId"}
+    parsed = RemoveWorkItemLabelsRequest.model_validate(single_envelope)
+    assert parsed.label_ids == ["l-b"]
+    batch_command = BatchRemoveWorkItemLabelsCommand.model_validate(
+        {**wire, "kind": "work_item.remove_labels"}
+    )
+    single = _labels_command(
+        operation="remove_labels",
+        command_id="agree-single",
+        space_id=SPACE_ID,
+        work_item_id="w1",
+        expected_version=4,
+        payload_hash="0" * 64,
+        label_ids=["l-b"],
+    )
+    batch = _domain_command(batch_command)
+    # Same entity id, same version, same payload: the declared hash is a
+    # placeholder here, so identity is compared with hash verification off.
+    single_request = build_task_space_request(single, verify_payload_hash=False)
+    batch_request = build_task_space_request(batch, verify_payload_hash=False)
+    assert single_request.name == batch_request.name == "task_space.RemoveWorkItemLabels"
+    assert single_request.entity_id == batch_request.entity_id == "w1"
+    assert single_request.expected_version == batch_request.expected_version == 4
+    # ``operation`` selects the request NAME, so it is not part of the payload;
+    # the business content of both entries is the same declared target set.
+    assert single_request.payload["label_ids"] == batch_request.payload["label_ids"]
+    assert single_request.payload["label_ids"] == ("l-b",)
+    assert "require_removed_label_ids" not in single_request.payload
+    assert "require_removed_label_ids" not in batch_request.payload
+
+
+def test_single_label_delete_carries_an_address_constraint_batch_cannot() -> None:
+    """The single DELETE's URL label is an address constraint; batch has none.
+
+    ★ 有意差异，不是疏漏（TS-02a / 裁决一第 32 行只对单标签 DELETE 路由提出
+    「核对 URL 的 label_id 与目标集合一致」）。两条 transport 的**集合语义相同**
+    （都是「收敛到声明的目标集合」），差别仅在单条路径多一个由 URL 身份派生的
+    地址约束。本用例把该差异钉成契约，避免它被当成不一致而误「修平」。
+    """
+    from app.routes.v1.task_space_commands import _domain_command
+    from app.routes.v1.work_items import _labels_command
+    from app.schemas.task_space import RemoveWorkItemLabelsRequest
+    from app.schemas.task_space_batch import BatchRemoveWorkItemLabelsCommand
+    from app.task_space.module import build_task_space_request
+
+    wire = {
+        "commandId": "addr-batch",
+        "spaceId": SPACE_ID,
+        "workItemId": "w1",
+        "expectedVersion": 4,
+        "payloadHash": "0" * 64,
+        "labelIds": ["l-b"],
+    }
+    single = _labels_command(
+        operation="remove_labels",
+        command_id="addr-single",
+        space_id=SPACE_ID,
+        work_item_id="w1",
+        expected_version=4,
+        payload_hash="0" * 64,
+        label_ids=["l-b"],
+        # The URL segment: this exact label must disappear.
+        require_removed_label_ids=["l-a"],
+    )
+    batch = _domain_command(
+        BatchRemoveWorkItemLabelsCommand.model_validate(
+            {**wire, "kind": "work_item.remove_labels"}
+        )
+    )
+    single_request = build_task_space_request(single, verify_payload_hash=False)
+    batch_request = build_task_space_request(batch, verify_payload_hash=False)
+
+    # Same collection semantics for both transports.
+    assert single_request.name == batch_request.name
+    assert single_request.payload["label_ids"] == batch_request.payload["label_ids"]
+    # Only the single route can express "the addressed label must be gone".
+    assert single_request.payload["require_removed_label_ids"] == ("l-a",)
+    assert "require_removed_label_ids" not in batch_request.payload
+    # Consequently the two payloads (and their canonical hashes) deliberately
+    # differ on that field.  A caller that wants the same physical result over
+    # the batch endpoint simply omits the address constraint.
+    single_eval = {
+        key: value for key, value in single_request.payload.items()
+        if key not in {"command_id", "payload_hash"}
+    }
+    batch_eval = {
+        key: value for key, value in batch_request.payload.items()
+        if key not in {"command_id", "payload_hash"}
+    }
+    assert single_eval != batch_eval
+    # Dropping the address constraint makes the two payloads byte-identical:
+    # the difference is exactly that one field, nothing else.
+    without_address = {
+        key: value for key, value in single_eval.items()
+        if key != "require_removed_label_ids"
+    }
+    assert without_address == batch_eval
 
 
 def test_relation_remove_and_resolve_carry_expected_version(
@@ -779,6 +938,127 @@ async def test_batch_endpoint_through_production_app(client) -> None:
         f"/api/v1/work-items/{work_item_id}", headers=headers
     )
     assert after_replay.json()["version"] == item_version + 1
+
+
+@pytest.mark.provisioned_space_storage
+async def test_batch_label_remove_through_production_app(client) -> None:
+    """E2E: batch ``work_item.remove_labels`` converges a real junction.
+
+    Covers the transport difference from the single-label DELETE (复审第 1 条 /
+    TS-02a): a batch command has no URL, so it carries NO address constraint —
+    only the declared target set. The test proves end-to-end (real app + real
+    space token + real UoW + middleware) that such a request is **accepted** and
+    converges the junction, not merely that the payload looks right in a
+    construction-level comparison.
+    """
+    from app.mutation.types import canonical_payload_hash
+
+    headers, space_id = await _setup_space_and_headers(client)
+
+    async def _post(path: str, command_id: str, body: dict[str, Any]):
+        response = await client.post(
+            path,
+            json={"commandId": command_id, "spaceId": space_id,
+                  "payloadHash": canonical_payload_hash(body), **body},
+            headers={**headers, "Idempotency-Key": command_id},
+        )
+        assert response.status_code in (200, 201), response.text
+        return response.json()["value"]
+
+    project = await client.post(
+        "/api/v1/projects",
+        json={
+            "commandId": "e2e-lbl-project",
+            "spaceId": space_id,
+            "payloadHash": canonical_payload_hash(
+                {"key": "LBL", "name": "Label Project", "description": None}
+            ),
+            "key": "LBL",
+            "name": "Label Project",
+            "description": None,
+        },
+        headers={**headers, "Idempotency-Key": "e2e-lbl-project"},
+    )
+    assert project.status_code == 201, project.text
+    project_id = project.json()["value"]["id"]
+
+    label_a = await _post("/api/v1/labels", "e2e-lbl-a", {"name": "Alpha", "color": None})
+    label_b = await _post("/api/v1/labels", "e2e-lbl-b", {"name": "Beta", "color": None})
+
+    item = await client.post(
+        "/api/v1/work-items",
+        json={
+            "commandId": "e2e-lbl-item",
+            "spaceId": space_id,
+            "payloadHash": canonical_payload_hash({
+                "title": "Labelled", "description": None, "parent_id": None,
+                "type_definition_id": None, "status_definition_id": None,
+                "priority": None,
+            }),
+            "projectId": project_id,
+            "title": "Labelled",
+        },
+        headers={**headers, "Idempotency-Key": "e2e-lbl-item"},
+    )
+    assert item.status_code == 201, item.text
+    work_item_id = item.json()["value"]["id"]
+    version = int(item.json()["value"]["version"])
+
+    # Batch #1: declare the full target set {A, B} via the batch endpoint.
+    add_all = {
+        "batchId": "e2e-lbl-batch-add",
+        "commands": [{
+            "kind": "work_item.add_labels",
+            "commandId": "e2e-lbl-add",
+            "spaceId": space_id,
+            "workItemId": work_item_id,
+            "expectedVersion": version,
+            "payloadHash": canonical_payload_hash(
+                {"label_ids": sorted([label_a["id"], label_b["id"]])}
+            ),
+            "labelIds": sorted([label_a["id"], label_b["id"]]),
+        }],
+    }
+    added = await client.post(
+        BATCH_PATH, json=add_all,
+        headers={**headers, "Idempotency-Key": "e2e-lbl-batch-add"},
+    )
+    assert added.status_code == 200, added.text
+    assert added.json()["acceptedCount"] == 1
+    version = int(added.json()["items"][0]["version"])
+    read = await client.get(f"/api/v1/work-items/{work_item_id}", headers=headers)
+    assert read.json()["labelIds"] == sorted([label_a["id"], label_b["id"]])
+
+    # Batch #2: remove A by declaring the post-removal target set {B}.
+    # Note: NO require_removed_label_ids — a batch command has no URL to address.
+    remove_a = {
+        "batchId": "e2e-lbl-batch-remove",
+        "commands": [{
+            "kind": "work_item.remove_labels",
+            "commandId": "e2e-lbl-remove",
+            "spaceId": space_id,
+            "workItemId": work_item_id,
+            "expectedVersion": version,
+            "payloadHash": canonical_payload_hash({"label_ids": [label_b["id"]]}),
+            "labelIds": [label_b["id"]],
+        }],
+    }
+    removed = await client.post(
+        BATCH_PATH, json=remove_a,
+        headers={**headers, "Idempotency-Key": "e2e-lbl-batch-remove"},
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["acceptedCount"] == 1, removed.text
+    assert removed.json()["rejectedCount"] == 0, removed.text
+    item_receipt = removed.json()["items"][0]
+    assert item_receipt["status"] == "accepted"
+    assert sorted(item_receipt["value"]["label_ids"]) == [label_b["id"]]
+
+    # The junction really converged server-side (read back through the query route).
+    final = await client.get(f"/api/v1/work-items/{work_item_id}", headers=headers)
+    assert final.status_code == 200, final.text
+    assert final.json()["labelIds"] == [label_b["id"]]
+    assert int(final.json()["version"]) == int(item_receipt["version"])
 
 
 @pytest.mark.provisioned_space_storage

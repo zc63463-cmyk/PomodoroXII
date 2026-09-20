@@ -1399,13 +1399,32 @@ TaskSpaceCompiler.compile_ArchiveLabel = _compile_ArchiveLabel
 def _compile_label_set_mutation(self, context, request, *, remove: bool):
     """One atomic AddWorkItemLabels / RemoveWorkItemLabels command.
 
-    The caller declares the target label_ids set it expects AFTER this
-    mutation.  The server read-modify-write converges the junction table to
-    that set inside one mutation command, bumping only the work_item version
-    when the set actually changes (idempotent no-op otherwise).  Stale
-    expected_versions fail with version_conflict — never a silent merge — and
-    a refreshed retry converges to the union.
+    ★ 2026-09-20（TS-02a / 裁决一）：``payload["label_ids"]`` 是**本次操作完成
+    后的完整目标集合**（labels-as-state），单条 REST、批量 REST 与未来 MCP 共用
+    同一语义 —— 服务器把 junction 精确收敛到该集合，绝不按载荷内容猜「这是差量
+    还是完整集合」。旧实现按差量解释（add 取并集、remove 取 current - declared），
+    于是「当前 {A,B}、移除 A、声明 {B}」会被算成 {A,B}-{B} = {A}，「仅有 A 时
+    声明空集」反而什么都不删 —— 那是本次修复的实际缺陷。
+
+    操作方向由**权威集合**判定，不由载荷形状推断：add 只允许维持/增加
+    （current ⊆ declared），remove 只允许维持/减少（declared ⊆ current）。越方向
+    的声明以 ``label_set_direction_violated`` 明确拒绝（闭集成员，见
+    app/errors.py::RESERVED_TS_CODES），避免 add 意外删除、remove 意外新增；
+    拒绝发生在编译期 ⇒ 无 DB 写、无版本 bump、无同步事件、无账本。
+
+    ★ 已知且有意的行为变更（TS-02a / 裁决一）：旧实现里 add 是幂等**并集**
+    （``current | declared``），所以「用 add 收敛到更小集合」过去会被接受并静默
+    忽略差额；现在同一请求得到 422。这是裁决一「Add 只允许维持/增加标签……
+    对越过操作方向的目标集合明确拒绝」的直接落地 —— 目标集合语义下若保留并集，
+    add 与 remove 便无法区分「声明」与「差量」，正是本包要消除的歧义。需要缩小
+    集合的调用方须改用 remove。仓库内盘点确认无按旧并集语义构造输入的调用方。
+
+    集合不变时是 no-op（``db_plans=()`` / ``sync_events=()``，版本不动）。CAS 先于
+    收敛：stale ``expected_version`` 一律 ``version_conflict``，绝不静默合并；客户端
+    刷新后按新 ``commandId`` 重新声明完整目标集合重试。
     """
+    from app.mutation.types import MutationRuleViolation
+
     overlay = context.authority
     entity_id = str(request.entity_id)
     item = _require_row(overlay, "work_item", entity_id)
@@ -1414,7 +1433,45 @@ def _compile_label_set_mutation(self, context, request, *, remove: bool):
     for label_id in declared:
         _require_row(overlay, "label", label_id)
     current = set(_label_ids_for_work_item(overlay, entity_id))
-    after_ids = (current - declared) if remove else (current | declared)
+    # Address-level constraint (single-label DELETE only): the URL named one
+    # specific label, so the declared target set must have actually dropped it
+    # AND must not have invented a different one.  Deciding this here — inside
+    # the locked authority read — is the whole point; a route-layer pre-read is
+    # unlocked and races a concurrent command.
+    addressed = request.payload.get("require_removed_label_ids")
+    if addressed is not None:
+        required = set(map(str, addressed))
+        if not required <= (current - declared):
+            raise MutationRuleViolation(
+                "label_set_direction_violated",
+                {
+                    "operation": "remove_labels",
+                    "would_remove": sorted(current - declared),
+                    "would_add": sorted(declared - current),
+                    "address_mismatch": sorted(required - (current - declared)),
+                },
+                retryable=False,
+            )
+    # Direction gate: the declared set is the TARGET, so an add may never drop
+    # and a remove may never gain.  Both directions are computed against the
+    # locked authority set (never against the payload shape) and the check runs
+    # before any state is touched.
+    removed_by_declaration = sorted(current - declared)
+    added_by_declaration = sorted(declared - current)
+    crossing = (
+        added_by_declaration if remove else removed_by_declaration
+    )
+    if crossing:
+        raise MutationRuleViolation(
+            "label_set_direction_violated",
+            {
+                "operation": "remove_labels" if remove else "add_labels",
+                "would_remove": removed_by_declaration,
+                "would_add": added_by_declaration,
+            },
+            retryable=False,
+        )
+    after_ids = declared
     value_ids = sorted(after_ids)
     if after_ids == current:
         # Idempotent set semantics: nothing changed -> no version bump, no

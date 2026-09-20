@@ -92,6 +92,18 @@ def _business_payload(command: TaskSpaceCommand) -> Mapping[str, object]:
             # "labels as state", exactly what the compiler converges the
             # junction to.  Sorted, so the canonical hash is order-stable.
             payload["label_ids"] = sorted(payload["label_ids"])
+            # ★ 2026-09-20（TS-02a）：单标签 DELETE 的 URL 约束（「这个标签必须
+            #   消失」）是命令契约的一部分 —— 它参与 hash，因此改 URL 后的重试是
+            #   「内容变了」而不是命中旧回执；也随命令进入编译器的加锁校验。
+            if payload.get("require_removed_label_ids") is not None:
+                payload["require_removed_label_ids"] = sorted(
+                    payload["require_removed_label_ids"]
+                )
+            else:
+                # Absent = no address-level constraint; keep the canonical
+                # payload free of an explicit null so single POST/DELETE and
+                # batch commands for the same logical set hash identically.
+                payload.pop("require_removed_label_ids", None)
         return payload
     if isinstance(command, LabelCommand):
         # create/update carry the definition fields; archive carries none.

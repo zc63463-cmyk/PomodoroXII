@@ -1876,6 +1876,12 @@ export interface paths {
         /**
          * Remove Work Item Label
          * @description Remove one label by declaring the post-removal full target set.
+         *
+         *     The URL's ``label_id`` is part of the request contract, not decoration: the
+         *     declared target set must actually have dropped THAT label.  The check is
+         *     handed to the compiler as ``require_removed_label_ids`` so it runs inside
+         *     the locked authority transaction; a route-layer pre-read would be unlocked
+         *     and could not be trusted as the authority.
          */
         delete: operations["remove_work_item_label_api_v1_work_items__work_item_id__labels__label_id__delete"];
         options?: never;
@@ -2174,6 +2180,18 @@ export interface components {
         /**
          * AddWorkItemLabelsRequest
          * @description Add labels: declare the full target label_ids set after this mutation.
+         *
+         *     ``labelIds`` must be a superset of the current set (maintain or add only);
+         *     a declaration that would drop a label is ``label_set_direction_violated``.
+         *
+         *     ★ 行为变更（TS-02a / 裁决一，2026-09-20，**已知并有意**）：在本包之前，
+         *     ``add`` 是幂等**并集**（``current | declared``），因此「用 add 收敛到更小的
+         *     集合」在旧语义下是被接受（并被静默忽略差额）的。裁决一明确要求「Add 只允许
+         *     维持/增加标签……对越过操作方向的目标集合明确拒绝」，于是该请求现在得到 422
+         *     ``label_set_direction_violated``。这是**刻意的收紧**，不是实现意外：目标集合
+         *     语义下若再保留并集，add 与 remove 就无法区分「声明」与「差量」，正是本包要
+         *     消除的歧义。需要缩小集合的调用方必须改用 remove（声明缩小后的目标集合）。
+         *     仓库内调用方盘点见本包交付说明：无任何按旧并集语义构造输入的客户端。
          */
         AddWorkItemLabelsRequest: {
             /** Commandid */
@@ -4139,9 +4157,13 @@ export interface components {
         };
         /**
          * RemoveWorkItemLabelsRequest
-         * @description Remove labels: declare the full target label_ids set after this
-         *     mutation (the caller computed it from its local row; the server read-
-         *     modify-writes the junction to the declared set with idempotent semantics).
+         * @description Remove labels: declare the full target label_ids set after this mutation.
+         *
+         *     ``labelIds`` is the post-removal *target set*, not the set of labels to
+         *     drop: removing A from ``{A,B}`` declares ``["B"]``, and removing the last
+         *     label declares ``[]``.  The declaration must be a subset of the current set
+         *     (maintain or drop only); a declaration that would add a label is
+         *     ``label_set_direction_violated``.
          */
         RemoveWorkItemLabelsRequest: {
             /** Commandid */

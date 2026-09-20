@@ -16,6 +16,7 @@
     "test:lib": "vitest run src/lib --reporter=dot",
     "test:components": "vitest run src/components --reporter=dot",
     "test:stores": "vitest run src/stores --reporter=dot",
+    "fixtures:label-requests": "node scripts/dump-pxii-label-requests.mjs",
     "verify:table-preview": "node scripts/verify-table-preview.mjs"
   },
   "dependencies": {

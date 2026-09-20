@@ -381,8 +381,20 @@ def _labels_command(
     expected_version: int,
     payload_hash: str,
     label_ids: list[str],
+    require_removed_label_ids: list[str] | None = None,
 ) -> MutateWorkItem:
-    business = {"label_ids": sorted(label_ids)}
+    """Build one label-set mutation declaring the FULL post-mutation set.
+
+    ``require_removed_label_ids`` carries the address-level constraint of a
+    single-label ``DELETE`` ("this exact label must be gone afterwards").  It
+    is *not* re-derived here: the value travels into the command payload so the
+    compiler — inside the locked authority transaction — is the one that
+    compares it against the declared target set.  Deciding it at the route on
+    an unlocked pre-read would be a TOCTOU race against a concurrent command.
+    """
+    business: dict[str, object] = {"label_ids": sorted(label_ids)}
+    if require_removed_label_ids is not None:
+        business["require_removed_label_ids"] = sorted(require_removed_label_ids)
     return MutateWorkItem(
         command_id=command_id,
         space_id=space_id,
@@ -430,7 +442,14 @@ async def remove_work_item_label(
     query_module=Depends(get_task_space_query_module),
     scope=Depends(get_space_runtime_handle),
 ) -> TaskSpaceAcceptedResponse:
-    """Remove one label by declaring the post-removal full target set."""
+    """Remove one label by declaring the post-removal full target set.
+
+    The URL's ``label_id`` is part of the request contract, not decoration: the
+    declared target set must actually have dropped THAT label.  The check is
+    handed to the compiler as ``require_removed_label_ids`` so it runs inside
+    the locked authority transaction; a route-layer pre-read would be unlocked
+    and could not be trusted as the authority.
+    """
     require_idempotency_key(body.command_id, idempotency_key)
     require_space_identity(scope, body.space_id)
     command = _labels_command(
@@ -441,6 +460,7 @@ async def remove_work_item_label(
         expected_version=body.expected_version,
         payload_hash=body.payload_hash,
         label_ids=body.label_ids,
+        require_removed_label_ids=[label_id],
     )
     outcome = await command_module.execute(scope, command)
     return await _map_work_item_outcome(outcome, scope, query_module)

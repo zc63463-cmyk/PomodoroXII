@@ -244,6 +244,8 @@ def test_add_labels_route_delegates_full_target_set(client, fake_commands) -> No
     assert command.payload["operation"] == "add_labels"
     assert command.payload["label_ids"] == ["l1", "l2"]
     assert command.expected_version == 2
+    # Add carries no address-level constraint (there is no URL label_id).
+    assert "require_removed_label_ids" not in command.payload
 
 
 def test_remove_labels_route_delegates_full_target_set(client, fake_commands) -> None:
@@ -265,6 +267,71 @@ def test_remove_labels_route_delegates_full_target_set(client, fake_commands) ->
     assert isinstance(command, MutateWorkItem)
     assert command.payload["operation"] == "remove_labels"
     assert command.payload["label_ids"] == ["l2"]
+    # ★ TS-02a：URL 的 label_id 是请求契约的一部分 —— 它作为「必须消失」的
+    #   约束随命令进入权威执行链（编译器在加锁事务内比对），路由不做预读判定。
+    assert command.payload["require_removed_label_ids"] == ["l1"]
+
+
+def test_remove_labels_route_url_label_travels_into_the_command_payload(
+    client, fake_commands
+) -> None:
+    """The URL constraint is carried by value, not re-resolved at the route."""
+    resp = client.request(
+        "DELETE",
+        "/api/v1/work-items/w1/labels/l-address",
+        json={
+            "commandId": "labels-rm-r2",
+            "spaceId": "s1",
+            "expectedVersion": 3,
+            "payloadHash": "a" * 64,
+            "labelIds": ["l-keep"],
+        },
+        headers=_headers("labels-rm-r2"),
+    )
+    assert resp.status_code == 200, resp.text
+    command = fake_commands.last_command
+    assert isinstance(command, MutateWorkItem)
+    assert command.payload["require_removed_label_ids"] == ["l-address"]
+
+
+def test_remove_labels_route_canonical_hash_covers_the_url_constraint(
+    client, fake_commands
+) -> None:
+    """Same body, different URL label_id => different business payload.
+
+    Without this, a retry against a different label would hit the recorded
+    receipt of the first command instead of being treated as changed content.
+    """
+    from app.task_space.module import build_task_space_request
+
+    bodies: list[dict[str, object]] = []
+    for command_id, label_id in (
+        ("labels-rm-h1", "l-1"),
+        ("labels-rm-h2", "l-2"),
+    ):
+        resp = client.request(
+            "DELETE",
+            f"/api/v1/work-items/w1/labels/{label_id}",
+            json={
+                "commandId": command_id,
+                "spaceId": "s1",
+                "expectedVersion": 3,
+                "payloadHash": "a" * 64,
+                "labelIds": ["l-keep"],
+            },
+            headers=_headers(command_id),
+        )
+        assert resp.status_code == 200, resp.text
+        bodies.append(dict(fake_commands.last_command.payload))
+
+    assert bodies[0] != bodies[1]
+    # The fake command carries a placeholder hash, so identity is compared with
+    # hash verification off (the route's job is to build the payload, not to
+    # validate a hash the test never computed).
+    first = build_task_space_request(
+        fake_commands.last_command, verify_payload_hash=False
+    )
+    assert first.payload["require_removed_label_ids"] == ("l-2",)
 
 
 def test_work_item_read_projects_label_ids(client) -> None:
