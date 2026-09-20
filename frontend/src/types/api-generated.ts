@@ -1882,6 +1882,15 @@ export interface paths {
          *     handed to the compiler as ``require_removed_label_ids`` so it runs inside
          *     the locked authority transaction; a route-layer pre-read would be unlocked
          *     and could not be trusted as the authority.
+         *
+         *     ★ TS-02a upgrade compatibility (defect one): the address constraint was
+         *     added to the *hashed* command contract by bbf528a, so a pre-upgrade client
+         *     replaying its original body gets ``invalid_payload_hash`` before
+         *     ``_resume_or_return`` is reachable.  A legacy request that is already
+         *     FINALIZED is answered from its **own persisted receipt** instead — see
+         *     ``_legacy_receipt_outcome``.  Nothing here loosens validation for a new
+         *     request: the compatibility branch only runs once the new-rule hash check has
+         *     already failed, and then re-verifies the persisted identity byte for byte.
          */
         delete: operations["remove_work_item_label_api_v1_work_items__work_item_id__labels__label_id__delete"];
         options?: never;
@@ -4164,6 +4173,14 @@ export interface components {
          *     label declares ``[]``.  The declaration must be a subset of the current set
          *     (maintain or drop only); a declaration that would add a label is
          *     ``label_set_direction_violated``.
+         *
+         *     On the single-label ``DELETE /{workItemId}/labels/{labelId}`` route the URL
+         *     additionally constrains the declaration to **exactly** ``current - {labelId}``
+         *     (equality, not a subset): the addressed label must disappear and no
+         *     un-addressed label may be dropped as a side effect.  Addressing a label the
+         *     item does not currently have is therefore a no-op declaration (declare the
+         *     current set unchanged), not a rejection.  The batch route has no URL segment
+         *     and stays on the direction rule alone.
          */
         RemoveWorkItemLabelsRequest: {
             /** Commandid */

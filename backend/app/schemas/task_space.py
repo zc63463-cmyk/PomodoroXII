@@ -306,6 +306,14 @@ class RemoveWorkItemLabelsRequest(WireModel):
     label declares ``[]``.  The declaration must be a subset of the current set
     (maintain or drop only); a declaration that would add a label is
     ``label_set_direction_violated``.
+
+    On the single-label ``DELETE /{workItemId}/labels/{labelId}`` route the URL
+    additionally constrains the declaration to **exactly** ``current - {labelId}``
+    (equality, not a subset): the addressed label must disappear and no
+    un-addressed label may be dropped as a side effect.  Addressing a label the
+    item does not currently have is therefore a no-op declaration (declare the
+    current set unchanged), not a rejection.  The batch route has no URL segment
+    and stays on the direction rule alone.
     """
 
     command_id: CommandId

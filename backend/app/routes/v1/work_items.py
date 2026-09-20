@@ -6,6 +6,7 @@ as a path parameter.
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
@@ -14,7 +15,9 @@ from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy import select
 
 from app.deps import get_space_runtime_handle
+from app.errors import AppError
 from app.models.work_item import WorkItem
+from app.mutation.types import BatchMutationResult
 from app.routes.v1.contract_dependencies import (
     get_task_space_command_module,
     get_task_space_query_module,
@@ -41,9 +44,16 @@ from app.task_space.contracts import (
     TaskSpaceAccepted,
     TaskSpaceOutcome,
     TaskSpacePageQuery,
+    TaskSpaceRejected,
+)
+from app.task_space.legacy_receipts import (
+    LegacyLabelReceiptResolver,
+    LegacyReceiptOutcome,
+    legacy_payload_rejection_reason,
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _space_id(scope) -> str:
@@ -449,6 +459,15 @@ async def remove_work_item_label(
     handed to the compiler as ``require_removed_label_ids`` so it runs inside
     the locked authority transaction; a route-layer pre-read would be unlocked
     and could not be trusted as the authority.
+
+    ★ TS-02a upgrade compatibility (defect one): the address constraint was
+    added to the *hashed* command contract by bbf528a, so a pre-upgrade client
+    replaying its original body gets ``invalid_payload_hash`` before
+    ``_resume_or_return`` is reachable.  A legacy request that is already
+    FINALIZED is answered from its **own persisted receipt** instead — see
+    ``_legacy_receipt_outcome``.  Nothing here loosens validation for a new
+    request: the compatibility branch only runs once the new-rule hash check has
+    already failed, and then re-verifies the persisted identity byte for byte.
     """
     require_idempotency_key(body.command_id, idempotency_key)
     require_space_identity(scope, body.space_id)
@@ -463,6 +482,146 @@ async def remove_work_item_label(
         require_removed_label_ids=[label_id],
     )
     outcome = await command_module.execute(scope, command)
+    if (
+        isinstance(outcome, TaskSpaceRejected)
+        and outcome.code == "invalid_payload_hash"
+    ):
+        legacy = await _legacy_receipt_outcome(
+            command_id=body.command_id,
+            work_item_id=work_item_id,
+            scope=scope,
+            payload_hash=body.payload_hash,
+            expected_version=body.expected_version,
+            label_ids=body.label_ids,
+        )
+        if isinstance(legacy, BatchMutationResult):
+            return await _legacy_receipt_response(
+                legacy, command_id=body.command_id, scope=scope, query_module=query_module
+            )
+        # Fail-closed, but diagnosed: the rejection carries which kind of miss
+        # this was, so a crash-window replay is not indistinguishable from a
+        # tampered payload.
+        return await _map_work_item_outcome(
+            _with_legacy_diagnosis(outcome, legacy), scope, query_module
+        )
+    return await _map_work_item_outcome(outcome, scope, query_module)
+
+
+def _with_legacy_diagnosis(
+    outcome: TaskSpaceRejected, legacy: LegacyReceiptOutcome | None
+) -> TaskSpaceRejected:
+    """Attach the legacy-lookup diagnosis to an ordinary hash rejection.
+
+    The error **code** stays the closed-set ``invalid_payload_hash`` (no new
+    code, closed set untouched); only the ``details`` gain the reason/recovery
+    fields. A same-code-different-details rejection is what lets an operator —
+    or the on-call runbook — tell "legacy request stuck in recovery" from
+    "content genuinely does not match".
+
+    ``legacy is None`` means the lookup proved *nothing* (unknown commandId,
+    changed content, foreign request name, or no journal authority). That is
+    still worth saying: it is the ``hash_mismatch`` case, and reporting it
+    explicitly stops the two conditions from being byte-identical rejections.
+    """
+    diagnosis = dict(legacy_payload_rejection_reason(legacy))
+    merged = {**dict(outcome.details), **diagnosis}
+    return replace(outcome, details=merged)
+
+
+async def _legacy_receipt_outcome(
+    *,
+    command_id: str,
+    work_item_id: str,
+    scope,
+    payload_hash: str,
+    expected_version: int,
+    label_ids: list[str],
+) -> BatchMutationResult | LegacyReceiptOutcome | None:
+    """Look for one pre-TS-02a receipt that this replay is provably identical to.
+
+    Returns the hydrated durable result on a hit, a
+    :class:`LegacyReceiptOutcome` explaining a *diagnosable* miss (a persisted
+    but non-terminal record, or an unusable receipt), or ``None`` when there is
+    simply nothing to say (unknown ID, changed content, foreign request name,
+    or no authority to read the journal). It never writes: the compatibility
+    path only re-reads.
+    """
+    session_factory = getattr(scope, "session_factory", None)
+    if not callable(session_factory):
+        # No authority to read the journal from: stay fail-closed.
+        return None
+    resolver = LegacyLabelReceiptResolver(session_factory)
+    try:
+        context = await resolver.load_identity(
+            command_id=command_id,
+            work_item_id=work_item_id,
+            declared_payload_hash=payload_hash,
+            expected_version=expected_version,
+            declared_label_ids=label_ids,
+        )
+        if context is None:
+            return None
+        if not resolver.space_matches(context, scope):
+            # Foreign Space: same closed 403 the new-request path raises.
+            raise AppError(
+                code="space_scope_mismatch",
+                details={
+                    "scopeSpaceId": _space_id(scope),
+                    "payloadSpaceId": context.space_id,
+                },
+            )
+        return await resolver.receipt_for(context)
+    except AppError:
+        raise
+    except Exception:  # noqa: BLE001 - an unreadable journal is a non-match
+        logger.exception("legacy label receipt lookup failed for %s", command_id)
+        return None
+
+
+async def _legacy_receipt_response(
+    result: BatchMutationResult,
+    *,
+    command_id: str,
+    scope,
+    query_module,
+) -> TaskSpaceAcceptedResponse:
+    """Re-read one hydrated legacy receipt through the ordinary response mapper.
+
+    The persisted ``applied.entity_type`` is the *request* entity type
+    (``"task_space"`` — see ``task_space/module.py`` which stamps
+    ``entity_type="task_space"`` on every ``build_task_space_request``), not the
+    *domain* entity the route serves. Passing that through verbatim would make
+    ``_map_work_item_outcome`` skip its ``entity_type == "work_item"`` branch and
+    return the raw durable post-image — a different wire shape from a live
+    accepted response (no derived ``depth``). This route only ever serves work
+    items, so the domain entity type is stated explicitly here and the ordinary
+    enrichment applies, keeping one shape for both a live accept and a replay.
+
+    Zero new ledger events and zero version movement: nothing was executed.
+    """
+    applied = result.applied[0]
+    entity_id = str(applied.entity_id)
+    # Fail closed rather than answering with a foreign shape: this route serves
+    # exactly one work item under one commandId, so a receipt that does not
+    # belong to that command is not ours to return. ``idempotency_conflict``
+    # (409, closed set) is the same code ``_resume_or_return`` uses when a
+    # batch identity does not match the request being replayed.
+    if str(applied.batch_id) != command_id:
+        raise AppError(
+            code="idempotency_conflict",
+            details={
+                "reason": "the legacy receipt does not belong to this command",
+                "operation_id": command_id,
+                "existing_batch_id": str(applied.batch_id),
+            },
+        )
+    outcome = TaskSpaceAccepted(
+        command_id=command_id,
+        entity_type="work_item",
+        entity_id=entity_id,
+        version=int(applied.version) if applied.version is not None else 0,
+        value=dict(applied.value),
+    )
     return await _map_work_item_outcome(outcome, scope, query_module)
 
 

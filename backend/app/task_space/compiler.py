@@ -1412,6 +1412,19 @@ def _compile_label_set_mutation(self, context, request, *, remove: bool):
     app/errors.py::RESERVED_TS_CODES），避免 add 意外删除、remove 意外新增；
     拒绝发生在编译期 ⇒ 无 DB 写、无版本 bump、无同步事件、无账本。
 
+    ★ 单标签 DELETE 的地址约束（TS-02a 补充）：当载荷带 ``require_removed_label_ids``
+    （只有 ``DELETE /items/{id}/labels/{label_id}`` 这条路会注入，见
+    routes/v1/work_items.py::remove_work_item_label）时，除方向门外还要求
+    **``declared == current - required``**（相等，不是子集）。这条相等判定一次
+    覆盖两种情形：
+      * 被寻址标签**本来就不存在** ⇒ ``declared == current`` 即成立，命令落在下面的
+        no-op 分支（零版本变化、零账本事件），而不是被拒；
+      * 被寻址标签**必须消失**，且**不得顺带删掉任何未寻址标签**（declared 少任何一个
+        未寻址标签即不等）。
+    带地址约束时方向门的作用被包含关系吸收：``declared ⊆ current`` 与
+    ``declared ⊇ current - required`` 都是等式的推论。批量 Remove 不带该字段，
+    仍只走方向门（见 task_space/batch.py 与 schemas/task_space_batch.py）。
+
     ★ 已知且有意的行为变更（TS-02a / 裁决一）：旧实现里 add 是幂等**并集**
     （``current | declared``），所以「用 add 收敛到更小集合」过去会被接受并静默
     忽略差额；现在同一请求得到 422。这是裁决一「Add 只允许维持/增加标签……
@@ -1434,21 +1447,48 @@ def _compile_label_set_mutation(self, context, request, *, remove: bool):
         _require_row(overlay, "label", label_id)
     current = set(_label_ids_for_work_item(overlay, entity_id))
     # Address-level constraint (single-label DELETE only): the URL named one
-    # specific label, so the declared target set must have actually dropped it
-    # AND must not have invented a different one.  Deciding this here — inside
-    # the locked authority read — is the whole point; a route-layer pre-read is
-    # unlocked and races a concurrent command.
+    # specific label, and ``label_ids`` is the FULL post-mutation target set, so
+    # the declaration must be EXACTLY "the current set minus the addressed
+    # label(s)" — ``declared == current - required``.
+    #
+    # Equality is what makes the constraint complete; a subset test is not:
+    #   * ``required <= (current - declared)`` only asks "is the addressed label
+    #     absent from declared?", which (a) wrongly REJECTS removing a label the
+    #     item never had — ``current - declared`` is then empty, so any non-empty
+    #     ``required`` fails, even though "remove what is not there" is a no-op
+    #     the zero-effect branch below handles; and (b) wrongly ACCEPTS a
+    #     declaration that also drops un-addressed labels, because those extra
+    #     removals never appear in ``required``.
+    # The equality form covers both directions with one comparison: the addressed
+    # label(s) must be gone (a surviving one makes ``declared`` too large) AND
+    # nothing else may be dropped (an extra removal makes it too small).
+    #
+    # Deciding this here — inside the locked authority read — is the whole point;
+    # a route-layer pre-read is unlocked and races a concurrent command.
     addressed = request.payload.get("require_removed_label_ids")
     if addressed is not None:
         required = set(map(str, addressed))
-        if not required <= (current - declared):
+        expected_target = current - required
+        if declared != expected_target:
             raise MutationRuleViolation(
                 "label_set_direction_violated",
                 {
                     "operation": "remove_labels",
+                    # What this declaration would really do, computed against the
+                    # locked authority set.
                     "would_remove": sorted(current - declared),
                     "would_add": sorted(declared - current),
-                    "address_mismatch": sorted(required - (current - declared)),
+                    # Why it does not equal ``current - required``: which addressed
+                    # label(s) survive, and which un-addressed label(s) would be
+                    # dropped as a side effect. Either list being non-empty means
+                    # ``declared != current - required``.
+                    "address_mismatch": {
+                        "address_label_kept": sorted(declared & required),
+                        "unaddressed_label_dropped": sorted(
+                            (current - required) - declared
+                        ),
+                        "required_target_ids": sorted(expected_target),
+                    },
                 },
                 retryable=False,
             )

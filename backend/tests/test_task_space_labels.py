@@ -692,8 +692,10 @@ async def test_single_label_delete_address_must_match_the_declared_target(
 
     ``require_removed_label_ids`` travels inside the command payload and is
     compared to the declared target set by the compiler — inside the locked
-    authority read — so a body that keeps the addressed label (or claims to
-    have removed one it never had) is refused with zero side effects.
+    authority read — under the **equality** rule ``declared == current -
+    addressed`` (compiler.py::_compile_label_set_mutation).  Both cases below
+    declare a set that differs from ``current - addressed``, so both are refused
+    with zero side effects.
     """
     label_a = await create_label(task_space_fixture, command_id="label-am-a", name="A")
     label_b = await create_label(task_space_fixture, command_id="label-am-b", name="B")
@@ -729,11 +731,21 @@ async def test_single_label_delete_address_must_match_the_declared_target(
     )
     assert isinstance(mismatch, TaskSpaceRejected)
     assert mismatch.code == "label_set_direction_violated"
-    assert tuple(mismatch.details["address_mismatch"]) == (label_a.entity_id,)
+    # current == {A,B}, addressed == {A}, so the only declaration equal to
+    # ``current - addressed`` is {B}; keeping A is too large, and the diagnosis
+    # names the addressed label that survived.
+    assert tuple(mismatch.details["address_mismatch"]["address_label_kept"]) == (
+        label_a.entity_id,
+    )
+    assert mismatch.details["address_mismatch"]["unaddressed_label_dropped"] == ()
+    assert tuple(mismatch.details["address_mismatch"]["required_target_ids"]) == (
+        label_b.entity_id,
+    )
 
-    # URL says "remove B" while the declared target KEEPS B and drops A: the
-    # addressed label did not disappear, so it is a mismatch too (and the
-    # direction rule alone would have let this removal through).
+    # URL says "remove B" while the declared target KEEPS B and drops A:
+    # current - addressed is {A}, but {B} != {A}, so it is refused — the
+    # declaration is neither "B gone" nor "nothing else dropped".  (The direction
+    # rule alone would have let this removal through, since it only adds nothing.)
     never_had = await task_space_fixture.module.execute(
         task_space_fixture.scope,
         remove_labels_command(
@@ -747,7 +759,14 @@ async def test_single_label_delete_address_must_match_the_declared_target(
     )
     assert isinstance(never_had, TaskSpaceRejected)
     assert never_had.code == "label_set_direction_violated"
-    assert tuple(never_had.details["address_mismatch"]) == (label_b.entity_id,)
+    # current == {A,B}, addressed == {B} => the required target is {A}, but the
+    # declaration is {B}: the addressed label survived AND A would be dropped.
+    assert tuple(never_had.details["address_mismatch"]["address_label_kept"]) == (
+        label_b.entity_id,
+    )
+    assert tuple(never_had.details["address_mismatch"]["unaddressed_label_dropped"]) == (
+        label_a.entity_id,
+    )
 
     read = await task_space_fixture.read_work_item(item.value["id"])
     assert read["label_ids"] == sorted([label_a.entity_id, label_b.entity_id])
