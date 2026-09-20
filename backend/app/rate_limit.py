@@ -12,6 +12,19 @@ from collections.abc import Iterable
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+#: TS-02（2026-09-20）：REST 批量写端点路径（与路由挂载保持一致）。
+#: 写通道准入不能假定已有保护：该端点必须显式纳入默认限流，在业务写入
+#: 前即可被限流拒绝；沿用已有可信代理解析（trusted_proxies），不做特殊处理。
+TASK_SPACE_BATCH_PATH = "/api/v1/task-space/commands:batch"
+#: 批量写窗口配额（每规范客户端 IP）：写操作昂贵，取保守预算。
+TASK_SPACE_BATCH_RATE_LIMIT: tuple[int, float] = (30, 60.0)
+
+DEFAULT_RATE_LIMITS: dict[str, tuple[int, float]] = {
+    "/api/v1/auth/login": (10, 60.0),
+    "/api/v1/auth/setup": (5, 60.0),
+    TASK_SPACE_BATCH_PATH: TASK_SPACE_BATCH_RATE_LIMIT,
+}
+
 
 class RateLimitMiddleware:
     """In-memory sliding-window limiter keyed by endpoint and canonical client IP."""
@@ -30,10 +43,7 @@ class RateLimitMiddleware:
         if cleanup_interval <= 0:
             raise ValueError("cleanup_interval must be positive")
         self.app = app
-        self._limits = limits or {
-            "/api/v1/auth/login": (10, 60.0),
-            "/api/v1/auth/setup": (5, 60.0),
-        }
+        self._limits = limits or dict(DEFAULT_RATE_LIMITS)
         self._max_clients = max_clients
         self._trusted_proxies = tuple(ipaddress.ip_network(value) for value in trusted_proxies)
         self._cleanup_interval = cleanup_interval

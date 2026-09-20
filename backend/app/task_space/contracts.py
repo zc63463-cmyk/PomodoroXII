@@ -334,3 +334,42 @@ class TaskSpaceCommandModule(Protocol):
     async def execute(
         self, scope: SpaceRuntimeHandle, command: TaskSpaceCommand
     ) -> TaskSpaceOutcome: ...
+
+
+# --------------------------------------------------------------------------- #
+# ★ TS-02（2026-09-20）：REST 批量写 —— 独立的批量命令协议与结果类型。
+#   单条 ``TaskSpaceCommandModule`` 保持不变：既有 mock 只需实现 ``execute``，
+#   不要求一并实现批量接口。批量结果按输入位置排列，每项关联原单条结果
+#   ``TaskSpaceAccepted | TaskSpaceRejected``；批量上限（条数 / 规范化字节）
+#   以本模块常量为单一事实来源，schema、REST 与后续 MCP 共用。
+# --------------------------------------------------------------------------- #
+
+#: 每批命令数上限（新 API 的保守预算；不改变 Sync v2 的 500 条上限）。
+TASK_SPACE_BATCH_MAX_COMMANDS = 100
+#: 规范化（RFC 8785 canonical JSON）批内容字节上限（1 MiB）。
+TASK_SPACE_BATCH_MAX_CANONICAL_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class TaskSpaceBatchItemOutcome:
+    """One command's outcome at its original input position."""
+
+    input_index: int
+    outcome: TaskSpaceOutcome
+
+
+@dataclass(frozen=True)
+class TaskSpaceBatchOutcome:
+    """Full durable business receipt for one batch, ordered by input position."""
+
+    batch_id: str
+    items: tuple[TaskSpaceBatchItemOutcome, ...]
+
+
+class TaskSpaceBatchCommandModule(Protocol):
+    async def execute_batch(
+        self,
+        scope: SpaceRuntimeHandle,
+        commands: tuple[TaskSpaceCommand, ...],
+        batch_id: str,
+    ) -> TaskSpaceBatchOutcome: ...

@@ -114,9 +114,23 @@ def _business_payload(command: TaskSpaceCommand) -> Mapping[str, object]:
     raise TypeError(f"unsupported TaskSpaceCommand: {type(command).__name__}")
 
 
-def build_task_space_request(command: TaskSpaceCommand) -> MutationRequest:
+def build_task_space_request(
+    command: TaskSpaceCommand, *, verify_payload_hash: bool = True
+) -> MutationRequest:
+    """Compile one domain command into its canonical MutationRequest.
+
+    ``verify_payload_hash=False`` skips only the declared-hash comparison so a
+    caller can still obtain the request **identity** (``request_hash`` covers
+    name / entity_type / entity_id / payload / expected_version) of a command
+    whose declared hash is wrong.  The batch adapter uses it to bind a
+    pre-rejected (``invalid_payload_hash``) item to the same content-addressed
+    identity a valid item would get, instead of a weaker business-payload-only
+    hash.  Default behaviour is unchanged: the single-command entry point still
+    validates the declared hash and raises ``InvalidPayloadHashError``.
+    """
     business_payload = _business_payload(command)
-    require_payload_hash(command.payload_hash, business_payload)
+    if verify_payload_hash:
+        require_payload_hash(command.payload_hash, business_payload)
     if isinstance(command, CreateProject):
         request_name = "CreateProject"
         entity_id = command.command_id
@@ -244,3 +258,10 @@ class DefaultTaskSpaceCommandModule:
                 details=exc.details,
             )
         return _accepted(command, result.value)
+
+
+# ★ TS-02（2026-09-20）：批量适配（task_space/batch.py）复用同一条 canonical
+#   业务载荷与 accepted 映射 —— 单条与批量对同一命令必须产生完全相同的
+#   MutationRequest 与回执；下划线名保持原位以兼容既有测试。
+business_payload = _business_payload
+accepted_outcome = _accepted

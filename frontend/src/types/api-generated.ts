@@ -1630,6 +1630,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/task-space/commands:batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Execute Task Space Commands Batch
+         * @description Execute one closed batch of Task Space commands (partial acceptance).
+         *
+         *     正常进入领域处理后，hash/版本/业务规则拒绝映射为逐项回执；接受集合的
+         *     提交、恢复与账本可见性由现有 UoW 批量语义管理。
+         */
+        post: operations["execute_task_space_commands_batch_api_v1_task_space_commands_batch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/time-blocks": {
         parameters: {
             query?: never;
@@ -2225,6 +2248,218 @@ export interface components {
             user_id: string;
             /** Valid */
             valid: boolean;
+        };
+        /** BatchAddWorkItemLabelsCommand */
+        BatchAddWorkItemLabelsCommand: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "work_item.add_labels";
+            /** Labelids */
+            labelIds: string[];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Workitemid */
+            workItemId: string;
+        };
+        /** BatchCreateRelationCommand */
+        BatchCreateRelationCommand: {
+            /** Commandid */
+            commandId: string;
+            /** Fromworkitemid */
+            fromWorkItemId: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "relation.create";
+            /** Payloadhash */
+            payloadHash: string;
+            /**
+             * Relationtype
+             * @enum {string}
+             */
+            relationType: "depends_on" | "blocks" | "relates_to";
+            /** Spaceid */
+            spaceId: string;
+            /** Toworkitemid */
+            toWorkItemId: string;
+        };
+        /**
+         * BatchCreateWorkItemCommand
+         * @description Create one work item (entity id remains server-derived from commandId).
+         */
+        BatchCreateWorkItemCommand: {
+            /** Commandid */
+            commandId: string;
+            /** Description */
+            description?: string | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "work_item.create";
+            /** Parentid */
+            parentId?: string | null;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Priority */
+            priority?: ("low" | "medium" | "high" | "urgent") | null;
+            /** Projectid */
+            projectId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Statusdefinitionid */
+            statusDefinitionId?: string | null;
+            /** Title */
+            title: string;
+            /** Typedefinitionid */
+            typeDefinitionId?: string | null;
+        };
+        /** BatchMoveWorkItemCommand */
+        BatchMoveWorkItemCommand: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "work_item.move";
+            /** Parentid */
+            parentId?: string | null;
+            /** Payloadhash */
+            payloadHash: string;
+            /** Projectid */
+            projectId: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Workitemid */
+            workItemId: string;
+        };
+        /** BatchRemoveRelationCommand */
+        BatchRemoveRelationCommand: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Fromworkitemid */
+            fromWorkItemId: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "relation.remove";
+            /** Payloadhash */
+            payloadHash: string;
+            /**
+             * Relationtype
+             * @enum {string}
+             */
+            relationType: "depends_on" | "blocks" | "relates_to";
+            /** Spaceid */
+            spaceId: string;
+            /** Toworkitemid */
+            toWorkItemId: string;
+        };
+        /** BatchRemoveWorkItemLabelsCommand */
+        BatchRemoveWorkItemLabelsCommand: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "work_item.remove_labels";
+            /** Labelids */
+            labelIds: string[];
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Workitemid */
+            workItemId: string;
+        };
+        /** BatchResolveRelationCommand */
+        BatchResolveRelationCommand: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Fromworkitemid */
+            fromWorkItemId: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "relation.resolve";
+            /** Payloadhash */
+            payloadHash: string;
+            /**
+             * Relationtype
+             * @enum {string}
+             */
+            relationType: "depends_on" | "blocks" | "relates_to";
+            /** Spaceid */
+            spaceId: string;
+            /** Toworkitemid */
+            toWorkItemId: string;
+        };
+        /** BatchTransitionWorkItemCommand */
+        BatchTransitionWorkItemCommand: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "work_item.transition";
+            /** Payloadhash */
+            payloadHash: string;
+            /** Spaceid */
+            spaceId: string;
+            /** Statusdefinitionid */
+            statusDefinitionId: string;
+            /** Workitemid */
+            workItemId: string;
+        };
+        /** BatchUpdateWorkItemCommand */
+        BatchUpdateWorkItemCommand: {
+            /** Commandid */
+            commandId: string;
+            /** Description */
+            description?: string | null;
+            /** Expectedversion */
+            expectedVersion: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "work_item.update";
+            /** Payloadhash */
+            payloadHash: string;
+            /** Priority */
+            priority?: ("low" | "medium" | "high" | "urgent") | null;
+            /** Spaceid */
+            spaceId: string;
+            /** Title */
+            title?: string | null;
+            /** Typedefinitionid */
+            typeDefinitionId?: string | null;
+            /** Workitemid */
+            workItemId: string;
         };
         /**
          * BlockedMapResponse
@@ -4812,6 +5047,72 @@ export interface components {
             };
             /** Version */
             version: number;
+        };
+        /** TaskSpaceBatchAcceptedItem */
+        TaskSpaceBatchAcceptedItem: {
+            /** Commandid */
+            commandId: string;
+            /** Entityid */
+            entityId: string;
+            /** Entitytype */
+            entityType: string;
+            /** Inputindex */
+            inputIndex: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "accepted";
+            /** Value */
+            value: {
+                [key: string]: unknown;
+            };
+            /** Version */
+            version: number;
+        };
+        /** TaskSpaceBatchRejectedItem */
+        TaskSpaceBatchRejectedItem: {
+            /** Code */
+            code: string;
+            /** Commandid */
+            commandId: string;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
+            /** Inputindex */
+            inputIndex: number;
+            /** Retryable */
+            retryable: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "rejected";
+        };
+        /**
+         * TaskSpaceBatchRequest
+         * @description One closed batch against exactly one authorized Space.
+         */
+        TaskSpaceBatchRequest: {
+            /** Batchid */
+            batchId: string;
+            /** Commands */
+            commands: (components["schemas"]["BatchCreateWorkItemCommand"] | components["schemas"]["BatchUpdateWorkItemCommand"] | components["schemas"]["BatchMoveWorkItemCommand"] | components["schemas"]["BatchTransitionWorkItemCommand"] | components["schemas"]["BatchAddWorkItemLabelsCommand"] | components["schemas"]["BatchRemoveWorkItemLabelsCommand"] | components["schemas"]["BatchCreateRelationCommand"] | components["schemas"]["BatchRemoveRelationCommand"] | components["schemas"]["BatchResolveRelationCommand"])[];
+        };
+        /**
+         * TaskSpaceBatchResponse
+         * @description HTTP 200 full business receipt: one item per input position.
+         */
+        TaskSpaceBatchResponse: {
+            /** Acceptedcount */
+            acceptedCount: number;
+            /** Batchid */
+            batchId: string;
+            /** Items */
+            items: (components["schemas"]["TaskSpaceBatchAcceptedItem"] | components["schemas"]["TaskSpaceBatchRejectedItem"])[];
+            /** Rejectedcount */
+            rejectedCount: number;
         };
         /** TaskSpaceDefinitionsResponse */
         TaskSpaceDefinitionsResponse: {
@@ -8963,6 +9264,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SyncV2StatusResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    execute_task_space_commands_batch_api_v1_task_space_commands_batch_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskSpaceBatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceBatchResponse"];
                 };
             };
             /** @description Domain or request validation error */

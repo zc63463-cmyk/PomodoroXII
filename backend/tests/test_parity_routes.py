@@ -31,6 +31,9 @@ EXPECTED_NON_ENTITY_PREFIXES = {
     # 依赖域：与 /work-items 同属 Task Space 契约路由，手工挂载，
     # 因此不走 registry 的 route_prefix 声明（见 registry/builtin.py 注释）。
     "/relations",
+    # TS-02 REST 批量写：跨实体契约端点（POST /api/v1/task-space/commands:batch），
+    # 按命令模块 + MutationUnitOfWork 语义批量提交，不是某个实体的 CRUD 路由。
+    "/task-space",
     "/trash",
     "/stats",
     "/sync",

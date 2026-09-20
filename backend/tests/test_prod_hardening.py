@@ -262,7 +262,14 @@ async def test_rate_limit_response_gets_request_id_and_security_headers(client):
     assert cors.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
-def _rate_app(*, trusted_proxies=(), limit=2, max_clients=10):
+def _rate_app(
+    *,
+    trusted_proxies=(),
+    limit=2,
+    max_clients=10,
+    limits: dict[str, tuple[int, float]] | None = None,
+    path: str = "/api/v1/auth/login",
+):
     from app.rate_limit import RateLimitMiddleware
 
     async def ok(scope, receive, send):
@@ -272,20 +279,24 @@ def _rate_app(*, trusted_proxies=(), limit=2, max_clients=10):
 
     return RateLimitMiddleware(
         ok,
-        limits={"/api/v1/auth/login": (limit, 60.0)},
+        limits=limits if limits is not None else {path: (limit, 60.0)},
         max_clients=max_clients,
         trusted_proxies=trusted_proxies,
     )
 
 
 async def _rate_request(
-    app, peer: str, forwarded: str | None = None, method: str = "POST"
+    app,
+    peer: str,
+    forwarded: str | None = None,
+    method: str = "POST",
+    path: str = "/api/v1/auth/login",
 ):
     headers = [] if forwarded is None else [(b"x-forwarded-for", forwarded.encode())]
     scope = {
         "type": "http",
         "method": method,
-        "path": "/api/v1/auth/login",
+        "path": path,
         "headers": headers,
         "client": (peer, 1234),
     }
@@ -357,6 +368,55 @@ async def test_rate_limit_only_counts_post(method):
     assert limiter.tracked_key_count == 0
     assert (await _rate_request(limiter, "198.51.100.5"))["status"] == 204
     assert (await _rate_request(limiter, "198.51.100.5"))["status"] == 429
+
+
+# -- TS-02: the Task Space batch write endpoint is explicitly protected ------ #
+
+
+def test_rate_limit_defaults_protect_task_space_batch_endpoint():
+    """生产默认配置必须显式包含批量写端点（不依赖通用兜底）。"""
+    from app.rate_limit import TASK_SPACE_BATCH_PATH, RateLimitMiddleware
+
+    async def ok(scope, receive, send):
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    limiter = RateLimitMiddleware(ok)
+    assert TASK_SPACE_BATCH_PATH in limiter._limits
+    limit, window = limiter._limits[TASK_SPACE_BATCH_PATH]
+    assert limit >= 1 and window > 0
+
+
+def test_rate_limit_default_paths_are_real_routes():
+    """默认限流表里的每个路径都必须是真实挂载的路由。
+
+    middleware 对 ``scope["path"]`` 精确匹配、不在表内直接放行 —— 表里写错的
+    路径不会报错，只会静默不设防。这条断言把「手写路径字符串」钉在真实路由
+    集合上：改名/挪前缀会立刻变红，而不是让写通道悄悄失去限流。
+    """
+    from app.main import create_app
+    from app.rate_limit import DEFAULT_RATE_LIMITS
+
+    paths = set(create_app().openapi()["paths"])
+    assert set(DEFAULT_RATE_LIMITS) <= paths, (
+        f"rate-limited paths missing from the mounted routes: "
+        f"{sorted(set(DEFAULT_RATE_LIMITS) - paths)}"
+    )
+
+
+async def test_rate_limit_blocks_task_space_batch_burst():
+    """超过窗口配额的批量写请求在业务写入前收到 429。"""
+    from app.rate_limit import TASK_SPACE_BATCH_PATH
+
+    limiter = _rate_app(limit=2, path=TASK_SPACE_BATCH_PATH)
+    first = await _rate_request(limiter, "198.51.100.9", path=TASK_SPACE_BATCH_PATH)
+    assert first["status"] == 204
+    second = await _rate_request(limiter, "198.51.100.9", path=TASK_SPACE_BATCH_PATH)
+    assert second["status"] == 204
+    limited = await _rate_request(limiter, "198.51.100.9", path=TASK_SPACE_BATCH_PATH)
+    assert limited["status"] == 429
+    # 独立路径配额：登录限流不受批量写流量影响。
+    assert (await _rate_request(limiter, "198.51.100.9"))["status"] == 204
 
 
 def _event(payload: dict[str, Any] | None = None):
