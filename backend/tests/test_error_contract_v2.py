@@ -281,6 +281,15 @@ EXPECTED_TS1_COMPILER_REJECTION_CODES = frozenset({
     "payload_field_not_allowed",
     # D5 Y: label definition CRUD owns the unique-name conflict.
     "label_name_conflict",
+    # ★ TS-02a（2026-09-20）：labelIds 是「本次操作完成后的完整目标集合」，
+    #   操作方向必须由**权威集合**判定，绝不按载荷内容猜差量。compiler.py 在
+    #   两处产出该码 —— 单标签 DELETE 的地址约束（declared == current - required）
+    #   与 add/remove 的方向门（compiler.py:1474 与 :1506 的
+    #   ``raise MutationRuleViolation("label_set_direction_violated", ...)``）。
+    #   它已在闭集中注册（app/errors.py::RESERVED_TS_CODES 与
+    #   MUTATION_REJECTION_SPECS，422 validation_error），因此这里必须列入清单，
+    #   而不是被排除。
+    "label_set_direction_violated",
 })
 
 
