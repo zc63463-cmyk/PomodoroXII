@@ -1,9 +1,10 @@
 'use client'
 
-import { createElement, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createElement, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { BlockerAckModal } from '@/components/task-space/blocker-ack-modal'
 import { FocusedWorkItemNote } from '@/components/timer/focused-work-item-note'
+import { RestCyclePanel } from '@/components/timer/rest-cycle-panel'
 import { SessionClock } from '@/components/timer/session-clock'
 import { SessionLauncher, type LaunchSelection } from '@/components/timer/session-launcher'
 import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
@@ -14,6 +15,14 @@ import { Button } from '@/components/ui/button'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
 import { createEndAlert } from '@/lib/focus-session/end-alert'
 import { deriveSessionClock } from '@/lib/focus-session/clock'
+import {
+  countCompletedWorkSessions,
+  defaultMinutesForMode,
+  isBreakMode,
+  modeLabel,
+  planRestCycle,
+  type SessionMode,
+} from '@/lib/focus-session/session-mode'
 import { resolveTimerError } from '@/lib/focus-session/timer-error'
 import { FocusSessionRepository, readSessionCommandReceipts, type LocalFocusSessionAggregate } from '@/lib/focus-session/focus-session-repository'
 import { SessionReviewDraftController, type SessionReviewDraft } from '@/lib/focus-session/session-review-draft-registry'
@@ -108,6 +117,13 @@ export default function TimerPage() {
   const [draftController, setDraftController] = useState<TimerNoteComposerDraftController | null>(null)
   const [reviewController, setReviewController] = useState<SessionReviewDraftController | null>(null)
   const [endedAggregate, setEndedAggregate] = useState<LocalFocusSessionAggregate | null>(null)
+  // ── 休息节奏（双体系兼容 2026-09-16）────────────────────────────────────
+  // 已完成番茄数（含刚结束那一轮）：长休间隔的判据，本地缓存行口径。
+  const [completedWorkSessions, setCompletedWorkSessions] = useState(0)
+  // 自动开始只对每个结束会话触发一次（闩锁按 sessionId）。
+  const restAutoStartedFor = useRef<string | null>(null)
+  const [restCycleStarting, setRestCycleStarting] = useState(false)
+  const [restCycleBlockedReason, setRestCycleBlockedReason] = useState<string | null>(null)
   const reviewDraft = useFocusSessionStore((state) => state.reviewDraft)
   const setReviewDraft = useFocusSessionStore((state) => state.setReviewDraft)
   const [error, setError] = useState<string | null>(null)
@@ -174,6 +190,8 @@ export default function TimerPage() {
       plannedSeconds: session.plannedSeconds,
       notificationEnabled,
       soundEnabled,
+      // 双体系兼容：休息到点的提示文案不同（「休息结束」），闩锁语义不变。
+      mode: ((session as { sessionType?: SessionMode }).sessionType ?? 'work') as SessionMode,
     })
   }, [clock, notificationEnabled, session, soundEnabled])
 
@@ -210,6 +228,45 @@ export default function TimerPage() {
     stateCommand: plan.completionDraft ? 'complete' as const : 'none' as const,
     expectedWorkItemVersion: plan.workItemVersionSnapshot,
   })), [plans])
+
+  // ── 休息节奏（双体系兼容 2026-09-16）────────────────────────────────────
+  // 设置订阅 + 纯函数判定：页面不重新发明节奏，只把设置喂给 planRestCycle。
+  const pomodoroMinutes = useSettingsStore((state) => state.pomodoroDuration)
+  const shortBreakMinutes = useSettingsStore((state) => state.shortBreakDuration)
+  const longBreakMinutes = useSettingsStore((state) => state.longBreakDuration)
+  const longBreakInterval = useSettingsStore((state) => state.longBreakInterval)
+  const autoStartBreaks = useSettingsStore((state) => state.autoStartBreaks)
+  const autoStartPomodoros = useSettingsStore((state) => state.autoStartPomodoros)
+  const activeSessionMode = ((session as { sessionType?: SessionMode } | null)?.sessionType ?? 'work') as SessionMode
+  const endedSessionMode = ((aggregate?.session as { sessionType?: SessionMode } | undefined)?.sessionType ?? activeSessionMode) as SessionMode
+  const runningBreak = isBreakMode(activeSessionMode)
+  /**
+   * 节奏面板只在「已结束 且 不需要复盘」时出现：
+   * - 休息型结束（免复盘）→ 立即出现；
+   * - 投入型 → 先走完复盘（reviewSession 非空时不出现），复盘提交后
+   *   reviewState 落 completed，面板才出现 —— 顺序即"先交结果，再休息"。
+   */
+  const restCycle = useMemo(() => (
+    endedAggregate && endedAggregate.session.clockState === 'ended' && !reviewSession
+      ? planRestCycle({
+          endedMode: endedSessionMode,
+          timerCompletion: endedAggregate.session.timerCompletion ?? null,
+          completedWorkSessions,
+          settings: {
+            pomodoroDuration: pomodoroMinutes,
+            shortBreakDuration: shortBreakMinutes,
+            longBreakDuration: longBreakMinutes,
+            longBreakInterval,
+            autoStartBreaks,
+            autoStartPomodoros,
+          },
+        })
+      : null
+  ), [
+    autoStartBreaks, autoStartPomodoros, completedWorkSessions, endedAggregate,
+    endedSessionMode, longBreakInterval, longBreakMinutes, pomodoroMinutes,
+    reviewSession, shortBreakMinutes,
+  ])
 
   useEffect(() => {
     let cancelled = false
@@ -267,6 +324,7 @@ export default function TimerPage() {
     }
     let cancelled = false
     void focusRepository.listCached().then(async (sessions) => {
+      if (!cancelled) setCompletedWorkSessions(countCompletedWorkSessions(sessions))
       const ended = selectReviewSession(sessions)
       if (!ended) {
         if (!cancelled) setEndedAggregate(null)
@@ -377,6 +435,13 @@ export default function TimerPage() {
    */
   const requestStart = async (selection: LaunchSelection) => {
     const level2Id = selection.level2WorkItemId
+    // ★ 双体系兼容（2026-09-16）：依赖域的「被阻塞」约束的是"要不要开始投入
+    //   这条工作项"，休息不产生投入/成果 —— 休息前不弹阻塞确认（否则每轮
+    //   休息都要为一个与休息无关的上游确认一次，节奏会被打断）。
+    if (isBreakMode(selection.sessionType)) {
+      await start(selection)
+      return
+    }
     if (!hasLaunchAck(level2Id)) {
       const cached = taskRepository
         ? await taskRepository.listCachedRelations(level2Id).catch(() => [])
@@ -443,6 +508,18 @@ export default function TimerPage() {
 
   const clockAction = async (action: 'pause' | 'resume' | 'end', occurredAt: string) => {
     try {
+      // ── 双体系兼容（2026-09-16）：结束口径按模式分流 ──────────────────────
+      // 1) timerCompletion 如实反映"这一轮有没有走到计划点"：到点后手动结束
+      //    = completed（番茄计数与休息节奏都依赖它；旧实现恒发 ended_early，
+      //    导致「每 4 个番茄长休」永远接不上）。提前结束 = ended_early。
+      // 2) 休息型：validity 直接 valid（免复盘）—— review_state 由仓储
+      //    （离线）与服务端（在线）保持 not_required，绝不进复盘流。
+      const currentSession = aggregate?.session ?? null
+      const mode = ((currentSession as { sessionType?: SessionMode } | null)?.sessionType ?? 'work') as SessionMode
+      const breakSession = isBreakMode(mode)
+      const reachedPlan = clock !== null && clock.remainingSeconds === 0
+      const timerCompletion: 'completed' | 'ended_early' = reachedPlan ? 'completed' : 'ended_early'
+      const validity: 'valid' | 'pending' = breakSession ? 'valid' : 'pending'
       if (localProvisional) {
         if (!focusRepository) throw new Error('focus_session_repository_not_ready')
         const sessionId = localProvisional.aggregate.session.sessionId
@@ -450,13 +527,13 @@ export default function TimerPage() {
           ? await focusRepository.pauseProvisional(sessionId, occurredAt)
           : action === 'resume'
             ? await focusRepository.resumeProvisional(sessionId, occurredAt)
-            : await focusRepository.endProvisional(sessionId, { occurredAt, timerCompletion: 'ended_early' })
+            : await focusRepository.endProvisional(sessionId, { occurredAt, timerCompletion })
         updateLocalProvisionalSession(next)
         return
       }
       if (action === 'pause') await coordinator.pause(occurredAt)
       else if (action === 'resume') await coordinator.resume(occurredAt)
-      else await coordinator.end({ occurredAt, timerCompletion: 'ended_early', validity: 'pending', validityReason: null })
+      else await coordinator.end({ occurredAt, timerCompletion, validity, validityReason: null })
     } catch (cause) {
       setStableError(cause)
     }
@@ -612,6 +689,56 @@ export default function TimerPage() {
     })
   }
 
+  /**
+   * 从节奏面板（或自动开始）发起下一步。
+   *
+   * 归属沿用刚结束那一轮的二级工作项；时长按**目标模式**的设置值推导
+   * （备选模式因此不会错用建议模式的分钟数）。休息型不带三级计划。
+   */
+  const startFromRestCycle = async (nextMode: SessionMode) => {
+    const level2WorkItemId = endedAggregate?.context?.level2WorkItemId ?? null
+    if (!level2WorkItemId) {
+      setRestCycleBlockedReason('上一轮没有可用的二级归属，无法自动接续 —— 请在准备态手动启动。')
+      return
+    }
+    setRestCycleStarting(true)
+    setRestCycleBlockedReason(null)
+    try {
+      await requestStart({
+        level2WorkItemId,
+        // 节奏接续不替用户勾三级计划（工作会话可在运行中加项）。
+        level3WorkItemIds: [],
+        plannedSeconds: Math.max(1, defaultMinutesForMode(nextMode, {
+          pomodoroDuration: pomodoroMinutes,
+          shortBreakDuration: shortBreakMinutes,
+          longBreakDuration: longBreakMinutes,
+        })) * 60,
+        sessionType: nextMode,
+      })
+    } catch (cause) {
+      // requestStart 内部（start 之外的守卫）会在这里抛出：已有活动会话 /
+      // spaceId 缺失 —— 原因必须可见，否则用户只看到按钮没反应。
+      setRestCycleBlockedReason(resolveTimerError(cause).message)
+    } finally {
+      setRestCycleStarting(false)
+    }
+  }
+
+  // 自动开始（autoStartBreaks / autoStartPomodoros）：每个"刚结束的会话"
+  // 只触发一次 —— 闩锁按 sessionId，重挂载/重渲染都不会连开两轮。
+  //
+  // ★ 刻意不把 startFromRestCycle 收进依赖：它内部引用 requestStart（每次渲染
+  //   都是新函数），useCallback 链会一路传染，而 effect 重跑本身无害（闩锁
+  //   在入口处短路）。这里的 exhaustive-deps 提示是这条设计选择的已知代价。
+  useEffect(() => {
+    if (!restCycle || !restCycle.autoStart || !endedAggregate) return
+    const endedId = sessionIdOf(endedAggregate.session)
+    if (restAutoStartedFor.current === endedId) return
+    restAutoStartedFor.current = endedId
+    void startFromRestCycle(restCycle.nextMode)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 见上：闩锁保证幂等
+  }, [endedAggregate, restCycle])
+
   const reconcileCommand = async (commandId: string, replaySafe: boolean): Promise<boolean> => {
     if (!database || !aggregate) return false
     try {
@@ -635,23 +762,49 @@ export default function TimerPage() {
   }
 
   const content: ReactNode = aggregate && aggregate.session.clockState === 'ended'
-    ? createElement(SessionReview, {
-      session: aggregate.session,
-      plans,
-      outcomes: aggregate.outcomes,
-      envelopes: aggregate.commandEnvelopes,
-      receipts: aggregate.commandReceipts as never,
-      draft: reviewDraft,
-      readOnly: !reviewSession,
-      // ★ 2026-09-11：只在复盘完成态（readOnly = 无待复盘项）渲染出口；待复盘
-      // （可写）态没有回跳入口。provisional 未导入分支结构上不会进入 readOnly
-      //（早退 + 保留草稿、不重读聚合），所以那里既无刷新也无回跳。
-      onReturnToTasks: reviewSession ? undefined : handleReturnToTasks,
-      onDraftChange: updateReviewDraft,
-      onSubmit: submitReview,
-      onReconcile: reconcileCommand,
-      onAbandon: abandonCommand,
-    })
+    // 结束态分两支（双体系兼容 2026-09-16）：
+    // ① 待复盘（投入型）→ 既有复盘面板，行为逐字不变；
+    // ② 不需复盘（休息型结束 / 投入型复盘已完成）→ 休息节奏面板：
+    //    建议下一步（短休/长休/下一个番茄），可自动开始，出口仍可回任务页。
+    ? (reviewSession
+      ? createElement(SessionReview, {
+        session: aggregate.session,
+        plans,
+        outcomes: aggregate.outcomes,
+        envelopes: aggregate.commandEnvelopes,
+        receipts: aggregate.commandReceipts as never,
+        draft: reviewDraft,
+        readOnly: !reviewSession,
+        // ★ 2026-09-11：只在复盘完成态（readOnly = 无待复盘项）渲染出口；待复盘
+        // （可写）态没有回跳入口。provisional 未导入分支结构上不会进入 readOnly
+        //（早退 + 保留草稿、不重读聚合），所以那里既无刷新也无回跳。
+        onReturnToTasks: reviewSession ? undefined : handleReturnToTasks,
+        onDraftChange: updateReviewDraft,
+        onSubmit: submitReview,
+        onReconcile: reconcileCommand,
+        onAbandon: abandonCommand,
+      })
+      : createElement('div', { className: 'grid gap-6 p-6' },
+        createElement('p', { className: 'text-xs text-muted-foreground' }, 'Focus session'),
+        restCycle
+          ? createElement(RestCyclePanel, {
+            endedMode: endedSessionMode,
+            focusedSeconds: aggregate.session.focusedSeconds,
+            breakSeconds: aggregate.session.breakSeconds,
+            cycle: restCycle,
+            blockedReason: restCycleBlockedReason,
+            starting: restCycleStarting,
+            onStart: (nextMode: SessionMode) => { void startFromRestCycle(nextMode) },
+            onReturnToTasks: handleReturnToTasks,
+          })
+          : createElement('div', { className: 'grid gap-3 justify-items-start' },
+            createElement('p', { role: 'status' }, `${modeLabel(endedSessionMode)}已结束，这一轮不需要复盘。`),
+            createElement(Button, {
+              type: 'button', variant: 'outline', onClick: handleReturnToTasks,
+            }, '回任务页'),
+          ),
+        createElement(TodaySummary),
+      ))
     : aggregate && session && clock ? createElement('div', {
       className: 'grid gap-6 p-6',
       // 沉浸模式（工单 B）：渐隐作用域由这个属性驱动（见 globals.css 的 timer 块）。
@@ -687,27 +840,35 @@ export default function TimerPage() {
       className: 'timer-immersive-region grid gap-6',
       'data-testid': 'immersive-region',
     },
-      createElement(SessionWorkspace, {
-        session, plans, availableLevel3,
-        onSetCurrent: setCurrent, onSetCompletionDraft: setCompletion,
-        onAddPlanItem: addPlanItem, onRemovePlanItem: removePlanItem,
-        onCreatePlanItem: createPlanItem,
-        onUpdateSessionNote: updateSessionNote,
-        onFlushWorkItemNote: async (reason) => { await draftController?.flush(reason) },
-        onSwitchWorkItemNote: async (nextWorkItemId) => {
-          if (draftController && spaceId) {
-            await draftController.switchTo({ spaceId, workItemId: nextWorkItemId })
-            return async () => {
-              if (focusedWorkItemId) {
-                await draftController.switchTo({ spaceId, workItemId: focusedWorkItemId })
+      // 双体系兼容（2026-09-16）：休息型运行态不渲染成果清单 / 当前项 / Note ——
+      // 休息不承接三级计划、不产生投入（服务端对 plan 行 fail-closed），
+      // 这里用一句说明代替，避免出现"点了必被拒"的控件。
+      runningBreak
+        ? createElement('p', {
+            className: 'text-sm text-muted-foreground',
+            'data-testid': 'break-session-note',
+          }, `${modeLabel(activeSessionMode)}不记录三级成果与投入 —— 只保留休息时长；结束后直接进入下一轮节奏。`)
+        : createElement(SessionWorkspace, {
+            session, plans, availableLevel3,
+            onSetCurrent: setCurrent, onSetCompletionDraft: setCompletion,
+            onAddPlanItem: addPlanItem, onRemovePlanItem: removePlanItem,
+            onCreatePlanItem: createPlanItem,
+            onUpdateSessionNote: updateSessionNote,
+            onFlushWorkItemNote: async (reason) => { await draftController?.flush(reason) },
+            onSwitchWorkItemNote: async (nextWorkItemId) => {
+              if (draftController && spaceId) {
+                await draftController.switchTo({ spaceId, workItemId: nextWorkItemId })
+                return async () => {
+                  if (focusedWorkItemId) {
+                    await draftController.switchTo({ spaceId, workItemId: focusedWorkItemId })
+                  }
+                }
+              } else {
+                await draftController?.flush('current-item-change')
               }
-            }
-          } else {
-            await draftController?.flush('current-item-change')
-          }
-        },
-      }),
-      focusedWorkItemId ? createElement(FocusedWorkItemNote, {
+            },
+          }),
+      !runningBreak && focusedWorkItemId ? createElement(FocusedWorkItemNote, {
         note: focusedNote, spaceId: spaceId ?? '', workItemId: focusedWorkItemId,
         draftRegistry: draftController ?? undefined, onAppendBlocks: appendBlocks,
       }) : null,

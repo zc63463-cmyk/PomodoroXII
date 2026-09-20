@@ -20,6 +20,7 @@
         "reviewState": "value",
         "sessionNote": "value",
         "sessionRevision": 0,
+        "sessionType": "value",
         "spaceId": "spc_test",
         "startedAt": "2026-08-06T00:00:00.000Z",
         "timerCompletion": null,
@@ -31,8 +32,8 @@
       "updated_at": "2026-08-06T00:00:00.000Z",
       "version": 0
     },
-    "jsonl_base64": "eyJlbnRpdHlfaWQiOiJmb2N1c1Nlc3Npb24tMSIsImVudGl0eV90eXBlIjoiZm9jdXNTZXNzaW9uIiwia2luZCI6ImVudGl0eSIsInBheWxvYWQiOnsiYnJlYWtTZWNvbmRzIjowLCJjcmVhdGVkQXQiOiIyMDI2LTA4LTA2VDAwOjAwOjAwLjAwMFoiLCJlbmRlZEF0IjpudWxsLCJmb2N1c2VkU2Vjb25kcyI6MCwiZ3Jvc3NTZWNvbmRzIjowLCJpZCI6ImZvY3VzU2Vzc2lvbi0xIiwibW9vZCI6bnVsbCwib3ZlcmFsbFByb2dyZXNzIjpudWxsLCJvd25lcnNoaXBTdGF0ZSI6InZhbHVlIiwicGF1c2VTdGFydGVkQXQiOm51bGwsInBhdXNlZFNlY29uZHMiOjAsInBsYW5uZWRTZWNvbmRzIjowLCJyZXZpZXdTdGF0ZSI6InZhbHVlIiwic2Vzc2lvbk5vdGUiOiJ2YWx1ZSIsInNlc3Npb25SZXZpc2lvbiI6MCwic3BhY2VJZCI6InNwY190ZXN0Iiwic3RhcnRlZEF0IjoiMjAyNi0wOC0wNlQwMDowMDowMC4wMDBaIiwidGltZXJDb21wbGV0aW9uIjpudWxsLCJ1cGRhdGVkQXQiOiIyMDI2LTA4LTA2VDAwOjAwOjAwLjAwMFoiLCJ2YWxpZGl0eSI6InZhbHVlIiwidmFsaWRpdHlSZWFzb24iOm51bGwsInZlcnNpb24iOjB9LCJ1cGRhdGVkX2F0IjoiMjAyNi0wOC0wNlQwMDowMDowMC4wMDBaIiwidmVyc2lvbiI6MH0K",
-    "sha256": "80796a481e4c1225d6ae7cf5a9b27bc79768bd60024bbd3c0dcc76677c20f565",
+    "jsonl_base64": "eyJlbnRpdHlfaWQiOiJmb2N1c1Nlc3Npb24tMSIsImVudGl0eV90eXBlIjoiZm9jdXNTZXNzaW9uIiwia2luZCI6ImVudGl0eSIsInBheWxvYWQiOnsiYnJlYWtTZWNvbmRzIjowLCJjcmVhdGVkQXQiOiIyMDI2LTA4LTA2VDAwOjAwOjAwLjAwMFoiLCJlbmRlZEF0IjpudWxsLCJmb2N1c2VkU2Vjb25kcyI6MCwiZ3Jvc3NTZWNvbmRzIjowLCJpZCI6ImZvY3VzU2Vzc2lvbi0xIiwibW9vZCI6bnVsbCwib3ZlcmFsbFByb2dyZXNzIjpudWxsLCJvd25lcnNoaXBTdGF0ZSI6InZhbHVlIiwicGF1c2VTdGFydGVkQXQiOm51bGwsInBhdXNlZFNlY29uZHMiOjAsInBsYW5uZWRTZWNvbmRzIjowLCJyZXZpZXdTdGF0ZSI6InZhbHVlIiwic2Vzc2lvbk5vdGUiOiJ2YWx1ZSIsInNlc3Npb25SZXZpc2lvbiI6MCwic2Vzc2lvblR5cGUiOiJ2YWx1ZSIsInNwYWNlSWQiOiJzcGNfdGVzdCIsInN0YXJ0ZWRBdCI6IjIwMjYtMDgtMDZUMDA6MDA6MDAuMDAwWiIsInRpbWVyQ29tcGxldGlvbiI6bnVsbCwidXBkYXRlZEF0IjoiMjAyNi0wOC0wNlQwMDowMDowMC4wMDBaIiwidmFsaWRpdHkiOiJ2YWx1ZSIsInZhbGlkaXR5UmVhc29uIjpudWxsLCJ2ZXJzaW9uIjowfSwidXBkYXRlZF9hdCI6IjIwMjYtMDgtMDZUMDA6MDA6MDAuMDAwWiIsInZlcnNpb24iOjB9Cg==",
+    "sha256": "762f708b206c1b59a2936761a2c6310f16fec49e2a00c3fad0d34ea5f0edd6e7",
     "entity_count": 1
   },
   {

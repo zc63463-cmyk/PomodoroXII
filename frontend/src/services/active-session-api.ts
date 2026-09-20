@@ -24,6 +24,8 @@ export function activateProvisionalHashPayload(input: {
 }) {
   const mapSession = (session: Record<string, unknown>) => ({
     session_revision: session.sessionRevision,
+    // 双体系兼容（2026-09-16）：与 _map_session_snapshot 的服务端口径一致。
+    session_type: session.sessionType ?? 'work',
     started_at: session.startedAt,
     pause_started_at: session.pauseStartedAt,
     planned_seconds: session.plannedSeconds,
@@ -90,17 +92,22 @@ export const activeSessionApi = {
   async start(input: {
     spaceId: string; sessionId: string; operationId: string; level2WorkItemId: string;
     level3WorkItemIds: string[]; plannedSeconds: number; startedAt: string;
+    sessionType?: 'work' | 'short_break' | 'long_break' | 'free' | 'countdown';
     ownerDeviceId: string; ownerTabId: string; expectedWorkItemVersions: Record<string, number>
   }) {
     requireSpace(input.spaceId)
+    // 双体系兼容（2026-09-16）：模式缺省 work，且**显式**进入请求体与
+    // hash 业务载荷（服务端只在带该键时才把它纳入 hash —— 两侧同口径）。
+    const sessionType = input.sessionType ?? 'work'
     const payload = {
       level2WorkItemId: input.level2WorkItemId, level3WorkItemIds: input.level3WorkItemIds,
-      plannedSeconds: input.plannedSeconds, startedAt: input.startedAt,
+      sessionType, plannedSeconds: input.plannedSeconds, startedAt: input.startedAt,
       ownerDeviceId: input.ownerDeviceId, ownerTabId: input.ownerTabId,
       expectedWorkItemVersions: input.expectedWorkItemVersions,
     }
     const fields = await buildCommandFields({ commandId: input.operationId, spaceId: input.spaceId, payload: {
       level2_work_item_id: input.level2WorkItemId, level3_work_item_ids: input.level3WorkItemIds,
+      session_type: sessionType,
       planned_seconds: input.plannedSeconds, started_at: input.startedAt,
       owner_device_id: input.ownerDeviceId, owner_tab_id: input.ownerTabId,
     } })

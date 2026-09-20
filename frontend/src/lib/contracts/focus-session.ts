@@ -12,6 +12,15 @@ const payloadHash = z.string().regex(/^[0-9a-f]{64}$/)
 const nonnegativeVersion = z.number().int().nonnegative()
 const positiveEpoch = z.number().int().positive()
 
+/**
+ * 番茄钟模式（双体系兼容 2026-09-16）。
+ *
+ * ``work`` / ``free`` / ``countdown`` = 投入型会话；``short_break`` /
+ * ``long_break`` = 休息型会话（服务端 focused_seconds 恒 0、免复盘、不进计划）。
+ * 归因不变量不变：两类都必须挂一个二级 WorkItem。
+ */
+export const sessionTypeSchema = z.enum(['work', 'short_break', 'long_break', 'free', 'countdown'])
+export const BREAK_SESSION_TYPES = ['short_break', 'long_break'] as const
 export const clockStateSchema = z.enum(['running', 'paused', 'ended'])
 export const timerCompletionSchema = z.enum(['completed', 'ended_early', 'interrupted'])
 export const validitySchema = z.enum(['pending', 'valid', 'invalid'])
@@ -175,6 +184,11 @@ export const sessionReviewDraftSchema = z.object({
 
 const focusSessionBusiness = {
   sessionRevision: nonnegativeVersion,
+  /**
+   * 双体系兼容：缺省 work —— 既有缓存行 / 既有 outbox 行（本字段出现之前
+   * 写入的）都按"工作会话"解释，与服务端列默认值逐字一致，不是猜测。
+   */
+  sessionType: sessionTypeSchema.default('work'),
   startedAt: utc,
   endedAt: utc.nullable(),
   pauseStartedAt: utc.nullable(),
@@ -206,7 +220,8 @@ const focusDeleteSchema = z.strictObject({ id })
 export const focusSessionBusinessPostImage = (
   row: z.infer<typeof focusSessionCommandPostImageSchema>,
 ): JsonValue => ({
-  session_revision: row.sessionRevision, started_at: row.startedAt,
+  session_revision: row.sessionRevision, session_type: row.sessionType,
+  started_at: row.startedAt,
   ended_at: row.endedAt, pause_started_at: row.pauseStartedAt,
   planned_seconds: row.plannedSeconds, gross_seconds: row.grossSeconds,
   paused_seconds: row.pausedSeconds, break_seconds: row.breakSeconds,
@@ -317,6 +332,8 @@ export function projectFocusSessionRecoveryWireToCache(raw: unknown) {
 
 const provisionalSessionSnapshotSchema = z.object({
   sessionRevision: nonnegativeVersion,
+  /** 双体系兼容：离线 provisional 快照同样携带模式；缺省 work（同服务端口径）。 */
+  sessionType: sessionTypeSchema.default('work'),
   startedAt: canonicalUtc,
   pauseStartedAt: canonicalUtc.nullable(),
   plannedSeconds: z.number().int().positive(),
@@ -429,6 +446,12 @@ const locator = <T extends z.ZodTypeAny>(payload: T) => root.extend({ payload })
 
 export const startActiveSessionPayloadSchema = z.object({
   level2WorkItemId: id, level3WorkItemIds: z.array(id), plannedSeconds: z.number().int().positive(),
+  /**
+   * 双体系兼容：显式携带（默认 work）——服务端只在载荷带该键时把它计入
+   * payload hash，线上/离线两条路径的 hash 口径由本 schema 与
+   * `activeSessionApi.start` 的 hash 载荷共同保证一致。
+   */
+  sessionType: sessionTypeSchema.default('work'),
   startedAt: canonicalUtc, ownerDeviceId: id, ownerTabId: id,
   expectedWorkItemVersions: z.record(id, nonnegativeVersion),
 }).strict()
@@ -486,6 +509,7 @@ export const activeSessionOperationSchema = activeSessionSchema.or(activationCon
 export const locatedActiveSessionSchema = activeSessionOperationSchema
 export const terminalActiveSessionResponseSchema = z.object({ session: focusSessionAggregateSchema.extend({ session: focusSessionSchema.extend({ clockState: z.literal('ended') }) }), locator: z.null() }).strict()
 
+export type FocusSessionType = z.infer<typeof sessionTypeSchema>
 export type FocusSessionAggregate = z.infer<typeof focusSessionAggregateSchema>
 export type FocusSessionAggregateView = FocusSessionAggregate
 export type FocusSessionRecoveryWire = z.infer<typeof focusSessionRecoveryWireSchema>

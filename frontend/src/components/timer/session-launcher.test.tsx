@@ -136,6 +136,85 @@ describe('SessionLauncher 时长预设（工单④）', () => {
   })
 })
 
+// ── 双体系兼容 2026-09-16：模式切换与休息节奏入口 ───────────────────────────
+describe('SessionLauncher 模式切换（双体系兼容）', () => {
+  beforeEach(() => {
+    useSettingsStore.setState({
+      pomodoroDuration: 25, shortBreakDuration: 5, longBreakDuration: 15,
+    })
+  })
+
+  it('默认 work：提交载荷显式携带 sessionType=work（旧行为语义不变）', () => {
+    const start = vi.fn().mockResolvedValue(undefined)
+    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+
+    expect(screen.getByRole('button', { name: '专注' })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ sessionType: 'work' }))
+  })
+
+  it('切到短休：默认时长取 shortBreakDuration、环下文案改「休息时长」、载荷带短休模式', () => {
+    const start = vi.fn().mockResolvedValue(undefined)
+    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: start }))
+
+    fireEvent.click(screen.getByRole('button', { name: '短休息' }))
+
+    expect(screen.getByLabelText('Planned minutes')).toHaveValue(5)
+    expect(screen.getByTestId('launcher-ring-preview')).toHaveTextContent('05:00')
+    expect(screen.getByTestId('launcher-ring-preview')).toHaveTextContent('休息时长')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      sessionType: 'short_break', plannedSeconds: 300, level3WorkItemIds: [],
+    }))
+  })
+
+  it('切到长休：取 longBreakDuration；三级计划控件整组换成说明（服务端拒绝休息带计划）', () => {
+    const start = vi.fn().mockResolvedValue(undefined)
+    render(createElement(SessionLauncher, {
+      items, initialWorkItemId: 'l3-a', onStart: start, onCreateLevel3: vi.fn(),
+    }))
+
+    // 切到长休前：三级计划区存在，且初始选中项已冻结进计划
+    expect(screen.queryByTestId('break-plan-note')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '长休息' }))
+
+    expect(screen.getByLabelText('Planned minutes')).toHaveValue(15)
+    expect(screen.getByTestId('break-plan-note')).toHaveTextContent('只记录休息时长')
+    // 三级清单/内联新建整组消失（不是"点了必被拒"）
+    expect(screen.queryByText('Level 3 plan')).toBeNull()
+    expect(screen.queryByLabelText('新三级标题')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      sessionType: 'long_break', plannedSeconds: 900, level3WorkItemIds: [],
+    }))
+  })
+
+  it('休息模式的时长预设换成分模式预设（5/10/15），work 预设不再出现', () => {
+    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn() }))
+
+    fireEvent.click(screen.getByRole('button', { name: '短休息' }))
+
+    for (const minutes of [5, 10, 15]) {
+      expect(screen.getByRole('button', { name: `${minutes} 分钟` })).toBeInTheDocument()
+    }
+    expect(screen.queryByRole('button', { name: '25 分钟' })).toBeNull()
+    expect(screen.getByRole('button', { name: '5 分钟' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('从休息切回工作：恢复 work 默认时长与 work 预设', () => {
+    render(createElement(SessionLauncher, { items, initialWorkItemId: 'l2', onStart: vi.fn() }))
+
+    fireEvent.click(screen.getByRole('button', { name: '短休息' }))
+    fireEvent.click(screen.getByRole('button', { name: '专注' }))
+
+    expect(screen.getByLabelText('Planned minutes')).toHaveValue(25)
+    expect(screen.getByRole('button', { name: '90 分钟' })).toBeInTheDocument()
+  })
+})
+
 // ── 工单② 2026-09-14：准备态静止环预览 ─────────────────────────────────────
 describe('SessionLauncher 准备态静止环预览（工单②）', () => {
   beforeEach(() => {

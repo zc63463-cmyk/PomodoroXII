@@ -115,6 +115,40 @@ _FOCUS_SYNC_MUTABLE_FIELDS = frozenset({
     "session_note", "overall_progress", "mood",
 })
 
+# --------------------------------------------------------------------------- #
+# 双体系兼容：番茄钟模式（2026-09-16）
+# --------------------------------------------------------------------------- #
+# 番茄钟体系（工作/休息节奏）与任务空间体系（归因 + 计划 + 复盘 + 投入）的
+# 兼容轴：同一张 focus_sessions 表用 ``session_type`` 区分两类会话。
+#   - 投入型（work / free / countdown）：focused_seconds 正常累计，计入二级投入；
+#   - 休息型（short_break / long_break）：focused_seconds 恒为 0，
+#     break_seconds 承载全部净时长，免复盘（不进入 pending），不进计划。
+# 归因不变量零放宽：休息会话同样必须挂一个二级 WorkItem（沿用上一工作会话的）。
+FOCUS_SESSION_TYPES = ("work", "short_break", "long_break", "free", "countdown")
+_FOCUS_BREAK_TYPES = frozenset({"short_break", "long_break"})
+_DEFAULT_SESSION_TYPE = "work"
+
+
+def _require_session_type(value: object) -> str:
+    """Fail-closed enum guard for the one new compatibility dimension."""
+    if value is None:
+        return _DEFAULT_SESSION_TYPE
+    if not isinstance(value, str) or value not in FOCUS_SESSION_TYPES:
+        raise _MutationRuleViolation(
+            "work_item_structure_changed",
+            {"reason": "invalid_session_type", "value": value},
+        )
+    return value
+
+
+def _session_type_of(row: Mapping[str, object]) -> str:
+    """Read a persisted row's type; legacy rows without the column read as work."""
+    return str(row.get("session_type") or _DEFAULT_SESSION_TYPE)
+
+
+def _is_break_session(row: Mapping[str, object]) -> bool:
+    return _session_type_of(row) in _FOCUS_BREAK_TYPES
+
 
 def entity_action(request: MutationRequest) -> str | None:
     """Derive create/update/delete from an S3 EntityCommand request name."""
@@ -421,6 +455,8 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 "version_conflict", {"entityId": session_id, "reason": "invalid_planned_seconds"},
             )
         planned_seconds = planned_value
+        # 双体系兼容：缺省即 work（旧客户端 / 旧载荷逐字保持原语义）。
+        session_type = _require_session_type(request.payload.get("session_type"))
         context_l2_id = str(request.payload.get("level2_work_item_id", ""))
         l3_ids = request.payload.get("level3_work_item_ids", ())
         if not isinstance(l3_ids, (tuple, list)):
@@ -431,6 +467,11 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         if len(set(l3_ids)) != len(l3_ids):
             raise _MutationRuleViolation(
                 "invalid_work_item_tree", {"reason": "duplicate_level3_ids"},
+            )
+        if session_type in _FOCUS_BREAK_TYPES and l3_ids:
+            # 休息不承接三级成果：计划只属于投入型会话（兼容设计的事实边界）。
+            raise _MutationRuleViolation(
+                "invalid_work_item_tree", {"reason": "break_session_has_no_plan"},
             )
         work_item_versions = request.payload.get("expected_work_item_versions")
         if work_item_versions is not None:
@@ -477,6 +518,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             version=1,
             created_at=started_at,
             updated_at=started_at,
+            session_type=session_type,
         )
         context_row = _context_row(
             id=f"ctx-{session_id}",
@@ -844,6 +886,13 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         if current is None:
             raise _MutationRuleViolation("not_found", {"entityId": session_id})
         self._reject_activation_conflict(current)
+        if _is_break_session(current):
+            # 双体系兼容：休息型免复盘（结束时 review_state 保持 not_required，
+            # 没有三级成果可标注）。
+            raise _MutationRuleViolation(
+                "version_conflict",
+                {"sessionId": session_id, "reason": "break_session_no_review"},
+            )
         if current.get("ended_at") is None:
             raise _MutationRuleViolation(
                 "version_conflict", {"sessionId": session_id, "reason": "session_not_ended"}
@@ -1718,6 +1767,12 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         if session is None:
             raise _MutationRuleViolation("not_found", {"entityId": session_id})
         self._reject_activation_conflict(session)
+        if _is_break_session(session):
+            # 双体系兼容：休息不承接三级计划（免复盘、无成果清单）。
+            raise _MutationRuleViolation(
+                "version_conflict",
+                {"sessionId": session_id, "reason": "break_session_has_no_plan"},
+            )
         if session.get("ended_at") is not None:
             raise _MutationRuleViolation(
                 "version_conflict", {"sessionId": session_id, "reason": "terminal_session"},
@@ -1941,6 +1996,9 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
                 "work_item_structure_changed", {"reason": "nonterminal_timer_completion"}
             )
         review_state = "not_required"
+        # 双体系兼容：离线 provisional 会话同样携带番茄钟模式（缺省 work，
+        # 与在线 start 一致）；休息型同样免复盘。
+        session_type = _require_session_type(get("session_type", "sessionType"))
         await self._require_locator_claim(context, request, require_owner=True)
         if pause_started_at is not None:
             pause_started_at = _require_canonical_timestamp(pause_started_at)
@@ -1977,6 +2035,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             version=1,
             created_at=started_at,
             updated_at=cached_at,
+            session_type=session_type,
         )
         _validate_duration_row(row)
         context_row = _snapshot_context_row(request, snapshot)
@@ -2011,6 +2070,11 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
         plan_rows = snapshot.get("plan", ())
         if not isinstance(plan_rows, (tuple, list)):
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "snapshot_plan"})
+        if session_type in _FOCUS_BREAK_TYPES and plan_rows:
+            # 休息不承接三级成果（与在线 start 同一条事实边界）。
+            raise _MutationRuleViolation(
+                "invalid_work_item_tree", {"reason": "break_session_has_no_plan"},
+            )
         plan_work_item_ids: list[str] = []
         for item in plan_rows:
             if not isinstance(item, Mapping):
@@ -2467,7 +2531,7 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             and payload.get("review_state") == "pending"
         )
         immutable = (
-            "id", "created_at", "started_at",
+            "id", "created_at", "started_at", "session_type",
             "planned_seconds", "ownership_state",
         )
         if not end_pending_review:
@@ -2578,7 +2642,8 @@ class FocusSessionMutationPolicy(MutationDomainPolicy):
             elif field not in {
                 "id", "created_at", "version", "updated_at", "session_revision",
                 "started_at", "planned_seconds", "validity", "validity_reason",
-                "ownership_state", "review_state", *_FOCUS_CLOCK_FIELDS,
+                "ownership_state", "review_state", "session_type",
+                *_FOCUS_CLOCK_FIELDS,
             }:
                 raise _MutationRuleViolation(
                     "work_item_structure_changed", {"reason": "session_field_not_sync_mutable", "field": field},
@@ -2688,6 +2753,13 @@ def _strict_counter(row: Mapping[str, object], field: str) -> int:
 
 
 def _focused_seconds(row: Mapping[str, object]) -> int:
+    if _is_break_session(row):
+        # 休息型会话永远不产生"投入"：这正是双体系兼容的核心口径 ——
+        # 休息也是正式会话（单一事实源、可同步、可统计），但不进二级投入。
+        _strict_counter(row, "gross_seconds")
+        _strict_counter(row, "paused_seconds")
+        _strict_counter(row, "break_seconds")
+        return 0
     gross = _strict_counter(row, "gross_seconds")
     paused = _strict_counter(row, "paused_seconds")
     breaks = _strict_counter(row, "break_seconds")
@@ -2786,12 +2858,22 @@ def _clock_transition_after(
         #   validity 停在 pending → 投入投影只累计 validity='valid' 的会话 →
         #   任务空间「投入」永远是 0（2026-09-11 实测：会话 ed5b7e05 结束，
         #   focused_seconds=3134，work_item.effort_actual_seconds 仍为 0）。
-        if current.get("review_state") == "not_required":
+        # ★ 双体系兼容（2026-09-16）：休息型会话免复盘 —— review_state 保持
+        #   not_required，结束即终态，不进入 pending 复盘流（休息没有三级成果
+        #   可标注）。投入型会话维持既有 end → reviewing 语义不变。
+        if current.get("review_state") == "not_required" and not _is_break_session(after):
             after["review_state"] = "pending"
     else:
         raise _MutationRuleViolation(
             "version_conflict", {"reason": "unsupported_clock_action"}
         )
+    if _is_break_session(after):
+        # 休息型的净时长全部归属 break_seconds（服务端权威推导，覆盖客户端载荷）；
+        # focused_seconds 恒为 0 —— 投入投影据此天然不计入，见 effort_projection。
+        after["break_seconds"] = max(
+            0, int(after.get("gross_seconds", 0)) - int(after.get("paused_seconds", 0))
+        )
+        after["focused_seconds"] = 0
     _validate_duration_row(after)
     return require_frozen_object(after)
 
@@ -2924,6 +3006,8 @@ def _validate_sync_create_row(
             raise _MutationRuleViolation(
                 "work_item_structure_changed", {"reason": "session_must_be_provisional"}
             )
+        # 双体系兼容：离线 create 的会话同样带番茄钟模式（缺省 work，spec 默认补齐）。
+        _require_session_type(row.get("session_type"))
         if row.get("validity") != "pending" or row.get("review_state") != "not_required":
             raise _MutationRuleViolation(
                 "work_item_structure_changed", {"reason": "session_post_image_state"}
@@ -2954,6 +3038,11 @@ def _validate_sync_create_row(
     if entity_type == "session_work_item_plan":
         if row.get("session_id") != session_id or row.get("removed_at") is not None:
             raise _MutationRuleViolation("work_item_structure_changed", {"reason": "plan_post_image"})
+        if _is_break_session(session):
+            # 休息型会话不承接三级计划（双体系兼容的事实边界）。
+            raise _MutationRuleViolation(
+                "work_item_structure_changed", {"reason": "break_session_has_no_plan"}
+            )
         _require_canonical_timestamp(row.get("added_at"))
         if context.authority.row(entity_type, request.entity_id) is not None:
             raise _MutationRuleViolation("version_conflict", {"entityId": request.entity_id})
@@ -2987,7 +3076,7 @@ def _validate_sync_update_row(
     allow_terminal_validity: bool = False,
 ) -> None:
     if entity_type == "focus_session":
-        immutable = ("id", "created_at", "ownership_state")
+        immutable = ("id", "created_at", "ownership_state", "session_type")
         if allow_terminal_validity and (
             before.get("review_state") == "not_required"
             and after.get("review_state") == "pending"
@@ -3031,6 +3120,7 @@ def _focus_session_row(
     validity_reason: str | None, overall_progress: str | None,
     mood: str | None, session_note: str, review_state: str,
     ownership_state: str, version: int, created_at: str, updated_at: str,
+    session_type: str = _DEFAULT_SESSION_TYPE,
 ) -> Mapping[str, object]:
     return require_frozen_object({
         "id": id,
@@ -3038,6 +3128,7 @@ def _focus_session_row(
         "updated_at": updated_at,
         "version": version,
         "session_revision": session_revision,
+        "session_type": session_type,
         "started_at": started_at,
         "ended_at": ended_at,
         "pause_started_at": pause_started_at,
@@ -3344,6 +3435,7 @@ def _to_camel_session(
         "updatedAt": row.get("updated_at"),
         "version": row.get("version"),
         "sessionRevision": row.get("session_revision"),
+        "sessionType": row.get("session_type") or _DEFAULT_SESSION_TYPE,
         "startedAt": row.get("started_at"),
         "endedAt": row.get("ended_at"),
         "pauseStartedAt": row.get("pause_started_at"),

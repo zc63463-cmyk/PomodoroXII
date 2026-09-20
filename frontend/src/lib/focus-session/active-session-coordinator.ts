@@ -4,6 +4,7 @@ import {
   type ActiveSessionLocator,
   type ActiveSessionView,
   type FocusSessionAggregateView,
+  type FocusSessionType,
   type FocusSessionView,
   type ReconcileFocusSessionCommandsInput,
 } from '@/lib/contracts/focus-session'
@@ -45,6 +46,11 @@ export interface GlobalStartActiveSessionInput {
   level2WorkItemId: string
   level3WorkItemIds: string[]
   plannedSeconds: number
+  /**
+   * 番茄钟模式（双体系兼容 2026-09-16）。可选：缺省 work —— 与服务端列默认
+   * 同口径；显式传入时随启动载荷（含 payload hash 业务载荷）一起上行。
+   */
+  sessionType?: FocusSessionType
   startedAt: string
   expectedWorkItemVersions: Record<string, number>
 }

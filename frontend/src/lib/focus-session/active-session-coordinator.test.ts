@@ -8,6 +8,7 @@ import type { TabIdentity } from './tab-identity'
 const aggregate = (sessionId = 'fs-1', sessionVersion = 1, planVersion = 1): FocusSessionAggregateView => ({
   session: {
     id: sessionId, spaceId: 'space-a', sessionRevision: sessionVersion,
+    sessionType: 'work',
     startedAt: '2026-07-15T08:00:00Z', endedAt: null, pauseStartedAt: null,
     plannedSeconds: 1500, grossSeconds: 0, pausedSeconds: 0, breakSeconds: 0,
     focusedSeconds: 0, clockState: 'running', timerCompletion: null,

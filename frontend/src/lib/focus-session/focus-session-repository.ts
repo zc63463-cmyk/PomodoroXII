@@ -14,6 +14,7 @@ import {
   sessionWorkItemPlanCommandPostImageSchema,
   sessionReviewDraftSchema,
   type FocusSessionAggregateView,
+  type FocusSessionType,
   type SessionCommandReceiptView,
   type SessionCommandReceiptWireView,
   type ProvisionalActivationPayload,
@@ -77,7 +78,19 @@ export interface LocalFocusSessionAggregate {
   commandReceipts: Array<Record<string, unknown>>
 }
 
-export type ProvisionalStartInput = CanonicalProvisionalStartIntent
+/**
+ * 离线 provisional 启动输入。
+ *
+ * ★ 双体系兼容（2026-09-16）：``sessionType`` 刻意**不进** canonical intent
+ *   （``buildProvisionalOperationRow`` 只读既有键）—— intentJson / payloadHash
+ *   逐字节保持旧口径，升级期的在途 provisional 操作不受影响。模式随
+ *   session 行与快照走（create post-image / activate payload），恢复路径优先
+ *   读已落库的 session 行。
+ */
+export type ProvisionalStartInput = CanonicalProvisionalStartIntent & { sessionType?: FocusSessionType }
+
+const isBreakSessionType = (sessionType: FocusSessionType | undefined): boolean =>
+  sessionType === 'short_break' || sessionType === 'long_break'
 
 export interface FocusSessionRows {
   session: CachedFocusSession
@@ -934,6 +947,8 @@ const serializeSessionPlanCommandPostImage = (row: CachedSessionWorkItemPlan) =>
 
 const localSessionCreateHashPayload = (row: CachedFocusSession): JsonValue => ({
   session_revision: row.sessionRevision,
+  // 与服务端 focusSession 业务载荷同口径：缺省 work（旧缓存行不带该键）。
+  session_type: row.sessionType ?? 'work',
   started_at: row.startedAt,
   ended_at: row.endedAt,
   pause_started_at: row.pauseStartedAt,
@@ -1175,7 +1190,7 @@ export class FocusSessionRepository {
   private clockAt(
     session: CachedFocusSession,
     occurredAt: string,
-  ): { grossSeconds: number; pausedSeconds: number; focusedSeconds: number } {
+  ): { grossSeconds: number; pausedSeconds: number; breakSeconds: number; focusedSeconds: number } {
     if (!occurredAt.endsWith('Z') || !Number.isFinite(Date.parse(occurredAt))) {
       throw new Error('occurredAt must be canonical UTC')
     }
@@ -1190,9 +1205,21 @@ export class FocusSessionRepository {
       ? 0 : Math.floor((occurredMs - Date.parse(session.pauseStartedAt)) / 1000)
     const grossSeconds = Math.floor((occurredMs - startedMs) / 1000)
     const pausedSeconds = session.pausedSeconds + Math.max(0, extraPause)
+    // 双体系兼容（2026-09-16）：休息型会话的净时长全部归属 break_seconds、
+    // 投入恒 0 —— 与服务端 `_clock_transition_after` 的推导逐字同口径，
+    // 否则离线 post-image 会在 sync 的 clock_post_image_mismatch 上被拒。
+    if (isBreakSessionType(session.sessionType)) {
+      return {
+        grossSeconds,
+        pausedSeconds,
+        breakSeconds: Math.max(0, grossSeconds - pausedSeconds),
+        focusedSeconds: 0,
+      }
+    }
     return {
       grossSeconds,
       pausedSeconds,
+      breakSeconds: session.breakSeconds,
       focusedSeconds: Math.max(0, grossSeconds - pausedSeconds - session.breakSeconds),
     }
   }
@@ -1272,6 +1299,11 @@ export class FocusSessionRepository {
       throw new Error('provisional_session_not_active')
     }
     return this.withLocalOwner(session, async (current, { operation }, token) => {
+      // 双体系兼容（2026-09-16）：休息型会话免复盘 —— 结束即终态
+      //（validity=valid、reviewState 保持 not_required），与服务端
+      // `_clock_transition_after` 对 break 的处理同口径。投入型维持既有
+      // 「结束即进复盘」语义（pending + 离线 review-import 流程）。
+      const isBreak = isBreakSessionType(current.sessionType)
       const next = await this.persistProvisionalClock(current, {
         ...current,
         ...this.clockAt(current, input.occurredAt),
@@ -1280,8 +1312,8 @@ export class FocusSessionRepository {
         pauseStartedAt: null,
         clockState: 'ended',
         timerCompletion: input.timerCompletion,
-        validity: 'pending',
-        reviewState: 'pending',
+        validity: isBreak ? 'valid' : 'pending',
+        reviewState: isBreak ? 'not_required' : 'pending',
         updatedAt: input.occurredAt,
       }, operation, token)
       await transitionProvisionalOperation(this.meta, this.spaceId, token,
@@ -1719,6 +1751,7 @@ function buildLocalProvisionalAggregate(
   const session = {
     sessionId,
     sessionRevision: 1,
+    sessionType: (input.sessionType ?? 'work') as FocusSessionType,
     startedAt: input.startedAt,
     endedAt: null,
     pauseStartedAt: null,

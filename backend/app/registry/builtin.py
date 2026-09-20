@@ -617,6 +617,9 @@ REGISTRY.register(EntitySpec(
     sync_conflict_policy="strict_cas",
     fields=_sync_fields() + (
         FieldSpec("session_revision", "integer", nullable=False, default=1),
+        # 双体系兼容（2026-09-16）：work/free/countdown = 投入型；
+        # short_break/long_break = 休息型（focused_seconds 恒 0、免复盘）。
+        FieldSpec("session_type", "string", nullable=False, default="work"),
         FieldSpec("started_at", "datetime", nullable=False),
         FieldSpec("ended_at", "datetime", nullable=True),
         FieldSpec("pause_started_at", "datetime", nullable=True),

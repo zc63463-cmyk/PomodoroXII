@@ -325,6 +325,9 @@ def _project_session(row: FocusSession, space_id: str) -> dict[str, object]:
         "updatedAt": row.updated_at,
         "version": row.version,
         "sessionRevision": row.session_revision,
+        # 双体系兼容（2026-09-16）：读投影携带番茄钟模式；旧行（列出现前）
+        # 由 DB 默认值 'work' 覆盖，不会出现缺字段。
+        "sessionType": row.session_type,
         "startedAt": row.started_at,
         "endedAt": row.ended_at,
         "pauseStartedAt": row.pause_started_at,

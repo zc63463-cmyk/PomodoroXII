@@ -1221,6 +1221,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/relations/{relation_id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Relation
+         * @description 确认「已取消的上游不再需要」（幂等 CAS；服务端打戳，见 D2 / ADR-0004）。
+         *
+         *     这是 relation 的 resolution / resolved_at 的**唯一**写入通道：客户端不能
+         *     选择 resolution 取值或时间戳（外部 schema extra="forbid"），重复确认是
+         *     零效果回执（无 version bump / 无 sync 事件）。
+         */
+        post: operations["resolve_relation_api_v1_relations__relation_id__resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/schedules": {
         parameters: {
             query?: never;
@@ -1407,6 +1431,9 @@ export interface paths {
          *     The hourly distribution is the point of this endpoint: it answers
          *     "which hours produce uninterrupted sessions" rather than "how many
          *     sessions did I do", which is the least informative number available.
+         *
+         *     ``start`` (optional) pins the window start explicitly; when omitted the
+         *     window is derived from ``days`` exactly as before (see StatsService).
          */
         get: operations["stats_focus_summary_api_v1_stats_focus_summary_get"];
         put?: never;
@@ -2335,8 +2362,11 @@ export interface components {
             fromWorkItemId: string;
             /** Payloadhash */
             payloadHash: string;
-            /** Relationtype */
-            relationType: string;
+            /**
+             * Relationtype
+             * @enum {string}
+             */
+            relationType: "depends_on" | "blocks" | "relates_to";
             /** Spaceid */
             spaceId: string;
             /** Toworkitemid */
@@ -2353,7 +2383,7 @@ export interface components {
             /** Payloadhash */
             payloadHash: string;
             /** Priority */
-            priority?: string | null;
+            priority?: ("low" | "medium" | "high" | "urgent") | null;
             /** Projectid */
             projectId: string;
             /** Spaceid */
@@ -2595,6 +2625,12 @@ export interface components {
             sessionNote: string;
             /** Sessionrevision */
             sessionRevision: number;
+            /**
+             * Sessiontype
+             * @default work
+             * @enum {string}
+             */
+            sessionType: "work" | "short_break" | "long_break" | "free" | "countdown";
             /** Spaceid */
             spaceId: string;
             /** Startedat */
@@ -2971,8 +3007,9 @@ export interface components {
             /**
              * Status
              * @default active
+             * @enum {string}
              */
-            status: string;
+            status: "active" | "archived";
             /**
              * Summary
              * @default
@@ -3003,7 +3040,7 @@ export interface components {
             /** Folder Id */
             folder_id?: string | null;
             /** Status */
-            status?: string | null;
+            status?: ("active" | "archived") | null;
             /** Summary */
             summary?: string | null;
             /** Tags */
@@ -3033,8 +3070,9 @@ export interface components {
             /**
              * Status
              * @default active
+             * @enum {string}
              */
-            status: string;
+            status: "active" | "archived";
             /**
              * Summary
              * @default
@@ -3470,6 +3508,8 @@ export interface components {
             sessionNote: string;
             /** Sessionrevision */
             sessionRevision: number;
+            /** Sessiontype */
+            sessionType?: ("work" | "short_break" | "long_break" | "free" | "countdown") | null;
             /** Startedat */
             startedAt: string;
             /**
@@ -3789,6 +3829,10 @@ export interface components {
             id: string;
             /** Relationtype */
             relationType: string;
+            /** Resolution */
+            resolution: string | null;
+            /** Resolvedat */
+            resolvedAt: string | null;
             /** Spaceid */
             spaceId: string;
             /** Toworkitemid */
@@ -3848,8 +3892,11 @@ export interface components {
             fromWorkItemId: string;
             /** Payloadhash */
             payloadHash: string;
-            /** Relationtype */
-            relationType: string;
+            /**
+             * Relationtype
+             * @enum {string}
+             */
+            relationType: "depends_on" | "blocks" | "relates_to";
             /** Spaceid */
             spaceId: string;
             /** Toworkitemid */
@@ -3937,6 +3984,36 @@ export interface components {
             payloadHash: string;
             /** Sessionid */
             sessionId: string;
+        };
+        /**
+         * ResolveRelationRequest
+         * @description 确认「已取消的上游不再需要」（D2 / ADR-0004）。
+         *
+         *     ★ 与 Remove 同形（edge 身份 + CAS），但语义是幂等的解除确认。
+         *     - **不接受任何时间戳字段**：``resolved_at`` 由服务端单调时钟打戳；
+         *       ``extra="forbid"``（WireModel）会拒收调用方自带的时间戳 / resolution，
+         *       防伪与防伪造确认。
+         *     - 只对阻塞型边（depends_on / blocks）有意义；``relates_to`` 由编译器
+         *       fail-closed 拒绝。
+         */
+        ResolveRelationRequest: {
+            /** Commandid */
+            commandId: string;
+            /** Expectedversion */
+            expectedVersion: number;
+            /** Fromworkitemid */
+            fromWorkItemId: string;
+            /** Payloadhash */
+            payloadHash: string;
+            /**
+             * Relationtype
+             * @enum {string}
+             */
+            relationType: "depends_on" | "blocks" | "relates_to";
+            /** Spaceid */
+            spaceId: string;
+            /** Toworkitemid */
+            toWorkItemId: string;
         };
         /**
          * RestoreWorkItemRequest
@@ -4450,6 +4527,8 @@ export interface components {
             ownerTabId: string;
             /** Plannedseconds */
             plannedSeconds: number;
+            /** Sessiontype */
+            sessionType?: ("work" | "short_break" | "long_break" | "free" | "countdown") | null;
             /** Startedat */
             startedAt: string;
         };
@@ -4991,7 +5070,7 @@ export interface components {
             /** Payloadhash */
             payloadHash: string;
             /** Priority */
-            priority?: string | null;
+            priority?: ("low" | "medium" | "high" | "urgent") | null;
             /** Spaceid */
             spaceId: string;
             /** Title */
@@ -5106,7 +5185,7 @@ export interface components {
             /** Completionwindowstart */
             completionWindowStart: string | null;
             /** Confidence */
-            confidence: string | null;
+            confidence: ("low" | "medium" | "high") | null;
             /** Createdat */
             createdAt: string;
             /**
@@ -5134,8 +5213,10 @@ export interface components {
             markedAsAttention: boolean;
             /** Parentid */
             parentId: string | null;
+            /** Prewaitingstatusdefinitionid */
+            preWaitingStatusDefinitionId?: string | null;
             /** Priority */
-            priority: string | null;
+            priority: ("low" | "medium" | "high" | "urgent") | null;
             /** Projectid */
             projectId: string;
             /** Reviewpoint */
@@ -7996,6 +8077,47 @@ export interface operations {
             };
         };
     };
+    resolve_relation_api_v1_relations__relation_id__resolve_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                relation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveRelationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSpaceAcceptedResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
     list_schedules_api_v1_schedules_get: {
         parameters: {
             query?: {
@@ -8430,6 +8552,8 @@ export interface operations {
             query?: {
                 /** @description Period in days */
                 days?: number;
+                /** @description Inclusive window start (UTC, second precision) */
+                start?: string | null;
             };
             header?: never;
             path?: never;

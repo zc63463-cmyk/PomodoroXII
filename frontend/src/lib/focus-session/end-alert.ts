@@ -28,6 +28,11 @@ export interface EndAlertTick {
   plannedSeconds: number
   notificationEnabled: boolean
   soundEnabled: boolean
+  /**
+   * 番茄钟模式（双体系兼容 2026-09-16，可选）：只影响**文案** ——
+   * 休息型到点说「休息结束」，投入型（缺省）保持既有「专注结束」逐字不变。
+   */
+  mode?: 'work' | 'short_break' | 'long_break' | 'free' | 'countdown' | null
 }
 
 export interface EndAlert {
@@ -81,9 +86,16 @@ export function createEndAlert(deps: EndAlertDeps = {}): EndAlert {
       // 失败重试会把一次故障放大成 log 洪水；迟到的提示也没有到点提示的价值。
       alerted.add(tick.sessionId)
       const minutes = Math.max(1, Math.round(tick.plannedSeconds / 60))
+      // 文案按模式分流：休息型说「休息结束 / 本轮休息 N 分钟已完成」；
+      // 其余（含缺省）保持既有「专注结束」逐字不变。
+      const breakSession = tick.mode === 'short_break' || tick.mode === 'long_break'
+      const title = breakSession ? '休息结束' : '专注结束'
+      const body = breakSession
+        ? `本轮休息 ${minutes} 分钟已完成`
+        : `本轮计划 ${minutes} 分钟已完成`
       if (tick.notificationEnabled) {
         try {
-          (deps.notify ?? defaultNotify)('专注结束', `本轮计划 ${minutes} 分钟已完成`)
+          (deps.notify ?? defaultNotify)(title, body)
         } catch (cause) {
           warn(`notification skipped: ${cause instanceof Error ? cause.message : String(cause)}`)
         }

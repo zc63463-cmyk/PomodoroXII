@@ -870,6 +870,18 @@
     --timer-ring-progress-overtime: var(--destructive);
   }
 
+  /* 模式色调（双体系兼容 2026-09-16）：只改进度色变量，环几何/动画不动。
+     work 刻意不写规则 —— 既有 primary 视觉基线逐字不变。
+     用 chart-2 / chart-5 而不是写死色值：本块规矩是"颜色只用主题变量"，
+     五个主题都定义了 chart-1..5，换主题不会有一档读不了。 */
+  .timer-ring--tone-break {
+    --timer-ring-progress: var(--chart-2);
+  }
+
+  .timer-ring--tone-flexible {
+    --timer-ring-progress: var(--chart-5);
+  }
+
   .timer-ring-track {
     stroke: var(--timer-ring-track);
   }

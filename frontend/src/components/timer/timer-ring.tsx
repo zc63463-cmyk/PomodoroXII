@@ -18,6 +18,11 @@ interface TimerRingProps {
   live: boolean
   /** svg 尺寸类覆盖：默认运行态 h-56 w-56；准备态预览传 h-40 w-40。 */
   svgClassName?: string
+  /**
+   * 模式色调（双体系兼容 2026-09-16）：只加一个 tone 类名，颜色由 CSS 决定。
+   * 不传 = 保持既有默认色（旧调用点行为逐字不变）。
+   */
+  tone?: 'work' | 'break' | 'flexible'
   /** 数字槽：渲染在环中心（绝对定位等样式由调用方决定）。 */
   children?: ReactNode
 }
@@ -36,12 +41,13 @@ interface TimerRingProps {
  *   - timer-ring--overtime / timer-ring-live 两个类名开关；
  *   - 默认尺寸 h-56 w-56（运行态原值）。
  */
-export function TimerRing({ fraction, overtime, live, svgClassName = 'h-56 w-56', children }: TimerRingProps) {
+export function TimerRing({ fraction, overtime, live, svgClassName = 'h-56 w-56', tone, children }: TimerRingProps) {
   const clampedFraction = Math.min(Math.max(fraction, 0), 1)
   const ringClassName = [
     'timer-ring relative grid place-items-center',
     overtime ? 'timer-ring--overtime' : '',
     live ? 'timer-ring-live' : '',
+    tone ? `timer-ring--tone-${tone}` : '',
   ].filter(Boolean).join(' ')
 
   return createElement(

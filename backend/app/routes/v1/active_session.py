@@ -144,7 +144,7 @@ async def _run_locator_mutation(operation):
 
 
 def _map_start_payload(payload: StartActiveSessionPayload) -> dict[str, object]:
-    return {
+    mapped: dict[str, object] = {
         "level2_work_item_id": payload.level2_work_item_id,
         "level3_work_item_ids": list(payload.level3_work_item_ids),
         "planned_seconds": payload.planned_seconds,
@@ -153,10 +153,15 @@ def _map_start_payload(payload: StartActiveSessionPayload) -> dict[str, object]:
         "owner_tab_id": payload.owner_tab_id,
         "expected_work_item_versions": dict(payload.expected_work_item_versions),
     }
+    # 双体系兼容（2026-09-16）：仅当客户端显式携带时才进入业务载荷 ——
+    # 不带该键的旧载荷逐字保持原样，payload hash 与旧口径一致（不动旧客户端）。
+    if payload.session_type is not None:
+        mapped["session_type"] = payload.session_type
+    return mapped
 
 
 def _map_session_snapshot(payload: ProvisionalSessionSnapshot) -> dict[str, object]:
-    return {
+    mapped: dict[str, object] = {
         "session_revision": payload.session_revision,
         "started_at": payload.started_at,
         "pause_started_at": payload.pause_started_at,
@@ -171,6 +176,11 @@ def _map_session_snapshot(payload: ProvisionalSessionSnapshot) -> dict[str, obje
         "ownership_state": payload.ownership_state,
         "session_note": payload.session_note,
     }
+    # 双体系兼容：与 _map_start_payload 同一约定 —— 只在显式携带时进入
+    # 业务载荷，旧快照的 payload hash 逐字不变。
+    if payload.session_type is not None:
+        mapped["session_type"] = payload.session_type
+    return mapped
 
 
 def _map_context_snapshot(payload: ProvisionalTaskContextSnapshot) -> dict[str, object]:

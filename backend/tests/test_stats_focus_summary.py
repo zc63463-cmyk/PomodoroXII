@@ -29,6 +29,7 @@ async def _add_session(
     focused_seconds: int = 1500,
     paused_seconds: int = 0,
     validity: str = "valid",
+    session_type: str = "work",
 ) -> None:
     from app.models.focus_session import FocusSession
 
@@ -44,6 +45,7 @@ async def _add_session(
             validity=validity,
             review_state="not_required",
             ownership_state="authoritative",
+            session_type=session_type,
         )
     )
     await space_session.flush()
@@ -82,6 +84,41 @@ async def test_focus_summary_buckets_by_hour(space_session):
     assert result["total_sessions"] == 3
     assert result["by_hour"][9]["sessions"] == 2
     assert result["by_hour"][14]["sessions"] == 1
+    assert result["by_hour"][10]["sessions"] == 0
+
+
+@pytest.mark.asyncio
+async def test_focus_summary_excludes_break_sessions(space_session):
+    """★ 双体系兼容（2026-09-16）：休息型会话不进「番茄」口径。
+
+    休息与投入共用 focus_sessions 表（单一事实源），但：
+    - 不计 total/valid/interrupted/by_hour（那不是番茄）；
+    - 不把休息的计划时长混进 estimate_accuracy 的分母；
+    - 时长侧天然为零（focused_seconds 恒 0），这里连求和也不参与。
+    """
+    from app.services.stats import StatsService
+
+    now = utc_now()
+    base = now.replace(minute=0, second=0, microsecond=0)
+    await _add_session(space_session, started_at=_iso(base.replace(hour=9)),
+                       planned_seconds=1500, focused_seconds=1500)
+    await _add_session(
+        space_session, started_at=_iso(base.replace(hour=9)),
+        planned_seconds=300, focused_seconds=0, session_type="short_break",
+    )
+    await _add_session(
+        space_session, started_at=_iso(base.replace(hour=10)),
+        planned_seconds=900, focused_seconds=0, session_type="long_break",
+    )
+
+    result = await StatsService(space_session).focus_summary(days=30)
+
+    assert result["total_sessions"] == 1
+    assert result["valid_sessions"] == 1
+    assert result["focused_seconds"] == 1500
+    assert result["planned_seconds"] == 1500
+    assert result["estimate_accuracy"] == 1.0
+    assert result["by_hour"][9]["sessions"] == 1
     assert result["by_hour"][10]["sessions"] == 0
 
 

@@ -389,6 +389,78 @@ describe('FocusSession aggregate persistence', () => {
     })
   })
 
+  it('双体系兼容：休息型临时会话净时长进 break_seconds、投入恒 0、免复盘', async () => {
+    const db = await openPomodoroXIDB(`focus-break-clock-${crypto.randomUUID()}`)
+    const meta = new MetaDB(`meta-focus-break-clock-${crypto.randomUUID()}`)
+    databases.push(db, meta)
+    await meta.open()
+    await meta.sessionTabs.put({
+      tabId: 'tab-a', deviceId: 'device-a', openedAt: '2026-07-15T08:00:00.000Z',
+      lastSeenAt: '2026-07-15T08:00:00.000Z', closedAt: null,
+    })
+    await db.projects.put({ id: 'project-1', name: 'Project', version: 1 })
+    await db.workItems.bulkPut([
+      { id: 'l2', projectId: 'project-1', title: 'Parent', depth: 2, parentId: null, statusDefinitionId: 'status-open', version: 4 },
+    ])
+    const active = {
+      updateSessionNote: vi.fn(), setCurrentPlanItem: vi.fn(), setCompletionDraft: vi.fn(),
+      addPlanItem: vi.fn(), removePlanItem: vi.fn(),
+    }
+    const lock = { run: async <T>(_operationId: string, effect: () => Promise<T>) => effect() }
+    const repository = new FocusSessionRepository(
+      db, meta, db.spaceId, { deviceId: 'device-a', tabId: 'tab-a' }, active as never, lock,
+    )
+
+    const started = await repository.startProvisional({
+      operationId: 'offline-break-1', spaceId: db.spaceId, sessionId: 'offline-break-1',
+      level2WorkItemId: 'l2', level3WorkItemIds: [], plannedSeconds: 300,
+      sessionType: 'short_break',
+      startedAt: '2026-07-15T08:00:00.000Z', deviceId: 'device-a', tabId: 'tab-a',
+      expectedWorkItemVersions: { l2: 4 },
+    })
+    expect(started.session.sessionType).toBe('short_break')
+    // 休息不承接三级计划：create 复合批只有 3 行（无 sessionWorkItemPlan）
+    expect((await db.outbox.toArray())
+      .filter((row) => row.compoundOperationId === 'offline-break-1')
+      .map((row) => row.entityType))
+      .toEqual(['focusSession', 'sessionTaskContext', 'sessionAttributionRevision'])
+
+    await repository.pauseProvisional('offline-break-1', '2026-07-15T08:05:00.000Z')
+    await repository.resumeProvisional('offline-break-1', '2026-07-15T08:06:00.000Z')
+    await repository.endProvisional('offline-break-1', {
+      occurredAt: '2026-07-15T08:10:00.000Z', timerCompletion: 'completed',
+    })
+
+    expect(await db.focusSessions.get('offline-break-1')).toMatchObject({
+      sessionType: 'short_break',
+      endedAt: '2026-07-15T08:10:00.000Z', pauseStartedAt: null,
+      grossSeconds: 600, pausedSeconds: 60,
+      // 净时长全部归属休息，投入恒 0（与服务端推导同口径）
+      breakSeconds: 540, focusedSeconds: 0,
+      clockState: 'ended', timerCompletion: 'completed',
+      // 免复盘：validity 直接 valid，review_state 保持 not_required
+      validity: 'valid', reviewState: 'not_required',
+    })
+    expect(await meta.provisionalOperations.get('offline-break-1'))
+      .toMatchObject({ state: 'awaiting_s4' })
+
+    const held = (await db.outbox.where('entityType').equals('focusSession').toArray())
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    expect(held).toHaveLength(4)
+    expect(held.map((row) => row.expectedVersion)).toEqual([null, 1, 2, 3])
+    // create 与每个 clock post-image 都带 session_type（服务端据此判定休息型）
+    expect(held.every((row) => JSON.parse(row.payload).sessionType === 'short_break')).toBe(true)
+    expect(JSON.parse(held[1]!.payload)).toMatchObject({
+      pauseStartedAt: '2026-07-15T08:05:00.000Z', grossSeconds: 300,
+      breakSeconds: 300, focusedSeconds: 0,
+    })
+    expect(JSON.parse(held[3]!.payload)).toMatchObject({
+      endedAt: '2026-07-15T08:10:00.000Z', grossSeconds: 600, pausedSeconds: 60,
+      breakSeconds: 540, focusedSeconds: 0,
+      validity: 'valid', reviewState: 'not_required',
+    })
+  })
+
   it('routes authoritative content mutations through the injected Coordinator', async () => {
     const db = await openPomodoroXIDB(`focus-authoritative-${crypto.randomUUID()}`)
     const meta = new MetaDB(`meta-focus-authoritative-${crypto.randomUUID()}`)
