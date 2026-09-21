@@ -98,11 +98,14 @@ def _event() -> dict[str, object]:
     }
 
 
-#: v2 的**运维面**端点：不属于 SYNC_OPERATIONS 定义的协议操作集，因此
-#: 既不要求 MCP 工具对齐，也不参与「REST == 协议操作」的相等断言。
-#: 保留期修剪由服务端策略驱动，客户端从不调用，故没有对应的 MCP 工具。
+#: v2 的**运维面/提示面**端点：不属于 SYNC_OPERATIONS 定义的协议操作集，
+#: 因此既不要求 MCP 工具对齐，也不参与「REST == 协议操作」的相等断言。
+#: - 保留期修剪由服务端策略驱动，客户端从不调用，故没有对应的 MCP 工具。
+#: - TS-04 的变更通知流只发失效提示（space_id + visible_watermark），既不读写
+#:   游标/ACK，也不构成第二个同步协议；客户端收到后调用的仍是既有 sync 周期。
 SYNC_V2_MAINTENANCE_OPERATIONS = {
     ("/api/v1/sync/v2/retention/prune", "POST"),
+    ("/api/v1/sync/v2/events", "GET"),
 }
 
 

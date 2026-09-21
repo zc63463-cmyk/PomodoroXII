@@ -1521,6 +1521,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sync/v2/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream Space Change Events
+         * @description Stream Space-scoped change invalidations (``text/event-stream``).
+         *
+         *     The response carries only watermark hints; the client is expected to run
+         *     its normal Sync v2 cycle on each one.
+         */
+        get: operations["stream_space_change_events_api_v1_sync_v2_events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sync/v2/operations/query": {
         parameters: {
             query?: never;
@@ -9055,6 +9078,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SyncV2AckResponse"];
+                };
+            };
+            /** @description Domain or request validation error */
+            422: {
+                headers: {
+                    "X-PomodoroXII-Error-Code"?: string;
+                    "X-PomodoroXII-Retryable"?: string;
+                    "X-Request-ID"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["RequestValidationErrorResponse"];
+                    "application/vnd.pomodoroxii.error+json;version=2": components["schemas"]["CanonicalErrorResponse"];
+                };
+            };
+        };
+    };
+    stream_space_change_events_api_v1_sync_v2_events_get: {
+        parameters: {
+            query: {
+                space_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Domain or request validation error */

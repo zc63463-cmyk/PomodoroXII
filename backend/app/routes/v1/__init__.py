@@ -38,6 +38,7 @@ def build_v1_router() -> APIRouter:
     from app.routes.v1.spaces import router as spaces_router
     from app.routes.v1.stats import router as stats_router
     from app.routes.v1.sync import router as sync_router
+    from app.routes.v1.sync_events import router as sync_events_router
     from app.routes.v1.task_space_commands import router as task_space_commands_router
     from app.routes.v1.time_blocks import router as time_blocks_router
     from app.routes.v1.trash import router as trash_router
@@ -72,6 +73,8 @@ def build_v1_router() -> APIRouter:
     router.include_router(stats_router, prefix="/stats", tags=["stats"])
     router.include_router(settings_router, prefix="/settings", tags=["settings"])
     router.include_router(sync_router, prefix="/sync", tags=["sync"])
+    # TS-04：Space 级已提交变更通知（SSE，只作失效提示，不承载业务 post-image）
+    router.include_router(sync_events_router, prefix="/sync", tags=["sync"])
 
     # Task Space contract routers (space token required).
     router.include_router(projects_router, prefix="/projects", tags=["projects"])

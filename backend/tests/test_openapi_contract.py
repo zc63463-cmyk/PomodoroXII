@@ -291,6 +291,9 @@ class TestOpenAPIContractGate:
             ("GET", "/api/v1/sync/v2/status"),
             # 保留期修剪：幂等、需 space token，属 v2 运维面。
             ("POST", "/api/v1/sync/v2/retention/prune"),
+            # TS-04：已提交变更通知流（SSE）。只发失效提示，不改动游标/ACK
+            # 语义，也不构成第二个同步协议。
+            ("GET", "/api/v1/sync/v2/events"),
         }
 
     def test_error_status_detection_covers_numeric_and_range_keys(self):
