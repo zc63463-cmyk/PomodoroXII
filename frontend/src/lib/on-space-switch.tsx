@@ -13,7 +13,11 @@
 
 import { type ReactNode, createElement, Fragment, useEffect } from 'react'
 import { queryClient } from '@/lib/query-client'
-import { syncEngine, bootstrapSyncEngine } from '@/lib/sync'
+import {
+  bootstrapSyncEngine,
+  stopTaskSpaceChangeStream,
+  syncEngine,
+} from '@/lib/sync'
 import { useSpaceStore } from '@/stores/space-store'
 import { STORE_RESET_FNS } from '@/stores'
 import { PXII_SPACE_SWITCHED_EVENT } from '@/lib/platform'
@@ -22,6 +26,8 @@ export function SpaceSwitchProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const handler = () => {
       // ② syncEngine.destroy() — destroy old sync engine
+      // TS-04：旧 Space 的变更流必须先关，否则它的迟到通知会驱动新 Space。
+      stopTaskSpaceChangeStream()
       syncEngine.destroy()
 
       // ③ queryClient.clear() — clear all React Query cache

@@ -18,9 +18,47 @@ import { useTaskSpaceStore } from '@/stores/task-space-store'
 import { RealSyncEngine } from './engine'
 import { loadSyncV2Meta } from './sync-meta'
 import { withSpaceAuthorityFence } from './space-authority-fence'
+import { startTaskSpaceChangeStream, type ChangeStreamHandle } from './change-stream'
 import { syncEngineStub, type SyncEngine } from './types'
 
 export let syncEngine: SyncEngine = syncEngineStub
+
+/**
+ * TS-04：当前 Space 的变更流句柄（每 Space 至多一条）。
+ *
+ * 生命周期与 engine 严格绑定：bootstrap 时启动，destroy/切换时关闭。关闭后
+ * 手动、在线、引导与脏标记同步路径全部照常工作 —— 变更流只是「更快」，不是
+ * 正确性来源（正确性由 visible watermark + Sync v2 recovery 兜底）。
+ */
+let changeStreamHandle: ChangeStreamHandle | null = null
+
+/** 关闭当前变更流（幂等）。Space 切换与 engine destroy 都必须走到这里。 */
+export function stopTaskSpaceChangeStream(): void {
+  changeStreamHandle?.close()
+  changeStreamHandle = null
+}
+
+function startChangeStreamFor(engine: RealSyncEngine, spaceId: string): void {
+  stopTaskSpaceChangeStream()
+  if (typeof window === 'undefined') return
+
+  // 在权威围栏内取 token：围栏退出即失效，旧的迟到回调因此无法污染新 Space。
+  void withSpaceAuthorityFence(spaceId, async (authority) => {
+    // 围栏内的 engine 可能已被替换（bootstrap 竞态）：以 live binding 为准。
+    if (syncEngine !== engine) return
+    changeStreamHandle = startTaskSpaceChangeStream({
+      spaceId,
+      authority,
+      sync: () => engine.sync(),
+      onError: (error) => {
+        // 仅诊断：通知失败不影响任何已有同步触发路径。
+        console.warn('[sync] change stream error:', error)
+      },
+    })
+  }).catch((error) => {
+    console.warn('[sync] change stream unavailable:', error)
+  })
+}
 
 export { syncEngineStub } from './types'
 export type { SyncEngine, SyncConflict, SyncStatus, SyncOp } from './types'
@@ -140,7 +178,9 @@ export async function wipeUninitializedSyncMeta(
  * 调用方：SpaceSwitchProvider ④ reset 之后；SpaceBootstrap hydrate 成功之后。
  */
 export function bootstrapSyncEngine(spaceId: string): void {
-  // 1. 旧引擎（含 stub）清 timer/listeners
+  // 1. 旧引擎（含 stub）清 timer/listeners；旧变更流必须先关，避免旧 Space 的
+  //    迟到通知驱动新 Space。
+  stopTaskSpaceChangeStream()
   syncEngine.destroy()
 
   // 2. db 必须已就绪（switchTo 在前）
@@ -160,6 +200,9 @@ export function bootstrapSyncEngine(spaceId: string): void {
 
   // 5. 首周期 sync（fire-and-forget；engine 内 since==='' → full）
   void engine.sync()
+
+  // 6. TS-04：接上已提交变更通知流（只作唤醒；失败不影响上面的首周期）。
+  startChangeStreamFor(engine, spaceId)
 }
 
 // Wave 2C: reconnect trigger.  Offline edits are enqueued to the outbox with

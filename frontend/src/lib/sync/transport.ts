@@ -34,6 +34,8 @@ export const SYNC_V2_PATHS = {
   recover: '/sync/v2/recover',
   ack: '/sync/v2/ack',
   status: '/sync/v2/status',
+  // TS-04：已提交变更通知流（SSE）。只发失效提示，不走 axios、不写游标/ACK。
+  events: '/sync/v2/events',
 } as const
 
 export const SYNC_V2_PUSH_REQUEST_PATH =

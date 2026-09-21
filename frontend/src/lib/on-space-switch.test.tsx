@@ -20,6 +20,8 @@ vi.mock('@/lib/sync', () => ({
     destroy: vi.fn(),
   },
   bootstrapSyncEngine: vi.fn(),
+  // TS-04：Space 切换必须先关旧变更流，再 destroy 引擎。
+  stopTaskSpaceChangeStream: vi.fn(),
 }))
 
 // Mock queryClient
