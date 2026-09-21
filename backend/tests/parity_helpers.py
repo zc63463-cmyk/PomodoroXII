@@ -151,6 +151,9 @@ EXPECTED_MCP_TOOLS = frozenset(
         "list_task_space_definitions",
         "get_sync_status",
         "sync_pull",
+        # TS-03：唯一的任务空间写入面。封闭九类命令 + 写准入，绝不暴露任意
+        # mutation 名、ORM 访问或派生字段（见 app/mcp/task_space_tools.py）。
+        "execute_task_space_commands",
     }
 )
 """Names of every tool that must be registered on the FastMCP server.

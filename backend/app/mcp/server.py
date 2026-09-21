@@ -43,6 +43,7 @@ from app.mcp.sync_tools import (
     McpSyncProtocolFactory,
     register_sync_tools,
 )
+from app.mcp.task_space_tools import register_task_space_write_tools
 from app.runtime.bootstrap import RuntimeServices
 from app.runtime.scope import AccessMode
 from app.runtime.space import SpaceRuntime, SpaceRuntimeHandle
@@ -171,11 +172,15 @@ mcp = FastMCP(
         "Task Space tools expose read-only project/work-item/note queries "
         "(three-level tree with statuses, types and labels). "
         "Meta tools expose the entity schema registry. "
-        "Sync tools expose push/pull/status for cross-device synchronization."
+        "Sync tools expose push/pull/status for cross-device synchronization. "
+        "execute_task_space_commands is the only write surface: one bounded, "
+        "admission-controlled batch of closed Task Space command kinds."
     ),
     auth=_InstalledRuntimeTokenVerifier(),
 )
-register_sync_tools(mcp, McpSyncProtocolFactory(_require_runtime_services))
+_sync_protocol_factory = McpSyncProtocolFactory(_require_runtime_services)
+register_sync_tools(mcp, _sync_protocol_factory)
+register_task_space_write_tools(mcp, _sync_protocol_factory)
 
 
 # --------------------------------------------------------------------------- #

@@ -217,6 +217,11 @@ class McpSyncProtocolFactory:
     def __init__(self, services_provider: RuntimeServicesProvider) -> None:
         self._services_provider = services_provider
 
+    @property
+    def services_provider(self) -> RuntimeServicesProvider:
+        """Public accessor for sibling tool surfaces (task-space write gateway)."""
+        return self._services_provider
+
     async def authenticate(self) -> Principal:
         return current_mcp_principal()
 
