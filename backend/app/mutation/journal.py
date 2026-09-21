@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
@@ -22,6 +23,8 @@ from app.mutation.types import (
     persisted_command_bytes,
 )
 from app.services.time import utc_now_iso_ms
+
+logger = logging.getLogger(__name__)
 
 LEGAL_TRANSITIONS = {
     MutationState.INTENT: frozenset({MutationState.STAGED, MutationState.ABORTED}),
@@ -156,8 +159,22 @@ def _decode_result(batch_id: str, payload: str | None) -> BatchMutationResult:
 
 
 class MutationJournal:
-    def __init__(self, session_factory: Callable[[], AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: Callable[[], AsyncSession],
+        *,
+        space_id: str | None = None,
+    ) -> None:
         self._sessions = session_factory
+        # TS-04: the Space this journal belongs to.  Supplied by the unit of
+        # work (which knows the authorized handle) so a finalized visible
+        # commit can be announced to the right Space without the ledger
+        # needing a redundant space_id column.
+        self._space_id = space_id
+        #: TS-04: best-effort sink for finalized visible commits.  None means
+        #: "no notifier in this deployment", which is a legal configuration —
+        #: clients then rely on their ordinary sync triggers.
+        self._change_observer: Callable[[str, int], None] | None = None
 
     async def is_clean(self) -> bool:
         async with self._sessions() as session:
@@ -638,7 +655,52 @@ class MutationJournal:
         found = await self.find_batch(batch_id)
         if found is None:
             raise IllegalMutationTransition("finalized batch receipt disappeared")
+        await self._notify_visible_change(batch_id)
         return found.result
+
+    async def _notify_visible_change(self, batch_id: str) -> None:
+        """Announce a committed, visible change to the Space change observer.
+
+        TS-04 seam.  This runs *after* the finalization transaction has
+        committed, so a notified subscriber can always pull the change it is
+        being told about.  It is deliberately best-effort: the observer is an
+        in-process invalidation hint, and correctness is owned by the durable
+        visible watermark plus the existing Sync v2 recovery path.  A failure
+        here must therefore never fail an already-committed mutation.
+        """
+        observer = self._change_observer
+        if observer is None:
+            return
+        try:
+            space_id, visible_watermark = await self._visible_position(batch_id)
+            if visible_watermark <= 0:
+                return
+            observer(space_id, visible_watermark)
+        except Exception:  # noqa: BLE001 - notification must not fail the commit
+            logger.warning(
+                "Space change notification failed for batch %s", batch_id,
+                exc_info=True,
+            )
+
+    async def _visible_position(self, batch_id: str) -> tuple[str, int]:
+        """The Space id and the newest visible ledger sequence for a batch.
+
+        Reads the ledger the same way the pull path does — ``visible.is_(True)``
+        as a top-level conjunction — so the announced watermark is exactly the
+        position a subscriber will observe when it pulls.
+        """
+        if not self._space_id:
+            return "", 0
+        async with self._sessions() as session:
+            watermark = await session.scalar(
+                select(func.max(SyncOutbox.id)).where(
+                    SyncOutbox.batch_id == batch_id,
+                    SyncOutbox.visible.is_(True),
+                )
+            )
+        if watermark is None:
+            return "", 0
+        return self._space_id, int(watermark)
 
     async def state(self, operation_id: str) -> MutationState:
         async with self._sessions() as session:

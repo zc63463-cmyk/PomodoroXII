@@ -489,6 +489,25 @@ async def _startup_owned(
                 MutationUnitOfWork,
             )
 
+            def observed_journal_factory(
+                session_factory,
+                *,
+                space_id: str | None = None,
+            ) -> MutationJournal:
+                """Bind the TS-04 committed-change observer onto each journal.
+
+                The journal announces a finalized *visible* commit to the
+                process-local Space change hub the SSE route subscribes to.
+                Notification stays best-effort: correctness is owned by the
+                durable visible watermark plus the existing Sync v2 recovery
+                path, so a delivery failure only delays a wakeup.
+                """
+                from app.sync.notifications import default_journal_observer
+
+                journal = MutationJournal(session_factory, space_id=space_id)
+                journal._change_observer = default_journal_observer
+                return journal
+
             interpreter = DbMutationInterpreter(catalog)
             projection_executor = FileSystemProjectionExecutor()
             recovery = MutationRecovery(
@@ -504,7 +523,7 @@ async def _startup_owned(
                     interpreter=interpreter,
                     projection_executor=projection_executor,
                     recovery_gate=recovery,
-                    journal_factory=MutationJournal,
+                    journal_factory=observed_journal_factory,
                 )
             )
         await runtime.prepare_registered_spaces(catalog, global_lease, fleet)

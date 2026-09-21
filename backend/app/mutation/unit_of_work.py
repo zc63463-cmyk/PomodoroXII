@@ -1979,7 +1979,12 @@ class RecoveryGate(Protocol):
 
 
 class MutationJournalFactory(Protocol):
-    def __call__(self, session_factory: async_sessionmaker[AsyncSession]) -> MutationJournal: ...
+    def __call__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        space_id: str | None = ...,
+    ) -> MutationJournal: ...
 
 
 class MutationUnitOfWork:
@@ -1999,6 +2004,31 @@ class MutationUnitOfWork:
         self.projection_executor = projection_executor
         self.recovery_gate = recovery_gate
         self.journal_factory = journal_factory
+
+    def mutation_journal(self, scope: SpaceRuntimeHandle) -> MutationJournal:
+        """Build the Space-bound journal used by the mutation execution path.
+
+        TS-04: only this construction binds the Space identity (and, in the
+        production factory, the committed-change observer).  Recovery and
+        inspection call sites keep the plain single-argument factory contract —
+        they never finalize a new visible commit, so they have nothing to
+        announce.
+
+        The Space keyword is optional and degrades gracefully: a factory that
+        only accepts the session factory keeps working unchanged, which is what
+        keeps existing journal doubles and any out-of-tree factory compatible.
+        Without a Space binding the journal simply announces nothing, and
+        clients fall back to their ordinary sync triggers.
+        """
+        space_id = getattr(getattr(scope, "scope", None), "space_id", None)
+        try:
+            return self.journal_factory(
+                scope.session_factory,
+                space_id=space_id if isinstance(space_id, str) else None,
+            )
+        except TypeError:
+            # Pre-TS-04 factory signature: no Space context available.
+            return self.journal_factory(scope.session_factory)
 
     async def recover_under_lease(
         self, scope: SpaceRuntimeHandle, lease: Lease
@@ -2106,7 +2136,7 @@ class MutationUnitOfWork:
         if _lease_fn is None:
             _lease_fn = scope.exclusive_space_resources
         async with _lease_fn("mutation", 5) as lease:
-            journal = self.journal_factory(scope.session_factory)
+            journal = self.mutation_journal(scope)
             recovery = await self.recover_under_lease(scope, lease)
             if recovery.failed_manual:
                 raise SpaceRecoveryRequiredError(
