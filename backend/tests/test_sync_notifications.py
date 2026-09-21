@@ -6,8 +6,8 @@ a liability at runtime:
 
 - nothing is published before the mutation is visible;
 - an older or repeated watermark is not fanned out (monotonic watermark);
-- subscribers are bounded, and a stalled subscriber is disconnected rather
-  than allowed to block a publisher or grow without bound;
+- subscribers are bounded: coalescing holds at most one pending hint, so a
+  stalled subscriber can neither block a publisher nor grow without bound;
 - a dropped hint is harmless because the connect-time watermark plus Sync v2
   is the correctness path;
 - the hub holds no database transaction or mutation lease for a stream's
@@ -94,10 +94,9 @@ async def test_burst_of_commits_coalesces_to_the_newest_watermark() -> None:
 async def test_slow_consumer_queue_stays_bounded_and_never_blocks_the_publisher() -> None:
     """A stalled consumer cannot grow memory or stall a commit path.
 
-    Coalescing is the first line of defense: a non-draining subscriber holds at
-    most one hint regardless of burst size.  The queue wall is the second: once
-    it is reached the subscriber is dropped rather than allowed to queue
-    indefinitely.
+    Coalescing is the whole mechanism: a non-draining subscriber holds at most
+    one hint regardless of burst size, so there is no queue wall to reach and
+    no disconnect path (see ``_Subscriber.offer``).
     """
     notifier = SpaceChangeNotifier(queue_size=2)
     async with notifier.subscribe("spc_a"):
@@ -109,26 +108,37 @@ async def test_slow_consumer_queue_stays_bounded_and_never_blocks_the_publisher(
 
         # The publisher returned promptly and never blocked on the consumer.
         assert elapsed < 1.0
-        # One subscriber entry, and its mailbox never exceeded the bound.
+        # One subscriber entry, and its mailbox never exceeded one hint.
         subscribers = notifier._subscribers.get("spc_a", [])
         assert len(subscribers) <= 1
-        assert all(item.pending <= 2 for item in subscribers)
+        assert all(item.pending <= 1 for item in subscribers)
 
 
-async def test_stalled_consumer_is_dropped_once_its_queue_wall_is_reached() -> None:
-    """Force distinct queued hints so the wall (not coalescing) is exercised."""
+async def test_stalled_consumer_holds_exactly_one_hint_and_is_never_dropped() -> None:
+    """A subscriber that stops draining coalesces, it is not disconnected.
+
+    The bounded mailbox is provided by coalescing, so a non-draining subscriber
+    stays registered holding the single newest watermark. Losing it is
+    impossible by design — and losing a hint would be harmless anyway, because
+    the connect-time watermark plus Sync v2 is the correctness path.
+    """
     notifier = SpaceChangeNotifier(queue_size=1)
     async with notifier.subscribe("spc_a") as stream:
-        # Drain in the background so hints are consumed, but keep publishing
-        # faster than the consumer observes closure.
-        notifier.publish("spc_a", 1)
-        notifier.publish("spc_a", 2)
-        # Fill the single slot with a hint that is never drained.
-        notifier.publish("spc_a", 3)
-        assert notifier.subscriber_count("spc_a") <= 1
-        # Whatever remains on the stream terminates rather than hanging.
-        remaining = [item async for item in stream]
-        assert all(item.visible_watermark > 0 for item in remaining)
+        for watermark in range(1, 6):
+            notifier.publish("spc_a", watermark)
+
+        # Still exactly one subscriber, still registered, still one pending hint.
+        assert notifier.subscriber_count("spc_a") == 1
+        subscriber = notifier._subscribers["spc_a"][0]
+        assert subscriber.closed is False
+        assert subscriber.pending == 1
+
+        # The hint it holds is the newest one, not a stale backlog.  The stream
+        # never ends on its own (a stalled consumer is not disconnected), so
+        # read once with a bound instead of draining to completion.
+        change = await asyncio.wait_for(anext(stream.__aiter__()), timeout=1.0)
+        assert change.visible_watermark == 5
+        assert subscriber.pending == 0
 
 
 async def test_publisher_is_never_blocked_by_a_stalled_subscriber() -> None:
@@ -451,3 +461,58 @@ async def test_watermark_advances_monotonically_across_batches(space_session) ->
     watermarks = [watermark for _space, watermark in published]
     assert watermarks == sorted(watermarks)
     assert len(set(watermarks)) == 3
+
+
+async def test_recovery_finalize_emits_no_notification(space_session) -> None:
+    """TS-04 activity boundary: a commit made visible *by recovery* is silent.
+
+    Recovery finalizes through the class-level
+    ``finalize_batch_in_transaction`` rather than the instance
+    ``finalize_batch``, so no observer is invoked.  This is intentional: the
+    durable visible watermark plus Sync v2 (and the stream's connect-time
+    watermark) is the correctness path, and recovery runs under the mutation
+    lease typically before any subscriber exists.
+
+    Pinned here so the boundary is a decision, not an accident: if someone
+    later routes recovery through ``finalize_batch`` this test fails and forces
+    the activity contract to be reconsidered deliberately.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.mutation.journal import MutationJournal
+    from app.mutation.recovery import MutationRecovery
+    from app.sync.notifications import space_change_notifier
+
+    published: list[tuple[str, int]] = []
+    original_publish = space_change_notifier.publish
+
+    def spy(space_id: str, visible_watermark: int) -> int:
+        published.append((space_id, visible_watermark))
+        return original_publish(space_id, visible_watermark)
+
+    sessions = async_sessionmaker(space_session.bind, expire_on_commit=False)
+    async with sessions.begin() as session:
+        _seed_finalizable_batch(session, batch_id="batch-recovered", space_id="spc_a")
+
+    class _Scope:
+        scope = type("S", (), {"space_id": "spc_a"})()
+        session_factory = sessions
+
+    recovery = MutationRecovery(
+        catalog=None,
+        interpreter=None,
+        projection_executor=None,
+        journal_factory=MutationJournal,
+    )
+    space_change_notifier.publish = spy  # type: ignore[method-assign]
+    try:
+        await recovery._finalize_batch(_Scope(), "batch-recovered")
+    finally:
+        space_change_notifier.publish = original_publish  # type: ignore[method-assign]
+
+    # The row is visible (recovery did commit it) but nothing was announced.
+    journal = MutationJournal(sessions, space_id="spc_a")
+    assert await journal.visible_event_count("batch-recovered") == 1, (
+        "recovery must still make the change visible"
+    )
+    assert published == [], f"recovery finalization must not notify; got {published}"

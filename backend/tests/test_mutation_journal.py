@@ -780,3 +780,93 @@ async def test_finalize_in_transaction_obeys_outer_rollback(space_session) -> No
             )
             is False
         )
+
+
+# --------------------------------------------------------------------------- #
+# TS-04: Space-bound journal factory and its signature-based compatibility
+# --------------------------------------------------------------------------- #
+
+
+def test_factory_accepts_space_id_reads_the_signature() -> None:
+    """The compatibility probe is signature-based, never a caught TypeError."""
+    from app.mutation.unit_of_work import _factory_accepts_space_id
+
+    def with_kw(session_factory, *, space_id=None):  # noqa: ANN001, ANN202
+        return None
+
+    def without_kw(session_factory):  # noqa: ANN001, ANN202
+        return None
+
+    def with_var_kw(session_factory, **kwargs):  # noqa: ANN001, ANN202
+        return None
+
+    assert _factory_accepts_space_id(with_kw) is True
+    assert _factory_accepts_space_id(without_kw) is False
+    assert _factory_accepts_space_id(with_var_kw) is True
+    # An uninspectable callable degrades to the single-argument contract, which
+    # is the safe direction (the journal simply announces nothing).
+    assert _factory_accepts_space_id(object()) is False
+
+
+def test_mutation_journal_does_not_hide_a_factory_type_error() -> None:
+    """A factory raising TypeError for its own reasons must surface it.
+
+    The old implementation wrapped the whole call in ``except TypeError`` and
+    silently retried with one argument, converting a real internal failure into
+    a confusing signature error.  The signature probe means the keyword form is
+    chosen up front, so the genuine TypeError propagates unchanged.
+    """
+    from app.mutation.unit_of_work import MutationUnitOfWork
+
+    class _Scope:
+        scope = type("S", (), {"space_id": "spc_x"})()
+        session_factory = object()
+
+    def buggy_factory(session_factory, *, space_id=None):  # noqa: ANN001, ANN202
+        raise TypeError("internal bug unrelated to the signature")
+
+    uow = MutationUnitOfWork.__new__(MutationUnitOfWork)
+    uow.journal_factory = buggy_factory
+
+    with pytest.raises(TypeError, match="internal bug unrelated to the signature"):
+        uow.mutation_journal(_Scope())
+
+
+def test_mutation_journal_binds_space_id_on_the_production_factory() -> None:
+    """The production factory receives the authorized Space identity."""
+    from app.mutation.journal import MutationJournal
+    from app.mutation.unit_of_work import MutationUnitOfWork
+
+    class _Scope:
+        scope = type("S", (), {"space_id": "spc_bound"})()
+        session_factory = object()
+
+    def observed_journal_factory(session_factory, *, space_id=None):  # noqa: ANN001, ANN202
+        return MutationJournal(session_factory, space_id=space_id)
+
+    uow = MutationUnitOfWork.__new__(MutationUnitOfWork)
+    uow.journal_factory = observed_journal_factory
+
+    journal = uow.mutation_journal(_Scope())
+    assert journal._space_id == "spc_bound"
+
+
+def test_mutation_journal_falls_back_for_a_one_argument_factory() -> None:
+    """Pre-TS-04 doubles keep working, bound to no Space."""
+    from app.mutation.unit_of_work import MutationUnitOfWork
+
+    class _Scope:
+        scope = type("S", (), {"space_id": "spc_x"})()
+        session_factory = "SF"
+
+    calls: list[str] = []
+
+    def legacy_factory(session_factory):  # noqa: ANN001, ANN202
+        calls.append("legacy")
+        return ("journal", session_factory)
+
+    uow = MutationUnitOfWork.__new__(MutationUnitOfWork)
+    uow.journal_factory = legacy_factory
+
+    assert uow.mutation_journal(_Scope()) == ("journal", "SF")
+    assert calls == ["legacy"]

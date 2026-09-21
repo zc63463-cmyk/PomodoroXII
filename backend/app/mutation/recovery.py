@@ -964,6 +964,24 @@ class MutationRecovery:
         )
 
     async def _finalize_batch(self, scope: Any, batch_id: str) -> None:
+        """Finalize a recovered batch.
+
+        TS-04 activity boundary (intentional, not an oversight): recovery calls
+        ``finalize_batch_in_transaction`` directly instead of
+        :meth:`MutationJournal.finalize_batch`, so a commit made visible *by
+        crash recovery* emits no Space change notification.
+
+        This is safe because notification is only ever an invalidation hint.
+        Correctness is owned by the durable visible watermark plus the existing
+        Sync v2 pull/recovery path: a client that was idle during the recovery
+        converges on its next connect (the SSE stream always emits the current
+        visible watermark on connect/reconnect) or on any ordinary sync
+        trigger. Recovery also runs under the mutation lease, typically before
+        the Space is serving readers, so there is no live subscriber to wake.
+
+        Pinned by ``test_recovery_finalize_emits_no_notification`` so the
+        boundary is a decision rather than an accident.
+        """
         async with scope.session_factory.begin() as session:
             await MutationJournal.finalize_batch_in_transaction(
                 session,

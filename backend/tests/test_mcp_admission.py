@@ -242,6 +242,64 @@ async def test_rejection_carries_retry_after_details() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retry_after_distinguishes_hit_from_in_flight_reservation() -> None:
+    """One retry policy for both exhaustion causes.
+
+    A window held by a *recorded* hit must advise waiting out its remainder,
+    while a window held only by an unsettled *reservation* is released by its
+    own settle call — so it advises a short retry rather than a full window.
+    Before the fix both cases shared one branch and the reservation case
+    reported a meaningless value.
+    """
+    clock = _Clock()
+    admission = McpWriteAdmission(burst=2, window_seconds=60.0, clock=clock)
+    principal = _principal()
+
+    # Case 1: exhausted by committed hits -> wait out the window.
+    first = await admission.check(principal, "spc_hit", 2)
+    await first.commit()
+    clock.advance(0.0)
+    with pytest.raises(AppError) as hit:
+        await admission.check(principal, "spc_hit", 1)
+    hit_retry = hit.value.details["retryAfterSeconds"]
+    assert hit_retry == 60, hit.value.details
+
+    # Case 2: exhausted by an in-flight reservation, no recorded hit yet.
+    held = await admission.check(principal, "spc_res", 2)
+    with pytest.raises(AppError) as reservation:
+        await admission.check(principal, "spc_res", 1)
+    reserved_retry = reservation.value.details["retryAfterSeconds"]
+    assert reserved_retry == 1, reservation.value.details
+    assert reserved_retry < hit_retry
+
+    # Releasing the reservation frees the key immediately, so the short advice
+    # was accurate rather than merely optimistic.
+    await held.release()
+    freed = await admission.check(principal, "spc_res", 2)
+    await freed.commit()
+
+
+@pytest.mark.asyncio
+async def test_oversized_request_reports_full_window_without_charging() -> None:
+    """A structurally impossible request reports the window and burns nothing."""
+    clock = _Clock()
+    admission = McpWriteAdmission(burst=2, window_seconds=30.0, clock=clock)
+
+    with pytest.raises(AppError) as oversized:
+        await admission.check(_principal(), "spc_a", 5)
+
+    details = oversized.value.details
+    assert details["requestedUnits"] == 5
+    assert details["capacity"] == 2
+    assert details["availableUnits"] == 2
+    assert details["retryAfterSeconds"] == 30
+
+    # Nothing was reserved, so the full budget remains usable.
+    lease = await admission.check(_principal(), "spc_a", 2)
+    await lease.commit()
+
+
+@pytest.mark.asyncio
 async def test_budget_refills_after_the_window() -> None:
     clock = _Clock()
     admission = McpWriteAdmission(clock=clock)

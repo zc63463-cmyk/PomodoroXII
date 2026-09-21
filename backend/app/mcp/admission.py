@@ -164,10 +164,25 @@ class McpWriteAdmission:
             timestamps.popleft()
         return timestamps
 
-    def _retry_after(self, timestamps: deque[float], now: float) -> int:
-        if not timestamps:
+    def _retry_after(
+        self, timestamps: deque[float], now: float, *, blocked_by_reservation: bool
+    ) -> int:
+        """Seconds until the caller's next chance at this key.
+
+        One policy for all rejection paths:
+        - a recorded hit holds the window open, so wait out its remainder;
+        - with no recorded hit the block is an in-flight reservation, which is
+          released by its own settle call rather than by the window, so advise
+          a short retry;
+        - the advice is always at least one second so clients never hot-spin.
+        """
+        if timestamps:
+            return max(1, math.ceil(self._window - (now - timestamps[0])))
+        if blocked_by_reservation:
             return 1
-        return max(1, math.ceil(self._window - (now - timestamps[0])))
+        # No hit and nothing in flight: the window cannot actually be exhausted
+        # by this key, so a full window is the only defensible advice.
+        return max(1, math.ceil(self._window))
 
     def _rejection(
         self,
@@ -210,9 +225,13 @@ class McpWriteAdmission:
             # by construction, so report it against the same key for visibility.
             key = _budget_key(principal, space_id)
             async with self._lock:
-                timestamps = self._prune(key, self._clock())
-                retry_after = self._retry_after(timestamps, self._clock())
-                available = self._burst - len(timestamps) - self._reserved.get(key, 0)
+                now = self._clock()
+                timestamps = self._prune(key, now)
+                in_flight = self._reserved.get(key, 0)
+                retry_after = self._retry_after(
+                    timestamps, now, blocked_by_reservation=in_flight > 0
+                )
+                available = self._burst - len(timestamps) - in_flight
             raise self._rejection(principal, space_id, units, available, retry_after)
 
         key = _budget_key(principal, space_id)
@@ -224,11 +243,15 @@ class McpWriteAdmission:
             available = self._burst - len(timestamps) - in_flight
             if available < units:
                 if not known_key and len(self._hits) > self._max_keys:
-                    # Table pressure: fail closed instead of growing unbounded.
+                    # Table pressure: the key is evicted rather than tracked, so
+                    # the caller's real block is table capacity, not a window —
+                    # advise waiting out a full window and fail closed.
                     self._hits.pop(key, None)
                     retry_after = max(1, math.ceil(self._window))
                 else:
-                    retry_after = self._retry_after(timestamps, now)
+                    retry_after = self._retry_after(
+                        timestamps, now, blocked_by_reservation=in_flight > 0
+                    )
                 raise self._rejection(
                     principal, space_id, units, available, retry_after
                 )
