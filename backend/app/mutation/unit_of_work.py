@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect as py_inspect
 import json
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -1987,6 +1988,31 @@ class MutationJournalFactory(Protocol):
     ) -> MutationJournal: ...
 
 
+def _factory_accepts_space_id(factory: object) -> bool:
+    """Whether ``factory`` can take the optional ``space_id`` keyword.
+
+    Used to keep pre-TS-04 one-argument journal factories (and test doubles)
+    working without catching ``TypeError`` broadly.  A callable is treated as
+    accepting the keyword only when its signature is introspectable *and* it
+    declares ``space_id`` or ``**kwargs``.  A genuinely uninspectable callable
+    falls back to the single-argument contract — the safe degradation, since
+    the journal then simply announces nothing.
+    """
+    try:
+        signature = py_inspect.signature(factory)
+    except (TypeError, ValueError):
+        # Uninspectable (e.g. some C callables): assume the legacy one-argument
+        # contract rather than risk calling it with an unexpected keyword.
+        return False
+    parameters = signature.parameters
+    if any(
+        parameter.kind is py_inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return True
+    return "space_id" in parameters
+
+
 class MutationUnitOfWork:
     def __init__(
         self,
@@ -2019,16 +2045,19 @@ class MutationUnitOfWork:
         keeps existing journal doubles and any out-of-tree factory compatible.
         Without a Space binding the journal simply announces nothing, and
         clients fall back to their ordinary sync triggers.
+
+        The compatibility check reads the factory signature instead of catching
+        ``TypeError``: a broad ``except TypeError`` here would silently reroute
+        a factory that raised ``TypeError`` for an unrelated reason, hiding the
+        real failure behind a confusing signature error.
         """
         space_id = getattr(getattr(scope, "scope", None), "space_id", None)
-        try:
+        bound_space_id = space_id if isinstance(space_id, str) else None
+        if _factory_accepts_space_id(self.journal_factory):
             return self.journal_factory(
-                scope.session_factory,
-                space_id=space_id if isinstance(space_id, str) else None,
+                scope.session_factory, space_id=bound_space_id
             )
-        except TypeError:
-            # Pre-TS-04 factory signature: no Space context available.
-            return self.journal_factory(scope.session_factory)
+        return self.journal_factory(scope.session_factory)
 
     async def recover_under_lease(
         self, scope: SpaceRuntimeHandle, lease: Lease

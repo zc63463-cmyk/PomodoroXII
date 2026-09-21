@@ -19,10 +19,11 @@ It is an *invalidation hint*, never a data channel:
 - publishing happens only after the visibility transaction has committed, so a
   subscriber can never be told about a change it cannot yet pull.
 
-Operational guarantees
-----------------------
-- Subscriber queues are bounded; a subscriber that stops draining is
-  disconnected rather than allowed to grow memory or stall a publisher.
+Operation and guarantee
+-----------------------
+- Subscriber queues are bounded: an offer coalesces into a single unconsumed
+  hint, so a subscriber that stops draining holds at most one item and can
+  never grow memory, block a publisher, or slow a commit path.
 - Repeated watermarks for one Space coalesce: a subscriber always sees the
   newest visible watermark, never a backlog of stale hints.
 - No database transaction or mutation lease is held for the lifetime of a
@@ -44,8 +45,9 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-#: Per-subscriber queue depth.  A subscriber that falls this far behind is
-#: considered stalled and is disconnected (see ``_Subscriber.offer``).
+#: Per-subscriber queue depth.  Coalescing keeps at most one unconsumed hint,
+#: so this is the hard ceiling on memory a slow subscriber can hold — it is
+#: never a "disconnect threshold" (see ``_Subscriber.offer``).
 DEFAULT_SUBSCRIBER_QUEUE_SIZE = 8
 #: Closed-flag re-check interval for a parked subscriber (seconds).
 DEFAULT_SUBSCRIBER_POLL_SECONDS = 0.25
@@ -98,17 +100,19 @@ class _Subscriber:
     def offer(self, change: SpaceChange) -> bool:
         """Try to enqueue ``change``; return False if this subscriber is stale.
 
-        Coalescing rule: if the queue already holds a hint, replace the newest
-        unconsumed hint with this one *when it carries a greater watermark*.
-        A subscriber only ever needs the newest state, so collapsing hints is
-        both safe and the intended behavior for a burst of commits.
+        Coalescing rule: the queue holds at most one unconsumed hint.  An offer
+        drains the queue first, keeps whichever hint carries the greater
+        watermark, and merges the rest away.  Because a subscriber only ever
+        needs the newest state, this collapses a burst of commits into a single
+        up-to-date hint and — critically — bounds memory at one item per
+        subscriber regardless of publish volume.
+
+        That bound is the whole reason no ``QueueFull`` path exists here: the
+        queue has capacity for a single hint, so it can never fill up.  A
+        consumer that stops draining simply keeps one pending hint; it is never
+        disconnected, and it can never grow the publisher's cost either.
         """
         if self._closed:
-            return False
-        if self._queue.full():
-            # The consumer is not draining at all: drop it instead of blocking
-            # the publisher or growing without bound.
-            self._closed = True
             return False
         while not self._queue.empty():
             existing = self._queue.get_nowait()
@@ -118,11 +122,7 @@ class _Subscriber:
                 self._dropped_increment()
                 return True
             self._dropped_increment()
-        try:
-            self._queue.put_nowait(change)
-        except asyncio.QueueFull:  # pragma: no cover - guarded above
-            self._closed = True
-            return False
+        self._queue.put_nowait(change)
         return True
 
     def _dropped_increment(self) -> None:
