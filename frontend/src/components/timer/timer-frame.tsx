@@ -92,8 +92,9 @@ export function TimerFrame({
         </section>
         {side ? (
           <aside
-            className="timer-immersive-region flex min-h-0 flex-col gap-4 overflow-y-auto"
+            className="timer-immersive-region ios-card flex min-h-0 flex-col gap-4 overflow-y-auto p-4"
             data-testid="immersive-region"
+            style={{ background: 'var(--ios-card, var(--card))' }}
           >
             {side}
           </aside>

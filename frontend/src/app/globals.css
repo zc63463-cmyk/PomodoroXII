@@ -1171,15 +1171,17 @@
   font-weight: 500;
 }
 
-/* 两栏骨架：宽屏 = 左焦点 + 右伴奏；窄屏（<1180px）右栏落到下方，避免挤压。
-   ——真实视口下内容区宽度会被左侧全局边栏吃掉，故断点取 1180px 而非 1024px。 */
+/* 两栏骨架：宽屏 = 左焦点 + 右伴奏；窄屏单列（右栏落到下方）。
+   断点取 780px —— 因为本应用有 ~240px 宽的左侧全局边栏，**实际内容区宽度
+   ≈ 视口 − 240**：用户在 1080px 视口下内容区仅 ~840px，若断点按视口取 1180
+   则永远进单列、两栏形同不存在（实测踩过）。780 对应视口 ≈1020，覆盖常见笔记本。 */
 .timer-frame-grid {
   display: grid;
   gap: 16px;
   grid-template-columns: minmax(0, 1fr) var(--timer-side-w, 336px);
 }
 
-@media (max-width: 1180px) {
+@media (max-width: 780px) {
   .timer-frame-grid {
     grid-template-columns: minmax(0, 1fr);
   }
