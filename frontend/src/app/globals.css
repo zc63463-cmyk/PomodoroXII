@@ -1004,14 +1004,20 @@
    令牌前缀 --ios-* 与既有 --color-* 隔离；作用域内以本组为准。
    ══════════════════════════════════════════════════════════════════════════ */
 .ios-scope {
-  --ios-bg: #f2f2f7;                     /* systemGroupedBackground */
-  --ios-card: #ffffff;
-  --ios-label: #1c1c1e;                  /* label */
-  --ios-label-2: rgba(60, 60, 67, 0.6);  /* secondaryLabel */
-  --ios-label-3: rgba(60, 60, 67, 0.3);  /* tertiaryLabel */
-  --ios-sep: rgba(60, 60, 67, 0.18);     /* separator */
-  --ios-blue: #007aff;                   /* systemBlue（仅可交互强调，不铺色） */
-  --ios-fill: rgba(120, 120, 128, 0.12); /* systemFill */
+  /* iOS 令牌默认**映射项目主题变量** —— 本应用有 4 套主题
+     （.dark / .midnight / .nord / .daylight），硬编码 iOS 专属色必然在其中
+     某套下突兀。因此这里只保留「iOS 结构语言」（圆角 / hairline / 44px 触控 /
+     分组卡 / 分段控件，见下方各原语），色值一律继承项目主题。 */
+  --ios-bg: var(--background);
+  --ios-card: var(--card);
+  --ios-label: var(--foreground);
+  --ios-label-2: var(--muted-foreground);
+  --ios-label-3: color-mix(in oklab, var(--foreground) 35%, transparent);
+  --ios-sep: var(--border);
+  --ios-fill: color-mix(in oklab, var(--foreground) 8%, transparent);
+  /* iOS systemBlue：唯一保留的 iOS 专属色，仅用于可交互强调，不铺面积 */
+  --ios-blue: #007aff;
+  --ios-blue-soft: color-mix(in oklab, var(--ios-blue) 12%, transparent);
 
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
     'PingFang SC', 'Helvetica Neue', 'Microsoft YaHei', sans-serif;
@@ -1062,7 +1068,7 @@
   background: var(--ios-fill);
 }
 .ios-row[data-selected='true'] {
-  background: rgba(0, 122, 255, 0.08);
+  background: var(--ios-blue-soft);
 }
 
 /* iOS 单选圆点（用于"继续上次"的选中态） */
@@ -1134,7 +1140,7 @@
 }
 .ios-seg-item[data-on='true'] {
   background: var(--ios-card);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 3px color-mix(in oklab, var(--foreground) 14%, transparent);
   font-weight: 500;
 }
 
@@ -1152,38 +1158,10 @@
   }
 }
 
-/* iOS 深色配色：跟随项目深色主题（next-themes 把 .dark/.midnight/.nord 挂在 <html>）。
-   iOS 本身有 dark mode，所以这不是"把浅色硬套"，而是换一套 iOS 深色令牌：
-   systemGroupedBackground(#000) / secondarySystemGroupedBackground(#1c1c1e) /
-   label(#fff) / separator(调亮) / systemBlue(#0a84ff)。 */
+/* iOS 深色主题：**只调 iOS 蓝** —— 其余令牌已映射项目主题变量，自动跟随。
+   （浅色 #007aff 在深底上对比不足，iOS 自己在 dark 下也用 #0a84ff） */
 .dark .ios-scope,
 .midnight .ios-scope,
 .nord .ios-scope {
-  --ios-bg: #000000;
-  --ios-card: #1c1c1e;
-  --ios-label: #ffffff;
-  --ios-label-2: rgba(235, 235, 245, 0.6);
-  --ios-label-3: rgba(235, 235, 245, 0.3);
-  --ios-sep: rgba(84, 84, 88, 0.65);
   --ios-blue: #0a84ff;
-  --ios-fill: rgba(120, 120, 128, 0.36);
-}
-
-.dark .ios-row + .ios-row::before,
-.midnight .ios-row + .ios-row::before,
-.nord .ios-row + .ios-row::before {
-  border-top-color: rgba(84, 84, 88, 0.65);
-}
-
-.dark .ios-row[data-selected='true'],
-.midnight .ios-row[data-selected='true'],
-.nord .ios-row[data-selected='true'] {
-  background: rgba(10, 132, 255, 0.18);
-}
-
-.dark .ios-seg-item[data-on='true'],
-.midnight .ios-seg-item[data-on='true'],
-.nord .ios-seg-item[data-on='true'] {
-  background: rgba(120, 120, 128, 0.4);
-  box-shadow: none;
 }

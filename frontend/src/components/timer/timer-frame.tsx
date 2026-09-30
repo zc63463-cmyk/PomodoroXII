@@ -50,6 +50,13 @@ export function TimerFrame({
   return (
     <div
       className="ios-scope flex min-h-full flex-col"
+      // 关键视觉用 inline style 引用主题变量（双保险）：
+      // 自定义类万一被其它样式压制/未加载，这里仍能生效；变量本身由
+      // .ios-scope（浅色）与 .dark/.midnight/.nord .ios-scope（深色）定义。
+      style={{
+        background: 'var(--ios-bg, var(--background))',
+        color: 'var(--ios-label, var(--foreground))',
+      }}
       {...(immersive === undefined
         ? {}
         : { 'data-immersive': immersive ? 'true' : 'false' })}
@@ -58,7 +65,7 @@ export function TimerFrame({
         <header className="flex min-h-[52px] items-center gap-3 px-5 py-2.5">
           <div
             className="min-w-0 flex-1 text-[13px]"
-            style={{ color: 'var(--ios-label-2)' }}
+            style={{ color: 'var(--ios-label-2, var(--muted-foreground))' }}
           >
             {breadcrumb}
           </div>
@@ -70,7 +77,12 @@ export function TimerFrame({
         className="timer-frame-grid min-h-0 flex-1 px-5 pb-6"
         style={{ '--timer-side-w': `${sideWidth}px` } as CSSProperties}
       >
-        <section className="ios-card flex min-h-[520px] flex-col p-6">{focus}</section>
+        <section
+          className="ios-card flex min-h-[520px] flex-col p-6"
+          style={{ background: 'var(--ios-card, var(--card))' }}
+        >
+          {focus}
+        </section>
         {side ? (
           <aside
             className="timer-immersive-region flex min-h-0 flex-col gap-4 overflow-y-auto"
