@@ -10,6 +10,7 @@ import { SessionLauncher, type LaunchSelection } from '@/components/timer/sessio
 import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
 import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/timer/session-review-completion'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
+import { ContinuePrevious } from '@/components/timer/continue-previous'
 import { TimerFrame } from '@/components/timer/timer-frame'
 import { TodaySummary } from '@/components/timer/today-summary'
 import { Button } from '@/components/ui/button'
@@ -32,6 +33,11 @@ import { focusSessionApi } from '@/services/focus-session-api'
 import { TimerNoteComposerDraftController, type TimerNoteComposerDraftDatabase } from '@/lib/task-space/timer-note-composer-draft-registry'
 import { TaskSpaceRepository } from '@/lib/task-space/task-space-repository'
 import { evaluateSessionLaunch } from '@/lib/task-space/session-launch-guard'
+import {
+  formatSessionTime as formatWorkMapSessionTime,
+  readContinuePrevious,
+  type ContinuePreviousBuckets,
+} from '@/lib/task-space/continue-previous'
 import { recordBlockerAck } from '@/lib/task-space/blocker-ack-log'
 import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
@@ -83,6 +89,19 @@ function sessionIdOf(session: { id?: string; sessionId?: string }): string {
 // 结束提醒的闩锁放在模块级单例上：跨重挂载（StrictMode dev 双挂载、热重载）
 // 也不对同一会话重复响；新会话 id 自然再次触发（end-alert 的闩锁语义）。
 const sessionEndAlert = createEndAlert()
+
+/** 数据层条目 join 工作项缓存行：给三栏快捷入口补 displayKey / title / priority。
+ *  参数用结构化最小类型（Dexie 的 CachedWorkItem 满足），不耦合完整 View。 */
+function joinWithWorkItems<T extends { workItemId: string }>(
+  entries: readonly T[],
+  workItems: readonly { id: string; displayKey: string; title: string; priority?: string | null }[],
+): Array<T & { displayKey: string; title: string; priority: string | null }> {
+  return entries.flatMap((entry) => {
+    const item = workItems.find((w) => w.id === entry.workItemId)
+    if (!item) return []
+    return [{ ...entry, displayKey: item.displayKey, title: item.title, priority: item.priority ?? null }]
+  })
+}
 
 export default function TimerPage() {
   const spaceId = useSpaceStore((state) => state.currentSpaceId)
@@ -161,6 +180,31 @@ export default function TimerPage() {
     () => deriveStatusCategoryById(definitions, workItems),
     [definitions, workItems],
   )
+  // 「继续上次」三栏快捷入口（ADR-0008 S2 / 用户 2026-09-30 确认口径）：
+  // 按工作项判定（有会话历史 且 未完成/未取消），按本地日界分三层。
+  // 日界复用 habits 域单一事实源（经 settings.dayBoundaryHour），不另写算法。
+  const dayBoundaryHour = useSettingsStore((state) => state.dayBoundaryHour)
+  const [continueBuckets, setContinueBuckets] = useState<ContinuePreviousBuckets | null>(null)
+  useEffect(() => {
+    if (!database || !spaceId || workItems.length === 0) {
+      setContinueBuckets(null)
+      return
+    }
+    let cancelled = false
+    void readContinuePrevious({
+      database,
+      workItems,
+      categoryById,
+      dayBoundaryHour,
+    })
+      .then((result) => { if (!cancelled) setContinueBuckets(result) })
+      .catch(() => { if (!cancelled) setContinueBuckets(null) })
+    return () => { cancelled = true }
+    // workItems 引用来自 zustand store（稳定），categoryById 是 useMemo —— 均可入依赖
+  }, [database, spaceId, workItems, categoryById, dayBoundaryHour])
+  const continueTotal = continueBuckets
+    ? continueBuckets.today.length + continueBuckets.yesterday.length + continueBuckets.withinWeek.length
+    : 0
   const aggregate = localProvisional?.aggregate ?? locator?.session ?? endedAggregate
   const plans = useMemo(() => aggregate?.plan.filter((plan) => plan.removedAt === null) ?? [], [aggregate?.plan])
   const currentPlan = plans.find((plan) => plan.currentDuringSession) ?? plans[0] ?? null
@@ -877,42 +921,56 @@ export default function TimerPage() {
     // 骨架替换不改任何子组件与文案（第一步为纯结构搬移）。
     focus: createElement('div', { className: 'grid gap-6' },
     createElement('header', null,
-      createElement('p', { className: 'text-xs text-muted-foreground' }, 'Focus session'),
-      createElement('h1', { className: 'text-2xl font-semibold' }, 'Start a focused Session'),
+      createElement('h1', { className: 'text-[22px] font-semibold leading-tight' }, '继续上次'),
+      createElement('p', { className: 'text-[13px]', style: { color: 'var(--ios-label-2)' } },
+        '选一个最近在做的任务，开始专注。'),
     ),
-    selectedWorkItem ? createElement('p', null, `Selected: ${selectedWorkItem.displayKey} ${selectedWorkItem.title}`) : null,
-    workItems.length
-      ? createElement('div', { className: 'ios-card', 'aria-label': 'WorkItems for focus' }, workItems.map((item) => createElement('button', {
-          key: item.id, type: 'button',
-          // iOS 分组列表行：44px 触控高 + hairline 分隔 + 单选圆点。
-          // 按钮的可访问名保持「displayKey + 空格 + title」逐字不变
-          //（displayKey 与 title 之间的空格是真实文本节点）。
-          className: 'ios-row w-full text-left',
-          'data-tappable': 'true',
-          'data-selected': selectedWorkItem?.id === item.id ? 'true' : 'false',
-          onClick: () => selectWorkItem(item.id),
-        },
-        createElement('span', { className: 'ios-radio' }),
-        createElement('span', { className: 'min-w-0 flex-1' },
-          createElement('span', { className: 'block text-[11px]', style: { color: 'var(--ios-label-2)' } }, item.displayKey),
+    // 三栏分层快捷入口：最近打开 / 昨日未完成 / 七天内堆积（数据见 continue-previous.ts）
+    continueTotal > 0 && continueBuckets
+      ? createElement(ContinuePrevious, {
+          buckets: {
+            today: joinWithWorkItems(continueBuckets.today, workItems),
+            yesterday: joinWithWorkItems(continueBuckets.yesterday, workItems),
+            withinWeek: joinWithWorkItems(continueBuckets.withinWeek, workItems),
+          },
+          selectedWorkItemId,
+          onSelect: (id) => selectWorkItem(id),
+          formatSessionTime: (iso) => formatWorkMapSessionTime(iso, { now: new Date(), dayBoundaryHour }),
+        })
+      : null,
+    createElement('details', {
+      className: 'ios-card',
+      // 无会话历史（三栏全空）时自动展开：新用户直接看到任务列表，不用多一次点击
+      ...(continueTotal === 0 ? { open: true } : {}),
+    },
+      createElement('summary', {
+        className: 'ios-row w-full text-left cursor-pointer select-none',
+        style: { color: 'var(--ios-label-2)' },
+      }, '⌕ 浏览全部任务…'),
+      workItems.length
+        ? createElement('div', { className: 'grid gap-2 p-3', 'aria-label': 'WorkItems for focus' }, workItems.map((item) => createElement('button', {
+            key: item.id, type: 'button',
+            className: 'ios-row w-full text-left',
+            'data-tappable': 'true',
+            'data-selected': selectedWorkItem?.id === item.id ? 'true' : 'false',
+            onClick: () => selectWorkItem(item.id),
+          },
+          createElement('span', { className: 'text-[11px]', style: { color: 'var(--ios-label-2)' } }, item.displayKey),
           ' ',
-          createElement('span', { className: 'block truncate text-[14px]' }, item.title),
+          createElement('span', { className: 'block' }, item.title),
+        )))
+        // ★ 空状态要说清「为什么空」和「去哪补」—— 走查实测（2026-09-10）。
+        : createElement('div', { role: 'status', className: 'grid gap-2 p-4 text-sm', style: { color: 'var(--ios-label-2)' } },
+          createElement('p', null, '这个 Space 里还没有工作项，所以没有东西可以投入。'),
+          createElement('p', null, '常见原因有三种，按顺序排查：'),
+          createElement('ol', { className: 'ml-5 list-decimal' },
+            createElement('li', null, '选错了 Space —— 左上角切到有数据的那个（本机内容都在名为「111」的 Space 里）。'),
+            createElement('li', null, '刚进来、首轮同步还没跑完 —— 任务页会显示 Loading；等它出树再回来。'),
+            createElement('li', null, '确实还没建 —— 去「任务」页新建项目与工作项。'),
+          ),
+          createElement('p', null, '另外：专注会话必须挂在「二级」工作项上，所以至少要有一个一级项 + 它的一个子项。'),
         ),
-      )))
-      // ★ 空状态要说清「为什么空」和「去哪补」。
-      //   原来只有一句 "No WorkItems are available in this Space."，
-      //   用户无法区分「选错 Space / 同步没跑完 / 确实没建」三种情况，
-      //   于是整体被误读成"番茄钟没开发"。走查实测（2026-09-10）。
-      : createElement('div', { role: 'status', className: 'grid gap-2 text-sm text-muted-foreground' },
-        createElement('p', null, '这个 Space 里还没有工作项，所以没有东西可以投入。'),
-        createElement('p', null, '常见原因有三种，按顺序排查：'),
-        createElement('ol', { className: 'ml-5 list-decimal' },
-          createElement('li', null, '选错了 Space —— 左上角切到有数据的那个（本机内容都在名为「111」的 Space 里）。'),
-          createElement('li', null, '刚进来、首轮同步还没跑完 —— 任务页会显示 Loading；等它出树再回来。'),
-          createElement('li', null, '确实还没建 —— 去「任务」页新建项目与工作项。'),
-        ),
-        createElement('p', null, '另外：专注会话必须挂在「二级」工作项上，所以至少要有一个一级项 + 它的一个子项。'),
-      ),
+    ),
     // 工单③（2026-09-14）：准备态内联新建三级 —— 走任务页同一 store 入口
     // （createChild，本组件 :89 已订阅）；直接用返回值 id，不读异步闭包里的
     // workItems 旧快照（createChild 先落 store 再返回，结构性避开该陷阱）。
@@ -923,9 +981,8 @@ export default function TimerPage() {
       onStart: requestStart,
       onCreateLevel3: async (level2Id: string, title: string) => (await createChild(level2Id, { title })).id,
     }) : null,
-    // 底部统计栏（工单③）：准备态布局底部（规格 L457）。
-    ),
     // 结束/准备两态都把这栏放在右栏（iOS 两栏骨架）；组件与 testid 不变。
+      ),
     side: createElement(TodaySummary),
   })
 
