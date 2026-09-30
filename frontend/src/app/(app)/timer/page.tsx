@@ -1,6 +1,6 @@
 'use client'
 
-import { createElement, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createElement, Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { BlockerAckModal } from '@/components/task-space/blocker-ack-modal'
 import { FocusedWorkItemNote } from '@/components/timer/focused-work-item-note'
@@ -10,6 +10,7 @@ import { SessionLauncher, type LaunchSelection } from '@/components/timer/sessio
 import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
 import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/timer/session-review-completion'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
+import { TimerFrame } from '@/components/timer/timer-frame'
 import { TodaySummary } from '@/components/timer/today-summary'
 import { Button } from '@/components/ui/button'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
@@ -767,7 +768,7 @@ export default function TimerPage() {
     // ② 不需复盘（休息型结束 / 投入型复盘已完成）→ 休息节奏面板：
     //    建议下一步（短休/长休/下一个番茄），可自动开始，出口仍可回任务页。
     ? (reviewSession
-      ? createElement(SessionReview, {
+      ? createElement(TimerFrame, { focus: createElement(SessionReview, {
         session: aggregate.session,
         plans,
         outcomes: aggregate.outcomes,
@@ -783,8 +784,10 @@ export default function TimerPage() {
         onSubmit: submitReview,
         onReconcile: reconcileCommand,
         onAbandon: abandonCommand,
-      })
-      : createElement('div', { className: 'grid gap-6 p-6' },
+      }) })
+      : createElement(TimerFrame, {
+        // 不需复盘的结束态（休息型结束 / 投入型复盘已完成）：焦点区 = 节奏面板。
+        focus: createElement('div', { className: 'grid gap-6' },
         createElement('p', { className: 'text-xs text-muted-foreground' }, 'Focus session'),
         restCycle
           ? createElement(RestCyclePanel, {
@@ -803,30 +806,25 @@ export default function TimerPage() {
               type: 'button', variant: 'outline', onClick: handleReturnToTasks,
             }, '回任务页'),
           ),
-        createElement(TodaySummary),
-      ))
-    : aggregate && session && clock ? createElement('div', {
-      className: 'grid gap-6 p-6',
-      // 沉浸模式（工单 B）：渐隐作用域由这个属性驱动（见 globals.css 的 timer 块）。
-      'data-immersive': immersive ? 'true' : 'false',
-    },
-    createElement('div', { className: 'flex items-center justify-between gap-3' },
-      // 二级归属（可选步）：查不到工作项就留空，交给右侧按钮独占行。
-      level2WorkItem
+        ),
+        side: createElement(TodaySummary),
+      }))
+    : aggregate && session && clock ? createElement(TimerFrame, {
+      immersive,
+      // 顶栏：二级归属（左）+ 沉浸开关（右）。
+      // 开关由骨架结构保证不在渐隐区内 —— 「退出沉浸」绝不能被自己的渐隐规则吃掉。
+      breadcrumb: level2WorkItem
         ? createElement('p', {
-            className: 'text-sm text-muted-foreground',
+            className: 'text-sm',
             'data-testid': 'focus-context',
           }, `${level2WorkItem.displayKey} ${level2WorkItem.title}`)
         : null,
-      // 沉浸开关：永远可见可点 —— 「退出沉浸」绝不能被自己的渐隐规则吃掉。
-      // 这是结构保证（按钮不在 .timer-immersive-region 内），不是样式巧合。
-      createElement(Button, {
+      actions: createElement(Button, {
         type: 'button', variant: 'ghost', size: 'sm',
         'aria-pressed': immersive,
         onClick: () => setImmersive((value) => !value),
       }, immersive ? '退出沉浸' : '沉浸模式'),
-    ),
-    createElement(SessionClock, {
+      focus: createElement(SessionClock, {
       session, nowMs, owner: ownershipMode === 'owner',
       ownerHint,
       onTakeover: ownershipMode === 'read_only' ? takeOverSession : undefined,
@@ -835,11 +833,8 @@ export default function TimerPage() {
       onEnd: (occurredAt) => clockAction('end', occurredAt),
       onFlushNote: async () => { await draftController?.flush('before-append') },
     }),
-    // 次级内容区：沉浸时整体渐隐（opacity-20 + pointer-events-none，见 globals.css）。
-    createElement('div', {
-      className: 'timer-immersive-region grid gap-6',
-      'data-testid': 'immersive-region',
-    },
+      // 伴奏区：由骨架保证带 .timer-immersive-region + data-testid（沉浸时只渐隐这一栏）。
+      side: createElement(Fragment, null,
       // 双体系兼容（2026-09-16）：休息型运行态不渲染成果清单 / 当前项 / Note ——
       // 休息不承接三级计划、不产生投入（服务端对 plan 行 fail-closed），
       // 这里用一句说明代替，避免出现"点了必被拒"的控件。
@@ -875,8 +870,12 @@ export default function TimerPage() {
       // 底部统计栏（工单③→工单 A 2026-09-14）：准备态与运行态两处布局的底部都要有（规格 L457/L505）。
       // 标签「今日」= 本地日界显式窗口（服务端 start，本单 A1/A2），理由见 today-summary.tsx 的注释。
       createElement(TodaySummary),
-    ),
-  ) : createElement('div', { className: 'grid gap-6 p-6' },
+      ),
+    })
+  : createElement(TimerFrame, {
+    // iOS 两栏骨架：准备态的焦点区 = 选工作项 + 启动器；伴奏区 = 今日统计。
+    // 骨架替换不改任何子组件与文案（第一步为纯结构搬移）。
+    focus: createElement('div', { className: 'grid gap-6' },
     createElement('header', null,
       createElement('p', { className: 'text-xs text-muted-foreground' }, 'Focus session'),
       createElement('h1', { className: 'text-2xl font-semibold' }, 'Start a focused Session'),
@@ -920,8 +919,10 @@ export default function TimerPage() {
       onCreateLevel3: async (level2Id: string, title: string) => (await createChild(level2Id, { title })).id,
     }) : null,
     // 底部统计栏（工单③）：准备态布局底部（规格 L457）。
-    createElement(TodaySummary),
-  )
+    ),
+    // 结束/准备两态都把这栏放在右栏（iOS 两栏骨架）；组件与 testid 不变。
+    side: createElement(TodaySummary),
+  })
 
   return createElement('main', { className: 'min-h-full' },
     error || timerError ? createElement('p', { role: 'alert', className: 'border-b bg-destructive/10 px-4 py-2 text-sm text-destructive' }, error ?? timerError) : null,
