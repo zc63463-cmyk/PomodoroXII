@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-09-30 |
-| 状态 | **已接受**（S1 三项裁决完成；D5–D7 为暂定，S3 前复核） |
+| 状态 | **已接受**（S1 三项裁决 D1–D3 完成，D8–D10 已经用户确认；D5–D7 为暂定，S3 前复核） |
 | 关联 | ADR-0007（会话类型双轨）、`CONTEXT.md`、MindCanvas v1.12.0、entity-ref 协议 v1.3.1 |
 | 前置 | S0 接缝校验通过（解析/岛投影/布局/浏览器渲染全部验证，`S0-接缝校验报告-2026-09-29.md`） |
 | 依赖 | React 已升至 19.3.0（`e62b265`），解除 `@mindcanvas/react` 的 React 版本冲突 |
@@ -106,6 +106,68 @@ note:                             ③ 该节点的思路记录
 
 `.mc.canvas.json`（自由画布）与本需求无关，不引入。
 
+### D8 · 图内节点：导图自有节点，不占工作项层级
+
+**背景事实**：任务空间工作项**最深 3 层**。`task_space/compiler.py:443-450` 硬拒绝：
+
+```python
+if parent_depth >= 3:
+    raise MutationRuleViolation("invalid_work_item_tree", {"reason": "depth_exceeds_three"}, retryable=False)
+```
+
+因此"L3 下再开一级工作项"这条路被既有不变量关闭（真实数据里的 depth=3 项属 2026-09-11 校验加入前的历史遗留）。
+
+**决策**：在导图里引入**图内节点**——不投影自工作项的节点，承载"还没成为正式任务的子任务/想法"。
+
+- 视觉：**虚线边框 + 极浅底 + 灰字**，与工作项投影节点（实线）区分
+- 可「**提升为工作项**」：届时才调任务空间 API 在合法层级创建，节点转为实线投影节点
+- **不触碰层级不变量**：图内节点只存在于 `.mm.md`，不写入 `work_items`
+
+这样"任务下面还能再开一级"的需求由图内节点满足，而任务空间保持三层。
+
+### D9 · 节点类型：思考类型作为节点属性
+
+节点可携带思考类型，取值（首版）：
+
+| 类型 | 形状 | 颜色 | 含义 |
+|---|---|---|---|
+| `insight` 洞察 | 实心圆 | 青 `#0c8599` | 想通了什么 |
+| `problem` 问题 | 三角 | 珊瑚 `#d85a30` | 卡住 / 风险 |
+| `decision` 决策 | 菱形 | 紫 `#534ab7` | 定了什么 |
+| `review` 复盘 | 空心圆 | 绿 `#2f9e44` | 回顾旧结论 |
+| `todo` 待办 | 方框 | 琥珀 `#d97706` | 下一步动作 |
+
+**可行性依据**：协议明确「未知字段一律保留，绝不丢弃」（`.mm.md` v1.3.1 前向兼容原则），故该属性可安全写入 `.mm.md`；MindCanvas 保留但**不渲染**它——**视觉呈现由 PomodoroXII 侧实现**，这正是集成特化的空间。
+
+**强制要求**：形状 + 颜色**双重区分**（不只靠颜色），保证色盲可辨。
+
+**由此长出的能力**：按类型跨岛筛选——只看「问题」得到全部历史卡点，只看「待办」得到跨会话行动清单。
+
+### D10 · 接入策略：模块化按需接入（不整包照搬）
+
+**可行，且有明确的官方依据**：kernel 的架构即「入口即组合点」，原话为「空注册表时内核照常工作（渐进增强架构『纯文本版』= `kernel + []` 组合）」「**app = kernel + [plugins]**」。
+
+三层控制手段（按粒度递增）：
+
+| 层 | 手段 | 本项目用法 |
+|---|---|---|
+| **包级** | `@mindcanvas/kernel`（零依赖 headless）· `@mindcanvas/react`（渲染器）· `@mindcanvas/free-canvas`（自由画布） | 接 kernel；接 react（取其渲染器，非整壳 App）；**不接 free-canvas** |
+| **数据级**（最强） | 解析 `.mm.md` 后**剥掉不需要的语义面**再交给 MapView | 首版**剥掉 `edges`（自由边）与 `relations`**；Section / 子树框按需 |
+| **props 级** | MapView 的 `boundaryLinks` / `islandMembers` / `centerIds` / `onRemoveSection` / `onEdgeClick` 等**全部可选** | 不传 `boundaryLinks` → **无岛间连线**；不传 `onEdgeClick` → 无自由边交互 |
+
+**关于"关系线"的逐项结论**：
+
+| 线 | 归属 | 能否不接 |
+|---|---|---|
+| 树连线（父子） | 思维导图本体（`layout.links`） | **必须留**（去掉就不是导图了） |
+| 跨岛边界边 | MapView `boundaryLinks` prop | ✅ **不传即关闭** |
+| 自由边 / 关系 | 由 `documentRoot` 经 `collectFreeEdges` **内部派生**（`MapView.tsx:762`） | ✅ **剥掉 `edges` 即得空数组** |
+| rel 关系几何 | `buildRelGeometries`（kernel 内，**react 包无引用**） | ✅ **天然不接**（不在渲染链路里） |
+
+**渲染层顺序**（`MapView.tsx:1946` 注释）为 `sections → tree-links → free-edges → nodes → edge-labels → ghosts → drag`，各层独立，可分别裁剪。
+
+**同时可注册自有能力**：kernel 的 `Plugin` 基类经 `registerInto` 支持六注册表（kinds / noteKeys / renderers / layouts / semantics / channels），PomodoroXII 可注册自己的 kind（如工作项引用、思考类型）而不改 MindCanvas 源码。
+
 ---
 
 ## 3. 术语（建议并入 `CONTEXT.md`）
@@ -153,6 +215,10 @@ note:                             ③ 该节点的思路记录
 | 2 | 导图同步方案（D6） | 跨设备成为真实需求时 |
 | 3 | 岛归档/折叠阈值（D3） | S4，必须用 MindCanvas 基准脚本给实测依据 |
 | 4 | 协议共享方：entity-ref 共享方名单当前不含 PomodoroXII | S1 内与 MindCanvas 侧对齐；未对齐前只作独立消费者，不承诺兼容 |
+| 5 | **导入子树 / 导入岛 + 复制操作**（用户规划中的后续能力）：把某工作项子树投影进当前图、把另一张图的会话岛搬运过来，并配套复制 | 独立立项。技术基础已具备：kernel 导出 `duplicateNode`（`tree/`），岛搬运可基于序列化 + `centers` 重分配 `cid` |
+| 6 | 图内节点「提升为工作项」的交互与冲突处理（D8） | S2/S3 |
+| 7 | 节点类型的**可扩展性**：首版五个类型是否够用、能否由用户自定义（D9） | 首版落地后按真实使用调整 |
+| 8 | L2–L3 联动的其余形态（如 L2 汇总视图 vs L3 各自成图） | 按真实使用痛点决定，不预先实现 |
 
 ---
 
@@ -171,3 +237,13 @@ note:                             ③ 该节点的思路记录
 | 沉浸模式渐隐实现 | `frontend/src/app/(app)/timer/page.tsx:198-205,811,823-842`；`globals.css:968-978` |
 | 后端响应带 X-Frame-Options: DENY | `backend/app/middleware.py:96-108` |
 | React 版本已对齐并 dedupe | 提交 `e62b265`；`npm ls react` 全树 `19.3.0 deduped` |
+| **任务空间最深 3 层（D8 依据）** | `backend/app/task_space/compiler.py:443-450`（`depth_exceeds_three` 硬拒绝）；`_parent_depth` `:358-381`；`_work_item_depth` `focus_session/policy.py:2881` |
+| 层级标注实测（L1/L2 真实 depth） | 实测 space.db：`思维导图的悬浮窗视图`=depth 1、`探索小窗实现方式`=depth 2、`体验：卡点分析记录`=depth 2 |
+| **协议容忍未知字段（D9 依据）** | MindCanvas `docs/specs/2026-09-02-mm-md-protocol.md` §一「前向兼容：未知 kind、未知字段一律保留，绝不丢弃」 |
+| type_definitions 具备 icon/color/rank | 实测 `space.db`：`type_definitions(id, created_at, updated_at, version, name, icon, color, rank, system, archived_at)`，当前仅 `sys-type-work-item` |
+| **模块化接入依据（D10）** | `packages/kernel/src/plugin/plugin.ts`（Plugin 基类 + registerInto 自注销）；`packages/kernel/src/registry/index.ts`（六注册表；「空注册表时内核照常工作 = kernel + []」「app = kernel + [plugins]」） |
+| MapView 能力全部可选 | `packages/react/src/render/MapView.tsx:139-300`（`boundaryLinks?` / `islandMembers?` / `centerIds?` / `onRemoveSection?` / `onEdgeClick?` …） |
+| 自由边由 documentRoot 内部派生 | `packages/react/src/render/MapView.tsx:762`（`collectFreeEdges(rootNode)`）→ 剥掉 `edges` 即空 |
+| 渲染层顺序独立可裁剪 | `packages/react/src/render/MapView.tsx:1946`（`sections → tree-links → free-edges → nodes → edge-labels → ghosts → drag`） |
+| rel 关系不在 react 渲染链路 | `buildRelGeometries` 在 `packages/react` 内零引用 |
+| 复制能力基础（§6-5） | kernel 导出 `duplicateNode`（`tree/treeOps.ts`） |
