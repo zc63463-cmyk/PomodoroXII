@@ -12,6 +12,7 @@ import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/time
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { ContinuePrevious } from '@/components/timer/continue-previous'
 import { TimerFrame } from '@/components/timer/timer-frame'
+import { TimerMapPort } from '@/components/timer/timer-map-port'
 import { TimerSideToday, type RecentSessionRow } from '@/components/timer/timer-side-today'
 import { TodaySummary } from '@/components/timer/today-summary'
 import { Button } from '@/components/ui/button'
@@ -41,6 +42,7 @@ import {
 } from '@/lib/task-space/continue-previous'
 import { recordBlockerAck } from '@/lib/task-space/blocker-ack-log'
 import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
+import { readWorkMap } from '@/lib/work-map/work-map-api'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
 import { createLaunchSessionIslands } from '@/lib/work-map/session-island-launch'
 import { canonicalNow } from '@/lib/direct-command-intents'
@@ -294,6 +296,33 @@ export default function TimerPage() {
   const activeSessionMode = ((session as { sessionType?: SessionMode } | null)?.sessionType ?? 'work') as SessionMode
   const endedSessionMode = ((aggregate?.session as { sessionType?: SessionMode } | undefined)?.sessionType ?? activeSessionMode) as SessionMode
   const runningBreak = isBreakMode(activeSessionMode)
+
+  // ── 导图端口「当前会话岛」（ADR-0008 D13 步 1）────────────────────────────
+  // 数据 = 当前投入 L3 的 `.mm.md` 原文。刷新时机有两条，缺一不可：
+  //   ① 会话 / 当前 L3 / 休息态变化 → 重读；
+  //   ② **建岛完成（launch promise 落定）→ mapRefreshSeq++ → 重读**。
+  //   ② 是 2026-09-30 真机验收抓到的竞态修复：建岛是 start 之后 fire-and-forget 的
+  //   另一次网络往返，端口首读可能落在"图在但本次会话岛还没写进去"的中间态。
+  // 失败一律 fail-quiet：端口退化占位文案，不阻断计时（不变量 4）。
+  const [sessionMapText, setSessionMapText] = useState<string | null>(null)
+  const [mapRefreshSeq, setMapRefreshSeq] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    if (activeSessionId === null || focusedWorkItemId === null || runningBreak) {
+      setSessionMapText(null)
+      return
+    }
+    void readWorkMap(focusedWorkItemId)
+      .then((text) => { if (!cancelled) setSessionMapText(text) })
+      .catch((cause) => {
+        if (cancelled) return
+        setSessionMapText(null)
+        console.warn(
+          `[timer-map-port] 导图读取失败（fail-soft，端口退化为占位）: ${cause instanceof Error ? cause.message : String(cause)}`,
+        )
+      })
+    return () => { cancelled = true }
+  }, [activeSessionId, focusedWorkItemId, mapRefreshSeq, runningBreak])
   /**
    * 节奏面板只在「已结束 且 不需要复盘」时出现：
    * - 休息型结束（免复盘）→ 立即出现；
@@ -475,6 +504,11 @@ export default function TimerPage() {
           startedAt: input.startedAt,
           level3WorkItemIds: selection.level3WorkItemIds,
           workItems,
+        }).finally(() => {
+          // ★ 写驱动刷新（2026-09-30 真机验收抓到的竞态）：端口若在岛写入完成前
+          //   读了导图，会拿到"有图但还没有本次会话岛"的中间态 → 落在占位文案上。
+          //   建岛 promise 落定即触发端口重读，天然消除该竞态（不轮询、不猜测）。
+          setMapRefreshSeq((seq) => seq + 1)
         })
       } else {
         if (!focusRepository) throw new Error('focus_session_repository_not_ready')
@@ -900,17 +934,21 @@ export default function TimerPage() {
       onEnd: (occurredAt) => clockAction('end', occurredAt),
       onFlushNote: async () => { await draftController?.flush('before-append') },
     }),
-      // 伴奏区：由骨架保证带 .timer-immersive-region + data-testid（沉浸时只渐隐这一栏）。
+      // 伴奏区：骨架带 .timer-immersive-region（结构标记 + testid）。
+      // 沉浸渐隐对象 = **显式标记 .timer-immersive-fade 的伴奏卡**（ADR-0008 D12）：
+      // 导图端口卡不标记 → 沉浸时仍常驻可交互（极简岛呈态）。
       side: createElement(Fragment, null,
       // 双体系兼容（2026-09-16）：休息型运行态不渲染成果清单 / 当前项 / Note ——
       // 休息不承接三级计划、不产生投入（服务端对 plan 行 fail-closed），
       // 这里用一句说明代替，避免出现"点了必被拒"的控件。
       runningBreak
-        ? createElement('p', {
+        ? createElement('div', { className: 'timer-immersive-fade' },
+          createElement('p', {
             className: 'text-sm text-muted-foreground',
             'data-testid': 'break-session-note',
-          }, `${modeLabel(activeSessionMode)}不记录三级成果与投入 —— 只保留休息时长；结束后直接进入下一轮节奏。`)
-        : createElement(SessionWorkspace, {
+          }, `${modeLabel(activeSessionMode)}不记录三级成果与投入 —— 只保留休息时长；结束后直接进入下一轮节奏。`))
+        : createElement('div', { className: 'timer-immersive-fade' },
+          createElement(SessionWorkspace, {
             session, plans, availableLevel3,
             onSetCurrent: setCurrent, onSetCompletionDraft: setCompletion,
             onAddPlanItem: addPlanItem, onRemovePlanItem: removePlanItem,
@@ -929,14 +967,27 @@ export default function TimerPage() {
                 await draftController?.flush('current-item-change')
               }
             },
-          }),
-      !runningBreak && focusedWorkItemId ? createElement(FocusedWorkItemNote, {
-        note: focusedNote, spaceId: spaceId ?? '', workItemId: focusedWorkItemId,
-        draftRegistry: draftController ?? undefined, onAppendBlocks: appendBlocks,
-      }) : null,
+          })),
+      // ── 导图端口「当前会话岛」（ADR-0008 D13 步 1）──────────────────────────
+      // ★ 刻意**不加** .timer-immersive-fade：沉浸时常驻（D12 裁决 1/2：极简岛 =
+      //   同一 DOM 上 data-minimal 派生，零布局抖动）。休息型会话不建岛，故不渲染。
+      !runningBreak
+        ? createElement(TimerMapPort, {
+            mapText: sessionMapText,
+            sessionId: activeSessionId,
+            minimal: immersive,
+          })
+        : null,
+      !runningBreak && focusedWorkItemId
+        ? createElement('div', { className: 'timer-immersive-fade' },
+          createElement(FocusedWorkItemNote, {
+            note: focusedNote, spaceId: spaceId ?? '', workItemId: focusedWorkItemId,
+            draftRegistry: draftController ?? undefined, onAppendBlocks: appendBlocks,
+          }))
+        : null,
       // 底部统计栏（工单③→工单 A 2026-09-14）：准备态与运行态两处布局的底部都要有（规格 L457/L505）。
       // 标签「今日」= 本地日界显式窗口（服务端 start，本单 A1/A2），理由见 today-summary.tsx 的注释。
-      createElement(TodaySummary),
+      createElement('div', { className: 'timer-immersive-fade' }, createElement(TodaySummary)),
       ),
     })
   : createElement(TimerFrame, {

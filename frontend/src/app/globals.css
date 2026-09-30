@@ -965,14 +965,20 @@
     }
   }
 
-  /* 沉浸模式（页面级）：data-immersive 在运行态容器上，只渐隐被标记的
-     次级内容区（Workspace / Note / TodaySummary）—— 退出按钮与环不在其中，
-     所以"退出"永远可见可点。 */
-  .timer-immersive-region {
+  /* 沉浸模式（页面级）：data-immersive 在运行态容器上。渐隐对象 =
+     **显式标记 `.timer-immersive-fade` 的伴奏卡**（Workspace / Note / TodaySummary）——
+     退出按钮与环不在其中，所以"退出"永远可见可点。
+
+     ★ 2026-09-30 ADR-0008 D12：渐隐作用域从"整个右栏（.timer-immersive-region）"
+     下沉到显式标记的卡。原因：**父级 opacity 是子树合成效果，子元素无法"逆渐隐"**
+     —— 导图端口卡若留在被渐隐的子树内，"导图不随沉浸渐隐"在 CSS 层面不可实现，
+     且 `pointer-events: none` 会让"沉浸中仍能记录"彻底失效。
+     `.timer-immersive-region` 保留为结构标记（既有 testid 契约），不再承担渐隐。 */
+  .timer-immersive-fade {
     transition: opacity 300ms ease;
   }
 
-  [data-immersive='true'] .timer-immersive-region {
+  [data-immersive='true'] .timer-immersive-fade {
     opacity: 0.2;
     pointer-events: none;
   }
@@ -990,7 +996,7 @@
     }
 
     .timer-ring-progress,
-    .timer-immersive-region {
+    .timer-immersive-fade {
       transition: none;
     }
   }
@@ -1081,6 +1087,78 @@
 .ios-prio[data-level='low'] {
   background: var(--ios-fill);
   color: var(--ios-label-2);
+}
+
+/* ── 工作导图端口（运行态「当前会话岛」，ADR-0008 D13 步 1）──────────────────
+   岛轮廓 + 节点行 + 点阵。沉浸态（[data-minimal='true']，D12 裁决 2）**只隐藏
+   文字标注**：用 visibility 而非 display —— 行盒保持原尺寸，容器尺寸不变，
+   → **零布局抖动**。岛轮廓与当前会话节点高亮在两种呈态下都保留。 */
+.ios-map-island {
+  border: 1.5px solid color-mix(in oklab, var(--ios-blue) 34%, transparent);
+  background: color-mix(in oklab, var(--ios-blue) 6%, transparent);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.ios-map-island-hd {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--ios-label-2);
+  margin-bottom: 4px;
+}
+.ios-map-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 5px 6px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+.ios-map-row + .ios-map-row::before {
+  content: '';
+  position: absolute;
+  left: 22px;
+  right: 6px;
+  top: 0;
+  border-top: 0.5px solid color-mix(in oklab, var(--ios-blue) 18%, transparent);
+}
+/* 当前会话节点高亮（极简态同样保留——"只保留岛轮廓与当前节点高亮"） */
+.ios-map-row[data-current='true'] {
+  background: color-mix(in oklab, var(--ios-blue) 10%, transparent);
+  font-weight: 500;
+}
+.ios-map-shape {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--ios-blue) 55%, transparent);
+}
+.ios-map-shape[data-kind='island'] {
+  width: 7px;
+  height: 7px;
+  background: transparent;
+  border: 1.5px solid color-mix(in oklab, var(--ios-blue) 60%, transparent);
+}
+.ios-map-node-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ios-map-tail {
+  margin-left: auto;
+  flex: none;
+  font-size: 10.5px;
+  color: var(--ios-label-2);
+}
+/* 极简岛（沉浸态）：同一 DOM、同尺寸 —— 只隐文字（含岛标题），留轮廓/点阵/当前高亮 */
+[data-minimal='true'] .ios-map-node-text,
+[data-minimal='true'] .ios-map-tail {
+  visibility: hidden;
 }
 
 /* 分组标题（iOS grouped header）：小字、次级色、左缩进 */

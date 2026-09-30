@@ -69,6 +69,11 @@ vi.mock('@/lib/work-map/session-island-launch', () => ({
   createLaunchSessionIslands: createLaunchSessionIslandsMock,
 }))
 
+// ★ ADR-0008 D13 步 1：运行态导图端口读当前 L3 的 `.mm.md`（真实网络 → 桩掉）。
+//   默认「尚无导图」（null）；接线断言见「运行态导图端口」describe。
+const readWorkMapMock = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/work-map/work-map-api', () => ({ readWorkMap: readWorkMapMock }))
+
 const coordinatorSpies = vi.hoisted(() => ({
   start: vi.fn(), pause: vi.fn(), resume: vi.fn(), end: vi.fn(),
   takeover: vi.fn(), updateSessionNote: vi.fn(), setCurrentPlanItem: vi.fn(),
@@ -104,6 +109,8 @@ const aggregate = {
  */
 function seedRunningTimerPage(): void {
   vi.clearAllMocks()
+  readWorkMapMock.mockReset()
+  readWorkMapMock.mockResolvedValue(null)
   fetchFocusSummaryWindowMock.mockReset()
   fetchFocusSummaryWindowMock.mockResolvedValue({
     period_days: 1, total_sessions: 3, valid_sessions: 2, interrupted_sessions: 1,
@@ -244,10 +251,72 @@ describe('TimerPage 沉浸模式与二级归属（工单 B 2026-09-14）', () =>
   })
 })
 
+// ── ADR-0008 D13 步 1：运行态导图端口「当前会话岛」─────────────────────────
+/** 会话 session-a 的岛文件（形状与真实产出一致；session_id 对齐 runningSession）。 */
+const ISLAND_FOR_RUNNING = `<!--
+next_cid: 2
+centers:
+  - at: "node:Verify output/09-30 19:55 会话"
+    cid: c1
+    dir: right
+    session_id: "session-a"
+-->
+# Verify output
+
+<!--
+cid: "c1"
+session_id: "session-a"
+-->
+## 09-30 19:55 会话
+
+### 验证输出
+`
+
+describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
+  beforeEach(seedRunningTimerPage)
+
+  it('★ 以当前投入 L3 读导图；岛到端口 —— 会话节点高亮行渲染（fail-soft 读）', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
+    render(createElement(TimerPage))
+
+    // 读的键 = 当前计划项的 L3（focusedWorkItemId），不是二级项
+    await waitFor(() => expect(readWorkMapMock).toHaveBeenCalledWith('l3-a'))
+    const sessionRow = await screen.findByTestId('map-session-node')
+    expect(sessionRow).toHaveAttribute('data-current', 'true')
+    expect(sessionRow).toHaveTextContent('09-30 19:55 会话')
+    expect(screen.getByTestId('timer-map-port')).toHaveAttribute('data-minimal', 'false')
+  })
+
+  it('★ 沉浸切换：端口不消失、data-minimal 翻转（D12 裁决 1/2 的页面级接线）', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
+    render(createElement(TimerPage))
+    expect(await screen.findByTestId('timer-map-port')).toHaveAttribute('data-minimal', 'false')
+
+    fireEvent.click(screen.getByRole('button', { name: '沉浸模式' }))
+
+    // 极简岛：同一 DOM 派生（卡片仍在，只是 data-minimal=true → CSS 隐文字）
+    const port = screen.getByTestId('timer-map-port')
+    expect(port).toHaveAttribute('data-minimal', 'true')
+    expect(port.querySelectorAll('.ios-map-row').length).toBe(2)
+    // 渐隐标记只打在伴奏卡上：端口刻意**不带** .timer-immersive-fade
+    expect(port.className).not.toContain('timer-immersive-fade')
+    expect(screen.getByTestId('immersive-region').querySelectorAll('.timer-immersive-fade').length)
+      .toBeGreaterThan(0)
+  })
+
+  it('无导图（读回 null）→ 占位文案，端口不炸（fail-soft）', async () => {
+    render(createElement(TimerPage))
+    expect(await screen.findByTestId('map-port-empty')).toBeTruthy()
+    expect(screen.queryByTestId('map-island')).toBeNull()
+  })
+})
+
 // ── 双体系兼容 2026-09-16：准备态 → 启动载荷带模式 ─────────────────────────
 /** 准备态种子：无活动会话（locator / session 皆空）。 */
 function seedIdleTimerPage(): void {
   vi.clearAllMocks()
+  readWorkMapMock.mockReset()
+  readWorkMapMock.mockResolvedValue(null)
   fetchFocusSummaryWindowMock.mockReset()
   fetchFocusSummaryWindowMock.mockResolvedValue({
     period_days: 1, total_sessions: 0, valid_sessions: 0, interrupted_sessions: 0,
