@@ -79,7 +79,14 @@ export function TimerFrame({
       >
         <section
           className="ios-card flex min-h-[520px] flex-col p-6"
-          style={{ background: 'var(--ios-card, var(--card))' }}
+          // 结构性视觉（背景 / 圆角 / 裁切）也走 inline：
+          // 排查期间发现「CSS 类是否生效」无法从服务端确证，故把最关键的
+          // 视觉属性提到 inline —— 它不可能被任何样式表规则覆盖。
+          style={{
+            background: 'var(--ios-card, var(--card, #ffffff))',
+            borderRadius: 12,
+            overflow: 'hidden',
+          }}
         >
           {focus}
         </section>
