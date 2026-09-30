@@ -84,7 +84,35 @@ note:                             ③ 该节点的思路记录
 
 **协议陷阱（实测踩过）**：笔记块**归属其后的节点**。`cid` 块必须写在会话节点标题**之前**，否则它挂到下一个节点上，导致 `cidIndexSize=0` + `dangling:cid-not-found`。
 
-**不自己实现写入逻辑**：使用 `@mindcanvas/react` 现成 API —— `ensureNodeCid` / `upsertCenter` / `removeCenter` / `collectCenters`（`render/centers.ts`）。
+**不自己实现写入逻辑**（**注：此条经 D11 修订**）：使用 `@mindcanvas/react` 现成 API —— `ensureNodeCid` / `upsertCenter` / `removeCenter` / `collectCenters`（`render/centers.ts`）。
+
+### D11 · 建岛实现：自持「移植精简版」（**修订 D4**）
+
+**变更原因**（实施 S2 时发现）：
+- `centers.ts` 位于 **react 包**（不在 kernel），且依赖同包 `freeEdges.js` 的三个函数
+  （`anchorOfNode` / `collectEntityOccurrences` / `splitEntityAnchor`）
+- react 包带 `workspace:*` 依赖，不能直接 `file:` 安装；引入需 vendor 整包
+- 而 S2 只需「建岛」一处能力，引入整包的成本收益比不佳
+
+**决策**：在 `frontend/src/lib/work-map/` 自持**文本级最小实现**：
+
+| 模块 | 职责 |
+|---|---|
+| `mm-note.ts` | `.mm.md` 文档级根块（`next_cid` / `centers`）的**有界解析**与**规范生成** |
+| `session-island.ts` | 会话 → 岛：两处同写、`session_id` 幂等、fail-soft |
+
+**为什么文本级可行**：完整 `.mm.md` 解析器要处理标题栈 / 列表栈 / 笔记块归属（~400 行），
+而建岛只用到**文档级根块**这一处；本实现只解析根块，**其余正文原样保留** → 天然保真，
+不会因重写而丢用户排版。遵循协议「宽松读入、规范写出」。
+
+**代价与硬约束**（必须守住）：
+1. 本项目与 MindCanvas 存在**两处实现**，都以协议 v1.3.1 为准；**协议变更时本项目须同步**
+2. 因此本模块测试锚在**协议可观察行为**上（生成物能被自己的解析器读回、条目形状、`cid` 单调、
+   未知键不丢、fail-soft），而**不是**内部实现细节
+3. S3 引入 kernel/react 后若两者的 centers 行为出现分叉，**以协议为准并补对照测试**
+
+**保留 D4 的其余纪律**：不自研另一套岛语义（岛仍是协议 `centers` 的升格机制）；
+两处同写与 `cid` 永不复用的规则不变。
 
 ### D5 · 导图端口与沉浸三态（**暂定**，S3 前复核）
 
