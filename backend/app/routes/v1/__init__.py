@@ -38,6 +38,7 @@ def build_v1_router() -> APIRouter:
     from app.routes.v1.spaces import router as spaces_router
     from app.routes.v1.stats import router as stats_router
     from app.routes.v1.sync import router as sync_router
+    from app.routes.v1.task_space_commands import router as task_space_commands_router
     from app.routes.v1.time_blocks import router as time_blocks_router
     from app.routes.v1.trash import router as trash_router
     from app.routes.v1.work_item_notes import router as work_item_notes_router
@@ -79,6 +80,10 @@ def build_v1_router() -> APIRouter:
     router.include_router(relations_router, prefix="/relations", tags=["relations"])
     router.include_router(
         work_item_notes_router, prefix="/work-items", tags=["work-item-notes"]
+    )
+    # TS-02 REST batch write (space token required).
+    router.include_router(
+        task_space_commands_router, prefix="/task-space", tags=["task-space"]
     )
 
     # Global ActiveSession coordination (master token required).

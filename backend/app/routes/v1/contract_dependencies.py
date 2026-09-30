@@ -13,6 +13,7 @@ from app.errors import AppError, IdempotencyConflictError, ValidationError, to_w
 from app.mutation.types import validate_operation_id
 from app.runtime.space import SpaceRuntimeHandle
 from app.schemas.task_space import TaskSpaceAcceptedResponse
+from app.task_space.batch import DefaultTaskSpaceBatchCommandModule
 from app.task_space.contracts import TaskSpaceAccepted, TaskSpaceRejected
 from app.task_space.module import DefaultTaskSpaceCommandModule
 from app.task_space.queries import DefaultTaskSpaceQueryModule
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
         FocusSessionModule,
     )
     from app.task_space.contracts import (
+        TaskSpaceBatchCommandModule,
         TaskSpaceCommandModule,
         TaskSpaceQueryModule,
     )
@@ -40,6 +42,16 @@ def get_task_space_command_module(
 ) -> "TaskSpaceCommandModule":
     """Bind the concrete Task Space command provider to the shared UoW."""
     return DefaultTaskSpaceCommandModule(uow)
+
+
+def get_task_space_batch_command_module(
+    uow=Depends(get_mutation_uow),
+) -> "TaskSpaceBatchCommandModule":
+    """Bind the concrete Task Space batch adapter to the shared UoW.
+
+    同一个 UoW 实例：单条与批量共享提交、恢复与账本可见性语义。
+    """
+    return DefaultTaskSpaceBatchCommandModule(uow)
 
 
 def get_focus_session_module(
