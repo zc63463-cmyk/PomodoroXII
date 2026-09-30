@@ -72,7 +72,11 @@ vi.mock('@/lib/work-map/session-island-launch', () => ({
 // ★ ADR-0008 D13 步 1：运行态导图端口读当前 L3 的 `.mm.md`（真实网络 → 桩掉）。
 //   默认「尚无导图」（null）；接线断言见「运行态导图端口」describe。
 const readWorkMapMock = vi.hoisted(() => vi.fn())
-vi.mock('@/lib/work-map/work-map-api', () => ({ readWorkMap: readWorkMapMock }))
+const writeWorkMapMock = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/work-map/work-map-api', () => ({
+  readWorkMap: readWorkMapMock,
+  writeWorkMap: writeWorkMapMock,
+}))
 
 const coordinatorSpies = vi.hoisted(() => ({
   start: vi.fn(), pause: vi.fn(), resume: vi.fn(), end: vi.fn(),
@@ -111,6 +115,8 @@ function seedRunningTimerPage(): void {
   vi.clearAllMocks()
   readWorkMapMock.mockReset()
   readWorkMapMock.mockResolvedValue(null)
+  writeWorkMapMock.mockReset()
+  writeWorkMapMock.mockResolvedValue(0)
   fetchFocusSummaryWindowMock.mockReset()
   fetchFocusSummaryWindowMock.mockResolvedValue({
     period_days: 1, total_sessions: 3, valid_sessions: 2, interrupted_sessions: 1,
@@ -308,6 +314,24 @@ describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
     render(createElement(TimerPage))
     expect(await screen.findByTestId('map-port-empty')).toBeTruthy()
     expect(screen.queryByTestId('map-island')).toBeNull()
+  })
+
+  it('★ 快速记录（D13 步 2）：类型 + 文本 → 写出追加后的导图，端口即时出现新节点', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
+    writeWorkMapMock.mockResolvedValue(128)
+    render(createElement(TimerPage))
+
+    fireEvent.click(await screen.findByTestId('map-quick-problem'))
+    fireEvent.change(screen.getByTestId('map-quick-input'), { target: { value: 'token 对照' } })
+    fireEvent.click(screen.getByTestId('map-quick-submit'))
+
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledTimes(1))
+    const [workItemId, written] = writeWorkMapMock.mock.calls[0] as [string, string]
+    expect(workItemId).toBe('l3-a') // 写的是当前投入 L3 的导图
+    expect(written).toContain('thought_type: "problem"')
+    expect(written).toContain('### token 对照')
+    // 端口即时反映（本地 state 已更新，无需再读一次服务端）
+    expect(await screen.findByText('token 对照')).toBeTruthy()
   })
 })
 

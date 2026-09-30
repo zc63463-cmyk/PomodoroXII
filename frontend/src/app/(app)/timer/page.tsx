@@ -42,7 +42,9 @@ import {
 } from '@/lib/task-space/continue-previous'
 import { recordBlockerAck } from '@/lib/task-space/blocker-ack-log'
 import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
-import { readWorkMap } from '@/lib/work-map/work-map-api'
+import { readWorkMap, writeWorkMap } from '@/lib/work-map/work-map-api'
+import { appendThoughtNode } from '@/lib/work-map/thought-nodes'
+import type { ThoughtType } from '@/lib/work-map/thought-types'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
 import { createLaunchSessionIslands } from '@/lib/work-map/session-island-launch'
 import { canonicalNow } from '@/lib/direct-command-intents'
@@ -323,6 +325,24 @@ export default function TimerPage() {
       })
     return () => { cancelled = true }
   }, [activeSessionId, focusedWorkItemId, mapRefreshSeq, runningBreak])
+
+  /**
+   * 快速记录（ADR-0008 D13 步 2）：把一条思路按类型追加为会话节点子节点。
+   *
+   * 读-改-写三步；D6「先单机」前提下不做并发合并（窗口内他端改写会被覆盖，
+   * 跨设备同步是独立议题）。失败抛出 → 端口卡内展示（不弹全局错误、不阻断计时）。
+   */
+  const quickRecord = async (type: ThoughtType, title: string): Promise<void> => {
+    if (focusedWorkItemId === null || activeSessionId === null) {
+      throw new Error('当前没有进行中的会话')
+    }
+    const base = sessionMapText ?? (await readWorkMap(focusedWorkItemId)) ?? ''
+    const result = appendThoughtNode(base, { sessionId: activeSessionId, type, title })
+    if (!result.changed) throw new Error(result.reason ?? '未产生变更')
+    await writeWorkMap(focusedWorkItemId, result.text)
+    // 立即反映（不等下一次读）；服务端已是同一份内容，无需额外对齐往返
+    setSessionMapText(result.text)
+  }
   /**
    * 节奏面板只在「已结束 且 不需要复盘」时出现：
    * - 休息型结束（免复盘）→ 立即出现；
@@ -976,6 +996,7 @@ export default function TimerPage() {
             mapText: sessionMapText,
             sessionId: activeSessionId,
             minimal: immersive,
+            onQuickRecord: quickRecord,
           })
         : null,
       !runningBreak && focusedWorkItemId

@@ -41,6 +41,8 @@ import type {
   ValidatedCenterSpec,
 } from '@mindcanvas/kernel'
 
+import { isThoughtType, THOUGHT_TYPE_KEY, type ThoughtType } from './thought-types'
+
 /** 端口渲染用的节点视图（kernel 内部 id 原样带出，作稳定 key）。 */
 export interface WorkMapNode {
   id: string
@@ -48,6 +50,8 @@ export interface WorkMapNode {
   text: string
   /** 该节点的协议 note（cid / session_id / note 列表等，原样带出，不解释） */
   note: Record<string, unknown> | null
+  /** 思考类型（D9 落盘为未知键 `thought_type`）；非法/缺失 → null（fail-closed） */
+  thoughtType: ThoughtType | null
   children: WorkMapNode[]
 }
 
@@ -98,10 +102,13 @@ export function displayTextOf(node: EditableNode): string {
 
 /** 深度优先展开（前序），映射成端口视图。 */
 function toWorkMapNode(node: EditableNode): WorkMapNode {
+  const note = node.note ? { ...(node.note as Record<string, unknown>) } : null
+  const rawType = note?.[THOUGHT_TYPE_KEY]
   return {
     id: node.id,
     text: displayTextOf(node),
-    note: node.note ? { ...(node.note as Record<string, unknown>) } : null,
+    note,
+    thoughtType: isThoughtType(rawType) ? rawType : null,
     children: node.children.map(toWorkMapNode),
   }
 }

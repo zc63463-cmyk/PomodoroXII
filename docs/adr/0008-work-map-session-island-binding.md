@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-09-30 |
-| 状态 | **已接受**（S1 三项裁决 D1–D3 完成，D8–D10 已经用户确认；**D5 已复核（D12）、S3 最小集已 spike 定盘（D13）**，均为 2026-09-30；D6–D7 为暂定） |
+| 状态 | **已接受**（S1 三项裁决 D1–D3 完成，D8–D10 已经用户确认；2026-09-30：**D5 已复核（D12）、S3 最小集已 spike 定盘（D13）、思考类型键名与写入形状已裁决（D14）**；D6–D7 为暂定） |
 | 关联 | ADR-0007（会话类型双轨）、`CONTEXT.md`、MindCanvas v1.12.0、entity-ref 协议 v1.3.1 |
 | 前置 | S0 接缝校验通过（解析/岛投影/布局/浏览器渲染全部验证，`S0-接缝校验报告-2026-09-29.md`） |
 | 依赖 | React 已升至 19.3.0（`e62b265`），解除 `@mindcanvas/react` 的 React 版本冲突 |
@@ -215,6 +215,47 @@ centers 读数（cid 优先 / 路径锚三态 / 坐标成对强转）由本项�
 
 ---
 
+### D14 · 思考类型的落盘键名与写入形状（2026-09-30，D13 步 2 前置裁决）
+
+**裁决**：思考类型落盘为**未知笔记键** `thought_type`，值域 = D9 五类 ASCII id
+（`insight` / `problem` / `decision` / `review` / `todo`）；写入形状 = 会话节点子标题
++ 其**前导**笔记块。
+
+**依据（改动前先读）**：
+- `.mm.md` 协议 §5.2：「**未知字段一律透传**（`Note` 有 `[key: string]: unknown`）」
+  —— 零协议改动、旧客户端忽略即降级
+- 同款先例：`note.ai_role`（MindCanvas `2026-08-27-mindmap-forgejo-sync-design.md:267`
+  「AI 建议（未采纳）→ `note` 未知键 …… 协议规定未知 note 键透传不报错」）
+- 反向先例（**不采用**）：新增 `EditableNode.type` 会撞上"未知 type 降级纪律未定义"
+  （`2026-09-14-node-card-flip-markdown-design.md:62` 的判据）—— 属协议面改动，须先立 ADR
+
+**键名取舍**：不用 `thought`（易被读成"思考正文"而歧义）、不用 `type`（与节点三分结构
+`type: text|image|entity` 撞名）；`thought_type` 对齐既有未知键命名风格（`<域>_<角色>`）。
+
+**写入形状（协议可观察行为，测试钉住）**：
+```markdown
+<!--
+thought_type: "problem"
+-->
+### token 对照：灰阶 vs 玻璃主题
+```
+- 笔记块**归属其后的节点**（协议：空行插在块之前，插在之后会拆开两者）
+- 层级 = 会话节点层级 + 1；插入点 = **会话子树末尾**（保持会话内时序，追加语义）
+- 其余正文**逐字节保留**（只做一处字符串拼接）
+- fail-closed：类型非法 / 空标题 / 缺 sessionId → 拒绝；fail-soft：找不到会话节点 → 原样返回
+
+**读侧**：`island-view` 把类型带出为 `WorkMapNode.thoughtType`（非法值 → `null`）；
+**形状与颜色映射只在渲染层**（不落盘）→ 改形状不需要动任何文件。
+
+**渲染（D9 双编码强制）**：洞察=实心圆/青 · 问题=三角/珊瑚 · 决策=菱形/紫 ·
+复盘=空心圆/绿 · 待办=空心方/琥珀；节点行 = 形状 + 中文尾标。
+节点类型**图例**与**跨岛按类型筛选**留 D13 步 3。
+
+**已知边界**：读-改-写不做并发合并（D6 单机前提；跨设备议题另立）；若该键未来升级为
+协议登记字段，按 D11 纪律「以协议为准 + 补对照测试」。
+
+---
+
 ### D6 · 同步：**先单机，跨设备延后**（**暂定**）
 
 `.mm.md` 不进 sync v2 账本（D2 的直接后果）。若跨设备成为真实需求，另立 ADR 设计导图同步——**不在本轮实现**。
@@ -354,6 +395,8 @@ if parent_depth >= 3:
 | 沉浸模式渐隐实现（2026-09-30 复核更新） | 作用域容器：`frontend/src/components/timer/timer-frame.tsx:100-124`（`data-immersive` 在根、`.timer-immersive-region` 在右栏）；渐隐规则：`globals.css:971-978`（子树级 `opacity .2` + `pointer-events: none`）→ D12 据此改机制 |
 | ~~渲染接入通道未验证（D12 发现 2）~~ → 已 spike 定盘（D13） | 实测 2026-09-30：`pnpm pack` kernel → `frontend/vendor/mindcanvas-kernel-1.12.0.tgz`（238 KB）→ `npm i` 成功；`parseMm`/`astToEditable`/`projectIslands` 对真实岛文件与 S0 样本 0 诊断、2 岛切分正确；断言见 `frontend/src/lib/work-map/island-view.test.ts`（11 例） |
 | 三处互操作边界（D13 发现，已钉测试） | `island-view.test.ts`：「坐标字符串强转」「单键条目标量化」「`next_cid` 两种约定并存」（S0 `c2` vs 本项目 `2`） |
+| 未知笔记键透传（D14 依据） | 协议 §5.2（`Note` 有 `[key: string]: unknown`，"未知字段一律透传"）；先例 `note.ai_role`（MindCanvas forgejo-sync 设计 §5.3）；反向判据「不新增 node type」：node-card-flip 设计 §3 D1 |
+| 快速记录写入形状（D14，已钉测试） | `frontend/src/lib/work-map/thought-nodes.test.ts`（写作形状 / 时序 / fail 语义 / 写读闭环）；真机验收：`s3-quick-record-demo.mjs` + 截图 `s3-quick-normal.png` + `s3-quick-minimal.png` |
 | 后端响应带 X-Frame-Options: DENY | `backend/app/middleware.py:96-108` |
 | React 版本已对齐并 dedupe | 提交 `e62b265`；`npm ls react` 全树 `19.3.0 deduped` |
 | **任务空间最深 3 层（D8 依据）** | `backend/app/task_space/compiler.py:443-450`（`depth_exceeds_three` 硬拒绝）；`_parent_depth` `:358-381`；`_work_item_depth` `focus_session/policy.py:2881` |
