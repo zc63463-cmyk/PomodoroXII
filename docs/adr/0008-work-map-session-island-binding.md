@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-09-30 |
-| 状态 | **已接受**（S1 三项裁决 D1–D3 完成，D8–D10 已经用户确认；**D5 已复核，见 D12（2026-09-30）**；D6–D7 为暂定） |
+| 状态 | **已接受**（S1 三项裁决 D1–D3 完成，D8–D10 已经用户确认；**D5 已复核（D12）、S3 最小集已 spike 定盘（D13）**，均为 2026-09-30；D6–D7 为暂定） |
 | 关联 | ADR-0007（会话类型双轨）、`CONTEXT.md`、MindCanvas v1.12.0、entity-ref 协议 v1.3.1 |
 | 前置 | S0 接缝校验通过（解析/岛投影/布局/浏览器渲染全部验证，`S0-接缝校验报告-2026-09-29.md`） |
 | 依赖 | React 已升至 19.3.0（`e62b265`），解除 `@mindcanvas/react` 的 React 版本冲突 |
@@ -171,6 +171,50 @@ DOM/SVG 行式渲染，kernel 渲染器推迟到主图布局成为真实瓶颈�
 
 ---
 
+### D13 · S3 接入最小集与递增路径（2026-09-30 spike 实测）
+
+**背景**：D12 发现 2 曾把"渲染接入通道选型"列为 S3 工作包 0 决策门。复核修正：
+D10 的集成特化是**按功能模块接入**——运输量随模块走；S3 端口所需的最小集
+**不含 react 渲染器**，故该决策门在 S3 不成立。
+
+**spike 实测（2026-09-30，全绿）**：
+- 出包：MindCanvas 侧 `pnpm -F @mindcanvas/kernel build && pnpm pack`
+  → `frontend/vendor/mindcanvas-kernel-1.12.0.tgz`（238 KB，`files:["dist"]`）
+- 安装：`npm i ./vendor/…tgz` → lockfile 记 `file:` + integrity；kernel **零传递依赖**，
+  无 `workspace:*` 问题（D11 曾因同类问题自持 centers 精简实现）
+- 跑通：对本项目**真实产出的岛文件**（`maps/ca5a2d6c….mm.md`）与 S0 手写样本：
+  `parseMm`（0 诊断）→ `astToEditable` → **自持 centers 读数** → `projectIslands`
+  正确切出**根岛 + 会话岛**（含边界边与 `ownerByNodeId`），会话岛 `session_id` 完整保留
+- 产物：`frontend/src/lib/work-map/island-view.ts`（最小数据层）+ 11 例协议行为断言
+
+**最小集（S3 步 1–3）**：kernel 的 `protocol/parser` + `tree/treeOps`（`astToEditable`）
++ `layout/islands`（`projectIslands`，内部拉入 `layout/forest`）——单包、零运行时依赖；
+centers 读数（cid 优先 / 路径锚三态 / 坐标成对强转）由本项目**自持**（D11 纪律延续，
+不引入 react 包的 `collectCenters`）。**react 渲染器不在 S3 关键路径。**
+
+**递增路径（每步可验收）**：
+
+| 步 | 内容 | 依赖 |
+|---|---|---|
+| 1 | 运行态当前岛（岛轮廓 + 节点行 + 类型标记 + D12 极简岛） | 最小集（已就位） |
+| 2 | 快速记录（写侧 `mm-note.ts` 已有；读侧回读验证） | 步 1 |
+| 3 | 准备态主图 / 结束态全览（多岛排布；行式不够时再引 kernel `layout`） | 步 1 |
+| 4 | 可交互导图（拖拽/缩放/富文本编辑）→ **此时才评估 react 渲染器**（tarball/bundle 通道，届时 spike） | 真实需求触发 |
+
+**spike 发现的三处互操作边界（已钉在 `island-view.test.ts`）**：
+1. **坐标是字符串**：kernel 的 note 解析保留标量原样（`x: 900` → `"900"`）→
+   读数必须数值强转，否则坐标静默丢失
+2. **单键条目不兼容**：只有单个 `k: v` 行的 centers 条目被解析成**标量字符串**
+   而非记录（本项目写出侧恒多键故不受影响；兼容外部文档前需与 MindCanvas 侧对齐口径）
+3. **`next_cid` 两种约定并存**：S0 样本写 `c2`（带前缀），本项目写出侧写 `2`——
+   cid 分配算法在步 3（多岛写回）前必须对齐，否则可能重复分配
+
+**运输与维护**：tgz 入库（`frontend/vendor/`）以保 `npm ci` 可复现；kernel 升级 =
+重新 pack + `npm i`（版本号与文件名同步）。若日后嫌二进制入库，可换私有 registry
+或 repack 脚本，均不改本决策的模块边界。
+
+---
+
 ### D6 · 同步：**先单机，跨设备延后**（**暂定**）
 
 `.mm.md` 不进 sync v2 账本（D2 的直接后果）。若跨设备成为真实需求，另立 ADR 设计导图同步——**不在本轮实现**。
@@ -284,7 +328,7 @@ if parent_depth >= 3:
 
 | # | 事项 | 复核时机 |
 |---|---|---|
-| 1 | ~~极简岛的视觉与交互细节（D5）~~ → **已复核（D12，2026-09-30）**；剩余子项：渲染接入通道选型（vendor tarball / 整包 / 自持行式） | S3 工作包 0（计划评审时定） |
+| 1 | ~~极简岛的视觉与交互细节（D5）~~ → **已复核（D12）**；~~渲染接入通道选型~~ → **S3 最小集已 spike 定盘（D13）：kernel 单包 + 特化渲染；react 渲染器推迟到步 4** | ✅ 2026-09-30 关闭（步 4 触发时重开评估） |
 | 2 | 导图同步方案（D6） | 跨设备成为真实需求时 |
 | 3 | 岛归档/折叠阈值（D3） | S4，必须用 MindCanvas 基准脚本给实测依据 |
 | 4 | 协议共享方：entity-ref 共享方名单当前不含 PomodoroXII | S1 内与 MindCanvas 侧对齐；未对齐前只作独立消费者，不承诺兼容 |
@@ -308,7 +352,8 @@ if parent_depth >= 3:
 | 岛总览语义缩放已验收 | `docs/specs/2026-09-17-island-overview-design.md` §3 D1–D11、§5、§9 |
 | 建岛写入 API 现成 | `@mindcanvas/react` `render/centers.ts`：`ensureNodeCid`/`upsertCenter`/`removeCenter`/`collectCenters` |
 | 沉浸模式渐隐实现（2026-09-30 复核更新） | 作用域容器：`frontend/src/components/timer/timer-frame.tsx:100-124`（`data-immersive` 在根、`.timer-immersive-region` 在右栏）；渐隐规则：`globals.css:971-978`（子树级 `opacity .2` + `pointer-events: none`）→ D12 据此改机制 |
-| 渲染接入通道未验证（D12 发现 2） | 实测：`frontend/package.json` 依赖清单无 `@mindcanvas/*`；前端无 vendor 目录；`@mindcanvas/react` 声明 `workspace:*`（D11 同源原因） |
+| ~~渲染接入通道未验证（D12 发现 2）~~ → 已 spike 定盘（D13） | 实测 2026-09-30：`pnpm pack` kernel → `frontend/vendor/mindcanvas-kernel-1.12.0.tgz`（238 KB）→ `npm i` 成功；`parseMm`/`astToEditable`/`projectIslands` 对真实岛文件与 S0 样本 0 诊断、2 岛切分正确；断言见 `frontend/src/lib/work-map/island-view.test.ts`（11 例） |
+| 三处互操作边界（D13 发现，已钉测试） | `island-view.test.ts`：「坐标字符串强转」「单键条目标量化」「`next_cid` 两种约定并存」（S0 `c2` vs 本项目 `2`） |
 | 后端响应带 X-Frame-Options: DENY | `backend/app/middleware.py:96-108` |
 | React 版本已对齐并 dedupe | 提交 `e62b265`；`npm ls react` 全树 `19.3.0 deduped` |
 | **任务空间最深 3 层（D8 依据）** | `backend/app/task_space/compiler.py:443-450`（`depth_exceeds_three` 硬拒绝）；`_parent_depth` `:358-381`；`_work_item_depth` `focus_session/policy.py:2881` |
