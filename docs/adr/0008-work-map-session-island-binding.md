@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-09-30 |
-| 状态 | **已接受**（S1 三项裁决 D1–D3 完成，D8–D10 已经用户确认；D5–D7 为暂定，S3 前复核） |
+| 状态 | **已接受**（S1 三项裁决 D1–D3 完成，D8–D10 已经用户确认；**D5 已复核，见 D12（2026-09-30）**；D6–D7 为暂定） |
 | 关联 | ADR-0007（会话类型双轨）、`CONTEXT.md`、MindCanvas v1.12.0、entity-ref 协议 v1.3.1 |
 | 前置 | S0 接缝校验通过（解析/岛投影/布局/浏览器渲染全部验证，`S0-接缝校验报告-2026-09-29.md`） |
 | 依赖 | React 已升至 19.3.0（`e62b265`），解除 `@mindcanvas/react` 的 React 版本冲突 |
@@ -114,7 +114,7 @@ note:                             ③ 该节点的思路记录
 **保留 D4 的其余纪律**：不自研另一套岛语义（岛仍是协议 `centers` 的升格机制）；
 两处同写与 `cid` 永不复用的规则不变。
 
-### D5 · 导图端口与沉浸三态（**暂定**，S3 前复核）
+### D5 · 导图端口与沉浸三态（**已复核，见 D12**；下述"暂定方案"已被 D12 取代）
 
 番茄钟页面（937 行、无 slot/portal 结构）新增导图分区：
 
@@ -125,6 +125,51 @@ note:                             ③ 该节点的思路记录
 | 结束态 | 本会话岛 + 该工作项已有岛的全览（本次落在全局中的位置） | 复盘区下方 |
 
 **沉浸模式冲突（必须裁决的语义问题）**：现有沉浸模式把 `.timer-immersive-region` 内元素渐隐至 `opacity 0.2`（`globals.css:968-978`），这与"沉浸时仍能记录思路"冲突。暂定方案：新增**极简岛**态（只保留岛轮廓与当前会话节点高亮，隐藏文字标注），环与退出按钮照常常驻。**S3 实施前须复核此决策**。
+
+### D12 · D5 复核结论（2026-09-30，S3 实施前复核完成）
+
+**复核对象**：D5 暂定方案（极简岛）与沉浸渐隐的实现假设。
+
+**发现 1（技术事实，必须改机制）**：沉浸渐隐现实现为
+`[data-immersive='true'] .timer-immersive-region { opacity: .2; pointer-events: none }`
+（`globals.css:971-978`；作用域容器由 `TimerFrame` 提供，`timer-frame.tsx:100-124`）。
+**父级 opacity 是子树合成效果，子元素无法"逆渐隐"** —— 只要导图端口仍位于
+`.timer-immersive-region` 子树内，"导图不随沉浸渐隐"在 CSS 层面不可实现；
+且现规则连 `pointer-events` 一并关闭，"沉浸时仍能记录思路"更无从谈起。
+
+**裁决 1（结构性方案）**：渐隐作用域从"整个右栏"下沉为**显式标记的伴奏卡**——
+新增 `.timer-immersive-fade`，只打在 Workspace / Note / TodaySummary 等卡上；
+导图端口卡**不加**该标记，天然常驻且可交互。`data-testid="immersive-region"`
+与根 `data-immersive` 保持不动（既有断言的稳定面不变）；`TimerFrame` 头注
+"被渐隐的是右栏"相应改为"被渐隐的是标记为 `.timer-immersive-fade` 的伴奏卡"。
+视觉代价：沉浸下右栏呈"渐隐卡 + 常驻卡"混排——这是"沉浸中仍可记录"的必然代价。
+
+**裁决 2（极简岛呈态，与 `CONTEXT.md` 定义对齐）**：
+- **保留**：岛轮廓、当前会话节点高亮、节点形状/颜色点阵（类型双编码）、
+  以及**「快速记录」类型按钮行**——它是动作入口，按钮文字属动作标签而非"文字标注"
+  （若不保留，D5 冲突里"沉浸时仍能记录思路"无解法）
+- **隐藏**：节点文字标注、非本次会话的历史岛（运行态本就只渲染当前岛）
+- **切换方式**：纯 CSS 派生（同一 DOM、同一容器尺寸）→ 零布局抖动；
+  极简态下快速记录直接落节点，输入控件为浮层，不撑开容器
+
+**裁决 3（端口位置，对齐演示稿决策节点）**：准备态 = 启动器相邻分区（目标 L3 主图）；
+运行态 = 右栏伴奏列新增一格（演示稿节点原文"端口位置：运行态网格"）；
+结束态 = 复盘区下方。
+
+**发现 2（渲染接入通道未验证 —— S3 工作包 0 必须先定）**：D10 的"接 react
+渲染器"在工程上尚无接入通道 —— 实测 `frontend/package.json` 无 `@mindcanvas/*`
+依赖、前端无 vendor 目录；且 `@mindcanvas/react` 带 `workspace:*` 依赖，
+不能 `file:` 安装（D11 已因同一原因自持 centers 精简实现）。候选通道：
+① MindCanvas 侧产出可安装 tarball；② vendor 整包；③ 端口按演示稿形态先自持
+DOM/SVG 行式渲染，kernel 渲染器推迟到主图布局成为真实瓶颈时。
+**该选型留给 S3 计划评审**，①/② 任一入选须先做最小 spike 取证。
+
+**S3 验收（承接《规划 v2修正》S3 行，强化为可测断言）**：
+1. 沉浸下岛可辨识（极简态渲染，且可完成一次快速记录）
+2. **无布局抖动**：沉浸切换前后端口容器尺寸不变（测试钉住）
+3. timer 页测试更新：渐隐作用域断言（哪些卡被标记）+ 极简态快速记录可用
+
+---
 
 ### D6 · 同步：**先单机，跨设备延后**（**暂定**）
 
@@ -239,7 +284,7 @@ if parent_depth >= 3:
 
 | # | 事项 | 复核时机 |
 |---|---|---|
-| 1 | 极简岛的视觉与交互细节（D5） | S3 实施前 |
+| 1 | ~~极简岛的视觉与交互细节（D5）~~ → **已复核（D12，2026-09-30）**；剩余子项：渲染接入通道选型（vendor tarball / 整包 / 自持行式） | S3 工作包 0（计划评审时定） |
 | 2 | 导图同步方案（D6） | 跨设备成为真实需求时 |
 | 3 | 岛归档/折叠阈值（D3） | S4，必须用 MindCanvas 基准脚本给实测依据 |
 | 4 | 协议共享方：entity-ref 共享方名单当前不含 PomodoroXII | S1 内与 MindCanvas 侧对齐；未对齐前只作独立消费者，不承诺兼容 |
@@ -262,7 +307,8 @@ if parent_depth >= 3:
 | 建岛三处同写、笔记块归属其后节点 | S0 实测：`s0-kernel-probe.mjs` 对自造样本的两次迭代输出 |
 | 岛总览语义缩放已验收 | `docs/specs/2026-09-17-island-overview-design.md` §3 D1–D11、§5、§9 |
 | 建岛写入 API 现成 | `@mindcanvas/react` `render/centers.ts`：`ensureNodeCid`/`upsertCenter`/`removeCenter`/`collectCenters` |
-| 沉浸模式渐隐实现 | `frontend/src/app/(app)/timer/page.tsx:198-205,811,823-842`；`globals.css:968-978` |
+| 沉浸模式渐隐实现（2026-09-30 复核更新） | 作用域容器：`frontend/src/components/timer/timer-frame.tsx:100-124`（`data-immersive` 在根、`.timer-immersive-region` 在右栏）；渐隐规则：`globals.css:971-978`（子树级 `opacity .2` + `pointer-events: none`）→ D12 据此改机制 |
+| 渲染接入通道未验证（D12 发现 2） | 实测：`frontend/package.json` 依赖清单无 `@mindcanvas/*`；前端无 vendor 目录；`@mindcanvas/react` 声明 `workspace:*`（D11 同源原因） |
 | 后端响应带 X-Frame-Options: DENY | `backend/app/middleware.py:96-108` |
 | React 版本已对齐并 dedupe | 提交 `e62b265`；`npm ls react` 全树 `19.3.0 deduped` |
 | **任务空间最深 3 层（D8 依据）** | `backend/app/task_space/compiler.py:443-450`（`depth_exceeds_three` 硬拒绝）；`_parent_depth` `:358-381`；`_work_item_depth` `focus_session/policy.py:2881` |
