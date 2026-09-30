@@ -22,7 +22,7 @@ from app.errors import MutationRejectedError
 from app.focus_session.commands import build_focus_request, focus_business_payload
 from app.focus_session.contracts import FocusSessionCommand
 from app.focus_session.module import DefaultFocusSessionModule
-from app.focus_session.policy import FocusSessionMutationPolicy
+from app.focus_session.policy import FocusSessionMutationPolicy, plan_row_id
 from app.focus_session.query import FocusSessionQuery
 from app.mutation.types import canonical_payload_hash
 from app.task_space.compiler import TaskSpaceCompiler
@@ -287,7 +287,7 @@ def _set_completion_draft_command(
     command_id: str = "set-draft-1",
     session_id: str = "fs-1",
     ownership_epoch: int = 1,
-    plan_item_id: str = "plan-fs-1-l3-a",
+    plan_item_id: str = plan_row_id("fs-1", "l3-a"),
     completion_draft: bool = True,
     expected_plan_version: int = 1,
 ) -> FocusSessionCommand:
@@ -1203,7 +1203,7 @@ class TestPlanChangesDoNotMutateWorkItem:
 
         command = _set_current_plan_command(
             work_item_id=None,
-            expected_plan_versions={"plan-fs-1-l3-a": 1},
+            expected_plan_versions={plan_row_id("fs-1", "l3-a"): 1},
         )
         await focus_fixture.module.set_current_plan_item(
             focus_fixture.scope, command,
@@ -1229,7 +1229,7 @@ class TestPlanChangesDoNotMutateWorkItem:
         await _start_session(focus_fixture)
 
         command = _set_completion_draft_command(
-            plan_item_id="plan-fs-1-l3-a",
+            plan_item_id=plan_row_id("fs-1", "l3-a"),
             completion_draft=True,
             expected_plan_version=1,
         )
@@ -1256,7 +1256,7 @@ class TestPlanChangesDoNotMutateWorkItem:
 
         command = _set_current_plan_command(
             work_item_id=None,
-            expected_plan_versions={"plan-fs-1-l3-a": 1},
+            expected_plan_versions={plan_row_id("fs-1", "l3-a"): 1},
         )
         await focus_fixture.module.set_current_plan_item(
             focus_fixture.scope, command,
@@ -1266,6 +1266,54 @@ class TestPlanChangesDoNotMutateWorkItem:
             entity_type="workItem",
         )
         assert len(events) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Plan row id length contract (2026-09-30 fix)
+# ---------------------------------------------------------------------------
+
+class TestPlanRowIdContract:
+    """★ 回归钉：计划行 id 的长度契约（真实启动 500 的修复）。
+
+    旧格式 ``plan-{session_id}-{work_item_id}`` 在真实 id（36 字符会话 UUID +
+    32 位十六进制工作项）下长 **74 字符**，同时违反：
+    - DB：``session_work_item_plans.id`` 声明 ``String(36)``
+    - wire：``SessionWorkItemPlanResponse.id`` ``max_length=64``
+
+    响应校验发生在事务提交之后 → "带三级计划的会话启动"必 500，且服务端留下
+    孤儿活跃会话（2026-09-30 真实浏览器验收当场复现）。修复 = ``plan_row_id``
+    派生哈希（32 字符、同键同 id 保重放幂等）。
+    """
+
+    def test_derived_id_fits_db_and_wire_contract(self) -> None:
+        realistic = (
+            ("8fbedb3c-203f-4f0a-8048-240fb5db7415", "ca5a2d6c753b5385bdfa3c79967f248d"),
+            ("f" * 36, "a" * 32),
+            ("fs-1", "l3-a"),
+        )
+        for session_id, work_item_id in realistic:
+            derived = plan_row_id(session_id, work_item_id)
+            assert len(derived) == 32
+            assert len(derived) <= 36, "DB 列宽 String(36)"
+            assert len(derived) <= 64, "wire max_length=64"
+        # 确定性 = 重放幂等的基础（同键同 id；异键异 id）
+        assert plan_row_id("s", "w") == plan_row_id("s", "w")
+        assert plan_row_id("s", "w") != plan_row_id("s", "w2")
+
+    @pytest.mark.asyncio
+    async def test_started_session_plan_ids_fit_contract(self, focus_fixture) -> None:
+        """真实启动路径落下的计划行 id 必须满足同一契约（端到端的长度闸）。"""
+        from app.models.session_revision import SessionWorkItemPlan
+
+        await _seed_catalog(focus_fixture)
+        await _start_session(focus_fixture)
+
+        async with focus_fixture.scope.session_factory() as session:
+            ids = (
+                await session.execute(select(SessionWorkItemPlan.id))
+            ).scalars().all()
+        assert ids, "启动成功应落计划行"
+        assert all(len(str(plan_id)) <= 36 for plan_id in ids), ids
 
 
 # ---------------------------------------------------------------------------
