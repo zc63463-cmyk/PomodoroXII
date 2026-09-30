@@ -219,5 +219,13 @@ class Settings(BaseSettings):
         """Return the notes directory for a given space_id."""
         return self.spaces_data_dir / space_id / "notes"
 
+    def space_maps_dir(self, space_id: str) -> Path:
+        """Return the work-map directory for a given space_id.
+
+        工作导图（``.mm.md``）的落点 —— 与 ``notes`` / ``assets`` 同级，
+        见 ADR-0008 D2。后端只做字节存取，不解析导图语义。
+        """
+        return self.spaces_data_dir / space_id / "maps"
+
 
 settings = Settings()

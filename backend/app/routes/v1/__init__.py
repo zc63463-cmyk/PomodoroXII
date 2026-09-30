@@ -43,6 +43,7 @@ def build_v1_router() -> APIRouter:
     from app.routes.v1.trash import router as trash_router
     from app.routes.v1.work_item_notes import router as work_item_notes_router
     from app.routes.v1.work_items import router as work_items_router
+    from app.routes.v1.work_maps import router as work_maps_router
 
     # Meta-layer (master token required).
     router.include_router(auth_router, prefix="/auth", tags=["auth"])
@@ -85,6 +86,10 @@ def build_v1_router() -> APIRouter:
     router.include_router(
         task_space_commands_router, prefix="/task-space", tags=["task-space"]
     )
+
+    # Work maps (ADR-0008 S2): 工作导图 .mm.md 的字节存取，space token required。
+    # 不进同步账本；解析与建岛由前端 MindCanvas kernel 负责。
+    router.include_router(work_maps_router, prefix="/work-maps", tags=["work-maps"])
 
     # Global ActiveSession coordination (master token required).
     router.include_router(
