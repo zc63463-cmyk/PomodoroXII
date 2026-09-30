@@ -42,6 +42,7 @@ import {
 import { recordBlockerAck } from '@/lib/task-space/blocker-ack-log'
 import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
+import { createLaunchSessionIslands } from '@/lib/work-map/session-island-launch'
 import { canonicalNow } from '@/lib/direct-command-intents'
 import { spaceDBManager } from '@/services/space-db'
 import { metaDB } from '@/services/meta-database'
@@ -465,6 +466,16 @@ export default function TimerPage() {
     try {
       if (typeof navigator === 'undefined' || navigator.onLine !== false) {
         await coordinator.start(input)
+        // ADR-0008 S2 收口（D4）：会话已在服务端真实成立 → 为其选中的 L3 建岛。
+        // fire-and-forget + 内部 fail-soft：建岛绝不阻断/回滚会话（不变量 4）。
+        // 离线临时会话（下面的 startProvisional 分支）没有后端可写，不建岛 ——
+        // 这是 S2 的已知限制（导图不进同步账本，见 ADR-0008 D2/D6）。
+        void createLaunchSessionIslands({
+          sessionId: input.sessionId,
+          startedAt: input.startedAt,
+          level3WorkItemIds: selection.level3WorkItemIds,
+          workItems,
+        })
       } else {
         if (!focusRepository) throw new Error('focus_session_repository_not_ready')
         const local = await focusRepository.startProvisional({

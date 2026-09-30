@@ -59,6 +59,16 @@ vi.mock('@/lib/stats/stats-api', () => ({
   fetchFocusSummaryWindow: fetchFocusSummaryWindowMock,
 }))
 
+// ★ ADR-0008 S2 收口：建岛编排在页面测试里桩掉（真实行为见
+//   session-island-launch.test.ts）；这里只断言"启动成功后确实带着
+//   选中的 L3 调了它"这条接线本身。
+const createLaunchSessionIslandsMock = vi.hoisted(() => vi.fn().mockResolvedValue({
+  created: [], skipped: [], failed: [],
+}))
+vi.mock('@/lib/work-map/session-island-launch', () => ({
+  createLaunchSessionIslands: createLaunchSessionIslandsMock,
+}))
+
 const coordinatorSpies = vi.hoisted(() => ({
   start: vi.fn(), pause: vi.fn(), resume: vi.fn(), end: vi.fn(),
   takeover: vi.fn(), updateSessionNote: vi.fn(), setCurrentPlanItem: vi.fn(),
@@ -272,6 +282,28 @@ function seedIdleTimerPage(): void {
 
 describe('TimerPage 双体系兼容 · 准备态模式（2026-09-16）', () => {
   beforeEach(seedIdleTimerPage)
+
+  it('★ 启动成功后为选中的 L3 建岛（ADR-0008 S2：fire-and-forget，不阻断会话）', async () => {
+    // 在 l2-x 下补一个三级项，并勾进本次计划
+    useTaskSpaceStore.setState((current) => ({
+      workItems: [
+        ...current.workItems,
+        { id: 'l3-plan', depth: 3, parentId: 'l2-x', title: '卡点分析记录', displayKey: 'P-3', version: 1 },
+      ],
+    }) as never)
+    render(createElement(TimerPage))
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: '卡点分析记录' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+
+    await waitFor(() => expect(createLaunchSessionIslandsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: expect.any(String),
+        startedAt: expect.any(String),
+        level3WorkItemIds: ['l3-plan'],
+      }),
+    ))
+  })
 
   it('默认 work 启动：载荷带 sessionType=work 与设置里的番茄时长', async () => {
     render(createElement(TimerPage))
