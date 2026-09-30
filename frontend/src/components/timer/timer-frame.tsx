@@ -29,6 +29,12 @@ export interface TimerFrameProps {
   /** 右栏伴奏区（计划 / 笔记 / 导图 / 统计）；缺省则只渲染左栏 */
   side?: ReactNode
   /**
+   * 右栏标题栏（设计稿 `.side .hd`）：全宽、带下边框，正文区自己滚动。
+   * 只在传入时启用「标题栏 + 正文区」两段式（准备态「今日」用）；
+   * 不传时保持原样（运行态 / 结束态右栏是若干卡片的自由滚动流，无标题栏）。
+   */
+  sideHeader?: ReactNode
+  /**
    * 沉浸模式。**仅在运行态传入**：
    * - `true` → 右栏渐隐（保留焦点区）
    * - `false` → 不渐隐但仍带沉浸作用域
@@ -44,6 +50,7 @@ export function TimerFrame({
   actions,
   focus,
   side,
+  sideHeader,
   immersive,
   sideWidth = 336,
 }: TimerFrameProps) {
@@ -91,13 +98,29 @@ export function TimerFrame({
           {focus}
         </section>
         {side ? (
-          <aside
-            className="timer-immersive-region ios-card flex min-h-0 flex-col gap-4 overflow-y-auto p-4"
-            data-testid="immersive-region"
-            style={{ background: 'var(--ios-card, var(--card))' }}
-          >
-            {side}
-          </aside>
+          sideHeader ? (
+            // 两段式（设计稿 .side）：全宽标题栏 + 自行滚动的正文区。
+            // 标题栏在渐隐区内 —— 它属于伴奏栏的一部分（运行态不传 sideHeader，
+            // 因此「退出沉浸」按钮永远不在这个分支里）。
+            <aside
+              className="timer-immersive-region ios-side flex min-h-0 flex-col overflow-hidden"
+              data-testid="immersive-region"
+              style={{ borderRadius: 12 }}
+            >
+              <div className="ios-side-hd">
+                <span className="t">{sideHeader}</span>
+              </div>
+              {side}
+            </aside>
+          ) : (
+            <aside
+              className="timer-immersive-region ios-card flex min-h-0 flex-col gap-4 overflow-y-auto p-4"
+              data-testid="immersive-region"
+              style={{ background: 'var(--ios-card, var(--card))' }}
+            >
+              {side}
+            </aside>
+          )
         ) : null}
       </div>
     </div>

@@ -1210,9 +1210,308 @@
 }
 
 /* iOS 深色主题：**只调 iOS 蓝** —— 其余令牌已映射项目主题变量，自动跟随。
-   （浅色 #007aff 在深底上对比不足，iOS 自己在 dark 下也用 #0a84ff） */
+   （浅色 #007aff 在深底下对比不足，iOS 自己在 dark 下也用 #0a84ff） */
 .dark .ios-scope,
 .midnight .ios-scope,
 .nord .ios-scope {
   --ios-blue: #0a84ff;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   番茄钟 · 设计稿对齐层（2026-09-30 第二轮："完全复刻"）
+   ──────────────────────────────────────────────────────────────────────────
+   设计稿 `设计稿-番茄钟页面UI优化.html` 用的是**固定色值**（#fcfcfb / #343434 /
+   #ebebeb …）；本项目有 4 套主题（.dark/.midnight/.nord/.daylight），硬抄会把
+   深色主题页刷成白底。因此这里**只复刻结构与度量**（列数/间距/圆角/字号/行高/
+   hairline 位置），**颜色一律映射 --ios-* 令牌**，由主题决定具体色值。
+
+   对应关系（设计稿 class → 本项目 class）：
+     .groups/.gh/.quick/.qrow   → .ios-groups/.ios-group-hd/.ios-quick/.ios-qrow
+     .side/.hd/.bd              → .ios-side/.ios-side-hd/.ios-side-bd
+     .card/.ct                  → .ios-card/.ios-card-title
+     .stats/.stat/.n/.l         → .ios-stats/.ios-stat/.ios-stat-n/.ios-stat-l
+     .row/.dot/.tail            → .ios-drow/.ios-dot/.ios-tail
+     .tiny                      → .ios-tiny
+     .crumb/.k                  → .ios-crumb/.ios-crumb-k
+     .durations/.dur            → .ios-chip（已有）
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 右栏（伴奏）底色：设计稿 #fcfcfb 比主背景略亮/略灰，用于把"栏"与"卡"分开。
+   用 color-mix 与背景混合，深浅主题都成立。 */
+.ios-side {
+  background: color-mix(in oklab, var(--ios-card) 88%, var(--ios-bg));
+}
+.ios-side-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 13px 16px 11px;
+  border-bottom: 0.5px solid var(--ios-sep);
+}
+.ios-side-hd .t {
+  font-size: 12px;
+  letter-spacing: 0.3px;
+  color: var(--ios-label-2);
+}
+.ios-side-bd {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px 18px;
+  overflow-y: auto;
+}
+
+/* 右栏卡片（设计稿 .card，比 .ios-card 更轻：带描边、无阴影 inset） */
+.ios-panel {
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 11px;
+  background: var(--ios-card);
+  padding: 13px 14px;
+}
+.ios-card-title {
+  margin-bottom: 9px;
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+}
+
+/* 右栏"数据行"（设计稿 .row）：圆点 + 文案 + 右侧尾标 */
+.ios-drow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+.ios-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ios-label-3);
+}
+.ios-dot--strong {
+  background: var(--ios-label);
+}
+.ios-tail {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+  white-space: nowrap;
+}
+
+/* 右栏统计三格（设计稿 .stats/.stat） */
+.ios-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+.ios-stat {
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 9px;
+  padding: 9px 10px;
+}
+.ios-stat-n {
+  font-size: 18px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.ios-stat-n small {
+  font-size: 11px;
+  color: var(--ios-label-2);
+}
+.ios-stat-l {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--ios-label-2);
+}
+
+/* 说明性小字（设计稿 .tiny） */
+.ios-tiny {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--ios-label-2);
+}
+
+/* 顶部面包屑（设计稿 .crumb） */
+.ios-crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ios-label-2);
+}
+.ios-crumb-k {
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 6px;
+  padding: 2px 8px;
+  background: var(--ios-fill);
+  color: var(--ios-label-2);
+}
+
+/* ── 「继续上次」三栏（设计稿 .groups）─────────────────────────────────────
+   设计稿是 **固定三列** repeat(3, minmax(0,1fr))（用户明确"三组竖着排开=每组
+   一列，三列并排"）。窄容器（<720px）折成单列。 */
+.ios-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 13px;
+}
+@media (max-width: 720px) {
+  .ios-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ios-group-hd {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 7px;
+  padding: 0 1px;
+}
+.ios-group-hd .r1 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+}
+.ios-group-hd .cnt {
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  background: var(--ios-fill);
+  color: var(--ios-label-2);
+}
+.ios-group-hd .sort {
+  font-size: 10.5px;
+  color: var(--ios-label-3);
+}
+
+/* 列表卡（设计稿 .quick）：列内竖向，行间 hairline 由 .ios-qrow 承担 */
+.ios-quick {
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 11px;
+  background: var(--ios-card);
+  overflow: hidden;
+}
+
+/* 两行紧凑行（设计稿 .qrow）：比 .ios-row(44px) 更密，专为窄列设计 */
+.ios-qrow {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 11px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  color: inherit;
+}
+.ios-qrow + .ios-qrow::before {
+  content: '';
+  position: absolute;
+  left: 11px;
+  right: 0;
+  top: 0;
+  border-top: 0.5px solid var(--ios-sep);
+}
+.ios-qrow[data-tappable='true'] {
+  cursor: pointer;
+}
+.ios-qrow[data-tappable='true']:active {
+  background: var(--ios-fill);
+}
+.ios-qrow[data-selected='true'] {
+  background: var(--ios-blue-soft);
+}
+.ios-qrow .qbody {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.ios-qrow .qt {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ios-qrow .qmeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ios-label-2);
+  white-space: nowrap;
+}
+/* 空层占位行：不假装有数据，但保留三栏结构（有意偏离设计稿"空层隐藏"） */
+.ios-qrow .qempty {
+  font-size: 12px;
+  color: var(--ios-label-3);
+}
+
+/* 小号单选圈（设计稿 .rd 为 13px；.ios-radio 是 20px 的 iOS 标准） */
+.ios-radio[data-size='sm'] {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  border-width: 1.5px;
+}
+.ios-qrow[data-selected='true'] .ios-radio {
+  border-color: var(--ios-blue);
+}
+.ios-qrow[data-selected='true'] .ios-radio::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: var(--ios-blue);
+}
+
+/* iOS「行内选择器」（二级归属）—— 原生 <select> 套一层 iOS 外观。
+   保留原生控件：它的键盘/无障碍语义是既有测试（`toBeRequired`）与真实可用性
+   的依托，不换自定义列表。 */
+.ios-select {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 9px;
+  background: var(--ios-card);
+  color: var(--ios-label);
+  font-family: inherit;
+  font-size: 13px;
+}
+.ios-select:disabled {
+  opacity: 0.5;
+}
+
+/* iOS 文本输入（自定义分钟 / 新三级标题） */
+.ios-input {
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 9px;
+  background: var(--ios-card);
+  color: var(--ios-label);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+/* 三级计划行里的复选（借用 .ios-qrow 的两行骨架，只调 checkbox 外观） */
+.ios-qrow input[type='checkbox'] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: var(--ios-blue);
 }

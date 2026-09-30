@@ -1,7 +1,6 @@
 'use client'
 
 import { createElement } from 'react'
-import { cn } from '@/lib/utils'
 import {
   modeLabel,
   SESSION_MODES,
@@ -42,11 +41,11 @@ export function ModeSwitcher({
         'data-testid': `mode-${item}`,
         disabled,
         onClick: () => onChange(item),
-        className: cn(
-          'rounded-lg border px-3 py-1 text-sm transition-colors',
-          item === mode ? 'border-primary bg-accent font-medium' : 'hover:bg-accent',
-          disabled ? 'pointer-events-none opacity-50' : '',
-        ),
+        // iOS 胶囊 chip（与「本次时长」的时长预设同一视觉语言）：
+        // 选中态由 --ios-blue 填充，未选中态是浅填充 —— 与番茄钟页其它选择项一致。
+        className: 'ios-chip',
+        'data-on': item === mode ? 'true' : 'false',
+        style: disabled ? { pointerEvents: 'none', opacity: 0.5 } : undefined,
       },
       modeLabel(item),
     )),

@@ -12,6 +12,7 @@ import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/time
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { ContinuePrevious } from '@/components/timer/continue-previous'
 import { TimerFrame } from '@/components/timer/timer-frame'
+import { TimerSideToday, type RecentSessionRow } from '@/components/timer/timer-side-today'
 import { TodaySummary } from '@/components/timer/today-summary'
 import { Button } from '@/components/ui/button'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
@@ -105,6 +106,13 @@ function joinWithWorkItems<T extends { workItemId: string }>(
 
 export default function TimerPage() {
   const spaceId = useSpaceStore((state) => state.currentSpaceId)
+  // 准备态顶部的「空间」面包屑（设计稿 `.crumb`）。`spaces` 可能尚未加载
+  //（页面测试只塞 currentSpaceId），因此全程按可空处理，查不到就不编造名字。
+  const spaces = useSpaceStore((state) => state.spaces)
+  const spaceName = useMemo(
+    () => (spaces ?? []).find((space) => space.id === spaceId)?.name ?? null,
+    [spaceId, spaces],
+  )
   const workItems = useTaskSpaceStore((state) => state.workItems)
   const selectedWorkItemId = useTaskSpaceStore((state) => state.selectedWorkItemId)
   const selectWorkItem = useTaskSpaceStore((state) => state.selectWorkItem)
@@ -140,6 +148,8 @@ export default function TimerPage() {
   // ── 休息节奏（双体系兼容 2026-09-16）────────────────────────────────────
   // 已完成番茄数（含刚结束那一轮）：长休间隔的判据，本地缓存行口径。
   const [completedWorkSessions, setCompletedWorkSessions] = useState(0)
+  // 准备态右栏「最近会话」的数据源：与上面同一批本地缓存行（不为展示再读一次库）。
+  const [recentSessions, setRecentSessions] = useState<RecentSessionRow[]>([])
   // 自动开始只对每个结束会话触发一次（闩锁按 sessionId）。
   const restAutoStartedFor = useRef<string | null>(null)
   const [restCycleStarting, setRestCycleStarting] = useState(false)
@@ -202,9 +212,7 @@ export default function TimerPage() {
     return () => { cancelled = true }
     // workItems 引用来自 zustand store（稳定），categoryById 是 useMemo —— 均可入依赖
   }, [database, spaceId, workItems, categoryById, dayBoundaryHour])
-  const continueTotal = continueBuckets
-    ? continueBuckets.today.length + continueBuckets.yesterday.length + continueBuckets.withinWeek.length
-    : 0
+  // 注意：这里**不再**派生 continueTotal 去 gate 渲染 —— 三栏恒显（见下方 950 行注释）。
   const aggregate = localProvisional?.aggregate ?? locator?.session ?? endedAggregate
   const plans = useMemo(() => aggregate?.plan.filter((plan) => plan.removedAt === null) ?? [], [aggregate?.plan])
   const currentPlan = plans.find((plan) => plan.currentDuringSession) ?? plans[0] ?? null
@@ -369,7 +377,11 @@ export default function TimerPage() {
     }
     let cancelled = false
     void focusRepository.listCached().then(async (sessions) => {
-      if (!cancelled) setCompletedWorkSessions(countCompletedWorkSessions(sessions))
+      if (!cancelled) {
+        setCompletedWorkSessions(countCompletedWorkSessions(sessions))
+        // 「最近会话」卡片消费同一批行（组件侧只取今日前 3 条，见 timer-side-today）。
+        setRecentSessions(sessions as unknown as RecentSessionRow[])
+      }
       const ended = selectReviewSession(sessions)
       if (!ended) {
         if (!cancelled) setEndedAggregate(null)
@@ -917,47 +929,78 @@ export default function TimerPage() {
       ),
     })
   : createElement(TimerFrame, {
-    // iOS 两栏骨架：准备态的焦点区 = 选工作项 + 启动器；伴奏区 = 今日统计。
-    // 骨架替换不改任何子组件与文案（第一步为纯结构搬移）。
-    focus: createElement('div', { className: 'grid gap-6' },
-    createElement('header', null,
-      createElement('h1', { className: 'text-[22px] font-semibold leading-tight' }, '继续上次'),
-      createElement('p', { className: 'text-[13px]', style: { color: 'var(--ios-label-2)' } },
-        '选一个最近在做的任务，开始专注。'),
+    // 准备态（设计稿 `① 准备态`）：左栏 = 继续上次三栏 + 浏览全部 + 本次时长 + 开始专注；
+    // 右栏 = 「今日」卡组。右栏标题栏走 sideHeader（全宽 + 下边框），正文自滚动。
+    sideHeader: '今日',
+    side: createElement(TimerSideToday, { recentSessions }),
+    focus: createElement('div', { className: 'grid gap-4' },
+    // 设计稿 `.crumb`：空间面包屑（查不到名字就不编造）
+    createElement('div', { className: 'ios-crumb' },
+      createElement('span', { className: 'ios-crumb-k' }, '空间'),
+      createElement('span', null, spaceName ?? '—'),
     ),
-    // 三栏分层快捷入口：最近打开 / 昨日未完成 / 七天内堆积（数据见 continue-previous.ts）
-    continueTotal > 0 && continueBuckets
-      ? createElement(ContinuePrevious, {
-          buckets: {
-            today: joinWithWorkItems(continueBuckets.today, workItems),
-            yesterday: joinWithWorkItems(continueBuckets.yesterday, workItems),
-            withinWeek: joinWithWorkItems(continueBuckets.withinWeek, workItems),
-          },
-          selectedWorkItemId,
-          onSelect: (id) => selectWorkItem(id),
-          formatSessionTime: (iso) => formatWorkMapSessionTime(iso, { now: new Date(), dayBoundaryHour }),
-        })
-      : null,
+    createElement('header', null,
+      createElement('h1', { className: 'text-[19px] font-medium leading-tight' }, '继续上次'),
+      createElement('p', { className: 'ios-tiny', style: { marginTop: 4 } },
+        '按时间分层：最近打开 → 昨日未完成 → 七天内堆积。同一个工作项只出现在最贴近它的那一层。'),
+    ),
+    // ── 三栏分层快捷入口（设计稿 `.groups`：固定三列并排）──────────────────
+    // ★ 恒渲染三列。此前是 `continueTotal > 0 &&` 才渲染，结果本机账号近 7 天
+    //   零会话时**一栏都不显示** —— 用户看不到结构本身，误判成"三列布局没做"
+    //   （2026-09-30 连续两次反馈）。空层现在在卡内显示「暂无」占位；
+    //   分桶/排序/去重仍在 lib/task-space/continue-previous.ts（纯函数，已单测）。
+    createElement(ContinuePrevious, {
+      buckets: {
+        today: joinWithWorkItems(continueBuckets?.today ?? [], workItems),
+        yesterday: joinWithWorkItems(continueBuckets?.yesterday ?? [], workItems),
+        withinWeek: joinWithWorkItems(continueBuckets?.withinWeek ?? [], workItems),
+      },
+      selectedWorkItemId,
+      onSelect: (id) => selectWorkItem(id),
+      formatSessionTime: (iso) => formatWorkMapSessionTime(iso, { now: new Date(), dayBoundaryHour }),
+    }),
+    // ── 「浏览全部任务…」（设计稿：整宽按钮，指向任务选择 Modal）────────────
+    // 设计稿的 ② 任务选择 Modal 属 S3 待办；延续既有的可展开列表承载同一入口
+    // （含筛选/搜索的位置），不因未开工而留下空白。
     createElement('details', {
-      className: 'ios-card',
-      // 无会话历史（三栏全空）时自动展开：新用户直接看到任务列表，不用多一次点击
-      ...(continueTotal === 0 ? { open: true } : {}),
+      className: 'ios-quick',
+      // 默认折叠。★ 2026-09-30 修订：此前是「三栏全空就自动展开」，理由是
+      // 「新用户直接看到任务列表」。但三栏现在**恒显三层结构**（见上），页面
+      // 已不再"看起来是空的"，自动展开反而把「本次时长 / 开始专注」推到
+      // 900px 视口的折线以下（实测 CTA 顶部 y≈1218）—— 启动路径被列表挡在
+      // 第一个屏幕之外。改为只在**确实一个工作项都没有**时展开（那时内容
+      // 就是一段短说明，用来回答"为什么空、去哪补"）。
+      ...(workItems.length === 0 ? { open: true } : {}),
     },
       createElement('summary', {
-        className: 'ios-row w-full text-left cursor-pointer select-none',
-        style: { color: 'var(--ios-label-2)' },
-      }, '⌕ 浏览全部任务…'),
+        className: 'ios-qrow',
+        'data-tappable': 'true',
+        style: { cursor: 'pointer', alignItems: 'center' },
+      },
+        createElement('span', { className: 'ios-tiny' }, '⌕'),
+        createElement('span', { className: 'qbody', style: { flexDirection: 'row', alignItems: 'center' } },
+          createElement('span', { className: 'qt' }, '浏览全部任务…')),
+        createElement('span', { className: 'ios-tail' }, '筛选 / 搜索'),
+      ),
       workItems.length
-        ? createElement('div', { className: 'grid gap-2 p-3', 'aria-label': 'WorkItems for focus' }, workItems.map((item) => createElement('button', {
+        // 展开后列表自带滚动上限（设计稿的任务树也是 `max-height:360px; overflow-y:auto`）
+        // —— 不让"浏览全部"把下方启动控件挤出屏幕。
+        ? createElement('div', {
+            'aria-label': 'WorkItems for focus',
+            style: { maxHeight: 280, overflowY: 'auto' },
+          }, workItems.map((item) => createElement('button', {
             key: item.id, type: 'button',
-            className: 'ios-row w-full text-left',
+            className: 'ios-qrow',
             'data-tappable': 'true',
             'data-selected': selectedWorkItem?.id === item.id ? 'true' : 'false',
             onClick: () => selectWorkItem(item.id),
           },
-          createElement('span', { className: 'text-[11px]', style: { color: 'var(--ios-label-2)' } }, item.displayKey),
-          ' ',
-          createElement('span', { className: 'block' }, item.title),
+          // 单选圈：设计稿每一行都有（旧版这一处只有文字，实测 `单选圈数 = 0`）
+          createElement('span', { className: 'ios-radio', 'data-size': 'sm' }),
+          createElement('span', { className: 'qbody' },
+            createElement('span', { className: 'qt' }, item.title),
+            createElement('span', { className: 'qmeta' }, item.displayKey),
+          ),
         )))
         // ★ 空状态要说清「为什么空」和「去哪补」—— 走查实测（2026-09-10）。
         : createElement('div', { role: 'status', className: 'grid gap-2 p-4 text-sm', style: { color: 'var(--ios-label-2)' } },
@@ -971,9 +1014,10 @@ export default function TimerPage() {
           createElement('p', null, '另外：专注会话必须挂在「二级」工作项上，所以至少要有一个一级项 + 它的一个子项。'),
         ),
     ),
+    // ── 启动器（归属 / 本次时长 / 开始专注）──────────────────────────────
     // 工单③（2026-09-14）：准备态内联新建三级 —— 走任务页同一 store 入口
-    // （createChild，本组件 :89 已订阅）；直接用返回值 id，不读异步闭包里的
-    // workItems 旧快照（createChild 先落 store 再返回，结构性避开该陷阱）。
+    // （createChild）；直接用返回值 id，不读异步闭包里的 workItems 旧快照
+    //（createChild 先落 store 再返回，结构性避开该陷阱）。
     // 失败不吞：让 SessionLauncher 以 role="alert" 呈现（离线创建禁令必须可见）。
     workItems.length ? createElement(SessionLauncher, {
       items: workItems,
@@ -981,9 +1025,7 @@ export default function TimerPage() {
       onStart: requestStart,
       onCreateLevel3: async (level2Id: string, title: string) => (await createChild(level2Id, { title })).id,
     }) : null,
-    // 结束/准备两态都把这栏放在右栏（iOS 两栏骨架）；组件与 testid 不变。
       ),
-    side: createElement(TodaySummary),
   })
 
   return createElement('main', { className: 'min-h-full' },
