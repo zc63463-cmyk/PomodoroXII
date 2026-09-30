@@ -211,6 +211,12 @@ def _compute_effort_map(
                 },
             )
 
+        # 双体系兼容（2026-09-16）：休息型会话（短休/长休）永不贡献二级投入。
+        # 它们的 focused_seconds 在 policy 层已恒为 0，这里显式跳过是第二道
+        # 防线（防御未来任何绕过时钟推导的写路径），而不是唯一防线。
+        if str(session.get("session_type") or "work") in {"short_break", "long_break"}:
+            continue
+
         # Only ended, valid, authoritative sessions contribute
         if ended_at is None:
             continue

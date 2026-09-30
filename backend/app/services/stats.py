@@ -249,6 +249,12 @@ class StatsService:
                     FocusSession.validity,
                 )
                 .where(FocusSession.started_at >= window_start)
+                # ★ 双体系兼容（2026-09-16）：休息型会话（短休/长休）不进"番茄"
+                #   口径 —— 它们与投入型共用 focus_sessions 表（单一事实源），
+                #   但既不是番茄（不计 total/valid/interrupted/by_hour），也不该
+                #   把休息的计划时长混进 estimate_accuracy 的分母。
+                #   focused_seconds 本来就是 0，这里的过滤是口径而非求和捷径。
+                .where(FocusSession.session_type.notin_(("short_break", "long_break")))
                 .limit(MAX_FOCUS_SESSIONS)
             )
         ).all()

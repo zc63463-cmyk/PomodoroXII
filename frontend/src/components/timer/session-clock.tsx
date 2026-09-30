@@ -3,6 +3,7 @@
 import { createElement, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Button } from '@/components/ui/button'
 import { deriveRingProgress, deriveSessionClock, formatClockSeconds, type ClockFacts } from '@/lib/focus-session/clock'
+import { isBreakMode, modeLabel, type SessionMode } from '@/lib/focus-session/session-mode'
 import { TimerRing } from './timer-ring'
 
 interface SessionClockProps {
@@ -113,8 +114,17 @@ export function SessionClock({
     await onEnd(new Date().toISOString())
   }
 
+  // 双体系兼容（2026-09-16）：环色调与模式标签随会话类型 —— 休息型一眼可见，
+  // 不再和"专注"共用同一种红。模式是创建后不可变事实，运行态只读不改。
+  const mode = (session.sessionType ?? 'work') as SessionMode
+  const breakSession = isBreakMode(mode)
+
   return createElement(
     'section', { 'aria-label': 'Focus session clock', className: 'grid justify-items-center gap-4' },
+    createElement('p', {
+      className: 'text-sm text-muted-foreground',
+      'data-testid': 'session-mode',
+    }, breakSession ? `${modeLabel(mode)}（不计入投入）` : modeLabel(mode)),
     // 环外壳提取为 TimerRing（工单① 2026-09-14）：类名 / testid / 几何原样搬移，
     // 记账（fraction / overtime / live）仍在本组件推导后传入；粒子与数字仍是
     // 本组件的 children（数字的分钟键重挂载语义不变）。
@@ -122,6 +132,7 @@ export function SessionClock({
       fraction: ring.fraction,
       overtime: ring.overtime,
       live: session.clockState === 'running',
+      tone: breakSession ? 'break' : mode === 'work' ? 'work' : 'flexible',
     },
       celebration === null
         ? null

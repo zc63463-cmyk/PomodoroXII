@@ -30,6 +30,22 @@ describe('createEndAlert（工单① 结束提醒）', () => {
     expect(notify).toHaveBeenCalledWith('专注结束', '本轮计划 25 分钟已完成')
   })
 
+  it('双体系兼容：休息型到点说「休息结束」，投入型文案逐字不变', () => {
+    const breakNotify = vi.fn()
+    const breakAlert = createEndAlert({ notify: breakNotify, beep: vi.fn() })
+    breakAlert.check({ ...baseTick, sessionId: 'break-1', mode: 'short_break', plannedSeconds: 300 })
+    expect(breakNotify).toHaveBeenCalledWith('休息结束', '本轮休息 5 分钟已完成')
+
+    // work / free / countdown / 未声明模式：同一份专注文案
+    const focusModes = [undefined, 'work', 'free', 'countdown'] as const
+    for (const [index, mode] of focusModes.entries()) {
+      const notify = vi.fn()
+      createEndAlert({ notify, beep: vi.fn() })
+        .check({ ...baseTick, sessionId: `s-${index}`, mode, plannedSeconds: 1500 })
+      expect(notify).toHaveBeenCalledWith('专注结束', '本轮计划 25 分钟已完成')
+    }
+  })
+
   it('notificationEnabled=false 不发通知，但不影响提示音', () => {
     const notify = vi.fn()
     const beep = vi.fn()

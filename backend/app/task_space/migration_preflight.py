@@ -23,7 +23,7 @@ SAFE_MUTATION_TERMINALS = ("FINALIZED", "ABORTED", "COMPENSATED")
 #    不一致就直接拒绝启动（防止有人偷偷改了迁移链）。
 #    忘了更新的症状是启动时报
 #    "fleet preflight policy targets a different revision"（assets 踩过一次）。
-TASK_SPACE_TARGET_HEAD = "space_015_relation_resolution"
+TASK_SPACE_TARGET_HEAD = "space_016_focus_session_type"
 
 
 # ★★ 判定口径（2026-09-11 修正，勿回退）：

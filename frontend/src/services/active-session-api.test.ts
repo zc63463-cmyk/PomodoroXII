@@ -38,10 +38,30 @@ describe('activeSessionApi', () => {
       ownerDeviceId: 'device-a', ownerTabId: 'tab-a', expectedWorkItemVersions: { l2: 3, l3: 2 },
     })
     const body = vi.mocked(metaApi.post).mock.calls[0]![1] as Record<string, unknown>
+    // 双体系兼容（2026-09-16）：session_type 是**业务事实**（不是 guard），
+    // 缺省 work 时也显式进入 hash 载荷 —— 服务端只在载荷带该键时纳入，
+    // 两侧同口径；版本守卫（expectedWorkItemVersions）仍被排除。
     expect(body.payloadHash).toBe(await hashCommandPayload({
       level2_work_item_id: 'l2', level3_work_item_ids: ['l3'], planned_seconds: 1500,
+      session_type: 'work',
       started_at: '2026-07-15T08:00:00Z', owner_device_id: 'device-a', owner_tab_id: 'tab-a',
     }))
+  })
+
+  it('hashes the explicit mode so a break start cannot collide with a work start', async () => {
+    vi.mocked(metaApi.post).mockResolvedValue({ data: activeResponse() })
+    const start = (sessionType: 'work' | 'short_break') => activeSessionApi.start({
+      spaceId: 'space-a', sessionId: 'fs-1', operationId: 'start-1', level2WorkItemId: 'l2',
+      level3WorkItemIds: [], plannedSeconds: 300, startedAt: '2026-07-15T08:00:00Z',
+      sessionType, ownerDeviceId: 'device-a', ownerTabId: 'tab-a',
+      expectedWorkItemVersions: { l2: 3 },
+    })
+    await start('work')
+    await start('short_break')
+    const first = vi.mocked(metaApi.post).mock.calls[0]![1] as Record<string, unknown>
+    const second = vi.mocked(metaApi.post).mock.calls[1]![1] as Record<string, unknown>
+    expect((second.payload as Record<string, unknown>).sessionType).toBe('short_break')
+    expect(second.payloadHash).not.toBe(first.payloadHash)
   })
 
   it('excludes only provisional guards while recursively hashing frozen snapshot facts', async () => {
@@ -57,5 +77,15 @@ describe('activeSessionApi', () => {
     const fact = structuredClone(base)
     fact.snapshot.context.level2VersionSnapshot = 2
     expect(await hashCommandPayload(activateProvisionalHashPayload(base))).not.toBe(await hashCommandPayload(activateProvisionalHashPayload(fact)))
+    // 双体系兼容（2026-09-16）：离线快照里的番茄钟模式是**冻结事实**，
+    // 改模式必然改 hash（不同模式不能被当成同一条命令幂等重放）。
+    const modeFact = {
+      ...structuredClone(base),
+      snapshot: {
+        ...base.snapshot,
+        session: { ...base.snapshot.session, sessionType: 'long_break' as const },
+      },
+    }
+    expect(await hashCommandPayload(activateProvisionalHashPayload(base))).not.toBe(await hashCommandPayload(activateProvisionalHashPayload(modeFact)))
   })
 })

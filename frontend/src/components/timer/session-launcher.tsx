@@ -2,8 +2,15 @@
 
 import { createElement, useEffect, useMemo, useRef, useState } from 'react'
 import { useSettingsStore } from '@/stores/settings-store'
-import { WORK_PRESETS } from '@/utils/constants'
 import { formatClockSeconds } from '@/lib/focus-session/clock'
+import {
+  defaultMinutesForMode,
+  isBreakMode,
+  modeLabel,
+  presetsForMode,
+  type SessionMode,
+} from '@/lib/focus-session/session-mode'
+import { ModeSwitcher } from './mode-switcher'
 import { TimerRing } from './timer-ring'
 
 export interface LaunchItem {
@@ -19,6 +26,8 @@ export interface LaunchSelection {
   level2WorkItemId: string
   level3WorkItemIds: string[]
   plannedSeconds: number
+  /** 双体系兼容（2026-09-16）：番茄钟模式，随启动命令一起落库。 */
+  sessionType: SessionMode
 }
 
 export function deriveLaunchSelection(items: LaunchItem[], selectedId: string | null) {
@@ -46,17 +55,31 @@ export function SessionLauncher({ items, initialWorkItemId, onStart, onCreateLev
   const initial = useMemo(() => deriveLaunchSelection(items, initialWorkItemId), [items, initialWorkItemId])
   const [level2Id, setLevel2Id] = useState<string | null>(initial.level2Id)
   const [level3Ids, setLevel3Ids] = useState<string[]>(initial.level3Ids)
-  // 默认时长来自设置（pomodoroDuration，分钟；工单④ / P07-a / D-4），
+  // 番茄钟模式（双体系兼容 2026-09-16）。默认 work —— 旧行为逐字不变。
+  const [mode, setMode] = useState<SessionMode>('work')
+  // 默认时长来自设置（按模式取对应项；工单④ / P07-a / D-4 → 轨 3 模式化），
   // 不再硬编码 1500s。plannedSeconds 是一次性初值，读 getState() 即可 ——
   // 启动器挂载时设置模块早已就绪。
   const [plannedSeconds, setPlannedSeconds] = useState(
-    () => useSettingsStore.getState().pomodoroDuration * 60,
+    () => defaultMinutesForMode('work', useSettingsStore.getState()) * 60,
   )
   const [starting, setStarting] = useState(false)
   useEffect(() => {
     setLevel2Id(initial.level2Id)
     setLevel3Ids(initial.level3Ids)
   }, [initial])
+  // 切模式同时把时长切到该模式的设置默认值（短休/长休各有自己的分钟数）；
+  // 用户随后仍可自定义输入或点预设覆盖。
+  const selectMode = (next: SessionMode) => {
+    setMode(next)
+    setPlannedSeconds(defaultMinutesForMode(next, useSettingsStore.getState()) * 60)
+    if (isBreakMode(next)) {
+      // 休息不承接三级成果（服务端 break_session_has_no_plan fail-closed）：
+      // 切换时清空待提交的三级勾选，避免发出必被拒的启动命令。
+      setLevel3Ids([])
+    }
+  }
+  const breakMode = isBreakMode(mode)
   const level2Items = items.filter((item) => item.depth === 2)
   const candidates = items.filter((item) => item.depth === 3 && item.parentId === level2Id)
   const frozen = new Set(initial.level3Ids)
@@ -99,10 +122,21 @@ export function SessionLauncher({ items, initialWorkItemId, onStart, onCreateLev
         event.preventDefault()
         if (!level2Id || starting) return
         setStarting(true)
-        void Promise.resolve(onStart({ level2WorkItemId: level2Id, level3WorkItemIds: level3Ids, plannedSeconds }))
+        // 模式随启动命令落库（双体系兼容）；休息型结构上不带三级计划 ——
+        // 服务端对 `break_session_has_no_plan` 是 fail-closed 的。
+        const selection: LaunchSelection = {
+          level2WorkItemId: level2Id,
+          level3WorkItemIds: breakMode ? [] : level3Ids,
+          plannedSeconds,
+          sessionType: mode,
+        }
+        void Promise.resolve(onStart(selection))
           .finally(() => setStarting(false))
       },
     },
+    // 模式切换（双体系兼容 2026-09-16）：准备态可选 5 种模式，切换即取该模式
+    // 的设置默认时长；运行态不可切换（模式是创建后不可变的服务端事实）。
+    createElement(ModeSwitcher, { mode, onChange: selectMode, disabled: starting }),
     createElement('div', { className: 'grid gap-2' },
       createElement('label', { htmlFor: 'level-2-attribution' }, 'Level 2 attribution'),
       createElement('select', {
@@ -119,7 +153,14 @@ export function SessionLauncher({ items, initialWorkItemId, onStart, onCreateLev
       level2Items.map((item) => createElement('option', { key: item.id, value: item.id }, item.title)),
       ),
     ),
-    createElement('fieldset', { className: 'grid gap-2 rounded-lg border p-3', disabled: !level2Id },
+    // 休息型不承接三级成果（服务端 `break_session_has_no_plan` fail-closed）：
+    // 整组换成一句说明，而不是渲染一个点了必被拒的控件。
+    breakMode
+      ? createElement('p', {
+          className: 'text-sm text-muted-foreground',
+          'data-testid': 'break-plan-note',
+        }, `${modeLabel(mode)}只记录休息时长（不计入二级投入、免复盘）；归属沿用上面选中的二级工作项。`)
+      : createElement('fieldset', { className: 'grid gap-2 rounded-lg border p-3', disabled: !level2Id },
       createElement('legend', null, 'Level 3 plan'),
       candidates.map((item) => createElement('label', { key: item.id, className: 'flex items-center gap-2' },
         createElement('input', {
@@ -162,11 +203,17 @@ export function SessionLauncher({ items, initialWorkItemId, onStart, onCreateLev
     // plannedSeconds 随预设/输入实时更新，与运行态共用 formatClockSeconds。
     // 不新增可聚焦元素、不新增 aria-live —— 可访问性源仍是「计划分钟」输入。
     createElement('div', { className: 'grid justify-items-center gap-1', 'data-testid': 'launcher-ring-preview' },
-      createElement(TimerRing, { fraction: 0, overtime: false, live: false, svgClassName: 'h-40 w-40' },
+      createElement(TimerRing, {
+        fraction: 0, overtime: false, live: false, svgClassName: 'h-40 w-40',
+        tone: breakMode ? 'break' : mode === 'work' ? 'work' : 'flexible',
+      },
         createElement('div', { className: 'absolute inset-0 grid place-items-center font-mono text-4xl tabular-nums' },
           formatClockSeconds(plannedSeconds)),
       ),
-      createElement('p', { className: 'text-xs text-muted-foreground' }, '专注时长'),
+      // 文案随模式：work → 「专注时长」（既有文案逐字保留）；休息型 → 「休息时长」；
+      // free/countdown → 「计时时长」（不假装是专注投入）。
+      createElement('p', { className: 'text-xs text-muted-foreground' },
+        breakMode ? '休息时长' : mode === 'work' ? '专注时长' : '计时时长'),
     ),
     createElement('div', { className: 'grid gap-2' },
       createElement('label', { className: 'grid gap-2', htmlFor: 'planned-seconds' },
@@ -176,12 +223,12 @@ export function SessionLauncher({ items, initialWorkItemId, onStart, onCreateLev
           onChange: (event: React.ChangeEvent<HTMLInputElement>) => setPlannedSeconds(Math.max(1, Number(event.target.value) || 1) * 60),
         }),
       ),
-      // 时长预设（工单④ / P07-a / D-4）：当前唯一的会话种类是 work，故取
-      // WORK_PRESETS；FOCUS_PRESETS（45/60/90/120）留给未来的自由/倒计时
-      // 模式（P04 沉浸 / P07-c 声景均不在本单范围），此处刻意不消费。
+      // 时长预设（工单④ / P07-a / D-4 → 轨 3 模式化）：按模式取——
+      // work → WORK_PRESETS（25/45/60/90）；短休 5/10/15；长休 15/20/30；
+      // free / countdown → FOCUS_PRESETS（45/60/90/120）。
       // 自定义输入不命中任何预设时，全部按钮呈未选中态（aria-pressed）。
       createElement('div', { role: 'group', 'aria-label': '时长预设', className: 'flex flex-wrap gap-2' },
-        ...WORK_PRESETS.map((minutes) => createElement('button', {
+        ...presetsForMode(mode).map((minutes) => createElement('button', {
           key: minutes,
           type: 'button',
           'aria-pressed': Math.round(plannedSeconds / 60) === minutes,

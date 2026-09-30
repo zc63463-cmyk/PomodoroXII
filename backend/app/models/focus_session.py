@@ -27,6 +27,16 @@ class FocusSession(Base, SyncMixin):
     )
 
     session_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    # 番茄钟体系 × 任务空间体系的双体系兼容字段（2026-09-16）。
+    # ``work`` / ``free`` / ``countdown`` 是"投入型"会话（focused_seconds 正常累计，
+    # 计入二级投入）；``short_break`` / ``long_break`` 是"休息型"会话：
+    # focused_seconds 恒为 0、break_seconds 承载全部净时长、免复盘、不进计划。
+    # 归因不变量不变：所有类型都必须挂一个二级 WorkItem（休息沿用上一工作会话的）。
+    # 枚举值在 policy / wire schema 双重 fail-closed；DB 层不加 CHECK 的理由见
+    # ``alembic_space/versions/016_focus_session_type.py`` 的文件头。
+    session_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="work", server_default="work"
+    )
     started_at: Mapped[str] = mapped_column(String(32), nullable=False)
     ended_at: Mapped[str | None] = mapped_column(String(32))
     pause_started_at: Mapped[str | None] = mapped_column(String(32))

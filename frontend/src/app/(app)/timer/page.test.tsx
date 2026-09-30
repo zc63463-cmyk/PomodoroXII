@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import TimerPage from './page'
+import { useSettingsStore } from '@/stores/settings-store'
 import { useSpaceStore } from '@/stores/space-store'
 import { useTaskSpaceStore } from '@/stores/task-space-store'
 import { useTimerStore } from '@/stores/timer-store'
@@ -230,5 +231,70 @@ describe('TimerPage 沉浸模式与二级归属（工单 B 2026-09-14）', () =>
 
     act(() => { useTaskSpaceStore.setState({ workItems: [] } as never) })
     expect(screen.queryByTestId('focus-context')).toBeNull()
+  })
+})
+
+// ── 双体系兼容 2026-09-16：准备态 → 启动载荷带模式 ─────────────────────────
+/** 准备态种子：无活动会话（locator / session 皆空）。 */
+function seedIdleTimerPage(): void {
+  vi.clearAllMocks()
+  fetchFocusSummaryWindowMock.mockReset()
+  fetchFocusSummaryWindowMock.mockResolvedValue({
+    period_days: 1, total_sessions: 0, valid_sessions: 0, interrupted_sessions: 0,
+    focused_seconds: 0, planned_seconds: 0, estimate_accuracy: 0, by_hour: [],
+  })
+  useSettingsStore.setState({
+    pomodoroDuration: 25, shortBreakDuration: 5, longBreakDuration: 15,
+    longBreakInterval: 4, autoStartBreaks: false, autoStartPomodoros: false,
+  })
+  useSpaceStore.setState({ currentSpaceId: 'space-1' } as never)
+  useTaskSpaceStore.setState({
+    workItems: [
+      { id: 'l2-x', depth: 2, parentId: 'l1', title: 'Ship feature', displayKey: 'P-2', version: 3 },
+    ],
+    selectedWorkItemId: 'l2-x',
+    selectedProjectId: 'proj-1',
+    relations: [],
+    definitions: [],
+    hydrate: vi.fn(),
+    reset: vi.fn(),
+    selectWorkItem: vi.fn(),
+    acknowledgeLaunch: vi.fn(),
+    clearLaunchAck: vi.fn(),
+    hasLaunchAck: vi.fn(() => true),
+    createChild: vi.fn(),
+  } as never)
+  useTimerStore.setState({
+    locator: null, session: null, localProvisional: null,
+    ownershipMode: 'none', nowMs: Date.parse('2026-09-13T08:00:00Z'), error: null,
+  } as never)
+}
+
+describe('TimerPage 双体系兼容 · 准备态模式（2026-09-16）', () => {
+  beforeEach(seedIdleTimerPage)
+
+  it('默认 work 启动：载荷带 sessionType=work 与设置里的番茄时长', async () => {
+    render(createElement(TimerPage))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Start focus session' }))
+
+    await waitFor(() => expect(coordinatorSpies.start).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionType: 'work', plannedSeconds: 1500 }),
+    ))
+  })
+
+  it('切到短休后启动：载荷带 sessionType=short_break、时长取 shortBreakDuration，且不弹阻塞确认', async () => {
+    render(createElement(TimerPage))
+
+    fireEvent.click(await screen.findByRole('button', { name: '短休息' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+
+    await waitFor(() => expect(coordinatorSpies.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionType: 'short_break', plannedSeconds: 300, level3WorkItemIds: [],
+      }),
+    ))
+    // 休息不是投入：依赖域的阻塞确认弹窗不该出现（即便 L2 被标记未确认）
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })

@@ -46,6 +46,9 @@ CanonicalUtc = Annotated[str, AfterValidator(_validate_canonical_utc)]
 
 class ProvisionalSessionSnapshot(WireModel):
     session_revision: int = Field(ge=0)
+    # 双体系兼容（2026-09-16）：离线 provisional 会话的番茄钟模式；
+    # 可选（旧客户端 / 旧载荷不带该键 → 按 work 解释，hash 与旧口径逐字一致）。
+    session_type: Literal["work", "short_break", "long_break", "free", "countdown"] | None = None
     started_at: CanonicalUtc
     pause_started_at: CanonicalUtc | None = None
     planned_seconds: int = Field(gt=0)
@@ -228,6 +231,9 @@ class ResolveActivationConflictRequest(WireModel):
 class StartActiveSessionPayload(WireModel):
     level2_work_item_id: str = Field(min_length=1, max_length=64)
     level3_work_item_ids: list[str]
+    # 双体系兼容（2026-09-16）：番茄钟模式；可选（旧客户端不带 → work，
+    # payload hash 与旧口径逐字一致；新客户端带上并计入 hash）。
+    session_type: Literal["work", "short_break", "long_break", "free", "countdown"] | None = None
     planned_seconds: int = Field(gt=0)
     started_at: CanonicalUtc
     owner_device_id: str = Field(min_length=1, max_length=64)
@@ -490,6 +496,9 @@ class FocusSessionResponse(WireResponseModel):
     updated_at: CanonicalUtc
     version: int = Field(ge=0)
     session_revision: int = Field(ge=0)
+    # 双体系兼容（2026-09-16）：番茄钟模式。缺省 work —— 出站始终携带
+    # （读投影必然写入），默认值只为兼容直接构造响应对象的调用方。
+    session_type: Literal["work", "short_break", "long_break", "free", "countdown"] = "work"
     started_at: CanonicalUtc
     ended_at: CanonicalUtc | None
     pause_started_at: CanonicalUtc | None

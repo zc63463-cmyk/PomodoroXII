@@ -7,6 +7,13 @@ export interface ClockFacts {
    * CachedFocusSession 有 sessionId，FocusSessionView 有 id —— 见 sessionIdOf。
    */
   sessionId?: string
+  /**
+   * 番茄钟模式（双体系兼容 2026-09-16，可选声明）。
+   *
+   * 纯钟面推导不需要它；消费方要按模式改**呈现**时需要（环色调、模式标签、
+   * 休息型的尺寸/文案）。缺省按 'work' 解释 —— 与缓存行/服务端列默认同口径。
+   */
+  sessionType?: string | null
   startedAt: string
   endedAt: string | null
   pauseStartedAt: string | null

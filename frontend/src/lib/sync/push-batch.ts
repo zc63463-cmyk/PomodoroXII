@@ -372,6 +372,9 @@ function toFocusSessionWirePostImage(
         updated_at: payload.updatedAt,
         version: payload.version,
         session_revision: payload.sessionRevision,
+        // 双体系兼容（2026-09-16）：缺省 work —— 本字段出现之前入队的 outbox
+        // 行没有 sessionType，按"工作会话"推到服务端（列默认值同口径）。
+        session_type: payload.sessionType ?? 'work',
         started_at: payload.startedAt,
         ended_at: payload.endedAt,
         pause_started_at: payload.pauseStartedAt,

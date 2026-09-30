@@ -640,10 +640,20 @@ class TestSyncPolicyMatrix:
             operation_id="seed-conflict",
         )
         assert len(after_events) == len(before_events) == 1
-        entity_type, rows = next(
+        entity_type, rows_before = next(
             entry for entry in sync_policy_fixture.mutation.overlay_snapshot()[0]
             if entry[0] == "focus_session"
         )
         assert entity_type == "focus_session"
-        row = next(db_row for db_row in rows if db_row[0] == "fs-conflict")
-        assert row[-1] == "activation_conflict"
+        # 该会话确实以 activation_conflict 落库（值断言，不依赖列序）。
+        assert "activation_conflict" in next(
+            db_row for db_row in rows_before if db_row[0] == "fs-conflict"
+        )
+        entity_type_after, rows_after = next(
+            entry for entry in sync_policy_fixture.mutation.overlay_snapshot()[0]
+            if entry[0] == "focus_session"
+        )
+        assert entity_type_after == "focus_session"
+        # 被拒的同步更新零副作用 = 整行逐列未变（比原来的 row[-1] 位置假设更强，
+        # 也不再被 016 追加 session_type 这类加列迁移打破）。
+        assert rows_after == rows_before
