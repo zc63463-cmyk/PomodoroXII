@@ -17,7 +17,7 @@
  * 不改变任何既有子组件（SessionClock / SessionWorkspace / SessionReview …）
  * 的内部实现与行为。
  */
-import { type ReactNode } from 'react'
+import { type CSSProperties, type ReactNode } from 'react'
 
 export interface TimerFrameProps {
   /** 顶栏左侧（二级归属等） */
@@ -67,8 +67,8 @@ export function TimerFrame({
       ) : null}
 
       <div
-        className="grid min-h-0 flex-1 gap-4 px-5 pb-6"
-        style={{ gridTemplateColumns: `minmax(0,1fr) ${sideWidth}px` }}
+        className="timer-frame-grid min-h-0 flex-1 px-5 pb-6"
+        style={{ '--timer-side-w': `${sideWidth}px` } as CSSProperties}
       >
         <section className="ios-card flex min-h-[520px] flex-col p-6">{focus}</section>
         {side ? (

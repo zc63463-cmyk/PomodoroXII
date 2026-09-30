@@ -1137,3 +1137,17 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   font-weight: 500;
 }
+
+/* 两栏骨架：宽屏 = 左焦点 + 右伴奏；窄屏（<1180px）右栏落到下方，避免挤压。
+   ——真实视口下内容区宽度会被左侧全局边栏吃掉，故断点取 1180px 而非 1024px。 */
+.timer-frame-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) var(--timer-side-w, 336px);
+}
+
+@media (max-width: 1180px) {
+  .timer-frame-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
