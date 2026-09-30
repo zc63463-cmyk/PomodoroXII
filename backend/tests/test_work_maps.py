@@ -206,6 +206,14 @@ async def test_put_unknown_work_item_is_404(client) -> None:
 
 
 async def test_http_roundtrip_for_real_work_item(client) -> None:
+    """端到端 PUT → GET 往返（S2 验收的核心用例）。
+
+    ★ 本用例同时是「GET 路由句柄所有权」的回归钉（2026-09-30 实测踩过）：
+    GET 一度只依赖 get_space_context，请求打开的 AuthorizedSpaceScope 无人
+    aclose → 运行时执行器闸门永不排空 → 本用例"测试通过但 teardown 挂死"。
+    修复 = 路由补 ``Depends(get_space_runtime_handle)``（见 work_maps.py）。
+    若该依赖被移除，本用例将以"PASSED 后卡死"的形态复现。
+    """
     master = await _master_headers(client)
     space = await _space(client, master, "maps-roundtrip")
     wi_id = await _work_item(client, space["headers"], space["id"])

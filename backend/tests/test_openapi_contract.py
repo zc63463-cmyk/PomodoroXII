@@ -402,6 +402,7 @@ class TestOpenAPIContractGate:
         for path in (
             "/api/v1/notes/{id}/content",
             "/api/v1/notes/{id}/versions/{version_id}",
+            "/api/v1/work-maps/{work_item_id}",
         ):
             content = schema["paths"][path]["get"]["responses"]["422"]["content"]
             assert set(content) == {
