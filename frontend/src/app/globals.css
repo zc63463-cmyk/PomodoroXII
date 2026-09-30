@@ -1061,6 +1061,28 @@
   color: #fff;
 }
 
+/* iOS 优先级标签（「七天内堆积」按优先级排布时显示）。
+   颜色用 color-mix 与前景色混合，保证深浅主题下都可读。 */
+.ios-prio {
+  font-size: 10.5px;
+  line-height: 1.6;
+  border-radius: 5px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.ios-prio[data-level='high'] {
+  background: color-mix(in oklab, #e24b4a 22%, transparent);
+  color: color-mix(in oklab, #e24b4a 70%, var(--foreground));
+}
+.ios-prio[data-level='mid'] {
+  background: color-mix(in oklab, #ef9f27 22%, transparent);
+  color: color-mix(in oklab, #ba7517 70%, var(--foreground));
+}
+.ios-prio[data-level='low'] {
+  background: var(--ios-fill);
+  color: var(--ios-label-2);
+}
+
 /* 分组标题（iOS grouped header）：小字、次级色、左缩进 */
 .ios-card-hd {
   display: flex;
