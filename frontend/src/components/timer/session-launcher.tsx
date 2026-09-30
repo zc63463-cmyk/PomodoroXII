@@ -162,7 +162,7 @@ export function SessionLauncher({ items, initialWorkItemId, onStart, onCreateLev
         }, `${modeLabel(mode)}只记录休息时长（不计入二级投入、免复盘）；归属沿用上面选中的二级工作项。`)
       : createElement('fieldset', { className: 'grid gap-2 rounded-lg border p-3', disabled: !level2Id },
       createElement('legend', null, 'Level 3 plan'),
-      candidates.map((item) => createElement('label', { key: item.id, className: 'flex items-center gap-2' },
+      candidates.map((item) => createElement('label', { key: item.id, className: 'ios-row', 'data-tappable': 'true' },
         createElement('input', {
           type: 'checkbox', checked: level3Ids.includes(item.id), disabled: frozen.has(item.id),
           onChange: (event: React.ChangeEvent<HTMLInputElement>) => setLevel3Ids((current) => event.target.checked
@@ -192,6 +192,8 @@ export function SessionLauncher({ items, initialWorkItemId, onStart, onCreateLev
         }),
         createElement('button', {
           type: 'button',
+          // iOS 纯文字按钮（次要动作）
+          className: 'ios-btn--plain',
           disabled: !level2Id || newLevel3Title.trim() === '',
           onClick: submitNewLevel3,
         }, '+ 新建三级'),
@@ -231,6 +233,9 @@ export function SessionLauncher({ items, initialWorkItemId, onStart, onCreateLev
         ...presetsForMode(mode).map((minutes) => createElement('button', {
           key: minutes,
           type: 'button',
+          // iOS 胶囊 chip：选中态用 systemBlue 填充（视觉权重明显高于普通描边按钮）
+          className: 'ios-chip',
+          'data-on': Math.round(plannedSeconds / 60) === minutes ? 'true' : 'false',
           'aria-pressed': Math.round(plannedSeconds / 60) === minutes,
           onClick: () => setPlannedSeconds(minutes * 60),
         }, `${minutes} 分钟`)),
@@ -255,6 +260,12 @@ export function SessionLauncher({ items, initialWorkItemId, onStart, onCreateLev
             className: 'text-sm text-muted-foreground',
           }, '先在上方「Level 2 attribution」里选中要投入的二级工作项，Start 才会启用。')
         : null,
-    createElement('button', { type: 'submit', disabled: !level2Id || starting }, 'Start focus session'),
+    createElement('button', {
+      type: 'submit',
+      // iOS 主按钮：systemBlue 填充 + 44px 高 + 大圆角；禁用时降透明度（iOS 惯例）
+      className: 'ios-btn',
+      disabled: !level2Id || starting,
+      style: { width: '100%', opacity: !level2Id || starting ? 0.35 : 1 },
+    }, 'Start focus session'),
   )
 }

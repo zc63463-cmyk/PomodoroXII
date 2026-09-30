@@ -882,17 +882,22 @@ export default function TimerPage() {
     ),
     selectedWorkItem ? createElement('p', null, `Selected: ${selectedWorkItem.displayKey} ${selectedWorkItem.title}`) : null,
     workItems.length
-      ? createElement('div', { className: 'grid gap-2', 'aria-label': 'WorkItems for focus' }, workItems.map((item) => createElement('button', {
+      ? createElement('div', { className: 'ios-card', 'aria-label': 'WorkItems for focus' }, workItems.map((item) => createElement('button', {
           key: item.id, type: 'button',
-          // 工单④（2026-09-14）：卡片化（纯样式）。按钮的可访问名保持
-          // 「displayKey + 空格 + title」逐字不变（displayKey 与 title 之间的
-          // 空格是真实文本节点）；选中项加 border-primary 高亮。
-          className: `rounded-lg border px-3 py-2 text-left hover:bg-accent${selectedWorkItem?.id === item.id ? ' border-primary' : ''}`,
+          // iOS 分组列表行：44px 触控高 + hairline 分隔 + 单选圆点。
+          // 按钮的可访问名保持「displayKey + 空格 + title」逐字不变
+          //（displayKey 与 title 之间的空格是真实文本节点）。
+          className: 'ios-row w-full text-left',
+          'data-tappable': 'true',
+          'data-selected': selectedWorkItem?.id === item.id ? 'true' : 'false',
           onClick: () => selectWorkItem(item.id),
         },
-        createElement('span', { className: 'block text-xs text-muted-foreground' }, item.displayKey),
-        ' ',
-        createElement('span', { className: 'block' }, item.title),
+        createElement('span', { className: 'ios-radio' }),
+        createElement('span', { className: 'min-w-0 flex-1' },
+          createElement('span', { className: 'block text-[11px]', style: { color: 'var(--ios-label-2)' } }, item.displayKey),
+          ' ',
+          createElement('span', { className: 'block truncate text-[14px]' }, item.title),
+        ),
       )))
       // ★ 空状态要说清「为什么空」和「去哪补」。
       //   原来只有一句 "No WorkItems are available in this Space."，

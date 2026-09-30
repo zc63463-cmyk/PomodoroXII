@@ -1032,6 +1032,33 @@
   background: var(--ios-card);
   border-radius: 12px;
   overflow: hidden;
+  /* 极细描边：让卡片边界在深浅两种主题下都清晰
+     （iOS 分组卡靠层次区分，但本项目 --card 与 --background 差距较小，补一层） */
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--foreground) 9%, transparent);
+}
+
+/* iOS 胶囊 chip：用于"时长预设"这类**可变数量 + 中文标签**的选项组。
+   （不用标准 segmented control —— 它固定等分，中文标签 + 4~5 项在窄容器必溢出） */
+.ios-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 15px;
+  border: none;
+  border-radius: 999px;
+  background: var(--ios-fill);
+  color: var(--ios-label);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ios-chip:active {
+  opacity: 0.8;
+}
+.ios-chip[data-on='true'] {
+  background: var(--ios-blue);
+  color: #fff;
 }
 
 /* 分组标题（iOS grouped header）：小字、次级色、左缩进 */
