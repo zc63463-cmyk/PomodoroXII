@@ -29,11 +29,20 @@ import { WorkMapTree } from './work-map-tree'
 export interface TimerMapOverviewProps {
   /** 结束会话所属 L3 的岛文件原文；null = 尚无导图 / 读取失败 */
   mapText: string | null
-  /** 本次会话 id（其岛根呈"本次"高亮） */
+  /** 本次会话 id（其岛根呈"本次"高亮）；准备态主图无"本次"语义，传 null */
   sessionId: string | null
+  /**
+   * 标题后缀（渲染为 `工作导图 · <title>`）：结束态默认「岛总览」，
+   * 准备态弹层传「主图」（ADR-0008 D18）。**只改文案，不改内容**。
+   */
+  title?: string
 }
 
-export function TimerMapOverview({ mapText, sessionId }: TimerMapOverviewProps): ReactNode {
+export function TimerMapOverview({
+  mapText,
+  sessionId,
+  title = '岛总览',
+}: TimerMapOverviewProps): ReactNode {
   const layout = useMemo(
     () => (mapText === null || mapText.trim() === '' ? null : readWorkMapLayout(mapText)),
     [mapText],
@@ -46,7 +55,7 @@ export function TimerMapOverview({ mapText, sessionId }: TimerMapOverviewProps):
   return (
     <div className="wm-overview" data-testid="timer-map-overview">
       <div className="wm-overview-hd">
-        工作导图 · 岛总览
+        工作导图 · {title}
         {islands.length > 0 ? (
           <span className="wm-editor-count">
             {islands.length} 个岛 · {nodeCount} 项

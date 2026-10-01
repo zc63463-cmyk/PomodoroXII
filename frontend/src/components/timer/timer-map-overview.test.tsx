@@ -52,6 +52,18 @@ describe('TimerMapOverview（结束态岛总览）', () => {
     expect(container.querySelectorAll('.wm-link').length).toBeGreaterThan(0)
   })
 
+  it('★ title prop：默认「岛总览」；准备态主图弹层传「主图」（只改文案不改内容）', () => {
+    const { unmount } = render(<TimerMapOverview mapText={DOC} sessionId={SID} />)
+    expect(screen.getByTestId('timer-map-overview')).toHaveTextContent('工作导图 · 岛总览')
+    unmount()
+
+    render(<TimerMapOverview mapText={DOC} sessionId={null} title="主图" />)
+    expect(screen.getByTestId('timer-map-overview')).toHaveTextContent('工作导图 · 主图')
+    // 内容不变：图例 + 全部 islands 照旧
+    expect(screen.getByTestId('map-legend')).toBeTruthy()
+    expect(screen.getByTestId('map-overview-canvas')).toBeTruthy()
+  })
+
   it('★ 只读（红线 2）：无编辑入口 —— 无 data-cid、无操作行、无快速记录行', () => {
     const { container } = render(<TimerMapOverview mapText={DOC} sessionId={SID} />)
     expect(container.querySelectorAll('.wm-node[data-cid]')).toHaveLength(0)

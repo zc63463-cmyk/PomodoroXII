@@ -1494,6 +1494,81 @@
   opacity: 0.28;
 }
 
+/* ── 准备态「主图」弹层（ADR-0008 D18 / D13 步 3-4a，方案 C）──────────────────
+   触发行在三栏之下；弹层内容**复用** `.wm-overview`（图例 + 全岛树 + 筛选），
+   这里只管壳（backdrop / 面板 / 关闭）与触发行。 */
+.wm-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.wm-preview-open {
+  flex: none;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.wm-preview-open:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.wm-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgb(0 0 0 / 0.42);
+}
+.wm-preview-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(1080px, 92vw);
+  max-height: 86vh;
+  padding: 12px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 16%, transparent);
+  border-radius: 14px;
+  background: var(--ios-card, var(--card));
+  box-shadow: 0 24px 64px -24px rgb(0 0 0 / 0.5);
+  overflow: auto;
+  outline: none;
+}
+.wm-preview-bar {
+  display: flex;
+  justify-content: flex-end;
+}
+.wm-preview-close {
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.wm-preview-loading {
+  padding: 24px 4px;
+}
+/* 弹层里的总览占满可用高度（面板 max-height 86vh 由内容自适应） */
+.wm-preview-panel .wm-overview {
+  min-height: 0;
+}
+.wm-preview-panel .wm-overview-canvas {
+  min-height: 320px;
+}
+
 /* 分组标题（iOS grouped header）：小字、次级色、左缩进 */
 .ios-card-hd {
   display: flex;
