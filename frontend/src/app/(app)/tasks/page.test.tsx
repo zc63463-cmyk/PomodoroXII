@@ -76,12 +76,9 @@ describe('TasksPage session launch wiring', () => {
     useTaskSpaceStore.getState().selectWorkItem('l2')
     const before = useTaskSpaceStore.getState().selectedWorkItemId
 
-    // The timer page derives the launcher selection from the same store key.
-    // ② 任务选择 Modal 落地后（2026-10-02）：派生从启动器内部上移到 timer 页面
-    //（同一 store key → deriveLaunchSelection → Modal 与启动器共享），契约不变。
-    const timerSource = readFileSync(resolve(process.cwd(), 'src/app/(app)/timer/page.tsx'), 'utf8')
-    expect(timerSource).toMatch(/deriveLaunchSelection\(workItems, selectedWorkItemId\)/)
-
+    // 计时页从同一 store key（selectedWorkItemId）派生启动选择 —— 该契约已由
+    // timer/page.test.tsx 的行为断言锁定（launcher-attribution-summary 随
+    // store 切换而变，Modal 内归属 select 同值），此处不再 grep 源码。
     expect(before).toBe('l2')
   })
 })

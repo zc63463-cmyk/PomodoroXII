@@ -740,6 +740,33 @@ describe('TimerPage 双体系兼容 · 准备态模式（2026-09-16）', () => {
     ))
   })
 
+  it('★ 启动选择从 store 的 selectedWorkItemId 派生（行为断言，替代源码 grep）', async () => {
+    // 种子默认 selectedWorkItemId='l2-x'（二级）→ 派生：归属=自身、计划 0 项。
+    // 可观察面 = 启动器摘要（launcher-attribution-summary）—— 它不读源码、
+    // 只反映 deriveLaunchSelection(workItems, selectedWorkItemId) 的真实产物。
+    render(createElement(TimerPage))
+
+    expect(await screen.findByTestId('launcher-attribution-summary')).toHaveTextContent('归属：Ship feature')
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('三级计划 0 项')
+
+    // store 切到三级项 → 派生跟着变：归属=父二级（Ship feature）、该三级冻结进计划 1 项
+    act(() => {
+      useTaskSpaceStore.setState((current) => ({
+        workItems: [
+          ...current.workItems,
+          { id: 'l3-a', depth: 3, parentId: 'l2-x', title: 'Verify output', displayKey: 'P-3', version: 2 },
+        ],
+        selectedWorkItemId: 'l3-a',
+      }) as never)
+    })
+    expect(await screen.findByTestId('launcher-attribution-summary')).toHaveTextContent('归属：Ship feature')
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('三级计划 1 项')
+
+    // 同一派生源的第二个可观察面：Modal 内归属 select 的 value 同步为该二级项
+    fireEvent.click(screen.getByTestId('launcher-browse-all'))
+    expect(await screen.findByLabelText('Level 2 attribution')).toHaveValue('l2-x')
+  })
+
   it('默认 work 启动：载荷带 sessionType=work 与设置里的番茄时长', async () => {
     render(createElement(TimerPage))
 
