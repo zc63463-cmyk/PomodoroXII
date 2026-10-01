@@ -82,3 +82,25 @@ describe('TasksPage session launch wiring', () => {
     expect(before).toBe('l2')
   })
 })
+
+// ── PXII-FEAT-TASK-SPACE-P0（P0-2）：「查看工作导图」接线 ─────────────────────
+// 与本文件既有风格一致：页面整树在 jsdom 下需要大量 Dexie/同步桩，故接线断言
+// 走源码锚点；交互细节（按钮渲染 / 点击上抛）由 work-item-detail.test.tsx
+// 行为锁定，弹层本体由 work-map-preview-overlay.test.tsx 锁定。
+describe('TasksPage work map preview wiring (P0-2)', () => {
+  it('mounts the WorkMapPreviewOverlay and reads the selected item map lazily', () => {
+    const source = pageSource()
+    expect(source).toMatch(/WorkMapPreviewOverlay/)
+    expect(source).toMatch(/readWorkMap/)
+    // 弹层三要素齐备：开、读图中、原文、关闭
+    expect(source).toMatch(/loading=\{workMapPreviewLoading\}/)
+    expect(source).toMatch(/mapText=\{workMapPreviewText\}/)
+    expect(source).toMatch(/onClose=\{\(\) => setWorkMapPreviewOpen\(false\)\}/)
+  })
+
+  it('forwards the detail entry via onOpenWorkMap bound to the selected item', () => {
+    const source = pageSource()
+    expect(source).toMatch(/onOpenWorkMap=\{selectedWorkItem/)
+    expect(source).toMatch(/openWorkMapPreview\(selectedWorkItem\.id\)/)
+  })
+})

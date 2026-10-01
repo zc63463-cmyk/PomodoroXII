@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import {
@@ -24,8 +24,10 @@ import {
 } from '@/components/task-space/waiting-resume-hint'
 import { WorkItemTree } from '@/components/task-space/work-item-tree'
 import { WorkItemNoteEditor } from '@/components/task-space/work-item-note-editor'
+import { WorkMapPreviewOverlay } from '@/components/timer/work-map-preview-overlay'
 import { TaskSpaceRepository } from '@/lib/task-space/task-space-repository'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
+import { readWorkMap } from '@/lib/work-map/work-map-api'
 import { syncEngine } from '@/lib/sync'
 import { useTaskSpaceShortcuts } from '@/hooks/use-task-space-shortcuts'
 import {
@@ -113,6 +115,35 @@ export default function TasksPage() {
   const [resolvingConflict, setResolvingConflict] = useState(false)
   const [blockedLaunch, setBlockedLaunch] = useState<CachedWorkItem | null>(null)
   const [treeFilter, setTreeFilter] = useState<WorkItemTreeFilter>(EMPTY_TREE_FILTER)
+
+  // ── 「查看工作导图」弹层（PXII-FEAT-TASK-SPACE-P0 P0-2）─────────────────────
+  // 懒读 + 代次防护：打开时才读该工作项的 `.mm.md`（复用 timer 准备态主图同一条
+  // readWorkMap 契约，404 → null → 弹层 fail-soft 占位）；切选工作项后旧在途响应
+  // 按代次丢弃，绝不把 A 项的图挂进 B 项的弹层。
+  const [workMapPreviewOpen, setWorkMapPreviewOpen] = useState(false)
+  const [workMapPreviewText, setWorkMapPreviewText] = useState<string | null>(null)
+  const [workMapPreviewLoading, setWorkMapPreviewLoading] = useState(false)
+  const workMapPreviewSeq = useRef(0)
+  const openWorkMapPreview = useCallback(async (workItemId: string) => {
+    const requestId = workMapPreviewSeq.current + 1
+    workMapPreviewSeq.current = requestId
+    setWorkMapPreviewOpen(true)
+    setWorkMapPreviewLoading(true)
+    setWorkMapPreviewText(null)
+    try {
+      const text = await readWorkMap(workItemId)
+      if (workMapPreviewSeq.current !== requestId) return
+      setWorkMapPreviewText(text)
+    } catch (cause) {
+      if (workMapPreviewSeq.current !== requestId) return
+      setWorkMapPreviewText(null)
+      console.warn(
+        `[task-space-map] 导图读取失败（fail-soft，弹层退化为占位）: ${cause instanceof Error ? cause.message : String(cause)}`,
+      )
+    } finally {
+      if (workMapPreviewSeq.current === requestId) setWorkMapPreviewLoading(false)
+    }
+  }, [])
 
   // Status ids are Space-scoped definitions, never hardcoded: the backend
   // owns the status machine and a Space may rename or re-categorise entries.
@@ -691,6 +722,9 @@ export default function TasksPage() {
             onRestore={() => restoreWorkItem(selectedWorkItemId ?? '')}
             onToggleLabel={(labelId, add) => toggleWorkItemLabel(selectedWorkItemId ?? '', labelId, add)}
             openChildCount={selectedWorkItem ? (openChildCountById[selectedWorkItem.id] ?? 0) : null}
+            onOpenWorkMap={selectedWorkItem
+              ? () => void openWorkMapPreview(selectedWorkItem.id)
+              : undefined}
             statusHint={selectedWorkItem && waitingResumeSuggestion ? (
               <WaitingResumeHint
                 upstreamCount={waitingResumeSuggestion.upstreamCount}
@@ -750,6 +784,14 @@ export default function TasksPage() {
             .filter((item): item is CachedWorkItem => item !== undefined)}
           onProceed={handleBlockerAckProceed}
           onCancel={handleBlockerAckCancel}
+        />
+      ) : null}
+      {workMapPreviewOpen ? (
+        <WorkMapPreviewOverlay
+          open
+          loading={workMapPreviewLoading}
+          mapText={workMapPreviewText}
+          onClose={() => setWorkMapPreviewOpen(false)}
         />
       ) : null}
       {conflict && blockedParent ? (

@@ -42,6 +42,9 @@ export interface WorkItemDetailProps {
   onToggleLabel?: (labelId: string, add: boolean) => Promise<unknown> | unknown
   /** 未完成的直接子项数：把「父项带子项不能直接完成」的域规则从报错前置为提示。 */
   openChildCount?: number | null
+  /** 打开该工作项的会话演进导图（PXII-FEAT-TASK-SPACE-P0 P0-2）。
+   *  缺省 = 不提供入口；读取与弹层挂载都由页面负责，本组件只上抛意图。 */
+  onOpenWorkMap?: () => void
 }
 
 function definitionLabel(
@@ -77,6 +80,28 @@ function timing(label: string, value: string | null, hint?: string | null): Reac
   )
 }
 
+/** 「查看工作导图」入口的分支图标（脑图隐喻）。内联 SVG 而非 lucide：
+ *  本组件此前零图标依赖（测试把 lucide mock 成空模块），内联不引入新耦合。 */
+function workMapIcon(): ReactNode {
+  return createElement(
+    'svg',
+    {
+      className: 'h-4 w-4',
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 2,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      'aria-hidden': true,
+    },
+    createElement('line', { x1: '6', y1: '3', x2: '6', y2: '15' }),
+    createElement('circle', { cx: '18', cy: '6', r: '3' }),
+    createElement('circle', { cx: '6', cy: '18', r: '3' }),
+    createElement('path', { d: 'M18 9a9 9 0 0 1-9 9' }),
+  )
+}
+
 export function WorkItemDetail({
   workItem,
   definitions,
@@ -94,6 +119,7 @@ export function WorkItemDetail({
   onRestore,
   onToggleLabel,
   openChildCount = null,
+  onOpenWorkMap,
 }: WorkItemDetailProps) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -225,6 +251,22 @@ export function WorkItemDetail({
       createElement(
         'div',
         { className: 'flex shrink-0 items-center gap-2' },
+        onOpenWorkMap
+          ? createElement(
+              Button,
+              {
+                type: 'button',
+                variant: 'outline',
+                size: 'sm',
+                'aria-label': '查看工作导图',
+                title: '查看会话演进导图',
+                ...({ 'data-work-item-open-map': true } as unknown as Record<string, never>),
+                onClick: () => onOpenWorkMap(),
+              },
+              workMapIcon(),
+              '查看工作导图',
+            )
+          : null,
         createElement('span', { className: 'text-xs text-muted-foreground' }, `v${workItem.version}`),
         readonly && onRestore
           ? createElement(
@@ -258,6 +300,21 @@ export function WorkItemDetail({
           : null,
       ),
     ),
+    // ── 幕布描述块（P0-3）：与导图 DescBlock 视觉同构（左竖线 + 缩进弱化文本）──
+    // 只读呈现层：编辑仍走下方表单的描述 textarea；这里让"读描述"不再依赖展开表单。
+    // trim 守卫：纯空白描述与 null 同样视为"无描述"，不渲染空壳块。
+    (workItem.description ?? '').trim() !== ''
+      ? createElement(
+          'section',
+          {
+            'aria-label': 'Work item description',
+            'data-desc-block': true,
+            className: 'wm-desc-container border-b py-4',
+          },
+          createElement('span', { className: 'wm-desc-bar', 'aria-hidden': true }),
+          createElement('p', { className: 'wm-desc-text m-0' }, workItem.description),
+        )
+      : null,
     readonly
       ? createElement(
           'p',

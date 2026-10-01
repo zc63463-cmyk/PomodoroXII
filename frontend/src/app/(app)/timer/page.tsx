@@ -49,7 +49,8 @@ import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
 import { buildHierarchyCodes } from '@/lib/task-space/hierarchy-code'
 import { readWorkMap, writeWorkMap } from '@/lib/work-map/work-map-api'
 import { appendThoughtNode } from '@/lib/work-map/thought-nodes'
-import { applyMapNodeEdit, type MapNodeEditOp } from '@/lib/work-map/node-edits'
+import { applyMapNodeEdit, normalizeNodeTitle, type MapNodeEditOp } from '@/lib/work-map/node-edits'
+import type { MapTreeNode } from '@/lib/work-map/island-layout'
 import type { ThoughtType } from '@/lib/work-map/thought-types'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
 import { buildSessionIsland } from '@/lib/work-map/session-island'
@@ -58,7 +59,7 @@ import { canonicalNow } from '@/lib/direct-command-intents'
 import { spaceDBManager } from '@/services/space-db'
 import { metaDB } from '@/services/meta-database'
 import type { PomodoroXIDB } from '@/services/database'
-import type { NoteBlock } from '@/lib/contracts/task-space'
+import type { NoteBlock, TaskSpaceDefinitions } from '@/lib/contracts/task-space'
 import type {
   CachedFocusSession,
   CachedSessionAttributionRevision,
@@ -114,6 +115,18 @@ function joinWithWorkItems<T extends { workItemId: string }>(
     if (!item) return []
     return [{ ...entry, displayKey: item.displayKey, title: item.title, priority: item.priority ?? null }]
   })
+}
+
+/** Space 作用域定义的**首个** id（与 task-space-store 的 definitionId 同一语义）：
+ *  升格创建不新发明默认值 —— 类型/状态沿用任务页 createChild 的同款取法。 */
+function firstDefinitionId(
+  definitions: TaskSpaceDefinitions | null,
+  group: 'statuses' | 'types',
+): string | null {
+  const first = definitions?.[group][0]
+  if (!first || typeof first !== 'object' || first === null) return null
+  const id = (first as Record<string, unknown>).id
+  return typeof id === 'string' && id.length > 0 ? id : null
 }
 
 export default function TimerPage() {
@@ -561,6 +574,59 @@ export default function TimerPage() {
     setSessionMap({ workItemId: focusedWorkItemId, text: result.text })
     setFocusCid(null)
   }
+
+  /**
+   * 节点升格为任务（PXII-FEAT-TASK-SPACE-P0 P0-1）：把会话岛内的思考节点沉淀为
+   * 正式 WorkItem，并在导图上回写任务编号。
+   *
+   * ## 层级深度防线（WORK_ITEM_MAX_DEPTH = 3，红线 2）
+   * 走 `TaskSpaceRepository.createWorkItem` 直连通道，**不经** store 的 createChild
+   * —— 那边会改写 selectedWorkItemId（focusedWorkItemId 的回退键），升格会静默
+   * 劫持当前专注项；且 selectedProjectId 在计时页不保证已选。目标父级按当前项
+   * 层级推导：L3 → 挂回同一 L2 父级（同级 L3，绝不 createChild 于 L3 之下）；
+   * L2 → 挂其下（新 L3）；其余层级 fail-loud（不猜父级）。
+   *
+   * ## 导图回写纪律（红线 4）
+   * 只用 `applyMapNodeEdit` 的 rename **定向改目标 heading 行**，其余正文逐字节
+   * 保留（D16-b）—— 严禁整文重新序列化。回写失败不回滚已创建的任务（实体已成
+   * 立，回写只是导图上的编号标注），把原因抛给编辑区卡内展示。
+   */
+  const handlePromoteNode = async (cid: string, node: MapTreeNode): Promise<void> => {
+    if (focusedWorkItemId === null || activeSessionId === null) {
+      throw new Error('当前没有进行中的会话')
+    }
+    if (!taskRepository) throw new Error('task_space_repository_not_ready')
+    // createWorkItem 落库后 store 的 workItems 不会自动追加，读最新快照防旧数组
+    const current = useTaskSpaceStore.getState().workItems.find((item) => item.id === focusedWorkItemId)
+    if (current === undefined) throw new Error('work_item_not_loaded')
+    const parentId = current.depth === 3
+      ? current.parentId
+      : current.depth === 2
+        ? current.id
+        : null
+    if (parentId === null || parentId === '') throw new Error('升格目标父级无法确定（当前项层级非 L2/L3）')
+    const title = normalizeNodeTitle(node.text)
+    if (title === '') throw new Error('promote_title_empty')
+    const description = node.comment !== null && node.comment.length > 0 ? node.comment.join('\n') : null
+    const created = await taskRepository.createWorkItem({
+      projectId: current.projectId,
+      parentId,
+      title,
+      description,
+      typeDefinitionId: firstDefinitionId(definitions, 'types'),
+      statusDefinitionId: firstDefinitionId(definitions, 'statuses'),
+      priority: null,
+    })
+    // 导图回写：`[PXII-102] 标题`。base 用带键缓存，键已切换则回落真实读取
+    //（与 quickRecord / editMap 同一条防串写纪律）。
+    const mapWorkItemId = focusedWorkItemId
+    const base = sessionMapText ?? (await readWorkMap(mapWorkItemId)) ?? ''
+    const renamed = applyMapNodeEdit(base, { kind: 'rename', cid, title: `[${created.displayKey}] ${title}` })
+    if (!renamed.changed) throw new Error(renamed.reason ?? '导图回写未产生变更')
+    await writeWorkMap(mapWorkItemId, renamed.text)
+    setSessionMap({ workItemId: mapWorkItemId, text: renamed.text })
+  }
+
   /**
    * 节奏面板只在「已结束 且 不需要复盘」时出现：
    * - 休息型结束（免复盘）→ 立即出现；
@@ -1211,6 +1277,7 @@ export default function TimerPage() {
               focusCid,
               onQuickRecord: quickRecord,
               onEdit: editMap,
+              onPromoteNode: handlePromoteNode,
             }),
       ),
       // 伴奏区：骨架带 .timer-immersive-region（结构标记 + testid）。

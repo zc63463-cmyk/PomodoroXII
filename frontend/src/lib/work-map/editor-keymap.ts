@@ -29,6 +29,7 @@ export type EditorKeyAction =
   | { type: 'rename' } // F2: 改名
   | { type: 'delete' } // Delete / Backspace: 删除
   | { type: 'comment' } // Shift+Enter: 编辑注释
+  | { type: 'promote' } // Shift+P: 升格为任务（PXII-FEAT-TASK-SPACE-P0）
   | { type: 'cancel' } // Escape: 取消选中或关闭浮层
   | { type: 'set-type'; thoughtType: ThoughtType } // 1~5: 直切思考类型
   | { type: 'navigate'; dir: 'up' | 'down' | 'left' | 'right' } // 方向键导航
@@ -65,8 +66,8 @@ export function isTextEntryTarget(target: EventTarget | null): boolean {
  *
  * 1. **输入态互斥**：焦点在输入面 → 一律 `null`（红线，见文件头注）
  * 2. **组合键让位**：`Ctrl/Cmd/Alt` 组合 → `null`（浏览器/系统快捷键优先）
- * 3. **Shift 类**：仅 `Shift+Enter`（注释）放行，其余 Shift 组合让位
- *    （`Shift+方向键` = 文本选区，不能抢）
+ * 3. **Shift 类**：仅 `Shift+Enter`（注释）与 `Shift+P`（升格，需选中节点）放行，
+ *    其余 Shift 组合让位（`Shift+方向键` = 文本选区，不能抢）
  * 4. **数字键 1~5**：仅在有选中节点时直切类型
  * 5. **裸键**：节点编辑与方向导航
  *
@@ -80,9 +81,13 @@ export function matchEditorKey(
   if (isTextEntryTarget(e.target)) return null
   // 2. 组合键：本表不含任何 Ctrl/Cmd/Alt 组合
   if (e.ctrlKey || e.metaKey || e.altKey) return null
-  // 3. Shift 类
+  // 3. Shift 类：注释（Shift+Enter）与升格（Shift+P，需选中节点——同数字键的
+  //    "接收者"纪律，无选中让给浏览器）；其余 Shift 组合一律让位
   if (e.shiftKey) {
-    return e.key === 'Enter' ? { type: 'comment' } : null
+    if (e.key === 'Enter') return { type: 'comment' }
+    // 真实键盘 Shift+P 的 e.key 是大写 'P'；大写锁定叠加时会是 'p'，一并接受
+    if ((e.key === 'P' || e.key === 'p') && hasSelectedNode) return { type: 'promote' }
+    return null
   }
   // 4. 数字键 1~5 直切思考类型（无选中 → 让给浏览器）
   if (hasSelectedNode) {
@@ -125,6 +130,7 @@ export const EDITOR_KEY_HINTS: ReadonlyArray<{ keys: string; label: string }> = 
   { keys: 'F2', label: '改名' },
   { keys: 'Del', label: '删除' },
   { keys: 'Shift+Enter', label: '注释' },
+  { keys: '⇧P', label: '升格为任务' },
   { keys: '1-5', label: '类型' },
   { keys: '↑↓←→', label: '导航' },
 ]

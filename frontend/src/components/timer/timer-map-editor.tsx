@@ -66,6 +66,9 @@ export interface TimerMapEditorProps {
   onQuickRecord?: (type: ThoughtType, title: string) => Promise<void>
   /** 节点编辑：改名 / 加子 / 类型 / 注释 / 删除（页面实现写入；抛错 → 卡内提示） */
   onEdit?: (op: MapNodeEditOp) => Promise<void>
+  /** 升格为任务（PXII-FEAT-TASK-SPACE-P0）：把节点标题/注释沉淀为正式 WorkItem，
+   *  页面实现创建与导图回写；抛错 → 卡内提示。缺省 = 不提供升格入口（只读）。 */
+  onPromoteNode?: (cid: string, node: MapTreeNode) => Promise<void>
 }
 
 type Overlay = 'rename' | 'add' | 'comment' | 'type'
@@ -78,6 +81,7 @@ export function TimerMapEditor({
   focusCid,
   onQuickRecord,
   onEdit,
+  onPromoteNode,
 }: TimerMapEditorProps): ReactNode {
   const island = useMemo(() => {
     if (mapText === null || sessionId === null) return null
@@ -193,6 +197,27 @@ export function TimerMapEditor({
     setEditError(null)
     try {
       await onEdit(op)
+      resetActions()
+    } catch (cause) {
+      setEditError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * 升格为任务（PXII-FEAT-TASK-SPACE-P0）：键盘 ⇧P 与操作行按钮共用的唯一入口。
+   * 与 `runEdit` 同一条纪律（busy 闸门 / 卡内错误 / 成功后焦点归还画布）——
+   * 失败时浮层语义不适用（本动作无浮层），错误落 `map-edit-error` 即可重试。
+   */
+  const runPromote = async (): Promise<void> => {
+    const node = selectedNode
+    if (node === null || node.cid === null || onPromoteNode === undefined || busy) return
+    const cid = node.cid
+    setBusy(true)
+    setEditError(null)
+    try {
+      await onPromoteNode(cid, node)
       resetActions()
     } catch (cause) {
       setEditError(cause instanceof Error ? cause.message : String(cause))
@@ -351,6 +376,9 @@ export function TimerMapEditor({
       case 'comment':
         openSelectedOverlay('comment')
         return
+      case 'promote':
+        void runPromote()
+        return
       case 'delete':
         requestDelete()
         return
@@ -482,6 +510,18 @@ export function TimerMapEditor({
             >
               注释
             </button>
+            {onPromoteNode !== undefined ? (
+              <button
+                type="button"
+                className="wm-action-btn"
+                data-testid="map-action-promote"
+                title="把节点标题与注释沉淀为正式任务"
+                disabled={busy}
+                onClick={() => void runPromote()}
+              >
+                升格为任务
+              </button>
+            ) : null}
             <button
               type="button"
               className="wm-action-btn wm-action-btn--danger"

@@ -547,3 +547,86 @@ describe('键盘路径的文本级保真（ADR-0008 D16-b）', () => {
     expect(result.text).toContain('next_cid: 6') // 删除不回退计数器
   })
 })
+
+/**
+ * 节点升格为任务（PXII-FEAT-TASK-SPACE-P0 P0-1）—— 编辑区侧的入口闭环。
+ *
+ * 断言锚在：⇧P 键位与操作行按钮落到**同一条** `onPromoteNode` 路径、上抛的
+ * 是完整节点（cid + 标题 + 注释）、失败落卡内错误、缺省时不提供任何入口。
+ * 页面侧的层级推导与导图回写在 timer/page 层（架构上不属本组件）。
+ */
+describe('节点升格为任务（Shift+P / 升格按钮）', () => {
+  const renderPromotable = (onPromoteNode = vi.fn().mockResolvedValue(undefined)) => {
+    const utils = render(
+      <TimerMapEditor
+        mapText={ISLAND}
+        sessionId={SESSION_ID}
+        onEdit={vi.fn().mockResolvedValue(undefined)}
+        onPromoteNode={onPromoteNode}
+      />,
+    )
+    return { ...utils, onPromoteNode }
+  }
+
+  it('★ 选中节点按 Shift+P → onPromoteNode(cid, node) 收到完整节点', async () => {
+    const { onPromoteNode } = renderPromotable()
+    select('c2')
+    press('P', { shift: true })
+
+    await waitFor(() => expect(onPromoteNode).toHaveBeenCalledTimes(1))
+    const [cid, node] = onPromoteNode.mock.calls[0] as [string, { cid: string | null; text: string; comment: string[] | null }]
+    expect(cid).toBe('c2')
+    expect(node.cid).toBe('c2')
+    expect(node.text).toBe('甲')
+  })
+
+  it('★ 点击操作行「升格为任务」按钮 → 与 ⇧P 同一条路径', async () => {
+    const { onPromoteNode } = renderPromotable()
+    select('c3')
+
+    fireEvent.click(screen.getByTestId('map-action-promote'))
+
+    await waitFor(() => expect(onPromoteNode).toHaveBeenCalledWith('c3', expect.objectContaining({ cid: 'c3', text: '乙' })))
+  })
+
+  it('★ 带注释的节点升格：node.comment 原样上抛（页面据它生成任务描述）', async () => {
+    const onPromoteNode = vi.fn().mockResolvedValue(undefined)
+    const withComment = ISLAND.replace(
+      '<!--\ncid: "c2"\n-->',
+      '<!--\ncid: "c2"\nnote:\n  - 备注 A\n  - 备注 B\n-->',
+    )
+    render(<TimerMapEditor mapText={withComment} sessionId={SESSION_ID} onEdit={vi.fn()} onPromoteNode={onPromoteNode} />)
+    select('c2')
+    press('P', { shift: true })
+
+    await waitFor(() =>
+      expect(onPromoteNode).toHaveBeenCalledWith('c2', expect.objectContaining({ comment: ['备注 A', '备注 B'] })),
+    )
+  })
+
+  it('★ 升格失败 → 错误落卡内 map-edit-error（不弹全局、可重试）', async () => {
+    const onPromoteNode = vi.fn().mockRejectedValue(new Error('offline_formal_creation_forbidden'))
+    renderPromotable(onPromoteNode)
+    select('c2')
+    press('P', { shift: true })
+
+    await waitFor(() => expect(screen.getByTestId('map-edit-error')).toHaveTextContent('offline_formal_creation_forbidden'))
+    // 操作行保留（选中态未丢），用户可直接重试
+    expect(screen.getByTestId('map-node-actions')).toBeTruthy()
+  })
+
+  it('★ 未提供 onPromoteNode → 无按钮、⇧P 无副作用', () => {
+    renderEditor()
+    select('c2')
+    expect(screen.queryByTestId('map-action-promote')).toBeNull()
+
+    press('P', { shift: true })
+    expect(screen.queryByTestId('map-edit-error')).toBeNull()
+  })
+
+  it('★ 未选中节点按 ⇧P 不触发（键位层无接收者即让位）', () => {
+    const { onPromoteNode } = renderPromotable()
+    press('P', { shift: true })
+    expect(onPromoteNode).not.toHaveBeenCalled()
+  })
+})

@@ -1372,6 +1372,29 @@
 [data-minimal='true'] .wm-desc-text {
   visibility: hidden;
 }
+/* ── 任务空间幕布描述块（PXII-FEAT-TASK-SPACE-P0 P0-3）─────────────────────
+   HTML 侧的 DescBlock 同构呈现（WorkItemDetail 的只读描述）：左 2px 竖线 +
+   缩进弱化多行文本。配色口径与上方 SVG 版一致（25% 前景竖线 + muted 文字），
+   选择器统一收在 .wm-desc-container 作用域下 —— 不与 SVG 侧的 stroke/fill
+   规则互相串扰。多行用 white-space: pre-wrap 保序（升格时注释按 \n join）。 */
+.wm-desc-container {
+  display: flex;
+  gap: 10px;
+}
+.wm-desc-container .wm-desc-bar {
+  flex: none;
+  width: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+.wm-desc-container .wm-desc-text {
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .wm-actions {
   display: flex;
   flex-wrap: wrap;

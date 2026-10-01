@@ -75,6 +75,32 @@ describe('matchEditorKey（导图键位表）', () => {
     expect(matchEditorKey(keyEvent('ArrowUp', { shift: true }), true)).toBeNull()
   })
 
+  it('★ Shift+P → 升格为任务（真实键盘 e.key 为大写 P；大写锁定叠加为 p）', () => {
+    expect(matchEditorKey(keyEvent('P', { shift: true }), true)).toEqual({ type: 'promote' })
+    expect(matchEditorKey(keyEvent('p', { shift: true }), true)).toEqual({ type: 'promote' })
+  })
+
+  it('★ Shift+P 无选中节点 → 不匹配（无接收者，把键让给浏览器）', () => {
+    expect(matchEditorKey(keyEvent('P', { shift: true }), false)).toBeNull()
+    expect(matchEditorKey(keyEvent('p', { shift: true }), false)).toBeNull()
+  })
+
+  it('★ Shift+P 带 Ctrl / Cmd / Alt → 不匹配（组合键让位）', () => {
+    expect(matchEditorKey(keyEvent('P', { shift: true, ctrl: true }), true)).toBeNull()
+    expect(matchEditorKey(keyEvent('P', { shift: true, meta: true }), true)).toBeNull()
+    expect(matchEditorKey(keyEvent('P', { shift: true, alt: true }), true)).toBeNull()
+  })
+
+  it('★ 裸 P / p（无 Shift）→ 不匹配（升格必须显式带 Shift，防止误升格）', () => {
+    expect(matchEditorKey(keyEvent('P'), true)).toBeNull()
+    expect(matchEditorKey(keyEvent('p'), true)).toBeNull()
+  })
+
+  it('★ 其它 Shift 字母组合仍让位（Shift+A / Shift+方向键不受升格规则影响）', () => {
+    expect(matchEditorKey(keyEvent('A', { shift: true }), true)).toBeNull()
+    expect(matchEditorKey(keyEvent('ArrowDown', { shift: true }), true)).toBeNull()
+  })
+
   it('★ 无关注（字母 / 空格 / F5）→ null（不吞用户的其它按键）', () => {
     for (const key of ['a', 'z', ' ', 'F5', 'Home', 'PageDown']) {
       expect(matchEditorKey(keyEvent(key), true)).toBeNull()
@@ -96,6 +122,8 @@ describe('★ 输入态互斥防穿透（架构红线）', () => {
     }
     // Shift+Enter 同样不穿透（输入框里的换行/提交由输入框自己处理）
     expect(matchEditorKey(keyEvent('Enter', { target: input, shift: true }), true)).toBeNull()
+    // Shift+P 同样不穿透（打字中的 P 是字符，不是升格）
+    expect(matchEditorKey(keyEvent('P', { target: input, shift: true }), true)).toBeNull()
   })
 
   it('★ 事件目标为 <textarea> → 全部键位不匹配', () => {
@@ -103,6 +131,7 @@ describe('★ 输入态互斥防穿透（架构红线）', () => {
     for (const key of allMapKeys) {
       expect(matchEditorKey(keyEvent(key, { target: area }), true)).toBeNull()
     }
+    expect(matchEditorKey(keyEvent('P', { target: area, shift: true }), true)).toBeNull()
   })
 
   it('★ 事件目标为 contentEditable（文档编辑器）→ 全部键位不匹配', () => {
@@ -113,6 +142,7 @@ describe('★ 输入态互斥防穿透（架构红线）', () => {
     for (const key of allMapKeys) {
       expect(matchEditorKey(keyEvent(key, { target: div }), true)).toBeNull()
     }
+    expect(matchEditorKey(keyEvent('P', { target: div, shift: true }), true)).toBeNull()
   })
 
   it('★ 事件目标为 <select> → 全部键位不匹配', () => {
@@ -120,6 +150,7 @@ describe('★ 输入态互斥防穿透（架构红线）', () => {
     for (const key of allMapKeys) {
       expect(matchEditorKey(keyEvent(key, { target: select }), true)).toBeNull()
     }
+    expect(matchEditorKey(keyEvent('P', { target: select, shift: true }), true)).toBeNull()
   })
 
   it('isTextEntryTarget：识别输入面，放过普通元素与空目标', () => {
@@ -143,5 +174,11 @@ describe('EDITOR_KEY_HINTS（提示文案与键位表同源）', () => {
     expect(matchEditorKey(keyEvent('Tab'), true)).not.toBeNull()
     expect(matchEditorKey(keyEvent('F2'), true)).not.toBeNull()
     expect(matchEditorKey(keyEvent('1'), true)).not.toBeNull()
+  })
+
+  it('★ 升格提示（⇧P 升格为任务）与键位表同源', () => {
+    const promote = EDITOR_KEY_HINTS.find((hint) => hint.keys === '⇧P')
+    expect(promote).toBeDefined()
+    expect(promote?.label).toBe('升格为任务')
   })
 })

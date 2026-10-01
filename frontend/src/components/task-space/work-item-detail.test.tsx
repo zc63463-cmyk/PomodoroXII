@@ -442,3 +442,66 @@ describe('WorkItemDetail', () => {
     expect(document.querySelector('[data-open-children-hint]')).toBeNull()
   })
 })
+
+// ── PXII-FEAT-TASK-SPACE-P0（2026-10-01）：工作导图入口 + 幕布描述块 ──────────
+describe('WorkItemDetail: 查看工作导图入口（P0-2）', () => {
+  it('provides onOpenWorkMap → renders the button and forwards the click', () => {
+    const onOpenWorkMap = vi.fn()
+    render(createElement(WorkItemDetail, {
+      workItem: item(),
+      definitions,
+      onOpenWorkMap,
+    }))
+    const button = screen.getByRole('button', { name: '查看工作导图' })
+    expect(button).toBeTruthy()
+    expect(button.getAttribute('title')).toBe('查看会话演进导图')
+    fireEvent.click(button)
+    expect(onOpenWorkMap).toHaveBeenCalledTimes(1)
+  })
+
+  it('omits the entry when onOpenWorkMap is not provided', () => {
+    render(createElement(WorkItemDetail, {
+      workItem: item(),
+      definitions,
+    }))
+    expect(screen.queryByRole('button', { name: '查看工作导图' })).toBeNull()
+  })
+})
+
+describe('WorkItemDetail: 幕布描述块（P0-3，与导图 DescBlock 视觉同构）', () => {
+  it('renders a non-empty description as the desc block (bar + muted text)', () => {
+    render(createElement(WorkItemDetail, {
+      workItem: item({ description: '第一行\n第二行' }),
+      definitions,
+    }))
+    const block = document.querySelector('[data-desc-block]')
+    expect(block).not.toBeNull()
+    expect(block?.className).toContain('wm-desc-container')
+    // 左竖线（bar）与弱化文本（text）两个同构件都在
+    expect(block?.querySelector('.wm-desc-bar')).not.toBeNull()
+    const text = block?.querySelector('.wm-desc-text')
+    expect(text?.textContent).toBe('第一行\n第二行')
+  })
+
+  it('keeps multi-line descriptions verbatim (pre-wrap payload from promote)', () => {
+    render(createElement(WorkItemDetail, {
+      workItem: item({ description: '甲\n乙\n丙' }),
+      definitions,
+    }))
+    expect(document.querySelector('[data-desc-block] .wm-desc-text')?.textContent).toBe('甲\n乙\n丙')
+  })
+
+  it('renders no desc block when description is null or whitespace', () => {
+    const { unmount } = render(createElement(WorkItemDetail, {
+      workItem: item({ description: null }),
+      definitions,
+    }))
+    expect(document.querySelector('[data-desc-block]')).toBeNull()
+    unmount()
+    render(createElement(WorkItemDetail, {
+      workItem: item({ description: '   ' }),
+      definitions,
+    }))
+    expect(document.querySelector('[data-desc-block]')).toBeNull()
+  })
+})
