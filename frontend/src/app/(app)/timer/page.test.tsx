@@ -682,7 +682,7 @@ describe('TimerPage 双体系兼容 · 准备态模式（2026-09-16）', () => {
   beforeEach(seedIdleTimerPage)
 
   it('★ 启动成功后为选中的 L3 建岛（ADR-0008 S2：fire-and-forget，不阻断会话）', async () => {
-    // 在 l2-x 下补一个三级项，并勾进本次计划
+    // 在 l2-x 下补一个三级项，经「任务选择」Modal 勾进本次计划（②落地后的路径）
     useTaskSpaceStore.setState((current) => ({
       workItems: [
         ...current.workItems,
@@ -691,7 +691,11 @@ describe('TimerPage 双体系兼容 · 准备态模式（2026-09-16）', () => {
     }) as never)
     render(createElement(TimerPage))
 
+    fireEvent.click(await screen.findByTestId('launcher-browse-all'))
     fireEvent.click(await screen.findByRole('checkbox', { name: '卡点分析记录' }))
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    await waitFor(() => expect(screen.queryByTestId('task-picker-modal')).toBeNull())
+
     fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
 
     await waitFor(() => expect(createLaunchSessionIslandsMock).toHaveBeenCalledWith(
@@ -700,6 +704,39 @@ describe('TimerPage 双体系兼容 · 准备态模式（2026-09-16）', () => {
         startedAt: expect.any(String),
         level3WorkItemIds: ['l3-plan'],
       }),
+    ))
+  })
+
+  it('★ ② 任务选择 Modal：勾三级 → 关闭 → 启动器摘要可见（无内联控件），CTA 载荷带计划', async () => {
+    useTaskSpaceStore.setState((current) => ({
+      workItems: [
+        ...current.workItems,
+        { id: 'l3-plan', depth: 3, parentId: 'l2-x', title: '卡点分析记录', displayKey: 'P-3', version: 1 },
+      ],
+    }) as never)
+    render(createElement(TimerPage))
+
+    // 打开 Modal：含归属 select + 三级 checkbox + 筛选（外派单验收 1）
+    fireEvent.click(await screen.findByTestId('launcher-browse-all'))
+    expect(await screen.findByTestId('task-picker-modal')).toHaveAttribute('role', 'dialog')
+    expect(screen.getByLabelText('Level 2 attribution')).toBeInTheDocument()
+    expect(screen.getByLabelText('搜索工作项')).toBeInTheDocument()
+    expect(screen.getByLabelText('按状态筛选')).toBeInTheDocument()
+
+    // 勾三级 → 关闭
+    fireEvent.click(await screen.findByRole('checkbox', { name: '卡点分析记录' }))
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    await waitFor(() => expect(screen.queryByTestId('task-picker-modal')).toBeNull())
+
+    // 启动器摘要可见；归属 select 不再内联在启动器里（外派单验收 3）
+    expect(screen.queryByLabelText('Level 2 attribution')).toBeNull()
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('归属：Ship feature')
+    expect(screen.getByTestId('launcher-attribution-summary')).toHaveTextContent('三级计划 1 项')
+
+    // 开始专注仍可达：载荷带归属与计划（外派单验收 5）
+    fireEvent.click(screen.getByRole('button', { name: 'Start focus session' }))
+    await waitFor(() => expect(coordinatorSpies.start).toHaveBeenCalledWith(
+      expect.objectContaining({ level2WorkItemId: 'l2-x', level3WorkItemIds: ['l3-plan'] }),
     ))
   })
 

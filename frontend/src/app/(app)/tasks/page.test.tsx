@@ -77,8 +77,10 @@ describe('TasksPage session launch wiring', () => {
     const before = useTaskSpaceStore.getState().selectedWorkItemId
 
     // The timer page derives the launcher selection from the same store key.
-    const launcherSource = readFileSync(resolve(process.cwd(), 'src/components/timer/session-launcher.tsx'), 'utf8')
-    expect(launcherSource).toMatch(/initialWorkItemId/)
+    // ② 任务选择 Modal 落地后（2026-10-02）：派生从启动器内部上移到 timer 页面
+    //（同一 store key → deriveLaunchSelection → Modal 与启动器共享），契约不变。
+    const timerSource = readFileSync(resolve(process.cwd(), 'src/app/(app)/timer/page.tsx'), 'utf8')
+    expect(timerSource).toMatch(/deriveLaunchSelection\(workItems, selectedWorkItemId\)/)
 
     expect(before).toBe('l2')
   })
