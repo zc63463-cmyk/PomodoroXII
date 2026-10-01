@@ -52,7 +52,8 @@ import { appendThoughtNode } from '@/lib/work-map/thought-nodes'
 import { applyMapNodeEdit, type MapNodeEditOp } from '@/lib/work-map/node-edits'
 import type { ThoughtType } from '@/lib/work-map/thought-types'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
-import { createLaunchSessionIslands } from '@/lib/work-map/session-island-launch'
+import { buildSessionIsland } from '@/lib/work-map/session-island'
+import { createLaunchSessionIslands, formatSessionIslandTitle } from '@/lib/work-map/session-island-launch'
 import { canonicalNow } from '@/lib/direct-command-intents'
 import { spaceDBManager } from '@/services/space-db'
 import { metaDB } from '@/services/meta-database'
@@ -335,21 +336,31 @@ export default function TimerPage() {
   //   ② 是 2026-09-30 真机验收抓到的竞态修复：建岛是 start 之后 fire-and-forget 的
   //   另一次网络往返，端口首读可能落在"图在但本次会话岛还没写进去"的中间态。
   // 失败一律 fail-quiet：端口退化占位文案，不阻断计时（不变量 4）。
-  const [sessionMapText, setSessionMapText] = useState<string | null>(null)
+  //
+  // ★ 2026-10-01（拆解自动切换）：缓存**必须带键**。运行中新建三级会把当前项
+  //   自动切到新 L3，而重读是一次网络往返 —— 切换后、重读落地前，旧 L3 的原文
+  //   仍留在 state 里；若下游（quickRecord / editMap）把它当作新 L3 的 base 写回，
+  //   上一个 L3 的正文会被整份写进新 L3 的文件。键不匹配即视为"无缓存"。
+  const [sessionMap, setSessionMap] = useState<{ workItemId: string; text: string | null } | null>(null)
+  // 对外仍以"当前键的文本（或 null）"呈现 —— 下游（编辑区 / 小视图 / 快速记录）
+  // 的既有契约不变；变的只是"键不匹配时不认这份缓存"。
+  const sessionMapText = sessionMap !== null && sessionMap.workItemId === focusedWorkItemId
+    ? sessionMap.text
+    : null
   const [focusCid, setFocusCid] = useState<string | null>(null)
   const [mapRefreshSeq, setMapRefreshSeq] = useState(0)
   useEffect(() => {
     let cancelled = false
     if (activeSessionId === null || focusedWorkItemId === null || runningBreak) {
-      setSessionMapText(null)
+      setSessionMap(null)
       setFocusCid(null)
       return
     }
     void readWorkMap(focusedWorkItemId)
-      .then((text) => { if (!cancelled) setSessionMapText(text) })
+      .then((text) => { if (!cancelled) setSessionMap({ workItemId: focusedWorkItemId, text }) })
       .catch((cause) => {
         if (cancelled) return
-        setSessionMapText(null)
+        setSessionMap(null)
         console.warn(
           `[timer-map-port] 导图读取失败（fail-soft，端口退化为占位）: ${cause instanceof Error ? cause.message : String(cause)}`,
         )
@@ -433,13 +444,101 @@ export default function TimerPage() {
     if (focusedWorkItemId === null || activeSessionId === null) {
       throw new Error('当前没有进行中的会话')
     }
+    // sessionMapText 只在键匹配时非空（见上面的带键缓存）：键已切换但重读未落地
+    // 时这里会回落到一次真实读取，绝不把上一个 L3 的原文写进当前 L3。
     const base = sessionMapText ?? (await readWorkMap(focusedWorkItemId)) ?? ''
     const result = appendThoughtNode(base, { sessionId: activeSessionId, type, title })
     if (!result.changed) throw new Error(result.reason ?? '未产生变更')
     await writeWorkMap(focusedWorkItemId, result.text)
     // 立即反映（不等下一次读）；服务端已是同一份内容，无需额外对齐往返
-    setSessionMapText(result.text)
+    setSessionMap({ workItemId: focusedWorkItemId, text: result.text })
     setFocusCid(null)
+  }
+
+  /**
+   * 拆解后的导图生长（2026-10-01）：为新 L3 的 `.mm.md` 建**本次会话的岛**，
+   * 并把新项写成岛内的一个 `todo` 节点。
+   *
+   * 写侧只用两个既有原语 —— `buildSessionIsland`（建岛）与 `appendThoughtNode`
+   * （落节点），页面层不做任何 Markdown 解析/字符串拼接（D11/D16-b 的写入纪律）。
+   * 岛标题必须与启动路径**同源**（`formatSessionIslandTitle` + 会话 `startedAt`）：
+   * 同一次会话在它出现过的每张图上都得叫同一个名字，否则同一个 session_id
+   * 在不同 L3 的图上会有两个岛标题。
+   *
+   * 失败策略（ADR-0008 不变量 4）：整段 fail-soft —— 读 / 建 / 写任何一步失败都只
+   * `console.warn` 并返回 null，绝不抛回调用方。拆解创建的是**正式 WorkItem**，
+   * 导图只是辅助能力，不能反过来阻断创建、切换与计时。
+   *
+   * @returns 本次写盘的导图原文；未产生变更或失败时 null（调用方据此决定是否刷新端口）
+   */
+  const growMapForNewLevel3 = async (
+    workItemId: string,
+    workItemTitle: string,
+    todoTitle: string,
+  ): Promise<string | null> => {
+    if (activeSessionId === null) return null
+    try {
+      // null = 尚无导图 → 空串走 buildSessionIsland 的新建文档分支
+      const existing = (await readWorkMap(workItemId)) ?? ''
+      // ① 建岛。**必须无条件调用**（幂等键 = sessionId，已有岛时返回
+      //    session_island_exists 且不变更）：新 L3 的图可能存在但没有**本次会话**的
+      //    岛（L3 早于本会话存在），此时 appendThoughtNode 会以
+      //    `session_node_not_found` 拒绝 —— 先补齐岛才谈得上往里落节点。
+      //
+      //    level3Titles 只列**本次已有的其它**计划项：岛上的裸 `### 标题` 是"这次
+      //    会话投入过哪些项"的清单，而新项由下面的 appendThoughtNode 以带
+      //    thought_type 的 todo 节点写入。若这里也带上新项标题，同一个标题会在
+      //    岛上落两个节点（一个裸标题、一个带类型的），是明确的重复。
+      const siblingTitles = plans
+        .map((plan) => plan.titleSnapshot)
+        .filter((title) => title.trim() !== '' && title !== todoTitle)
+      const startedAt = new Date(aggregate?.session.startedAt ?? '')
+      const island = buildSessionIsland(existing, {
+        sessionId: activeSessionId,
+        workItemTitle,
+        sessionTitle: formatSessionIslandTitle(
+          Number.isNaN(startedAt.getTime()) ? new Date() : startedAt,
+        ),
+        level3Titles: siblingTitles,
+        dir: 'right',
+      })
+      // 无 H1 / 建岛自身失败等结构性问题：不猜测、不写盘（appendThoughtNode 同样会拒）
+      if (!island.changed && island.reason !== 'session_island_exists') {
+        console.warn(
+          `[timer-map-grow] 新 L3 ${workItemId} 建岛未产生变更（${island.reason ?? 'unchanged'}），跳过节点追加`,
+        )
+        return null
+      }
+
+      // ② 落节点：本次拆解出来的子行动 = 本次会话岛下的一个 todo。
+      const appended = appendThoughtNode(island.text, {
+        sessionId: activeSessionId,
+        type: 'todo',
+        title: todoTitle,
+      })
+      if (!appended.changed) {
+        // 岛建好了但节点没落上：把岛本身写回仍有价值（本次会话在该 L3 图上留下
+        // 痕迹），原因如实记录，不升级为失败。
+        console.warn(
+          `[timer-map-grow] 新 L3 ${workItemId} 的 todo 节点未写入（${appended.reason ?? 'unchanged'}）`,
+        )
+        if (!island.changed) return null
+        await writeWorkMap(workItemId, island.text)
+        setSessionMap({ workItemId, text: island.text })
+        return island.text
+      }
+
+      await writeWorkMap(workItemId, appended.text)
+      // 立即反映：拆解后 setCurrent 会把当前项切到新 L3，带键缓存让编辑区/小视图
+      // 直接拿到最终文本，不必等下一次读回（键不匹配时 getter 不会取用它）。
+      setSessionMap({ workItemId, text: appended.text })
+      return appended.text
+    } catch (cause) {
+      console.warn(
+        `[timer-map-grow] 新 L3 ${workItemId} 的导图生长失败（fail-soft，不阻断拆解）: ${cause instanceof Error ? cause.message : String(cause)}`,
+      )
+      return null
+    }
   }
 
   /**
@@ -459,7 +558,7 @@ export default function TimerPage() {
     const result = applyMapNodeEdit(base, op)
     if (!result.changed) throw new Error(result.reason ?? '未产生变更')
     await writeWorkMap(focusedWorkItemId, result.text)
-    setSessionMapText(result.text)
+    setSessionMap({ workItemId: focusedWorkItemId, text: result.text })
     setFocusCid(null)
   }
   /**
@@ -855,7 +954,27 @@ export default function TimerPage() {
     const level2WorkItemId = aggregate.context?.level2WorkItemId
     if (!level2WorkItemId) throw new Error('session_level2_missing')
     const created = await createChild(level2WorkItemId, { title })
+    // ★ 顺序硬约束：加入计划必须**早于** setCurrent —— 本地仓储与后端都要求
+    //   切换目标已在计划内（focus-session-repository.ts:1331 `session_plan_item_not_found`；
+    //   后端 policy 同款 not_found 校验），反序必被拒。
     await addPlanItem(created.id)
+    // 导图生长（fail-soft，见 growMapForNewLevel3）必须在 setCurrent **之前**完成：
+    //   切换后读图 effect 会立刻为新 L3 拉一次导图，若那次读落在写入之前，用户会先
+    //   看到一次「还没有导图记录」再跳成有岛 —— 顺序对了就只有最终态这一帧。
+    const grown = await growMapForNewLevel3(created.id, created.title, created.title)
+    try {
+      // 自动切为当前专注项：拆解出的子行动就是下一步要投入的东西。
+      // 失败**不 rethrow** —— setCurrent 内部已 setStableError（全局 error 由页面
+      // 顶部 role=alert 呈现），再往上抛会让 SessionWorkspace 把"已创建成功"谎报成
+      // 创建失败，用户重试就会多出一个重复的 L3。
+      await setCurrent(created.id)
+    } catch {
+      // 已由 setCurrent 上报（全局 error 呈现）；此处只吞掉，避免误报创建失败。
+    }
+    // 端口刷新自增是**必需项**：空计划场景下 focusedWorkItemId 在 setCurrent 之前
+    // 就已经指向新 L3（createChild 会改写 selectedWorkItemId），键没变则读图 effect
+    // 不会重跑，不 bump 就永远停在占位文案上。
+    if (grown !== null) setMapRefreshSeq((seq) => seq + 1)
   }
 
   const appendBlocks = async (workItemId: string, blocks: NoteBlock[], operationId: string) => {
@@ -1113,6 +1232,9 @@ export default function TimerPage() {
             onSetCurrent: setCurrent, onSetCompletionDraft: setCompletion,
             onAddPlanItem: addPlanItem, onRemovePlanItem: removePlanItem,
             onCreatePlanItem: createPlanItem,
+            // 拆解出的新项挂在**会话的二级归属**下（见 createPlanItem 的 parentId 来源）——
+            // 轻提示如实说明归属，避免用户以为它挂在当前专注的三级项下。
+            parentTitle: level2WorkItem?.title ?? null,
             onUpdateSessionNote: updateSessionNote,
             onFlushWorkItemNote: async (reason) => { await draftController?.flush(reason) },
             onSwitchWorkItemNote: async (nextWorkItemId) => {

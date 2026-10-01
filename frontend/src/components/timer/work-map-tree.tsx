@@ -10,6 +10,19 @@
  *   随容器自适应 —— 因此"小视图 vs 大编辑区"**是同一个组件的两种容器宽度**，
  *   没有第二套代码（D13「最小集」纪律：一份渲染器）
  * - **不写任何事实**：纯展示（形状/颜色映射只在渲染层，不落盘）
+ * - **归档岛**（D19-a）：`isArchive` 虚拟岛画成收拢卡片（不画历史节点），
+ *   点击经 `onExpandArchive` 上抛，展开与否由调用方持有状态
+ * - **依赖徽章**（D19-b 紧凑态）：实体节点（`refId`）可挂 `.wm-dep-badge`
+ *   （红 ⚡N / 绿 ✓ + 原生 tooltip），数据由 `dependency-map-adapter` 统计；
+ *   不跑连线避让，自由边完整语义保留在 `root.note.edges`（导出侧）
+ * - **地标卡与聚焦**（S4-3，D19-c 纯自持增强）：会话岛外包实底圆角卡 +
+ *   左色条（当前会话蓝 / 历史灰）+ 右上胶囊角标（N 项思考 + 5 类思考点阵）；
+ *   双击卡片 / 点击角标上抛聚焦请求，viewBox 平滑切到单岛（rAF 插值），
+ *   非聚焦岛挂 `.wm-island--dimmed`（纯 CSS opacity，DOM 不动）
+ * - **幕布描述块**（PXII-FEAT-DESC-BLOCK）：节点盒内画左引用细竖线 + 缩进小灰字
+ *   （对齐 MindCanvas `DescBlock`），几何取自 `descBlockGeometry`（与度量同源）；
+ *   超出可见行上限的全文走原生 `<title>` tooltip —— 替代了原先"只有一个小橙点"的
+ *   降级形态（`node.box.h` 不足以容纳描述时才回落到橙点）
  *
  * ## 视觉（D9 形状 + 颜色双重编码）
  * 会话节点 = 高亮框（当前会话岛根）；思考节点 = 形状（●洞察 ▲问题 ◆决策 ○复盘 □待办）+
@@ -17,10 +30,21 @@
  * 极简态（沉浸）由外层 `[data-minimal='true']` 派生 CSS：**只隐文字，几何不变**
  * （零布局抖动）。
  */
-import type { ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 
-import { fitTextToBox, type MapIslandLayout, type MapTreeNode } from '@/lib/work-map/island-layout'
-import type { ThoughtType } from '@/lib/work-map/thought-types'
+import {
+  DESC_BAR_W,
+  DESC_INDENT,
+  DESC_INSET_X,
+  NODE_H_BASE,
+  descBlockGeometry,
+  fitDescLineToBox,
+  fitTextToBox,
+  visibleDescLines,
+  type MapIslandLayout,
+  type MapTreeNode,
+} from '@/lib/work-map/island-layout'
+import { THOUGHT_TYPES, type ThoughtType } from '@/lib/work-map/thought-types'
 
 export interface WorkMapTreeProps {
   /** 要渲染的岛（1..N）；几何来自 `readWorkMapLayout` */
@@ -53,29 +77,44 @@ export interface WorkMapTreeProps {
    * 当 onSelectNode 未给而 onFocusNode 给定时生效。不与 onSelectNode 并用（ADR-0008 D15）。
    */
   onFocusNode?: (cid: string) => void
+  /**
+   * 点击**归档岛卡片**（`isArchive` 虚拟岛，ADR-0008 D19-a）→ 一键展开全部历史
+   * （等同「全部展开」）。未提供时归档卡为纯展示。
+   */
+  onExpandArchive?: () => void
+  /**
+   * 依赖状态徽章（ADR-0008 D19-b 双轨制 · 紧凑态）：键 = 节点实体引用 id
+   * （``MapTreeNode.refId``，即 ``@work_item:<id>`` 的 ``<id>``）。
+   * 上游 > 0 才渲染：有未完成上游 → 红 ``⚡ N``；全部完成 → 绿 ``✓``。
+   * 数据源 = ``dependency-map-adapter`` 的统计映射。未提供则不渲染任何徽章。
+   */
+  dependencyBadges?: ReadonlyMap<string, WorkMapDependencyBadge>
+  /**
+   * 聚焦岛（S4-3 fitToIsland）：非空的岛在 viewBox 中单岛呈现，其余岛挂
+   * ``.wm-island--dimmed``（纯 CSS opacity，不破坏 DOM）。null / 缺省 = 全览。
+   */
+  focusedIslandId?: string | null
+  /**
+   * 聚焦目标 bounds（由调用方按岛 bounds + 32px 安全内边距意图传入原始 bounds，
+   * 本组件统一加 32px padding 计算目标 viewBox）。null / 缺省 = 全岛并集。
+   */
+  focusBounds?: { minX: number; minY: number; maxX: number; maxY: number } | null
+  /**
+   * 聚焦请求上抛（双击岛地标卡 / 点击胶囊角标「聚焦此岛」）→ 调用方持有
+   * focusedIslandId 状态（S4-3）。未提供时卡片无聚焦交互（编辑区/小视图场景）。
+   */
+  onIslandFocusRequest?: (islandId: string) => void
+}
+
+/** 一个节点的依赖徽章数据（D19-b：紧凑态不跑连线避让，用 Badge 表达）。 */
+export interface WorkMapDependencyBadge {
+  /** 上游 blocker 总数 */
+  upstream: number
+  /** 其中未完成（未 completed）的上游数 */
+  blocked: number
 }
 
 const PAD = 12
-
-function unionBounds(islands: readonly MapIslandLayout[]): {
-  minX: number
-  minY: number
-  maxX: number
-  maxY: number
-} {
-  let minX = Number.POSITIVE_INFINITY
-  let minY = Number.POSITIVE_INFINITY
-  let maxX = Number.NEGATIVE_INFINITY
-  let maxY = Number.NEGATIVE_INFINITY
-  for (const island of islands) {
-    minX = Math.min(minX, island.bounds.minX)
-    minY = Math.min(minY, island.bounds.minY)
-    maxX = Math.max(maxX, island.bounds.maxX)
-    maxY = Math.max(maxY, island.bounds.maxY)
-  }
-  if (!Number.isFinite(minX)) return { minX: 0, minY: 0, maxX: 1, maxY: 1 }
-  return { minX, minY, maxX, maxY }
-}
 
 /**
  * 思考类型形状（9px 视口，位于节点盒左侧 10px 处）。
@@ -105,6 +144,7 @@ function NodeBox({
   focused,
   dimmed,
   highlighted,
+  badge,
   onSelect,
   onFocus,
 }: {
@@ -117,11 +157,35 @@ function NodeBox({
   dimmed: boolean
   /** 跨岛筛选：命中类型 → 满 opacity + 描边环 */
   highlighted: boolean
+  /** 依赖状态徽章（D19-b 紧凑态）；null / upstream 0 → 不渲染 */
+  badge: WorkMapDependencyBadge | null
   onSelect?: (cid: string) => void
   onFocus?: (cid: string) => void
 }): ReactNode {
-  const label = fitTextToBox(node.text === '' ? '（无标题）' : node.text, node.box.w, node.depth)
+  const badgeText =
+    badge !== null && badge.upstream > 0
+      ? badge.blocked > 0
+        ? `⚡ ${badge.blocked}`
+        : '✓'
+      : null
+  const badgeWidth = badgeText === null ? 0 : 10 + badgeText.length * 6.5
+  const label = fitTextToBox(
+    node.text === '' ? '（无标题）' : node.text,
+    badgeText === null ? node.box.w : node.box.w - badgeWidth - 6,
+    node.depth,
+  )
   const textX = node.thoughtType !== null ? 24 : 12
+
+  // ── 幕布描述块（PXII-FEAT-DESC-BLOCK）────────────────────────────────
+  // 几何来自 `descBlockGeometry`（与 `measureWorkMapNode` 同一函数）：预留高度
+  // 与画出的行数**同源**，不可能出现"文字画出盒外"。`box.h` 不够（手工构造的
+  // 岛 / 老几何）时降级成右上角小圆点 —— 至少让"此节点有注释"可见。
+  const descGeo = descBlockGeometry(node.comment, node.box.h)
+  const descLines = visibleDescLines(node.comment)
+  const hasDesc = descGeo !== null && node.box.h > NODE_H_BASE + 2
+  // 标题行带高：有描述时标题只占顶部基础带，纵向居中于该带内（不再占满整盒）
+  const titleCy = hasDesc ? NODE_H_BASE / 2 : node.box.h / 2
+  const commentLines = node.comment ?? []
 
   const isSelectMode = onSelect !== undefined
   const isFocusMode = !isSelectMode && onFocus !== undefined
@@ -150,6 +214,21 @@ function NodeBox({
         : `定位：${node.text === '' ? '（无标题）' : node.text}`)
     : undefined
 
+  // 原生 tooltip：完整标题 + 完整注释（> 3 行的长注释靠这里 100% 可读）
+  const readonlyHint = actionCid === null
+    ? (isSession ? '会话节点（只读）' : '存量节点（无 cid，只读）')
+    : null
+  const tooltipParts: string[] = []
+  if (commentLines.length > 0) {
+    tooltipParts.push(
+      node.text === '' ? '（无标题）' : node.text,
+      '',
+      `[注释备忘]:\n${commentLines.join('\n')}`,
+    )
+  }
+  if (readonlyHint !== null) tooltipParts.push(readonlyHint)
+  const tooltip = tooltipParts.length > 0 ? tooltipParts.join('\n\n') : null
+
   return (
     <g
       transform={`translate(${node.box.x} ${node.box.y})`}
@@ -165,6 +244,7 @@ function NodeBox({
       data-session={isSession ? 'true' : 'false'}
       data-cid={actionCid ?? undefined}
       data-comment={node.comment !== null ? 'true' : undefined}
+      data-desc-lines={hasDesc ? descGeo.lineCount : undefined}
       data-readonly={actionCid === null ? 'true' : undefined}
       data-selected={selected ? 'true' : undefined}
       data-focus={focused ? 'true' : undefined}
@@ -185,10 +265,8 @@ function NodeBox({
           : undefined
       }
     >
-      {/* 只读节点的 hover 提示（SVG 原生 tooltip）——点击无效但原因可见 */}
-      {actionCid === null ? (
-        <title>{isSession ? '会话节点（只读）' : '存量节点（无 cid，只读）'}</title>
-      ) : null}
+      {/* 原生 tooltip：完整标题 + 完整注释（只读节点另附只读原因） */}
+      {tooltip !== null ? <title>{tooltip}</title> : null}
       <rect
         width={node.box.w}
         height={node.box.h}
@@ -198,24 +276,302 @@ function NodeBox({
         }
       />
       {node.thoughtType !== null ? (
-        <TypeShape x={12} y={node.box.h / 2} type={node.thoughtType} />
+        <TypeShape x={12} y={titleCy} type={node.thoughtType} />
       ) : (
-        <circle cx={12} cy={node.box.h / 2} r={3} className="wm-shape wm-shape--plain" />
+        <circle cx={12} cy={titleCy} r={3} className="wm-shape wm-shape--plain" />
       )}
       {/* 字号与度量同一档（root/branch/leaf）—— 截断宽度才不会与绘制宽度分叉 */}
       <text
         x={textX}
-        y={node.box.h / 2}
+        y={titleCy}
         dy="0.32em"
         fontSize={node.depth === 0 ? 12.5 : node.depth === 1 ? 12 : 11}
         className="wm-text"
       >
         {label}
       </text>
-      {/* 带注释的节点：右上角小圆点（D13 步 3-2 §3.5） */}
-      {node.comment !== null ? (
+      {/* 幕布描述块：左引用竖线 + 缩进小灰字（对齐 MindCanvas DescBlock） */}
+      {hasDesc ? (
+        <g className="wm-desc-group" data-testid="wm-desc-group">
+          <line
+            x1={DESC_INSET_X}
+            y1={descGeo.barTop}
+            x2={DESC_INSET_X}
+            y2={descGeo.barBottom}
+            className="wm-desc-bar"
+            strokeWidth={DESC_BAR_W}
+            strokeLinecap="round"
+          />
+          <text
+            x={DESC_INSET_X + DESC_BAR_W + DESC_INDENT}
+            className="wm-desc-text"
+            fontSize={10}
+            fontFamily="inherit"
+          >
+            {descLines.map((line, index) => (
+              <tspan
+                key={`${index}-${line}`}
+                x={DESC_INSET_X + DESC_BAR_W + DESC_INDENT}
+                y={descGeo.baselineOf(index)}
+              >
+                {fitDescLineToBox(line, node.box.w)}
+              </tspan>
+            ))}
+          </text>
+        </g>
+      ) : null}
+      {/* 有注释但盒高不足以画描述（手工构造岛 / 老几何）→ 降级小圆点 */}
+      {node.comment !== null && !hasDesc ? (
         <circle cx={node.box.w - 6} cy={6} r={3.5} className="wm-comment-dot" />
       ) : null}
+      {/* 依赖状态徽章（D19-b 紧凑态）：红色 ⚡N = 有未完成上游；绿 ✓ = 全部完成 */}
+      {badgeText !== null ? (
+        <g
+          className={`wm-dep-badge ${badge !== null && badge.blocked > 0 ? 'wm-dep-badge--blocked' : 'wm-dep-badge--ok'}`}
+          data-testid="wm-dep-badge"
+          data-blocked={badge !== null && badge.blocked > 0 ? 'true' : 'false'}
+          data-upstream={badge?.upstream ?? 0}
+        >
+          <title>
+            {`上游依赖 ${badge?.upstream ?? 0} 项 · 未完成 ${badge?.blocked ?? 0} 项`}
+          </title>
+          <rect
+            x={node.box.w - badgeWidth - 6}
+            y={titleCy - 8}
+            width={badgeWidth}
+            height={16}
+            rx={8}
+          />
+          <text
+            x={node.box.w - badgeWidth / 2 - 6}
+            y={titleCy}
+            dy="0.32em"
+            textAnchor="middle"
+          >
+            {badgeText}
+          </text>
+        </g>
+      ) : null}
+    </g>
+  )
+}
+
+/**
+ * 历史会话**归档岛卡片**（ADR-0008 D19-a）：虚拟岛的呈现形态 —— 一张收拢卡片，
+ * 不画任何历史节点（节点在几何层已收拢为计数）。点击 = 一键展开全部历史。
+ */
+function ArchiveCard({
+  island,
+  onExpand,
+  dimmed,
+}: {
+  island: MapIslandLayout
+  onExpand?: () => void
+  dimmed: boolean
+}): ReactNode {
+  const count = island.archivedCount ?? 0
+  const box = island.tree.box
+  const interactive = onExpand !== undefined
+  return (
+    <g
+      transform={`translate(${box.x} ${box.y})`}
+      className={dimmed ? 'wm-island--archive wm-island--dimmed' : 'wm-island--archive'}
+      data-testid="wm-archive-island"
+      data-archived-count={count}
+      role={interactive ? 'button' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={interactive ? `展开历史全览（共 ${count} 次早期专注）` : undefined}
+      onClick={interactive ? onExpand : undefined}
+      onKeyDown={
+        interactive
+          ? (event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                onExpand?.()
+              }
+            }
+          : undefined
+      }
+    >
+      <rect width={box.w} height={box.h} rx={10} className="wm-box" />
+      <text x={16} y={box.h / 2 - 6} className="wm-archive-title">
+        📁 早期会话 (共 {count} 次专注)
+      </text>
+      <text x={16} y={box.h / 2 + 16} className="wm-archive-sub">
+        {interactive ? '点击展开历史全览' : '已展开全部历史'}
+      </text>
+    </g>
+  )
+}
+
+/** 岛地标卡外框相对岛 bounds 的外扩量（顶部留胶囊角标条位，S4-3）。 */
+const FRAME_PAD = { top: 28, right: 12, bottom: 12, left: 12 }
+/** 胶囊角标几何（高度 / 圆点间距 / 思考类型点阵数）。 */
+const BADGE_H = 18
+const DOT_GAP = 10
+/** viewBox 切换的平滑动画时长（ms；prefers-reduced-motion 时直接落位）。 */
+const VIEW_BOX_EASE_MS = 240
+
+type WorkMapBounds = { minX: number; minY: number; maxX: number; maxY: number }
+
+/** 岛的「视觉 bounds」：会话岛含地标卡外框（union viewBox 不得裁掉卡片）。 */
+function islandVisualBounds(island: MapIslandLayout): WorkMapBounds {
+  if (island.isArchive === true || island.sessionId === null) return island.bounds
+  return {
+    minX: island.bounds.minX - FRAME_PAD.left,
+    minY: island.bounds.minY - FRAME_PAD.top,
+    maxX: island.bounds.maxX + FRAME_PAD.right,
+    maxY: island.bounds.maxY + FRAME_PAD.bottom,
+  }
+}
+
+function parseViewBox(value: string): [number, number, number, number] | null {
+  const parts = value.split(/[\s,]+/).map(Number)
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null
+  return [parts[0], parts[1], parts[2], parts[3]]
+}
+
+const sameViewBox = (a: [number, number, number, number], b: [number, number, number, number]): boolean =>
+  a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3]
+
+/**
+ * viewBox 平滑插值（S4-3 fitToIsland）：SVG 的 viewBox 是属性、CSS 无法过渡，
+ * 用 rAF 逐帧 easeOutCubic 逼近目标；最终帧**逐字**落在目标串（单测可精确断言）。
+ * 无 rAF / 偏好减少动态时直接落位（可及性 + jsdom 容错）。
+ */
+function useAnimatedViewBox(target: string): string {
+  const [display, setDisplay] = useState(target)
+  const displayRef = useRef(target)
+  const rafRef = useRef<number | null>(null)
+  useEffect(() => {
+    const from = parseViewBox(displayRef.current)
+    const to = parseViewBox(target)
+    const settle = (): void => {
+      displayRef.current = target
+      setDisplay(target)
+    }
+    if (
+      from === null ||
+      to === null ||
+      sameViewBox(from, to) ||
+      typeof window === 'undefined' ||
+      typeof window.requestAnimationFrame !== 'function' ||
+      window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true
+    ) {
+      settle()
+      return
+    }
+    // ★ 起点**惰性取自首帧时间戳**：rAF 的回调时间戳与 performance.now() 不同源
+    //   （jsdom 实测两者相差近 1s），混用会得到负进度、永不收敛。
+    let start: number | null = null
+    const tick = (now: number): void => {
+      const stamp =
+        typeof now === 'number' && Number.isFinite(now) ? now : window.performance.now()
+      if (start === null) start = stamp
+      const t = Math.min(1, Math.max(0, (stamp - start) / VIEW_BOX_EASE_MS))
+      const eased = 1 - (1 - t) ** 3
+      const next = from
+        .map((v, i) => Math.round((v + (to[i] - v) * eased) * 10) / 10)
+        .join(' ')
+      displayRef.current = next
+      setDisplay(next)
+      if (t < 1) {
+        rafRef.current = window.requestAnimationFrame(tick)
+      } else {
+        settle()
+      }
+    }
+    rafRef.current = window.requestAnimationFrame(tick)
+    return () => {
+      if (rafRef.current !== null) window.cancelAnimationFrame(rafRef.current)
+    }
+  }, [target])
+  return display
+}
+
+/**
+ * 岛**地标卡**（S4-3，对齐 MindCanvas IO-UX 规范）：会话岛外包实底圆角卡 +
+ * 左侧色条（当前会话 systemBlue / 历史中性灰）+ 右上胶囊角标
+ * （「N 项思考」+ 5 类思考点阵，有对应类型节点才点亮）。
+ * 双击卡片或点击角标 → 上抛聚焦请求（D19-c 纯自持增强，无外渲染器）。
+ */
+function IslandFrameCard({
+  island,
+  isCurrent,
+  interactive,
+  onRequestFocus,
+}: {
+  island: MapIslandLayout
+  isCurrent: boolean
+  interactive: boolean
+  onRequestFocus?: (islandId: string) => void
+}): ReactNode {
+  const x = island.bounds.minX - FRAME_PAD.left
+  const y = island.bounds.minY - FRAME_PAD.top
+  const w = island.bounds.maxX - island.bounds.minX + FRAME_PAD.left + FRAME_PAD.right
+  const h = island.bounds.maxY - island.bounds.minY + FRAME_PAD.top + FRAME_PAD.bottom
+  // 思考条目数 = 岛内子节点数（岛根不计）；点阵 = 5 类是否有命中
+  const thoughtCount = Math.max(0, island.nodes.length - 1)
+  const litTypes = new Set<ThoughtType>()
+  for (const node of island.nodes) {
+    if (node.thoughtType !== null) litTypes.add(node.thoughtType)
+  }
+  const countText = `${thoughtCount} 项思考`
+  const textWidth = [...countText].reduce(
+    (sum, ch) => sum + (/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFF00-\uFF60]/.test(ch) ? 10 : 5.6),
+    0,
+  )
+  const dotsWidth = THOUGHT_TYPES.length * DOT_GAP
+  const badgeWidth = 10 + textWidth + 6 + dotsWidth + 8
+  const badgeX = x + w - badgeWidth - 8
+  const badgeY = y + 6
+
+  return (
+    <g
+      className={`wm-island-card${isCurrent ? ' wm-island-card--current' : ''}`}
+      data-testid="wm-island-card"
+      data-island-id={island.rootId}
+      data-thought-count={thoughtCount}
+      onDoubleClick={interactive ? () => onRequestFocus?.(island.rootId) : undefined}
+    >
+      <title>{interactive ? '双击聚焦此岛' : undefined}</title>
+      {/* 实底圆角卡（柔和投影走 CSS filter）；左色条标识当前/历史 */}
+      <rect x={x} y={y} width={w} height={h} rx={12} className="wm-island-frame" />
+      <rect x={x} y={y} width={4} height={h} rx={2} className="wm-island-bar" />
+      {/* 胶囊角标：统计 + 点阵 + 「聚焦此岛」入口 */}
+      <g
+        className="wm-island-badge"
+        data-testid="wm-island-badge"
+        role={interactive ? 'button' : undefined}
+        tabIndex={interactive ? 0 : undefined}
+        aria-label={interactive ? `聚焦此岛：${island.tree.text}（${thoughtCount} 项思考）` : undefined}
+        onClick={interactive ? () => onRequestFocus?.(island.rootId) : undefined}
+        onKeyDown={
+          interactive
+            ? (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onRequestFocus?.(island.rootId)
+                }
+              }
+            : undefined
+        }
+      >
+        <rect x={badgeX} y={badgeY} width={badgeWidth} height={BADGE_H} rx={BADGE_H / 2} />
+        <text x={badgeX + 10} y={badgeY + BADGE_H / 2} dy="0.32em">
+          {countText}
+        </text>
+        {THOUGHT_TYPES.map((type, index) => (
+          <g
+            key={type}
+            transform={`translate(${badgeX + 10 + textWidth + 6 + index * DOT_GAP} ${badgeY + BADGE_H / 2})`}
+            opacity={litTypes.has(type) ? 1 : 0.16}
+            data-lit={litTypes.has(type) ? 'true' : 'false'}
+          >
+            <TypeShape x={0} y={0} type={type} />
+          </g>
+        ))}
+      </g>
     </g>
   )
 }
@@ -230,13 +586,30 @@ export function WorkMapTree({
   highlightType,
   onSelectNode,
   onFocusNode,
+  onExpandArchive,
+  dependencyBadges,
+  focusedIslandId,
+  focusBounds,
+  onIslandFocusRequest,
 }: WorkMapTreeProps): ReactNode {
-  const bounds = unionBounds(islands)
   // 筛选只调「视觉权重」：命中 = 高亮，其余 dim；null = 全亮（D17）
   const filter = highlightType ?? null
-  const width = Math.max(1, bounds.maxX - bounds.minX + PAD * 2)
-  const height = Math.max(1, bounds.maxY - bounds.minY + PAD * 2)
-  const viewBox = `${bounds.minX - PAD} ${bounds.minY - PAD} ${width} ${height}`
+  // 聚焦态（S4-3）：viewBox = 单岛 bounds + 32px 安全内边距；否则全岛并集
+  //（并集计入地标卡外框，避免卡片顶部被裁）。切换经 rAF 插值平滑过渡。
+  const target = focusBounds ?? {
+    minX: Math.min(...islands.map((island) => islandVisualBounds(island).minX), Number.POSITIVE_INFINITY),
+    minY: Math.min(...islands.map((island) => islandVisualBounds(island).minY), Number.POSITIVE_INFINITY),
+    maxX: Math.max(...islands.map((island) => islandVisualBounds(island).maxX), Number.NEGATIVE_INFINITY),
+    maxY: Math.max(...islands.map((island) => islandVisualBounds(island).maxY), Number.NEGATIVE_INFINITY),
+  }
+  const pad = focusBounds === undefined || focusBounds === null ? PAD : 32
+  const width = Math.max(1, target.maxX - target.minX + pad * 2)
+  const height = Math.max(1, target.maxY - target.minY + pad * 2)
+  const viewBox = useAnimatedViewBox(
+    islands.length === 0
+      ? '0 0 1 1'
+      : `${target.minX - pad} ${target.minY - pad} ${width} ${height}`,
+  )
 
   return (
     <svg
@@ -247,6 +620,14 @@ export function WorkMapTree({
       aria-label={label ?? '工作导图'}
     >
       {islands.map((island) => {
+        // 聚焦态（S4-3）：非聚焦岛 dim（纯 CSS opacity，DOM 结构不动）
+        const dimmed = focusedIslandId != null && focusedIslandId !== island.rootId
+        // 归档岛是虚拟卡片（无真实节点/连线），单独呈态；点击上抛「展开历史」
+        if (island.isArchive === true) {
+          return (
+            <ArchiveCard key={island.rootId} island={island} onExpand={onExpandArchive} dimmed={dimmed} />
+          )
+        }
         const current = island.sessionId === sessionId
         // 命中判据只看 thoughtType；无类型节点（会话根 / 存量标题行）在筛选下同样 dim
         const dimById = new Map<string, boolean>()
@@ -254,7 +635,20 @@ export function WorkMapTree({
           dimById.set(node.id, filter !== null && node.thoughtType !== filter)
         }
         return (
-          <g key={island.rootId} data-testid={current ? 'wm-current-island' : undefined}>
+          <g
+            key={island.rootId}
+            className={dimmed ? 'wm-island--dimmed' : undefined}
+            data-testid={current ? 'wm-current-island' : undefined}
+          >
+            {/* 会话岛地标卡（外框/色条/胶囊角标）；根岛与归档卡不套地标卡 */}
+            {island.sessionId !== null ? (
+              <IslandFrameCard
+                island={island}
+                isCurrent={current}
+                interactive={onIslandFocusRequest !== undefined}
+                onRequestFocus={onIslandFocusRequest}
+              />
+            ) : null}
             {island.links.map((link) => {
               // 两端都 dim 才 dim：一端亮则线亮，树结构不被筛选打散（D17）
               const dimLink =
@@ -274,7 +668,18 @@ export function WorkMapTree({
               <NodeBox
                 key={node.id}
                 node={node}
-                isSession={node.sessionId === sessionId}
+                // ★ BUG-WM-001（2026-10-01 修复）：未传 sessionId（准备态主图传
+                //   null）时，`null === null` 曾让根岛与存量节点误挂「本次」蓝框。
+                //   只有真实会话 id 命中岛根的 session_id 才算当前会话节点。
+                isSession={
+                  typeof sessionId === 'string' &&
+                  sessionId !== '' &&
+                  node.sessionId === sessionId
+                }
+                // 依赖徽章：按实体引用 id 对位（D19-b 紧凑态）
+                badge={
+                  node.refId !== null ? (dependencyBadges?.get(node.refId) ?? null) : null
+                }
                 // 可编辑面只在「当前会话岛」：其它岛/无 cid/会话节点一律只读（D16-a）
                 editable={onSelectNode !== undefined && current && !node.sessionNode}
                 selected={

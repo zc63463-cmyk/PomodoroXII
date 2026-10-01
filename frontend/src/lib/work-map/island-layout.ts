@@ -19,16 +19,39 @@
  * ## 边界
  * - fail-soft：解析失败/无根 → `null`（调用方渲染占位）
  * - 不产生任何写入；布局不进事实源（ADR-0008 不变量 1/2）
+ * - 近 N 展开（D19-a）：默认只展开最新 5 个会话岛，更早的历史会话聚合成一个
+ *   **虚拟归档岛**（`isArchive` + `archivedCount`）—— 纯视图层投影切片，
+ *   绝不改写 `.mm.md`（历史节点 / cid / session_id / centers 原样保留）
+ * - **幕布描述块（PXII-FEAT-DESC-BLOCK）**：节点盒高度随 `note:` 列表行数动态增长
+ *   （`NODE_H_BASE` + 可见行数 × `DESC_LINE_H`），宽度同向扩宽 —— 垂直空间必须在
+ *   度量阶段就预留，否则描述文字会画出盒外压住下方节点（见 `measureWorkMapNode`）
  */
 import { astToEditable, layoutIslands, parseMm, projectIslands } from '@mindcanvas/kernel'
 import type {
   EditableNode,
-  IslandProjection,
   IslandSourceKind,
+  LayoutIsland,
 } from '@mindcanvas/kernel'
 
 import { displayTextOf, resolveCenters } from './island-view'
 import { isThoughtType, THOUGHT_TYPE_KEY, type ThoughtType } from './thought-types'
+
+/**
+ * 近 N 展开的默认阈值（ADR-0008 D19-a 实测黄金点）：N=5 时世界高恒定 868px、
+ * k≈0.83（字号 10px）、布局 <1ms，覆盖用户半日专注心流；全平铺在 50 岛时 k 跌至 0.086。
+ */
+export const WORK_MAP_DEFAULT_ACTIVE_LIMIT = 5
+
+/** 读图选项（ADR-0008 D19-a：近 N 展开 + 历史归档岛）。 */
+export interface WorkMapLayoutOptions {
+  /**
+   * 展开的最近会话岛数（默认 5）。只统计携带 `session_id` 的会话岛；
+   * 根岛与非会话升格中心不受限，恒展开。
+   */
+  activeLimit?: number
+  /** 全量展开（归档岛卡片 / 「全部展开」切换的目标态）；默认 false */
+  expandAll?: boolean
+}
 
 export interface MapBox {
   x: number
@@ -52,6 +75,13 @@ export interface MapTreeNode {
   cid: string | null
   /** 块内 `note:` 列表（S0 形状，一行一条）；缺失 / 脏值 → `null` */
   comment: string[] | null
+  /**
+   * 实体引用 id（D19-b 依赖徽章锚点）：entity 节点取 `ref.id`（如 work_item UUID），
+   * 其余节点为 null。徽章按此键对位（``@work_item:<id>`` 的 ``<id>``）。
+   */
+  refId: string | null
+  /** 实体引用 kind（如 `work_item`）；非 entity 节点为 null */
+  refKind: string | null
   depth: number
   box: MapBox
   children: MapTreeNode[]
@@ -59,7 +89,11 @@ export interface MapTreeNode {
 
 export interface MapIslandLayout {
   rootId: string
-  sourceKind: IslandSourceKind
+  /**
+   * 岛来源；`'archive'` = 虚拟的**历史会话归档岛**（ADR-0008 D19-a：纯视图层投影切片，
+   * 不对应任何真实节点，渲染层画成卡片）。
+   */
+  sourceKind: IslandSourceKind | 'archive'
   /** 岛内任一节点的 `session_id`（会话岛）；非会话岛为 null */
   sessionId: string | null
   /** 岛根（会话节点）的树 */
@@ -70,6 +104,10 @@ export interface MapIslandLayout {
   links: { fromId: string; toId: string; path: string }[]
   /** 岛内包围盒（世界坐标，来自节点盒） */
   bounds: { minX: number; minY: number; maxX: number; maxY: number }
+  /** 是否为归档岛（真岛缺省 false / 无此字段） */
+  isArchive?: boolean
+  /** 归档岛收纳的历史会话数 M（仅归档岛有） */
+  archivedCount?: number
 }
 
 export interface WorkMapLayout {
@@ -77,11 +115,41 @@ export interface WorkMapLayout {
   diagnostics: { code: string; message: string }[]
 }
 
-const NODE_H = 28
+/** 节点盒基础高度（无描述时的高度；= 渲染层单行文字盒） */
+export const NODE_H_BASE = 28
+/**
+ * 描述行高与节点盒内边距（对齐 MindCanvas `DescBlock` 的世界 px 口径：
+ * `DESC_LINE_H = 15` / `DESC_PAD = 5`，此处按本项目 SVG 盒略收窄）。
+ *
+ * ⚠️ 行高**不随层级差分**（同 DescBlock 的裁决）：度量拿不到渲染层的字号档，
+ * 若行高随 depth 变而度量不变，预留高度就会与画出的文字错位。
+ */
+export const DESC_LINE_H = 14
+/** 描述区上内边距（标题行与描述首行之间的呼吸） */
+export const DESC_PAD_TOP = 4
+/** 描述区下内边距 */
+export const DESC_PAD_BOTTOM = 4
+/**
+ * 盒内可见描述行数上限：超出部分**不撑高节点**，靠原生 `<title>` tooltip
+ * 与「选中后的操作行列表」给全文（同 DescBlock 的「软上限 + 滚动」语义，
+ * 这里用 SVG 无法内滚，故以 tooltip 兜底）。
+ */
+export const DESC_MAX_VISIBLE_LINES = 3
 const MIN_W = 76
 const MAX_W = 240
 /** 三档字号（root / branch / leaf）：与端口渲染层同一视觉档口径 */
 const fontOf = (depth: number): number => (depth === 0 ? 12.5 : depth === 1 ? 12 : 11)
+
+/**
+ * 描述字号：比节点正文小一档（10px），**不随层级差分** ——
+ * 与 `DESC_LINE_H` 同源，保证「度量预留 = 渲染占用」逐 px 对齐。
+ */
+export const DESC_FONT_SIZE = 10
+/** 描述块左内边距（引用竖线的落点） */
+export const DESC_INSET_X = 10
+/** 引用竖线宽 + 文字缩进（竖线画在 `DESC_INSET_X`，文字从 `DESC_INSET_X + DESC_INDENT` 起） */
+export const DESC_BAR_W = 2
+export const DESC_INDENT = 8
 
 /** 全角判定（CJK/假名/全角标点等，按 2 倍半角宽估算） */
 const WIDE_CHAR = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/
@@ -92,11 +160,50 @@ function estimateTextWidth(text: string, size: number): number {
   return units * size
 }
 
-/** 节点度量（kernel `MeasureFn` 口径）：盒 = 文本估算 + 内边距，夹紧到 [MIN_W, MAX_W]。 */
+/** 宽度夹紧（标题与描述共用一把尺子：`[MIN_W, MAX_W]`）。 */
+function clampWidth(raw: number): number {
+  return Math.max(MIN_W, Math.min(MAX_W, Math.round(raw)))
+}
+
+/**
+ * 节点笔记块里的 `note:` 列表（S0 形状，一行一条）；缺失 / 脏值 → `null`。
+ *
+ * **度量与渲染共用本函数**（D16 读侧 fail-closed 口径）：两处若各读各的，
+ * 「预留高度」与「实际画出的行数」会分叉 → 文字画出盒外。
+ */
+export function commentOf(node: EditableNode): string[] | null {
+  const raw = (node.note as Record<string, unknown> | undefined)?.note
+  return Array.isArray(raw) && raw.every((item) => typeof item === 'string')
+    ? (raw as string[])
+    : null
+}
+
+/**
+ * 节点度量（kernel `MeasureFn` 口径）：盒 = 文本估算 + 内边距，夹紧到 [MIN_W, MAX_W]。
+ *
+ * **动态高度（幕布描述块）**：有描述时节点盒按可见描述行数加高 —— 这是布局的
+ * **几何不变量**：`layoutIslands` 只按 measure 返回的 `h` 分配垂直槽位，
+ * 度量不预留 → 描述文字会画出盒外、压住下方节点（`mindmap.ts` 的
+ * `subtreeHeightOf` 逐节点取 `measure(node, depth).h` 后按 `V_GAP` 堆叠）。
+ *
+ * 宽度同向扩宽（描述**不折行**，长了撑宽盒，同 `DescBlock.estimateDescWidth`），
+ * 但两轴都受 `MAX_W` / 可见行数上限约束 —— 长描述不撑成巨盒，全文走 tooltip。
+ */
 export function measureWorkMapNode(node: EditableNode, depth = 0): { w: number; h: number } {
   const text = displayTextOf(node)
-  const raw = estimateTextWidth(text === '' ? '　' : text, fontOf(depth)) + 24
-  return { w: Math.max(MIN_W, Math.min(MAX_W, Math.round(raw))), h: NODE_H }
+  const titleW = estimateTextWidth(text === '' ? '　' : text, fontOf(depth)) + 24
+  const comment = commentOf(node)
+  const geo = descBlockGeometry(comment, NODE_H_BASE)
+  if (geo === null) {
+    return { w: clampWidth(titleW), h: NODE_H_BASE }
+  }
+  // 最长一行决定宽度（不折行语义）；+8 是竖线右侧到盒边的呼吸位
+  let descW = 0
+  for (const line of visibleDescLines(comment)) {
+    descW = Math.max(descW, estimateTextWidth(line, DESC_FONT_SIZE))
+  }
+  const descBoxW = descW + DESC_INSET_X + DESC_BAR_W + DESC_INDENT + 8
+  return { w: clampWidth(Math.max(titleW, descBoxW)), h: geo.height }
 }
 
 /** 与度量同一把尺子的文字截断（SVG 没有 ellipsis，超出部分自行补 `…`）。 */
@@ -116,6 +223,58 @@ export function fitTextToBox(text: string, boxW: number, depth = 0): string {
   return `${out}…`
 }
 
+/**
+ * 描述行截断（与描述度量同一把尺子：`DESC_FONT_SIZE` + 同一 `estimateTextWidth`）。
+ *
+ * 幕布语义是「描述不折行、长了撑宽盒」（`DescBlock.estimateDescWidth`）——
+ * 盒宽又被 `MAX_W` 夹住，故超长行在渲染层补 `…`；全文由原生 `<title>` tooltip
+ * 与「选中后的操作行列表」兜底，**信息不丢**。
+ */
+export function fitDescLineToBox(text: string, boxW: number): string {
+  const budget = boxW - (DESC_INSET_X + DESC_BAR_W + DESC_INDENT) - 8
+  if (budget <= 0 || text === '') return text
+  if (estimateTextWidth(text, DESC_FONT_SIZE) <= budget) return text
+  const ellipsis = estimateTextWidth('…', DESC_FONT_SIZE)
+  let out = ''
+  let used = 0
+  for (const ch of text) {
+    const width = estimateTextWidth(ch, DESC_FONT_SIZE)
+    if (used + width + ellipsis > budget) break
+    out += ch
+    used += width
+  }
+  return `${out}…`
+}
+
+/**
+ * 描述块几何（**度量与渲染的唯一同源**）：盒高、首行基线、引用竖线两端。
+ *
+ * 度量侧只用 `height`（喂 kernel 的 `MeasureFn`），渲染侧只用基线/竖线坐标 ——
+ * 两侧取自同一函数，改一处必然同时生效（分叉 = 文字画出盒外，是硬回归）。
+ * 无描述 → `null`（节点回落到 `NODE_H_BASE`，不画竖线）。
+ */
+export function descBlockGeometry(
+  comment: readonly string[] | null,
+  boxH: number,
+): { height: number; lineCount: number; barTop: number; barBottom: number; baselineOf: (index: number) => number } | null {
+  if (comment === null || comment.length === 0) return null
+  const lineCount = Math.min(DESC_MAX_VISIBLE_LINES, comment.length)
+  const barTop = NODE_H_BASE + DESC_PAD_TOP
+  return {
+    height: barTop + lineCount * DESC_LINE_H + DESC_PAD_BOTTOM,
+    lineCount,
+    barTop,
+    barBottom: Math.max(barTop, boxH - DESC_PAD_BOTTOM),
+    // 基线落在 14px 行盒内（10px 字号视觉居中：≈ 0.72 × 行高）
+    baselineOf: (index: number) => barTop + index * DESC_LINE_H + DESC_LINE_H * 0.72,
+  }
+}
+
+/** 盒内可见的描述行（超出部分走 tooltip；与 `descBlockGeometry` 同一上限）。 */
+export function visibleDescLines(comment: readonly string[] | null): string[] {
+  return comment === null ? [] : comment.slice(0, DESC_MAX_VISIBLE_LINES)
+}
+
 /** 节点树 → 视图树（box 取自布局结果；缺 box 时回退度量，保证始终可渲染）。 */
 function toTreeNode(
   node: EditableNode,
@@ -129,11 +288,9 @@ function toTreeNode(
   // 稳定编辑键与注释：脏值一律容忍为 null（读侧 fail-closed 口径，同 thoughtType）
   const rawCid = note.cid
   const cid = typeof rawCid === 'string' && rawCid !== '' ? rawCid : null
-  const rawComment = note.note
-  const comment =
-    Array.isArray(rawComment) && rawComment.every((item) => typeof item === 'string')
-      ? (rawComment as string[])
-      : null
+  // 与度量共用同一读数（`commentOf`）—— 预留高度与渲染行数同源，不会分叉
+  const comment = commentOf(node)
+  const ref = node.type === 'entity' ? node.ref : undefined
   const fallback = measureWorkMapNode(node, depth)
   return {
     id: node.id,
@@ -143,6 +300,8 @@ function toTreeNode(
     sessionNode: sessionId !== null,
     cid,
     comment,
+    refId: typeof ref?.id === 'string' && ref.id !== '' ? ref.id : null,
+    refKind: typeof ref?.kind === 'string' && ref.kind !== '' ? ref.kind : null,
     depth,
     box: boxById.get(node.id) ?? { x: 0, y: 0, w: fallback.w, h: fallback.h },
     children: node.children.map((child) => toTreeNode(child, depth + 1, boxById)),
@@ -172,12 +331,120 @@ function boundsOf(nodes: MapTreeNode[]): MapIslandLayout['bounds'] {
 }
 
 /**
+ * 投影岛 → 会话 id（岛内前序首个携带 `session_id` 的成员；与 `toTreeNode` 读数同口径）。
+ * `projectedRoot` 的 children 已剔除嵌套升格后代，前序遍历即 `memberIds` 顺序。
+ */
+function sessionIdOfProjection(island: LayoutIsland): string | null {
+  const walk = (node: EditableNode): string | null => {
+    const raw = (node.note as Record<string, unknown> | undefined)?.session_id
+    if (typeof raw === 'string' && raw !== '') return raw
+    for (const child of node.children) {
+      const hit = walk(child)
+      if (hit !== null) return hit
+    }
+    return null
+  }
+  return walk(island.projectedRoot)
+}
+
+/**
+ * 从**运行时投影副本**中摘除目标子树（就地 splice；`editable` 是本次调用的私有副本，
+ * 与 `.mm.md` 原文无关联 —— D19-a 红线：归档不触碰事实源）。
+ *
+ * @returns 被摘除的全部节点 id（含后代；用于过滤 centers 读数）
+ */
+function pruneSubtrees(root: EditableNode, subtreeRootIds: ReadonlySet<string>): Set<string> {
+  const removed = new Set<string>()
+  const collect = (node: EditableNode): void => {
+    removed.add(node.id)
+    for (const child of node.children) collect(child)
+  }
+  const walk = (node: EditableNode): void => {
+    const keep: EditableNode[] = []
+    for (const child of node.children) {
+      if (subtreeRootIds.has(child.id)) collect(child)
+      else {
+        keep.push(child)
+        walk(child)
+      }
+    }
+    node.children = keep
+  }
+  walk(root)
+  return removed
+}
+
+/** 归档岛卡片尺寸（宽与节点盒 MAX_W 同口径；高容纳标题 + 副标题两行）。 */
+const ARCHIVE_CARD_W = 240
+const ARCHIVE_CARD_H = 88
+/** 归档岛与任何展开岛（含根岛）的最小间距（世界坐标 px）。 */
+const ARCHIVE_GAP = 32
+/** 归档岛合成 id（kernel `newId` 恒生成 `nd…` 前缀，不会撞车）。 */
+const ARCHIVE_ROOT_ID = 'wm-archive'
+const ARCHIVE_CARD_ID = 'wm-archive-card'
+
+/**
+ * 合成归档岛（虚拟岛）：一张收拢卡片，排布在全部展开岛（含根岛）的**左侧**且与其
+ * 无重叠（派发示例「首个展开岛 X−450px」在无 pos 自动排开场景会与根岛相撞，故锚定
+ * 最左内容的左侧再让出卡宽与间距，几何不变量是「在展开岛左侧」）。
+ */
+function buildArchiveIsland(laidIslands: readonly MapIslandLayout[], archivedCount: number): MapIslandLayout {
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  for (const island of laidIslands) {
+    minX = Math.min(minX, island.bounds.minX)
+    minY = Math.min(minY, island.bounds.minY)
+  }
+  if (!Number.isFinite(minX)) {
+    minX = 0
+    minY = 0
+  }
+  const x = Math.round(minX - ARCHIVE_GAP - ARCHIVE_CARD_W)
+  const y = Math.round(minY)
+  const card: MapTreeNode = {
+    id: ARCHIVE_CARD_ID,
+    text: '早期会话',
+    thoughtType: null,
+    sessionId: null,
+    sessionNode: false,
+    cid: null,
+    comment: null,
+    refId: null,
+    refKind: null,
+    depth: 0,
+    box: { x, y, w: ARCHIVE_CARD_W, h: ARCHIVE_CARD_H },
+    children: [],
+  }
+  return {
+    rootId: ARCHIVE_ROOT_ID,
+    sourceKind: 'archive',
+    sessionId: null,
+    tree: card,
+    nodes: [card],
+    links: [],
+    bounds: { minX: x, minY: y, maxX: x + ARCHIVE_CARD_W, maxY: y + ARCHIVE_CARD_H },
+    isArchive: true,
+    archivedCount,
+  }
+}
+
+/**
  * 读一份工作导图并计算几何（fail-soft）。
+ *
+ * 近 N 展开（ADR-0008 D19-a）：会话岛多于 `activeLimit` 时，只展开**最新** N 个；
+ * 更早的历史会话在渲染层聚合为一个虚拟归档岛（`isArchive: true` + `archivedCount: M`）。
+ * 切片是**纯视图层投影切片**：只摘除本次调用私有的运行时投影副本，`.mm.md` 原文的
+ * 历史节点、cid、session_id 与 centers 条目**逐字节保留**。
  *
  * @returns 解析成功 → 布局视图；失败 → `null`（只记 warn）
  */
-export function readWorkMapLayout(text: string): WorkMapLayout | null {
+export function readWorkMapLayout(
+  text: string,
+  options: WorkMapLayoutOptions = {},
+): WorkMapLayout | null {
   if (typeof text !== 'string' || text.trim() === '') return null
+  const activeLimit = Math.max(1, Math.floor(options.activeLimit ?? WORK_MAP_DEFAULT_ACTIVE_LIMIT))
+  const expandAll = options.expandAll ?? false
   try {
     const parsed = parseMm(text)
     if (parsed.root === null) return null
@@ -185,7 +452,27 @@ export function readWorkMapLayout(text: string): WorkMapLayout | null {
     if (editable === null) return null
 
     const { specs, diagnostics: centerDiagnostics } = resolveCenters(editable)
-    const projection: IslandProjection = projectIslands(editable, specs)
+
+    // 规划遍：全量投影（单次结构 DFS，无度量/布局开销）确定会话岛的文档时序
+    const fullProjection = projectIslands(editable, specs)
+    const sessionRootIds: string[] = []
+    for (const island of fullProjection.islands) {
+      if (sessionIdOfProjection(island) !== null) sessionRootIds.push(island.rootId)
+    }
+
+    let projection = fullProjection
+    let effectiveSpecs = specs
+    let archivedCount = 0
+    if (!expandAll && sessionRootIds.length > activeLimit) {
+      // 最新 N 个保持活跃；其余 M = Total − N 收进归档岛
+      const archivedRootIds = new Set(sessionRootIds.slice(0, sessionRootIds.length - activeLimit))
+      archivedCount = archivedRootIds.size
+      const prunedIds = pruneSubtrees(editable, archivedRootIds)
+      // 指向已归档子树的 centers 条目不再激活 —— 属切片语义而非 dangling 错误，不产诊断
+      effectiveSpecs = specs.filter((spec) => spec.nodeId === null || !prunedIds.has(spec.nodeId))
+      projection = projectIslands(editable, effectiveSpecs)
+    }
+
     const layout = layoutIslands(projection, measureWorkMapNode, new Set())
 
     const boxById = new Map<string, MapBox>()
@@ -198,7 +485,7 @@ export function readWorkMapLayout(text: string): WorkMapLayout | null {
       })
     }
 
-    const islands = projection.islands.map((island) => {
+    const islands: MapIslandLayout[] = projection.islands.map((island) => {
       const members = new Set(island.memberIds)
       const tree = toTreeNode(island.projectedRoot, 0, boxById)
       const nodes = flatten(tree)
@@ -217,6 +504,8 @@ export function readWorkMapLayout(text: string): WorkMapLayout | null {
         bounds: boundsOf(nodes),
       } satisfies MapIslandLayout
     })
+
+    if (archivedCount > 0) islands.push(buildArchiveIsland(islands, archivedCount))
 
     return {
       islands,

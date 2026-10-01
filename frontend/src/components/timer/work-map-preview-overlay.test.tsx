@@ -89,6 +89,15 @@ describe('WorkMapPreviewOverlay（准备态主图弹层）', () => {
     expect(screen.getByTestId('map-legend')).toBeTruthy() // 图例随总览一起来了
   })
 
+  it('★ BUG-WM-001 回归（2026-10-01）：准备态弹层 sessionId=null，不再误挂「本次」高亮框', () => {
+    // 修复前：WorkMapTree 里 `node.sessionId === sessionId` 的 null === null
+    // 让根岛与存量节点全部带上 wm-box--session 蓝框。
+    const { container } = render(<Harness initial />)
+    expect(container.querySelectorAll('.wm-box--session')).toHaveLength(0)
+    expect(container.querySelectorAll('[data-testid="wm-session-node"]')).toHaveLength(0)
+    expect(container.querySelectorAll('.wm-node[data-session="true"]')).toHaveLength(0)
+  })
+
   it('★ 只读（红线 2）：弹层内无编辑入口、无快速记录行', () => {
     const { container } = render(<Harness initial />)
     expect(container.querySelectorAll('.wm-node[data-cid]')).toHaveLength(0)

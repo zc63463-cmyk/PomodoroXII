@@ -1110,6 +1110,34 @@
   border-radius: 999px;
   padding: 0 7px;
 }
+/* ── 键盘心流提示（PXII-FEAT-KEYMAP-FLOW）──────────────────────────────────
+   键位提示行与 `.wm-editor-hd` 同排：**只在可编辑（传了 onEdit）时渲染**。
+   文案与 `EDITOR_KEY_HINTS` 同源 —— 改键位必然改提示，不会分叉。 */
+.wm-editor-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--ios-label-3);
+}
+.wm-key-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.wm-key-hint kbd {
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 18%, transparent);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--ios-label-2);
+  background: color-mix(in oklab, var(--foreground) 4%, transparent);
+}
 .wm-editor-canvas {
   flex: 1;
   min-height: 190px;
@@ -1125,6 +1153,16 @@
   justify-content: center;
   font-size: 12px;
   color: var(--ios-label-2);
+}
+/* 画布焦点（键盘流的落点）：只描边、**不加 padding/不换 border-width** ——
+   任何盒尺寸变化都会让 SVG 的 viewBox 重算，出现"一聚焦树就抖一下"。
+   `:focus-visible` 限定只在键盘聚焦时出现（鼠标点选不留框）。 */
+.wm-editor-canvas:focus {
+  outline: none;
+}
+.wm-editor-canvas:focus-visible {
+  outline: 1.5px solid color-mix(in oklab, var(--ios-blue) 45%, transparent);
+  outline-offset: 1px;
 }
 /* 小视图画布（右栏）：矮高度 → 树自动缩到"可辨轮廓"尺寸 */
 .wm-port-canvas {
@@ -1306,6 +1344,33 @@
 }
 .wm-comment-dot {
   fill: #d97706;
+}
+/* ── 幕布描述块（PXII-FEAT-DESC-BLOCK）：节点盒内的引用块 ────────────────────
+   左引用细竖线 + 缩进小灰字，对齐 MindCanvas `DescBlock` 的视觉层级
+   （节点本体 = 正文，描述 = 弱化一档）。几何由 `descBlockGeometry` 给定，
+   这里只管配色 —— 颜色全部走主题变量，浅色/深色主题下都清晰可辨。 */
+.wm-desc-bar {
+  stroke: color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+.wm-desc-text {
+  fill: var(--muted-foreground);
+  /* 描述是弱化层，不参与标题的字重 */
+  font-weight: 400;
+}
+/* 选中态：引用竖线与描述文字随主边框（--ios-blue）微调提亮 */
+.wm-node--selected .wm-desc-bar {
+  stroke: color-mix(in srgb, var(--ios-blue) 55%, transparent);
+}
+.wm-node--selected .wm-desc-text {
+  fill: color-mix(in srgb, var(--ios-blue) 35%, var(--muted-foreground));
+}
+/* 定位态（focusCid）：与 #d97706 环同色系 */
+.wm-node--focus .wm-desc-bar {
+  stroke: color-mix(in srgb, #d97706 55%, transparent);
+}
+/* 极简岛（沉浸）：与 .wm-text 同一条纪律 —— 只隐文字，几何不变（零布局抖动） */
+[data-minimal='true'] .wm-desc-text {
+  visibility: hidden;
 }
 .wm-actions {
   display: flex;
@@ -1503,6 +1568,155 @@
 }
 .wm-link--dim {
   opacity: 0.28;
+}
+
+/* ── 近 N 展开 + 历史归档岛（ADR-0008 D19-a：纯视图层投影切片）──────────────
+   顶部控制栏 = 图例（左）+ [近 5 岛 | 全部展开] 分段切换（右）；
+   归档岛是虚拟卡片（虚线描边），点击等同「全部展开」。 */
+.wm-overview-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.wm-view-toggle {
+  display: inline-flex;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.wm-view-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 11.5px;
+  font-family: inherit;
+  line-height: 1.6;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wm-view-btn + .wm-view-btn {
+  border-left: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+}
+.wm-view-btn[aria-pressed='true'] {
+  background: var(--ios-blue);
+  color: #fff;
+}
+/* 归档岛卡片：虚线描边 + 浅底 —— 纯投影切片，与真实岛（实线）区分 */
+.wm-island--archive .wm-box {
+  fill: color-mix(in oklab, var(--ios-fill) 60%, var(--ios-card));
+  stroke: color-mix(in oklab, var(--foreground) 38%, transparent);
+  stroke-width: 1.2;
+  stroke-dasharray: 5 3;
+}
+.wm-island--archive .wm-archive-title {
+  fill: var(--ios-label);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.wm-island--archive .wm-archive-sub {
+  fill: var(--ios-label-2);
+  font-size: 10.5px;
+}
+.wm-island--archive[role='button'] {
+  cursor: pointer;
+}
+.wm-island--archive[role='button']:hover .wm-box,
+.wm-island--archive[role='button']:focus-visible .wm-box {
+  stroke: var(--ios-blue);
+}
+.wm-island--archive[role='button']:focus-visible {
+  outline: none;
+}
+
+/* ── 依赖状态徽章（ADR-0008 D19-b 双轨制 · 紧凑态）──────────────────────────
+   自持树不跑贝塞尔避让：依赖用节点旁 Badge 表达（红 ⚡N = 有未完成上游，
+   绿 ✓ = 上游全部完成）；完整自由边语义保留在 root.note.edges（导出侧）。 */
+.wm-dep-badge rect {
+  stroke-width: 1;
+}
+.wm-dep-badge--blocked rect {
+  fill: color-mix(in oklab, #e24b4a 18%, var(--ios-card));
+  stroke: #e24b4a;
+}
+.wm-dep-badge--blocked text {
+  fill: #d85a30;
+  font-size: 10px;
+  font-weight: 600;
+}
+.wm-dep-badge--ok rect {
+  fill: color-mix(in oklab, #2f9e44 14%, var(--ios-card));
+  stroke: #2f9e44;
+}
+.wm-dep-badge--ok text {
+  fill: #2f9e44;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+/* ── 岛地标卡 + 聚焦（S4-3，D19-c：纯自持增强，不引 @mindcanvas/react）──────
+   对齐 MindCanvas IO-UX 规范：会话岛外包实底圆角卡（柔和投影）+ 左侧色条
+   （当前会话 systemBlue / 历史中性灰）+ 右上胶囊角标（N 项思考 + 思考点阵）；
+   聚焦时非聚焦岛纯 CSS opacity 0.15（DOM 结构不动）。 */
+.wm-island-frame {
+  fill: var(--ios-card);
+  stroke: color-mix(in oklab, var(--foreground) 14%, transparent);
+  stroke-width: 1;
+  filter: drop-shadow(0 1px 3px color-mix(in oklab, var(--foreground) 12%, transparent));
+}
+.wm-island-card--current .wm-island-frame {
+  stroke: color-mix(in oklab, var(--ios-blue) 55%, transparent);
+}
+.wm-island-bar {
+  fill: color-mix(in oklab, var(--foreground) 26%, transparent);
+}
+.wm-island-card--current .wm-island-bar {
+  fill: var(--ios-blue);
+}
+.wm-island-badge {
+  cursor: default;
+}
+.wm-island-badge[role='button'] {
+  cursor: pointer;
+}
+.wm-island-badge rect {
+  fill: color-mix(in oklab, var(--ios-blue) 12%, transparent);
+  stroke: color-mix(in oklab, var(--ios-blue) 25%, transparent);
+  stroke-width: 1;
+}
+.wm-island-badge text {
+  fill: var(--ios-label-2);
+  font-size: 10px;
+}
+.wm-island-badge[role='button']:hover rect,
+.wm-island-badge[role='button']:focus-visible rect {
+  fill: color-mix(in oklab, var(--ios-blue) 22%, transparent);
+}
+.wm-island-badge[role='button']:focus-visible {
+  outline: none;
+}
+/* 聚焦态：非聚焦岛压暗（不隐藏 —— 树结构不破坏，同 D17 dim 纪律） */
+.wm-island--dimmed {
+  opacity: 0.15;
+}
+/* 聚焦控制栏：[ ← 退出聚焦 ] 正在查看：会话 X */
+.wm-focus-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.wm-focus-exit {
+  border: 1px solid var(--ios-blue);
+  border-radius: 8px;
+  color: var(--ios-blue);
+}
+.wm-focus-label {
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+  white-space: nowrap;
 }
 
 /* ── 准备态「主图」弹层（ADR-0008 D18 / D13 步 3-4a，方案 C）──────────────────

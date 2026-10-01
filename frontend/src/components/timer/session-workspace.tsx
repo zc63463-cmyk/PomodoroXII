@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
+import { useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
 
 interface PlanItem {
   id: string
@@ -30,6 +30,11 @@ export interface SessionWorkspaceProps {
    * 失败必须可见：实现方应抛出，由本组件以 role="alert" 呈现原因。
    */
   onCreatePlanItem?: (title: string) => Promise<void> | void
+  /**
+   * 本次会话挂的**二级项标题**：仅用于拆解表单上方的归属轻提示。
+   * 缺省 / 空串 → 整行不渲染（父级未知时不编造归属）。
+   */
+  parentTitle?: string | null
   onUpdateSessionNote?: (value: string) => void | Promise<void>
   onUpdateWorkItemNote?: (value: string) => void | Promise<void>
   onFlushWorkItemNote?: (reason: 'current-item-change') => Promise<void>
@@ -46,6 +51,7 @@ export function SessionWorkspace({
   onAddPlanItem,
   onRemovePlanItem,
   onCreatePlanItem,
+  parentTitle,
   onUpdateSessionNote,
   onUpdateWorkItemNote: _onUpdateWorkItemNote,
   onFlushWorkItemNote,
@@ -55,6 +61,16 @@ export function SessionWorkspace({
   const [switchError, setSwitchError] = useState<string | null>(null)
   const [createdTitle, setCreatedTitle] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
+  // 拆解表单的在途标记 + 输入框引用。二者共同服务「连续拆解」心流：
+  // busy 挡住回车连击造成的重复创建（每次创建都要落一条正式 WorkItem），
+  // inputRef 让成功/失败两条路径都把焦点交还输入框，用户敲完一条直接敲下一条。
+  //
+  // ★ 判重同时用 state 与 ref：`creating` 驱动按钮 disabled（可见反馈），
+  //   而 ref 在**同一 tick** 内即可生效 —— 两次回车若落在同一批渲染里，
+  //   state 还没回流，只有 ref 拦得住第二个。
+  const [creating, setCreating] = useState(false)
+  const creatingRef = useRef(false)
+  const createInputRef = useRef<HTMLInputElement>(null)
 
   const selectCurrent = (workItemId: string) => {
     if (!onSwitchWorkItemNote && !onFlushWorkItemNote) {
@@ -78,14 +94,22 @@ export function SessionWorkspace({
   const handleCreateSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const title = createdTitle.trim()
-    if (!title || !onCreatePlanItem) return
+    if (!title || !onCreatePlanItem || creatingRef.current) return
     void (async () => {
+      creatingRef.current = true
+      setCreating(true)
       setCreateError(null)
       try {
         await onCreatePlanItem(title)
         setCreatedTitle('')
       } catch (cause) {
         setCreateError(cause instanceof Error ? cause.message : 'Unable to create WorkItem')
+      } finally {
+        creatingRef.current = false
+        setCreating(false)
+        // 焦点交还输入框：拆解是**连续**动作（一条接一条），不能要求用户每次
+        // 重新点回输入框。失败路径同样交还 —— 输入已保留，直接改完再回车即可。
+        createInputRef.current?.focus()
       }
     })()
   }
@@ -195,27 +219,35 @@ export function SessionWorkspace({
           </div>
         ) : null}
 
-        {/* 运行中内联新建三级项 */}
+        {/* 运行中拆解子行动（原「内联新建三级」）：创建正式 WorkItem 并加入计划 */}
         {onCreatePlanItem ? (
           <form
             className="ios-plan-create-form"
             aria-label="Create plan item"
             onSubmit={handleCreateSubmit}
           >
+            {/* 归属轻提示：新建项的 parentId = 会话挂的二级项（页面层传 parentTitle），
+                不是当前专注的三级项 —— 三级下不能再挂四级，这里如实说明挂在哪。 */}
+            {parentTitle !== undefined && parentTitle !== null && parentTitle.trim() !== '' ? (
+              <div className="ios-tiny" data-testid="plan-create-parent-hint">
+                在「{parentTitle}」下新建行动项
+              </div>
+            ) : null}
             <div className="flex items-center gap-2">
               <input
+                ref={createInputRef}
                 value={createdTitle}
                 aria-label="新三级标题"
-                placeholder="新建三级工作项并加入计划…"
+                placeholder="输入子行动步骤，按回车拆解…"
                 onChange={(event: ChangeEvent<HTMLInputElement>) => setCreatedTitle(event.target.value)}
                 className="ios-input flex-1"
               />
               <button
                 type="submit"
-                disabled={createdTitle.trim() === ''}
+                disabled={creating || createdTitle.trim() === ''}
                 className="ios-btn-subtle"
               >
-                + 新建三级
+                + 拆解行动
               </button>
             </div>
             {createError ? (
