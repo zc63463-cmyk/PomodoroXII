@@ -25,8 +25,12 @@ describe('CommandReceiptList', () => {
     expect(screen.queryByRole('button', { name: 'Retry cmd-unsafe' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Query cmd-unsafe' }))
     fireEvent.click(screen.getByRole('button', { name: 'Query cmd-safe' }))
-    await waitFor(() => expect(reconcile).toHaveBeenCalledWith('cmd-safe', false))
-    expect(screen.getByRole('button', { name: 'Retry cmd-safe' })).toBeVisible()
+    // ★ 确定性（F2）：按钮是 reconcile 之后的**重渲染产物**，必须与 mock 断言同等到齐 ——
+    //   只 await「mock 被调」会让紧随的 getByRole 在高负载下抢在 React 调度之前抛"找不到"。
+    await waitFor(() => {
+      expect(reconcile).toHaveBeenCalledWith('cmd-safe', false)
+      expect(screen.getByRole('button', { name: 'Retry cmd-safe' })).toBeVisible()
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Retry cmd-safe' }))
     fireEvent.click(screen.getByRole('button', { name: 'Abandon cmd-unsafe' }))
     expect(reconcile).toHaveBeenNthCalledWith(1, 'cmd-unsafe', false)
@@ -49,8 +53,11 @@ describe('CommandReceiptList', () => {
     expect(screen.queryByRole('button', { name: 'Abandon cmd-pending' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Abandon cmd-abandoned' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Query cmd-pending' }))
-    await waitFor(() => expect(reconcile).toHaveBeenCalledWith('cmd-pending', false))
-    expect(screen.getByRole('button', { name: 'Abandon cmd-pending' })).toBeVisible()
+    // ★ 同型（F2）：按钮断言并入同一 waitFor
+    await waitFor(() => {
+      expect(reconcile).toHaveBeenCalledWith('cmd-pending', false)
+      expect(screen.getByRole('button', { name: 'Abandon cmd-pending' })).toBeVisible()
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Abandon cmd-pending' }))
     expect(abandon).toHaveBeenCalledWith('cmd-pending')
   })
@@ -64,8 +71,11 @@ describe('CommandReceiptList', () => {
     }))
 
     fireEvent.click(screen.getByRole('button', { name: 'Query cmd-safe' }))
-    await waitFor(() => expect(reconcile).toHaveBeenCalledWith('cmd-safe', false))
-    expect(screen.queryByRole('button', { name: 'Retry cmd-safe' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Abandon cmd-safe' })).toBeNull()
+    // ★ 同型（F2）：反例也收敛进同一 waitFor —— 等"查询已发生"这个前提成立后再断言未解锁
+    await waitFor(() => {
+      expect(reconcile).toHaveBeenCalledWith('cmd-safe', false)
+      expect(screen.queryByRole('button', { name: 'Retry cmd-safe' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Abandon cmd-safe' })).toBeNull()
+    })
   })
 })
