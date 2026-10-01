@@ -13,6 +13,7 @@ import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { ContinuePrevious } from '@/components/timer/continue-previous'
 import { TimerFrame } from '@/components/timer/timer-frame'
 import { TimerMapEditor } from '@/components/timer/timer-map-editor'
+import { TimerMapOverview } from '@/components/timer/timer-map-overview'
 import { TimerMapPort } from '@/components/timer/timer-map-port'
 import { TimerSideToday, type RecentSessionRow } from '@/components/timer/timer-side-today'
 import { TodaySummary } from '@/components/timer/today-summary'
@@ -327,6 +328,32 @@ export default function TimerPage() {
       })
     return () => { cancelled = true }
   }, [activeSessionId, focusedWorkItemId, mapRefreshSeq, runningBreak])
+
+  // ── 结束态「岛总览」数据（ADR-0008 D13 步 3-4b）────────────────────────────
+  // 键 = 结束会话的 **focused plan item** 的 L3。页面 `plans` 派生自 `aggregate.plan`
+  // （过滤 removedAt），`currentPlan` 即"本会话聚焦项"、无标记时回退 plans[0] ——
+  // 单 L3 场景与外派单 §2.3 的 `plans[0]` 口径完全等价。`endedAggregate` 非空时
+  // `aggregate === endedAggregate`（见上面 endedAggregate 的 effect 早退条件）。
+  // 与运行态端口同款 fail-quiet：读不到就退化为占位，不阻断复盘。
+  const endedMapWorkItemId = endedAggregate === null ? null : (currentPlan?.workItemId ?? null)
+  const [endedMapText, setEndedMapText] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    if (endedMapWorkItemId === null) {
+      setEndedMapText(null)
+      return
+    }
+    void readWorkMap(endedMapWorkItemId)
+      .then((text) => { if (!cancelled) setEndedMapText(text) })
+      .catch((cause) => {
+        if (cancelled) return
+        setEndedMapText(null)
+        console.warn(
+          `[timer-map-overview] 结束态导图读取失败（fail-soft，总览退化为占位）: ${cause instanceof Error ? cause.message : String(cause)}`,
+        )
+      })
+    return () => { cancelled = true }
+  }, [endedMapWorkItemId])
 
   /**
    * 快速记录（ADR-0008 D13 步 2）：把一条思路按类型追加为会话节点子节点。
@@ -911,23 +938,31 @@ export default function TimerPage() {
     // ② 不需复盘（休息型结束 / 投入型复盘已完成）→ 休息节奏面板：
     //    建议下一步（短休/长休/下一个番茄），可自动开始，出口仍可回任务页。
     ? (reviewSession
-      ? createElement(TimerFrame, { focus: createElement(SessionReview, {
-        session: aggregate.session,
-        plans,
-        outcomes: aggregate.outcomes,
-        envelopes: aggregate.commandEnvelopes,
-        receipts: aggregate.commandReceipts as never,
-        draft: reviewDraft,
-        readOnly: !reviewSession,
-        // ★ 2026-09-11：只在复盘完成态（readOnly = 无待复盘项）渲染出口；待复盘
-        // （可写）态没有回跳入口。provisional 未导入分支结构上不会进入 readOnly
-        //（早退 + 保留草稿、不重读聚合），所以那里既无刷新也无回跳。
-        onReturnToTasks: reviewSession ? undefined : handleReturnToTasks,
-        onDraftChange: updateReviewDraft,
-        onSubmit: submitReview,
-        onReconcile: reconcileCommand,
-        onAbandon: abandonCommand,
-      }) })
+      // 焦点区 = 复盘面板 + **下方**「岛总览」（D12 裁决 3 / D13 步 3-4b）；
+      // 总览**只读**：不传 onEdit/onQuickRecord（编辑入口仅运行态有，D16-a）。
+      ? createElement(TimerFrame, { focus: createElement(Fragment, null,
+        createElement(SessionReview, {
+          session: aggregate.session,
+          plans,
+          outcomes: aggregate.outcomes,
+          envelopes: aggregate.commandEnvelopes,
+          receipts: aggregate.commandReceipts as never,
+          draft: reviewDraft,
+          readOnly: !reviewSession,
+          // ★ 2026-09-11：只在复盘完成态（readOnly = 无待复盘项）渲染出口；待复盘
+          // （可写）态没有回跳入口。provisional 未导入分支结构上不会进入 readOnly
+          //（早退 + 保留草稿、不重读聚合），所以那里既无刷新也无回跳。
+          onReturnToTasks: reviewSession ? undefined : handleReturnToTasks,
+          onDraftChange: updateReviewDraft,
+          onSubmit: submitReview,
+          onReconcile: reconcileCommand,
+          onAbandon: abandonCommand,
+        }),
+        createElement(TimerMapOverview, {
+          mapText: endedMapText,
+          sessionId: reviewSession.sessionId,
+        }),
+      ) })
       : createElement(TimerFrame, {
         // 不需复盘的结束态（休息型结束 / 投入型复盘已完成）：焦点区 = 节奏面板。
         focus: createElement('div', { className: 'grid gap-6' },

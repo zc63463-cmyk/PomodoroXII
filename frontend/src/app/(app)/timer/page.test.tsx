@@ -19,7 +19,47 @@ import { useTimerStore } from '@/stores/timer-store'
 const pushMock = vi.fn()
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: pushMock }) }))
 
-const fakeDatabase = vi.hoisted(() => ({ focusSessions: { get: vi.fn(async () => undefined) } }))
+/**
+ * D13 步 3-4b：结束态「岛总览」要走 `readLocalAggregate` 的**真实表访问路径**，
+ * 故 fakeDatabase 从"只有 focusSessions.get"扩成「可变 store + 通用表链桩」。
+ * 既有用例只用到 `focusSessions.get`（store 默认为空 → 与原行为等价）。
+ */
+const fakeStore = vi.hoisted(() => ({
+  focusSessions: [] as Array<Record<string, unknown>>,
+  sessionTaskContexts: [] as Array<Record<string, unknown>>,
+  sessionAttributionRevisions: [] as Array<Record<string, unknown>>,
+  sessionWorkItemPlans: [] as Array<Record<string, unknown>>,
+  sessionWorkItemOutcomes: [] as Array<Record<string, unknown>>,
+  sessionCommandEnvelopes: [] as Array<Record<string, unknown>>,
+}))
+const fakeDatabase = vi.hoisted(() => {
+  const table = (key: keyof typeof fakeStore) => {
+    const rows = () => fakeStore[key]
+    const chain = {
+      first: async () => rows()[0],
+      toArray: async () => rows(),
+      count: async () => rows().length,
+    }
+    return {
+      get: async () => rows()[0],
+      toArray: async () => rows(),
+      where: () => ({ equals: () => chain }),
+      orderBy: () => ({ toArray: async () => rows(), reverse: () => ({ toArray: async () => rows() }) }),
+      put: async () => undefined,
+      add: async () => undefined,
+      delete: async () => undefined,
+    }
+  }
+  return {
+    focusSessions: table('focusSessions'),
+    sessionTaskContexts: table('sessionTaskContexts'),
+    sessionAttributionRevisions: table('sessionAttributionRevisions'),
+    sessionWorkItemPlans: table('sessionWorkItemPlans'),
+    sessionWorkItemOutcomes: table('sessionWorkItemOutcomes'),
+    sessionCommandEnvelopes: table('sessionCommandEnvelopes'),
+    sessionReviewDrafts: table('sessionCommandEnvelopes'),
+  }
+})
 vi.mock('@/services/space-db', () => ({
   spaceDBManager: { currentBinding: { database: fakeDatabase, spaceId: 'space-1' } },
 }))
@@ -34,9 +74,11 @@ vi.mock('@/lib/task-space/work-item-note-repository', () => ({
     appendBlocks = vi.fn()
   },
 }))
+/** 结束态总览用例需要控制「本地缓存会话列表」（默认空 = 既有行为）。 */
+const focusListCachedMock = vi.hoisted(() => vi.fn(async () => [] as Array<Record<string, unknown>>))
 vi.mock('@/lib/focus-session/focus-session-repository', () => ({
   FocusSessionRepository: class {
-    listCached = async () => []
+    listCached = focusListCachedMock
     addPlanItem = vi.fn().mockResolvedValue(undefined)
   },
   readSessionCommandReceipts: async () => [],
@@ -117,6 +159,9 @@ function seedRunningTimerPage(): void {
   readWorkMapMock.mockResolvedValue(null)
   writeWorkMapMock.mockReset()
   writeWorkMapMock.mockResolvedValue(0)
+  focusListCachedMock.mockReset()
+  focusListCachedMock.mockResolvedValue([])
+  for (const rows of Object.values(fakeStore)) rows.length = 0
   fetchFocusSummaryWindowMock.mockReset()
   fetchFocusSummaryWindowMock.mockResolvedValue({
     period_days: 1, total_sessions: 3, valid_sessions: 2, interrupted_sessions: 1,
@@ -416,6 +461,114 @@ describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
   })
 })
 
+// ── D13 步 3-4b：结束态「岛总览」──────────────────────────────────────────
+const ENDED_SESSION_ID = 'session-e'
+
+/** 结束会话所属 L3 的岛（会话岛 + 一个 problem / 一个 todo）。 */
+const ISLAND_FOR_ENDED = `<!--
+next_cid: 4
+centers:
+  - at: "node:Verify output/09-30 19:55 会话"
+    cid: c1
+    dir: right
+    session_id: "${ENDED_SESSION_ID}"
+-->
+# Verify output
+
+<!--
+cid: "c1"
+session_id: "${ENDED_SESSION_ID}"
+-->
+## 09-30 19:55 会话
+
+<!--
+thought_type: "problem"
+cid: "c2"
+-->
+### 甲
+
+<!--
+thought_type: "todo"
+cid: "c3"
+-->
+### 乙
+`
+
+/**
+ * 结束态种子：locator / 本地临时皆空 → 走 `focusRepository.listCached()` +
+ * `readLocalAggregate()` 的真实路径把 `endedAggregate` 立起来。
+ */
+function seedEndedTimerPage(): void {
+  focusListCachedMock.mockResolvedValue([
+    {
+      sessionId: ENDED_SESSION_ID, clockState: 'ended', reviewState: 'pending',
+      ownershipState: 'owned', validity: 'pending',
+    },
+  ])
+  fakeStore.focusSessions.push({
+    id: ENDED_SESSION_ID, sessionId: ENDED_SESSION_ID,
+    startedAt: '2026-09-13T08:00:00Z', endedAt: '2026-09-13T08:25:00Z', pauseStartedAt: null,
+    plannedSeconds: 1500, pausedSeconds: 0, focusedSeconds: 1200, breakSeconds: 0,
+    grossSeconds: 1500, timerCompletion: 'completed', clockState: 'ended', version: 2,
+    sessionRevision: 1, validity: 'pending', validityReason: null, reviewState: 'pending',
+    ownershipState: 'owned', sessionType: 'work', overallProgress: null, mood: null,
+    sessionNote: null,
+  })
+  fakeStore.sessionTaskContexts.push({ sessionId: ENDED_SESSION_ID, level2WorkItemId: 'l2-x' })
+  fakeStore.sessionAttributionRevisions.push({ sessionId: ENDED_SESSION_ID, effective: true })
+  fakeStore.sessionWorkItemPlans.push({
+    id: 'plan-e', sessionId: ENDED_SESSION_ID, workItemId: 'l3-a', titleSnapshot: 'Verify output',
+    currentDuringSession: true, completionDraft: false, removedAt: null, planRank: 0,
+  })
+  useTimerStore.setState({
+    locator: null, session: null, localProvisional: null,
+    ownershipMode: 'none', nowMs: Date.parse('2026-09-13T08:26:00Z'), error: null,
+  } as never)
+}
+
+describe('TimerPage 结束态岛总览（ADR-0008 D13 步 3-4b）', () => {
+  beforeEach(seedRunningTimerPage)
+
+  it('★ 读结束会话 focused plan item 的 L3 导图；总览挂在复盘面板**下方**且只读', async () => {
+    seedEndedTimerPage()
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_ENDED)
+    render(createElement(TimerPage))
+
+    // 键 = 结束会话 focused plan item 的 L3（不是二级项）
+    await waitFor(() => expect(readWorkMapMock).toHaveBeenCalledWith('l3-a'))
+
+    const overview = await screen.findByTestId('timer-map-overview')
+    expect(screen.getByTestId('map-overview-canvas')).toBeTruthy()
+    expect(overview).toHaveTextContent('工作导图 · 岛总览')
+    // 「复盘面板下方」= 焦点容器里最后一个直接子（前面是复盘面板）
+    const focusContainer = overview.parentElement as HTMLElement
+    expect(focusContainer.children.length).toBeGreaterThanOrEqual(2)
+    expect([...focusContainer.children].indexOf(overview)).toBe(focusContainer.children.length - 1)
+    // 只读：无编辑入口、无快速记录行
+    expect(overview.querySelectorAll('.wm-node[data-cid]')).toHaveLength(0)
+    expect(screen.queryByTestId('map-node-actions')).toBeNull()
+    expect(screen.queryByTestId('map-quick')).toBeNull()
+  })
+
+  it('★ 结束态总览可筛选（图例点「问题」→ 命中高亮、其余 dim、节点数不变）', async () => {
+    seedEndedTimerPage()
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_ENDED)
+    render(createElement(TimerPage))
+
+    // 先等地图到位（总览容器先出现、canvas 在 endedMapText 落定后才渲染 → 逐步增强）
+    await screen.findByTestId('map-overview-canvas')
+    const overview = screen.getByTestId('timer-map-overview')
+    const total = overview.querySelectorAll('.wm-node').length
+    expect(total).toBeGreaterThan(1)
+
+    fireEvent.click(screen.getByTestId('map-legend-problem'))
+
+    expect(overview.querySelectorAll('.wm-node').length).toBe(total) // dim 不 hide
+    expect(overview.querySelectorAll('.wm-node[data-highlight="true"]').length).toBeGreaterThan(0)
+    expect(overview.querySelectorAll('.wm-node[data-dim="true"]').length).toBeGreaterThan(0)
+  })
+})
+
 // ── 双体系兼容 2026-09-16：准备态 → 启动载荷带模式 ─────────────────────────
 /** 准备态种子：无活动会话（locator / session 皆空）。 */
 function seedIdleTimerPage(): void {
@@ -424,6 +577,9 @@ function seedIdleTimerPage(): void {
   readWorkMapMock.mockResolvedValue(null)
   writeWorkMapMock.mockReset()
   writeWorkMapMock.mockResolvedValue(0)
+  focusListCachedMock.mockReset()
+  focusListCachedMock.mockResolvedValue([])
+  for (const rows of Object.values(fakeStore)) rows.length = 0
   fetchFocusSummaryWindowMock.mockReset()
   fetchFocusSummaryWindowMock.mockResolvedValue({
     period_days: 1, total_sessions: 0, valid_sessions: 0, interrupted_sessions: 0,
