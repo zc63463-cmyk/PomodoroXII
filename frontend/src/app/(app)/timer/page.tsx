@@ -15,6 +15,7 @@ import { TimerFrame } from '@/components/timer/timer-frame'
 import { TimerMapEditor } from '@/components/timer/timer-map-editor'
 import { TimerMapOverview } from '@/components/timer/timer-map-overview'
 import { TimerMapPort } from '@/components/timer/timer-map-port'
+import { WorkMapPreviewOverlay } from '@/components/timer/work-map-preview-overlay'
 import { TimerSideToday, type RecentSessionRow } from '@/components/timer/timer-side-today'
 import { TodaySummary } from '@/components/timer/today-summary'
 import { Button } from '@/components/ui/button'
@@ -354,6 +355,46 @@ export default function TimerPage() {
       })
     return () => { cancelled = true }
   }, [endedMapWorkItemId])
+
+  // ── 准备态「主图」弹层数据（ADR-0008 D18 / D13 步 3-4a，方案 C）─────────────
+  // **懒读**：只有弹层**打开时**才读该三级项的导图（准备态不做无谓请求）；
+  // 打开过一次即缓存（`previewFor` 记住已加载/已尝试的 L3），**切换三级项时清空重读**。
+  // 主图 = `<L3 id>.mm.md`（按 L3 归档）→ 只有选中**三级项**才可点。fail-soft：读不到 → null → 弹层占位。
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [previewMapText, setPreviewMapText] = useState<string | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  // 已加载/已发起过的 L3（缓存标记）+ 请求代次（切 L3 后丢弃旧响应）。
+  // ★ 用 ref 而不是 state：若把"已加载标记"放进 deps，effect 自己触发的状态更新会
+  //   导致 deps 变化 → 清理函数把**正在飞的读**取消掉（实测踩到过）。
+  const previewLoadedFor = useRef<string | null>(null)
+  const previewRequestSeq = useRef(0)
+  const previewWorkItem = selectedWorkItem !== null && selectedWorkItem.depth === 3
+    ? selectedWorkItem
+    : null
+  const previewWorkItemId = previewWorkItem?.id ?? null
+  useEffect(() => {
+    if (!previewOpen || previewWorkItemId === null) return
+    if (previewLoadedFor.current === previewWorkItemId) return // 打开过一次即缓存
+    const requestId = previewRequestSeq.current + 1
+    previewRequestSeq.current = requestId
+    previewLoadedFor.current = previewWorkItemId
+    setPreviewLoading(true)
+    setPreviewMapText(null) // 换三级项先清空，避免短暂显示上一张图
+    void readWorkMap(previewWorkItemId)
+      .then((text) => {
+        if (previewRequestSeq.current !== requestId) return
+        setPreviewMapText(text)
+        setPreviewLoading(false)
+      })
+      .catch((cause) => {
+        if (previewRequestSeq.current !== requestId) return
+        setPreviewMapText(null)
+        setPreviewLoading(false)
+        console.warn(
+          `[work-map-preview] 主图读取失败（fail-soft，弹层退化为占位）: ${cause instanceof Error ? cause.message : String(cause)}`,
+        )
+      })
+  }, [previewOpen, previewWorkItemId])
 
   /**
    * 快速记录（ADR-0008 D13 步 2）：把一条思路按类型追加为会话节点子节点。
@@ -1111,6 +1152,25 @@ export default function TimerPage() {
       onSelect: (id) => selectWorkItem(id),
       formatSessionTime: (iso) => formatWorkMapSessionTime(iso, { now: new Date(), dayBoundaryHour }),
     }),
+    // ── 「查看主图」（ADR-0008 D18 / D13 步 3-4a，方案 C：弹层）──────────────
+    // 仅当选中**三级项**时可点（主图 = `<L3 id>.mm.md`，按 L3 归档）。
+    // ★ 刻意插在「浏览全部任务…」**之前**：那个入口预留给设计稿 ② 任务选择 Modal，本单不碰。
+    createElement('div', { className: 'wm-preview-row' },
+      createElement('span', { className: 'ios-tiny', 'data-testid': 'launcher-selected-title' },
+        // 显示**当前选中项**的标题（不限层级）—— 非三级时按钮另给提示说明为何不可点
+        `已选：${selectedWorkItem?.title ?? '—'}`),
+      createElement('button', {
+        type: 'button',
+        className: 'wm-preview-open',
+        'data-testid': 'launcher-view-map',
+        onClick: () => setPreviewOpen(true),
+        ...(previewWorkItem === null ? { disabled: true, 'aria-disabled': true } : {}),
+      }, '查看主图'),
+    ),
+    previewWorkItem === null
+      ? createElement('p', { className: 'ios-tiny', 'data-testid': 'launcher-view-map-hint' },
+          '选择三级项后可查看主图')
+      : null,
     // ── 「浏览全部任务…」（设计稿：整宽按钮，指向任务选择 Modal）────────────
     // 设计稿的 ② 任务选择 Modal 属 S3 待办；延续既有的可展开列表承载同一入口
     // （含筛选/搜索的位置），不因未开工而留下空白。
@@ -1189,6 +1249,13 @@ export default function TimerPage() {
       blockers: workItems.filter((item) => blockedLaunch.blockerIds.includes(item.id)),
       onProceed: handleBlockedProceed,
       onCancel: handleBlockedCancel,
+    }) : null,
+    // 准备态「主图」弹层（D18）：与 BlockerAckModal 同层，挂在页面根部
+    previewOpen ? createElement(WorkMapPreviewOverlay, {
+      open: true,
+      loading: previewLoading,
+      mapText: previewMapText,
+      onClose: () => setPreviewOpen(false),
     }) : null,
   )
 }

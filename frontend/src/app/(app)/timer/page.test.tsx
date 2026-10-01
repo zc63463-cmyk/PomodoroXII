@@ -612,6 +612,72 @@ function seedIdleTimerPage(): void {
   } as never)
 }
 
+// ── D13 步 3-4a：准备态「主图」弹层（方案 C，ADR-0008 D18）──────────────────
+describe('TimerPage 准备态主图弹层（ADR-0008 D18）', () => {
+  beforeEach(seedIdleTimerPage)
+
+  it('★ 选中非三级 → 按钮 disabled + aria-disabled + 提示；选中三级 → 可点', async () => {
+    useTaskSpaceStore.setState((current) => ({
+      workItems: [
+        ...current.workItems,
+        { id: 'l3-a', depth: 3, parentId: 'l2-x', title: 'Verify output', displayKey: 'P-3', version: 2 },
+      ],
+    }) as never)
+    const { rerender } = render(createElement(TimerPage))
+
+    // 种子默认 selectedWorkItemId = 'l2-x'（二级）→ 不可点
+    const button = await screen.findByTestId('launcher-view-map')
+    expect(button).toBeDisabled()
+    expect(button).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByTestId('launcher-selected-title')).toHaveTextContent('已选：Ship feature')
+    expect(screen.getByTestId('launcher-view-map-hint')).toHaveTextContent('选择三级项后可查看主图')
+
+    // 切到三级项 → 可点、提示消失（store 更新触发页面重渲染 → 需包 act）
+    act(() => {
+      useTaskSpaceStore.setState({ selectedWorkItemId: 'l3-a' } as never)
+    })
+    rerender(createElement(TimerPage))
+    expect(screen.getByTestId('launcher-view-map')).toBeEnabled()
+    expect(screen.getByTestId('launcher-selected-title')).toHaveTextContent('已选：Verify output')
+    expect(screen.queryByTestId('launcher-view-map-hint')).toBeNull()
+  })
+
+  it('★ 懒读 + 弹层：**打开前不读**；点开才 readWorkMap(L3)、面板 role=dialog、内容=主图；Esc 关 + 焦点归还', async () => {
+    useTaskSpaceStore.setState((current) => ({
+      workItems: [
+        ...current.workItems,
+        { id: 'l3-a', depth: 3, parentId: 'l2-x', title: 'Verify output', displayKey: 'P-3', version: 2 },
+      ],
+    }) as never)
+    useTaskSpaceStore.setState({ selectedWorkItemId: 'l3-a' } as never)
+    readWorkMapMock.mockResolvedValue(ISLAND_FOR_ENDED)
+    render(createElement(TimerPage))
+
+    const button = await screen.findByTestId('launcher-view-map')
+    // 懒读：**没打开之前一次都不读**
+    expect(readWorkMapMock).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('map-preview-panel')).toBeNull()
+
+    button.focus()
+    fireEvent.click(button)
+
+    const panel = await screen.findByTestId('map-preview-panel')
+    expect(panel).toHaveAttribute('role', 'dialog')
+    expect(panel).toHaveAttribute('aria-modal', 'true')
+    expect(panel).toHaveAttribute('aria-label', '工作导图 · 主图')
+
+    await waitFor(() => expect(readWorkMapMock).toHaveBeenCalledWith('l3-a'))
+    expect(await screen.findByTestId('map-overview-canvas')).toBeTruthy()
+    expect(screen.getByTestId('timer-map-overview')).toHaveTextContent('工作导图 · 主图')
+    // 只读：无编辑入口
+    expect(document.querySelectorAll('.wm-node[data-cid]')).toHaveLength(0)
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByTestId('map-preview-panel')).toBeNull())
+    expect(document.activeElement).toBe(button) // 焦点归还触发按钮
+  })
+})
+
 describe('TimerPage 双体系兼容 · 准备态模式（2026-09-16）', () => {
   beforeEach(seedIdleTimerPage)
 
