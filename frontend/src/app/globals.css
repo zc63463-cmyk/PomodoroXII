@@ -1089,106 +1089,109 @@
   color: var(--ios-label-2);
 }
 
-/* ── 工作导图端口（运行态「当前会话岛」，ADR-0008 D13 步 1）──────────────────
-   岛轮廓 + 节点行 + 点阵。沉浸态（[data-minimal='true']，D12 裁决 2）**只隐藏
-   文字标注**：用 visibility 而非 display —— 行盒保持原尺寸，容器尺寸不变，
-   → **零布局抖动**。岛轮廓与当前会话节点高亮在两种呈态下都保留。 */
-.ios-map-island {
-  border: 1.5px solid color-mix(in oklab, var(--ios-blue) 34%, transparent);
-  background: color-mix(in oklab, var(--ios-blue) 6%, transparent);
-  border-radius: 12px;
-  padding: 10px 12px;
+/* ── 导图三件套布局（ADR-0008 D15，2026-10-01 用户视觉评审后拆分）────────────
+   中央编辑区 = 看全 + 记录（沉浸时保留）；右栏小视图 = 缩略 + 定位（沉浸时极简岛）。
+   两个容器渲染**同一份树**（`.wm-tree`），差异只在容器宽度/高度。 */
+.wm-editor {
+  position: relative; /* 快速记录浮层的定位基准（浮层不撑开几何） */
+  gap: 8px;
 }
-.ios-map-island-hd {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 11px;
-  color: var(--ios-label-2);
-  margin-bottom: 4px;
-}
-.ios-map-row {
-  position: relative;
+.wm-editor-hd {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 30px;
-  padding: 5px 6px;
-  font-size: 12.5px;
-  border-radius: 8px;
-}
-.ios-map-row + .ios-map-row::before {
-  content: '';
-  position: absolute;
-  left: 22px;
-  right: 6px;
-  top: 0;
-  border-top: 0.5px solid color-mix(in oklab, var(--ios-blue) 18%, transparent);
-}
-/* 当前会话节点高亮（极简态同样保留——"只保留岛轮廓与当前节点高亮"） */
-.ios-map-row[data-current='true'] {
-  background: color-mix(in oklab, var(--ios-blue) 10%, transparent);
-  font-weight: 500;
-}
-.ios-map-shape {
-  flex: none;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: color-mix(in oklab, var(--ios-blue) 55%, transparent);
-}
-.ios-map-shape[data-kind='island'] {
-  width: 7px;
-  height: 7px;
-  background: transparent;
-  border: 1.5px solid color-mix(in oklab, var(--ios-blue) 60%, transparent);
-}
-.ios-map-node-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ios-map-tail {
-  margin-left: auto;
-  flex: none;
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--ios-label-2);
 }
-/* 极简岛（沉浸态）：同一 DOM、同尺寸 —— 只隐文字（含岛标题），留轮廓/点阵/当前高亮。
-   ★「快速记录」按钮行**不在此列**（D12 裁决 2：动作入口不是文字标注）→ 极简态仍可记录 */
-[data-minimal='true'] .ios-map-node-text,
-[data-minimal='true'] .ios-map-tail {
+.wm-editor-count {
+  font-size: 10.5px;
+  color: var(--ios-label-3);
+  border: 1px solid var(--ios-sep);
+  border-radius: 999px;
+  padding: 0 7px;
+}
+.wm-editor-canvas {
+  flex: 1;
+  min-height: 190px;
+  padding: 6px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--foreground) 3%, transparent);
+  overflow: hidden;
+}
+.wm-editor-canvas--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--ios-label-2);
+}
+/* 小视图画布（右栏）：矮高度 → 树自动缩到"可辨轮廓"尺寸 */
+.wm-port-canvas {
+  margin-top: 6px;
+  height: 132px;
+  padding: 4px;
+  border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--foreground) 3%, transparent);
+  overflow: hidden;
+}
+
+/* ── 工作导图树渲染器（ADR-0008 D15：中央编辑区与右栏小视图**共用同一份**）────
+   同一 SVG + 随容器自适应的 viewBox → "小视图 vs 大编辑区"只是容器宽度不同，
+   没有第二套代码。极简态（[data-minimal='true']）只隐文字、不动几何。 */
+.wm-tree {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.wm-link {
+  fill: none;
+  stroke: color-mix(in oklab, var(--ios-blue) 38%, transparent);
+  stroke-width: 1.6;
+}
+.wm-box {
+  fill: var(--ios-card);
+  stroke: color-mix(in oklab, var(--foreground) 18%, transparent);
+  stroke-width: 1;
+}
+.wm-box--session {
+  fill: color-mix(in oklab, var(--ios-blue) 10%, var(--ios-card));
+  stroke: var(--ios-blue);
+  stroke-width: 1.6;
+}
+.wm-text {
+  fill: var(--ios-label);
+  font-family: inherit;
+}
+.wm-shape--plain {
+  fill: color-mix(in oklab, var(--ios-blue) 55%, transparent);
+}
+.wm-shape--insight {
+  fill: #0c8599;
+}
+.wm-shape--problem {
+  fill: #d85a30;
+}
+.wm-shape--decision {
+  fill: #534ab7;
+}
+.wm-shape--review {
+  fill: none;
+  stroke: #2f9e44;
+  stroke-width: 1.6;
+}
+.wm-shape--todo {
+  fill: none;
+  stroke: #d97706;
+  stroke-width: 1.6;
+}
+[data-minimal='true'] .wm-text {
   visibility: hidden;
 }
 
-/* ── 快速记录（ADR-0008 D13 步 2；D9 形状 + 颜色双重编码）──────────────────── */
-.ios-map-port {
-  position: relative; /* 浮层输入的定位基准（不撑开容器） */
-}
-/* 类型形状：洞察=实心圆 / 问题=三角 / 决策=菱形 / 复盘=空心圆 / 待办=空心方 */
-.ios-map-shape[data-thought='insight'] {
-  background: #0c8599;
-}
-.ios-map-shape[data-thought='problem'] {
-  background: #d85a30;
-  border-radius: 0;
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
-}
-.ios-map-shape[data-thought='decision'] {
-  background: #534ab7;
-  border-radius: 2px;
-  transform: rotate(45deg);
-}
-.ios-map-shape[data-thought='review'] {
-  background: transparent;
-  border: 1.5px solid #2f9e44;
-}
-.ios-map-shape[data-thought='todo'] {
-  background: transparent;
-  border: 1.5px solid #d97706;
-  border-radius: 1px;
-}
+/* ── 快速记录（ADR-0008 D13 步 2 → D15 迁移至**中央编辑区**）──────────────────
+   形状/颜色的**节点侧**编码在 `.wm-shape--*`（SVG）；这里只管按钮行与浮层输入。 */
 .ios-map-quick {
   display: flex;
   flex-wrap: wrap;

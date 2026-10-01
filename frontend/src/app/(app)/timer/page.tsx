@@ -12,6 +12,7 @@ import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/time
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { ContinuePrevious } from '@/components/timer/continue-previous'
 import { TimerFrame } from '@/components/timer/timer-frame'
+import { TimerMapEditor } from '@/components/timer/timer-map-editor'
 import { TimerMapPort } from '@/components/timer/timer-map-port'
 import { TimerSideToday, type RecentSessionRow } from '@/components/timer/timer-side-today'
 import { TodaySummary } from '@/components/timer/today-summary'
@@ -945,15 +946,26 @@ export default function TimerPage() {
         'aria-pressed': immersive,
         onClick: () => setImmersive((value) => !value),
       }, immersive ? '退出沉浸' : '沉浸模式'),
-      focus: createElement(SessionClock, {
-      session, nowMs, owner: ownershipMode === 'owner',
-      ownerHint,
-      onTakeover: ownershipMode === 'read_only' ? takeOverSession : undefined,
-      onPause: (occurredAt) => clockAction('pause', occurredAt),
-      onResume: (occurredAt) => clockAction('resume', occurredAt),
-      onEnd: (occurredAt) => clockAction('end', occurredAt),
-      onFlushNote: async () => { await draftController?.flush('before-append') },
-    }),
+      // 焦点区 = 环（上）+ **导图编辑区**（下，占了原本的空白大块；ADR-0008 D15）。
+      // 编辑区常驻（不随沉浸渐隐）—— 沉浸时右栏伴奏渐隐而这里仍可看全、记录。
+      focus: createElement(Fragment, null,
+        createElement(SessionClock, {
+          session, nowMs, owner: ownershipMode === 'owner',
+          ownerHint,
+          onTakeover: ownershipMode === 'read_only' ? takeOverSession : undefined,
+          onPause: (occurredAt) => clockAction('pause', occurredAt),
+          onResume: (occurredAt) => clockAction('resume', occurredAt),
+          onEnd: (occurredAt) => clockAction('end', occurredAt),
+          onFlushNote: async () => { await draftController?.flush('before-append') },
+        }),
+        runningBreak
+          ? null
+          : createElement(TimerMapEditor, {
+              mapText: sessionMapText,
+              sessionId: activeSessionId,
+              onQuickRecord: quickRecord,
+            }),
+      ),
       // 伴奏区：骨架带 .timer-immersive-region（结构标记 + testid）。
       // 沉浸渐隐对象 = **显式标记 .timer-immersive-fade 的伴奏卡**（ADR-0008 D12）：
       // 导图端口卡不标记 → 沉浸时仍常驻可交互（极简岛呈态）。
@@ -988,15 +1000,15 @@ export default function TimerPage() {
               }
             },
           })),
-      // ── 导图端口「当前会话岛」（ADR-0008 D13 步 1）──────────────────────────
-      // ★ 刻意**不加** .timer-immersive-fade：沉浸时常驻（D12 裁决 1/2：极简岛 =
-      //   同一 DOM 上 data-minimal 派生，零布局抖动）。休息型会话不建岛，故不渲染。
+      // ── 导图小视图（ADR-0008 D15：端口职责拆分的"缩略 + 定位"一半）──────────
+      // ★ 刻意**不加** .timer-immersive-fade：用户 2026-10-01 确认「极简岛 = 小视图
+      //   在沉浸时的呈现」（保留轮廓/点阵/当前高亮；同一 DOM 上 data-minimal 派生）。
+      //   休息型会话不建岛，故不渲染。
       !runningBreak
         ? createElement(TimerMapPort, {
             mapText: sessionMapText,
             sessionId: activeSessionId,
             minimal: immersive,
-            onQuickRecord: quickRecord,
           })
         : null,
       !runningBreak && focusedWorkItemId

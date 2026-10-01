@@ -281,42 +281,52 @@ session_id: "session-a"
 describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
   beforeEach(seedRunningTimerPage)
 
-  it('★ 以当前投入 L3 读导图；岛到端口 —— 会话节点高亮行渲染（fail-soft 读）', async () => {
+  it('★ 以当前投入 L3 读导图；中央编辑区与小视图**各自**渲染同一棵树', async () => {
     readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
     render(createElement(TimerPage))
 
     // 读的键 = 当前计划项的 L3（focusedWorkItemId），不是二级项
     await waitFor(() => expect(readWorkMapMock).toHaveBeenCalledWith('l3-a'))
-    const sessionRow = await screen.findByTestId('map-session-node')
-    expect(sessionRow).toHaveAttribute('data-current', 'true')
-    expect(sessionRow).toHaveTextContent('09-30 19:55 会话')
+    // 中央编辑区（D15：焦点区下半）
+    const editor = await screen.findByTestId('timer-map-editor')
+    expect(editor.querySelector('svg.wm-tree')).not.toBeNull()
+    expect(screen.getByTestId('map-editor-canvas')).toBeTruthy()
+    // 右栏小视图
     expect(screen.getByTestId('timer-map-port')).toHaveAttribute('data-minimal', 'false')
+    expect(screen.getByTestId('map-port-canvas')).toBeTruthy()
+    // 两处都出现会话节点（同一份几何渲染两次）
+    expect(screen.getAllByTestId('wm-session-node').length).toBe(2)
   })
 
-  it('★ 沉浸切换：端口不消失、data-minimal 翻转（D12 裁决 1/2 的页面级接线）', async () => {
+  it('★ 沉浸切换：小视图 data-minimal 翻转、编辑区保留（D15：记录面常驻中央）', async () => {
     readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
     render(createElement(TimerPage))
     expect(await screen.findByTestId('timer-map-port')).toHaveAttribute('data-minimal', 'false')
 
     fireEvent.click(screen.getByRole('button', { name: '沉浸模式' }))
 
-    // 极简岛：同一 DOM 派生（卡片仍在，只是 data-minimal=true → CSS 隐文字）
+    // 极简岛：小视图同一 DOM 派生（卡片仍在，只是 data-minimal=true → CSS 隐文字）
     const port = screen.getByTestId('timer-map-port')
     expect(port).toHaveAttribute('data-minimal', 'true')
-    expect(port.querySelectorAll('.ios-map-row').length).toBe(2)
-    // 渐隐标记只打在伴奏卡上：端口刻意**不带** .timer-immersive-fade
+    expect(port.querySelectorAll('.wm-node').length).toBe(2)
+    // 渐隐标记只打在伴奏卡上：小视图刻意**不带** .timer-immersive-fade
     expect(port.className).not.toContain('timer-immersive-fade')
     expect(screen.getByTestId('immersive-region').querySelectorAll('.timer-immersive-fade').length)
       .toBeGreaterThan(0)
+    // ★ 用户 2026-10-01 裁决：沉浸时**中央编辑区保留**（不在渐隐区、仍在 DOM）
+    const editor = screen.getByTestId('timer-map-editor')
+    expect(screen.getByTestId('immersive-region').contains(editor)).toBe(false)
+    expect(editor.querySelector('svg.wm-tree')).not.toBeNull()
   })
 
-  it('无导图（读回 null）→ 占位文案，端口不炸（fail-soft）', async () => {
+  it('无导图（读回 null）→ 两处都显示占位，页面不炸（fail-soft）', async () => {
     render(createElement(TimerPage))
     expect(await screen.findByTestId('map-port-empty')).toBeTruthy()
-    expect(screen.queryByTestId('map-island')).toBeNull()
+    expect(screen.getByTestId('map-editor-empty')).toBeTruthy()
+    expect(screen.queryByTestId('map-port-canvas')).toBeNull()
   })
 
-  it('★ 快速记录（D13 步 2）：类型 + 文本 → 写出追加后的导图，端口即时出现新节点', async () => {
+  it('★ 快速记录（D13 步 2 → D15 迁至编辑区）：类型 + 文本 → 写出追加后的导图并即时可见', async () => {
     readWorkMapMock.mockResolvedValue(ISLAND_FOR_RUNNING)
     writeWorkMapMock.mockResolvedValue(128)
     render(createElement(TimerPage))
@@ -330,8 +340,11 @@ describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
     expect(workItemId).toBe('l3-a') // 写的是当前投入 L3 的导图
     expect(written).toContain('thought_type: "problem"')
     expect(written).toContain('### token 对照')
-    // 端口即时反映（本地 state 已更新，无需再读一次服务端）
-    expect(await screen.findByText('token 对照')).toBeTruthy()
+    // 即时反映（本地 state 已更新，无需再读一次服务端）。
+    // 注意：中央编辑区与右栏小视图都会渲染该文本（同一份几何渲染两次）
+    // → 用 canvas 作用域断言，避免多重命中歧义。
+    const canvas = screen.getByTestId('map-editor-canvas')
+    await waitFor(() => expect(canvas.textContent).toContain('token 对照'))
   })
 })
 
@@ -341,6 +354,8 @@ function seedIdleTimerPage(): void {
   vi.clearAllMocks()
   readWorkMapMock.mockReset()
   readWorkMapMock.mockResolvedValue(null)
+  writeWorkMapMock.mockReset()
+  writeWorkMapMock.mockResolvedValue(0)
   fetchFocusSummaryWindowMock.mockReset()
   fetchFocusSummaryWindowMock.mockResolvedValue({
     period_days: 1, total_sessions: 0, valid_sessions: 0, interrupted_sessions: 0,

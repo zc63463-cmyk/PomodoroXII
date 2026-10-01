@@ -256,6 +256,41 @@ thought_type: "problem"
 
 ---
 
+### D15 · 导图界面分工与树形渲染（2026-10-01，用户视觉评审后修订 D12 裁决 2/3 的适用面）
+
+**背景**：D12 把运行态导图放在右栏（304px 列）并以"行式"呈现；D13 把树形排到步 3。
+用户视觉评审（2026-10-01）指出：焦点区环下方是一大块空白，而 304px 塞不下可读的树。
+
+**裁决（用户明确确认三项）**：
+1. **职责拆分**：中央焦点区（环下大块）= **导图编辑区**（看全 + 记录）；右栏 = **小视图**
+   （缩略 + 定位）。两者渲染**同一份几何**（`WorkMapTree` 单一渲染器 + 自适应 `viewBox`，
+   "小视图 vs 大编辑区"只是容器宽度，没有第二套代码）。
+2. **极简岛重定位**：原"右栏端口在沉浸下的呈现态" → 现在 = **小视图在沉浸时的呈现**
+   （保留轮廓/点阵/当前高亮、隐文字）；"记录入口"职责移交中央编辑区。
+3. **沉浸语义**：沉浸只渐隐右栏伴奏，**中央编辑区保留**（记录面常驻）。
+   D12 裁决 1（渐隐作用域下沉到卡）保持不变并继续生效。
+
+**树形渲染（D13 步 3-1，本次交付）**：横向树（数据语义 `dir: right` 落到几何）。
+- 几何：kernel `layoutIslands(projection, measure, ∅)` → `nodes[]`（盒）+ `links[]`（**SVG
+  path 字符串**，可直接画）——度量**自持**（全角/半角估算 + 夹紧 [76,240]；不引 react 的
+  canvas 精确度量，理由同 D13 最小集）
+- 渲染：`WorkMapTree`（SVG：盒 + `<path>` + 类型形状/颜色 D9）+ `fitTextToBox`（与度量
+  同一把尺子截断，SVG 无 ellipsis）
+
+**实现落点**：`island-layout.ts`（几何层）· `work-map-tree.tsx`（共用渲染器）·
+`timer-map-editor.tsx`（中央编辑区，快速记录自端口迁移至此）· `timer-map-port.tsx`
+（小视图）· `globals.css`（`.wm-*`；旧行式样式 `.ios-map-island/row/node-text/tail` 删除）。
+
+**顺带修复（跨日实测发现）**：`TimerSideToday.formatRecentTime` 原先自取 `new Date()`，
+"今日/日期"分支绕过组件注入的 `now` → 注入语义不完整、单测跨日必红；改为由调用方传入
+同一把 `todayKey`（生产调用方恒传真实 now，行为不变）。
+
+**验证**：真机截图 `s3-tree-center.png`（中央树 + 右栏小视图）/ `s3-tree-minimal.png`
+（沉浸：中央保留 + 右栏极简）；断言见 `island-layout.test.ts` / `timer-map-editor.test.tsx` /
+`timer-map-port.test.tsx` / `page.test.tsx`。
+
+---
+
 ### D6 · 同步：**先单机，跨设备延后**（**暂定**）
 
 `.mm.md` 不进 sync v2 账本（D2 的直接后果）。若跨设备成为真实需求，另立 ADR 设计导图同步——**不在本轮实现**。

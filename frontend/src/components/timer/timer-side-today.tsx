@@ -71,11 +71,17 @@ const PROGRESS_LABEL: Record<string, string> = {
 
 const pad2 = (value: number): string => String(value).padStart(2, '0')
 
-/** 会话时长显示：「今日 09:12」 + 「· 25min」。 */
-function formatRecentTime(row: RecentSessionRow, dayBoundaryHour: number): string {
+/**
+ * 会话时长显示：「今日 09:12」 + 「· 25min」。
+ *
+ * ⚠ `todayKey` 必须由调用方传入（同一把 `now` 尺子）—— 2026-10-01 修：
+ * 本函数原先自取 `new Date()`，"今日/日期"分支与组件注入的 `now` 分叉，
+ * 后果是注入语义不完整（跨日必红、单测不确定）。生产调用方恒传真实 now，
+ * 行为不变；注入路径（测试）自此**完全确定**。
+ */
+function formatRecentTime(row: RecentSessionRow, todayKey: string, dayBoundaryHour: number): string {
   const at = new Date(String(row.startedAt))
   if (Number.isNaN(at.getTime())) return ''
-  const todayKey = todayStartIso(new Date(), dayBoundaryHour)
   const atKey = todayStartIso(at, dayBoundaryHour)
   const stamp = `${pad2(at.getHours())}:${pad2(at.getMinutes())}`
   return atKey === todayKey ? `今日 ${stamp}` : `${pad2(at.getMonth() + 1)}-${pad2(at.getDate())} ${stamp}`
@@ -175,7 +181,7 @@ export function TimerSideToday({ recentSessions, now }: TimerSideTodayProps) {
             className: index === 0 ? 'ios-dot ios-dot--strong' : 'ios-dot',
           }),
           createElement('span', null,
-            `${formatRecentTime(row, dayBoundaryHour)} · ${formatRecentMinutes(row)}`.replace(/ · $/, ''),
+            `${formatRecentTime(row, todayKey, dayBoundaryHour)} · ${formatRecentMinutes(row)}`.replace(/ · $/, ''),
           ),
           row.overallProgress && PROGRESS_LABEL[row.overallProgress]
             ? createElement('span', { className: 'ios-tail' }, PROGRESS_LABEL[row.overallProgress])
