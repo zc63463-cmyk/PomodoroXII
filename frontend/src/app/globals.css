@@ -1293,6 +1293,17 @@
   stroke-width: 2;
   fill: color-mix(in oklab, var(--ios-blue) 14%, var(--ios-card));
 }
+/* ── 节点定位（ADR-0008 D15）：小视图点击定位 → 中央高亮环 ──────────────────
+   由 focusCid 驱动，与 wm-node--selected（编辑选中）区分；沉浸极简态常驻可见。 */
+.wm-node--focus .wm-box {
+  stroke: #d97706;
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0 3px color-mix(in oklab, #d97706 45%, transparent));
+}
+.wm-node--selected.wm-node--focus .wm-box {
+  stroke: #d97706;
+  stroke-width: 2.4;
+}
 .wm-comment-dot {
   fill: #d97706;
 }

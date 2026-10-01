@@ -2,7 +2,9 @@
  * 中央导图编辑区（TimerMapEditor）—— ADR-0008 D15 / D13 步 2（快速记录迁移后）。
  *
  * 断言锚在可观察结构上：树渲染（SVG + 节点 + 连线 + 计数）、快速记录闭环
- * （类型行 → 浮层 → 回调 → 收起 / 失败提示）、fail-soft 占位。
+ * （类型行 → 浮层 → 回调 → 收起 / 失败提示）、fail-soft 占位、
+ * 节点编辑交互（选中、改名、加子、类型、注释、删除二次确认）、
+ * 外部 focusCid 定位高亮环（独立于内部 selectedCid，fail-soft）。
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -238,5 +240,34 @@ describe('TimerMapEditor 节点编辑（ADR-0008 D16 / D13 步 3-2）', () => {
     expect(container.querySelectorAll('.wm-node[data-cid]')).toHaveLength(0)
     fireEvent.click(container.querySelectorAll('.wm-node')[0])
     expect(screen.queryByTestId('map-node-actions')).toBeNull()
+  })
+
+  it('★ focusCid 定位高亮环：透传至 WorkMapTree 独立呈现，不与 selectedCid 混用', () => {
+    const onEdit = vi.fn().mockResolvedValue(undefined)
+    const { container, rerender } = render(
+      <TimerMapEditor
+        mapText={EDITABLE_ISLAND}
+        sessionId={SESSION_ID}
+        focusCid="c2"
+        onEdit={onEdit}
+      />,
+    )
+    // 节点获得 focus 环，但并未处于编辑选中态（无操作行）
+    const node = editableNode(container)
+    expect(node).toHaveClass('wm-node--focus')
+    expect(node).toHaveAttribute('data-focus', 'true')
+    expect(node?.getAttribute('data-selected')).toBeNull()
+    expect(screen.queryByTestId('map-node-actions')).toBeNull()
+
+    // fail-soft：指向不存在/已删节点时无环无报错
+    rerender(
+      <TimerMapEditor
+        mapText={EDITABLE_ISLAND}
+        sessionId={SESSION_ID}
+        focusCid="non-existent-cid"
+        onEdit={onEdit}
+      />,
+    )
+    expect(container.querySelector('.wm-node--focus')).toBeNull()
   })
 })

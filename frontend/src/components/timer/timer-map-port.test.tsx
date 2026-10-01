@@ -2,10 +2,11 @@
  * 右栏导图**小视图**（TimerMapPort）—— ADR-0008 D15 后的断言面。
  *
  * 断言锚在可观察结构上：树渲染（SVG + 会话节点高亮 + 类型节点）、极简态 `data-minimal`
- * 派生且**同一 DOM**（几何不变）、无图/解析失败 → 占位（fail-soft）。
+ * 派生且**同一 DOM**（几何不变）、无图/解析失败 → 占位（fail-soft）、
+ * 点即定位（`onFocusNode` 抛出 cid，极简态仍可用）。
  * 快速记录的断言已随职责迁移到 `timer-map-editor.test.tsx`（D15）。
  */
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { appendThoughtNode } from '@/lib/work-map/thought-nodes'
@@ -68,6 +69,51 @@ describe('TimerMapPort（右栏小视图）', () => {
     expect([...minimal.container.querySelectorAll('.wm-text')].map((el) => el.textContent))
       .toEqual(fullTexts)
     expect(screen.getByTestId('wm-session-node')).toHaveAttribute('data-session', 'true')
+  })
+
+  it('★ 点即定位（B-1）：透传 onFocusNode，点击带 cid 节点上抛 cid，存量无 cid 节点只读', () => {
+    const onFocusNode = vi.fn()
+    const { container } = render(
+      <TimerMapPort
+        mapText={ISLAND}
+        sessionId={SESSION_ID}
+        minimal={false}
+        onFocusNode={onFocusNode}
+      />,
+    )
+
+    // 点击会话节点（cid="c1"）
+    const sessionNode = screen.getByTestId('wm-session-node')
+    fireEvent.click(sessionNode)
+    expect(onFocusNode).toHaveBeenCalledWith('c1')
+
+    // 点击思考节点（cid="c2"）
+    const thoughtNode = container.querySelector('.wm-node[data-thought="problem"]')
+    fireEvent.click(thoughtNode!)
+    expect(onFocusNode).toHaveBeenCalledWith('c2')
+
+    // 点击存量无 cid 节点：不抛出
+    const readonlyNode = container.querySelector('.wm-node[data-readonly="true"]')
+    expect(readonlyNode?.querySelector('title')?.textContent).toBe('存量节点（无 cid，只读）')
+    fireEvent.click(readonlyNode!)
+    expect(onFocusNode).toHaveBeenCalledTimes(2)
+  })
+
+  it('★ 沉浸极简态下定位仍可用（B-1/B-2）：minimal=true 时点击节点仍触发 onFocusNode', () => {
+    const onFocusNode = vi.fn()
+    const { container } = render(
+      <TimerMapPort
+        mapText={ISLAND}
+        sessionId={SESSION_ID}
+        minimal={true}
+        onFocusNode={onFocusNode}
+      />,
+    )
+    expect(screen.getByTestId('timer-map-port')).toHaveAttribute('data-minimal', 'true')
+
+    const thoughtNode = container.querySelector('.wm-node[data-thought="problem"]')
+    fireEvent.click(thoughtNode!)
+    expect(onFocusNode).toHaveBeenCalledWith('c2')
   })
 
   it('fail-soft：无导图（null）/ 解析失败 → 占位文案，不渲染树', () => {

@@ -29,9 +29,16 @@ export interface TimerMapPortProps {
   sessionId: string | null
   /** 沉浸态（极简岛）：同一 DOM，仅 CSS 派生 */
   minimal: boolean
+  /** 点击有 cid 节点上抛 cid（用于中央编辑区定位高亮；ADR-0008 D15） */
+  onFocusNode?: (cid: string) => void
 }
 
-export function TimerMapPort({ mapText, sessionId, minimal }: TimerMapPortProps): ReactNode {
+export function TimerMapPort({
+  mapText,
+  sessionId,
+  minimal,
+  onFocusNode,
+}: TimerMapPortProps): ReactNode {
   const island = useMemo(() => {
     if (mapText === null || sessionId === null) return null
     const layout = readWorkMapLayout(mapText)
@@ -50,7 +57,12 @@ export function TimerMapPort({ mapText, sessionId, minimal }: TimerMapPortProps)
       </div>
       {island !== null ? (
         <div className="wm-port-canvas" data-testid="map-port-canvas">
-          <WorkMapTree islands={[island]} sessionId={sessionId} label="本次会话导图（小视图）" />
+          <WorkMapTree
+            islands={[island]}
+            sessionId={sessionId}
+            label="本次会话导图（小视图）"
+            onFocusNode={onFocusNode}
+          />
         </div>
       ) : (
         <p className="ios-tiny" data-testid="map-port-empty" style={{ marginTop: 6 }}>

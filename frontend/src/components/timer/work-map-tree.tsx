@@ -33,6 +33,11 @@ export interface WorkMapTreeProps {
   /** 当前选中节点的 cid（编辑区选中态；只影响视觉环） */
   selectedCid?: string | null
   /**
+   * 被定位节点的 cid（小视图定位态；驱动中央/小视图的 wm-node--focus 环）
+   * 与 selectedCid（编辑选中）区分独立（ADR-0008 D15）
+   */
+  focusCid?: string | null
+  /**
    * 跨岛按类型筛选（D13 步 3-4b）：命中类型的节点满 opacity + 描边环，其余 **dim**
    * （`opacity` 压低，**不隐藏** —— 隐藏会拆断树结构，见 ADR-0008 D17）；
    * 连线两端都 dim 才 dim。`null` / 缺省 = 全亮。
@@ -43,6 +48,11 @@ export interface WorkMapTreeProps {
    * 不给则整树**只读**（右栏小视图即如此）——只读节点点击无效、但 hover 有「只读」提示。
    */
   onSelectNode?: (cid: string) => void
+  /**
+   * 点击**有 cid 的节点**（小视图场景；会话节点与思考节点均有 cid）→ 上抛 cid 以在中央定位高亮。
+   * 当 onSelectNode 未给而 onFocusNode 给定时生效。不与 onSelectNode 并用（ADR-0008 D15）。
+   */
+  onFocusNode?: (cid: string) => void
 }
 
 const PAD = 12
@@ -92,60 +102,91 @@ function NodeBox({
   isSession,
   editable,
   selected,
+  focused,
   dimmed,
   highlighted,
   onSelect,
+  onFocus,
 }: {
   node: MapTreeNode
   isSession: boolean
   editable: boolean
   selected: boolean
+  focused: boolean
   /** 跨岛筛选：非命中类型 → dim（**只调视觉权重、不隐藏**，D17） */
   dimmed: boolean
   /** 跨岛筛选：命中类型 → 满 opacity + 描边环 */
   highlighted: boolean
   onSelect?: (cid: string) => void
+  onFocus?: (cid: string) => void
 }): ReactNode {
   const label = fitTextToBox(node.text === '' ? '（无标题）' : node.text, node.box.w, node.depth)
   const textX = node.thoughtType !== null ? 24 : 12
+
+  const isSelectMode = onSelect !== undefined
+  const isFocusMode = !isSelectMode && onFocus !== undefined
+
   // 可编辑 = 属当前会话岛 + 有 cid + 非会话节点（D16-a）；只读节点不给入口
-  const editableCid = editable && node.cid !== null ? node.cid : null
-  const activate = editableCid !== null ? (): void => onSelect?.(editableCid) : undefined
+  // 可定位 = 小视图场景下，只要有 cid 即可定位（包含会话节点与思考节点）
+  const isActionable = isSelectMode
+    ? (editable && node.cid !== null)
+    : (isFocusMode && node.cid !== null)
+
+  const actionCid = isActionable ? node.cid : null
+
+  const handleClick = actionCid !== null
+    ? (): void => {
+        if (isSelectMode) {
+          onSelect?.(actionCid)
+        } else if (isFocusMode) {
+          onFocus?.(actionCid)
+        }
+      }
+    : undefined
+
+  const ariaLabel = actionCid !== null
+    ? (isSelectMode
+        ? `编辑节点：${node.text === '' ? '（无标题）' : node.text}`
+        : `定位：${node.text === '' ? '（无标题）' : node.text}`)
+    : undefined
+
   return (
     <g
       transform={`translate(${node.box.x} ${node.box.y})`}
       className={[
         'wm-node',
         selected ? 'wm-node--selected' : '',
+        focused ? 'wm-node--focus' : '',
         dimmed ? 'wm-node--dim' : '',
         highlighted ? 'wm-node--hl' : '',
       ].filter((token) => token !== '').join(' ')}
       data-testid={isSession ? 'wm-session-node' : undefined}
       data-thought={node.thoughtType ?? undefined}
       data-session={isSession ? 'true' : 'false'}
-      data-cid={editableCid ?? undefined}
+      data-cid={actionCid ?? undefined}
       data-comment={node.comment !== null ? 'true' : undefined}
-      data-readonly={editableCid === null ? 'true' : undefined}
+      data-readonly={actionCid === null ? 'true' : undefined}
       data-selected={selected ? 'true' : undefined}
+      data-focus={focused ? 'true' : undefined}
       data-dim={dimmed ? 'true' : undefined}
       data-highlight={highlighted ? 'true' : undefined}
-      role={editableCid !== null ? 'button' : undefined}
-      tabIndex={editableCid !== null ? 0 : undefined}
-      aria-label={editableCid !== null ? `编辑节点：${node.text === '' ? '（无标题）' : node.text}` : undefined}
-      onClick={activate}
+      role={actionCid !== null ? 'button' : undefined}
+      tabIndex={actionCid !== null ? 0 : undefined}
+      aria-label={ariaLabel}
+      onClick={handleClick}
       onKeyDown={
-        editableCid !== null
+        actionCid !== null
           ? (event) => {
               if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault()
-                onSelect?.(editableCid)
+                handleClick?.()
               }
             }
           : undefined
       }
     >
       {/* 只读节点的 hover 提示（SVG 原生 tooltip）——点击无效但原因可见 */}
-      {editableCid === null ? (
+      {actionCid === null ? (
         <title>{isSession ? '会话节点（只读）' : '存量节点（无 cid，只读）'}</title>
       ) : null}
       <rect
@@ -185,8 +226,10 @@ export function WorkMapTree({
   className,
   label,
   selectedCid,
+  focusCid,
   highlightType,
   onSelectNode,
+  onFocusNode,
 }: WorkMapTreeProps): ReactNode {
   const bounds = unionBounds(islands)
   // 筛选只调「视觉权重」：命中 = 高亮，其余 dim；null = 全亮（D17）
@@ -240,9 +283,14 @@ export function WorkMapTree({
                   node.cid !== null &&
                   node.cid === (selectedCid ?? null)
                 }
+                focused={
+                  node.cid !== null &&
+                  node.cid === (focusCid ?? null)
+                }
                 dimmed={dimById.get(node.id) ?? false}
                 highlighted={filter !== null && node.thoughtType === filter}
                 onSelect={onSelectNode}
+                onFocus={onFocusNode}
               />
             ))}
           </g>

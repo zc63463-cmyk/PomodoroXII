@@ -45,6 +45,8 @@ export interface TimerMapEditorProps {
   mapText: string | null
   /** 当前会话 id（高亮其岛根） */
   sessionId: string | null
+  /** 外部传入被定位节点的 cid（小视图点击定位；驱动 focus 环，不与 selectedCid 混用；ADR-0008 D15） */
+  focusCid?: string | null
   /** 快速记录：追加「类型 + 文本」为会话节点子节点（页面实现写入；抛错 → 卡内提示） */
   onQuickRecord?: (type: ThoughtType, title: string) => Promise<void>
   /** 节点编辑：改名 / 加子 / 类型 / 注释 / 删除（页面实现写入；抛错 → 卡内提示） */
@@ -58,6 +60,7 @@ const DELETE_CONFIRM_MS = 3000
 export function TimerMapEditor({
   mapText,
   sessionId,
+  focusCid,
   onQuickRecord,
   onEdit,
 }: TimerMapEditorProps): ReactNode {
@@ -221,6 +224,7 @@ export function TimerMapEditor({
             sessionId={sessionId}
             label="本次会话导图（编辑区）"
             selectedCid={selectedCid}
+            focusCid={focusCid}
             onSelectNode={editable ? selectNode : undefined}
           />
         </div>

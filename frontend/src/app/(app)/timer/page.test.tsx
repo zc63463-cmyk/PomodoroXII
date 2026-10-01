@@ -459,6 +459,71 @@ describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
     expect(written).not.toContain('### 旧标题')
     expect(written).toContain('### 验证输出')
   })
+
+  it('★ 点即定位（ADR-0008 D15）：小视图点击带 cid 节点 → 中央编辑区对应节点获得 wm-node--focus 环，存量无 cid 节点不响应', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_EDITABLE_FOR_RUNNING)
+    render(createElement(TimerPage))
+
+    const port = await screen.findByTestId('timer-map-port')
+    const editor = screen.getByTestId('timer-map-editor')
+
+    // 初始状态：无 focus 环
+    expect(editor.querySelector('.wm-node--focus')).toBeNull()
+
+    // 1. 在右栏小视图中点击带 cid 的思考节点（cid="c2"）
+    const portThoughtNode = port.querySelector('.wm-node[data-thought="problem"]')
+    expect(portThoughtNode).not.toBeNull()
+    fireEvent.click(portThoughtNode!)
+
+    // 中央编辑区中对应节点出现 focus 环
+    const editorThoughtNode = editor.querySelector('.wm-node[data-thought="problem"]')
+    expect(editorThoughtNode).toHaveClass('wm-node--focus')
+    expect(editorThoughtNode).toHaveAttribute('data-focus', 'true')
+
+    // 2. 点击右栏小视图的会话节点（带 cid="c1"）
+    const portSessionNode = port.querySelector('[data-testid="wm-session-node"]')
+    expect(portSessionNode).not.toBeNull()
+    fireEvent.click(portSessionNode!)
+
+    const editorSessionNode = editor.querySelector('[data-testid="wm-session-node"]')
+    expect(editorSessionNode).toHaveClass('wm-node--focus')
+    expect(editorThoughtNode).not.toHaveClass('wm-node--focus')
+
+    // 3. 点击无 cid 存量标题行：不触发定位
+    const portReadonlyNode = port.querySelector('.wm-node[data-readonly="true"]')
+    expect(portReadonlyNode).not.toBeNull()
+    fireEvent.click(portReadonlyNode!)
+    const editorStockNode = editor.querySelector('.wm-node:not([data-session="true"])[data-readonly="true"]')
+    expect(editorStockNode).not.toHaveClass('wm-node--focus')
+  })
+
+  it('★ 沉浸极简态下点即定位仍生效，写回操作成功后清空 focus 环', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_EDITABLE_FOR_RUNNING)
+    writeWorkMapMock.mockResolvedValue(128)
+    render(createElement(TimerPage))
+
+    // 进入沉浸模式
+    fireEvent.click(await screen.findByRole('button', { name: '沉浸模式' }))
+    const port = screen.getByTestId('timer-map-port')
+    expect(port).toHaveAttribute('data-minimal', 'true')
+    const editor = screen.getByTestId('timer-map-editor')
+
+    // 极简态下点小视图思考节点
+    const portThoughtNode = port.querySelector('.wm-node[data-thought="problem"]')
+    fireEvent.click(portThoughtNode!)
+
+    const editorThoughtNode = editor.querySelector('.wm-node[data-thought="problem"]')
+    expect(editorThoughtNode).toHaveClass('wm-node--focus')
+
+    // 快速记录一条新思路 → 写回成功后清空 focus 环
+    fireEvent.click(screen.getByTestId('map-quick-todo'))
+    fireEvent.change(screen.getByTestId('map-quick-input'), { target: { value: '新待办' } })
+    fireEvent.click(screen.getByTestId('map-quick-submit'))
+
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalled())
+    // focus 环已被清空
+    await waitFor(() => expect(editor.querySelector('.wm-node--focus')).toBeNull())
+  })
 })
 
 // ── D13 步 3-4b：结束态「岛总览」──────────────────────────────────────────

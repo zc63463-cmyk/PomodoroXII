@@ -336,11 +336,13 @@ export default function TimerPage() {
   //   另一次网络往返，端口首读可能落在"图在但本次会话岛还没写进去"的中间态。
   // 失败一律 fail-quiet：端口退化占位文案，不阻断计时（不变量 4）。
   const [sessionMapText, setSessionMapText] = useState<string | null>(null)
+  const [focusCid, setFocusCid] = useState<string | null>(null)
   const [mapRefreshSeq, setMapRefreshSeq] = useState(0)
   useEffect(() => {
     let cancelled = false
     if (activeSessionId === null || focusedWorkItemId === null || runningBreak) {
       setSessionMapText(null)
+      setFocusCid(null)
       return
     }
     void readWorkMap(focusedWorkItemId)
@@ -437,6 +439,7 @@ export default function TimerPage() {
     await writeWorkMap(focusedWorkItemId, result.text)
     // 立即反映（不等下一次读）；服务端已是同一份内容，无需额外对齐往返
     setSessionMapText(result.text)
+    setFocusCid(null)
   }
 
   /**
@@ -457,6 +460,7 @@ export default function TimerPage() {
     if (!result.changed) throw new Error(result.reason ?? '未产生变更')
     await writeWorkMap(focusedWorkItemId, result.text)
     setSessionMapText(result.text)
+    setFocusCid(null)
   }
   /**
    * 节奏面板只在「已结束 且 不需要复盘」时出现：
@@ -1085,6 +1089,7 @@ export default function TimerPage() {
           : createElement(TimerMapEditor, {
               mapText: sessionMapText,
               sessionId: activeSessionId,
+              focusCid,
               onQuickRecord: quickRecord,
               onEdit: editMap,
             }),
@@ -1132,6 +1137,7 @@ export default function TimerPage() {
             mapText: sessionMapText,
             sessionId: activeSessionId,
             minimal: immersive,
+            onFocusNode: (cid) => setFocusCid(cid),
           })
         : null,
       !runningBreak && focusedWorkItemId
