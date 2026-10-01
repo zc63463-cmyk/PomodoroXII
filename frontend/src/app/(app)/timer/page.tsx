@@ -6,7 +6,8 @@ import { BlockerAckModal } from '@/components/task-space/blocker-ack-modal'
 import { FocusedWorkItemNote } from '@/components/timer/focused-work-item-note'
 import { RestCyclePanel } from '@/components/timer/rest-cycle-panel'
 import { SessionClock } from '@/components/timer/session-clock'
-import { SessionLauncher, type LaunchSelection } from '@/components/timer/session-launcher'
+import { SessionLauncher, deriveLaunchSelection, type LaunchSelection } from '@/components/timer/session-launcher'
+import { TaskPickerModal } from '@/components/timer/task-picker-modal'
 import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
 import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/timer/session-review-completion'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
@@ -45,6 +46,7 @@ import {
 } from '@/lib/task-space/continue-previous'
 import { recordBlockerAck } from '@/lib/task-space/blocker-ack-log'
 import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
+import { buildHierarchyCodes } from '@/lib/task-space/hierarchy-code'
 import { readWorkMap, writeWorkMap } from '@/lib/work-map/work-map-api'
 import { appendThoughtNode } from '@/lib/work-map/thought-nodes'
 import { applyMapNodeEdit, type MapNodeEditOp } from '@/lib/work-map/node-edits'
@@ -227,6 +229,29 @@ export default function TimerPage() {
   const currentPlan = plans.find((plan) => plan.currentDuringSession) ?? plans[0] ?? null
   const focusedWorkItemId = currentPlan?.workItemId ?? selectedWorkItemId
   const selectedWorkItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
+  // ── ② 任务选择 Modal（2026-10-02）：归属/三级计划的状态源 ────────────────────
+  // 原启动器内部状态上移到页面：Modal 与启动器共享**同一份**（不新增第二状态源，
+  // 派生仍走 deriveLaunchSelection）。store 选中项变化（三栏/主图提示/阻塞取消）
+  // 时按派生覆写 —— 与原启动器的 useEffect [initial] 同步语义逐字等价。
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const derivedLaunch = useMemo(
+    () => deriveLaunchSelection(workItems, selectedWorkItemId),
+    [workItems, selectedWorkItemId],
+  )
+  const [launchLevel2Id, setLaunchLevel2Id] = useState<string | null>(derivedLaunch.level2Id)
+  const [launchLevel3Ids, setLaunchLevel3Ids] = useState<string[]>(derivedLaunch.level3Ids)
+  // 同步条件 = 派生**结果**（语义键），不是 workItems 引用：后台同步/建子落库会让
+  // store 数组换引用、派生重算出"值相同的新对象"—— 若按引用覆写，用户在 Modal 里
+  // 改到一半的归属/计划会被静默清空（真机验收实测复现，2026-10-02）。旧启动器把
+  // 状态放内部时同样暴露于此（initial 按引用 memo），随承载迁移一并收口。
+  const derivedLevel3Key = derivedLaunch.level3Ids.join(',')
+  useEffect(() => {
+    setLaunchLevel2Id(derivedLaunch.level2Id)
+    setLaunchLevel3Ids(derivedLaunch.level3Ids)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWorkItemId, derivedLaunch.level2Id, derivedLevel3Key])
+  // 层级编码（1 / 1.2 / 1.2.3）：Modal 关键字筛选按编号命中（任务页同款口径）。
+  const hierarchyCodes = useMemo(() => buildHierarchyCodes(workItems), [workItems])
   // Wave 2C fix: previously subscribed via `useTimerStore((state) =>
   // selectDerivedClock(state))`, whose selector returned a fresh object every
   // call once a session existed.  useSyncExternalStore treats that as an
@@ -1171,71 +1196,35 @@ export default function TimerPage() {
       ? createElement('p', { className: 'ios-tiny', 'data-testid': 'launcher-view-map-hint' },
           '选择三级项后可查看主图')
       : null,
-    // ── 「浏览全部任务…」（设计稿：整宽按钮，指向任务选择 Modal）────────────
-    // 设计稿的 ② 任务选择 Modal 属 S3 待办；延续既有的可展开列表承载同一入口
-    // （含筛选/搜索的位置），不因未开工而留下空白。
-    createElement('details', {
-      className: 'ios-quick',
-      // 默认折叠。★ 2026-09-30 修订：此前是「三栏全空就自动展开」，理由是
-      // 「新用户直接看到任务列表」。但三栏现在**恒显三层结构**（见上），页面
-      // 已不再"看起来是空的"，自动展开反而把「本次时长 / 开始专注」推到
-      // 900px 视口的折线以下（实测 CTA 顶部 y≈1218）—— 启动路径被列表挡在
-      // 第一个屏幕之外。改为只在**确实一个工作项都没有**时展开（那时内容
-      // 就是一段短说明，用来回答"为什么空、去哪补"）。
-      ...(workItems.length === 0 ? { open: true } : {}),
-    },
-      createElement('summary', {
+    // ── 「浏览全部任务…」（设计稿：整宽按钮，打开 ② 任务选择 Modal）──────────
+    // 2026-10-02 落地：原 <details> 可展开列表退役 —— 归属/三级计划/筛选全部
+    // 迁入 TaskPickerModal（页面根部挂载）。列表不再占据启动路径，此前
+    // 「自动展开列表把 CTA 推到 900px 折线以下（实测 y≈1218）」的回归根因
+    // 就此消除；空 Space 的说明也移进 Modal（打开按钮即达）。
+    createElement('div', { className: 'ios-quick' },
+      createElement('button', {
+        type: 'button',
         className: 'ios-qrow',
         'data-tappable': 'true',
-        style: { cursor: 'pointer', alignItems: 'center' },
+        'data-testid': 'launcher-browse-all',
+        style: { cursor: 'pointer', alignItems: 'center', width: '100%' },
+        onClick: () => setPickerOpen(true),
       },
         createElement('span', { className: 'ios-tiny' }, '⌕'),
         createElement('span', { className: 'qbody', style: { flexDirection: 'row', alignItems: 'center' } },
           createElement('span', { className: 'qt' }, '浏览全部任务…')),
         createElement('span', { className: 'ios-tail' }, '筛选 / 搜索'),
       ),
-      workItems.length
-        // 展开后列表自带滚动上限（设计稿的任务树也是 `max-height:360px; overflow-y:auto`）
-        // —— 不让"浏览全部"把下方启动控件挤出屏幕。
-        ? createElement('div', {
-            'aria-label': 'WorkItems for focus',
-            style: { maxHeight: 280, overflowY: 'auto' },
-          }, workItems.map((item) => createElement('button', {
-            key: item.id, type: 'button',
-            className: 'ios-qrow',
-            'data-tappable': 'true',
-            'data-selected': selectedWorkItem?.id === item.id ? 'true' : 'false',
-            onClick: () => selectWorkItem(item.id),
-          },
-          // 单选圈：设计稿每一行都有（旧版这一处只有文字，实测 `单选圈数 = 0`）
-          createElement('span', { className: 'ios-radio', 'data-size': 'sm' }),
-          createElement('span', { className: 'qbody' },
-            createElement('span', { className: 'qt' }, item.title),
-            createElement('span', { className: 'qmeta' }, item.displayKey),
-          ),
-        )))
-        // ★ 空状态要说清「为什么空」和「去哪补」—— 走查实测（2026-09-10）。
-        : createElement('div', { role: 'status', className: 'grid gap-2 p-4 text-sm', style: { color: 'var(--ios-label-2)' } },
-          createElement('p', null, '这个 Space 里还没有工作项，所以没有东西可以投入。'),
-          createElement('p', null, '常见原因有三种，按顺序排查：'),
-          createElement('ol', { className: 'ml-5 list-decimal' },
-            createElement('li', null, '选错了 Space —— 左上角切到有数据的那个（本机内容都在名为「111」的 Space 里）。'),
-            createElement('li', null, '刚进来、首轮同步还没跑完 —— 任务页会显示 Loading；等它出树再回来。'),
-            createElement('li', null, '确实还没建 —— 去「任务」页新建项目与工作项。'),
-          ),
-          createElement('p', null, '另外：专注会话必须挂在「二级」工作项上，所以至少要有一个一级项 + 它的一个子项。'),
-        ),
     ),
-    // ── 启动器（归属 / 本次时长 / 开始专注）──────────────────────────────
-    // 工单③（2026-09-14）：准备态内联新建三级 —— 走任务页同一 store 入口
-    // （createChild）；直接用返回值 id，不读异步闭包里的 workItems 旧快照
-    //（createChild 先落 store 再返回，结构性避开该陷阱）。
-    // 失败不吞：让 SessionLauncher 以 role="alert" 呈现（离线创建禁令必须可见）。
+    // ── 启动器（已选摘要 / 本次时长 / 开始专注）────────────────────────────
+    // ② Modal 落地后：归属/三级计划控件在 TaskPickerModal 里，启动器只读同一份
+    // 页面状态源（launchLevel2Id / launchLevel3Ids）呈现摘要并提交 CTA。
     workItems.length ? createElement(SessionLauncher, {
       items: workItems,
-      initialWorkItemId: selectedWorkItemId,
+      level2Id: launchLevel2Id,
+      level3Ids: launchLevel3Ids,
+      onLevel3IdsChange: setLaunchLevel3Ids,
       onStart: requestStart,
-      onCreateLevel3: async (level2Id: string, title: string) => (await createChild(level2Id, { title })).id,
     }) : null,
       ),
   })
@@ -1257,5 +1246,28 @@ export default function TimerPage() {
       mapText: previewMapText,
       onClose: () => setPreviewOpen(false),
     }) : null,
+    // ② 任务选择 Modal（2026-10-02）：与 BlockerAckModal / 主图弹层同层，挂在页面根部。
+    // 归属/三级计划的唯一状态源在上方（launchLevel2Id / launchLevel3Ids）；
+    // 改归属即清空三级计划 —— 与原启动器 select onChange 的联动逐字一致。
+    // 内联新建三级（工单③）随三级计划组迁入 Modal：走任务页同一 store 入口
+    //（createChild），直接用返回值 id，不读异步闭包里的 workItems 旧快照
+    //（createChild 先落 store 再返回，结构性避开该陷阱）；
+    // 失败不吞：Modal 以 role="alert" 呈现（离线创建禁令必须可见）。
+    createElement(TaskPickerModal, {
+      open: pickerOpen,
+      onOpenChange: setPickerOpen,
+      items: workItems,
+      level2Id: launchLevel2Id,
+      level3Ids: launchLevel3Ids,
+      frozenLevel3Ids: derivedLaunch.level3Ids,
+      categoryById,
+      codeById: hierarchyCodes,
+      onAttributionChange: (nextLevel2Id: string | null) => {
+        setLaunchLevel2Id(nextLevel2Id)
+        setLaunchLevel3Ids([])
+      },
+      onLevel3IdsChange: setLaunchLevel3Ids,
+      onCreateLevel3: async (level2Id: string, title: string) => (await createChild(level2Id, { title })).id,
+    }),
   )
 }
