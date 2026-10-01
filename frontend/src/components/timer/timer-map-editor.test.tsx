@@ -4,7 +4,7 @@
  * 断言锚在可观察结构上：树渲染（SVG + 节点 + 连线 + 计数）、快速记录闭环
  * （类型行 → 浮层 → 回调 → 收起 / 失败提示）、fail-soft 占位。
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { TimerMapEditor } from './timer-map-editor'
@@ -91,5 +91,152 @@ describe('TimerMapEditor（中央编辑区）', () => {
     expect(screen.getByTestId('map-editor-empty')).toBeTruthy()
     expect(screen.queryByTestId('map-editor-canvas')).toBeNull()
     warn.mockRestore()
+  })
+})
+
+/** 带一个**可编辑节点**（cid c2，含注释）的岛 —— 节点编辑交互断言的 fixture。 */
+const EDITABLE_ISLAND = `${ISLAND.trimEnd()}
+
+<!--
+thought_type: "problem"
+cid: "c2"
+note:
+  - 一条注释
+-->
+### 可编辑节点
+`
+
+describe('TimerMapEditor 节点编辑（ADR-0008 D16 / D13 步 3-2）', () => {
+  const renderEditor = (onEdit = vi.fn().mockResolvedValue(undefined)) => {
+    const utils = render(
+      <TimerMapEditor mapText={EDITABLE_ISLAND} sessionId={SESSION_ID} onEdit={onEdit} />,
+    )
+    return { ...utils, onEdit }
+  }
+  const editableNode = (container: HTMLElement): Element | null =>
+    container.querySelector('.wm-node[data-cid="c2"]')
+
+  it('★ 选中：只有可编辑节点可点；会话节点/无 cid 节点点击无效（hover 提示只读）', () => {
+    const { container } = renderEditor()
+    // 可编辑面只有 c2 一个；会话节点与存量 L3 节点都标 readonly
+    expect(container.querySelectorAll('.wm-node[data-cid]')).toHaveLength(1)
+    expect(container.querySelectorAll('.wm-node[data-readonly="true"]')).toHaveLength(2)
+    expect(container.querySelector('.wm-node[data-readonly="true"] title')?.textContent).toContain('只读')
+    expect(screen.queryByTestId('map-node-actions')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('wm-session-node'))
+    expect(screen.queryByTestId('map-node-actions')).toBeNull()
+
+    fireEvent.click(editableNode(container)!)
+    expect(screen.getByTestId('map-node-actions')).toBeTruthy()
+    expect(editableNode(container)).toHaveAttribute('data-selected', 'true')
+  })
+
+  it('★ 改名：浮层预填现值 → 提交回调 rename', async () => {
+    const { container, onEdit } = renderEditor()
+    fireEvent.click(editableNode(container)!)
+    fireEvent.click(screen.getByTestId('map-action-rename'))
+    const input = screen.getByTestId('map-action-input') as HTMLInputElement
+    expect(input.value).toBe('可编辑节点')
+    fireEvent.change(input, { target: { value: '新标题' } })
+    fireEvent.click(screen.getByTestId('map-action-submit'))
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith({ kind: 'rename', cid: 'c2', title: '新标题' }),
+    )
+    await waitFor(() => expect(screen.queryByTestId('map-action-pop')).toBeNull())
+  })
+
+  it('★ 加子：空输入 → 提交回调 add', async () => {
+    const { container, onEdit } = renderEditor()
+    fireEvent.click(editableNode(container)!)
+    fireEvent.click(screen.getByTestId('map-action-add'))
+    const input = screen.getByTestId('map-action-input') as HTMLInputElement
+    expect(input.value).toBe('')
+    fireEvent.change(input, { target: { value: '子标题' } })
+    fireEvent.click(screen.getByTestId('map-action-submit'))
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith({ kind: 'add', cid: 'c2', title: '子标题' }),
+    )
+  })
+
+  it('★ 类型：5 chip；点 chip 回调 type；「清除类型」回调 type=null', async () => {
+    const { container, onEdit } = renderEditor()
+    fireEvent.click(editableNode(container)!)
+    fireEvent.click(screen.getByTestId('map-action-type'))
+    expect(screen.getByTestId('map-action-pop').querySelectorAll('.wm-action-chip[data-thought]')).toHaveLength(5)
+    fireEvent.click(screen.getByTestId('map-action-type-decision'))
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith({ kind: 'type', cid: 'c2', type: 'decision' }),
+    )
+
+    fireEvent.click(screen.getByTestId('map-action-type'))
+    fireEvent.click(screen.getByTestId('map-action-type-clear'))
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith({ kind: 'type', cid: 'c2', type: null }),
+    )
+  })
+
+  it('★ 注释：选中显示注释内容；浮层多行预填 → 提交为一行一条的列表', async () => {
+    const { container, onEdit } = renderEditor()
+    fireEvent.click(editableNode(container)!)
+    expect(screen.getByTestId('map-node-comment')).toHaveTextContent('一条注释')
+
+    fireEvent.click(screen.getByTestId('map-action-comment'))
+    const area = screen.getByTestId('map-action-input') as HTMLTextAreaElement
+    expect(area.value).toBe('一条注释')
+    fireEvent.change(area, { target: { value: '第一行\n第二行' } })
+    fireEvent.click(screen.getByTestId('map-action-submit'))
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith({
+        kind: 'comment', cid: 'c2', comment: ['第一行', '第二行'],
+      }),
+    )
+  })
+
+  it('★ 删除二次确认：第一次不删（文案变「确认删除？」），第二次才回调', async () => {
+    const { container, onEdit } = renderEditor()
+    fireEvent.click(editableNode(container)!)
+    fireEvent.click(screen.getByTestId('map-action-delete'))
+    expect(onEdit).not.toHaveBeenCalled()
+    expect(screen.getByTestId('map-action-delete')).toHaveTextContent('确认删除？')
+
+    fireEvent.click(screen.getByTestId('map-action-delete'))
+    await waitFor(() => expect(onEdit).toHaveBeenCalledWith({ kind: 'delete', cid: 'c2' }))
+  })
+
+  it('删除二次确认：3 秒未再点 → 回退为「删除」', () => {
+    vi.useFakeTimers()
+    try {
+      const { container } = renderEditor()
+      fireEvent.click(editableNode(container)!)
+      fireEvent.click(screen.getByTestId('map-action-delete'))
+      expect(screen.getByTestId('map-action-delete')).toHaveTextContent('确认删除？')
+      act(() => {
+        vi.advanceTimersByTime(3000)
+      })
+      expect(screen.getByTestId('map-action-delete')).toHaveTextContent('删除')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('编辑失败 → 卡内提示（map-edit-error），浮层保留以便重试', async () => {
+    const onEdit = vi.fn().mockRejectedValue(new Error('cid_not_found'))
+    const { container } = renderEditor(onEdit)
+    fireEvent.click(editableNode(container)!)
+    fireEvent.click(screen.getByTestId('map-action-rename'))
+    fireEvent.change(screen.getByTestId('map-action-input'), { target: { value: 'x' } })
+    fireEvent.click(screen.getByTestId('map-action-submit'))
+    expect(await screen.findByTestId('map-edit-error')).toHaveTextContent('cid_not_found')
+    expect(screen.getByTestId('map-action-pop')).toBeTruthy()
+  })
+
+  it('不传 onEdit → 整树只读（无 data-cid、无操作行）', () => {
+    const { container } = render(
+      <TimerMapEditor mapText={EDITABLE_ISLAND} sessionId={SESSION_ID} />,
+    )
+    expect(container.querySelectorAll('.wm-node[data-cid]')).toHaveLength(0)
+    fireEvent.click(container.querySelectorAll('.wm-node')[0])
+    expect(screen.queryByTestId('map-node-actions')).toBeNull()
   })
 })

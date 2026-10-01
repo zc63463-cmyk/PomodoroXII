@@ -278,6 +278,32 @@ session_id: "session-a"
 ### 验证输出
 `
 
+/** 带一个**可编辑节点**（cid c2）的岛 —— 节点编辑页面接线断言。 */
+const ISLAND_EDITABLE_FOR_RUNNING = `<!--
+next_cid: 3
+centers:
+  - at: "node:Verify output/09-30 19:55 会话"
+    cid: c1
+    dir: right
+    session_id: "session-a"
+-->
+# Verify output
+
+<!--
+cid: "c1"
+session_id: "session-a"
+-->
+## 09-30 19:55 会话
+
+### 验证输出
+
+<!--
+thought_type: "problem"
+cid: "c2"
+-->
+### 旧标题
+`
+
 describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
   beforeEach(seedRunningTimerPage)
 
@@ -345,6 +371,48 @@ describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
     // → 用 canvas 作用域断言，避免多重命中歧义。
     const canvas = screen.getByTestId('map-editor-canvas')
     await waitFor(() => expect(canvas.textContent).toContain('token 对照'))
+  })
+
+  it('★ 节点编辑接线：改名 → writeWorkMap 收到含新标题、不含旧标题的文本（本地即时反映）', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_EDITABLE_FOR_RUNNING)
+    writeWorkMapMock.mockResolvedValue(64)
+    render(createElement(TimerPage))
+
+    const canvas = await screen.findByTestId('map-editor-canvas')
+    const node = canvas.querySelector('.wm-node[data-cid="c2"]')
+    expect(node).not.toBeNull()
+    fireEvent.click(node!)
+    fireEvent.click(screen.getByTestId('map-action-rename'))
+    fireEvent.change(screen.getByTestId('map-action-input'), { target: { value: '新标题' } })
+    fireEvent.click(screen.getByTestId('map-action-submit'))
+
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledTimes(1))
+    const [workItemId, written] = writeWorkMapMock.mock.calls[0] as [string, string]
+    expect(workItemId).toBe('l3-a')
+    expect(written).toContain('### 新标题')
+    expect(written).not.toContain('### 旧标题')
+    // 即时反映（不等下一次读）：编辑区画布已含新标题
+    await waitFor(() =>
+      expect(screen.getByTestId('map-editor-canvas').textContent).toContain('新标题'),
+    )
+  })
+
+  it('★ 节点编辑接线：删除二次确认 → 文本少一个节点、该 cid 消失', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_EDITABLE_FOR_RUNNING)
+    writeWorkMapMock.mockResolvedValue(48)
+    render(createElement(TimerPage))
+
+    const canvas = await screen.findByTestId('map-editor-canvas')
+    fireEvent.click(canvas.querySelector('.wm-node[data-cid="c2"]')!)
+    fireEvent.click(screen.getByTestId('map-action-delete'))
+    expect(writeWorkMapMock).not.toHaveBeenCalled() // 第一次点击只确认
+    fireEvent.click(screen.getByTestId('map-action-delete'))
+
+    await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledTimes(1))
+    const written = writeWorkMapMock.mock.calls[0][1] as string
+    expect(written).not.toContain('cid: "c2"')
+    expect(written).not.toContain('### 旧标题')
+    expect(written).toContain('### 验证输出')
   })
 })
 

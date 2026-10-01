@@ -45,6 +45,7 @@ import { recordBlockerAck } from '@/lib/task-space/blocker-ack-log'
 import { deriveStatusCategoryById } from '@/lib/task-space/status-categories'
 import { readWorkMap, writeWorkMap } from '@/lib/work-map/work-map-api'
 import { appendThoughtNode } from '@/lib/work-map/thought-nodes'
+import { applyMapNodeEdit, type MapNodeEditOp } from '@/lib/work-map/node-edits'
 import type { ThoughtType } from '@/lib/work-map/thought-types'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
 import { createLaunchSessionIslands } from '@/lib/work-map/session-island-launch'
@@ -342,6 +343,26 @@ export default function TimerPage() {
     if (!result.changed) throw new Error(result.reason ?? '未产生变更')
     await writeWorkMap(focusedWorkItemId, result.text)
     // 立即反映（不等下一次读）；服务端已是同一份内容，无需额外对齐往返
+    setSessionMapText(result.text)
+  }
+
+  /**
+   * 节点编辑（ADR-0008 D16 / D13 步 3-2）：改名 / 加子 / 类型 / 注释 / 删除。
+   *
+   * 与快速记录同一条**读-改-写**纪律：基于 `sessionMapText`（空则先 `readWorkMap`）
+   * → 对应原语 → `writeWorkMap` → 立即反映。读-改-写窗口**不做并发合并**
+   * （D14 已知边界：跨设备同步是独立议题）。失败抛出 → 编辑区卡内展示
+   * （`map-edit-error`，模式同 `map-quick-error`），不弹全局错误、不阻断计时。
+   * 编辑目标恒为「当前会话岛内带 cid 的节点」——由编辑区只给这些节点挂入口保证（D16-a）。
+   */
+  const editMap = async (op: MapNodeEditOp): Promise<void> => {
+    if (focusedWorkItemId === null || activeSessionId === null) {
+      throw new Error('当前没有进行中的会话')
+    }
+    const base = sessionMapText ?? (await readWorkMap(focusedWorkItemId)) ?? ''
+    const result = applyMapNodeEdit(base, op)
+    if (!result.changed) throw new Error(result.reason ?? '未产生变更')
+    await writeWorkMap(focusedWorkItemId, result.text)
     setSessionMapText(result.text)
   }
   /**
@@ -964,6 +985,7 @@ export default function TimerPage() {
               mapText: sessionMapText,
               sessionId: activeSessionId,
               onQuickRecord: quickRecord,
+              onEdit: editMap,
             }),
       ),
       // 伴奏区：骨架带 .timer-immersive-region（结构标记 + testid）。

@@ -29,6 +29,13 @@ export interface WorkMapTreeProps {
   className?: string
   /** 无障碍名（不同容器可给不同描述） */
   label?: string
+  /** 当前选中节点的 cid（编辑区选中态；只影响视觉环） */
+  selectedCid?: string | null
+  /**
+   * 点击**可编辑节点**（属当前会话岛、`cid !== null`、非会话节点）→ 上抛 cid。
+   * 不给则整树**只读**（右栏小视图即如此）——只读节点点击无效、但 hover 有「只读」提示。
+   */
+  onSelectNode?: (cid: string) => void
 }
 
 const PAD = 12
@@ -69,22 +76,61 @@ function TypeShape({ x, y, type }: { x: number; y: number; type: NonNullable<Map
   }
 }
 
-function NodeBox({ node, isSession }: { node: MapTreeNode; isSession: boolean }): ReactNode {
+function NodeBox({
+  node,
+  isSession,
+  editable,
+  selected,
+  onSelect,
+}: {
+  node: MapTreeNode
+  isSession: boolean
+  editable: boolean
+  selected: boolean
+  onSelect?: (cid: string) => void
+}): ReactNode {
   const label = fitTextToBox(node.text === '' ? '（无标题）' : node.text, node.box.w, node.depth)
   const textX = node.thoughtType !== null ? 24 : 12
+  // 可编辑 = 属当前会话岛 + 有 cid + 非会话节点（D16-a）；只读节点不给入口
+  const editableCid = editable && node.cid !== null ? node.cid : null
+  const activate = editableCid !== null ? (): void => onSelect?.(editableCid) : undefined
   return (
     <g
       transform={`translate(${node.box.x} ${node.box.y})`}
-      className="wm-node"
+      className={selected ? 'wm-node wm-node--selected' : 'wm-node'}
       data-testid={isSession ? 'wm-session-node' : undefined}
       data-thought={node.thoughtType ?? undefined}
       data-session={isSession ? 'true' : 'false'}
+      data-cid={editableCid ?? undefined}
+      data-comment={node.comment !== null ? 'true' : undefined}
+      data-readonly={editableCid === null ? 'true' : undefined}
+      data-selected={selected ? 'true' : undefined}
+      role={editableCid !== null ? 'button' : undefined}
+      tabIndex={editableCid !== null ? 0 : undefined}
+      aria-label={editableCid !== null ? `编辑节点：${node.text === '' ? '（无标题）' : node.text}` : undefined}
+      onClick={activate}
+      onKeyDown={
+        editableCid !== null
+          ? (event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                onSelect?.(editableCid)
+              }
+            }
+          : undefined
+      }
     >
+      {/* 只读节点的 hover 提示（SVG 原生 tooltip）——点击无效但原因可见 */}
+      {editableCid === null ? (
+        <title>{isSession ? '会话节点（只读）' : '存量节点（无 cid，只读）'}</title>
+      ) : null}
       <rect
         width={node.box.w}
         height={node.box.h}
         rx={7}
-        className={isSession ? 'wm-box wm-box--session' : 'wm-box'}
+        className={
+          selected ? 'wm-box wm-box--selected' : isSession ? 'wm-box wm-box--session' : 'wm-box'
+        }
       />
       {node.thoughtType !== null ? (
         <TypeShape x={12} y={node.box.h / 2} type={node.thoughtType} />
@@ -101,11 +147,22 @@ function NodeBox({ node, isSession }: { node: MapTreeNode; isSession: boolean })
       >
         {label}
       </text>
+      {/* 带注释的节点：右上角小圆点（D13 步 3-2 §3.5） */}
+      {node.comment !== null ? (
+        <circle cx={node.box.w - 6} cy={6} r={3.5} className="wm-comment-dot" />
+      ) : null}
     </g>
   )
 }
 
-export function WorkMapTree({ islands, sessionId, className, label }: WorkMapTreeProps): ReactNode {
+export function WorkMapTree({
+  islands,
+  sessionId,
+  className,
+  label,
+  selectedCid,
+  onSelectNode,
+}: WorkMapTreeProps): ReactNode {
   const bounds = unionBounds(islands)
   const width = Math.max(1, bounds.maxX - bounds.minX + PAD * 2)
   const height = Math.max(1, bounds.maxY - bounds.minY + PAD * 2)
@@ -119,16 +176,32 @@ export function WorkMapTree({ islands, sessionId, className, label }: WorkMapTre
       role="img"
       aria-label={label ?? '工作导图'}
     >
-      {islands.map((island) => (
-        <g key={island.rootId} data-testid={island.sessionId === sessionId ? 'wm-current-island' : undefined}>
-          {island.links.map((link) => (
-            <path key={`${link.fromId}->${link.toId}`} d={link.path} className="wm-link" />
-          ))}
-          {island.nodes.map((node) => (
-            <NodeBox key={node.id} node={node} isSession={node.sessionId === sessionId} />
-          ))}
-        </g>
-      ))}
+      {islands.map((island) => {
+        const current = island.sessionId === sessionId
+        return (
+          <g key={island.rootId} data-testid={current ? 'wm-current-island' : undefined}>
+            {island.links.map((link) => (
+              <path key={`${link.fromId}->${link.toId}`} d={link.path} className="wm-link" />
+            ))}
+            {island.nodes.map((node) => (
+              <NodeBox
+                key={node.id}
+                node={node}
+                isSession={node.sessionId === sessionId}
+                // 可编辑面只在「当前会话岛」：其它岛/无 cid/会话节点一律只读（D16-a）
+                editable={onSelectNode !== undefined && current && !node.sessionNode}
+                selected={
+                  onSelectNode !== undefined &&
+                  current &&
+                  node.cid !== null &&
+                  node.cid === (selectedCid ?? null)
+                }
+                onSelect={onSelectNode}
+              />
+            ))}
+          </g>
+        )
+      })}
     </svg>
   )
 }
