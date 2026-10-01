@@ -272,6 +272,45 @@ export type RelationEdge = z.infer<typeof relationEdgeSchema>
 export type RelationSet = z.infer<typeof relationSetSchema>
 export type BlockedMap = z.infer<typeof blockedMapSchema>
 
+// ── 依赖域上图投影（ADR-0008 D19-b）────────────────────────────────────────
+// MindCanvas GraphJsonPayload 契约：**键名钉死为 snake_case**（kernel 的
+// graphJsonToMindmap 直接消费），故这里不做项目惯用的 camelCase 映射。
+
+export const graphJsonNodeSchema = z.object({
+  id: z.string().min(1),
+  label: z.string(),
+  // 后端 str | None 会序列化出 null；kernel 的 GraphJsonNode 是可选 string（无 null）
+  // → 解析时把 null 归一为 undefined，保证与 kernel 类型结构同构直传
+  level: z.string().nullish().transform((v) => v ?? undefined),
+  kind: z.string(),
+  file_path: z.string().nullish().transform((v) => v ?? undefined),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+}).strict()
+
+export const graphJsonEdgeSchema = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+  kind: z.string(),
+  direction: z.enum(['fwd', 'back', 'both']).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+}).strict()
+
+export const graphJsonPayloadSchema = z.object({
+  version: z.string(),
+  domain: z.string(),
+  source_hash: z.string().min(1),
+  nodes: z.array(graphJsonNodeSchema),
+  edges: z.array(graphJsonEdgeSchema),
+  indices: z.object({
+    descendants: z.record(z.string(), z.array(z.string())).optional(),
+    ancestors: z.record(z.string(), z.array(z.string())).optional(),
+    in_degree: z.record(z.string(), z.number().int()).optional(),
+    topological_order: z.array(z.string()).optional(),
+  }).strict(),
+}).strict()
+
+export type GraphJsonPayloadWire = z.infer<typeof graphJsonPayloadSchema>
+
 type TaskSpaceSyncEntityType = Extract<SyncEntityType,
   'project' | 'statusDefinition' | 'typeDefinition' | 'label' |
   'workItemLabel' | 'workItem' | 'workItemNote' | 'relation'>
