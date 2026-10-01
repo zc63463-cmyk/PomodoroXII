@@ -20,6 +20,7 @@
 import type { ReactNode } from 'react'
 
 import { fitTextToBox, type MapIslandLayout, type MapTreeNode } from '@/lib/work-map/island-layout'
+import type { ThoughtType } from '@/lib/work-map/thought-types'
 
 export interface WorkMapTreeProps {
   /** 要渲染的岛（1..N）；几何来自 `readWorkMapLayout` */
@@ -31,6 +32,12 @@ export interface WorkMapTreeProps {
   label?: string
   /** 当前选中节点的 cid（编辑区选中态；只影响视觉环） */
   selectedCid?: string | null
+  /**
+   * 跨岛按类型筛选（D13 步 3-4b）：命中类型的节点满 opacity + 描边环，其余 **dim**
+   * （`opacity` 压低，**不隐藏** —— 隐藏会拆断树结构，见 ADR-0008 D17）；
+   * 连线两端都 dim 才 dim。`null` / 缺省 = 全亮。
+   */
+  highlightType?: ThoughtType | null
   /**
    * 点击**可编辑节点**（属当前会话岛、`cid !== null`、非会话节点）→ 上抛 cid。
    * 不给则整树**只读**（右栏小视图即如此）——只读节点点击无效、但 hover 有「只读」提示。
@@ -60,8 +67,12 @@ function unionBounds(islands: readonly MapIslandLayout[]): {
   return { minX, minY, maxX, maxY }
 }
 
-/** 思考类型形状（9px 视口，位于节点盒左侧 10px 处）。 */
-function TypeShape({ x, y, type }: { x: number; y: number; type: NonNullable<MapTreeNode['thoughtType']> }): ReactNode {
+/**
+ * 思考类型形状（9px 视口，位于节点盒左侧 10px 处）。
+ * **导出**：类型图例（`work-map-legend`）复用同一份几何 —— D9 双编码要"形状同源"，
+ * 不能在图例里另抄一份（改了树没改图例就会分叉）。
+ */
+export function TypeShape({ x, y, type }: { x: number; y: number; type: NonNullable<MapTreeNode['thoughtType']> }): ReactNode {
   switch (type) {
     case 'insight':
       return <circle cx={x} cy={y} r={4} className="wm-shape wm-shape--insight" />
@@ -81,12 +92,18 @@ function NodeBox({
   isSession,
   editable,
   selected,
+  dimmed,
+  highlighted,
   onSelect,
 }: {
   node: MapTreeNode
   isSession: boolean
   editable: boolean
   selected: boolean
+  /** 跨岛筛选：非命中类型 → dim（**只调视觉权重、不隐藏**，D17） */
+  dimmed: boolean
+  /** 跨岛筛选：命中类型 → 满 opacity + 描边环 */
+  highlighted: boolean
   onSelect?: (cid: string) => void
 }): ReactNode {
   const label = fitTextToBox(node.text === '' ? '（无标题）' : node.text, node.box.w, node.depth)
@@ -97,7 +114,12 @@ function NodeBox({
   return (
     <g
       transform={`translate(${node.box.x} ${node.box.y})`}
-      className={selected ? 'wm-node wm-node--selected' : 'wm-node'}
+      className={[
+        'wm-node',
+        selected ? 'wm-node--selected' : '',
+        dimmed ? 'wm-node--dim' : '',
+        highlighted ? 'wm-node--hl' : '',
+      ].filter((token) => token !== '').join(' ')}
       data-testid={isSession ? 'wm-session-node' : undefined}
       data-thought={node.thoughtType ?? undefined}
       data-session={isSession ? 'true' : 'false'}
@@ -105,6 +127,8 @@ function NodeBox({
       data-comment={node.comment !== null ? 'true' : undefined}
       data-readonly={editableCid === null ? 'true' : undefined}
       data-selected={selected ? 'true' : undefined}
+      data-dim={dimmed ? 'true' : undefined}
+      data-highlight={highlighted ? 'true' : undefined}
       role={editableCid !== null ? 'button' : undefined}
       tabIndex={editableCid !== null ? 0 : undefined}
       aria-label={editableCid !== null ? `编辑节点：${node.text === '' ? '（无标题）' : node.text}` : undefined}
@@ -161,9 +185,12 @@ export function WorkMapTree({
   className,
   label,
   selectedCid,
+  highlightType,
   onSelectNode,
 }: WorkMapTreeProps): ReactNode {
   const bounds = unionBounds(islands)
+  // 筛选只调「视觉权重」：命中 = 高亮，其余 dim；null = 全亮（D17）
+  const filter = highlightType ?? null
   const width = Math.max(1, bounds.maxX - bounds.minX + PAD * 2)
   const height = Math.max(1, bounds.maxY - bounds.minY + PAD * 2)
   const viewBox = `${bounds.minX - PAD} ${bounds.minY - PAD} ${width} ${height}`
@@ -178,11 +205,28 @@ export function WorkMapTree({
     >
       {islands.map((island) => {
         const current = island.sessionId === sessionId
+        // 命中判据只看 thoughtType；无类型节点（会话根 / 存量标题行）在筛选下同样 dim
+        const dimById = new Map<string, boolean>()
+        for (const node of island.nodes) {
+          dimById.set(node.id, filter !== null && node.thoughtType !== filter)
+        }
         return (
           <g key={island.rootId} data-testid={current ? 'wm-current-island' : undefined}>
-            {island.links.map((link) => (
-              <path key={`${link.fromId}->${link.toId}`} d={link.path} className="wm-link" />
-            ))}
+            {island.links.map((link) => {
+              // 两端都 dim 才 dim：一端亮则线亮，树结构不被筛选打散（D17）
+              const dimLink =
+                filter !== null &&
+                (dimById.get(link.fromId) ?? false) &&
+                (dimById.get(link.toId) ?? false)
+              return (
+                <path
+                  key={`${link.fromId}->${link.toId}`}
+                  d={link.path}
+                  className={dimLink ? 'wm-link wm-link--dim' : 'wm-link'}
+                  data-dim={dimLink ? 'true' : undefined}
+                />
+              )
+            })}
             {island.nodes.map((node) => (
               <NodeBox
                 key={node.id}
@@ -196,6 +240,8 @@ export function WorkMapTree({
                   node.cid !== null &&
                   node.cid === (selectedCid ?? null)
                 }
+                dimmed={dimById.get(node.id) ?? false}
+                highlighted={filter !== null && node.thoughtType === filter}
                 onSelect={onSelectNode}
               />
             ))}
