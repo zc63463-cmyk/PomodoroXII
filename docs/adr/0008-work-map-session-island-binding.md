@@ -291,6 +291,45 @@ thought_type: "problem"
 
 ---
 
+### D16 · 节点身份与编辑写入纪律（2026-10-01，D13 步 3-2 前置裁决）
+
+**背景**：中央编辑区要对**当前会话岛**的节点做五个最小编辑（改名 / 加子 / 删除 / 类型切换 /
+注释）。前置问题是「怎样**稳定指认**一个节点」——写回后文本变化会重建整棵树。
+
+**D16-a · 节点身份与定位**
+- kernel 的 `EditableNode.id` 是**运行时标识**：`astToEditable` 每次解析 `newId()` 重新分配，
+  `editableToAst` 剥离（`packages/kernel/src/tree/treeOps.ts` 头注原文「id 不进入序列化」）。
+  页面每次写回后 `mapText` 变化 → 重新 parse → **所有节点 id 全变**。故它只能作 React 复用键，
+  **绝不能**当跨渲染的持久编辑键。
+- **稳定编辑键 = 节点笔记块里的 `cid`**（协议 §6.3 既有机制，与根块 `next_cid` 联动）。
+  定位通式：找到含 `cid: "<目标>"` 的笔记块 → 其标题 = 块后**第一个 heading 行**
+  （协议：笔记块**归属其后的节点**）。
+- **新节点一律带 cid**：`appendThoughtNode`（快速记录）与加子都从根块 `next_cid` 分配并写回；
+  与建岛**共用同一计数器**（否则下一次建岛会与已分配 cid 撞车）。
+- **只读边界**：存量无 cid 节点（D14 期 thought 节点、建岛写的 L3 标题行）、会话节点（岛根）、
+  根岛、其它会话岛 → **一律只读**（渐进增强；防跨会话编辑冲突）。centers 条目的 cid 属岛根，
+  删普通节点不碰它。
+
+**D16-b · 写入纪律（延续 D11/D14）**
+- 全部操作为**文本级字符串变换**：除目标节点的块/标题行（加子另含根块 `next_cid` 那一行）外，
+  其余正文**逐字节保留**。
+- **禁止** `parse → treeOps 编辑 → serializeMm 整文写回`（D11 已否：会把用户手写排版规范化成
+  全量 diff）。kernel `treeOps`（`updateNode/removeNode/addChild`）只作**行为参照**，不进编辑路径。
+- 返回形状沿用 `{ text, changed, reason? }`；fail-closed（非法输入拒绝）与 fail-soft
+  （结构找不到原样返回）分工同 `thought-nodes.ts` 头注。
+- **子树边界必须包含边界节点的笔记块**：块的物理位置落在**前一个节点**的行范围内
+  （`…### 前\n\n<!--块-->\n### 后`）。若边界按 heading 行算，会连后一节点的块一起删/覆盖 →
+  静默丢 cid（`node-edits.ts` 的 `unitStart` 即为此）。
+
+**实现落点**：`node-edits.ts`（五原语）· `thought-nodes.ts`（薄委托，语义不变）·
+`island-layout.ts`（`MapTreeNode` + `cid`/`comment`）· `timer-map-editor.tsx` / `work-map-tree.tsx`
+（选中 + 操作行 + 浮层 + 删除二次确认）· `page.tsx`（`editMap` 接线）· `globals.css`（`.wm-*`）。
+
+**验证**：断言锚在写入形状 / 字节保真 / cid 分配 / fail 语义（`node-edits.test.ts`）与
+交互闭环（`timer-map-editor.test.tsx` / `page.test.tsx`）；真机五操作演练见交付报告。
+
+---
+
 ### D6 · 同步：**先单机，跨设备延后**（**暂定**）
 
 `.mm.md` 不进 sync v2 账本（D2 的直接后果）。若跨设备成为真实需求，另立 ADR 设计导图同步——**不在本轮实现**。

@@ -45,6 +45,13 @@ export interface MapTreeNode {
   sessionId: string | null
   /** 会话节点便捷判定（= `sessionId !== null`） */
   sessionNode: boolean
+  /**
+   * 节点笔记块里的稳定编辑键 `cid`（ADR-0008 D16-a）。
+   * 缺失 / 脏值 → `null`（**只读**：存量无 cid 节点不提供编辑入口）。
+   */
+  cid: string | null
+  /** 块内 `note:` 列表（S0 形状，一行一条）；缺失 / 脏值 → `null` */
+  comment: string[] | null
   depth: number
   box: MapBox
   children: MapTreeNode[]
@@ -119,6 +126,14 @@ function toTreeNode(
   const rawType = note[THOUGHT_TYPE_KEY]
   const rawSession = note.session_id
   const sessionId = typeof rawSession === 'string' && rawSession !== '' ? rawSession : null
+  // 稳定编辑键与注释：脏值一律容忍为 null（读侧 fail-closed 口径，同 thoughtType）
+  const rawCid = note.cid
+  const cid = typeof rawCid === 'string' && rawCid !== '' ? rawCid : null
+  const rawComment = note.note
+  const comment =
+    Array.isArray(rawComment) && rawComment.every((item) => typeof item === 'string')
+      ? (rawComment as string[])
+      : null
   const fallback = measureWorkMapNode(node, depth)
   return {
     id: node.id,
@@ -126,6 +141,8 @@ function toTreeNode(
     thoughtType: isThoughtType(rawType) ? rawType : null,
     sessionId,
     sessionNode: sessionId !== null,
+    cid,
+    comment,
     depth,
     box: boxById.get(node.id) ?? { x: 0, y: 0, w: fallback.w, h: fallback.h },
     children: node.children.map((child) => toTreeNode(child, depth + 1, boxById)),

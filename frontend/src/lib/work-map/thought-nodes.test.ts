@@ -31,8 +31,16 @@ session_id: "${SID}"
 ### 测试次一级的workitme
 `
 
+/**
+ * D16 演进后的期望根块：新节点带 `cid` 行，且根块 `next_cid` 被**定向推进**（2 → 3）
+ * —— 与建岛共用同一计数器，避免跨会话 cid 撞车（见 node-edits.ts 头注）。
+ * §2「唯一允许的断言变化 = 追加形状多了 cid 行」在此**显式放宽**（已授权）：
+ * 例1 的 `toBe` 因此同时多出 cid 行与 next_cid 两处。
+ */
+const ROOT_AFTER_ONE_APPEND = ISLAND.trimEnd().replace('next_cid: 2', 'next_cid: 3')
+
 describe('appendThoughtNode（快速记录写侧）', () => {
-  it('★ 写入形状：笔记块（thought_type）在前、子标题在后，落在会话子树末尾；其余正文逐字节保留', () => {
+  it('★ 写入形状：笔记块（thought_type + cid）在前、子标题在后，落在会话子树末尾；其余正文逐字节保留', () => {
     const result = appendThoughtNode(ISLAND, {
       sessionId: SID,
       type: 'problem',
@@ -40,7 +48,7 @@ describe('appendThoughtNode（快速记录写侧）', () => {
     })
     expect(result.changed).toBe(true)
     expect(result.text).toBe(
-      `${ISLAND.trimEnd()}\n\n<!--\nthought_type: "problem"\n-->\n### token 对照：灰阶 vs 玻璃主题\n`,
+      `${ROOT_AFTER_ONE_APPEND}\n\n<!--\nthought_type: "problem"\ncid: "c2"\n-->\n### token 对照：灰阶 vs 玻璃主题\n`,
     )
   })
 
@@ -49,8 +57,8 @@ describe('appendThoughtNode（快速记录写侧）', () => {
     const second = appendThoughtNode(first.text, { sessionId: SID, type: 'todo', title: '第二' })
     expect(second.changed).toBe(true)
     expect(second.text.indexOf('### 第一')).toBeLessThan(second.text.indexOf('### 第二'))
-    // 只追加不重写：第一次的块原样在位
-    expect(second.text).toContain('<!--\nthought_type: "insight"\n-->\n### 第一')
+    // 只追加不重写：第一次的块原样在位（D16：块内多出 cid 行）
+    expect(second.text).toContain('<!--\nthought_type: "insight"\ncid: "c2"\n-->\n### 第一')
   })
 
   it('标题压平：换行/制表符 → 空格（标题不能把 heading 行撑破）', () => {

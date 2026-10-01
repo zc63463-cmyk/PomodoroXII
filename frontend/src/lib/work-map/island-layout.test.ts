@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { appendThoughtNode } from './thought-nodes'
+import { setNodeComment } from './node-edits'
 import { findSessionIslandLayout, measureWorkMapNode, readWorkMapLayout } from './island-layout'
 import { astToEditable, parseMm } from '@mindcanvas/kernel'
 
@@ -110,5 +111,42 @@ describe('readWorkMapLayout（几何层）', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     expect(readWorkMapLayout('<!--\nnote: 无标题\n-->\n')).toBeNull()
     warn.mockRestore()
+  })
+
+  it('★ 稳定编辑键 cid：可编辑节点带 cid，存量无 cid 节点为 null（只读；D16-a）', () => {
+    const layout = readWorkMapLayout(WITH_THOUGHTS)
+    const island = layout === null ? null : findSessionIslandLayout(layout, SID)
+    if (island === null) throw new Error('fixture 解析失败')
+    // 会话节点 c1；存量 L3 标题行无块 → null；两个快速记录节点 c2 / c3
+    expect(island.nodes.map((node) => node.cid)).toEqual(['c1', null, 'c2', 'c3'])
+  })
+
+  it('★ 注释 comment：从块内 note 列表读出；无注释节点为 null', () => {
+    const withComment = setNodeComment(WITH_THOUGHTS, {
+      cid: 'c2',
+      comment: ['先确认上游', 'blocked 不能进 post-image'],
+    }).text
+    const layout = readWorkMapLayout(withComment)
+    const island = layout === null ? null : findSessionIslandLayout(layout, SID)
+    if (island === null) throw new Error('fixture 解析失败')
+    expect(
+      island.nodes.find((node) => node.text === 'token 对照：灰阶 vs 玻璃主题')?.comment,
+    ).toEqual(['先确认上游', 'blocked 不能进 post-image'])
+    expect(
+      island.nodes.find((node) => node.text === '写一节"岛的归档策略"草案')?.comment,
+    ).toBeNull()
+  })
+
+  it('脏值容忍：cid 缺失 / note 非字符串列表 → null（读侧 fail-closed）', () => {
+    const dirty = WITH_THOUGHTS.replace(
+      '<!--\nthought_type: "problem"\ncid: "c2"\n-->',
+      '<!--\nthought_type: "problem"\nnote: 只是标量\n-->',
+    )
+    const layout = readWorkMapLayout(dirty)
+    const island = layout === null ? null : findSessionIslandLayout(layout, SID)
+    if (island === null) throw new Error('fixture 解析失败')
+    const node = island.nodes.find((item) => item.text === 'token 对照：灰阶 vs 玻璃主题')
+    expect(node?.cid).toBeNull()
+    expect(node?.comment).toBeNull()
   })
 })
