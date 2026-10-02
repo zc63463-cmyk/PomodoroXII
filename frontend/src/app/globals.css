@@ -3040,3 +3040,172 @@
   margin-top: 4px;
 }
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+   复盘提炼卡片（PXII-FEAT-REVIEW-HARVEST，2026-10-02）
+   ──────────────────────────────────────────────────────────────────────────
+   位置：复盘面板**可写态**的表单之后、页脚之前。它是「本轮思考 → 任务/笔记」
+   的唯一落点，所以必须比表单更轻：低饱和底 + 细描边，**不抢**有效性/结果
+   字段的注意力（那是复盘必须答的，这是复盘顺手能做的）。
+   完成态颜色复用 iOS systemGreen（--ios-green，与 .wm-sub-island-check
+   一致）——「已完成」这一种语义不允许出现第二种绿。 */
+
+/* 挂载位：不额外加边距，让卡片自己带出层次 */
+.harvest-mount {
+  display: block;
+}
+
+/* iOS 主按钮显式变体：与 .ios-btn（本身就是 systemBlue filled）等价，
+   单独成类是为了让「沉淀」这个**唯一**主动作在语义上可检索、可覆盖，
+   而不必靠猜调用处用的是哪个按钮基类。 */
+.ios-btn-primary {
+  background: var(--ios-blue);
+  color: #fff;
+}
+
+.ios-btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.harvest-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 13px;
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 11px;
+  background: var(--ios-fill);
+}
+
+.harvest-hd {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.harvest-hd-title {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ios-label);
+}
+
+.harvest-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.harvest-block-title {
+  font-size: 11.5px;
+  color: var(--ios-label-2);
+}
+
+.harvest-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.harvest-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 0.5px solid var(--ios-sep);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.harvest-item:last-child {
+  border-bottom: none;
+}
+
+.harvest-check {
+  flex: none;
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--ios-blue);
+}
+
+/* 标题单行截断：待办标题可能很长，不截断会把 44px 触控行撑成两行块 */
+.harvest-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ios-label);
+}
+
+.harvest-sub {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ios-label-3);
+}
+
+/* 已升格：只读成果行（无勾选框），绿意只落在标记与编号上 */
+.harvest-list--done {
+  padding-top: 4px;
+  border-top: 0.5px solid var(--ios-sep);
+}
+
+.harvest-done {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--ios-label-2);
+}
+
+.harvest-done-mark,
+.harvest-done-key {
+  flex: none;
+  color: var(--ios-green);
+  font-variant-numeric: tabular-nums;
+}
+
+.harvest-done-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harvest-toggle {
+  align-self: flex-start;
+}
+
+.harvest-preview {
+  max-height: 180px;
+  margin: 0;
+  padding: 9px 10px;
+  overflow: auto;
+  border: 0.5px solid var(--ios-sep);
+  border-radius: 9px;
+  background: var(--ios-card);
+  color: var(--ios-label);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 动作按钮：撑满一行，避免 44px 主按钮与 36px 次按钮并排时高矮不齐 */
+.harvest-submit {
+  align-self: stretch;
+}
+
+.harvest-status {
+  margin: 0;
+}

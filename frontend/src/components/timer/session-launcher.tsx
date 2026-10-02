@@ -32,6 +32,7 @@
  */
 import { useState } from 'react'
 import { useSettingsStore } from '@/stores/settings-store'
+import { ensureAudioContextReady } from '@/lib/focus-session/end-alert'
 import { formatClockSeconds } from '@/lib/focus-session/clock'
 import {
   defaultMinutesForMode,
@@ -112,6 +113,11 @@ export function SessionLauncher({ items, level2Id, level3Ids, onLevel3IdsChange,
       className="grid gap-4"
       onSubmit={(event) => {
         event.preventDefault()
+        // ★ PXII-FEAT-TIMER-CHIME：Autoplay 解锁。必须在**用户手势的同步栈**里
+        //   触碰 AudioContext —— 否则到点（后台标签页）拿到的仍是 suspended 上下文，
+        //   声音会被浏览器静默丢弃。放在 `if (!level2Id)` 早退之前：
+        //   即使用户这次没启动成功，上下文也已解锁，下次点「开始」直接可用。
+        ensureAudioContextReady()
         if (!level2Id || starting) return
         setStarting(true)
         // 模式随启动命令落库（双体系兼容）；休息型结构上不带三级计划 ——

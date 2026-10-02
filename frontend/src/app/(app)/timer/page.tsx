@@ -10,6 +10,7 @@ import { SessionLauncher, deriveLaunchSelection, type LaunchSelection } from '@/
 import { TaskPickerModal } from '@/components/timer/task-picker-modal'
 import { isReviewableEndedSession, selectReviewSession, SessionReview } from '@/components/timer/session-review'
 import { returnToTaskSpace, submitReviewWithCompletion } from '@/components/timer/session-review-completion'
+import { SessionReviewHarvest } from '@/components/timer/session-review-harvest'
 import { SessionWorkspace } from '@/components/timer/session-workspace'
 import { ContinuePrevious } from '@/components/timer/continue-previous'
 import { TimerFrame } from '@/components/timer/timer-frame'
@@ -21,7 +22,7 @@ import { TimerSideToday, type RecentSessionRow } from '@/components/timer/timer-
 import { TodaySummary } from '@/components/timer/today-summary'
 import { Button } from '@/components/ui/button'
 import { useActiveSessionCoordinator, useActiveSessionIdentity, useActiveSessionProvisionalLock } from '@/lib/focus-session/active-session-provider'
-import { createEndAlert } from '@/lib/focus-session/end-alert'
+import { createEndAlert, ensureAudioContextReady, playGentleBell } from '@/lib/focus-session/end-alert'
 import { deriveSessionClock } from '@/lib/focus-session/clock'
 import {
   countCompletedWorkSessions,
@@ -50,6 +51,7 @@ import { buildHierarchyCodes } from '@/lib/task-space/hierarchy-code'
 import { readWorkMap, writeWorkMap } from '@/lib/work-map/work-map-api'
 import { appendThoughtNode } from '@/lib/work-map/thought-nodes'
 import { applyMapNodeEdit, normalizeNodeTitle, type MapNodeEditOp } from '@/lib/work-map/node-edits'
+import { harvestSessionThoughts, type HarvestedThoughts, type HarvestedTodoItem } from '@/lib/work-map/harvest-thoughts'
 import type { MapTreeNode } from '@/lib/work-map/island-layout'
 import type { ThoughtType } from '@/lib/work-map/thought-types'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
@@ -127,6 +129,63 @@ function firstDefinitionId(
   if (!first || typeof first !== 'object' || first === null) return null
   const id = (first as Record<string, unknown>).id
   return typeof id === 'string' && id.length > 0 ? id : null
+}
+
+// ── 到点通知授权 + 提示音试听微胶囊（PXII-FEAT-TIMER-CHIME）───────────────────
+// 此前 `Notification.requestPermission` 只在 /settings 有入口，而设置页不会在
+// 专注中途被打开 —— 结果是 /timer 切后台后通知 100% 被浏览器默默丢弃。
+// 这里给一条**就地授权**的捷径，并配一个「试听」让用户确认扬声器真的在工作。
+// fail-quiet：无 Notification API 时只留试听按钮，绝不渲染点了没反应的死控件。
+
+function notificationPermissionState(): NotificationPermission | 'unsupported' {
+  if (typeof window === 'undefined' || typeof window.Notification === 'undefined') return 'unsupported'
+  return window.Notification.permission
+}
+
+async function requestNotificationPermission(): Promise<NotificationPermission | 'unsupported'> {
+  if (typeof window === 'undefined' || typeof window.Notification === 'undefined') return 'unsupported'
+  try {
+    return await window.Notification.requestPermission()
+  } catch {
+    // 老式回调签名 / 被策略拒 → 回读现值。授权失败绝不能打断专注会话。
+    return window.Notification.permission
+  }
+}
+
+function notificationStatusLabel(permission: NotificationPermission | 'unsupported'): string {
+  if (permission === 'granted') return '🔔 到点通知已开启'
+  if (permission === 'denied') return '🔔 通知已被浏览器拒绝'
+  return '🔔 允许通知'
+}
+
+function NotificationChimeCapsule({ onPreviewSound }: { onPreviewSound: () => void }) {
+  const [permission, setPermission] = useState<NotificationPermission | 'unsupported'>(
+    notificationPermissionState,
+  )
+  return createElement(Fragment, null,
+    // 未授权 → 可点的一键授权；已授权/已拒绝 → 只读状态胶囊（不给重复点的假控件）；
+    // 浏览器没有 Notification API → 整块不渲染。
+    permission === 'unsupported'
+      ? null
+      : permission === 'default'
+        ? createElement('button', {
+            type: 'button',
+            className: 'ios-chip-btn',
+            'data-testid': 'notify-enable',
+            onClick: () => { void requestNotificationPermission().then(setPermission) },
+          }, notificationStatusLabel(permission))
+        : createElement('span', {
+            className: 'ios-chip-btn',
+            'data-testid': 'notify-state',
+            'aria-live': 'polite',
+          }, notificationStatusLabel(permission)),
+    createElement('button', {
+      type: 'button',
+      className: 'ios-chip-btn',
+      'data-testid': 'chime-preview',
+      onClick: onPreviewSound,
+    }, '🔊 试听提示音'),
+  )
 }
 
 export default function TimerPage() {
@@ -430,6 +489,21 @@ export default function TimerPage() {
       })
     return () => { cancelled = true }
   }, [endedMapWorkItemId])
+
+  // ── 复盘提炼（PXII-FEAT-REVIEW-HARVEST）─────────────────────────────────────
+  // 「本会话岛里的思考」是**读侧派生**：不新增任何表/字段，每次直接从已加载的
+  // `endedMapText` 现算（纯函数见 lib/work-map/harvest-thoughts，fail-soft）。
+  // 沉淀后我们回写导图 → `endedMapText` 换新 → 派生结果自然更新（升格项随之
+  // 落进"已升格"区），无需额外刷新通道。
+  const harvestedThoughts = useMemo<HarvestedThoughts | null>(() => {
+    if (!endedMapText || !reviewSession) return null
+    return harvestSessionThoughts(endedMapText, reviewSession.sessionId)
+  }, [endedMapText, reviewSession])
+  // 笔记注入的**本地基线**：结束态的 `aggregate` 来自 `endedAggregate`（一次性读库
+  // 快照，不随 coordinator 写回刷新）。若每次都拿它当基线，第二次注入会把第一次
+  // 覆盖掉 —— 故写成功后由本地基线接管。会话切换时清账。
+  const [harvestNoteBase, setHarvestNoteBase] = useState<string | null>(null)
+  useEffect(() => { setHarvestNoteBase(null) }, [reviewSession?.sessionId])
 
   // ── 准备态「主图」弹层数据（ADR-0008 D18 / D13 步 3-4a，方案 C）─────────────
   // **懒读**：只有弹层**打开时**才读该三级项的导图（准备态不做无谓请求）；
@@ -1020,6 +1094,104 @@ export default function TimerPage() {
     } catch (cause) { setStableError(cause) }
   }
 
+  /**
+   * 待办一键沉淀的**归属解析**（红线：严格复用 `taskRepository.createWorkItem`）：
+   * 与 `handlePromoteNode` 同一套层级防线（WORK_ITEM_MAX_DEPTH = 3）——
+   * 岛归档在「本会话聚焦的 L3」上，故 L3 → 挂回**同一 L2 父级**（同级 L3），
+   * L2 → 挂其下；其余层级 fail-loud（不猜父级）。于是新任务天然落在
+   * **本会话的二级任务之下**（外派单 §2.1「归属在当前会话的二级任务下」）。
+   */
+  const resolveHarvestTarget = (workItemId: string): { projectId: string; parentId: string } => {
+    // createWorkItem 落库后 store 的 workItems 不会自动追加，读最新快照防旧数组
+    const current = useTaskSpaceStore.getState().workItems.find((item) => item.id === workItemId)
+    if (current === undefined) throw new Error('work_item_not_loaded')
+    const parentId = current.depth === 3
+      ? current.parentId
+      : current.depth === 2
+        ? current.id
+        : null
+    if (parentId === null || parentId === '') throw new Error('沉淀目标父级无法确定（当前项层级非 L2/L3）')
+    return { projectId: current.projectId, parentId }
+  }
+
+  /**
+   * 待办批量沉淀（PXII-FEAT-REVIEW-HARVEST）：逐项建正式 WorkItem → 导图编号
+   * 回注 `[PXII-xxx] 标题` → 一次写盘。
+   *
+   * 回写一律走 `applyMapNodeEdit` 的 rename（**定向改目标 heading 行**，其余正文
+   * 逐字节保留，D16-b），与 `handlePromoteNode` 同一把尺子；严禁整文重新序列化。
+   * 写盘**一次**（累积改完最后统一 PUT），避免逐项往返把并发写的正文打散。
+   * 单项失败不阻断其余项（失败原因汇总后抛给卡片显示）；已创建的任务不回滚 ——
+   * 实体已成立，编号回写只是导图上的标注。
+   */
+  const handleHarvestTodos = async (items: HarvestedTodoItem[]): Promise<void> => {
+    if (items.length === 0) return
+    if (endedMapWorkItemId === null) throw new Error('当前没有可回写的导图')
+    if (!taskRepository) throw new Error('task_space_repository_not_ready')
+    const { projectId, parentId } = resolveHarvestTarget(endedMapWorkItemId)
+    const mapWorkItemId = endedMapWorkItemId
+
+    let text = endedMapText ?? (await readWorkMap(mapWorkItemId)) ?? ''
+    const base = text
+    const failures: string[] = []
+
+    for (const item of items) {
+      const title = normalizeNodeTitle(item.title)
+      if (title === '' || item.cid === '') { failures.push(item.title || item.cid); continue }
+      try {
+        const created = await taskRepository.createWorkItem({
+          projectId,
+          parentId,
+          title,
+          description: null,
+          typeDefinitionId: firstDefinitionId(definitions, 'types'),
+          statusDefinitionId: firstDefinitionId(definitions, 'statuses'),
+          priority: null,
+        })
+        const renamed = applyMapNodeEdit(text, {
+          kind: 'rename', cid: item.cid, title: `[${created.displayKey}] ${title}`,
+        })
+        if (!renamed.changed) { failures.push(title); continue }
+        text = renamed.text
+      } catch (cause) {
+        failures.push(`${title}（${cause instanceof Error ? cause.message : 'unknown'}）`)
+      }
+    }
+
+    if (text !== base) {
+      await writeWorkMap(mapWorkItemId, text)
+      setEndedMapText(text)
+    }
+    if (failures.length > 0) throw new Error(`以下节点未沉淀成功：${failures.join('；')}`)
+  }
+
+  /**
+   * 复盘笔记一键注入：**双换行追加**（空笔记直接赋值），复用页面既有
+   * `updateSessionNote` —— 不新开写通道。写成功后由本地基线接管（见
+   * `harvestNoteBase` 头注），保证连续注入是"追加"而不是"覆盖"。
+   */
+  const handleInjectHarvestNote = async (markdown: string): Promise<void> => {
+    if (markdown === '') return
+    const existing = harvestNoteBase ?? aggregate?.session.sessionNote ?? ''
+    const trimmed = existing.replace(/\s+$/, '')
+    const combined = trimmed === '' ? markdown : `${trimmed}\n\n${markdown}`
+    await updateSessionNote(combined)
+    setHarvestNoteBase(combined)
+  }
+
+  /**
+   * 「试听提示音」（PXII-FEAT-TIMER-CHIME）：预热 → 播一次柔和钟声。
+   * 与到点走**同一条路径**（同一单例上下文 + 同一合成器），所以听到的就是
+   * 到点会响的那声。浏览器没有 Web Audio 时明说原因，不做静默空点。
+   */
+  const previewChime = () => {
+    const ctx = ensureAudioContextReady()
+    if (ctx === null) { setError('当前浏览器不支持网页提示音（Web Audio 不可用）'); return }
+    void ctx.resume()
+      .catch(() => undefined)
+      .finally(() => { try { playGentleBell(ctx) } catch { /* fail-quiet：音频失败不打断专注 */ } })
+  }
+
   const setCurrent = async (workItemId: string | null) => {
     if (!aggregate) return
     try {
@@ -1280,6 +1452,17 @@ export default function TimerPage() {
           // （可写）态没有回跳入口。provisional 未导入分支结构上不会进入 readOnly
           //（早退 + 保留草稿、不重读聚合），所以那里既无刷新也无回跳。
           onReturnToTasks: reviewSession ? undefined : handleReturnToTasks,
+          // ★ PXII-FEAT-REVIEW-HARVEST：把「本轮记在图里的思考」一键带走。
+          //   提炼为空（无思考节点）时组件自身返回 null → 优雅收起不占位；
+          //   解析失败同样只是空提炼，绝不阻断复盘表单的渲染与提交。
+          harvestSlot: harvestedThoughts
+            ? createElement(SessionReviewHarvest, {
+                key: reviewSession.sessionId,
+                thoughts: harvestedThoughts,
+                onPromoteTodos: handleHarvestTodos,
+                onInjectNote: handleInjectHarvestNote,
+              })
+            : null,
           onDraftChange: updateReviewDraft,
           onSubmit: submitReview,
           onReconcile: reconcileCommand,
@@ -1324,11 +1507,17 @@ export default function TimerPage() {
             'data-testid': 'focus-context',
           }, `${level2WorkItem.displayKey} ${level2WorkItem.title}`)
         : null,
-      actions: createElement(Button, {
-        type: 'button', variant: 'ghost', size: 'sm',
-        'aria-pressed': immersive,
-        onClick: () => setImmersive((value) => !value),
-      }, immersive ? '退出沉浸' : '沉浸模式'),
+      actions: createElement(Fragment, null,
+        // ★ PXII-FEAT-TIMER-CHIME：通知授权 + 试听入口放在顶栏动作区（永不渐隐）。
+        //   只在运行态出现 —— 这是到点会真正消费通知的那个状态，也是用户唯一
+        //   还来得及「顺手授权」的时机（进设置页要中断专注）。
+        createElement(NotificationChimeCapsule, { onPreviewSound: previewChime }),
+        createElement(Button, {
+          type: 'button', variant: 'ghost', size: 'sm',
+          'aria-pressed': immersive,
+          onClick: () => setImmersive((value) => !value),
+        }, immersive ? '退出沉浸' : '沉浸模式'),
+      ),
       // 焦点区 = 环（上）+ **导图编辑区**（下，占了原本的空白大块；ADR-0008 D15）。
       // 编辑区常驻（不随沉浸渐隐）—— 沉浸时右栏伴奏渐隐而这里仍可看全、记录。
       focus: createElement(Fragment, null,
@@ -1336,9 +1525,12 @@ export default function TimerPage() {
           session, nowMs, owner: ownershipMode === 'owner',
           ownerHint,
           onTakeover: ownershipMode === 'read_only' ? takeOverSession : undefined,
-          onPause: (occurredAt) => clockAction('pause', occurredAt),
-          onResume: (occurredAt) => clockAction('resume', occurredAt),
-          onEnd: (occurredAt) => clockAction('end', occurredAt),
+          // ★ PXII-FEAT-TIMER-CHIME：「暂停 / 继续 / 结束」都是真实用户手势，
+          //   是给单例 AudioContext 续用户激活最自然的时机。到点（可能已切到
+          //   后台标签页）时直接复用已 running 的上下文，不再受 Autoplay 拦截。
+          onPause: (occurredAt) => { ensureAudioContextReady(); return clockAction('pause', occurredAt) },
+          onResume: (occurredAt) => { ensureAudioContextReady(); return clockAction('resume', occurredAt) },
+          onEnd: (occurredAt) => { ensureAudioContextReady(); return clockAction('end', occurredAt) },
           onFlushNote: async () => { await draftController?.flush('before-append') },
         }),
         runningBreak
