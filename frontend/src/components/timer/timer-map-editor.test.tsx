@@ -9,6 +9,11 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
+import {
+  ARCHIPELAGO_CARD_W,
+  ARCHIPELAGO_GAP_X,
+} from '@/lib/work-map/island-layout'
+
 import { TimerMapEditor } from './timer-map-editor'
 
 const SESSION_ID = 'c766be47-8725-443b-86e3-7cfee648a2f4'
@@ -107,6 +112,316 @@ note:
 -->
 ### 可编辑节点
 `
+
+/**
+ * 群岛流 fixture：会话岛下挂 **4 个** L3 子岛（>2 才触发 `WorkMapTree` 的横向撑宽，
+ * 从而激活溢出指示与翻页按钮）。子岛标题即 `subIslands[i].title`，用于断言切岛落点。
+ */
+const ARCHIPELAGO_ISLAND = `<!--
+next_cid: 9
+centers:
+  - at: "node:群岛测试workitem/10-02 10:00 会话"
+    cid: c1
+    dir: right
+    session_id: "${SESSION_ID}"
+-->
+# 群岛测试workitem
+
+<!--
+cid: "c1"
+session_id: "${SESSION_ID}"
+-->
+## 10-02 10:00 会话
+
+<!--
+cid: "c2"
+-->
+### 甲岛
+
+<!--
+cid: "c3"
+-->
+### 乙岛
+
+<!--
+cid: "c4"
+-->
+### 丙岛
+
+<!--
+cid: "c5"
+-->
+### 丁岛
+`
+
+/** 画布（键位作用域的焦点持有者）。 */
+const canvasEl = (): HTMLElement => screen.getByTestId('map-editor-canvas')
+
+/** 在画布上敲一个键（可选修饰键）。 */
+const pressKey = (
+  key: string,
+  options: { alt?: boolean; shift?: boolean; target?: HTMLElement } = {},
+): void => {
+  fireEvent.keyDown(options.target ?? canvasEl(), {
+    key,
+    altKey: options.alt ?? false,
+    shiftKey: options.shift ?? false,
+  })
+}
+
+/** 当前聚焦的子岛标题（从横幅读；未聚焦 → null）。 */
+const focusedTitle = (): string | null => {
+  const banner = screen.queryByTestId('map-sub-island-banner')
+  if (banner === null) return null
+  return banner.querySelector('strong')?.textContent ?? null
+}
+
+describe('TimerMapEditor 群岛流导航（PXII-FEAT-ARCHIPELAGO-NAV）', () => {
+  const renderArchipelago = (
+    onEdit = vi.fn().mockResolvedValue(undefined),
+    onQuickRecord = vi.fn().mockResolvedValue(undefined),
+  ) => {
+    const utils = render(
+      <TimerMapEditor
+        mapText={ARCHIPELAGO_ISLAND}
+        sessionId={SESSION_ID}
+        onEdit={onEdit}
+        onQuickRecord={onQuickRecord}
+      />,
+    )
+    return { ...utils, onEdit, onQuickRecord }
+  }
+
+  it('★ `]` / `[`：逐岛环形切换（末岛 → 首岛、首岛 → 末岛），并自动平移居中', () => {
+    const { container } = renderArchipelago()
+    const viewport = screen.getByTestId('map-canvas-viewport')
+    expect(focusedTitle()).toBeNull()
+
+    // 全局态按 `]` → 进入第 1 岛
+    pressKey(']')
+    expect(focusedTitle()).toBe('甲岛')
+    expect(screen.getByTestId('map-sub-island-banner')).toBeTruthy()
+
+    // 依次向后
+    pressKey(']')
+    expect(focusedTitle()).toBe('乙岛')
+    pressKey(']')
+    expect(focusedTitle()).toBe('丙岛')
+    pressKey(']')
+    expect(focusedTitle()).toBe('丁岛')
+
+    // 末岛再按 `]` → 环回首岛（不是停在边界）
+    pressKey(']')
+    expect(focusedTitle()).toBe('甲岛')
+
+    // `[` 从首岛反向环绕到末岛
+    pressKey('[')
+    expect(focusedTitle()).toBe('丁岛')
+    pressKey('[')
+    expect(focusedTitle()).toBe('丙岛')
+
+    // 聚焦态下视口复位到基准（平移居中由渲染器按该岛 bounds 自适应框定）
+    expect(viewport.style.transform).toContain('translate(0px, 0px)')
+    expect(viewport.style.transform).toContain('scale(1)')
+
+    // 切换子岛会收敛节点选中态：操作行不再残留（防"对着看不见的节点操作"）
+    expect(screen.queryByTestId('map-node-actions')).toBeNull()
+    expect(container.querySelector('.wm-node[data-selected="true"]')).toBeNull()
+  })
+
+  it('★ Alt+← / Alt+→ 与 `[` / `]` 等价', () => {
+    renderArchipelago()
+    pressKey('ArrowRight', { alt: true })
+    expect(focusedTitle()).toBe('甲岛')
+    pressKey('ArrowRight', { alt: true })
+    expect(focusedTitle()).toBe('乙岛')
+    pressKey('ArrowLeft', { alt: true })
+    expect(focusedTitle()).toBe('甲岛')
+    pressKey('ArrowLeft', { alt: true })
+    expect(focusedTitle()).toBe('丁岛')
+  })
+
+  it('★ 数字键 1~4：直达对应子岛；越界序号（5~9）忽略且不跳转', () => {
+    const { container } = renderArchipelago()
+
+    pressKey('3')
+    expect(focusedTitle()).toBe('丙岛')
+
+    pressKey('1')
+    expect(focusedTitle()).toBe('甲岛')
+
+    pressKey('4')
+    expect(focusedTitle()).toBe('丁岛')
+
+    // 越界：只有 4 个岛，按 5~9 应保持原状
+    for (const key of ['5', '6', '7', '8', '9']) {
+      pressKey(key)
+      expect(focusedTitle()).toBe('丁岛')
+    }
+    // 越界键不产生副作用，也不残留选中
+    expect(container.querySelector('.wm-node[data-selected="true"]')).toBeNull()
+  })
+
+  it('★ `0`：退出聚焦态回到全局群岛视图；全局态下 `0` 无副作用（让键冒泡）', () => {
+    renderArchipelago()
+    pressKey('2')
+    expect(focusedTitle()).toBe('乙岛')
+
+    pressKey('0')
+    expect(focusedTitle()).toBeNull()
+    expect(screen.queryByTestId('map-sub-island-banner')).toBeNull()
+
+    // 已是全局态：再按 `0` 不产生任何变化（键位层无接收者即让位）
+    pressKey('0')
+    expect(focusedTitle()).toBeNull()
+  })
+
+  it('★ Esc：聚焦态下退出聚焦（逐级退让的第二级），且不吞掉全局 Esc', () => {
+    renderArchipelago()
+    pressKey('2')
+    expect(focusedTitle()).toBe('乙岛')
+
+    pressKey('Escape')
+    expect(focusedTitle()).toBeNull()
+  })
+
+  it('★ 防穿透：快速记录浮层输入框里按 `[` `]` 1~9 0 都是**打字**，不切岛', async () => {
+    const { onEdit } = renderArchipelago()
+    fireEvent.click(screen.getByTestId('map-quick-insight'))
+    const input = screen.getByTestId('map-quick-input') as HTMLInputElement
+    expect(document.activeElement).toBe(input)
+
+    for (const key of ['[', ']', '1', '2', '0']) {
+      pressKey(key, { target: input })
+    }
+    fireEvent.change(input, { target: { value: '[1] 待办 2' } })
+
+    // 文本原样保留，视图完全未动
+    expect(input.value).toBe('[1] 待办 2')
+    expect(focusedTitle()).toBeNull()
+    expect(onEdit).not.toHaveBeenCalled()
+  })
+
+  it('★ 防穿透：节点编辑浮层输入框里按 `[` `]` / 数字键不切岛、不改类型', () => {
+    const { container, onEdit } = renderArchipelago()
+    fireEvent.click(container.querySelector('.wm-node[data-cid="c2"]')!)
+    fireEvent.click(screen.getByTestId('map-action-rename'))
+    const input = screen.getByTestId('map-action-input')
+
+    for (const key of ['[', ']', '1', '9', '0']) {
+      pressKey(key, { target: input })
+    }
+
+    expect(focusedTitle()).toBeNull()
+    expect(onEdit).not.toHaveBeenCalled()
+  })
+
+  it('★ 防穿透：Alt+←/→ 在输入框内不切岛（文本选区/光标语义优先）', () => {
+    renderArchipelago()
+    fireEvent.click(screen.getByTestId('map-quick-todo'))
+    const input = screen.getByTestId('map-quick-input')
+
+    pressKey('ArrowLeft', { alt: true, target: input })
+    pressKey('ArrowRight', { alt: true, target: input })
+    expect(focusedTitle()).toBeNull()
+  })
+
+  it('★ 有选中节点时数字键仍是「类型直切」，切岛交给 `[` `]`（两层语义互斥）', async () => {
+    const { container, onEdit } = renderArchipelago()
+    fireEvent.click(container.querySelector('.wm-node[data-cid="c2"]')!)
+
+    // 有接收者 → 数字键直切类型，不切岛
+    pressKey('1')
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith({ kind: 'type', cid: 'c2', type: 'insight' }),
+    )
+    expect(focusedTitle()).toBeNull()
+
+    // 同一时刻 `]` 仍然切岛（岛屿导航与类型直切各走各的键）
+    pressKey(']')
+    expect(focusedTitle()).toBe('甲岛')
+  })
+})
+
+describe('TimerMapEditor 群岛流视口溢出（PXII-FEAT-ARCHIPELAGO-OVERFLOW）', () => {
+  const renderArchipelago = (onEdit = vi.fn().mockResolvedValue(undefined)) => {
+    const utils = render(
+      <TimerMapEditor mapText={ARCHIPELAGO_ISLAND} sessionId={SESSION_ID} onEdit={onEdit} />,
+    )
+    return { ...utils, onEdit }
+  }
+
+  it('★ 溢出控件仅在全局群岛视图渲染；进入聚焦态后自动隐藏', () => {
+    renderArchipelago()
+    expect(screen.getByTestId('map-scroll-left')).toBeTruthy()
+    expect(screen.getByTestId('map-scroll-right')).toBeTruthy()
+
+    pressKey('2')
+    expect(screen.queryByTestId('map-scroll-left')).toBeNull()
+    expect(screen.queryByTestId('map-scroll-right')).toBeNull()
+    expect(screen.queryByTestId('map-fade-left')).toBeNull()
+    expect(screen.queryByTestId('map-fade-right')).toBeNull()
+
+    pressKey('0')
+    expect(screen.getByTestId('map-scroll-left')).toBeTruthy()
+  })
+
+  it('★ 边界状态：初始滚到最左 → 左钮禁用且左遮罩隐退，右钮可用', () => {
+    renderArchipelago()
+    expect(screen.getByTestId('map-scroll-left')).toBeDisabled()
+    expect(screen.getByTestId('map-scroll-right')).not.toBeDisabled()
+    expect(screen.getByTestId('map-fade-left')).toHaveAttribute('data-visible', 'false')
+    expect(screen.getByTestId('map-fade-right')).toHaveAttribute('data-visible', 'true')
+  })
+
+  it('★ 点击 `›` 向右翻页一个步长（1 卡宽 + 间距），并出现左遮罩', () => {
+    renderArchipelago()
+    const viewport = screen.getByTestId('map-canvas-viewport')
+    expect(viewport.style.transform).toContain('translate(0px, 0px)')
+
+    fireEvent.click(screen.getByTestId('map-scroll-right'))
+    const step = ARCHIPELAGO_CARD_W + ARCHIPELAGO_GAP_X
+    expect(viewport.style.transform).toContain(`translate(${-step}px, 0px)`)
+
+    // 已离开左边界 → 左钮可用、左遮罩浮现
+    expect(screen.getByTestId('map-scroll-left')).not.toBeDisabled()
+    expect(screen.getByTestId('map-fade-left')).toHaveAttribute('data-visible', 'true')
+  })
+
+  it('★ 点击 `‹` 向左翻页，且不会翻过最左端（夹在 0）', () => {
+    renderArchipelago()
+    const viewport = screen.getByTestId('map-canvas-viewport')
+    const step = ARCHIPELAGO_CARD_W + ARCHIPELAGO_GAP_X
+
+    fireEvent.click(screen.getByTestId('map-scroll-right'))
+    expect(viewport.style.transform).toContain(`translate(${-step}px, 0px)`)
+
+    fireEvent.click(screen.getByTestId('map-scroll-left'))
+    expect(viewport.style.transform).toContain('translate(0px, 0px)')
+    // 已在最左端 → 左钮回到禁用（隐退）
+    expect(screen.getByTestId('map-scroll-left')).toBeDisabled()
+  })
+
+  it('★ 连续右翻至最右端 → 右钮禁用且右遮罩隐退（不会滚出空白区）', () => {
+    renderArchipelago()
+    const right = screen.getByTestId('map-scroll-right')
+    // 4 卡总宽 1152 + 32 = 1184；兜底视口 860 → 最多右翻 324px，两跳即到边界
+    for (let i = 0; i < 5; i += 1) {
+      if ((right as HTMLButtonElement).disabled) break
+      fireEvent.click(right)
+    }
+    expect(screen.getByTestId('map-scroll-right')).toBeDisabled()
+    expect(screen.getByTestId('map-fade-right')).toHaveAttribute('data-visible', 'false')
+    expect(screen.getByTestId('map-scroll-left')).not.toBeDisabled()
+  })
+
+  it('★ 子岛 ≤ 2 个（不撑宽）→ 不渲染溢出控件', () => {
+    render(<TimerMapEditor mapText={ISLAND} sessionId={SESSION_ID} onEdit={vi.fn()} />)
+    expect(screen.queryByTestId('map-scroll-left')).toBeNull()
+    expect(screen.queryByTestId('map-scroll-right')).toBeNull()
+    expect(screen.queryByTestId('map-fade-left')).toBeNull()
+  })
+})
 
 describe('TimerMapEditor 节点编辑（ADR-0008 D16 / D13 步 3-2）', () => {
   const renderEditor = (onEdit = vi.fn().mockResolvedValue(undefined)) => {

@@ -334,10 +334,14 @@ describe('中央编辑区键盘心流（PXII-FEAT-KEYMAP-FLOW）', () => {
       await waitFor(() => expect(onEdit).toHaveBeenCalled())
       expect(globalHandler).not.toHaveBeenCalled()
 
-      // 反向确认：无选中时的数字键不匹配导图键位 → 冒泡照旧（全局仍可处理）
+      // 反向确认：未认领的按键照旧冒泡（全局仍可处理）。
+      // ⚠️ 2026-10-02：这里原本用「无选中时的数字键」当例子，但
+      // PXII-FEAT-ARCHIPELAGO-NAV 已把**无选中**时的 1~9 认领为「直达第 N 个子岛」
+      // （有选中时仍是类型直切），故改用本矩阵与导图键位表都不认领的 `?`
+      // 来证明「未命中即放行」这条契约本身没变。
       fireEvent.keyDown(canvas(), { key: 'Escape' }) // 类型写入后选中已清，Esc 不拦截
       globalHandler.mockClear()
-      press('1')
+      press('?')
       expect(globalHandler).toHaveBeenCalledTimes(1)
     } finally {
       window.removeEventListener('keydown', globalHandler)

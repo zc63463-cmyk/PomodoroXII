@@ -1201,6 +1201,77 @@
   font-size: 11px;
   min-width: 38px;
 }
+/* ── 群岛流视口溢出指示（PXII-FEAT-ARCHIPELAGO-OVERFLOW）────────────────────
+   横向卡片流总宽超出视口时，左右边缘浮现渐变遮罩 + 垂直居中的毛玻璃翻页微按钮。
+   三层叠放次序：视口内容 < 渐变遮罩 < 翻页按钮（遮罩 `pointer-events: none`，
+   不挡画布拖拽；按钮才是可点目标）。到达边界时遮罩平滑淡出、按钮 `opacity: 0`
+   且 `pointer-events: none`（"隐退"而非位移，避免布局抖动）。 */
+.wm-archipelago-fade-mask {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 36px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  z-index: 8;
+}
+.wm-archipelago-fade-mask--left {
+  left: 0;
+  background: linear-gradient(to right, var(--background), transparent);
+}
+.wm-archipelago-fade-mask--right {
+  right: 0;
+  background: linear-gradient(to left, var(--background), transparent);
+}
+.wm-archipelago-fade-mask.is-visible {
+  opacity: 0.85;
+}
+.wm-archipelago-nav-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  appearance: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 17px;
+  line-height: 1;
+  color: var(--ios-label-2);
+  background: color-mix(in oklab, var(--ios-card) 80%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in oklab, var(--foreground) 14%, transparent);
+  border-radius: 50%;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  z-index: 9;
+  user-select: none;
+  transition: opacity 0.18s ease, background 0.15s ease, color 0.15s ease,
+    transform 0.15s ease;
+}
+.wm-archipelago-nav-btn--left {
+  left: 6px;
+}
+.wm-archipelago-nav-btn--right {
+  right: 6px;
+}
+.wm-archipelago-nav-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--ios-card) 96%, transparent);
+  color: var(--ios-label);
+}
+.wm-archipelago-nav-btn:active:not(:disabled) {
+  transform: translateY(-50%) scale(0.92);
+}
+/* 边界隐退：`opacity: 0` + 不可点（仍占位，故不会让相邻元素跳动） */
+.wm-archipelago-nav-btn:disabled {
+  opacity: 0;
+  pointer-events: none;
+}
 /* 子岛视图切换与聚焦横幅 */
 .wm-sub-island-toggle {
   display: inline-flex;

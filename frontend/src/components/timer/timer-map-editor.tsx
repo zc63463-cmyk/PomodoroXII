@@ -39,8 +39,10 @@ import {
   type ReactNode,
 } from 'react'
 
-import { EDITOR_KEY_HINTS, matchEditorKey } from '@/lib/work-map/editor-keymap'
+import { EDITOR_KEY_HINTS, isTextEntryTarget, matchEditorKey } from '@/lib/work-map/editor-keymap'
 import {
+  ARCHIPELAGO_CARD_W,
+  ARCHIPELAGO_GAP_X,
   findSessionIslandLayout,
   readWorkMapLayout,
   type MapTreeNode,
@@ -76,6 +78,94 @@ export interface TimerMapEditorProps {
 type Overlay = 'rename' | 'add' | 'comment' | 'type'
 
 const DELETE_CONFIRM_MS = 3000
+
+/**
+ * 画布容器宽度的**兜底值**。jsdom 里 `clientWidth` 恒为 0（无布局引擎），
+ * 而溢出判定必须可测 —— 兜底到 860 与「适应」按钮既有口径一致（同款兜底）。
+ */
+const DEFAULT_CANVAS_W = 860
+
+/** 翻页步长 = 1 张卡片宽 + 1 个卡间距（PXII-FEAT-ARCHIPELAGO-OVERFLOW） */
+const ARCHIPELAGO_PAGE_STEP = ARCHIPELAGO_CARD_W + ARCHIPELAGO_GAP_X
+
+/**
+ * 群岛流内容区的**最小宽度**与**两侧留白**（与 `layoutArchipelagoIsland` 同源：
+ * 那边 `totalW = Math.max(780, totalCardsW + 32)`）。
+ *
+ * 编辑区沿用 860 而非 780 —— 视口最小宽度下的保底，避免 3 张卡（858px）时
+ * 内容比视口还窄、SVG 被拉伸。
+ */
+const ARCHIPELAGO_MIN_CONTENT_W = 860
+const ARCHIPELAGO_CONTENT_PAD_X = 32
+
+/** 遮罩显隐的裁剪阈值：被裁不足 10px 时视为「已到边界」，避免边缘抖动闪烁 */
+const OVERFLOW_EDGE_EPS = 10
+
+/**
+ * 群岛流导航动作（PXII-FEAT-ARCHIPELAGO-NAV）—— 纯数据，与 React 无关。
+ *
+ * `focus-index` 用 **0 基下标**（数字键 1 → 下标 0），越界判定留给匹配器。
+ */
+export type ArchipelagoNavAction =
+  | { type: 'focus-index'; index: number }
+  | { type: 'step'; delta: 1 | -1 }
+  | { type: 'reset' }
+
+/**
+ * 群岛流导航键位匹配（PXII-FEAT-ARCHIPELAGO-NAV）。
+ *
+ * | 键 | 动作 |
+ * |---|---|
+ * | `[` / `Alt+←` | 上一个子岛（首岛循环到末岛） |
+ * | `]` / `Alt+→` | 下一个子岛（末岛循环到首岛） |
+ * | `1`~`9` | 直达第 N 个子岛（越界 → 不匹配） |
+ * | `0` | 退出聚焦态（仅聚焦态下有接收者） |
+ *
+ * ## 与「数字键 1-5 直切类型」的**分层**（关键）
+ * 导图键位表（`matchEditorKey`）里 1~5 = 思考类型直切，前提是**有选中节点**。
+ * 本匹配器只在**无选中节点**时接管数字键 —— 有接收者时类型直切优先，
+ * 无接收者时数字键才有"第 N 个子岛"这一层新语义。两层互斥，不会互相吃掉。
+ *
+ * ## 防穿透（红线）
+ * 输入面（input / textarea / select / contentEditable）一律 `null`：打字中的
+ * `[` `]` `1`~`9` 必须是字符。判据复用 `isTextEntryTarget`（事件目标是浏览器
+ * 给出的事实，比 state 标志位可靠）。`Ctrl/Cmd` 组合同样让位；快速记录输入态
+ * （`isQuickRecording`）同样整体让位 —— 用户正在写东西时不允许任何视图跳转。
+ */
+export function matchArchipelagoNavKey(
+  e: KeyboardEvent,
+  ctx: {
+    islandCount: number
+    hasSelectedNode: boolean
+    isFocused: boolean
+    /** 快速记录输入态（`activeType !== null || draft !== ''`）→ 一切切岛键让位 */
+    isQuickRecording: boolean
+  },
+): ArchipelagoNavAction | null {
+  if (ctx.islandCount <= 0) return null
+  if (ctx.isQuickRecording) return null
+  if (isTextEntryTarget(e.target)) return null
+  // 判定次序同 `matchEditorKey`：修饰键优先于裸键，裸键要求无任何修饰。
+  if (e.ctrlKey || e.metaKey) return null
+  // 本矩阵不含任何 Shift 组合（`{` `}` 不属于切岛键位）
+  if (e.shiftKey) return null
+  // Alt 只在方向键上放行（Alt+←/→）；其余 Alt 组合让给系统
+  if (e.altKey) {
+    if (e.key === 'ArrowLeft') return { type: 'step', delta: -1 }
+    if (e.key === 'ArrowRight') return { type: 'step', delta: 1 }
+    return null
+  }
+  if (e.key === '[') return { type: 'step', delta: -1 }
+  if (e.key === ']') return { type: 'step', delta: 1 }
+  // `0`：只在聚焦态有接收者；全局态让键继续冒泡（不吞无副作用的按键）
+  if (e.key === '0') return ctx.isFocused ? { type: 'reset' } : null
+  // 数字键：仅无选中节点时接管（有选中 → 让给类型直切）
+  if (!ctx.hasSelectedNode && e.key.length === 1 && e.key >= '1' && e.key <= '9') {
+    const index = Number(e.key) - 1
+    return index < ctx.islandCount ? { type: 'focus-index', index } : null
+  }
+  return null
+}
 
 export function TimerMapEditor({
   mapText,
@@ -219,6 +309,135 @@ export function TimerMapEditor({
   const focusCanvas = useCallback((): void => {
     canvasRef.current?.focus({ preventScroll: true })
   }, [])
+
+  // ── 群岛流导航（PXII-FEAT-ARCHIPELAGO-NAV / OVERFLOW）────────────────────
+  const subIslands = island?.subIslands ?? []
+
+  /**
+   * 画布可视宽度。jsdom 无布局引擎（`clientWidth` 恒 0）→ 兜底 `DEFAULT_CANVAS_W`，
+   * 让溢出判定在测试里也是确定的；真实浏览器里由 ResizeObserver 实时校正。
+   */
+  const [canvasWidth, setCanvasWidth] = useState(DEFAULT_CANVAS_W)
+  useEffect(() => {
+    const el = canvasRef.current
+    if (el === null) return
+    const measure = (): void => {
+      setCanvasWidth(el.clientWidth > 0 ? el.clientWidth : DEFAULT_CANVAS_W)
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    // ResizeObserver 在 jsdom 下不存在 → 有则用（容器随窗口/布局变化时实时校正）
+    const observer =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    observer?.observe(el)
+    return () => {
+      window.removeEventListener('resize', measure)
+      observer?.disconnect()
+    }
+  }, [island])
+
+  /** 全部子岛卡片横向平铺的总宽（与 `layoutArchipelagoIsland` 同一份几何常量） */
+  const archipelagoCardsW =
+    subIslands.length === 0
+      ? 0
+      : subIslands.length * ARCHIPELAGO_CARD_W + (subIslands.length - 1) * ARCHIPELAGO_GAP_X
+
+  /**
+   * **内容宽度 = 渲染宽度**（同源红线）：下面给 `WorkMapTree` 的 `style.width`
+   * 与此处用同一个表达式，否则遮罩会在"其实没溢出"时误亮、或在溢出时不亮。
+   *
+   * - 子岛 ≤ 2 个：不撑宽（`style` 为 undefined）→ SVG 按 100% 等比缩进视口 → 无溢出；
+   * - 子岛 > 2 个：显式撑到 `max(860, 卡片总宽 + 32)` → 超出视口的部分即横向溢出。
+   */
+  const archipelagoContentW =
+    subIslands.length > 2
+      ? Math.max(
+          ARCHIPELAGO_MIN_CONTENT_W,
+          archipelagoCardsW + ARCHIPELAGO_CONTENT_PAD_X,
+        )
+      : 0
+
+  /** 溢出指示只在**全局群岛视图**且内容确实超出视口时激活；单子岛聚焦态一律收起 */
+  const overflowActive = focusedSubIslandId === null && archipelagoContentW > 0
+  // 内容自视口左缘起排布（transformOrigin: center center + 初始 pan 0 = 左对齐呈现）：
+  // 左溢 = 已把内容右移（pan.x < 0）；右溢 = 内容右缘仍在视口右缘之外。
+  // 容差 10px 吸收亚像素抖动，避免边界处遮罩反复闪烁。
+  const canScrollLeft = overflowActive && pan.x < -OVERFLOW_EDGE_EPS
+  const canScrollRight =
+    overflowActive && canvasWidth - pan.x < archipelagoContentW - OVERFLOW_EDGE_EPS
+
+  /**
+   * 切换子岛 / 退出聚焦时的**状态收敛**：节点选中及其衍生 UI 一并收起。
+   *
+   * 必要性（不是洁癖）：聚焦态下渲染器只画当前子岛，选中节点若在别的岛上就**不可见**，
+   * 而操作行仍会呈现 —— 用户可能对着看不见的节点按删除。视图切走 = 选中态失效。
+   */
+  const clearNodeSelection = (): void => {
+    clearDeleteTimer()
+    setPendingDelete(false)
+    setSelectedCid(null)
+    setOverlay(null)
+    setOverlayCid(null)
+    setEditError(null)
+  }
+
+  /**
+   * 一键聚焦第 index 个子岛（0 基）：清选中 → 复位缩放平移 → 聚焦。
+   *
+   * 「自动平移居中」由渲染器负责：聚焦态下 `WorkMapTree` 按
+   * `subIslandVisualBounds(sub, true)` 自适应框定该岛（同既有 Tab 按钮的落点），
+   * 故这里只需把视口复位到基准，不必自己算平移量。
+   *
+   * 不抢焦点：切岛可能发生在快速记录浮层开着的时候（输入框持有焦点），
+   * 强行 `focusCanvas` 会打断打字。键盘路径下事件目标本就在画布内，无需归还。
+   */
+  const focusSubIslandAt = (index: number): void => {
+    const sub = subIslands[index]
+    if (sub === undefined) return
+    clearNodeSelection()
+    setFocusedSubIslandId(sub.id)
+    setZoom(1.0)
+    setPan({ x: 0, y: 0 })
+  }
+
+  /** 退出子岛聚焦 → 回到会话全局群岛视图（`0` / Esc / 横幅与 Tab 按钮共用同一落点） */
+  const exitSubIslandFocus = (): void => {
+    clearNodeSelection()
+    setFocusedSubIslandId(null)
+    setZoom(1.0)
+    setPan({ x: 0, y: 0 })
+  }
+
+  /**
+   * 翻页一个步长（294px = 1 卡宽 + 1 卡间距）。
+   * `delta = 1` 看右边（内容左移）／`delta = -1` 看左边（内容右移）。
+   * 结果夹在 `[-maxScrollRight, 0]`：滚到边界即停，不会翻出空白区。
+   */
+  const scrollArchipelago = (delta: 1 | -1): void => {
+    const maxScrollRight = Math.max(0, archipelagoContentW - canvasWidth)
+    setPan((p) => {
+      const next = p.x - delta * ARCHIPELAGO_PAGE_STEP
+      return { x: Math.round(Math.max(-maxScrollRight, Math.min(0, next))), y: p.y }
+    })
+  }
+
+  /** 群岛导航动作落地（键盘与按钮共用的唯一入口） */
+  const applyArchipelagoNav = (action: ArchipelagoNavAction): void => {
+    if (action.type === 'reset') {
+      exitSubIslandFocus()
+      return
+    }
+    if (action.type === 'focus-index') {
+      focusSubIslandAt(action.index)
+      return
+    }
+    // 环形步进：未聚焦时 `]` → 首岛、`[` → 末岛；已聚焦则前后环绕
+    const count = subIslands.length
+    if (count === 0) return
+    const current = subIslands.findIndex((sub) => sub.id === focusedSubIslandId)
+    const base = current === -1 ? (action.delta === 1 ? -1 : 0) : current
+    focusSubIslandAt(((base + action.delta) % count + count) % count)
+  }
 
   // 改名浮层：打开即**全选**现有名称 —— 一键打字覆盖，也可按方向键微调（手感同 F2）
   useEffect(() => {
@@ -423,13 +642,36 @@ export function TimerMapEditor({
     }
 
     const action = matchEditorKey(event.nativeEvent, selectedNode !== null)
-    if (action === null) return
+    if (action === null) {
+      // 导图键位未命中 → 再看群岛流导航键位（`[` `]` / Alt+←→ / 1~9 / 0）。
+      // 两层互斥：`matchEditorKey` 在有选中节点时已接管 1~5（类型直切），
+      // 群岛匹配器也只在**无选中**时认数字键，所以不会有按键被两层同时认领。
+      const nav = matchArchipelagoNavKey(event.nativeEvent, {
+        islandCount: subIslands.length,
+        hasSelectedNode: selectedNode !== null,
+        isFocused: focusedSubIslandId !== null,
+        isQuickRecording: activeType !== null || draft !== '',
+      })
+      if (nav === null) return
+      // 命中即拦截：全局数字键 1-5 是**路由跳转**（AppShell），不拦会顺手跳页
+      event.preventDefault()
+      event.stopPropagation()
+      applyArchipelagoNav(nav)
+      return
+    }
 
     const currentCid = selectedNode?.cid ?? null
 
     // Esc 且**无可退让的对象**：只把焦点交还页面（让全局快捷键继续处理这次 Esc），
     // 不做 preventDefault —— 否则用户按 Esc 关不掉页面上其它浮层（键盘陷阱）。
-    if (action.type === 'cancel' && overlay === null && currentCid === null) {
+    // ★ 聚焦子岛时**有**可退让对象（退出聚焦，PXII-FEAT-ARCHIPELAGO-NAV），
+    //   故不在此早退，落到下面 switch 的 cancel 分支逐级退让。
+    if (
+      action.type === 'cancel' &&
+      overlay === null &&
+      currentCid === null &&
+      focusedSubIslandId === null
+    ) {
       canvasRef.current.blur()
       return
     }
@@ -477,11 +719,8 @@ export function TimerMapEditor({
       case 'cancel':
         // 逐级退让：浮层 → 子岛聚焦 → 选中
         if (overlay !== null) closeOverlay()
-        else if (focusedSubIslandId !== null) {
-          setFocusedSubIslandId(null)
-          setZoom(1.0)
-          setPan({ x: 0, y: 0 })
-        } else {
+        else if (focusedSubIslandId !== null) exitSubIslandFocus()
+        else {
           setSelectedCid(null)
           resetActions()
         }
@@ -550,11 +789,7 @@ export function TimerMapEditor({
               className={`wm-view-btn ${focusedSubIslandId === null ? 'wm-view-btn--active' : ''}`}
               aria-pressed={focusedSubIslandId === null}
               data-testid="map-view-global"
-              onClick={() => {
-                setFocusedSubIslandId(null)
-                setZoom(1.0)
-                setPan({ x: 0, y: 0 })
-              }}
+              onClick={exitSubIslandFocus}
             >
               🌐 会话全局
             </button>
@@ -572,12 +807,13 @@ export function TimerMapEditor({
                   aria-pressed={isFocused}
                   data-testid={`map-view-sub-${sub.id}`}
                   onClick={() => {
-                    setFocusedSubIslandId(isFocused ? null : sub.id)
-                    setZoom(1.0)
-                    setPan({ x: 0, y: 0 })
+                    // 再点已聚焦的 Tab = 退出（与横幅按钮同一落点）
+                    if (isFocused) exitSubIslandFocus()
+                    else focusSubIslandAt(idx)
                   }}
-                  title={`聚焦子岛：${sub.title}`}
+                  title={`聚焦子岛：${sub.title}（快捷键 ${idx + 1}）`}
                   aria-label={`聚焦子岛：${sub.title}`}
+                  aria-keyshortcuts={idx < 9 ? String(idx + 1) : undefined}
                 >
                   {isCurrent ? '⚡ ' : '🏝️ '}
                   {`${idx + 1}. `}
@@ -623,11 +859,7 @@ export function TimerMapEditor({
                 type="button"
                 className="wm-sub-island-exit-btn"
                 data-testid="map-sub-island-exit"
-                onClick={() => {
-                  setFocusedSubIslandId(null)
-                  setZoom(1.0)
-                  setPan({ x: 0, y: 0 })
-                }}
+                onClick={exitSubIslandFocus}
               >
                 退出子岛聚焦
               </button>
@@ -656,12 +888,7 @@ export function TimerMapEditor({
               style={
                 focusedSubIslandId === null && island.subIslands && island.subIslands.length > 2
                   ? {
-                      width: `${Math.max(
-                        860,
-                        island.subIslands.length * 270 +
-                          (island.subIslands.length - 1) * 24 +
-                          32,
-                      )}px`,
+                      width: `${archipelagoContentW}px`,
                       height: '100%',
                       minWidth: '100%',
                     }
@@ -675,6 +902,53 @@ export function TimerMapEditor({
               onSelectNode={editable ? selectNode : undefined}
             />
           </div>
+
+          {/* 左右溢出渐变遮罩 + 悬浮翻页微按钮（PXII-FEAT-ARCHIPELAGO-OVERFLOW）
+              只在全局群岛视图且卡片总宽超出视口时出现；进入单子岛聚焦态自动隐藏。 */}
+          {overflowActive && (canScrollLeft || canScrollRight) ? (
+            <>
+              <div
+                className={`wm-archipelago-fade-mask wm-archipelago-fade-mask--left ${
+                  canScrollLeft ? 'is-visible' : ''
+                }`}
+                data-testid="map-fade-left"
+                data-visible={canScrollLeft}
+                aria-hidden="true"
+              />
+              <div
+                className={`wm-archipelago-fade-mask wm-archipelago-fade-mask--right ${
+                  canScrollRight ? 'is-visible' : ''
+                }`}
+                data-testid="map-fade-right"
+                data-visible={canScrollRight}
+                aria-hidden="true"
+              />
+              <button
+                type="button"
+                className="wm-archipelago-nav-btn wm-archipelago-nav-btn--left"
+                data-testid="map-scroll-left"
+                aria-label="向左翻页（上一张卡片）"
+                title="向左翻页"
+                disabled={!canScrollLeft}
+                aria-disabled={!canScrollLeft}
+                onClick={() => scrollArchipelago(-1)}
+              >
+                ‹
+              </button>
+              <button
+                type="button"
+                className="wm-archipelago-nav-btn wm-archipelago-nav-btn--right"
+                data-testid="map-scroll-right"
+                aria-label="向右翻页（下一张卡片）"
+                title="向右翻页"
+                disabled={!canScrollRight}
+                aria-disabled={!canScrollRight}
+                onClick={() => scrollArchipelago(1)}
+              >
+                ›
+              </button>
+            </>
+          ) : null}
 
           {/* 浮动缩放控制条 */}
           <div
