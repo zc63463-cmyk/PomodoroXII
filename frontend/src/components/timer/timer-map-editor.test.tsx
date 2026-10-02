@@ -342,6 +342,29 @@ describe('TimerMapEditor 群岛流导航（PXII-FEAT-ARCHIPELAGO-NAV）', () => 
     pressKey(']')
     expect(focusedTitle()).toBe('甲岛')
   })
+
+  it('★ 关键不变量：聚焦子岛后编辑节点（mapText 更新），保持聚焦在该子岛，不退回全局', () => {
+    const onEdit = vi.fn().mockResolvedValue(undefined)
+    const { rerender } = render(
+      <TimerMapEditor mapText={ARCHIPELAGO_ISLAND} sessionId={SESSION_ID} onEdit={onEdit} />,
+    )
+
+    // 1. 聚焦到甲岛
+    pressKey('1')
+    expect(focusedTitle()).toBe('甲岛')
+    expect(screen.getByTestId('map-sub-island-banner')).toHaveTextContent('甲岛')
+
+    // 2. 模拟编辑后 mapText 重新解析更新（例如添加/编辑了思考内容）
+    const updatedMapText = ARCHIPELAGO_ISLAND.replace('思考1', '思考1-已编辑')
+    rerender(
+      <TimerMapEditor mapText={updatedMapText} sessionId={SESSION_ID} onEdit={onEdit} />,
+    )
+
+    // 3. 断言：依然处于聚焦态、依然聚焦在甲岛，绝不退回全局
+    expect(focusedTitle()).toBe('甲岛')
+    expect(screen.getByTestId('map-sub-island-banner')).toHaveTextContent('甲岛')
+    expect(screen.queryByTestId('map-view-global')).not.toHaveClass('wm-view-btn--active')
+  })
 })
 
 describe('TimerMapEditor 群岛流视口溢出（PXII-FEAT-ARCHIPELAGO-OVERFLOW）', () => {

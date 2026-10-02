@@ -1260,11 +1260,18 @@ export function WorkMapTree({
   // 筛选只调「视觉权重」：命中 = 高亮，其余 dim；null = 全亮（D17）
   const filter = highlightType ?? null
 
-  // 子岛聚焦解析：
+  // 子岛聚焦解析（支持 stableId、cid、title 跨重新解析稳定对齐）：
   const activeSubIsland = useMemo(() => {
     if (!focusedSubIslandId) return null
     for (const island of islands) {
-      const hit = island.subIslands?.find((sub) => sub.id === focusedSubIslandId)
+      const hit = island.subIslands?.find(
+        (sub) =>
+          sub.id === focusedSubIslandId ||
+          (sub.cid !== null && sub.cid === focusedSubIslandId) ||
+          sub.title === focusedSubIslandId ||
+          `sub:${sub.title}` === focusedSubIslandId ||
+          (focusedSubIslandId.startsWith('sub:') && sub.title === focusedSubIslandId.slice(4)),
+      )
       if (hit) return hit
     }
     return null

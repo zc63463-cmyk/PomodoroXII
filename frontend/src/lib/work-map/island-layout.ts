@@ -628,12 +628,15 @@ export function readWorkMapLayout(
       // 会话 id：取岛内首个携带 session_id 的节点（本项目建岛时写在岛根上）
       const sessionId = nodes.find((node) => node.sessionId !== null)?.sessionId ?? null
       // 嵌套子岛：岛根直属一级子节点（depth === 1）每个为一个 L3 任务子岛及其思考分支
-      const subIslands: MapSubIsland[] = tree.children.map((child) => {
+      const subIslands: MapSubIsland[] = tree.children.map((child, index) => {
         const subNodes = flatten(child)
         const subNodeIds = new Set(subNodes.map((n) => n.id))
         const subLinks = links.filter((l) => subNodeIds.has(l.fromId) && subNodeIds.has(l.toId))
+        // 稳定身份（跨重新解析对齐）：优先 cid，其次子岛标题，兜底索引；避免 astToEditable 的随机 node.id 导致编辑后丢失聚焦
+        const stableId =
+          child.cid ?? (child.text.trim() !== '' ? `sub:${child.text.trim()}` : `sub:${index}`)
         return {
-          id: child.id,
+          id: stableId,
           title: child.text,
           cid: child.cid,
           rootNode: child,

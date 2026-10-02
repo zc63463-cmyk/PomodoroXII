@@ -235,8 +235,24 @@ export function TimerMapEditor({
 
   const focusedSubIsland = useMemo(() => {
     if (!focusedSubIslandId || !island?.subIslands) return null
-    return island.subIslands.find((sub) => sub.id === focusedSubIslandId) ?? null
+    return (
+      island.subIslands.find(
+        (sub) =>
+          sub.id === focusedSubIslandId ||
+          (sub.cid !== null && sub.cid === focusedSubIslandId) ||
+          sub.title === focusedSubIslandId ||
+          `sub:${sub.title}` === focusedSubIslandId ||
+          (focusedSubIslandId.startsWith('sub:') && sub.title === focusedSubIslandId.slice(4)),
+      ) ?? null
+    )
   }, [focusedSubIslandId, island])
+
+  // 跨重新解析状态对齐：当 mapText 编辑更新后，始终锚定在当前同一子岛
+  useEffect(() => {
+    if (focusedSubIsland && focusedSubIslandId !== focusedSubIsland.id) {
+      setFocusedSubIslandId(focusedSubIsland.id)
+    }
+  }, [focusedSubIsland, focusedSubIslandId])
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
@@ -509,7 +525,16 @@ export function TimerMapEditor({
     // 环形步进：未聚焦时 `]` → 首岛、`[` → 末岛；已聚焦则前后环绕
     const count = subIslands.length
     if (count === 0) return
-    const current = subIslands.findIndex((sub) => sub.id === focusedSubIslandId)
+    const current = subIslands.findIndex(
+      (sub) =>
+        sub.id === focusedSubIslandId ||
+        (sub.cid !== null && sub.cid === focusedSubIslandId) ||
+        sub.title === focusedSubIslandId ||
+        `sub:${sub.title}` === focusedSubIslandId ||
+        (focusedSubIslandId !== null &&
+          focusedSubIslandId.startsWith('sub:') &&
+          sub.title === focusedSubIslandId.slice(4)),
+    )
     const base = current === -1 ? (action.delta === 1 ? -1 : 0) : current
     focusSubIslandAt(((base + action.delta) % count + count) % count)
   }
@@ -882,8 +907,8 @@ export function TimerMapEditor({
           >
             <button
               type="button"
-              className={`wm-view-btn ${focusedSubIslandId === null ? 'wm-view-btn--active' : ''}`}
-              aria-pressed={focusedSubIslandId === null}
+              className={`wm-view-btn ${focusedSubIsland === null ? 'wm-view-btn--active' : ''}`}
+              aria-pressed={focusedSubIsland === null}
               data-testid="map-view-global"
               onClick={exitSubIslandFocus}
             >
@@ -894,7 +919,7 @@ export function TimerMapEditor({
                 currentPlanTitle != null &&
                 currentPlanTitle.trim() !== '' &&
                 sub.title === currentPlanTitle.trim()
-              const isFocused = focusedSubIslandId === sub.id
+              const isFocused = focusedSubIsland !== null && focusedSubIsland.id === sub.id
               return (
                 <button
                   key={sub.id}
