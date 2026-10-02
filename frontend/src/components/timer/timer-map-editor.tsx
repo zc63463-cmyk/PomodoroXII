@@ -634,6 +634,16 @@ export function TimerMapEditor({
   }
 
   /**
+   * 取消快速记录：收起浮层、清空草稿及错误，并将焦点归还画布。
+   */
+  const cancelQuick = (): void => {
+    setActiveType(null)
+    setDraft('')
+    setQuickError(null)
+    focusCanvas()
+  }
+
+  /**
    * 打开浮层（写入目标显式传入 —— 加同级作用于**父节点**、未选中 Tab 作用于**岛根**，
    * 都不是"当前选中节点"）。
    */
@@ -726,6 +736,15 @@ export function TimerMapEditor({
       return
     }
 
+    if (activeType !== null) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        cancelQuick()
+      }
+      return
+    }
+
     const target = event.target as Node | null
     if (canvasRef.current === null || target === null) return
     if (!canvasRef.current.contains(target)) return
@@ -790,6 +809,7 @@ export function TimerMapEditor({
     if (
       action.type === 'cancel' &&
       overlay === null &&
+      activeType === null &&
       currentCid === null &&
       focusedSubIslandId === null
     ) {
@@ -838,8 +858,9 @@ export function TimerMapEditor({
         return
       }
       case 'cancel':
-        // 逐级退让：浮层 → 子岛聚焦 → 选中
+        // 逐级退让：浮层 → 快速记录 → 子岛聚焦 → 选中
         if (overlay !== null) closeOverlay()
+        else if (activeType !== null) cancelQuick()
         else if (focusedSubIslandId !== null) exitSubIslandFocus()
         else {
           setSelectedCid(null)
@@ -862,6 +883,7 @@ export function TimerMapEditor({
         await onEdit({ kind: 'add', cid: focusedSubIsland.cid, title, thoughtType: activeType })
         setDraft('')
         setActiveType(null)
+        focusCanvas()
       } catch (cause) {
         setQuickError(cause instanceof Error ? cause.message : String(cause))
       } finally {
@@ -877,6 +899,7 @@ export function TimerMapEditor({
       await onQuickRecord(activeType, title)
       setDraft('')
       setActiveType(null)
+      focusCanvas()
     } catch (cause) {
       setQuickError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -1380,8 +1403,12 @@ export function TimerMapEditor({
               aria-pressed={activeType === type}
               disabled={busy}
               onClick={() => {
-                setActiveType(type)
-                setQuickError(null)
+                if (activeType === type) {
+                  cancelQuick()
+                } else {
+                  setActiveType(type)
+                  setQuickError(null)
+                }
               }}
             >
               {THOUGHT_TYPE_LABEL[type]}
@@ -1397,6 +1424,13 @@ export function TimerMapEditor({
           onSubmit={(event) => {
             event.preventDefault()
             void submitQuick()
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              cancelQuick()
+            }
           }}
         >
           <input
@@ -1420,6 +1454,15 @@ export function TimerMapEditor({
             disabled={busy || draft.trim() === ''}
           >
             {busy ? '记录中…' : '记下'}
+          </button>
+          <button
+            type="button"
+            className="ios-map-quick-cancel"
+            data-testid="map-quick-cancel"
+            disabled={busy}
+            onClick={cancelQuick}
+          >
+            取消
           </button>
         </form>
       ) : null}

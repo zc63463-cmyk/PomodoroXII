@@ -81,6 +81,81 @@ describe('TimerMapEditor（中央编辑区）', () => {
     expect(screen.getByTestId('map-quick-pop')).toBeTruthy()
   })
 
+  it('★ 取消方式一：点击「取消」按钮 → 浮层收起、草稿清空、错误清除', async () => {
+    const onQuickRecord = vi.fn().mockRejectedValue(new Error('网络超时'))
+    render(
+      <TimerMapEditor mapText={ISLAND} sessionId={SESSION_ID} onQuickRecord={onQuickRecord} />,
+    )
+    fireEvent.click(screen.getByTestId('map-quick-insight'))
+    expect(screen.getByTestId('map-quick-pop')).toBeTruthy()
+
+    const input = screen.getByTestId('map-quick-input') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '待放弃草稿' } })
+    expect(input.value).toBe('待放弃草稿')
+
+    // 触发错误后，点击取消应一并消除错误提示
+    fireEvent.click(screen.getByTestId('map-quick-submit'))
+    expect(await screen.findByTestId('map-quick-error')).toHaveTextContent('网络超时')
+
+    // 点击取消
+    fireEvent.click(screen.getByTestId('map-quick-cancel'))
+    expect(screen.queryByTestId('map-quick-pop')).toBeNull()
+    expect(screen.queryByTestId('map-quick-error')).toBeNull()
+
+    // 重新打开同一类型，草稿已被重置
+    fireEvent.click(screen.getByTestId('map-quick-insight'))
+    expect((screen.getByTestId('map-quick-input') as HTMLInputElement).value).toBe('')
+  })
+
+  it('★ 取消方式二：输入框内按 Escape 键 → 浮层收起、草稿清空', () => {
+    const onQuickRecord = vi.fn().mockResolvedValue(undefined)
+    render(
+      <TimerMapEditor mapText={ISLAND} sessionId={SESSION_ID} onQuickRecord={onQuickRecord} />,
+    )
+    fireEvent.click(screen.getByTestId('map-quick-problem'))
+    const input = screen.getByTestId('map-quick-input') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '某项草稿' } })
+
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(screen.queryByTestId('map-quick-pop')).toBeNull()
+
+    // 再次点开，草稿已清空
+    fireEvent.click(screen.getByTestId('map-quick-problem'))
+    expect((screen.getByTestId('map-quick-input') as HTMLInputElement).value).toBe('')
+  })
+
+  it('★ 取消方式三：再次点击已激活的类型按钮（反选 Toggle）→ 浮层收起', () => {
+    const onQuickRecord = vi.fn().mockResolvedValue(undefined)
+    render(
+      <TimerMapEditor mapText={ISLAND} sessionId={SESSION_ID} onQuickRecord={onQuickRecord} />,
+    )
+    const btn = screen.getByTestId('map-quick-decision')
+    // 第一次点击：激活打开
+    fireEvent.click(btn)
+    expect(btn).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('map-quick-pop')).toBeTruthy()
+
+    // 第二次点击同一按钮：反选关闭
+    fireEvent.click(btn)
+    expect(btn).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.queryByTestId('map-quick-pop')).toBeNull()
+  })
+
+  it('★ 类型切换：从一类切到另一类保留草稿文本，只变更类型', () => {
+    const onQuickRecord = vi.fn().mockResolvedValue(undefined)
+    render(
+      <TimerMapEditor mapText={ISLAND} sessionId={SESSION_ID} onQuickRecord={onQuickRecord} />,
+    )
+    fireEvent.click(screen.getByTestId('map-quick-problem'))
+    const input = screen.getByTestId('map-quick-input') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '这其实是洞察' } })
+
+    // 切换至洞察
+    fireEvent.click(screen.getByTestId('map-quick-insight'))
+    expect(screen.getByTestId('map-quick-pop')).toBeTruthy()
+    expect((screen.getByTestId('map-quick-input') as HTMLInputElement).value).toBe('这其实是洞察')
+  })
+
   it('只读编辑区（不传 onQuickRecord）→ 不渲染类型行', () => {
     render(<TimerMapEditor mapText={ISLAND} sessionId={SESSION_ID} />)
     expect(screen.queryByTestId('map-quick')).toBeNull()

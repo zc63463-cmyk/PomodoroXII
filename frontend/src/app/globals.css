@@ -1561,6 +1561,26 @@
   opacity: 0.5;
   cursor: default;
 }
+.ios-map-quick-cancel {
+  flex: none;
+  border: 1px solid color-mix(in oklab, var(--foreground) 16%, transparent);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--ios-label-2);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.ios-map-quick-cancel:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+.ios-map-quick-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 
 /* ── 节点编辑（ADR-0008 D16 / D13 步 3-2）：选中环 · 操作行 · 浮层 · 注释 ─────
    可编辑节点（有 cid）才可点；只读节点不给指针样式、hover 靠 SVG <title> 提示。 */
