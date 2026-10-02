@@ -12,7 +12,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { appendThoughtNode } from '@/lib/work-map/thought-nodes'
 import { setNodeComment } from '@/lib/work-map/node-edits'
-import { readWorkMapLayout } from '@/lib/work-map/island-layout'
+import { findSessionIslandLayout, readWorkMapLayout } from '@/lib/work-map/island-layout'
 import type { MapIslandLayout, MapTreeNode } from '@/lib/work-map/island-layout'
 
 import { WorkMapTree, type WorkMapDependencyBadge } from './work-map-tree'
@@ -697,5 +697,225 @@ describe('幕布描述块渲染（PXII-FEAT-DESC-BLOCK）', () => {
     expect(exitBtn?.textContent).toContain('返回会话全局群岛')
     fireEvent.click(exitBtn!)
     expect(onSubFocus).toHaveBeenLastCalledWith('')
+  })
+})
+
+/**
+ * 群岛 fixture：会话岛下挂 **4 个** L3 子岛 —— 触发 `layoutArchipelagoIsland`
+ * 横向卡片流（>2 才撑宽），从而覆盖"全局群岛卡片"这一支的完成态渲染。
+ */
+const ARCHIPELAGO_MARKDOWN = `<!--
+next_cid: 9
+centers:
+  - at: "node:完成态测试workitem/10-02 10:00 会话"
+    cid: c1
+    dir: right
+    session_id: "${SESSION_ID}"
+-->
+# 完成态测试workitem
+
+<!--
+cid: "c1"
+session_id: "${SESSION_ID}"
+-->
+## 10-02 10:00 会话
+
+<!--
+cid: "c2"
+-->
+### 甲岛
+
+<!--
+cid: "c3"
+-->
+### 乙岛
+
+<!--
+cid: "c4"
+-->
+### 丙岛
+
+<!--
+cid: "c5"
+-->
+### 丁岛
+`
+
+const ARCHIPELAGO_LAYOUT = readWorkMapLayout(ARCHIPELAGO_MARKDOWN)!
+
+/**
+ * 横向群岛卡片流只对**单会话岛**投影（`islands.length === 1` 才生效，
+ * 多岛全览维持全局 2D 排布）—— 与 `TimerMapEditor` / `TimerMapPort` 的用法一致。
+ */
+const ARCHIPELAGO_ISLAND = findSessionIslandLayout(ARCHIPELAGO_LAYOUT, SESSION_ID)!
+
+describe('WorkMapTree 子岛一键完成（PXII-FEAT-PLAN-CHECKOFF）', () => {
+  const cardOf = (container: HTMLElement, title: string): Element => {
+    const cards = [...container.querySelectorAll('[data-testid="wm-sub-island-card"]')]
+    const hit = cards.find((card) =>
+      card.querySelector('[data-testid="wm-sub-island-card-title"]')?.textContent?.includes(title),
+    )
+    if (hit === undefined) throw new Error(`找不到子岛卡片：${title}`)
+    return hit
+  }
+
+  it('★ 未完成：卡片渲染打勾按钮（data-completed="false"、○），点击上抛该子岛标题', () => {
+    const onToggle = vi.fn()
+    const { container } = render(
+      <WorkMapTree
+        islands={[ARCHIPELAGO_ISLAND]}
+        sessionId={SESSION_ID}
+        planCompletion={new Map([['甲岛', false]])}
+        onTogglePlanCompletion={onToggle}
+      />,
+    )
+    const card = cardOf(container, '甲岛')
+    const check = card.querySelector('[data-testid="wm-sub-island-check"]')!
+    expect(check).not.toBeNull()
+    expect(check.getAttribute('data-completed')).toBe('false')
+    expect(check.getAttribute('aria-pressed')).toBe('false')
+    expect(check.querySelector('.wm-sub-island-check-mark')?.textContent).toBe('○')
+    expect(card.getAttribute('data-completed')).toBeNull()
+
+    fireEvent.click(check)
+    expect(onToggle).toHaveBeenCalledWith('甲岛')
+  })
+
+  it('★ 已完成：卡片挂 --completed / data-completed="true"，✓ 标记与「✓ 已完成」胶囊，且**分支与连线完整保留**', () => {
+    const { container } = render(
+      <WorkMapTree
+        islands={[ARCHIPELAGO_ISLAND]}
+        sessionId={SESSION_ID}
+        planCompletion={new Map([['乙岛', true]])}
+        onTogglePlanCompletion={vi.fn()}
+      />,
+    )
+    const card = cardOf(container, '乙岛')
+    expect(card).toHaveClass('wm-sub-island-card--completed')
+    expect(card.getAttribute('data-completed')).toBe('true')
+
+    // 打勾按钮：淡绿实底对勾
+    const check = card.querySelector('[data-testid="wm-sub-island-check"]')!
+    expect(check).toHaveClass('wm-sub-island-check--done')
+    expect(check.getAttribute('data-completed')).toBe('true')
+    expect(check.querySelector('.wm-sub-island-check-mark')?.textContent).toBe('✓')
+
+    // 右上角微型胶囊「✓ 已完成」
+    expect(card.querySelector('.wm-sub-island-tag-text')?.textContent).toBe('✓ 已完成')
+
+    // ★ 红线：完成态**不裁信息** —— 整图节点/连线数与未完成时逐一相等
+    //   （节点与连线是子岛卡片的**兄弟**而非子元素，故按整图统计）
+    expect(container.querySelectorAll('.wm-node').length).toBeGreaterThan(0)
+    //   该子岛的根节点仍在 DOM 且带完成绿意（不是被隐藏）
+    const rootMark = container.querySelector('.wm-node[data-plan-completed="true"]')
+    expect(rootMark).not.toBeNull()
+    expect(rootMark!.querySelector('.wm-box--plan-completed')).not.toBeNull()
+
+    const { container: plain } = render(
+      <WorkMapTree
+        islands={[ARCHIPELAGO_ISLAND]}
+        sessionId={SESSION_ID}
+        planCompletion={new Map([['乙岛', false]])}
+        onTogglePlanCompletion={vi.fn()}
+      />,
+    )
+    expect(plain.querySelectorAll('.wm-node').length).toBe(container.querySelectorAll('.wm-node').length)
+    expect(plain.querySelectorAll('.wm-link').length).toBe(container.querySelectorAll('.wm-link').length)
+    expect(plain.querySelectorAll('.wm-text').length).toBe(container.querySelectorAll('.wm-text').length)
+  })
+
+  it('★ 打勾点击阻断冒泡：单击打勾**不会**触发卡片的聚焦双击（两个动作互不吃掉）', () => {
+    const onToggle = vi.fn()
+    const onSubFocus = vi.fn()
+    const { container } = render(
+      <WorkMapTree
+        islands={[ARCHIPELAGO_ISLAND]}
+        sessionId={SESSION_ID}
+        planCompletion={new Map([['甲岛', false]])}
+        onTogglePlanCompletion={onToggle}
+        onSubIslandFocusRequest={onSubFocus}
+      />,
+    )
+    const check = cardOf(container, '甲岛').querySelector('[data-testid="wm-sub-island-check"]')!
+
+    fireEvent.click(check)
+    fireEvent.doubleClick(check)
+    expect(onToggle).toHaveBeenCalledTimes(1)
+    expect(onSubFocus).not.toHaveBeenCalled()
+
+    // 对照：卡片本体的双击仍然聚焦（打勾按钮没有把整张卡的双击吞掉）
+    fireEvent.doubleClick(cardOf(container, '甲岛'))
+    expect(onSubFocus).toHaveBeenCalledTimes(1)
+  })
+
+  it('★ 未传 planCompletion（小视图 / 总览）→ 不渲染任何打勾入口与完成态（纯展示零变化）', () => {
+    const { container } = render(
+      <WorkMapTree
+        islands={[ARCHIPELAGO_ISLAND]}
+        sessionId={SESSION_ID}
+        onTogglePlanCompletion={vi.fn()}
+      />,
+    )
+    expect(container.querySelector('[data-testid="wm-sub-island-check"]')).toBeNull()
+    expect(container.querySelector('.wm-sub-island-card--completed')).toBeNull()
+    // 未命中的子岛（有 Map 但无此项）同样不打勾：只有"本次计划的项"才可闭环
+    const { container: partial } = render(
+      <WorkMapTree
+        islands={[ARCHIPELAGO_ISLAND]}
+        sessionId={SESSION_ID}
+        planCompletion={new Map([['甲岛', true]])}
+        onTogglePlanCompletion={vi.fn()}
+      />,
+    )
+    expect(partial.querySelectorAll('[data-testid="wm-sub-island-check"]')).toHaveLength(1)
+  })
+
+  it('★ 已完成子岛的**根节点**带轻微绿意（data-plan-completed），其余节点不受影响', () => {
+    const { container } = render(
+      <WorkMapTree
+        islands={[ARCHIPELAGO_ISLAND]}
+        sessionId={SESSION_ID}
+        planCompletion={new Map([['丙岛', true]])}
+        onTogglePlanCompletion={vi.fn()}
+      />,
+    )
+    const marked = container.querySelectorAll('.wm-node[data-plan-completed="true"]')
+    // 每个子岛只有根节点一个 → 恰 1 个（本 fixture 各子岛均为叶子，无后代思考节点）
+    expect(marked).toHaveLength(1)
+    expect(marked[0].querySelector('.wm-box--plan-completed')).not.toBeNull()
+  })
+
+  it('★ 聚焦态：打勾按钮与状态角标并排（不叠字），已完成时角标仍为「N 项思考」而非被顶掉', () => {
+    const subCard = (container: HTMLElement): Element =>
+      container.querySelector('[data-testid="wm-sub-island-card"]')!
+    const subId = (() => {
+      const { container } = render(
+        <WorkMapTree islands={[ARCHIPELAGO_ISLAND]} sessionId={SESSION_ID} />,
+      )
+      return subCard(container).getAttribute('data-sub-island-id')!
+    })()
+
+    const { container } = render(
+      <WorkMapTree
+        islands={[ARCHIPELAGO_ISLAND]}
+        sessionId={SESSION_ID}
+        focusedSubIslandId={subId}
+        planCompletion={new Map([['甲岛', true]])}
+        onTogglePlanCompletion={vi.fn()}
+      />,
+    )
+    const card = subCard(container)
+    expect(card.getAttribute('data-focused')).toBe('true')
+    expect(card.getAttribute('data-completed')).toBe('true')
+
+    const check = card.querySelector('[data-testid="wm-sub-island-check"]')!
+    const badge = card.querySelector('[data-testid="wm-sub-island-badge"]')!
+    // 几何不重叠：打勾圆心 + 半径 ≤ 角标左缘
+    const cx = Number(check.querySelector('circle')!.getAttribute('cx'))
+    const r = Number(check.querySelector('circle')!.getAttribute('r'))
+    const badgeX = Number(badge.querySelector('rect')!.getAttribute('x'))
+    expect(cx + r).toBeLessThanOrEqual(badgeX)
+    // 状态角标语义不被完成态顶掉（「N 项思考」/「当前专注中」照旧）
+    expect(badge.textContent).toContain('项思考')
   })
 })

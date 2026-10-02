@@ -121,6 +121,14 @@ export interface WorkMapTreeProps {
    */
   focusBounds?: { minX: number; minY: number; maxX: number; maxY: number } | null
   /**
+   * `focusBounds` 模式下的安全内边距（px），缺省 32。
+   *
+   * 为什么可调：右栏小视图的画布只有 ~132px 高，而一个子岛卡片本身就有 200px ——
+   * 32px 的双边内边距在这里是纯浪费（会把卡片压到画布的一半）。窄视口调用方
+   * 传更小的值即可让"专注跟随"真正填满视口。**缺省值不变**，既有调用零影响。
+   */
+  focusPadding?: number
+  /**
    * 聚焦请求上抛（双击岛地标卡 / 点击胶囊角标「聚焦此岛」）→ 调用方持有
    * focusedIslandId 状态（S4-3）。未提供时卡片无聚焦交互（编辑区/小视图场景）。
    */
@@ -134,6 +142,56 @@ export interface WorkMapTreeProps {
    * 子岛聚焦请求上抛（双击嵌套子岛卡片 / 点击子岛微标签）→ 调用方持有 focusedSubIslandId 状态。
    */
   onSubIslandFocusRequest?: (subIslandId: string) => void
+  /**
+   * 计划项完成态（PXII-FEAT-PLAN-CHECKOFF）：键 = 子岛**标题**（`MapSubIsland.title`，
+   * 两端按 `.trim()` 归一 —— 与 `currentPlanTitle` 的既有比对口径一致）。
+   * 命中 → 卡片挂 `.wm-sub-island-card--completed` / `data-completed`，色条与角标转柔和绿，
+   * 但**卡内思考分支与连线依然 100% 完整可见**（完成态只调视觉权重，不裁信息）。
+   * 未提供 → 不渲染任何完成态（右栏小视图与总览保持纯展示）。
+   */
+  planCompletion?: ReadonlyMap<string, boolean>
+  /**
+   * 点击子岛打勾按钮 → 上抛该子岛标题（调用方按标题匹配计划项后复用既有
+   * `setCompletion(planItemId, completed)` 完成契约）。未提供 → 不渲染打勾入口。
+   */
+  onTogglePlanCompletion?: (subIslandTitle: string) => void
+}
+
+/**
+ * 完成态查询（标题两端 `.trim()` 归一）。
+ *
+ * 键与 `currentPlanTitle` 的比对口径**必须一致**：计划项 `titleSnapshot` 与子岛标题
+ * 可能差一个首尾空格（标题来自用户输入 / Markdown 行），`===` 直比会漏配 ——
+ * 表现为"右栏打了勾，导图卡片却没变绿"。
+ *
+ * 返回值三态：`undefined` = **无对应计划项**（不渲染打勾入口）/ `false` 未完成 / `true` 已完成。
+ */
+function planCompletionOf(
+  planCompletion: ReadonlyMap<string, boolean> | undefined,
+  title: string,
+): boolean | undefined {
+  if (planCompletion === undefined) return undefined
+  const direct = planCompletion.get(title)
+  if (direct !== undefined) return direct
+  const trimmed = title.trim()
+  return trimmed === title ? undefined : planCompletion.get(trimmed)
+}
+
+/**
+ * 方案 A 横向卡片流投影（**导出**：右栏小视图的专注跟随要按同一份几何算 viewBox）。
+ *
+ * 为什么要共用：小视图若自己拿**未投影**的子岛 bounds 当 `focusBounds`，框会落在
+ * "原始 2D 排布"的子岛位置上，而画出来的却是"横向卡片流"的卡片 —— 框错位。
+ * 把投影收敛成一个函数，两侧几何必然同源（D13「最小集」纪律）。
+ */
+export function projectArchipelagoIsland(
+  island: MapIslandLayout,
+  currentPlanTitle?: string | null,
+): MapIslandLayout {
+  if (island.sessionId === null || !island.subIslands || island.subIslands.length === 0) {
+    return island
+  }
+  return layoutArchipelagoIsland(island, currentPlanTitle)
 }
 
 /** 一个节点的依赖徽章数据（D19-b：紧凑态不跑连线避让，用 Badge 表达）。 */
@@ -176,6 +234,7 @@ function NodeBox({
   highlighted,
   badge,
   currentPlan,
+  completed,
   onSelect,
   onFocus,
 }: {
@@ -188,6 +247,8 @@ function NodeBox({
   currentSession: boolean
   /** 当前专注的计划项（L3）分支高亮（方案 A） */
   currentPlan?: boolean
+  /** 所属子岛已完成（PXII-FEAT-PLAN-CHECKOFF）：只加一层柔和绿意，不改变任何几何 */
+  completed?: boolean
   editable: boolean
   selected: boolean
   focused: boolean
@@ -279,6 +340,7 @@ function NodeBox({
       className={[
         'wm-node',
         currentPlan ? 'wm-node--current-plan' : '',
+        completed ? 'wm-node--plan-completed' : '',
         selected ? 'wm-node--selected' : '',
         focused ? 'wm-node--focus' : '',
         dimmed ? 'wm-node--dim' : '',
@@ -288,6 +350,7 @@ function NodeBox({
       data-thought={node.thoughtType ?? undefined}
       data-session={currentSession ? 'true' : 'false'}
       data-current-plan={currentPlan ? 'true' : undefined}
+      data-plan-completed={completed ? 'true' : undefined}
       data-cid={actionCid ?? undefined}
       // 发端枢纽不画描述块/橙点（盒仅 28px，几何装不下）—— 注释全文仍由 tooltip 承载，
       // 故 data-comment / data-desc-lines 对会话节点不挂（避免"标了却没画"的假信号）
@@ -323,13 +386,14 @@ function NodeBox({
             width={node.box.w}
             height={node.box.h}
             rx={7}
-            className={
-              selected
-                ? 'wm-box wm-box--selected'
-                : currentPlan
-                  ? 'wm-box wm-box--current-plan'
-                  : 'wm-box'
-            }
+            className={[
+              'wm-box',
+              selected ? 'wm-box--selected' : '',
+              !selected && currentPlan ? 'wm-box--current-plan' : '',
+              !selected && !currentPlan && completed ? 'wm-box--plan-completed' : '',
+            ]
+              .filter((token) => token !== '')
+              .join(' ')}
           />
           {node.thoughtType !== null ? (
             <TypeShape x={12} y={titleCy} type={node.thoughtType} />
@@ -729,6 +793,8 @@ function SubIslandFrameCard({
   isFocused,
   dimmed,
   interactive,
+  planCompletion,
+  onToggleCompletion,
   onRequestFocus,
 }: {
   subIsland: MapSubIsland
@@ -736,8 +802,17 @@ function SubIslandFrameCard({
   isFocused: boolean
   dimmed: boolean
   interactive: boolean
+  /**
+   * 该子岛对应的计划项完成态（PXII-FEAT-PLAN-CHECKOFF）：`undefined` = **无对应计划项**
+   * （不渲染打勾入口）/ `false` 未完成 / `true` 已完成。
+   * 完成态只调视觉权重 —— 卡片内的思考分支与连线**依然 100% 完整可见**（复盘信息不丢）。
+   */
+  planCompletion?: boolean
+  /** 点击打勾按钮 → 上抛（调用方按标题匹配计划项切换完成态）；缺省 = 不渲染打勾入口 */
+  onToggleCompletion?: () => void
   onRequestFocus?: (subIslandId: string) => void
 }): ReactNode {
+  const completed = planCompletion === true
   const isArchipelago =
     !isFocused && subIsland.bounds.maxX - subIsland.bounds.minX === ARCHIPELAGO_CARD_W
   const visual = isArchipelago ? subIsland.bounds : subIslandVisualBounds(subIsland, isFocused)
@@ -745,7 +820,9 @@ function SubIslandFrameCard({
   const h = Math.max(1, visual.maxY - visual.minY)
   const thoughtCount = subIsland.nodes.filter((n) => n.thoughtType !== null).length
   const tagText =
-    isArchipelago && isCurrentPlan
+    completed
+      ? '✓ 已完成'
+      : isArchipelago && isCurrentPlan
       ? 'L3 子岛 · 专注中'
       : thoughtCount > 0
       ? `L3 子岛 · ${thoughtCount}项`
@@ -789,6 +866,68 @@ function SubIslandFrameCard({
   const badgeX = visual.maxX - badgeW - 12
   const badgeY = visual.minY + 7
 
+  // ── 一键完成打勾（PXII-FEAT-PLAN-CHECKOFF）──────────────────────────────
+  // 位置：微标签／角标**左侧**（标签恒在卡片右上角，左侧是唯一不会撞标题/出界的空位）。
+  // 事件：`stopPropagation` 阻断冒泡 —— 卡片自身的 `onDoubleClick` 是"聚焦此岛"，
+  // 打勾按钮上的一次点击绝不能顺带把视图切进/切出聚焦态。
+  const checkR = 8
+  const checkCx = isArchipelago
+    ? tagX - checkR - 4
+    : isFocused
+      ? badgeX - checkR - 4
+      : tagX - checkR - 4
+  const checkCy = isArchipelago
+    ? visual.minY + 15
+    : isFocused
+      ? badgeY + 9
+      : tagY + (isLeaf ? 9 : 6)
+  const checkHandler =
+    onToggleCompletion === undefined
+      ? null
+      : {
+          onClick: (event: React.MouseEvent) => {
+            event.stopPropagation()
+            onToggleCompletion()
+          },
+          onDoubleClick: (event: React.MouseEvent) => event.stopPropagation(),
+          onKeyDown: (event: React.KeyboardEvent) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              event.stopPropagation()
+              onToggleCompletion()
+            }
+          },
+        }
+  const checkNode =
+    checkHandler === null ? null : (
+      <g
+        className={`wm-sub-island-check ${completed ? 'wm-sub-island-check--done' : ''}`}
+        data-testid="wm-sub-island-check"
+        data-completed={completed ? 'true' : 'false'}
+        role="button"
+        tabIndex={0}
+        aria-pressed={completed}
+        aria-label={completed ? `标记未完成：${subIsland.title}` : `标记已完成：${subIsland.title}`}
+        {...checkHandler}
+      >
+        <title>{completed ? '点击标记未完成' : '点击标记已完成'}</title>
+        <circle cx={checkCx} cy={checkCy} r={checkR} className="wm-sub-island-check-bg" />
+        <text
+          x={checkCx}
+          y={checkCy}
+          textAnchor="middle"
+          dominantBaseline="central"
+          fontSize={10}
+          fontWeight={700}
+          className="wm-sub-island-check-mark"
+        >
+          {completed ? '✓' : '○'}
+        </text>
+      </g>
+    )
+  /** 打勾按钮占位宽度 —— 与它同排的标题可写宽度必须扣掉，否则叠字 */
+  const checkReserve = checkHandler === null ? 0 : checkR * 2 + 8
+
   // 底部退出胶囊按钮
   const exitW = 140
   const exitH = 20
@@ -801,6 +940,7 @@ function SubIslandFrameCard({
         'wm-sub-island-card',
         isCurrentPlan ? 'wm-sub-island-card--current' : '',
         isFocused ? 'wm-sub-island-card--focused' : '',
+        completed ? 'wm-sub-island-card--completed' : '',
         dimmed ? 'wm-sub-island-card--dimmed' : '',
       ]
         .filter((token) => token !== '')
@@ -809,6 +949,7 @@ function SubIslandFrameCard({
       data-sub-island-id={subIsland.id}
       data-current-plan={isCurrentPlan ? 'true' : undefined}
       data-focused={isFocused ? 'true' : undefined}
+      data-completed={completed ? 'true' : undefined}
       onDoubleClick={handleClick}
     >
       <title>
@@ -828,8 +969,8 @@ function SubIslandFrameCard({
       />
       {isArchipelago ? (
         <>
-          {/* 实底卡片与左侧色条（当前计划高亮蓝） */}
-          {isCurrentPlan ? (
+          {/* 实底卡片与左侧色条（当前计划高亮蓝 / 已完成柔和绿） */}
+          {isCurrentPlan || completed ? (
             <rect
               x={visual.minX}
               y={visual.minY}
@@ -881,8 +1022,15 @@ function SubIslandFrameCard({
             data-testid="wm-sub-island-card-title"
             fill={isCurrentPlan ? 'var(--ios-blue)' : 'var(--ios-label)'}
           >
-            {fitIslandTitleToWidth(title, isCurrentPlan ? w - 96 : w - 74, 11.5)}
+            {fitIslandTitleToWidth(
+              title,
+              (isCurrentPlan ? w - 96 : w - 74) - checkReserve,
+              11.5,
+            )}
           </text>
+
+          {/* 一键完成打勾（微标签左侧） */}
+          {checkNode}
 
           {/* 右上角微标签 */}
           <g
@@ -979,8 +1127,10 @@ function SubIslandFrameCard({
             className="wm-sub-island-title"
             data-testid="wm-sub-island-title"
           >
-            🏝️ L3 子任务岛 · {fitIslandTitleToWidth(title, Math.max(20, badgeX - titleX - 8), 11.5)}
+            🏝️ L3 子任务岛 ·{' '}
+            {fitIslandTitleToWidth(title, Math.max(20, badgeX - titleX - 8 - checkReserve), 11.5)}
           </text>
+          {checkNode}
           <g className="wm-sub-island-badge" data-testid="wm-sub-island-badge">
             <rect
               x={badgeX}
@@ -1040,42 +1190,45 @@ function SubIslandFrameCard({
           ) : null}
         </>
       ) : (
-        <g
-          className="wm-sub-island-tag-wrap"
-          role={interactive ? 'button' : undefined}
-          tabIndex={interactive ? 0 : undefined}
-          aria-label={interactive ? `聚焦子岛：${subIsland.title}` : undefined}
-          onClick={handleClick}
-          onKeyDown={
-            interactive
-              ? (event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    handleClick?.()
+        <>
+          {checkNode}
+          <g
+            className="wm-sub-island-tag-wrap"
+            role={interactive ? 'button' : undefined}
+            tabIndex={interactive ? 0 : undefined}
+            aria-label={interactive ? `聚焦子岛：${subIsland.title}` : undefined}
+            onClick={handleClick}
+            onKeyDown={
+              interactive
+                ? (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      handleClick?.()
+                    }
                   }
-                }
-              : undefined
-          }
-        >
-          <rect
-            x={tagX}
-            y={tagY}
-            width={tagW}
-            height={12}
-            rx={3}
-            className="wm-sub-island-tag-bg"
-          />
-          <text
-            x={tagX + tagW / 2}
-            y={tagY + 6}
-            textAnchor="middle"
-            dominantBaseline="central"
-            fontSize={8.5}
-            className="wm-sub-island-tag-text"
+                : undefined
+            }
           >
-            {tagText}
-          </text>
-        </g>
+            <rect
+              x={tagX}
+              y={tagY}
+              width={tagW}
+              height={12}
+              rx={3}
+              className="wm-sub-island-tag-bg"
+            />
+            <text
+              x={tagX + tagW / 2}
+              y={tagY + 6}
+              textAnchor="middle"
+              dominantBaseline="central"
+              fontSize={8.5}
+              className="wm-sub-island-tag-text"
+            >
+              {tagText}
+            </text>
+          </g>
+        </>
       )}
     </g>
   )
@@ -1097,9 +1250,12 @@ export function WorkMapTree({
   dependencyBadges,
   focusedIslandId,
   focusBounds,
+  focusPadding,
   onIslandFocusRequest,
   focusedSubIslandId,
   onSubIslandFocusRequest,
+  planCompletion,
+  onTogglePlanCompletion,
 }: WorkMapTreeProps): ReactNode {
   // 筛选只调「视觉权重」：命中 = 高亮，其余 dim；null = 全亮（D17）
   const filter = highlightType ?? null
@@ -1130,7 +1286,6 @@ export function WorkMapTree({
       return isl
     })
   }, [islands, activeSubIsland, currentPlanTitle])
-
   // 聚焦态（S4-3 / PXII-FEAT-NESTED-ISLAND）：
   // 1. 显式 focusBounds（若外部传入）
   // 2. 子岛聚焦 bounds（若 activeSubIsland 存在）
@@ -1150,7 +1305,13 @@ export function WorkMapTree({
   }, [focusBounds, activeSubIsland, processedIslands])
 
   const pad =
-    focusBounds != null ? 32 : activeSubIsland != null ? 24 : focusedIslandId != null ? 32 : PAD
+    focusBounds != null
+      ? (focusPadding ?? 32)
+      : activeSubIsland != null
+        ? 24
+        : focusedIslandId != null
+          ? 32
+          : PAD
   const width = Math.max(1, target.maxX - target.minX + pad * 2)
   const height = Math.max(1, target.maxY - target.minY + pad * 2)
   const viewBox = useAnimatedViewBox(
@@ -1201,6 +1362,11 @@ export function WorkMapTree({
         const renderedNodes =
           activeSubIsland !== null ? activeSubIsland.nodes : island.nodes
 
+        // 已完成子岛的**根节点** id 集合：根节点带轻微完成绿意（分支与连线不动）
+        const completedRootIds = new Set<string>()
+        for (const sub of renderedSubIslands) {
+          if (planCompletionOf(planCompletion, sub.title) === true) completedRootIds.add(sub.rootNode.id)
+        }
 
         return (
           <g
@@ -1226,6 +1392,9 @@ export function WorkMapTree({
                 currentPlanTitle.trim() !== '' &&
                 sub.title === currentPlanTitle.trim()
               const isSubFocused = activeSubIsland !== null && activeSubIsland.id === sub.id
+              // 完成态按**子岛标题**匹配（`plans[].titleSnapshot` 与子岛标题同源）；
+              // 未传 planCompletion → `undefined`（既不打勾也不变绿，小视图/总览零变化）
+              const subPlanCompletion = planCompletionOf(planCompletion, sub.title)
               return (
                 <SubIslandFrameCard
                   key={sub.id}
@@ -1234,6 +1403,12 @@ export function WorkMapTree({
                   isFocused={isSubFocused}
                   dimmed={false}
                   interactive={onSubIslandFocusRequest !== undefined}
+                  planCompletion={subPlanCompletion}
+                  onToggleCompletion={
+                    onTogglePlanCompletion === undefined || subPlanCompletion === undefined
+                      ? undefined
+                      : () => onTogglePlanCompletion(sub.title)
+                  }
                   onRequestFocus={onSubIslandFocusRequest}
                 />
               )
@@ -1275,6 +1450,7 @@ export function WorkMapTree({
                     node.sessionId === sessionId
                   }
                   currentPlan={isCurrentPlan}
+                  completed={completedRootIds.has(node.id)}
                   badge={
                     node.refId !== null ? (dependencyBadges?.get(node.refId) ?? null) : null
                   }

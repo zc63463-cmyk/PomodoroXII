@@ -1024,6 +1024,10 @@
   /* iOS systemBlue：唯一保留的 iOS 专属色，仅用于可交互强调，不铺面积 */
   --ios-blue: #007aff;
   --ios-blue-soft: color-mix(in oklab, var(--ios-blue) 12%, transparent);
+  /* iOS systemGreen：完成态专用（PXII-FEAT-PLAN-CHECKOFF）。与 systemBlue 同理
+     —— 只承载"已完成"一种语义，不铺面积、不参与布局。 */
+  --ios-green: #34c759;
+  --ios-green-soft: color-mix(in oklab, var(--ios-green) 12%, transparent);
 
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
     'PingFang SC', 'Helvetica Neue', 'Microsoft YaHei', sans-serif;
@@ -1320,6 +1324,34 @@
   background: var(--ios-blue);
   color: #fff;
 }
+/* 聚焦横幅里的**完成胶囊**（PXII-FEAT-PLAN-CHECKOFF）：与「退出子岛聚焦」
+   同排同尺寸 —— 两个胶囊并排时高度必须一致，否则横幅基线会歪。
+   未完成 = 中性描边（○ 标记完成）；已完成 = 淡绿实底（✓ 已完成）。 */
+.wm-sub-island-check-pill {
+  appearance: none;
+  background: transparent;
+  border: 1px solid color-mix(in oklab, var(--foreground) 20%, transparent);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  color: var(--ios-label-2);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.wm-sub-island-check-pill:hover {
+  border-color: var(--ios-green);
+  color: var(--ios-green);
+}
+.wm-sub-island-check-pill--done {
+  background: var(--ios-green-soft);
+  border-color: color-mix(in oklab, var(--ios-green) 55%, transparent);
+  color: var(--ios-green);
+  font-weight: 600;
+}
+.wm-sub-island-check-pill--done:hover {
+  background: color-mix(in oklab, var(--ios-green) 20%, transparent);
+}
 .wm-editor-canvas--empty {
   display: flex;
   align-items: center;
@@ -1346,6 +1378,42 @@
   border-radius: 10px;
   background: color-mix(in oklab, var(--foreground) 3%, transparent);
   overflow: hidden;
+}
+
+/* 小视图标题栏的**模式微胶囊**（PXII-FEAT-PORT-FOCUS-SYNC）：
+   🎯 专注项 / 🌐 全景 两段切换。贴在「N 项」计数之后、右对齐 ——
+   标题行是 flex，`margin-left: auto` 把它推到最右，不与计数挤在一起。 */
+.wm-port-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  padding: 1px;
+  border-radius: 999px;
+  background: var(--ios-fill);
+}
+.wm-port-mode-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--ios-label-2);
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.wm-port-mode-btn:hover {
+  color: var(--ios-label);
+}
+.wm-port-mode-btn--active {
+  background: var(--ios-card);
+  color: var(--ios-blue);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 /* ── 工作导图树渲染器（ADR-0008 D15：中央编辑区与右栏小视图**共用同一份**）────
@@ -2018,6 +2086,71 @@
 .wm-sub-island-bar {
   fill: var(--ios-blue);
 }
+
+/* ── 一键完成（PXII-FEAT-PLAN-CHECKOFF）────────────────────────────────────
+   打勾按钮 / 已完成绿意 / 已完成胶囊角标。
+   ★ 完成态只调**视觉权重**：卡内思考分支与连线依然 100% 完整可见（复盘信息不丢），
+     故这里没有任何 display/opacity 裁切，只有配色派生。 */
+.wm-sub-island-check {
+  cursor: pointer;
+  user-select: none;
+}
+.wm-sub-island-check-bg {
+  fill: color-mix(in oklab, var(--ios-card) 88%, transparent);
+  stroke: color-mix(in oklab, var(--foreground) 26%, transparent);
+  stroke-width: 1.2;
+  transition: fill 0.15s, stroke 0.15s;
+}
+.wm-sub-island-check:hover .wm-sub-island-check-bg,
+.wm-sub-island-check:focus-visible .wm-sub-island-check-bg {
+  stroke: var(--ios-green);
+  fill: var(--ios-green-soft);
+}
+.wm-sub-island-check-mark {
+  fill: var(--ios-label-3);
+  transition: fill 0.15s;
+}
+.wm-sub-island-check:hover .wm-sub-island-check-mark {
+  fill: var(--ios-green);
+}
+.wm-sub-island-check--done .wm-sub-island-check-bg {
+  fill: var(--ios-green-soft);
+  stroke: var(--ios-green);
+}
+.wm-sub-island-check--done .wm-sub-island-check-mark {
+  fill: var(--ios-green);
+}
+/* 已完成卡片：左色条转柔和绿 + 卡片底/描边极轻绿意（信息不裁切） */
+.wm-sub-island-card--completed .wm-sub-island-frame {
+  fill: color-mix(in oklab, var(--ios-green) 3%, transparent);
+  stroke: color-mix(in oklab, var(--ios-green) 38%, transparent);
+}
+.wm-sub-island-card--completed .wm-sub-island-bar {
+  fill: var(--ios-green);
+}
+/* 已完成卡片与「专注中」同现时：专注蓝仍是主色条（用户当下正在看它），
+   绿意退到描边 —— 避免两种强调色在同一条 4px 色条上打架。 */
+.wm-sub-island-card--completed.wm-sub-island-card--current .wm-sub-island-frame {
+  fill: color-mix(in oklab, var(--ios-blue) 3.5%, transparent);
+  stroke: color-mix(in oklab, var(--ios-green) 45%, transparent);
+}
+.wm-sub-island-card--completed.wm-sub-island-card--current .wm-sub-island-bar {
+  fill: var(--ios-blue);
+}
+/* 已完成角标：淡绿实底对勾胶囊 */
+.wm-sub-island-card--completed .wm-sub-island-tag-bg {
+  fill: var(--ios-green-soft);
+  stroke: var(--ios-green);
+}
+.wm-sub-island-card--completed .wm-sub-island-tag-text {
+  fill: var(--ios-green);
+  font-weight: 600;
+}
+/* 子岛根节点的轻微完成绿意（分支与连线不动） */
+.wm-node--plan-completed .wm-box--plan-completed {
+  fill: color-mix(in oklab, var(--ios-green) 5%, var(--ios-card));
+  stroke: color-mix(in oklab, var(--ios-green) 42%, transparent);
+}
 .wm-sub-island-title {
   fill: var(--ios-label);
   letter-spacing: -0.2px;
@@ -2292,6 +2425,8 @@
 .midnight .ios-scope,
 .nord .ios-scope {
   --ios-blue: #0a84ff;
+  /* 深色下 systemGreen 提亮一档（浅色 #34c759 在深底上偏暗、与蓝色强调失衡） */
+  --ios-green: #30d158;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

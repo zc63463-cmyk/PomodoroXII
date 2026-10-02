@@ -160,12 +160,13 @@ const canvasEl = (): HTMLElement => screen.getByTestId('map-editor-canvas')
 /** 在画布上敲一个键（可选修饰键）。 */
 const pressKey = (
   key: string,
-  options: { alt?: boolean; shift?: boolean; target?: HTMLElement } = {},
+  options: { alt?: boolean; shift?: boolean; ctrl?: boolean; target?: HTMLElement } = {},
 ): void => {
   fireEvent.keyDown(options.target ?? canvasEl(), {
     key,
     altKey: options.alt ?? false,
     shiftKey: options.shift ?? false,
+    ctrlKey: options.ctrl ?? false,
   })
 }
 
@@ -683,5 +684,166 @@ describe('TimerMapEditor 节点编辑（ADR-0008 D16 / D13 步 3-2）', () => {
       }),
     )
     expect(onQuickRecord).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 子岛一键完成（PXII-FEAT-PLAN-CHECKOFF）—— 页面层「计划项 ⇄ 导图卡片」的接线。
+ *
+ * 断言锚：卡片打勾按钮上抛**计划项 id**（不是标题）、`Alt+D` / `Ctrl+Enter`
+ * 在聚焦态生效、写回走的是调用方给的 `onSetCompletionDraft`（不发明第二套状态）。
+ */
+describe('TimerMapEditor 子岛一键完成（PXII-FEAT-PLAN-CHECKOFF）', () => {
+  /** 甲岛已完成 / 乙岛未完成 / 丙丁岛不在本次计划里（不应出现打勾入口）。 */
+  const PLANS = [
+    { id: 'plan-jia', workItemId: 'wi-jia', titleSnapshot: '甲岛', completionDraft: true },
+    { id: 'plan-yi', workItemId: 'wi-yi', titleSnapshot: '乙岛', completionDraft: false },
+  ]
+
+  const renderWithPlans = (onSet = vi.fn().mockResolvedValue(undefined)) => {
+    const utils = render(
+      <TimerMapEditor
+        mapText={ARCHIPELAGO_ISLAND}
+        sessionId={SESSION_ID}
+        // 键盘心流只在可编辑画布上挂载（与既有键位矩阵同一前提），故补 onEdit
+        onEdit={vi.fn().mockResolvedValue(undefined)}
+        plans={PLANS}
+        onSetCompletionDraft={onSet}
+      />,
+    )
+    return { ...utils, onSet }
+  }
+
+  const cardTitled = (container: HTMLElement, title: string): Element => {
+    const hit = [...container.querySelectorAll('[data-testid="wm-sub-island-card"]')].find((card) =>
+      card.querySelector('[data-testid="wm-sub-island-card-title"]')?.textContent?.includes(title),
+    )
+    if (hit === undefined) throw new Error(`找不到子岛卡片：${title}`)
+    return hit
+  }
+
+  it('★ 卡片打勾按钮：点击上抛**计划项 id** 与取反后的完成态（复用 setCompletion 契约）', () => {
+    const { container, onSet } = renderWithPlans()
+
+    // 甲岛已完成 → 按钮呈对勾态；点击应回传 false（取消完成）
+    const jiaCheck = cardTitled(container, '甲岛').querySelector('[data-testid="wm-sub-island-check"]')!
+    expect(jiaCheck.getAttribute('data-completed')).toBe('true')
+    fireEvent.click(jiaCheck)
+    expect(onSet).toHaveBeenCalledWith('plan-jia', false)
+
+    // 乙岛未完成 → 点击应回传 true
+    const yiCheck = cardTitled(container, '乙岛').querySelector('[data-testid="wm-sub-island-check"]')!
+    expect(yiCheck.getAttribute('data-completed')).toBe('false')
+    fireEvent.click(yiCheck)
+    expect(onSet).toHaveBeenCalledWith('plan-yi', true)
+  })
+
+  it('★ 不在本次计划里的子岛 → 不渲染打勾入口（不画"点了没反应"的假按钮）', () => {
+    const { container } = renderWithPlans()
+    expect(container.querySelectorAll('[data-testid="wm-sub-island-check"]')).toHaveLength(2)
+    expect(cardTitled(container, '丙岛').querySelector('[data-testid="wm-sub-island-check"]')).toBeNull()
+    expect(cardTitled(container, '丁岛').querySelector('[data-testid="wm-sub-island-check"]')).toBeNull()
+  })
+
+  it('★ 只读编辑区（不传 plans / onSetCompletionDraft）→ 完全没有完成态入口（零回归）', () => {
+    const { container } = render(
+      <TimerMapEditor mapText={ARCHIPELAGO_ISLAND} sessionId={SESSION_ID} />,
+    )
+    expect(container.querySelector('[data-testid="wm-sub-island-check"]')).toBeNull()
+    expect(container.querySelector('.wm-sub-island-card--completed')).toBeNull()
+  })
+
+  it('★ 聚焦态横幅：胶囊显示当前完成态，点击切换', () => {
+    const { onSet } = renderWithPlans()
+    pressKey('2') // 乙岛
+    expect(focusedTitle()).toBe('乙岛')
+
+    const pill = screen.getByTestId('map-sub-island-complete')
+    expect(pill).toHaveAttribute('data-completed', 'false')
+    expect(pill.textContent).toBe('○ 标记完成')
+    fireEvent.click(pill)
+    expect(onSet).toHaveBeenCalledWith('plan-yi', true)
+  })
+
+  it('★ 聚焦态横幅：未命中计划项的聚焦子岛**不出现**完成胶囊（无完成态可切换）', () => {
+    renderWithPlans()
+    pressKey('3') // 丙岛（不在 PLANS 里）
+    expect(focusedTitle()).toBe('丙岛')
+    expect(screen.queryByTestId('map-sub-island-complete')).toBeNull()
+    // 退出聚焦入口照旧在（横幅没有因缺胶囊而变形）
+    expect(screen.getByTestId('map-sub-island-exit')).toBeTruthy()
+  })
+
+  it('★ 快捷键 Alt+D：聚焦态一键切换完成', () => {
+    const { onSet } = renderWithPlans()
+    pressKey('2')
+    expect(focusedTitle()).toBe('乙岛')
+
+    pressKey('d', { alt: true })
+    expect(onSet).toHaveBeenCalledWith('plan-yi', true)
+  })
+
+  it('★ 快捷键 Ctrl+Enter：与 Alt+D 等价；未聚焦 / 未命中计划项时**不认领**（键让位）', () => {
+    const { onSet } = renderWithPlans()
+
+    // 全局态（未聚焦）：无接收者 → 不触发
+    pressKey('Enter', { ctrl: true })
+    expect(onSet).not.toHaveBeenCalled()
+
+    // 聚焦丙岛（不在计划里）：同样不触发
+    pressKey('3')
+    expect(focusedTitle()).toBe('丙岛')
+    pressKey('Enter', { ctrl: true })
+    expect(onSet).not.toHaveBeenCalled()
+
+    // 聚焦乙岛（在计划里）→ 触发
+    pressKey('2')
+    expect(focusedTitle()).toBe('乙岛')
+    pressKey('Enter', { ctrl: true })
+    expect(onSet).toHaveBeenCalledWith('plan-yi', true)
+  })
+
+  it('★ 防穿透：快速记录输入框里 Alt+D / Ctrl+Enter 是**打字/提交语义**，不切换完成态', () => {
+    const onSet = vi.fn().mockResolvedValue(undefined)
+    render(
+      <TimerMapEditor
+        mapText={ARCHIPELAGO_ISLAND}
+        sessionId={SESSION_ID}
+        onEdit={vi.fn().mockResolvedValue(undefined)}
+        onQuickRecord={vi.fn().mockResolvedValue(undefined)}
+        plans={PLANS}
+        onSetCompletionDraft={onSet}
+      />,
+    )
+    pressKey('2') // 先进入乙岛聚焦态（有接收者）
+    expect(focusedTitle()).toBe('乙岛')
+
+    fireEvent.click(screen.getByTestId('map-quick-insight'))
+    const input = screen.getByTestId('map-quick-input') as HTMLElement
+    pressKey('d', { alt: true, target: input })
+    pressKey('Enter', { ctrl: true, target: input })
+    expect(onSet).not.toHaveBeenCalled()
+  })
+
+  it('★ 完成态不裁信息：卡片变绿后卡内节点与连线数不变（复盘信息完整保留）', () => {
+    const { container } = renderWithPlans()
+    const before = {
+      nodes: container.querySelectorAll('.wm-node').length,
+      links: container.querySelectorAll('.wm-link').length,
+      texts: container.querySelectorAll('.wm-text').length,
+    }
+    expect(cardTitled(container, '甲岛')).toHaveClass('wm-sub-island-card--completed')
+
+    const { container: plain } = render(
+      <TimerMapEditor
+        mapText={ARCHIPELAGO_ISLAND}
+        sessionId={SESSION_ID}
+        plans={PLANS.map((plan) => ({ ...plan, completionDraft: false }))}
+        onSetCompletionDraft={vi.fn()}
+      />,
+    )
+    expect(plain.querySelectorAll('.wm-node').length).toBe(before.nodes)
+    expect(plain.querySelectorAll('.wm-link').length).toBe(before.links)
+    expect(plain.querySelectorAll('.wm-text').length).toBe(before.texts)
   })
 })

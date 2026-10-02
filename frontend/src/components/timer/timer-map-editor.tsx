@@ -73,6 +73,29 @@ export interface TimerMapEditorProps {
   /** 升格为任务（PXII-FEAT-TASK-SPACE-P0）：把节点标题/注释沉淀为正式 WorkItem，
    *  页面实现创建与导图回写；抛错 → 卡内提示。缺省 = 不提供升格入口（只读）。 */
   onPromoteNode?: (cid: string, node: MapTreeNode) => Promise<void>
+  /**
+   * 本次会话的计划项（PXII-FEAT-PLAN-CHECKOFF）：按 `titleSnapshot` 与子岛标题匹配，
+   * 命中即可在**当前思考卡片上就地闭环**完成打勾，不必抬手切到右栏清单。
+   * 缺省 = 不渲染任何打勾入口（只读编辑区）。
+   */
+  plans?: PlanItemLike[]
+  /**
+   * 完成态写回：**复用页面层既有的 `setCompletion(planItemId, completionDraft)`**
+   * （`PXII-FEAT-PLAN-CHECKOFF` 红线 2：不发明第二套完成状态）。
+   * 本组件只做「标题 → 计划项」的匹配与事件上抛，状态机与持久化都在页面。
+   */
+  onSetCompletionDraft?: (planItemId: string, completionDraft: boolean) => Promise<void> | void
+}
+
+/**
+ * 计划项在导图侧需要的**最小投影**（结构化兼容页面 `aggregate.plan` 的元素）。
+ * 刻意只取这四个字段：导图不参与计划项的增删改，只做「标题匹配 → 打勾」。
+ */
+export interface PlanItemLike {
+  id: string
+  workItemId: string
+  titleSnapshot: string
+  completionDraft: boolean
 }
 
 type Overlay = 'rename' | 'add' | 'comment' | 'type'
@@ -175,6 +198,8 @@ export function TimerMapEditor({
   onQuickRecord,
   onEdit,
   onPromoteNode,
+  plans,
+  onSetCompletionDraft,
 }: TimerMapEditorProps): ReactNode {
   const island = useMemo(() => {
     if (mapText === null || sessionId === null) return null
@@ -312,6 +337,56 @@ export function TimerMapEditor({
 
   // ── 群岛流导航（PXII-FEAT-ARCHIPELAGO-NAV / OVERFLOW）────────────────────
   const subIslands = island?.subIslands ?? []
+
+  // ── 子岛完成态（PXII-FEAT-PLAN-CHECKOFF）────────────────────────────────
+  /**
+   * 计划项完成态投影：键 = `titleSnapshot`，值 = `completionDraft`。
+   *
+   * 标题匹配是外派单 §1.1 的既定口径（`plans.find(p => p.titleSnapshot === subIsland.title)`），
+   * 这里把它预计算成 Map，避免每个子岛每帧一次 O(n) 扫描。只读投影 —— 完成态的
+   * **写**走 `onSetCompletionDraft`（页面既有的 `setCompletion` 状态机），本组件不持有。
+   */
+  const planCompletion = useMemo(() => {
+    if (plans === undefined || plans.length === 0) return undefined
+    const map = new Map<string, boolean>()
+    for (const plan of plans) map.set(plan.titleSnapshot, plan.completionDraft)
+    return map
+  }, [plans])
+
+  /** 计划项完成态查询（含 `.trim()` 归一；未命中 → `undefined`） */
+  const planForSubIsland = useCallback(
+    (title: string): PlanItemLike | null => {
+      if (plans === undefined) return null
+      const direct = plans.find((plan) => plan.titleSnapshot === title)
+      if (direct !== undefined) return direct
+      const trimmed = title.trim()
+      return plans.find((plan) => plan.titleSnapshot.trim() === trimmed) ?? null
+    },
+    [plans],
+  )
+
+  /**
+   * 一键切换完成（打勾按钮 / `Alt+D` / `Ctrl+Enter` 三处入口共用的唯一落点）。
+   *
+   * 完成态写回**完全复用页面既有的 `setCompletion(planItemId, completionDraft)`**
+   * （红线 2：不发明第二套完成状态）；本组件只负责「子岛标题 → 计划项 id」的匹配。
+   * 匹配不到计划项 → 静默 no-op（子岛可能来自历史会话 / 未加入本次计划）。
+   */
+  const toggleSubIslandCompletion = useCallback(
+    (title: string): void => {
+      if (onSetCompletionDraft === undefined) return
+      const plan = planForSubIsland(title)
+      if (plan === null) return
+      void onSetCompletionDraft(plan.id, !plan.completionDraft)
+    },
+    [onSetCompletionDraft, planForSubIsland],
+  )
+
+  /** 当前聚焦子岛对应的计划项（横幅胶囊用）；未聚焦 / 未命中 → null */
+  const focusedPlan = useMemo(() => {
+    if (focusedSubIslandId === null || focusedSubIsland === null) return null
+    return planForSubIsland(focusedSubIsland.title)
+  }, [focusedSubIslandId, focusedSubIsland, planForSubIsland])
 
   /**
    * 画布可视宽度。jsdom 无布局引擎（`clientWidth` 恒 0）→ 兜底 `DEFAULT_CANVAS_W`，
@@ -630,6 +705,27 @@ export function TimerMapEditor({
     if (canvasRef.current === null || target === null) return
     if (!canvasRef.current.contains(target)) return
 
+    // ── 一键完成（PXII-FEAT-PLAN-CHECKOFF）───────────────────────────────
+    // `Alt+D` / `Ctrl+Enter`：**只在单子岛聚焦态且该子岛命中计划项时**认领。
+    // 放在「节点 <g> 的 Enter/Space 归渲染器」闸门**之前** —— 否则 Ctrl+Enter 会被
+    // 那道闸门当成裸 Enter 吞掉（焦点恰在节点上时快捷键静默失效）。
+    // 防穿透沿用同一判据：打字态（输入面）一律让位，`Ctrl+Enter` 在文本域里
+    // 常是"提交"、`Alt+D` 在部分 IME 下是输入辅助，抢走会打断用户。
+    if (
+      !isTextEntryTarget(event.nativeEvent.target) &&
+      focusedSubIsland !== null &&
+      focusedPlan !== null
+    ) {
+      const isAltD = event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'd' || event.key === 'D')
+      const isCtrlEnter = (event.ctrlKey || event.metaKey) && !event.altKey && event.key === 'Enter'
+      if (isAltD || isCtrlEnter) {
+        event.preventDefault()
+        event.stopPropagation()
+        toggleSubIslandCompletion(focusedSubIsland.title)
+        return
+      }
+    }
+
     // 焦点停在**节点 `<g>` 上**时（用户 Tab 键浏览到某个节点），Enter/Space 归
     // 渲染器自己的激活处理（选中该节点），否则会同一次按键既选中又开「加同级」。
     // 选中后 `selectNode` 会把焦点收回画布，之后的 Enter 才走导图键位。
@@ -855,6 +951,24 @@ export function TimerMapEditor({
               <span>
                 正在聚焦 L3 子岛：<strong>{focusedSubIsland.title}</strong>
               </span>
+              {/* 完成胶囊（PXII-FEAT-PLAN-CHECKOFF）：只在该子岛命中计划项时出现 ——
+                  未加入本次计划的子岛没有完成态可切换，不画"点了没反应"的假入口。 */}
+              {focusedPlan !== null ? (
+                <button
+                  type="button"
+                  className={`wm-sub-island-check-pill ${
+                    focusedPlan.completionDraft ? 'wm-sub-island-check-pill--done' : ''
+                  }`}
+                  data-testid="map-sub-island-complete"
+                  data-completed={focusedPlan.completionDraft ? 'true' : 'false'}
+                  aria-pressed={focusedPlan.completionDraft}
+                  aria-keyshortcuts="Alt+D Control+Enter"
+                  title={focusedPlan.completionDraft ? '标记未完成（Alt+D）' : '标记已完成（Alt+D）'}
+                  onClick={() => toggleSubIslandCompletion(focusedSubIsland.title)}
+                >
+                  {focusedPlan.completionDraft ? '✓ 已完成' : '○ 标记完成'}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="wm-sub-island-exit-btn"
@@ -899,6 +1013,10 @@ export function TimerMapEditor({
                 setZoom(1.0)
                 setPan({ x: 0, y: 0 })
               }}
+              planCompletion={planCompletion}
+              onTogglePlanCompletion={
+                onSetCompletionDraft === undefined ? undefined : toggleSubIslandCompletion
+              }
               onSelectNode={editable ? selectNode : undefined}
             />
           </div>

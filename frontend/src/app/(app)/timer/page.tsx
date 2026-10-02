@@ -1351,6 +1351,11 @@ export default function TimerPage() {
               onQuickRecord: quickRecord,
               onEdit: editMap,
               onPromoteNode: handlePromoteNode,
+              // PXII-FEAT-PLAN-CHECKOFF：把本次会话的计划项交给导图，让「完成」
+              // 能在当前思考卡片上就地闭环。写回**复用同一台状态机** `setCompletion`
+              // （= SessionWorkspace 清单里那个勾选框用的同一个函数），不新开完成通道。
+              plans,
+              onSetCompletionDraft: setCompletion,
             }),
       ),
       // 伴奏区：骨架带 .timer-immersive-region（结构标记 + testid）。

@@ -570,6 +570,113 @@ describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
   })
 })
 
+// ── PXII-FEAT-PLAN-CHECKOFF / PORT-FOCUS-SYNC：导图与执行计划深度联动 ──────
+/**
+ * 会话岛下挂**两个** L3 子岛（标题 = 计划项的 `titleSnapshot`），
+ * 供「卡片打勾 → 完成状态机」「小视图专注跟随」两条页面级接线断言。
+ */
+const ISLAND_ARCHIPELAGO_FOR_RUNNING = `<!--
+next_cid: 5
+centers:
+  - at: "node:Verify output/09-30 19:55 会话"
+    cid: c1
+    dir: right
+    session_id: "session-a"
+-->
+# Verify output
+
+<!--
+cid: "c1"
+session_id: "session-a"
+-->
+## 09-30 19:55 会话
+
+<!--
+cid: "c2"
+-->
+### Verify output
+
+<!--
+cid: "c3"
+-->
+### 第二个子任务
+`
+
+describe('TimerPage 导图与执行计划联动（PXII-FEAT-PLAN-CHECKOFF / PORT-FOCUS-SYNC）', () => {
+  beforeEach(seedRunningTimerPage)
+
+  it('★ 导图卡片打勾 → 复用 setCompletion 状态机（coordinator.setCompletionDraft 收到 planItemId 与取反值）', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_ARCHIPELAGO_FOR_RUNNING)
+    render(createElement(TimerPage))
+
+    const editor = await screen.findByTestId('timer-map-editor')
+    const check = await waitFor(() => {
+      const hit = editor.querySelector('[data-testid="wm-sub-island-check"]')
+      expect(hit).not.toBeNull()
+      return hit!
+    })
+    // 计划项 plan-a 的 titleSnapshot = 'Verify output'，初始未完成
+    expect(check.getAttribute('data-completed')).toBe('false')
+
+    fireEvent.click(check)
+
+    await waitFor(() =>
+      expect(coordinatorSpies.setCompletionDraft).toHaveBeenCalledWith({
+        sessionId: 'session-a',
+        planItemId: 'plan-a',
+        completionDraft: true,
+      }),
+    )
+  })
+
+  it('★ 未加入本次计划的子岛（第二个子任务）→ 导图上没有打勾入口（不画假按钮）', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_ARCHIPELAGO_FOR_RUNNING)
+    render(createElement(TimerPage))
+
+    const editor = await screen.findByTestId('timer-map-editor')
+    await waitFor(() =>
+      expect(editor.querySelectorAll('[data-testid="wm-sub-island-check"]')).toHaveLength(1),
+    )
+    // 小视图是纯展示（不传 plans）→ 零打勾入口
+    const port = screen.getByTestId('timer-map-port')
+    expect(port.querySelector('[data-testid="wm-sub-island-check"]')).toBeNull()
+  })
+
+  it('★ 小视图默认专注跟随：currentPlanTitle 命中子岛 → 模式胶囊与 data-view-mode 就位', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_ARCHIPELAGO_FOR_RUNNING)
+    render(createElement(TimerPage))
+
+    const port = await screen.findByTestId('timer-map-port')
+    expect(port).toHaveAttribute('data-view-mode', 'focused')
+    expect(screen.getByTestId('map-port-mode-toggle')).toBeTruthy()
+    expect(screen.getByTestId('map-port-mode-focused')).toHaveAttribute('aria-pressed', 'true')
+    // 当前计划项 = 'Verify output' → 命中子岛 → data-follow=true（viewBox 已框到该岛）
+    await waitFor(() =>
+      expect(screen.getByTestId('map-port-canvas')).toHaveAttribute('data-follow', 'true'),
+    )
+  })
+
+  it('★ 小视图切到全景：data-follow 关闭、模式胶囊翻转，且**编辑区不受影响**', async () => {
+    readWorkMapMock.mockResolvedValue(ISLAND_ARCHIPELAGO_FOR_RUNNING)
+    render(createElement(TimerPage))
+
+    const port = await screen.findByTestId('timer-map-port')
+    await waitFor(() =>
+      expect(screen.getByTestId('map-port-canvas')).toHaveAttribute('data-follow', 'true'),
+    )
+    const editorNodesBefore = screen.getByTestId('timer-map-editor').querySelectorAll('.wm-node').length
+
+    fireEvent.click(screen.getByTestId('map-port-mode-all'))
+
+    expect(port).toHaveAttribute('data-view-mode', 'all')
+    expect(screen.getByTestId('map-port-mode-all')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('map-port-canvas')).toHaveAttribute('data-follow', 'false')
+    // 编辑区是独立组件实例：小视图换模式不动它（同一份渲染器、各自持有视口）
+    expect(screen.getByTestId('timer-map-editor').querySelectorAll('.wm-node').length)
+      .toBe(editorNodesBefore)
+  })
+})
+
 // ── 2026-10-01：拆解 = 创建 + 导图生长 + 自动切为当前专注项 ────────────────
 /** 新 L3 的图：本次会话的岛已在（启动时按勾选建过），但还没有这次拆解的子行动。 */
 const ISLAND_FOR_NEW_L3 = `<!--
