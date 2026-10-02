@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { extractRootNoteBlock, parseRootNote, parseNodeNoteFields } from './mm-note';
-import { buildSessionIsland, hasSessionIsland } from './session-island';
+import { buildSessionIsland, hasSessionIsland, syncPlanItemsToSessionIsland } from './session-island';
 
 /** 一份已有两个岛的既有导图（结构取自真实工作项的导图形态）。 */
 const EXISTING_MAP = `<!--
@@ -176,5 +176,60 @@ describe('hasSessionIsland', () => {
     expect(hasSessionIsland(EXISTING_MAP, 'sess-1')).toBe(true);
     expect(hasSessionIsland(EXISTING_MAP, 'sess-absent')).toBe(false);
     expect(hasSessionIsland('', 'sess-1')).toBe(false);
+  });
+});
+
+describe('syncPlanItemsToSessionIsland (方案 A：计划项同步到当前会话岛)', () => {
+  const SESSION_DOC = `<!--
+next_cid: 3
+centers:
+  - at: "node:工作项/09-30 会话"
+    cid: c1
+    dir: right
+    session_id: "sess-1"
+-->
+# 工作项
+
+<!--
+cid: "c1"
+session_id: "sess-1"
+-->
+## 09-30 会话
+
+### 已有子任务A
+`;
+
+  it('补充缺失的计划项：新项追加为会话节点下的一级子干（###），已有项不重复添加', () => {
+    const res = syncPlanItemsToSessionIsland(SESSION_DOC, {
+      sessionId: 'sess-1',
+      planTitles: ['已有子任务A', '新子任务B', '新子任务C'],
+    });
+
+    expect(res.changed).toBe(true);
+    expect(res.addedTitles).toEqual(['新子任务B', '新子任务C']);
+    expect(res.text).toContain('### 已有子任务A');
+    expect(res.text).toContain('### 新子任务B');
+    expect(res.text).toContain('### 新子任务C');
+    // 新项带有独立的 cid
+    expect(res.text).toContain('cid: "c3"');
+    expect(res.text).toContain('cid: "c4"');
+
+    // 再次调用（全已存在）→ 幂等不变更
+    const second = syncPlanItemsToSessionIsland(res.text, {
+      sessionId: 'sess-1',
+      planTitles: ['已有子任务A', '新子任务B', '新子任务C'],
+    });
+    expect(second.changed).toBe(false);
+    expect(second.addedTitles).toHaveLength(0);
+  });
+
+  it('找不到会话节点时 fail-soft 不变更', () => {
+    const res = syncPlanItemsToSessionIsland(SESSION_DOC, {
+      sessionId: 'sess-non-existent',
+      planTitles: ['新子任务'],
+    });
+    expect(res.changed).toBe(false);
+    expect(res.addedTitles).toHaveLength(0);
+    expect(res.text).toBe(SESSION_DOC);
   });
 });

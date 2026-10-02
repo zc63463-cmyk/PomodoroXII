@@ -53,7 +53,7 @@ import { applyMapNodeEdit, normalizeNodeTitle, type MapNodeEditOp } from '@/lib/
 import type { MapTreeNode } from '@/lib/work-map/island-layout'
 import type { ThoughtType } from '@/lib/work-map/thought-types'
 import { WorkItemNoteRepository } from '@/lib/task-space/work-item-note-repository'
-import { buildSessionIsland } from '@/lib/work-map/session-island'
+import { buildSessionIsland, hasSessionIsland, syncPlanItemsToSessionIsland } from '@/lib/work-map/session-island'
 import { createLaunchSessionIslands, formatSessionIslandTitle } from '@/lib/work-map/session-island-launch'
 import { canonicalNow } from '@/lib/direct-command-intents'
 import { spaceDBManager } from '@/services/space-db'
@@ -241,6 +241,7 @@ export default function TimerPage() {
   const aggregate = localProvisional?.aggregate ?? locator?.session ?? endedAggregate
   const plans = useMemo(() => aggregate?.plan.filter((plan) => plan.removedAt === null) ?? [], [aggregate?.plan])
   const currentPlan = plans.find((plan) => plan.currentDuringSession) ?? plans[0] ?? null
+  const currentPlanTitle = currentPlan?.titleSnapshot ?? null
   const focusedWorkItemId = currentPlan?.workItemId ?? selectedWorkItemId
   const selectedWorkItem = workItems.find((item) => item.id === selectedWorkItemId) ?? null
   // ── ② 任务选择 Modal（2026-10-02）：归属/三级计划的状态源 ────────────────────
@@ -300,7 +301,8 @@ export default function TimerPage() {
   // 运行态专用：只渐隐次级内容区（Workspace / Note / 统计栏），环与退出按钮常驻。
   // 会话切换时重置 —— 上一个会话的"沉浸"不应预支到下一个会话。
   const [immersive, setImmersive] = useState(false)
-  const activeSessionId = session ? sessionIdOf(session) : null
+  const currentSession = session ?? aggregate?.session ?? null
+  const activeSessionId = currentSession ? sessionIdOf(currentSession) : null
   useEffect(() => {
     setImmersive(false)
   }, [activeSessionId])
@@ -370,7 +372,29 @@ export default function TimerPage() {
       return
     }
     void readWorkMap(focusedWorkItemId)
-      .then((text) => { if (!cancelled) setSessionMap({ workItemId: focusedWorkItemId, text }) })
+      .then((rawText) => {
+        if (cancelled) return
+        if (!rawText) {
+          setSessionMap({ workItemId: focusedWorkItemId, text: rawText })
+          return
+        }
+        // 方案 A：确保当前会话的全部计划项（L3）都作为一级分支存在于会话岛下
+        const planTitles = plans
+          .map((p) => p.titleSnapshot)
+          .filter((t) => typeof t === 'string' && t.trim() !== '')
+        if (planTitles.length > 0 && activeSessionId) {
+          const synced = syncPlanItemsToSessionIsland(rawText, {
+            sessionId: activeSessionId,
+            planTitles,
+          })
+          if (synced.changed) {
+            void writeWorkMap(focusedWorkItemId, synced.text).catch(() => null)
+            setSessionMap({ workItemId: focusedWorkItemId, text: synced.text })
+            return
+          }
+        }
+        setSessionMap({ workItemId: focusedWorkItemId, text: rawText })
+      })
       .catch((cause) => {
         if (cancelled) return
         setSessionMap(null)
@@ -379,7 +403,7 @@ export default function TimerPage() {
         )
       })
     return () => { cancelled = true }
-  }, [activeSessionId, focusedWorkItemId, mapRefreshSeq, runningBreak])
+  }, [activeSessionId, focusedWorkItemId, mapRefreshSeq, plans, runningBreak])
 
   // ── 结束态「岛总览」数据（ADR-0008 D13 步 3-4b）────────────────────────────
   // 键 = 结束会话的 **focused plan item** 的 L3。页面 `plans` 派生自 `aggregate.plan`
@@ -487,66 +511,46 @@ export default function TimerPage() {
   const growMapForNewLevel3 = async (
     workItemId: string,
     workItemTitle: string,
-    todoTitle: string,
+    planTitle: string,
   ): Promise<string | null> => {
     if (activeSessionId === null) return null
     try {
-      // null = 尚无导图 → 空串走 buildSessionIsland 的新建文档分支
       const existing = (await readWorkMap(workItemId)) ?? ''
-      // ① 建岛。**必须无条件调用**（幂等键 = sessionId，已有岛时返回
-      //    session_island_exists 且不变更）：新 L3 的图可能存在但没有**本次会话**的
-      //    岛（L3 早于本会话存在），此时 appendThoughtNode 会以
-      //    `session_node_not_found` 拒绝 —— 先补齐岛才谈得上往里落节点。
-      //
-      //    level3Titles 只列**本次已有的其它**计划项：岛上的裸 `### 标题` 是"这次
-      //    会话投入过哪些项"的清单，而新项由下面的 appendThoughtNode 以带
-      //    thought_type 的 todo 节点写入。若这里也带上新项标题，同一个标题会在
-      //    岛上落两个节点（一个裸标题、一个带类型的），是明确的重复。
       const siblingTitles = plans
         .map((plan) => plan.titleSnapshot)
-        .filter((title) => title.trim() !== '' && title !== todoTitle)
+        .filter((title) => title.trim() !== '')
+      const allTitles = Array.from(new Set([...siblingTitles, planTitle]))
       const startedAt = new Date(aggregate?.session.startedAt ?? '')
-      const island = buildSessionIsland(existing, {
-        sessionId: activeSessionId,
-        workItemTitle,
-        sessionTitle: formatSessionIslandTitle(
-          Number.isNaN(startedAt.getTime()) ? new Date() : startedAt,
-        ),
-        level3Titles: siblingTitles,
-        dir: 'right',
-      })
-      // 无 H1 / 建岛自身失败等结构性问题：不猜测、不写盘（appendThoughtNode 同样会拒）
-      if (!island.changed && island.reason !== 'session_island_exists') {
-        console.warn(
-          `[timer-map-grow] 新 L3 ${workItemId} 建岛未产生变更（${island.reason ?? 'unchanged'}），跳过节点追加`,
-        )
-        return null
+
+      let baseText = existing
+      if (!hasSessionIsland(baseText, activeSessionId)) {
+        const island = buildSessionIsland(baseText, {
+          sessionId: activeSessionId,
+          workItemTitle,
+          sessionTitle: formatSessionIslandTitle(
+            Number.isNaN(startedAt.getTime()) ? new Date() : startedAt,
+          ),
+          level3Titles: allTitles,
+          dir: 'right',
+        })
+        if (island.changed) {
+          baseText = island.text
+        }
       }
 
-      // ② 落节点：本次拆解出来的子行动 = 本次会话岛下的一个 todo。
-      const appended = appendThoughtNode(island.text, {
+      const synced = syncPlanItemsToSessionIsland(baseText, {
         sessionId: activeSessionId,
-        type: 'todo',
-        title: todoTitle,
+        planTitles: allTitles,
       })
-      if (!appended.changed) {
-        // 岛建好了但节点没落上：把岛本身写回仍有价值（本次会话在该 L3 图上留下
-        // 痕迹），原因如实记录，不升级为失败。
-        console.warn(
-          `[timer-map-grow] 新 L3 ${workItemId} 的 todo 节点未写入（${appended.reason ?? 'unchanged'}）`,
-        )
-        if (!island.changed) return null
-        await writeWorkMap(workItemId, island.text)
-        setSessionMap({ workItemId, text: island.text })
-        return island.text
+      const nextText = synced.changed ? synced.text : baseText
+      if (nextText !== existing) {
+        await writeWorkMap(workItemId, nextText)
+        if (focusedWorkItemId === workItemId) {
+          setSessionMap({ workItemId, text: nextText })
+        }
+        return nextText
       }
-
-      await writeWorkMap(workItemId, appended.text)
-      // 仅在当前项与目标匹配时更新缓存，避免后台写新图污染当前图的缓存
-      if (focusedWorkItemId === workItemId) {
-        setSessionMap({ workItemId, text: appended.text })
-      }
-      return appended.text
+      return null
     } catch (cause) {
       console.warn(
         `[timer-map-grow] 新 L3 ${workItemId} 的导图生长失败（fail-soft，不阻断拆解）: ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -557,12 +561,12 @@ export default function TimerPage() {
 
   /**
    * 方案 A（保持在原图生长，不自动切换）：
-   * 把拆解出的子行动作为 todo 待办节点，直接追加到**当前正在查看的导图**的会话岛下。
+   * 把拆解出的新三级计划项，作为会话岛下的一级子分支（### <标题>），直接追加到**当前正在查看的导图**上。
    * 保留当前导图内所有已有的思考、注释和上下文，不强行切走焦点。
    */
-  const appendTodoToCurrentMap = async (
+  const appendPlanItemToCurrentMap = async (
     currentId: string,
-    todoTitle: string,
+    planTitle: string,
   ): Promise<string | null> => {
     if (activeSessionId === null) return null
     try {
@@ -573,43 +577,40 @@ export default function TimerPage() {
       const currentItem = workItems.find((w) => w.id === currentId)
       const currentTitle = currentItem?.title ?? '当前工作项'
       const startedAt = new Date(aggregate?.session.startedAt ?? '')
-      const siblingTitles = plans
-        .map((plan) => plan.titleSnapshot)
-        .filter((title) => title.trim() !== '' && title !== todoTitle)
-      const island = buildSessionIsland(existing, {
+
+      let baseText = existing
+      if (!hasSessionIsland(baseText, activeSessionId)) {
+        const siblingTitles = plans
+          .map((plan) => plan.titleSnapshot)
+          .filter((title) => title.trim() !== '')
+        const island = buildSessionIsland(baseText, {
+          sessionId: activeSessionId,
+          workItemTitle: currentTitle,
+          sessionTitle: formatSessionIslandTitle(
+            Number.isNaN(startedAt.getTime()) ? new Date() : startedAt,
+          ),
+          level3Titles: siblingTitles,
+          dir: 'right',
+        })
+        if (island.changed) {
+          baseText = island.text
+        }
+      }
+
+      const synced = syncPlanItemsToSessionIsland(baseText, {
         sessionId: activeSessionId,
-        workItemTitle: currentTitle,
-        sessionTitle: formatSessionIslandTitle(
-          Number.isNaN(startedAt.getTime()) ? new Date() : startedAt,
-        ),
-        level3Titles: siblingTitles,
-        dir: 'right',
+        planTitles: [planTitle],
       })
-      if (!island.changed && island.reason !== 'session_island_exists') {
-        console.warn(
-          `[timer-map-grow] 当前图 ${currentId} 建岛未产生变更（${island.reason ?? 'unchanged'}），跳过节点追加`,
-        )
+      if (!synced.changed) {
         return null
       }
 
-      const appended = appendThoughtNode(island.text, {
-        sessionId: activeSessionId,
-        type: 'todo',
-        title: todoTitle,
-      })
-      if (!appended.changed) {
-        console.warn(
-          `[timer-map-grow] 当前图 ${currentId} 追加 todo 节点未产生变更（${appended.reason ?? 'unchanged'}）`,
-        )
-        return null
-      }
-
-      await writeWorkMap(currentId, appended.text)
-      setSessionMap({ workItemId: currentId, text: appended.text })
-      return appended.text
+      await writeWorkMap(currentId, synced.text)
+      setSessionMap({ workItemId: currentId, text: synced.text })
+      return synced.text
     } catch (cause) {
       console.warn(
-        `[timer-map-grow] 当前图 ${currentId} 生长 todo 节点失败（fail-soft）: ${cause instanceof Error ? cause.message : String(cause)}`,
+        `[timer-map-grow] 当前图 ${currentId} 同步计划项节点失败（fail-soft）: ${cause instanceof Error ? cause.message : String(cause)}`,
       )
       return null
     }
@@ -1056,6 +1057,12 @@ export default function TimerPage() {
         await focusRepository?.addPlanItem(localProvisional.aggregate.session.sessionId, workItemId, planRank, canonicalNow())
         await localAggregateRefresh()
       } else await coordinator.addPlanItem({ sessionId: sessionIdOf(aggregate.session), workItemId, expectedWorkItemVersion: item.version, planRank, addedAt: canonicalNow() })
+
+      if (focusedWorkItemId) {
+        void appendPlanItemToCurrentMap(focusedWorkItemId, item.title)
+          .then((grown) => { if (grown !== null) setMapRefreshSeq((seq) => seq + 1) })
+          .catch(() => null)
+      }
     } catch (cause) { setStableError(cause) }
   }
 
@@ -1086,7 +1093,7 @@ export default function TimerPage() {
     //   后端 policy 同款 not_found 校验），反序必被拒。
     await addPlanItem(created.id)
     // 方案 A（保持在原图生长，不自动切换）：
-    // 1) 若当前已有专注项（currentFocusedId），直接在当前正在看的大图上长出 todo 待办分支；
+    // 1) 若当前已有专注项（currentFocusedId），直接在当前正在看的大图上长出一级子分支（### <标题>）；
     //    保留所有已有节点、思考与注释上下文，不跳出当前画面；
     // 2) 静默为新创建的 L3 初始化专属导图（带会话岛），供用户后续主动在右栏点击切换时使用；
     // 3) 若此前没有专注项（如启动时未选三级项），才切为当前项。
@@ -1094,7 +1101,7 @@ export default function TimerPage() {
     let grown: string | null = null
 
     if (currentFocusedId) {
-      grown = await appendTodoToCurrentMap(currentFocusedId, created.title)
+      grown = await appendPlanItemToCurrentMap(currentFocusedId, created.title)
       void growMapForNewLevel3(created.id, created.title, created.title).catch(() => null)
     } else {
       grown = await growMapForNewLevel3(created.id, created.title, created.title)
@@ -1340,6 +1347,7 @@ export default function TimerPage() {
               mapText: sessionMapText,
               sessionId: activeSessionId,
               focusCid,
+              currentPlanTitle,
               onQuickRecord: quickRecord,
               onEdit: editMap,
               onPromoteNode: handlePromoteNode,
@@ -1391,6 +1399,7 @@ export default function TimerPage() {
             mapText: sessionMapText,
             sessionId: activeSessionId,
             minimal: immersive,
+            currentPlanTitle,
             onFocusNode: (cid) => setFocusCid(cid),
           })
         : null,

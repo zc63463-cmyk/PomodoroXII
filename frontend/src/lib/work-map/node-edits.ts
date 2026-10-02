@@ -82,7 +82,7 @@ export function normalizeNodeTitle(raw: string): string {
 
 const eolOf = (text: string): string => (text.includes('\r\n') ? '\r\n' : '\n')
 
-interface NoteBlockHit {
+export interface NoteBlockHit {
   /** `<!--` 所在行号 */
   open: number
   /** 含 `-->` 的行号 */
@@ -90,7 +90,7 @@ interface NoteBlockHit {
 }
 
 /** 找到含 `cid: "<目标>"` 的笔记块（块扫描口径与 `thought-nodes.ts` 一致）。 */
-function findBlockByCid(lines: string[], cid: string): NoteBlockHit | null {
+export function findBlockByCid(lines: string[], cid: string): NoteBlockHit | null {
   for (let i = 0; i < lines.length; i += 1) {
     if (!lines[i].trimStart().startsWith('<!--')) continue
     const body: string[] = []
@@ -108,7 +108,7 @@ function findBlockByCid(lines: string[], cid: string): NoteBlockHit | null {
 }
 
 /** 块后第一个 heading 行（= 该笔记块所属节点的标题）。 */
-function headingAfter(lines: string[], from: number): { index: number; level: number } | null {
+export function headingAfter(lines: string[], from: number): { index: number; level: number } | null {
   for (let k = from; k < lines.length; k += 1) {
     const match = HEADING.exec(lines[k])
     if (match) return { index: k, level: match[1].length }
@@ -117,7 +117,7 @@ function headingAfter(lines: string[], from: number): { index: number; level: nu
 }
 
 /** 从 `from` 起第一个层级 ≤ maxLevel 的 heading（= 子树边界）；无则 -1。 */
-function firstHeadingAtOrAbove(lines: string[], from: number, maxLevel: number): number {
+export function firstHeadingAtOrAbove(lines: string[], from: number, maxLevel: number): number {
   for (let k = from; k < lines.length; k += 1) {
     const match = HEADING.exec(lines[k])
     if (match && match[1].length <= maxLevel) return k

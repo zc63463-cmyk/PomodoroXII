@@ -21,6 +21,13 @@ import {
   renderRootNote,
   type DocCenterEntry,
 } from './mm-note';
+import {
+  addChildNode,
+  findBlockByCid,
+  findCenterCidBySessionId,
+  firstHeadingAtOrAbove,
+  headingAfter,
+} from './node-edits';
 
 export interface BuildSessionIslandInput {
   /** 会话 id（幂等键，写入 centers 条目的 `session_id`） */
@@ -150,4 +157,80 @@ export function hasSessionIsland(text: string, sessionId: string): boolean {
   if (block === null) return false;
   const model = parseRootNote(block.body);
   return model.centers.some((c) => c.session_id === sessionId);
+}
+
+export interface SyncPlanItemsInput {
+  sessionId: string;
+  planTitles: readonly string[];
+}
+
+export interface SyncPlanItemsResult {
+  text: string;
+  changed: boolean;
+  addedTitles: string[];
+}
+
+/**
+ * 同步会话计划项到当前会话岛下（方案 A：保证当前会话的所有计划项均作为一级子分支存在）。
+ *
+ * 如果 `planTitles` 中的某个项在当前会话节点下尚未存在，则以 `addChildNode` 方式追加为 `### <标题>`。
+ */
+export function syncPlanItemsToSessionIsland(
+  text: string,
+  input: SyncPlanItemsInput,
+): SyncPlanItemsResult {
+  const sessionId = input.sessionId.trim();
+  if (sessionId === '' || input.planTitles.length === 0) {
+    return { text, changed: false, addedTitles: [] };
+  }
+  const centerCid = findCenterCidBySessionId(text, sessionId);
+  if (centerCid === null) {
+    return { text, changed: false, addedTitles: [] };
+  }
+
+  const lines = text.split(/\r?\n/);
+  const hit = findBlockByCid(lines, centerCid);
+  if (hit === null) return { text, changed: false, addedTitles: [] };
+  const sessionHeading = headingAfter(lines, hit.close + 1);
+  if (sessionHeading === null) return { text, changed: false, addedTitles: [] };
+
+  // 收集当前会话节点下的直接一级子标题（level === sessionHeading.level + 1）
+  const boundary = firstHeadingAtOrAbove(lines, sessionHeading.index + 1, sessionHeading.level);
+  const endLine = boundary === -1 ? lines.length : boundary;
+  const childLevel = sessionHeading.level + 1;
+  const existingChildTitles = new Set<string>();
+
+  for (let i = sessionHeading.index + 1; i < endLine; i += 1) {
+    const line = lines[i].trim();
+    const match = line.match(/^#{1,6}\s+(.+)$/);
+    if (match) {
+      const level = line.indexOf(' ');
+      if (level === childLevel) {
+        existingChildTitles.add(normalizeTitle(match[1], ''));
+      }
+    }
+  }
+
+  let currentText = text;
+  let changed = false;
+  const addedTitles: string[] = [];
+
+  for (const rawTitle of input.planTitles) {
+    const title = normalizeTitle(rawTitle, '');
+    if (title === '' || existingChildTitles.has(title)) continue;
+
+    // 追加到会话节点下（作为没有 thought_type 的正式计划项节点）
+    const res = addChildNode(currentText, {
+      parentCid: centerCid,
+      title,
+    });
+    if (res.changed) {
+      currentText = res.text;
+      changed = true;
+      addedTitles.push(title);
+      existingChildTitles.add(title);
+    }
+  }
+
+  return { text: currentText, changed, addedTitles };
 }

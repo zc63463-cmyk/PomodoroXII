@@ -13,6 +13,7 @@ import { appendThoughtNode } from '@/lib/work-map/thought-nodes'
 import { buildSessionIsland } from '@/lib/work-map/session-island'
 
 import { TimerMapOverview } from './timer-map-overview'
+import { MIN_ISLAND_CARD_W } from './work-map-tree'
 
 const SID = 'c766be47-8725-443b-86e3-7cfee648a2f4'
 
@@ -215,18 +216,20 @@ describe('TimerMapOverview 地标卡与聚焦交互（S4-3 / D19-c）', () => {
     return `${b.minX - 32} ${b.minY - 32} ${b.maxX - b.minX + 64} ${b.maxY - b.minY + 64}`
   })()
 
-  /** 全览 viewBox：并集计入地标卡外框（top 28 / 侧 12），pad = 12（渲染器同式）。 */
+  /** 全览 viewBox：并集计入地标卡外框（top 28 / 侧 12，最小宽 MIN_ISLAND_CARD_W），pad = 12（渲染器同式）。 */
   const EXPECTED_ALL_VIEW_BOX = (() => {
-    const visual = MANY_LAYOUT.islands.map((island) =>
-      island.isArchive === true || island.sessionId === null
-        ? island.bounds
-        : {
-            minX: island.bounds.minX - 12,
-            minY: island.bounds.minY - 28,
-            maxX: island.bounds.maxX + 12,
-            maxY: island.bounds.maxY + 12,
-          },
-    )
+    const visual = MANY_LAYOUT.islands.map((island) => {
+      if (island.isArchive === true || island.sessionId === null) return island.bounds
+      const minX = island.bounds.minX - 12
+      const naturalW = island.bounds.maxX - island.bounds.minX + 24
+      const w = Math.max(MIN_ISLAND_CARD_W, naturalW)
+      return {
+        minX,
+        minY: island.bounds.minY - 28,
+        maxX: minX + w,
+        maxY: island.bounds.maxY + 12,
+      }
+    })
     const minX = Math.min(...visual.map((v) => v.minX))
     const minY = Math.min(...visual.map((v) => v.minY))
     const maxX = Math.max(...visual.map((v) => v.maxX))

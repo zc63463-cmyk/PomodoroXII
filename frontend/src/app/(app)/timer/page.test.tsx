@@ -324,7 +324,7 @@ session_id: "session-a"
 -->
 ## 09-30 19:55 会话
 
-### 验证输出
+### Verify output
 `
 
 /** 带一个**可编辑节点**（cid c2）的岛 —— 节点编辑页面接线断言。 */
@@ -344,7 +344,7 @@ session_id: "session-a"
 -->
 ## 09-30 19:55 会话
 
-### 验证输出
+### Verify output
 
 <!--
 thought_type: "problem"
@@ -501,7 +501,7 @@ describe('TimerPage 运行态导图端口（ADR-0008 D13 步 1）', () => {
     const written = writeWorkMapMock.mock.calls[0][1] as string
     expect(written).not.toContain('cid: "c2"')
     expect(written).not.toContain('### 旧标题')
-    expect(written).toContain('### 验证输出')
+    expect(written).toContain('### Verify output')
   })
 
   it('★ 点即定位（ADR-0008 D15）：小视图点击带 cid 节点 → 中央编辑区对应节点获得 wm-node--focus 环，存量无 cid 节点不响应', async () => {
@@ -634,24 +634,22 @@ describe('TimerPage 拆解行动：导图生长与自动切换（2026-10-01）',
     fireEvent.change(screen.getByLabelText('新三级标题'), { target: { value: '新三级 A' } })
     fireEvent.click(screen.getByRole('button', { name: '+ 拆解行动' }))
 
-    // 写的是**当前查看的 L3（l3-a）**的图，且内容含本次拆解出来的 todo 节点
+    // 写的是**当前查看的 L3（l3-a）**的图，且内容含本次拆解出来的一级子分支
     await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledWith('l3-a', expect.any(String)))
     const callsForCurrent = writeWorkMapMock.mock.calls.filter(([id]) => id === 'l3-a')
     const [, written] = callsForCurrent[0] as [string, string]
     expect(written).toContain('session_id: "session-a"')
-    expect(written).toContain('thought_type: "todo"')
     expect(written).toContain('### 新三级 A')
-    // 原图原有的内容完全保留（验证输出）
-    expect(written).toContain('### 验证输出')
+    // 原图原有的内容完全保留（Verify output）
+    expect(written).toContain('### Verify output')
 
     // 中央编辑区在原图上长出新节点
     const canvas = await screen.findByTestId('map-editor-canvas')
     await waitFor(() => expect(canvas.textContent).toContain('新三级 A'))
-    expect(canvas.querySelector('.wm-node[data-thought="todo"]')).not.toBeNull()
     expect(screen.queryByTestId('map-editor-empty')).toBeNull()
   })
 
-  it('新 L3 的图上已有本次会话岛（幂等分支）：不重复建岛，仍把子行动落成 todo 节点', async () => {
+  it('新 L3 的图上已有本次会话岛（幂等分支）：不重复建岛，把子行动同步为会话一级子分支', async () => {
     seedCreateChild()
     readWorkMapMock.mockImplementation(async (workItemId: string) =>
       workItemId === 'l3-a' ? ISLAND_FOR_RUNNING : null)
@@ -664,7 +662,6 @@ describe('TimerPage 拆解行动：导图生长与自动切换（2026-10-01）',
     await waitFor(() => expect(writeWorkMapMock).toHaveBeenCalledWith('l3-a', expect.any(String)))
     const calls = writeWorkMapMock.mock.calls.filter(([id]) => id === 'l3-a')
     const [, written] = calls[0] as [string, string]
-    expect(written).toContain('thought_type: "todo"')
     expect(written).toContain('### 拆解出的行动')
   })
 

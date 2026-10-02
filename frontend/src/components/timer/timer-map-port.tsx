@@ -31,6 +31,8 @@ export interface TimerMapPortProps {
   minimal: boolean
   /** 点击有 cid 节点上抛 cid（用于中央编辑区定位高亮；ADR-0008 D15） */
   onFocusNode?: (cid: string) => void
+  /** 当前专注的计划项（L3）标题（方案 A：高亮标识正在专注的分支） */
+  currentPlanTitle?: string | null
 }
 
 export function TimerMapPort({
@@ -38,6 +40,7 @@ export function TimerMapPort({
   sessionId,
   minimal,
   onFocusNode,
+  currentPlanTitle,
 }: TimerMapPortProps): ReactNode {
   const island = useMemo(() => {
     if (mapText === null || sessionId === null) return null
@@ -61,6 +64,7 @@ export function TimerMapPort({
             islands={[island]}
             sessionId={sessionId}
             label="本次会话导图（小视图）"
+            currentPlanTitle={currentPlanTitle}
             onFocusNode={onFocusNode}
           />
         </div>

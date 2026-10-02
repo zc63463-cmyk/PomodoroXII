@@ -595,4 +595,29 @@ describe('幕布描述块渲染（PXII-FEAT-DESC-BLOCK）', () => {
     expect(textX).toBeGreaterThan(0)
     expect(textX).toBeLessThan(boxW)
   })
+
+  it('★ 当前专注计划项高亮（方案 A）：currentPlanTitle 命中 depth 1 节点挂 .wm-node--current-plan 与 [专注中] 标识', () => {
+    const { container } = render(
+      <WorkMapTree
+        islands={LAYOUT.islands}
+        sessionId={SESSION_ID}
+        currentPlanTitle="测试次一级的workitme"
+      />,
+    )
+    const currentPlanNode = container.querySelector('.wm-node[data-current-plan="true"]')
+    expect(currentPlanNode).not.toBeNull()
+    expect(currentPlanNode).toHaveClass('wm-node--current-plan')
+    expect(currentPlanNode!.querySelector('.wm-box--current-plan')).not.toBeNull()
+    expect(currentPlanNode!.querySelector('title')?.textContent).toContain('[专注中]')
+
+    // 不匹配的标题不误标
+    const { container: mismatchContainer } = render(
+      <WorkMapTree
+        islands={LAYOUT.islands}
+        sessionId={SESSION_ID}
+        currentPlanTitle="其它不存在项"
+      />,
+    )
+    expect(mismatchContainer.querySelector('.wm-node[data-current-plan="true"]')).toBeNull()
+  })
 })

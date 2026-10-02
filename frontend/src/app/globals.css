@@ -1331,6 +1331,16 @@
   stroke-width: 2;
   fill: color-mix(in oklab, var(--ios-blue) 14%, var(--ios-card));
 }
+/* ── 当前专注计划项（方案 A）：高亮标识正在专注的三级计划项 ─────────────────── */
+.wm-node--current-plan .wm-box {
+  stroke: var(--ios-blue);
+  stroke-width: 1.8;
+  fill: color-mix(in oklab, var(--ios-blue) 6%, var(--ios-card, #ffffff));
+}
+.wm-node--current-plan .wm-text {
+  font-weight: 600;
+  fill: var(--ios-blue);
+}
 /* ── 节点定位（ADR-0008 D15）：小视图点击定位 → 中央高亮环 ──────────────────
    由 focusCid 驱动，与 wm-node--selected（编辑选中）区分；沉浸极简态常驻可见。 */
 .wm-node--focus .wm-box {

@@ -76,6 +76,11 @@ export interface WorkMapTreeProps {
    */
   highlightType?: ThoughtType | null
   /**
+   * 当前专注的计划项（L3）标题（方案 A：高亮标识正在专注的分支）。
+   * 命中当前会话岛下 depth === 1 且文本相同的节点将获得 .wm-node--current-plan 样式与 [专注中] 标记。
+   */
+  currentPlanTitle?: string | null
+  /**
    * 点击**可编辑节点**（属当前会话岛、`cid !== null`、非会话节点）→ 上抛 cid。
    * 不给则整树**只读**（右栏小视图即如此）——只读节点点击无效、但 hover 有「只读」提示。
    */
@@ -153,6 +158,7 @@ function NodeBox({
   dimmed,
   highlighted,
   badge,
+  currentPlan,
   onSelect,
   onFocus,
 }: {
@@ -163,6 +169,8 @@ function NodeBox({
    * 只是不属于"本次" —— 两者都画发端枢纽，但只有当前会话带高亮呼吸环。
    */
   currentSession: boolean
+  /** 当前专注的计划项（L3）分支高亮（方案 A） */
+  currentPlan?: boolean
   editable: boolean
   selected: boolean
   focused: boolean
@@ -244,6 +252,7 @@ function NodeBox({
       `[注释备忘]:\n${commentLines.join('\n')}`,
     )
   }
+  if (currentPlan) tooltipParts.push('[专注中]')
   if (readonlyHint !== null) tooltipParts.push(readonlyHint)
   const tooltip = tooltipParts.length > 0 ? tooltipParts.join('\n\n') : null
 
@@ -252,6 +261,7 @@ function NodeBox({
       transform={`translate(${node.box.x} ${node.box.y})`}
       className={[
         'wm-node',
+        currentPlan ? 'wm-node--current-plan' : '',
         selected ? 'wm-node--selected' : '',
         focused ? 'wm-node--focus' : '',
         dimmed ? 'wm-node--dim' : '',
@@ -260,6 +270,7 @@ function NodeBox({
       data-testid={currentSession ? 'wm-session-node' : undefined}
       data-thought={node.thoughtType ?? undefined}
       data-session={currentSession ? 'true' : 'false'}
+      data-current-plan={currentPlan ? 'true' : undefined}
       data-cid={actionCid ?? undefined}
       // 发端枢纽不画描述块/橙点（盒仅 28px，几何装不下）—— 注释全文仍由 tooltip 承载，
       // 故 data-comment / data-desc-lines 对会话节点不挂（避免"标了却没画"的假信号）
@@ -296,7 +307,11 @@ function NodeBox({
             height={node.box.h}
             rx={7}
             className={
-              selected ? 'wm-box wm-box--selected' : 'wm-box'
+              selected
+                ? 'wm-box wm-box--selected'
+                : currentPlan
+                  ? 'wm-box wm-box--current-plan'
+                  : 'wm-box'
             }
           />
           {node.thoughtType !== null ? (
@@ -681,6 +696,7 @@ export function WorkMapTree({
   selectedCid,
   focusCid,
   highlightType,
+  currentPlanTitle,
   onSelectNode,
   onFocusNode,
   onExpandArchive,
@@ -761,42 +777,51 @@ export function WorkMapTree({
                 />
               )
             })}
-            {island.nodes.map((node) => (
-              <NodeBox
-                key={node.id}
-                node={node}
-                // ★ BUG-WM-001（2026-10-01 修复）：未传 sessionId（准备态主图传
-                //   null）时，`null === null` 曾让根岛与存量节点误挂「本次」蓝框。
-                //   只有真实会话 id 命中岛根的 session_id 才算当前会话节点。
-                //   （会话节点本身的判定在 NodeBox 内按 node.sessionNode 取 —— 历史
-                //   会话岛的岛根同样是会话节点，同画发端枢纽，只是不带"本次"高亮。）
-                currentSession={
-                  typeof sessionId === 'string' &&
-                  sessionId !== '' &&
-                  node.sessionId === sessionId
-                }
-                // 依赖徽章：按实体引用 id 对位（D19-b 紧凑态）
-                badge={
-                  node.refId !== null ? (dependencyBadges?.get(node.refId) ?? null) : null
-                }
-                // 可编辑面只在「当前会话岛」：其它岛/无 cid/会话节点一律只读（D16-a）
-                editable={onSelectNode !== undefined && current && !node.sessionNode}
-                selected={
-                  onSelectNode !== undefined &&
-                  current &&
-                  node.cid !== null &&
-                  node.cid === (selectedCid ?? null)
-                }
-                focused={
-                  node.cid !== null &&
-                  node.cid === (focusCid ?? null)
-                }
-                dimmed={dimById.get(node.id) ?? false}
-                highlighted={filter !== null && node.thoughtType === filter}
-                onSelect={onSelectNode}
-                onFocus={onFocusNode}
-              />
-            ))}
+            {island.nodes.map((node) => {
+              const isCurrentPlan =
+                current &&
+                node.depth === 1 &&
+                currentPlanTitle != null &&
+                currentPlanTitle.trim() !== '' &&
+                node.text === currentPlanTitle.trim()
+              return (
+                <NodeBox
+                  key={node.id}
+                  node={node}
+                  // ★ BUG-WM-001（2026-10-01 修复）：未传 sessionId（准备态主图传
+                  //   null）时，`null === null` 曾让根岛与存量节点误挂「本次」蓝框。
+                  //   只有真实会话 id 命中岛根的 session_id 才算当前会话节点。
+                  //   （会话节点本身的判定在 NodeBox 内按 node.sessionNode 取 —— 历史
+                  //   会话岛的岛根同样是会话节点，同画发端枢纽，只是不带"本次"高亮。）
+                  currentSession={
+                    typeof sessionId === 'string' &&
+                    sessionId !== '' &&
+                    node.sessionId === sessionId
+                  }
+                  currentPlan={isCurrentPlan}
+                  // 依赖徽章：按实体引用 id 对位（D19-b 紧凑态）
+                  badge={
+                    node.refId !== null ? (dependencyBadges?.get(node.refId) ?? null) : null
+                  }
+                  // 可编辑面只在「当前会话岛」：其它岛/无 cid/会话节点一律只读（D16-a）
+                  editable={onSelectNode !== undefined && current && !node.sessionNode}
+                  selected={
+                    onSelectNode !== undefined &&
+                    current &&
+                    node.cid !== null &&
+                    node.cid === (selectedCid ?? null)
+                  }
+                  focused={
+                    node.cid !== null &&
+                    node.cid === (focusCid ?? null)
+                  }
+                  dimmed={dimById.get(node.id) ?? false}
+                  highlighted={filter !== null && node.thoughtType === filter}
+                  onSelect={onSelectNode}
+                  onFocus={onFocusNode}
+                />
+              )
+            })}
           </g>
         )
       })}
