@@ -743,8 +743,14 @@ function SubIslandFrameCard({
       ) + 12,
     ),
   )
-  const tagX = visual.minX + 8
-  const tagY = visual.minY + 3
+  // 全局视图下：单叶子节点将微标签并排置于节点右侧（同高居中）；含思考项的子岛置于右上角
+  const isLeaf = subIsland.nodes.length === 1
+  const tagX = isLeaf
+    ? subIsland.bounds.maxX + 6
+    : Math.max(visual.minX + 8, visual.maxX - tagW - 8)
+  const tagY = isLeaf
+    ? subIsland.bounds.minY + Math.max(0, (subIsland.bounds.maxY - subIsland.bounds.minY - 12) / 2)
+    : visual.minY + 2
 
   const handleClick = interactive
     ? () => onRequestFocus?.(isFocused ? '' : subIsland.id)
@@ -752,18 +758,18 @@ function SubIslandFrameCard({
 
   // 聚焦态专用几何（顶栏标题 + 状态角标 + 底部返回按钮）
   const titleX = visual.minX + 14
-  const titleY = visual.minY + 14
+  const titleY = visual.minY + 16
   const title = subIsland.title === '' ? '（未命名 L3 子任务）' : subIsland.title
   const badgeText = isCurrentPlan ? '⚡ 当前专注中' : `${thoughtCount} 项思考`
   const badgeW = isCurrentPlan ? 78 : 66
-  const badgeX = visual.maxX - badgeW - 10
-  const badgeY = visual.minY + 5
+  const badgeX = visual.maxX - badgeW - 12
+  const badgeY = visual.minY + 7
 
   // 底部退出胶囊按钮
   const exitW = 140
   const exitH = 20
   const exitX = visual.minX + Math.max(8, (w - exitW) / 2)
-  const exitY = visual.maxY - exitH - 5
+  const exitY = visual.maxY - exitH - 7
 
   return (
     <g
@@ -950,9 +956,6 @@ export function WorkMapTree({
     return null
   }, [islands, focusedSubIslandId])
 
-  const activeSubNodeIds = useMemo(() => {
-    return activeSubIsland ? new Set(activeSubIsland.nodes.map((n) => n.id)) : null
-  }, [activeSubIsland])
 
   // 聚焦态（S4-3 / PXII-FEAT-NESTED-ISLAND）：
   // 1. 显式 focusBounds（若外部传入）
@@ -1005,13 +1008,31 @@ export function WorkMapTree({
         for (const node of island.nodes) {
           dimById.set(node.id, filter !== null && node.thoughtType !== filter)
         }
+        // 子岛聚焦态（PXII-FEAT-NESTED-ISLAND）：
+        // 若当前处于子岛聚焦，仅渲染包含该子岛的岛
+        if (activeSubIsland !== null) {
+          const containsActiveSub = island.subIslands?.some((s) => s.id === activeSubIsland.id) ?? false
+          if (!containsActiveSub) return null
+        }
+
+        const renderedSubIslands =
+          activeSubIsland !== null
+            ? (island.subIslands?.filter((sub) => sub.id === activeSubIsland.id) ?? [])
+            : (island.subIslands ?? [])
+
+        const renderedLinks =
+          activeSubIsland !== null ? activeSubIsland.links : island.links
+
+        const renderedNodes =
+          activeSubIsland !== null ? activeSubIsland.nodes : island.nodes
+
         return (
           <g
             key={island.rootId}
             className={dimmed ? 'wm-island--dimmed' : undefined}
             data-testid={current ? 'wm-current-island' : undefined}
           >
-            {/* 会话岛地标卡（外框/色条/胶囊角标）；根岛、归档卡及子岛聚焦态下不套地标卡 */}
+            {/* 会话岛地标卡（仅在全局视图且有 sessionId 时呈现） */}
             {island.sessionId !== null && activeSubIsland === null ? (
               <IslandFrameCard
                 island={island}
@@ -1020,38 +1041,34 @@ export function WorkMapTree({
                 onRequestFocus={onIslandFocusRequest}
               />
             ) : null}
-            {/* 嵌套子岛地标卡（L3 任务及后代思考） */}
-            {island.subIslands?.map((sub) => {
+
+            {/* 嵌套子岛地标卡：统一 map 结构保证 key={sub.id} 的 DOM 节点在聚焦切换时稳定复用 */}
+            {renderedSubIslands.map((sub) => {
               const isCurrentPlan =
                 current &&
                 currentPlanTitle != null &&
                 currentPlanTitle.trim() !== '' &&
                 sub.title === currentPlanTitle.trim()
-              const isSubFocused = focusedSubIslandId === sub.id
-              const isSubDimmed = focusedSubIslandId != null && !isSubFocused
+              const isSubFocused = activeSubIsland !== null && activeSubIsland.id === sub.id
               return (
                 <SubIslandFrameCard
                   key={sub.id}
                   subIsland={sub}
                   isCurrentPlan={isCurrentPlan}
                   isFocused={isSubFocused}
-                  dimmed={isSubDimmed}
+                  dimmed={false}
                   interactive={onSubIslandFocusRequest !== undefined}
                   onRequestFocus={onSubIslandFocusRequest}
                 />
               )
             })}
-            {island.links.map((link) => {
-              // 两端都 dim 才 dim：一端亮则线亮，树结构不被筛选打散（D17）
-              // 若处于子岛聚焦，非该子岛内部连线也 dim
-              const outsideSubIsland =
-                activeSubNodeIds !== null &&
-                (!activeSubNodeIds.has(link.fromId) || !activeSubNodeIds.has(link.toId))
+
+            {/* 连线：子岛聚焦时仅渲染子岛内部连线 */}
+            {renderedLinks.map((link) => {
               const dimLink =
-                outsideSubIsland ||
-                (filter !== null &&
-                  (dimById.get(link.fromId) ?? false) &&
-                  (dimById.get(link.toId) ?? false))
+                filter !== null &&
+                (dimById.get(link.fromId) ?? false) &&
+                (dimById.get(link.toId) ?? false)
               return (
                 <path
                   key={`${link.fromId}->${link.toId}`}
@@ -1061,20 +1078,22 @@ export function WorkMapTree({
                 />
               )
             })}
-            {island.nodes.map((node) => {
+
+            {/* 节点：子岛聚焦时仅渲染子岛内部节点 */}
+            {renderedNodes.map((node) => {
               const isCurrentPlan =
                 current &&
                 node.depth === 1 &&
                 currentPlanTitle != null &&
                 currentPlanTitle.trim() !== '' &&
                 node.text === currentPlanTitle.trim()
-              const outsideSub = activeSubNodeIds !== null && !activeSubNodeIds.has(node.id)
-              const dimmedNode = outsideSub || (dimById.get(node.id) ?? false)
+              const dimmedNode = filter !== null && node.thoughtType !== filter
               return (
                 <NodeBox
                   key={node.id}
                   node={node}
                   currentSession={
+                    activeSubIsland === null &&
                     typeof sessionId === 'string' &&
                     sessionId !== '' &&
                     node.sessionId === sessionId

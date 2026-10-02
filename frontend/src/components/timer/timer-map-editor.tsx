@@ -112,6 +112,7 @@ export function TimerMapEditor({
 
   // ── 嵌套子岛与缩放平移（PXII-FEAT-NESTED-ISLAND & ZOOM-PAN）───────────────
   const [focusedSubIslandId, setFocusedSubIslandId] = useState<string | null>(null)
+
   const [zoom, setZoom] = useState(1.0)
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [isPanning, setIsPanning] = useState(false)
@@ -570,6 +571,7 @@ export function TimerMapEditor({
                     setPan({ x: 0, y: 0 })
                   }}
                   title={`聚焦子岛：${sub.title}`}
+                  aria-label={`聚焦子岛：${sub.title}`}
                 >
                   {isCurrent ? '⚡ ' : ''}
                   {sub.title.length > 7 ? `${sub.title.slice(0, 7)}…` : sub.title}

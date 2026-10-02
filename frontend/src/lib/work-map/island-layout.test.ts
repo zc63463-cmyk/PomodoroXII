@@ -583,18 +583,18 @@ session_id: "${SID}"
     expect(sub1.bounds.minX).toBeLessThanOrEqual(sub1.rootNode.box.x)
     expect(sub1.bounds.maxX).toBeGreaterThanOrEqual(sub1.rootNode.box.x + sub1.rootNode.box.w)
 
-    // 视觉包围盒按安全 padding 扩展
+    // 视觉包围盒按安全 padding 扩展（紧凑 3px 垂直间距，防卡片重叠）
     const visual = subIslandVisualBounds(sub1)
-    expect(visual.minX).toBe(sub1.bounds.minX - 10)
-    expect(visual.minY).toBe(sub1.bounds.minY - 18)
-    expect(visual.maxX).toBe(sub1.bounds.maxX + 12)
-    expect(visual.maxY).toBe(sub1.bounds.maxY + 10)
+    expect(visual.minX).toBe(sub1.bounds.minX - 8)
+    expect(visual.minY).toBe(sub1.bounds.minY - 3)
+    expect(visual.maxX).toBe(sub1.bounds.maxX + 8)
+    expect(visual.maxY).toBe(sub1.bounds.maxY + 3)
 
-    // 聚焦态包围盒按更大安全内边距扩展（预留顶栏地标标题与底部返回胶囊）
+    // 聚焦态包围盒按更大安全内边距扩展（预留顶栏地标标题与底部返回胶囊，保底 340×140）
     const focusedVisual = subIslandVisualBounds(sub1, true)
-    expect(focusedVisual.minX).toBe(sub1.bounds.minX - 14)
-    expect(focusedVisual.minY).toBe(sub1.bounds.minY - 30)
-    expect(focusedVisual.maxX).toBe(sub1.bounds.maxX + 16)
-    expect(focusedVisual.maxY).toBe(sub1.bounds.maxY + 30)
+    expect(focusedVisual.minX).toBe(sub1.bounds.minX - 16)
+    expect(focusedVisual.minY).toBe(sub1.bounds.minY - 32)
+    expect(focusedVisual.maxX - focusedVisual.minX).toBeGreaterThanOrEqual(340)
+    expect(focusedVisual.maxY - focusedVisual.minY).toBeGreaterThanOrEqual(140)
   })
 })
