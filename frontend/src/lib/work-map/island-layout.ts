@@ -172,7 +172,7 @@ export const NODE_MAX_W = 200
 const MIN_W = NODE_MIN_W
 const MAX_W = NODE_MAX_W
 
-/** 嵌套子岛安全内边距 */
+/** 嵌套子岛安全内边距（全局多岛流默认态） */
 export const SUB_ISLAND_PAD = {
   left: 10,
   top: 18,
@@ -180,13 +180,25 @@ export const SUB_ISLAND_PAD = {
   bottom: 10,
 }
 
-/** 计算子岛视觉呈现包围盒（含内边距与顶部微标签空间） */
-export function subIslandVisualBounds(subIsland: MapSubIsland): { minX: number; minY: number; maxX: number; maxY: number } {
+/** 嵌套子岛聚焦态安全内边距（单岛聚焦态，预留顶栏地标标题与底部返回按钮空间） */
+export const SUB_ISLAND_FOCUSED_PAD = {
+  left: 14,
+  top: 30,
+  right: 16,
+  bottom: 30,
+}
+
+/** 计算子岛视觉呈现包围盒（含内边距与微标签/地标顶栏空间） */
+export function subIslandVisualBounds(
+  subIsland: MapSubIsland,
+  isFocused = false,
+): { minX: number; minY: number; maxX: number; maxY: number } {
+  const pad = isFocused ? SUB_ISLAND_FOCUSED_PAD : SUB_ISLAND_PAD
   return {
-    minX: subIsland.bounds.minX - SUB_ISLAND_PAD.left,
-    minY: subIsland.bounds.minY - SUB_ISLAND_PAD.top,
-    maxX: subIsland.bounds.maxX + SUB_ISLAND_PAD.right,
-    maxY: subIsland.bounds.maxY + SUB_ISLAND_PAD.bottom,
+    minX: subIsland.bounds.minX - pad.left,
+    minY: subIsland.bounds.minY - pad.top,
+    maxX: subIsland.bounds.maxX + pad.right,
+    maxY: subIsland.bounds.maxY + pad.bottom,
   }
 }
 

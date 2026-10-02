@@ -399,7 +399,7 @@ export function hasRootTitle(text: string): boolean {
  */
 export type MapNodeEditOp =
   | { kind: 'rename'; cid: string; title: string }
-  | { kind: 'add'; cid: string; title: string }
+  | { kind: 'add'; cid: string; title: string; thoughtType?: ThoughtType }
   | { kind: 'type'; cid: string; type: ThoughtType | null }
   | { kind: 'comment'; cid: string; comment: string[] | null }
   | { kind: 'delete'; cid: string }
@@ -410,7 +410,7 @@ export function applyMapNodeEdit(text: string, op: MapNodeEditOp): NodeEditResul
     case 'rename':
       return renameNode(text, { cid: op.cid, title: op.title })
     case 'add':
-      return addChildNode(text, { parentCid: op.cid, title: op.title })
+      return addChildNode(text, { parentCid: op.cid, title: op.title, thoughtType: op.thoughtType })
     case 'type':
       return setThoughtType(text, { cid: op.cid, type: op.type })
     case 'comment':

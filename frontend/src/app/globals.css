@@ -1140,9 +1140,9 @@
 }
 .wm-editor-canvas {
   position: relative;
-  height: 290px; /* 区域限制：保证焦点区稳定紧凑，不无节制纵向推挤页面 */
-  min-height: 220px;
-  max-height: 380px;
+  height: 320px; /* 区域限制：舒适标准高度，保证焦点区稳定紧凑，支持内部漫游缩放 */
+  min-height: 240px;
+  max-height: 440px;
   padding: 6px;
   border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
   border-radius: 10px;
@@ -1938,13 +1938,22 @@
   stroke-dasharray: none;
 }
 .wm-sub-island-card--focused .wm-sub-island-frame {
-  fill: color-mix(in oklab, var(--ios-blue) 5%, transparent);
+  fill: var(--ios-card);
   stroke: var(--ios-blue);
   stroke-width: 1.5;
   stroke-dasharray: none;
+  filter: drop-shadow(0 4px 16px color-mix(in oklab, var(--ios-blue) 18%, transparent));
+}
+.wm-sub-island-bar {
+  fill: var(--ios-blue);
+}
+.wm-sub-island-title {
+  fill: var(--ios-label);
+  letter-spacing: -0.2px;
+  user-select: none;
 }
 .wm-sub-island-card--dimmed {
-  opacity: 0.26;
+  opacity: 0.18;
 }
 .wm-sub-island-tag-wrap {
   cursor: pointer;
@@ -1976,6 +1985,33 @@
 .wm-sub-island-card--focused .wm-sub-island-tag-text {
   fill: #fff;
   font-weight: 600;
+}
+.wm-sub-island-exit-pill {
+  cursor: pointer;
+}
+.wm-sub-island-exit-bg {
+  fill: color-mix(in oklab, var(--ios-blue) 10%, transparent);
+  stroke: color-mix(in oklab, var(--ios-blue) 30%, transparent);
+  stroke-width: 1;
+  transition: fill 0.15s;
+}
+.wm-sub-island-exit-pill:hover .wm-sub-island-exit-bg,
+.wm-sub-island-exit-pill:focus-visible .wm-sub-island-exit-bg {
+  fill: color-mix(in oklab, var(--ios-blue) 22%, transparent);
+}
+.wm-sub-island-exit-text {
+  fill: var(--ios-blue);
+  user-select: none;
+}
+.wm-sub-island-hint {
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.75;
+  transition: opacity 0.15s;
+}
+.wm-sub-island-hint:hover {
+  opacity: 1;
+  text-decoration: underline;
 }
 
 /* ── 准备态「主图」弹层（ADR-0008 D18 / D13 步 3-4a，方案 C）──────────────────

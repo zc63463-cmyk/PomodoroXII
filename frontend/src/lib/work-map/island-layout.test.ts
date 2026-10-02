@@ -589,5 +589,12 @@ session_id: "${SID}"
     expect(visual.minY).toBe(sub1.bounds.minY - 18)
     expect(visual.maxX).toBe(sub1.bounds.maxX + 12)
     expect(visual.maxY).toBe(sub1.bounds.maxY + 10)
+
+    // 聚焦态包围盒按更大安全内边距扩展（预留顶栏地标标题与底部返回胶囊）
+    const focusedVisual = subIslandVisualBounds(sub1, true)
+    expect(focusedVisual.minX).toBe(sub1.bounds.minX - 14)
+    expect(focusedVisual.minY).toBe(sub1.bounds.minY - 30)
+    expect(focusedVisual.maxX).toBe(sub1.bounds.maxX + 16)
+    expect(focusedVisual.maxY).toBe(sub1.bounds.maxY + 30)
   })
 })

@@ -485,7 +485,25 @@ export function TimerMapEditor({
   const submitQuick = async (): Promise<void> => {
     if (activeType === null || busy) return
     const title = draft.trim()
-    if (title === '' || onQuickRecord === undefined) return
+    if (title === '') return
+
+    // 优先：若处于子岛聚焦态且该子岛具备持久编辑键 cid，且编辑能力已开放 → 直接挂在该子岛下
+    if (focusedSubIsland !== null && focusedSubIsland.cid !== null && onEdit !== undefined) {
+      setBusy(true)
+      setQuickError(null)
+      try {
+        await onEdit({ kind: 'add', cid: focusedSubIsland.cid, title, thoughtType: activeType })
+        setDraft('')
+        setActiveType(null)
+      } catch (cause) {
+        setQuickError(cause instanceof Error ? cause.message : String(cause))
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
+
+    if (onQuickRecord === undefined) return
     setBusy(true)
     setQuickError(null)
     try {
@@ -928,7 +946,11 @@ export function TimerMapEditor({
             className="ios-map-quick-input"
             data-testid="map-quick-input"
             aria-label={`${THOUGHT_TYPE_LABEL[activeType]}内容`}
-            placeholder={`${THOUGHT_TYPE_LABEL[activeType]}…（Enter 记下）`}
+            placeholder={
+              focusedSubIsland !== null
+                ? `${THOUGHT_TYPE_LABEL[activeType]}…（追加到 L3 子岛「${focusedSubIsland.title.length > 8 ? `${focusedSubIsland.title.slice(0, 8)}…` : focusedSubIsland.title}」）`
+                : `${THOUGHT_TYPE_LABEL[activeType]}…（Enter 记下）`
+            }
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
           />

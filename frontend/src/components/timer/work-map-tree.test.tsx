@@ -652,6 +652,9 @@ describe('幕布描述块渲染（PXII-FEAT-DESC-BLOCK）', () => {
     const subId = subCard!.getAttribute('data-sub-island-id')!
     expect(subId).toBeTruthy()
 
+    // 全局视角下：会话地标大卡存在
+    expect(container.querySelector('[data-testid="wm-island-card"]')).not.toBeNull()
+
     // 点击标签上抛
     const tagWrap = subCard!.querySelector('.wm-sub-island-tag-wrap')!
     fireEvent.click(tagWrap)
@@ -661,16 +664,38 @@ describe('幕布描述块渲染（PXII-FEAT-DESC-BLOCK）', () => {
     fireEvent.doubleClick(subCard!)
     expect(onSubFocus).toHaveBeenCalledWith(subId)
 
-    // 当 focusedSubIslandId 命中时
+    // 当 focusedSubIslandId 命中时（进入 L3 专注岛视图）
     rerender(
       <WorkMapTree
         islands={LAYOUT.islands}
         sessionId={SESSION_ID}
+        currentPlanTitle="测试次一级的workitme"
         focusedSubIslandId={subId}
         onSubIslandFocusRequest={onSubFocus}
       />,
     )
     expect(subCard).toHaveClass('wm-sub-island-card--focused')
     expect(subCard?.getAttribute('data-focused')).toBe('true')
+
+    // 方案 A 关键断言 1：外层父会话大卡隐藏，不产生层叠挤压
+    expect(container.querySelector('[data-testid="wm-island-card"]')).toBeNull()
+
+    // 方案 A 关键断言 2：聚焦子岛顶栏标题（红框）与左色条呈现
+    const subTitle = subCard!.querySelector('[data-testid="wm-sub-island-title"]')
+    expect(subTitle).not.toBeNull()
+    expect(subTitle?.textContent).toContain('L3 子任务岛')
+    expect(subCard!.querySelector('.wm-sub-island-bar')).not.toBeNull()
+
+    // 方案 A 关键断言 3：状态角标
+    const subBadge = subCard!.querySelector('[data-testid="wm-sub-island-badge"]')
+    expect(subBadge).not.toBeNull()
+    expect(subBadge?.textContent).toContain('当前专注中')
+
+    // 方案 A 关键断言 4：底部返回全局群岛胶囊按钮，点击上抛退出
+    const exitBtn = subCard!.querySelector('[data-testid="map-sub-island-exit-btn"]')
+    expect(exitBtn).not.toBeNull()
+    expect(exitBtn?.textContent).toContain('返回会话全局群岛')
+    fireEvent.click(exitBtn!)
+    expect(onSubFocus).toHaveBeenLastCalledWith('')
   })
 })

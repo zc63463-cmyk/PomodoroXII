@@ -331,4 +331,42 @@ describe('TimerMapEditor 节点编辑（ADR-0008 D16 / D13 步 3-2）', () => {
     expect(screen.queryByTestId('map-sub-island-banner')).toBeNull()
     expect(screen.getByTestId('map-view-global')).toHaveAttribute('aria-pressed', 'true')
   })
+
+  it('★ 子岛聚焦下快速记录（PXII-FEAT-NESTED-ISLAND）：输入定向挂载到当前 L3 子岛', async () => {
+    const onEdit = vi.fn().mockResolvedValue(undefined)
+    const onQuickRecord = vi.fn().mockResolvedValue(undefined)
+    render(
+      <TimerMapEditor
+        mapText={EDITABLE_ISLAND}
+        sessionId={SESSION_ID}
+        onEdit={onEdit}
+        onQuickRecord={onQuickRecord}
+      />,
+    )
+    // 聚焦到有 cid 的子岛（可编辑节点，cid="c2"）
+    const subBtns = screen.getAllByRole('button', { name: /聚焦子岛/ })
+    const targetSubBtn = subBtns.find((btn) => btn.getAttribute('data-testid')?.includes('c2') || btn.textContent?.includes('可编辑')) ?? subBtns[subBtns.length - 1]!
+    fireEvent.click(targetSubBtn)
+    expect(screen.getByTestId('map-sub-island-banner')).toBeInTheDocument()
+
+    // 点击待办类型按钮打开浮层
+    fireEvent.click(screen.getByTestId('map-quick-todo'))
+    const input = screen.getByTestId('map-quick-input')
+    expect(input.getAttribute('placeholder')).toContain('追加到 L3 子岛')
+
+    // 输入并提交
+    fireEvent.change(input, { target: { value: '子任务专属待办' } })
+    fireEvent.click(screen.getByTestId('map-quick-submit'))
+
+    // 关键断言：直接调 onEdit（kind: 'add', cid: 子岛cid, title, thoughtType）而不是全会话的 onQuickRecord
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith({
+        kind: 'add',
+        cid: 'c2',
+        title: '子任务专属待办',
+        thoughtType: 'todo',
+      }),
+    )
+    expect(onQuickRecord).not.toHaveBeenCalled()
+  })
 })

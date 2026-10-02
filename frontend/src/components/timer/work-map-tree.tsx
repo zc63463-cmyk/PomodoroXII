@@ -327,6 +327,11 @@ function NodeBox({
           />
           {node.thoughtType !== null ? (
             <TypeShape x={12} y={titleCy} type={node.thoughtType} />
+          ) : currentPlan ? (
+            <g className="wm-shape wm-shape--current-hub">
+              <circle cx={12} cy={titleCy} r={4.5} fill="none" stroke="var(--ios-blue)" strokeWidth={1.5} />
+              <circle cx={12} cy={titleCy} r={2} fill="var(--ios-blue)" />
+            </g>
           ) : (
             <circle cx={12} cy={titleCy} r={3} className="wm-shape wm-shape--plain" />
           )}
@@ -720,7 +725,7 @@ function SubIslandFrameCard({
   interactive: boolean
   onRequestFocus?: (subIslandId: string) => void
 }): ReactNode {
-  const visual = subIslandVisualBounds(subIsland)
+  const visual = subIslandVisualBounds(subIsland, isFocused)
   const w = Math.max(1, visual.maxX - visual.minX)
   const h = Math.max(1, visual.maxY - visual.minY)
   const thoughtCount = subIsland.nodes.filter((n) => n.thoughtType !== null).length
@@ -744,6 +749,21 @@ function SubIslandFrameCard({
   const handleClick = interactive
     ? () => onRequestFocus?.(isFocused ? '' : subIsland.id)
     : undefined
+
+  // 聚焦态专用几何（顶栏标题 + 状态角标 + 底部返回按钮）
+  const titleX = visual.minX + 14
+  const titleY = visual.minY + 14
+  const title = subIsland.title === '' ? '（未命名 L3 子任务）' : subIsland.title
+  const badgeText = isCurrentPlan ? '⚡ 当前专注中' : `${thoughtCount} 项思考`
+  const badgeW = isCurrentPlan ? 78 : 66
+  const badgeX = visual.maxX - badgeW - 10
+  const badgeY = visual.minY + 5
+
+  // 底部退出胶囊按钮
+  const exitW = 140
+  const exitH = 20
+  const exitX = visual.minX + Math.max(8, (w - exitW) / 2)
+  const exitY = visual.maxY - exitH - 5
 
   return (
     <g
@@ -773,45 +793,127 @@ function SubIslandFrameCard({
         y={visual.minY}
         width={w}
         height={h}
-        rx={8}
+        rx={isFocused ? 12 : 8}
         className="wm-sub-island-frame"
       />
-      <g
-        className="wm-sub-island-tag-wrap"
-        role={interactive ? 'button' : undefined}
-        tabIndex={interactive ? 0 : undefined}
-        aria-label={interactive ? `聚焦子岛：${subIsland.title}` : undefined}
-        onClick={handleClick}
-        onKeyDown={
-          interactive
-            ? (event) => {
+      {isFocused ? (
+        <>
+          <rect
+            x={visual.minX}
+            y={visual.minY}
+            width={4}
+            height={h}
+            rx={2}
+            className="wm-sub-island-bar"
+          />
+          <text
+            x={titleX}
+            y={titleY}
+            textAnchor="start"
+            dominantBaseline="central"
+            fontSize={11.5}
+            fontWeight={600}
+            className="wm-sub-island-title"
+            data-testid="wm-sub-island-title"
+          >
+            🏝️ L3 子任务岛 · {fitIslandTitleToWidth(title, Math.max(20, badgeX - titleX - 8), 11.5)}
+          </text>
+          <g className="wm-sub-island-badge" data-testid="wm-sub-island-badge">
+            <rect
+              x={badgeX}
+              y={badgeY}
+              width={badgeW}
+              height={18}
+              rx={9}
+              fill={isCurrentPlan ? 'var(--ios-blue)' : 'color-mix(in oklab, var(--foreground) 10%, transparent)'}
+            />
+            <text
+              x={badgeX + badgeW / 2}
+              y={badgeY + 9}
+              textAnchor="middle"
+              dominantBaseline="central"
+              fontSize={9}
+              fill={isCurrentPlan ? '#fff' : 'currentColor'}
+              fontWeight={600}
+            >
+              {badgeText}
+            </text>
+          </g>
+          {interactive ? (
+            <g
+              className="wm-sub-island-exit-pill"
+              data-testid="map-sub-island-exit-btn"
+              role="button"
+              tabIndex={0}
+              aria-label="返回会话全局群岛视图"
+              onClick={() => onRequestFocus?.('')}
+              onKeyDown={(event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
-                  handleClick?.()
+                  onRequestFocus?.('')
                 }
-              }
-            : undefined
-        }
-      >
-        <rect
-          x={tagX}
-          y={tagY}
-          width={tagW}
-          height={12}
-          rx={3}
-          className="wm-sub-island-tag-bg"
-        />
-        <text
-          x={tagX + tagW / 2}
-          y={tagY + 6}
-          textAnchor="middle"
-          dominantBaseline="central"
-          fontSize={8.5}
-          className="wm-sub-island-tag-text"
+              }}
+            >
+              <rect
+                x={exitX}
+                y={exitY}
+                width={exitW}
+                height={exitH}
+                rx={exitH / 2}
+                className="wm-sub-island-exit-bg"
+              />
+              <text
+                x={exitX + exitW / 2}
+                y={exitY + exitH / 2}
+                textAnchor="middle"
+                dominantBaseline="central"
+                fontSize={9.5}
+                className="wm-sub-island-exit-text"
+                fontWeight={500}
+              >
+                ← 返回会话全局群岛
+              </text>
+            </g>
+          ) : null}
+        </>
+      ) : (
+        <g
+          className="wm-sub-island-tag-wrap"
+          role={interactive ? 'button' : undefined}
+          tabIndex={interactive ? 0 : undefined}
+          aria-label={interactive ? `聚焦子岛：${subIsland.title}` : undefined}
+          onClick={handleClick}
+          onKeyDown={
+            interactive
+              ? (event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    handleClick?.()
+                  }
+                }
+              : undefined
+          }
         >
-          {tagText}
-        </text>
-      </g>
+          <rect
+            x={tagX}
+            y={tagY}
+            width={tagW}
+            height={12}
+            rx={3}
+            className="wm-sub-island-tag-bg"
+          />
+          <text
+            x={tagX + tagW / 2}
+            y={tagY + 6}
+            textAnchor="middle"
+            dominantBaseline="central"
+            fontSize={8.5}
+            className="wm-sub-island-tag-text"
+          >
+            {tagText}
+          </text>
+        </g>
+      )}
     </g>
   )
 }
@@ -860,7 +962,7 @@ export function WorkMapTree({
   const target = useMemo(() => {
     if (focusBounds != null) return focusBounds
     if (activeSubIsland != null) {
-      return subIslandVisualBounds(activeSubIsland)
+      return subIslandVisualBounds(activeSubIsland, true)
     }
     return {
       minX: Math.min(...islands.map((island) => islandVisualBounds(island).minX), Number.POSITIVE_INFINITY),
@@ -909,8 +1011,8 @@ export function WorkMapTree({
             className={dimmed ? 'wm-island--dimmed' : undefined}
             data-testid={current ? 'wm-current-island' : undefined}
           >
-            {/* 会话岛地标卡（外框/色条/胶囊角标）；根岛与归档卡不套地标卡 */}
-            {island.sessionId !== null ? (
+            {/* 会话岛地标卡（外框/色条/胶囊角标）；根岛、归档卡及子岛聚焦态下不套地标卡 */}
+            {island.sessionId !== null && activeSubIsland === null ? (
               <IslandFrameCard
                 island={island}
                 isCurrent={current}
