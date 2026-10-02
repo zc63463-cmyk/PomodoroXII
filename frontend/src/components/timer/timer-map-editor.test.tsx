@@ -270,4 +270,65 @@ describe('TimerMapEditor 节点编辑（ADR-0008 D16 / D13 步 3-2）', () => {
     )
     expect(container.querySelector('.wm-node--focus')).toBeNull()
   })
+
+  it('★ 画布缩放工具条（PXII-FEAT-ZOOM-PAN）：放大、缩小、重置与自适应居中', () => {
+    const onEdit = vi.fn().mockResolvedValue(undefined)
+    render(
+      <TimerMapEditor
+        mapText={EDITABLE_ISLAND}
+        sessionId={SESSION_ID}
+        onEdit={onEdit}
+      />,
+    )
+    const viewport = screen.getByTestId('map-canvas-viewport')
+    expect(viewport.style.transform).toContain('scale(1)')
+
+    // 放大
+    fireEvent.click(screen.getByTestId('map-zoom-in'))
+    expect(viewport.style.transform).toContain('scale(1.2)')
+    expect(screen.getByTestId('map-zoom-reset')).toHaveTextContent('120%')
+
+    // 缩小
+    fireEvent.click(screen.getByTestId('map-zoom-out'))
+    expect(viewport.style.transform).toContain('scale(1)')
+    expect(screen.getByTestId('map-zoom-reset')).toHaveTextContent('100%')
+
+    // 再次放大并重置
+    fireEvent.click(screen.getByTestId('map-zoom-in'))
+    expect(viewport.style.transform).toContain('scale(1.2)')
+    fireEvent.click(screen.getByTestId('map-zoom-reset'))
+    expect(viewport.style.transform).toContain('scale(1)')
+
+    // 自适应
+    fireEvent.click(screen.getByTestId('map-zoom-fit'))
+    expect(viewport.style.transform).toContain('scale(1)')
+  })
+
+  it('★ 嵌套子岛视图切换（PXII-FEAT-NESTED-ISLAND）：全局岛 vs L3 子岛视图自由切换与退出', () => {
+    const onEdit = vi.fn().mockResolvedValue(undefined)
+    render(
+      <TimerMapEditor
+        mapText={EDITABLE_ISLAND}
+        sessionId={SESSION_ID}
+        onEdit={onEdit}
+      />,
+    )
+    // 渲染视图切换控制组
+    const toggle = screen.getByTestId('map-sub-island-toggle')
+    expect(toggle).toBeTruthy()
+    expect(screen.getByTestId('map-view-global')).toHaveAttribute('aria-pressed', 'true')
+
+    // 点击切换到 L3 子岛聚焦
+    const subBtn = screen.getAllByRole('button', { name: /聚焦子岛/ })[0]!
+    fireEvent.click(subBtn)
+
+    // 呈现聚焦横幅与退出按钮
+    expect(screen.getByTestId('map-sub-island-banner')).toHaveTextContent('正在聚焦 L3 子岛')
+    expect(screen.getByTestId('map-view-global')).toHaveAttribute('aria-pressed', 'false')
+
+    // 点击横幅退出按钮 → 返回会话全局
+    fireEvent.click(screen.getByTestId('map-sub-island-exit'))
+    expect(screen.queryByTestId('map-sub-island-banner')).toBeNull()
+    expect(screen.getByTestId('map-view-global')).toHaveAttribute('aria-pressed', 'true')
+  })
 })

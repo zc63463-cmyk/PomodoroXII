@@ -620,4 +620,57 @@ describe('幕布描述块渲染（PXII-FEAT-DESC-BLOCK）', () => {
     )
     expect(mismatchContainer.querySelector('.wm-node[data-current-plan="true"]')).toBeNull()
   })
+
+  it('★ 嵌套子岛（PXII-FEAT-NESTED-ISLAND）：渲染 L3 子岛卡片、支持当前计划项标识', () => {
+    const { container } = render(
+      <WorkMapTree
+        islands={LAYOUT.islands}
+        sessionId={SESSION_ID}
+        currentPlanTitle="测试次一级的workitme"
+      />,
+    )
+    const subCards = container.querySelectorAll('[data-testid="wm-sub-island-card"]')
+    expect(subCards.length).toBeGreaterThanOrEqual(1)
+    const currentSubCard = container.querySelector('[data-testid="wm-sub-island-card"][data-current-plan="true"]')
+    expect(currentSubCard).not.toBeNull()
+    expect(currentSubCard).toHaveClass('wm-sub-island-card--current')
+    expect(currentSubCard?.querySelector('.wm-sub-island-frame')).not.toBeNull()
+    expect(currentSubCard?.querySelector('.wm-sub-island-tag-text')?.textContent).toContain('L3 子岛')
+  })
+
+  it('★ 嵌套子岛聚焦与交互：双击卡片/点击标签上抛 onSubIslandFocusRequest，focusedSubIslandId 生效并 dim 其它子岛', () => {
+    const onSubFocus = vi.fn()
+    const { container, rerender } = render(
+      <WorkMapTree
+        islands={LAYOUT.islands}
+        sessionId={SESSION_ID}
+        onSubIslandFocusRequest={onSubFocus}
+      />,
+    )
+    const subCard = container.querySelector('[data-testid="wm-sub-island-card"]')
+    expect(subCard).not.toBeNull()
+    const subId = subCard!.getAttribute('data-sub-island-id')!
+    expect(subId).toBeTruthy()
+
+    // 点击标签上抛
+    const tagWrap = subCard!.querySelector('.wm-sub-island-tag-wrap')!
+    fireEvent.click(tagWrap)
+    expect(onSubFocus).toHaveBeenCalledWith(subId)
+
+    // 双击卡片上抛
+    fireEvent.doubleClick(subCard!)
+    expect(onSubFocus).toHaveBeenCalledWith(subId)
+
+    // 当 focusedSubIslandId 命中时
+    rerender(
+      <WorkMapTree
+        islands={LAYOUT.islands}
+        sessionId={SESSION_ID}
+        focusedSubIslandId={subId}
+        onSubIslandFocusRequest={onSubFocus}
+      />,
+    )
+    expect(subCard).toHaveClass('wm-sub-island-card--focused')
+    expect(subCard?.getAttribute('data-focused')).toBe('true')
+  })
 })

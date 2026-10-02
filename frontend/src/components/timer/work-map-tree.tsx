@@ -35,7 +35,7 @@
  * 极简态（沉浸）由外层 `[data-minimal='true']` 派生 CSS：**只隐文字，几何不变**
  * （零布局抖动）。
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import {
   DESC_BAR_W,
@@ -48,8 +48,10 @@ import {
   fitDescLineToBox,
   fitIslandTitleToWidth,
   fitTextToBox,
+  subIslandVisualBounds,
   visibleDescLines,
   type MapIslandLayout,
+  type MapSubIsland,
   type MapTreeNode,
 } from '@/lib/work-map/island-layout'
 import { THOUGHT_TYPES, type ThoughtType } from '@/lib/work-map/thought-types'
@@ -117,6 +119,15 @@ export interface WorkMapTreeProps {
    * focusedIslandId 状态（S4-3）。未提供时卡片无聚焦交互（编辑区/小视图场景）。
    */
   onIslandFocusRequest?: (islandId: string) => void
+  /**
+   * 聚焦子岛 id（PXII-FEAT-NESTED-ISLAND）：选中的 L3 任务子岛在 viewBox 中聚焦呈现，
+   * 其余节点/连线/子岛挂 dim。null / 缺省 = 会话全览。
+   */
+  focusedSubIslandId?: string | null
+  /**
+   * 子岛聚焦请求上抛（双击嵌套子岛卡片 / 点击子岛微标签）→ 调用方持有 focusedSubIslandId 状态。
+   */
+  onSubIslandFocusRequest?: (subIslandId: string) => void
 }
 
 /** 一个节点的依赖徽章数据（D19-b：紧凑态不跑连线避让，用 Badge 表达）。 */
@@ -688,6 +699,123 @@ function IslandFrameCard({
   )
 }
 
+/**
+ * 嵌套子岛地标卡（PXII-FEAT-NESTED-ISLAND）：
+ * 会话岛内每个 L3 任务子分支作为一个嵌套子岛呈现。
+ * 外包半透明圆角虚线框 + 顶部微标签（L3 子岛 · N 项思考）+ 支持当前计划项高亮。
+ * 双击卡片或点击微标签触发聚焦进该子岛（或退出聚焦）。
+ */
+function SubIslandFrameCard({
+  subIsland,
+  isCurrentPlan,
+  isFocused,
+  dimmed,
+  interactive,
+  onRequestFocus,
+}: {
+  subIsland: MapSubIsland
+  isCurrentPlan: boolean
+  isFocused: boolean
+  dimmed: boolean
+  interactive: boolean
+  onRequestFocus?: (subIslandId: string) => void
+}): ReactNode {
+  const visual = subIslandVisualBounds(subIsland)
+  const w = Math.max(1, visual.maxX - visual.minX)
+  const h = Math.max(1, visual.maxY - visual.minY)
+  const thoughtCount = subIsland.nodes.filter((n) => n.thoughtType !== null).length
+  const tagText = thoughtCount > 0 ? `L3 子岛 · ${thoughtCount}项` : 'L3 子岛'
+  const tagW = Math.max(
+    50,
+    Math.round(
+      [...tagText].reduce(
+        (s, c) =>
+          s +
+          (/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFF00-\uFF60]/.test(c)
+            ? 9
+            : 5.5),
+        0,
+      ) + 12,
+    ),
+  )
+  const tagX = visual.minX + 8
+  const tagY = visual.minY + 3
+
+  const handleClick = interactive
+    ? () => onRequestFocus?.(isFocused ? '' : subIsland.id)
+    : undefined
+
+  return (
+    <g
+      className={[
+        'wm-sub-island-card',
+        isCurrentPlan ? 'wm-sub-island-card--current' : '',
+        isFocused ? 'wm-sub-island-card--focused' : '',
+        dimmed ? 'wm-sub-island-card--dimmed' : '',
+      ]
+        .filter((token) => token !== '')
+        .join(' ')}
+      data-testid="wm-sub-island-card"
+      data-sub-island-id={subIsland.id}
+      data-current-plan={isCurrentPlan ? 'true' : undefined}
+      data-focused={isFocused ? 'true' : undefined}
+      onDoubleClick={handleClick}
+    >
+      <title>
+        {interactive
+          ? isFocused
+            ? '双击退出子岛聚焦'
+            : `双击聚焦此子岛：${subIsland.title}`
+          : undefined}
+      </title>
+      <rect
+        x={visual.minX}
+        y={visual.minY}
+        width={w}
+        height={h}
+        rx={8}
+        className="wm-sub-island-frame"
+      />
+      <g
+        className="wm-sub-island-tag-wrap"
+        role={interactive ? 'button' : undefined}
+        tabIndex={interactive ? 0 : undefined}
+        aria-label={interactive ? `聚焦子岛：${subIsland.title}` : undefined}
+        onClick={handleClick}
+        onKeyDown={
+          interactive
+            ? (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  handleClick?.()
+                }
+              }
+            : undefined
+        }
+      >
+        <rect
+          x={tagX}
+          y={tagY}
+          width={tagW}
+          height={12}
+          rx={3}
+          className="wm-sub-island-tag-bg"
+        />
+        <text
+          x={tagX + tagW / 2}
+          y={tagY + 6}
+          textAnchor="middle"
+          dominantBaseline="central"
+          fontSize={8.5}
+          className="wm-sub-island-tag-text"
+        >
+          {tagText}
+        </text>
+      </g>
+    </g>
+  )
+}
+
 export function WorkMapTree({
   islands,
   sessionId,
@@ -704,18 +832,46 @@ export function WorkMapTree({
   focusedIslandId,
   focusBounds,
   onIslandFocusRequest,
+  focusedSubIslandId,
+  onSubIslandFocusRequest,
 }: WorkMapTreeProps): ReactNode {
   // 筛选只调「视觉权重」：命中 = 高亮，其余 dim；null = 全亮（D17）
   const filter = highlightType ?? null
-  // 聚焦态（S4-3）：viewBox = 单岛 bounds + 32px 安全内边距；否则全岛并集
-  //（并集计入地标卡外框，避免卡片顶部被裁）。切换经 rAF 插值平滑过渡。
-  const target = focusBounds ?? {
-    minX: Math.min(...islands.map((island) => islandVisualBounds(island).minX), Number.POSITIVE_INFINITY),
-    minY: Math.min(...islands.map((island) => islandVisualBounds(island).minY), Number.POSITIVE_INFINITY),
-    maxX: Math.max(...islands.map((island) => islandVisualBounds(island).maxX), Number.NEGATIVE_INFINITY),
-    maxY: Math.max(...islands.map((island) => islandVisualBounds(island).maxY), Number.NEGATIVE_INFINITY),
-  }
-  const pad = focusBounds === undefined || focusBounds === null ? PAD : 32
+
+  // 子岛聚焦解析：
+  const activeSubIsland = useMemo(() => {
+    if (!focusedSubIslandId) return null
+    for (const island of islands) {
+      const hit = island.subIslands?.find((sub) => sub.id === focusedSubIslandId)
+      if (hit) return hit
+    }
+    return null
+  }, [islands, focusedSubIslandId])
+
+  const activeSubNodeIds = useMemo(() => {
+    return activeSubIsland ? new Set(activeSubIsland.nodes.map((n) => n.id)) : null
+  }, [activeSubIsland])
+
+  // 聚焦态（S4-3 / PXII-FEAT-NESTED-ISLAND）：
+  // 1. 显式 focusBounds（若外部传入）
+  // 2. 子岛聚焦 bounds（若 activeSubIsland 存在）
+  // 3. 单岛聚焦（focusedIslandId 存在时）
+  // 4. 全岛并集
+  const target = useMemo(() => {
+    if (focusBounds != null) return focusBounds
+    if (activeSubIsland != null) {
+      return subIslandVisualBounds(activeSubIsland)
+    }
+    return {
+      minX: Math.min(...islands.map((island) => islandVisualBounds(island).minX), Number.POSITIVE_INFINITY),
+      minY: Math.min(...islands.map((island) => islandVisualBounds(island).minY), Number.POSITIVE_INFINITY),
+      maxX: Math.max(...islands.map((island) => islandVisualBounds(island).maxX), Number.NEGATIVE_INFINITY),
+      maxY: Math.max(...islands.map((island) => islandVisualBounds(island).maxY), Number.NEGATIVE_INFINITY),
+    }
+  }, [focusBounds, activeSubIsland, islands])
+
+  const pad =
+    focusBounds != null ? 32 : activeSubIsland != null ? 24 : focusedIslandId != null ? 32 : PAD
   const width = Math.max(1, target.maxX - target.minX + pad * 2)
   const height = Math.max(1, target.maxY - target.minY + pad * 2)
   const viewBox = useAnimatedViewBox(
@@ -762,12 +918,38 @@ export function WorkMapTree({
                 onRequestFocus={onIslandFocusRequest}
               />
             ) : null}
+            {/* 嵌套子岛地标卡（L3 任务及后代思考） */}
+            {island.subIslands?.map((sub) => {
+              const isCurrentPlan =
+                current &&
+                currentPlanTitle != null &&
+                currentPlanTitle.trim() !== '' &&
+                sub.title === currentPlanTitle.trim()
+              const isSubFocused = focusedSubIslandId === sub.id
+              const isSubDimmed = focusedSubIslandId != null && !isSubFocused
+              return (
+                <SubIslandFrameCard
+                  key={sub.id}
+                  subIsland={sub}
+                  isCurrentPlan={isCurrentPlan}
+                  isFocused={isSubFocused}
+                  dimmed={isSubDimmed}
+                  interactive={onSubIslandFocusRequest !== undefined}
+                  onRequestFocus={onSubIslandFocusRequest}
+                />
+              )
+            })}
             {island.links.map((link) => {
               // 两端都 dim 才 dim：一端亮则线亮，树结构不被筛选打散（D17）
+              // 若处于子岛聚焦，非该子岛内部连线也 dim
+              const outsideSubIsland =
+                activeSubNodeIds !== null &&
+                (!activeSubNodeIds.has(link.fromId) || !activeSubNodeIds.has(link.toId))
               const dimLink =
-                filter !== null &&
-                (dimById.get(link.fromId) ?? false) &&
-                (dimById.get(link.toId) ?? false)
+                outsideSubIsland ||
+                (filter !== null &&
+                  (dimById.get(link.fromId) ?? false) &&
+                  (dimById.get(link.toId) ?? false))
               return (
                 <path
                   key={`${link.fromId}->${link.toId}`}
@@ -784,26 +966,21 @@ export function WorkMapTree({
                 currentPlanTitle != null &&
                 currentPlanTitle.trim() !== '' &&
                 node.text === currentPlanTitle.trim()
+              const outsideSub = activeSubNodeIds !== null && !activeSubNodeIds.has(node.id)
+              const dimmedNode = outsideSub || (dimById.get(node.id) ?? false)
               return (
                 <NodeBox
                   key={node.id}
                   node={node}
-                  // ★ BUG-WM-001（2026-10-01 修复）：未传 sessionId（准备态主图传
-                  //   null）时，`null === null` 曾让根岛与存量节点误挂「本次」蓝框。
-                  //   只有真实会话 id 命中岛根的 session_id 才算当前会话节点。
-                  //   （会话节点本身的判定在 NodeBox 内按 node.sessionNode 取 —— 历史
-                  //   会话岛的岛根同样是会话节点，同画发端枢纽，只是不带"本次"高亮。）
                   currentSession={
                     typeof sessionId === 'string' &&
                     sessionId !== '' &&
                     node.sessionId === sessionId
                   }
                   currentPlan={isCurrentPlan}
-                  // 依赖徽章：按实体引用 id 对位（D19-b 紧凑态）
                   badge={
                     node.refId !== null ? (dependencyBadges?.get(node.refId) ?? null) : null
                   }
-                  // 可编辑面只在「当前会话岛」：其它岛/无 cid/会话节点一律只读（D16-a）
                   editable={onSelectNode !== undefined && current && !node.sessionNode}
                   selected={
                     onSelectNode !== undefined &&
@@ -815,7 +992,7 @@ export function WorkMapTree({
                     node.cid !== null &&
                     node.cid === (focusCid ?? null)
                   }
-                  dimmed={dimById.get(node.id) ?? false}
+                  dimmed={dimmedNode}
                   highlighted={filter !== null && node.thoughtType === filter}
                   onSelect={onSelectNode}
                   onFocus={onFocusNode}

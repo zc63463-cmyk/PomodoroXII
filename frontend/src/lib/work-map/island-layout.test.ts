@@ -15,12 +15,15 @@ import {
   DESC_PAD_TOP,
   ISLAND_TITLE_FONT_SIZE,
   NODE_H_BASE,
+  NODE_MIN_W,
+  NODE_MAX_W,
   SESSION_HUB_SIZE,
   descBlockGeometry,
   findSessionIslandLayout,
   fitIslandTitleToWidth,
   measureWorkMapNode,
   readWorkMapLayout,
+  subIslandVisualBounds,
   WORK_MAP_DEFAULT_ACTIVE_LIMIT,
 } from './island-layout'
 import { readWorkMapView } from './island-view'
@@ -87,7 +90,7 @@ describe('readWorkMapLayout（几何层）', () => {
     for (const child of root.children) {
       expect(child.depth).toBe(1)
       expect(child.box.x).toBeGreaterThan(root.box.x) // 右侧生长（dir: right）
-      expect(child.box.w).toBeGreaterThanOrEqual(76)
+      expect(child.box.w).toBeGreaterThanOrEqual(NODE_MIN_W)
       expect(child.box.h).toBeGreaterThan(0)
     }
     // 同级不重叠（纵向排开）
@@ -112,14 +115,14 @@ describe('readWorkMapLayout（几何层）', () => {
     }
   })
 
-  it('度量自持：全角更宽、夹在 [76, 240]、非文本节点不崩', () => {
+  it('度量自持：全角更宽、夹在 [NODE_MIN_W, NODE_MAX_W]、非文本节点不崩', () => {
     const narrow = astToEditable(parseMm('# 根\n\n## a\n')!.root!)!
     const wide = astToEditable(parseMm('# 根\n\n## 很长很长很长很长很长很长很长很长很长很长很长很长的标题\n')!.root!)!
     const narrowChild = narrow.children[0]
     const wideChild = wide.children[0]
     expect(measureWorkMapNode(narrowChild, 1).w).toBeLessThan(measureWorkMapNode(wideChild, 1).w)
-    expect(measureWorkMapNode(wideChild, 1).w).toBeLessThanOrEqual(240)
-    expect(measureWorkMapNode(narrowChild, 1).w).toBeGreaterThanOrEqual(76)
+    expect(measureWorkMapNode(wideChild, 1).w).toBeLessThanOrEqual(NODE_MAX_W)
+    expect(measureWorkMapNode(narrowChild, 1).w).toBeGreaterThanOrEqual(NODE_MIN_W)
   })
 
   it('fail-soft：空文本 / 无根文档 → null（只记 warn，不抛）', () => {
@@ -198,9 +201,9 @@ describe('会话发端枢纽：会话岛根紧凑度量（PXII-FEAT-SESSION-HUB�
     const editable = astToEditable(parseMm(WITH_THOUGHTS)!.root!)!
     const sessionNode = editable.children[0]!
     expect(measureWorkMapNode(sessionNode, 0)).toEqual({ w: 28, h: 28 })
-    // 非会话岛根（文档根 = H1 标题）不受影响：仍按文本估算夹在 [76, 240]
+    // 非会话岛根（文档根 = H1 标题）不受影响：仍按文本估算夹在 [NODE_MIN_W, NODE_MAX_W]
     const rootNode = editable
-    expect(measureWorkMapNode(rootNode, 0).w).toBeGreaterThanOrEqual(76)
+    expect(measureWorkMapNode(rootNode, 0).w).toBeGreaterThanOrEqual(NODE_MIN_W)
     // 同一会话节点若被放在 depth 1（非岛根），不享受枢纽度量（判据含 depth === 0）
     expect(measureWorkMapNode(sessionNode, 1).w).toBeGreaterThan(28)
   })
@@ -242,8 +245,8 @@ describe('会话发端枢纽：会话岛根紧凑度量（PXII-FEAT-SESSION-HUB�
     const stock = island.nodes.find((node) => node.text === '测试次一级的workitme')!
     expect(stock.sessionNode).toBe(false)
     expect(stock.box.w).toBeGreaterThan(SESSION_HUB_SIZE)
-    expect(stock.box.w).toBeGreaterThanOrEqual(76)
-    expect(stock.box.w).toBeLessThanOrEqual(240)
+    expect(stock.box.w).toBeGreaterThanOrEqual(NODE_MIN_W)
+    expect(stock.box.w).toBeLessThanOrEqual(NODE_MAX_W)
   })
 
   it('★ 脏 session_id（非字符串）不享受枢纽度量（与渲染层 sessionNode 判据同源）', () => {
@@ -360,14 +363,14 @@ cid: "c4"
     expect(nodeOf(five, 'c2').node.comment).toHaveLength(5)
   })
 
-  it('★ 长文本注释 → 盒宽在 [MIN_W, MAX_W] 内合理扩宽（夹在 240）', () => {
+  it('★ 长文本注释 → 盒宽在 [NODE_MIN_W, NODE_MAX_W] 内合理扩宽', () => {
     const longLine = '这是一条特别特别特别特别特别特别特别特别特别长的注释行用来测试宽度扩展行为'
     const text = setNodeComment(SIBLINGS, { cid: 'c2', comment: [longLine] }).text
     const wide = nodeOf(text, 'c2').node.box.w
     const narrow = nodeOf(SIBLINGS, 'c2').node.box.w
     expect(wide).toBeGreaterThan(narrow) // 描述比标题长 → 横向撑开
-    expect(wide).toBeLessThanOrEqual(240) // 但夹在 MAX_W
-    expect(wide).toBeGreaterThanOrEqual(76)
+    expect(wide).toBeLessThanOrEqual(NODE_MAX_W) // 但夹在 MAX_W
+    expect(wide).toBeGreaterThanOrEqual(NODE_MIN_W)
     // 描述比标题短时不影响宽度（取二者较大者）
     const short = setNodeComment(SIBLINGS, { cid: 'c2', comment: ['短'] }).text
     expect(nodeOf(short, 'c2').node.box.w).toBe(narrow)
@@ -533,5 +536,58 @@ describe('近 N 展开 + 历史归档岛（D19-a：纯视图层投影切片）',
     // 结构层（island-view，不切片）仍看到根岛 + 20 会话岛 —— 事实源未被改写
     const view = readWorkMapView(before)
     expect(view?.islands).toHaveLength(21)
+  })
+})
+
+describe('嵌套子岛（MapSubIsland）', () => {
+  it('★ 会话岛自动聚合 L3 任务子岛（每个一级子节点为一个子岛，含其全部后代节点）', () => {
+    const fixture = `<!--
+centers:
+  - at: "node:根/会话"
+    cid: c1
+    session_id: "${SID}"
+-->
+# 根
+
+<!--
+cid: "c1"
+session_id: "${SID}"
+-->
+## 会话
+
+### L3任务一
+
+#### 思考A
+
+#### 思考B
+
+### L3任务二
+`
+    const layout = readWorkMapLayout(fixture)
+    const island = layout === null ? null : findSessionIslandLayout(layout, SID)
+    expect(island).not.toBeNull()
+    expect(island?.subIslands).toBeDefined()
+    expect(island?.subIslands).toHaveLength(2)
+
+    const sub1 = island!.subIslands![0]
+    expect(sub1.title).toBe('L3任务一')
+    expect(sub1.nodes).toHaveLength(3)
+    expect(sub1.nodes.map((n) => n.text)).toEqual(['L3任务一', '思考A', '思考B'])
+
+    const sub2 = island!.subIslands![1]
+    expect(sub2.title).toBe('L3任务二')
+    expect(sub2.nodes).toHaveLength(1)
+    expect(sub2.nodes.map((n) => n.text)).toEqual(['L3任务二'])
+
+    // 包围盒严格包围子树全部节点
+    expect(sub1.bounds.minX).toBeLessThanOrEqual(sub1.rootNode.box.x)
+    expect(sub1.bounds.maxX).toBeGreaterThanOrEqual(sub1.rootNode.box.x + sub1.rootNode.box.w)
+
+    // 视觉包围盒按安全 padding 扩展
+    const visual = subIslandVisualBounds(sub1)
+    expect(visual.minX).toBe(sub1.bounds.minX - 10)
+    expect(visual.minY).toBe(sub1.bounds.minY - 18)
+    expect(visual.maxX).toBe(sub1.bounds.maxX + 12)
+    expect(visual.maxY).toBe(sub1.bounds.maxY + 10)
   })
 })

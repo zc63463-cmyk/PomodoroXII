@@ -1139,13 +1139,115 @@
   background: color-mix(in oklab, var(--foreground) 4%, transparent);
 }
 .wm-editor-canvas {
-  flex: 1;
-  min-height: 190px;
+  position: relative;
+  height: 290px; /* 区域限制：保证焦点区稳定紧凑，不无节制纵向推挤页面 */
+  min-height: 220px;
+  max-height: 380px;
   padding: 6px;
   border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
   border-radius: 10px;
   background: color-mix(in oklab, var(--foreground) 3%, transparent);
   overflow: hidden;
+}
+.wm-canvas-viewport {
+  width: 100%;
+  height: 100%;
+  transform-origin: center center;
+  will-change: transform;
+}
+/* 浮动画布缩放控制条（PXII-FEAT-ZOOM-PAN） */
+.wm-canvas-toolbar {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: color-mix(in oklab, var(--ios-card) 88%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 999px;
+  padding: 3px 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  z-index: 10;
+  user-select: none;
+}
+.wm-canvas-tool-btn {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--ios-label-2);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.wm-canvas-tool-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+  color: var(--ios-label);
+}
+.wm-canvas-tool-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.wm-canvas-tool-btn--label {
+  font-size: 11px;
+  min-width: 38px;
+}
+/* 子岛视图切换与聚焦横幅 */
+.wm-sub-island-toggle {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-left: 6px;
+}
+.wm-sub-island-banner {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: color-mix(in oklab, var(--ios-card) 90%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in oklab, var(--ios-blue) 40%, transparent);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 11px;
+  color: var(--ios-label);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  z-index: 10;
+}
+.wm-sub-island-banner strong {
+  color: var(--ios-blue);
+  font-weight: 600;
+}
+.wm-sub-island-exit-btn {
+  appearance: none;
+  background: color-mix(in oklab, var(--ios-blue) 12%, transparent);
+  border: none;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  color: var(--ios-blue);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.wm-sub-island-exit-btn:hover {
+  background: var(--ios-blue);
+  color: #fff;
 }
 .wm-editor-canvas--empty {
   display: flex;
@@ -1812,6 +1914,68 @@
   font-size: 11.5px;
   color: var(--ios-label-2);
   white-space: nowrap;
+}
+
+/* ── 嵌套子岛地标卡（PXII-FEAT-NESTED-ISLAND）────────────────────────────
+   会话岛内的 L3 任务分支嵌套卡：半透明圆角虚线边框 + 顶部微标签。
+   当前专注项亮蓝色，子岛聚焦时高亮并 dim 其余子岛。 */
+.wm-sub-island-card {
+  transition: opacity 0.2s;
+}
+.wm-sub-island-frame {
+  fill: color-mix(in oklab, var(--foreground) 2.5%, transparent);
+  stroke: color-mix(in oklab, var(--foreground) 12%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  transition: fill 0.2s, stroke 0.2s;
+}
+.wm-sub-island-card:hover .wm-sub-island-frame {
+  stroke: color-mix(in oklab, var(--ios-blue) 45%, transparent);
+}
+.wm-sub-island-card--current .wm-sub-island-frame {
+  fill: color-mix(in oklab, var(--ios-blue) 3.5%, transparent);
+  stroke: color-mix(in oklab, var(--ios-blue) 45%, transparent);
+  stroke-dasharray: none;
+}
+.wm-sub-island-card--focused .wm-sub-island-frame {
+  fill: color-mix(in oklab, var(--ios-blue) 5%, transparent);
+  stroke: var(--ios-blue);
+  stroke-width: 1.5;
+  stroke-dasharray: none;
+}
+.wm-sub-island-card--dimmed {
+  opacity: 0.26;
+}
+.wm-sub-island-tag-wrap {
+  cursor: pointer;
+}
+.wm-sub-island-tag-bg {
+  fill: color-mix(in oklab, var(--ios-card) 92%, transparent);
+  stroke: color-mix(in oklab, var(--foreground) 15%, transparent);
+  stroke-width: 0.8;
+  transition: fill 0.15s, stroke 0.15s;
+}
+.wm-sub-island-card--current .wm-sub-island-tag-bg {
+  fill: color-mix(in oklab, var(--ios-blue) 12%, var(--ios-card));
+  stroke: var(--ios-blue);
+}
+.wm-sub-island-card--focused .wm-sub-island-tag-bg {
+  fill: var(--ios-blue);
+  stroke: var(--ios-blue);
+}
+.wm-sub-island-tag-text {
+  fill: var(--ios-label-2);
+  font-weight: 500;
+  letter-spacing: -0.2px;
+  user-select: none;
+}
+.wm-sub-island-card--current .wm-sub-island-tag-text {
+  fill: var(--ios-blue);
+  font-weight: 600;
+}
+.wm-sub-island-card--focused .wm-sub-island-tag-text {
+  fill: #fff;
+  font-weight: 600;
 }
 
 /* ── 准备态「主图」弹层（ADR-0008 D18 / D13 步 3-4a，方案 C）──────────────────

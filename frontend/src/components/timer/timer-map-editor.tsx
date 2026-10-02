@@ -110,6 +110,77 @@ export function TimerMapEditor({
   const [editError, setEditError] = useState<string | null>(null)
   const deleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // ── 嵌套子岛与缩放平移（PXII-FEAT-NESTED-ISLAND & ZOOM-PAN）───────────────
+  const [focusedSubIslandId, setFocusedSubIslandId] = useState<string | null>(null)
+  const [zoom, setZoom] = useState(1.0)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [isPanning, setIsPanning] = useState(false)
+  const panStartRef = useRef<{ startX: number; startY: number; initPanX: number; initPanY: number } | null>(null)
+
+  const focusedSubIsland = useMemo(() => {
+    if (!focusedSubIslandId || !island?.subIslands) return null
+    return island.subIslands.find((sub) => sub.id === focusedSubIslandId) ?? null
+  }, [focusedSubIslandId, island])
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    const target = e.target as HTMLElement | SVGElement
+    if (
+      target.closest('button') ||
+      target.closest('input') ||
+      target.closest('textarea') ||
+      target.closest('[role="button"]') ||
+      target.closest('.wm-canvas-toolbar') ||
+      target.closest('.wm-sub-island-banner') ||
+      target.closest('.wm-action-pop') ||
+      target.closest('.ios-map-quick-pop')
+    ) {
+      return
+    }
+    panStartRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      initPanX: pan.x,
+      initPanY: pan.y,
+    }
+    setIsPanning(true)
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      // ignore
+    }
+  }
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!panStartRef.current) return
+    const dx = e.clientX - panStartRef.current.startX
+    const dy = e.clientY - panStartRef.current.startY
+    setPan({
+      x: Math.round(panStartRef.current.initPanX + dx),
+      y: Math.round(panStartRef.current.initPanY + dy),
+    })
+  }
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (panStartRef.current) {
+      panStartRef.current = null
+      setIsPanning(false)
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) {
+      e.preventDefault()
+      const delta = e.deltaY > 0 ? -0.15 : 0.15
+      setZoom((z) => Math.min(2.5, Math.max(0.6, Math.round((z + delta) * 10) / 10)))
+    }
+  }
+
   // ── 键盘心流（PXII-FEAT-KEYMAP-FLOW）──────────────────────────────────
   /** 画布（SVG 所在块）：既是键位作用域判定的基准，也是浮层收起后的**焦点归还点** */
   const canvasRef = useRef<HTMLDivElement | null>(null)
@@ -397,9 +468,13 @@ export function TimerMapEditor({
         return
       }
       case 'cancel':
-        // 逐级退让：浮层 → 选中（两级都为空的情形已在上面提前返回）
+        // 逐级退让：浮层 → 子岛聚焦 → 选中
         if (overlay !== null) closeOverlay()
-        else {
+        else if (focusedSubIslandId !== null) {
+          setFocusedSubIslandId(null)
+          setZoom(1.0)
+          setPan({ x: 0, y: 0 })
+        } else {
           setSelectedCid(null)
           resetActions()
         }
@@ -433,9 +508,57 @@ export function TimerMapEditor({
       onKeyDown={editable ? handleKeyDown : undefined}
     >
       <div className="wm-editor-hd">
-        工作导图 · 本次会话
+        <span>工作导图 · 本次会话</span>
         {island !== null ? (
           <span className="wm-editor-count">{island.nodes.length} 项</span>
+        ) : null}
+        {/* 子岛视图切换（会话全局岛视图 vs L3子任务岛视图） */}
+        {island !== null && island.subIslands && island.subIslands.length > 0 ? (
+          <div
+            className="wm-sub-island-toggle"
+            role="group"
+            aria-label="导图视图切换"
+            data-testid="map-sub-island-toggle"
+          >
+            <button
+              type="button"
+              className={`wm-view-btn ${focusedSubIslandId === null ? 'wm-view-btn--active' : ''}`}
+              aria-pressed={focusedSubIslandId === null}
+              data-testid="map-view-global"
+              onClick={() => {
+                setFocusedSubIslandId(null)
+                setZoom(1.0)
+                setPan({ x: 0, y: 0 })
+              }}
+            >
+              会话全局
+            </button>
+            {island.subIslands.map((sub) => {
+              const isCurrent =
+                currentPlanTitle != null &&
+                currentPlanTitle.trim() !== '' &&
+                sub.title === currentPlanTitle.trim()
+              const isFocused = focusedSubIslandId === sub.id
+              return (
+                <button
+                  key={sub.id}
+                  type="button"
+                  className={`wm-view-btn ${isFocused ? 'wm-view-btn--active' : ''}`}
+                  aria-pressed={isFocused}
+                  data-testid={`map-view-sub-${sub.id}`}
+                  onClick={() => {
+                    setFocusedSubIslandId(isFocused ? null : sub.id)
+                    setZoom(1.0)
+                    setPan({ x: 0, y: 0 })
+                  }}
+                  title={`聚焦子岛：${sub.title}`}
+                >
+                  {isCurrent ? '⚡ ' : ''}
+                  {sub.title.length > 7 ? `${sub.title.slice(0, 7)}…` : sub.title}
+                </button>
+              )
+            })}
+          </div>
         ) : null}
         {editable && island !== null ? (
           <span className="wm-editor-keys" data-testid="map-key-hints">
@@ -457,16 +580,117 @@ export function TimerMapEditor({
           tabIndex={editable ? 0 : undefined}
           role={editable ? 'application' : undefined}
           aria-label={editable ? '本次会话导图（Tab 加子 / Enter 同级 / F2 改名 / 1-5 类型 / 方向键导航）' : undefined}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onWheel={handleWheel}
         >
-          <WorkMapTree
-            islands={[island]}
-            sessionId={sessionId}
-            label="本次会话导图（编辑区）"
-            selectedCid={selectedCid}
-            focusCid={focusCid}
-            currentPlanTitle={currentPlanTitle}
-            onSelectNode={editable ? selectNode : undefined}
-          />
+          {focusedSubIsland !== null ? (
+            <div className="wm-sub-island-banner" data-testid="map-sub-island-banner">
+              <span>
+                正在聚焦 L3 子岛：<strong>{focusedSubIsland.title}</strong>
+              </span>
+              <button
+                type="button"
+                className="wm-sub-island-exit-btn"
+                data-testid="map-sub-island-exit"
+                onClick={() => {
+                  setFocusedSubIslandId(null)
+                  setZoom(1.0)
+                  setPan({ x: 0, y: 0 })
+                }}
+              >
+                退出子岛聚焦
+              </button>
+            </div>
+          ) : null}
+
+          {/* 缩放与平移视口 */}
+          <div
+            className="wm-canvas-viewport"
+            data-testid="map-canvas-viewport"
+            style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: 'center center',
+              transition: isPanning ? 'none' : 'transform 0.15s cubic-bezier(0.2, 0, 0, 1)',
+              cursor: isPanning ? 'grabbing' : zoom > 1 ? 'grab' : 'default',
+            }}
+          >
+            <WorkMapTree
+              islands={[island]}
+              sessionId={sessionId}
+              label="本次会话导图（编辑区）"
+              selectedCid={selectedCid}
+              focusCid={focusCid}
+              currentPlanTitle={currentPlanTitle}
+              focusedSubIslandId={focusedSubIslandId}
+              onSubIslandFocusRequest={(subId) => {
+                setFocusedSubIslandId(subId || null)
+                setZoom(1.0)
+                setPan({ x: 0, y: 0 })
+              }}
+              onSelectNode={editable ? selectNode : undefined}
+            />
+          </div>
+
+          {/* 浮动缩放控制条 */}
+          <div
+            className="wm-canvas-toolbar"
+            data-testid="map-canvas-toolbar"
+            role="toolbar"
+            aria-label="画布缩放控制"
+          >
+            <button
+              type="button"
+              className="wm-canvas-tool-btn"
+              data-testid="map-zoom-out"
+              aria-label="缩小"
+              title="缩小"
+              disabled={zoom <= 0.6}
+              onClick={() => setZoom((z) => Math.max(0.6, Math.round((z - 0.2) * 10) / 10))}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="wm-canvas-tool-btn wm-canvas-tool-btn--label"
+              data-testid="map-zoom-reset"
+              aria-label="重置缩放"
+              title="点击重置为 100%"
+              onClick={() => {
+                setZoom(1.0)
+                setPan({ x: 0, y: 0 })
+              }}
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              type="button"
+              className="wm-canvas-tool-btn"
+              data-testid="map-zoom-in"
+              aria-label="放大"
+              title="放大"
+              disabled={zoom >= 2.5}
+              onClick={() => setZoom((z) => Math.min(2.5, Math.round((z + 0.2) * 10) / 10))}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              className="wm-canvas-tool-btn"
+              data-testid="map-zoom-fit"
+              aria-label="自适应居中"
+              title="重置缩放并适应视图"
+              onClick={() => {
+                setZoom(1.0)
+                setPan({ x: 0, y: 0 })
+                setFocusedSubIslandId(null)
+              }}
+            >
+              适应
+            </button>
+          </div>
         </div>
       ) : (
         <div className="wm-editor-canvas wm-editor-canvas--empty" data-testid="map-editor-empty">

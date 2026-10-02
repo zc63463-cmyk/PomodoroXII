@@ -87,6 +87,16 @@ export interface MapTreeNode {
   children: MapTreeNode[]
 }
 
+export interface MapSubIsland {
+  id: string
+  title: string
+  cid: string | null
+  rootNode: MapTreeNode
+  nodes: MapTreeNode[]
+  links: { fromId: string; toId: string; path: string }[]
+  bounds: { minX: number; minY: number; maxX: number; maxY: number }
+}
+
 export interface MapIslandLayout {
   rootId: string
   /**
@@ -104,6 +114,8 @@ export interface MapIslandLayout {
   links: { fromId: string; toId: string; path: string }[]
   /** 岛内包围盒（世界坐标，来自节点盒） */
   bounds: { minX: number; minY: number; maxX: number; maxY: number }
+  /** 嵌套子岛（L3 任务及其后代思考形成的子岛列表） */
+  subIslands?: MapSubIsland[]
   /** 是否为归档岛（真岛缺省 false / 无此字段） */
   isArchive?: boolean
   /** 归档岛收纳的历史会话数 M（仅归档岛有） */
@@ -154,8 +166,30 @@ export const DESC_PAD_BOTTOM = 4
  * 这里用 SVG 无法内滚，故以 tooltip 兜底）。
  */
 export const DESC_MAX_VISIBLE_LINES = 3
-const MIN_W = 76
-const MAX_W = 240
+/** 节点盒最小与最大宽度（调整为更紧凑优雅的比例） */
+export const NODE_MIN_W = 64
+export const NODE_MAX_W = 200
+const MIN_W = NODE_MIN_W
+const MAX_W = NODE_MAX_W
+
+/** 嵌套子岛安全内边距 */
+export const SUB_ISLAND_PAD = {
+  left: 10,
+  top: 18,
+  right: 12,
+  bottom: 10,
+}
+
+/** 计算子岛视觉呈现包围盒（含内边距与顶部微标签空间） */
+export function subIslandVisualBounds(subIsland: MapSubIsland): { minX: number; minY: number; maxX: number; maxY: number } {
+  return {
+    minX: subIsland.bounds.minX - SUB_ISLAND_PAD.left,
+    minY: subIsland.bounds.minY - SUB_ISLAND_PAD.top,
+    maxX: subIsland.bounds.maxX + SUB_ISLAND_PAD.right,
+    maxY: subIsland.bounds.maxY + SUB_ISLAND_PAD.bottom,
+  }
+}
+
 /** 三档字号（root / branch / leaf）：与端口渲染层同一视觉档口径 */
 const fontOf = (depth: number): number => (depth === 0 ? 12.5 : depth === 1 ? 12 : 11)
 
@@ -491,6 +525,7 @@ function buildArchiveIsland(laidIslands: readonly MapIslandLayout[], archivedCou
     nodes: [card],
     links: [],
     bounds: { minX: x, minY: y, maxX: x + ARCHIVE_CARD_W, maxY: y + ARCHIVE_CARD_H },
+    subIslands: [],
     isArchive: true,
     archivedCount,
   }
@@ -562,6 +597,21 @@ export function readWorkMapLayout(
         .map((link) => ({ fromId: link.fromId, toId: link.toId, path: link.path }))
       // 会话 id：取岛内首个携带 session_id 的节点（本项目建岛时写在岛根上）
       const sessionId = nodes.find((node) => node.sessionId !== null)?.sessionId ?? null
+      // 嵌套子岛：岛根直属一级子节点（depth === 1）每个为一个 L3 任务子岛及其思考分支
+      const subIslands: MapSubIsland[] = tree.children.map((child) => {
+        const subNodes = flatten(child)
+        const subNodeIds = new Set(subNodes.map((n) => n.id))
+        const subLinks = links.filter((l) => subNodeIds.has(l.fromId) && subNodeIds.has(l.toId))
+        return {
+          id: child.id,
+          title: child.text,
+          cid: child.cid,
+          rootNode: child,
+          nodes: subNodes,
+          links: subLinks,
+          bounds: boundsOf(subNodes),
+        }
+      })
       return {
         rootId: island.rootId,
         sourceKind: island.sourceKind,
@@ -570,6 +620,7 @@ export function readWorkMapLayout(
         nodes,
         links,
         bounds: boundsOf(nodes),
+        subIslands,
       } satisfies MapIslandLayout
     })
 
