@@ -543,7 +543,10 @@ export function TimerMapEditor({
   useEffect(() => {
     if (overlay !== 'rename') return
     const input = actionInputRef.current
-    if (input instanceof HTMLInputElement) input.select()
+    if (input instanceof HTMLInputElement) {
+      input.focus({ preventScroll: true })
+      input.select()
+    }
   }, [overlay])
 
   // 注释浮层：打开即聚焦并把光标置于**末尾**（接着写，而不是覆盖已有注释）——
@@ -552,7 +555,7 @@ export function TimerMapEditor({
     if (overlay !== 'comment') return
     const input = actionInputRef.current
     if (input instanceof HTMLTextAreaElement) {
-      input.focus()
+      input.focus({ preventScroll: true })
       input.setSelectionRange(input.value.length, input.value.length)
     }
   }, [overlay])
