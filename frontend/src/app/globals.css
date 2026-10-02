@@ -1098,6 +1098,10 @@
    两个容器渲染**同一份树**（`.wm-tree`），差异只在容器宽度/高度。 */
 .wm-editor {
   position: relative; /* 快速记录浮层的定位基准（浮层不撑开几何） */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
   gap: 8px;
 }
 .wm-editor-hd {
@@ -1106,6 +1110,7 @@
   gap: 8px;
   font-size: 12px;
   color: var(--ios-label-2);
+  flex-shrink: 0;
 }
 .wm-editor-count {
   font-size: 10.5px;
@@ -1144,9 +1149,8 @@
 }
 .wm-editor-canvas {
   position: relative;
-  height: 320px; /* 区域限制：舒适标准高度，保证焦点区稳定紧凑，支持内部漫游缩放 */
-  min-height: 240px;
-  max-height: 440px;
+  flex: 1 1 0%; /* 自适应垂直铺满焦点区，与右栏高度对齐 */
+  min-height: 320px;
   padding: 6px;
   border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
   border-radius: 10px;
@@ -1476,6 +1480,7 @@
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 9px;
+  flex-shrink: 0;
 }
 .ios-map-quick-btn {
   display: inline-flex;
