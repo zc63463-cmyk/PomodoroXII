@@ -118,6 +118,25 @@ export interface WorkMapLayout {
 /** 节点盒基础高度（无描述时的高度；= 渲染层单行文字盒） */
 export const NODE_H_BASE = 28
 /**
+ * **会话发端枢纽（Anchor Hub）**边长（PXII-FEAT-SESSION-HUB）——
+ * 会话岛根不再画成宽矩形卡片，而是收拢为紧凑的圆形发端枢纽；会话标题上浮到
+ * 地标卡顶栏（渲染层 `wm-island-title`），画布内不再有被截断的 `10-01 14:29 会…`。
+ *
+ * 尺寸是**几何不变量**：kernel `layoutIslands` 按 measure 返回的 `w/h` 排布，
+ * 岛根盒缩小 → 子节点整列向左紧凑平移（`placeSubtree` 取 `xEdge + H_GAP`），
+ * 连线由 `islandLinks` 按平移后的世界坐标重建 —— 两端自动贴合新盒缘。
+ */
+export const SESSION_HUB_SIZE = 28
+
+/**
+ * 地标卡顶栏会话标题字号（PXII-FEAT-SESSION-HUB）—— 会话标题从画布节点**上浮**
+ * 到岛地标卡顶栏后，用的是"岛级"字号档，与节点三档字号（root/branch/leaf）无关。
+ *
+ * 渲染层用 `fontSize={ISLAND_TITLE_FONT_SIZE}` 显式给定、截断估算用同一档
+ * （`fitIslandTitleToWidth` 缺省值）—— 两处同源，标题才不会画出卡外压住角标。
+ */
+export const ISLAND_TITLE_FONT_SIZE = 11.5
+/**
  * 描述行高与节点盒内边距（对齐 MindCanvas `DescBlock` 的世界 px 口径：
  * `DESC_LINE_H = 15` / `DESC_PAD = 5`，此处按本项目 SVG 盒略收窄）。
  *
@@ -179,6 +198,19 @@ export function commentOf(node: EditableNode): string[] | null {
 }
 
 /**
+ * 会话岛根判定（度量专用）：岛根（`depth === 0`）且携带**良构** `session_id`。
+ *
+ * 与 `toTreeNode` 的 `sessionNode` **逐字同判据**（`typeof raw === 'string' && raw !== ''`）——
+ * 度量与渲染必须同源：度量把盒收成 28×28 而渲染按普通节点画宽盒（或反之），
+ * 就会出现"文字画出盒外/盒子空一大块"的硬分叉。脏值（非字符串）两侧一致按普通节点处理。
+ */
+function isSessionIslandRoot(node: EditableNode, depth: number): boolean {
+  if (depth !== 0) return false
+  const raw = (node.note as Record<string, unknown> | undefined)?.session_id
+  return typeof raw === 'string' && raw !== ''
+}
+
+/**
  * 节点度量（kernel `MeasureFn` 口径）：盒 = 文本估算 + 内边距，夹紧到 [MIN_W, MAX_W]。
  *
  * **动态高度（幕布描述块）**：有描述时节点盒按可见描述行数加高 —— 这是布局的
@@ -188,8 +220,16 @@ export function commentOf(node: EditableNode): string[] | null {
  *
  * 宽度同向扩宽（描述**不折行**，长了撑宽盒，同 `DescBlock.estimateDescWidth`），
  * 但两轴都受 `MAX_W` / 可见行数上限约束 —— 长描述不撑成巨盒，全文走 tooltip。
+ *
+ * **会话发端枢纽（PXII-FEAT-SESSION-HUB）**：会话岛根恒返回
+ * `SESSION_HUB_SIZE × SESSION_HUB_SIZE`（方形，渲染层画成圆环 + 中心亮点），
+ * 会话标题由地标卡顶栏承载 —— 岛根不再占用 ~150px 横向空间。
  */
 export function measureWorkMapNode(node: EditableNode, depth = 0): { w: number; h: number } {
+  // 会话岛根 → 紧凑发端枢纽（标题上浮到地标卡，画布内不再有截断文本）
+  if (isSessionIslandRoot(node, depth)) {
+    return { w: SESSION_HUB_SIZE, h: SESSION_HUB_SIZE }
+  }
   const text = displayTextOf(node)
   const titleW = estimateTextWidth(text === '' ? '　' : text, fontOf(depth)) + 24
   const comment = commentOf(node)
@@ -217,6 +257,34 @@ export function fitTextToBox(text: string, boxW: number, depth = 0): string {
   for (const ch of text) {
     const width = estimateTextWidth(ch, fontOf(depth))
     if (used + width + ellipsis > budget) break
+    out += ch
+    used += width
+  }
+  return `${out}…`
+}
+
+/**
+ * 地标卡顶栏会话标题的截断（PXII-FEAT-SESSION-HUB）—— **与度量同一把尺子**。
+ *
+ * 会话标题从画布节点上浮到岛地标卡顶栏后，可写宽度 = 角标左缘 − 起点 − 呼吸位
+ * （渲染层算 `maxW`）；超长时补 `…`，全文由原生 `<title>` tooltip 兜底（信息不丢）。
+ * 字号取 `ISLAND_TITLE_FONT_SIZE`（与渲染层 `fontSize` 同源），故截断宽度 = 绘制宽度。
+ */
+export function fitIslandTitleToWidth(
+  text: string,
+  maxW: number,
+  fontSize = ISLAND_TITLE_FONT_SIZE,
+): string {
+  if (text === '') return text
+  // 一个字符都放不下 → 不画（全文仍由渲染层的 <title> tooltip 兜底）
+  if (maxW <= 0) return ''
+  if (estimateTextWidth(text, fontSize) <= maxW) return text
+  const ellipsis = estimateTextWidth('…', fontSize)
+  let out = ''
+  let used = 0
+  for (const ch of text) {
+    const width = estimateTextWidth(ch, fontSize)
+    if (used + width + ellipsis > maxW) break
     out += ch
     used += width
   }

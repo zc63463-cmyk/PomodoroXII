@@ -1699,6 +1699,68 @@
 .wm-island-card--current .wm-island-bar {
   fill: var(--ios-blue);
 }
+/* ── 顶栏会话标题（PXII-FEAT-SESSION-HUB）──────────────────────────────────
+   会话标题从画布节点**上浮**到地标卡顶栏左侧（红框位）—— 它是会话标题的唯一
+   完整展示位（画布内岛根已收拢为发端枢纽，不再承载文本）。
+   当前会话 = systemBlue 高亮，历史会话 = 柔和灰（与左色条同一套颜色语义）。
+   字号由渲染层 `fontSize` 给定（ISLAND_TITLE_FONT_SIZE，与截断尺子同源）。 */
+.wm-island-title {
+  fill: color-mix(in oklab, var(--foreground) 45%, transparent);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+}
+.wm-island-card--current .wm-island-title {
+  fill: var(--ios-blue);
+}
+/* ── 会话发端枢纽（Anchor Hub，PXII-FEAT-SESSION-HUB）──────────────────────
+   会话岛根的紧凑形态：外圆环 + 中心亮点（替代原先 ~150px 宽、常被截断的
+   会话节点矩形卡）。当前会话 = systemBlue 呼吸环，历史会话 = 中性灰。
+   几何（盒 28×28）由 `SESSION_HUB_SIZE` 度量给定，这里只管描边/填充。 */
+.wm-box--session-hub {
+  cursor: default;
+}
+.wm-node[data-cid] .wm-box--session-hub {
+  cursor: pointer;
+}
+.wm-hub-ring {
+  fill: color-mix(in oklab, var(--ios-card) 88%, transparent);
+  stroke: color-mix(in oklab, var(--foreground) 38%, transparent);
+  stroke-width: 1.6;
+}
+.wm-hub-core {
+  fill: color-mix(in oklab, var(--foreground) 42%, transparent);
+}
+/* 当前会话：蓝环 + 蓝芯 + 呼吸（与计时环同一套「进行中」语言） */
+.wm-box--session-hub[data-hub-current='true'] .wm-hub-ring {
+  stroke: var(--ios-blue);
+  stroke-width: 2;
+}
+.wm-box--session-hub[data-hub-current='true'] .wm-hub-core {
+  fill: var(--ios-blue);
+  animation: wm-hub-breathe 2.8s ease-in-out infinite;
+}
+@keyframes wm-hub-breathe {
+  0%,
+  100% {
+    opacity: 0.82;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+/* 定位环（focusCid）：枢纽随 .wm-node--focus 提亮，与矩形节点同语义 */
+.wm-node--focus .wm-hub-ring {
+  stroke: #d97706;
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0 3px color-mix(in oklab, #d97706 45%, transparent));
+}
+/* 呼吸环在偏好减少动态下冻结（与计时环同一纪律） */
+@media (prefers-reduced-motion: reduce) {
+  .wm-box--session-hub[data-hub-current='true'] .wm-hub-core {
+    animation: none;
+  }
+}
 .wm-island-badge {
   cursor: default;
 }

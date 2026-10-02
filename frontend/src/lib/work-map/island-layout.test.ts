@@ -13,9 +13,12 @@ import {
   DESC_MAX_VISIBLE_LINES,
   DESC_PAD_BOTTOM,
   DESC_PAD_TOP,
+  ISLAND_TITLE_FONT_SIZE,
   NODE_H_BASE,
+  SESSION_HUB_SIZE,
   descBlockGeometry,
   findSessionIslandLayout,
+  fitIslandTitleToWidth,
   measureWorkMapNode,
   readWorkMapLayout,
   WORK_MAP_DEFAULT_ACTIVE_LIMIT,
@@ -161,6 +164,114 @@ describe('readWorkMapLayout（几何层）', () => {
     const node = island.nodes.find((item) => item.text === 'token 对照：灰阶 vs 玻璃主题')
     expect(node?.cid).toBeNull()
     expect(node?.comment).toBeNull()
+  })
+})
+
+/**
+ * 会话发端枢纽（Anchor Hub，PXII-FEAT-SESSION-HUB，2026-10-02）—— **几何不变量**。
+ *
+ * 断言锚：会话岛根盒 = `SESSION_HUB_SIZE` 方盒（不再按标题宽度 clampWidth 撑到 ~150px）、
+ * 子节点因岛根变窄而**向左紧凑平移**、连线端点仍精确贴合新盒缘（`islandLinks` 按
+ * 平移后世界坐标重建）、非会话节点度量逐位不变（回归面）。
+ */
+describe('会话发端枢纽：会话岛根紧凑度量（PXII-FEAT-SESSION-HUB）', () => {
+  const hubIsland = (text: string) => {
+    const layout = readWorkMapLayout(text)
+    if (layout === null) throw new Error('fixture 解析失败')
+    const island = findSessionIslandLayout(layout, SID)
+    if (island === null) throw new Error('会话岛缺失')
+    return island
+  }
+
+  it('★ SESSION_HUB_SIZE = 28：会话岛根盒恒为 28×28（不随标题长度变化）', () => {
+    expect(SESSION_HUB_SIZE).toBe(28)
+    const island = hubIsland(WITH_THOUGHTS)
+    expect(island.tree.sessionNode).toBe(true)
+    expect(island.tree.box.w).toBe(SESSION_HUB_SIZE)
+    expect(island.tree.box.h).toBe(SESSION_HUB_SIZE)
+    // 收拢前后对比：会话标题 `09-30 19:55 会话` 按普通节点度量会撑到 ~127px
+    const editable = astToEditable(parseMm(WITH_THOUGHTS)!.root!)!
+    expect(measureWorkMapNode(editable.children[0]!, 1).w).toBeGreaterThan(SESSION_HUB_SIZE)
+  })
+
+  it('★ 度量直调：depth 0 + session_id → 28×28；depth 0 无 session_id → 原 clampWidth 逻辑', () => {
+    const editable = astToEditable(parseMm(WITH_THOUGHTS)!.root!)!
+    const sessionNode = editable.children[0]!
+    expect(measureWorkMapNode(sessionNode, 0)).toEqual({ w: 28, h: 28 })
+    // 非会话岛根（文档根 = H1 标题）不受影响：仍按文本估算夹在 [76, 240]
+    const rootNode = editable
+    expect(measureWorkMapNode(rootNode, 0).w).toBeGreaterThanOrEqual(76)
+    // 同一会话节点若被放在 depth 1（非岛根），不享受枢纽度量（判据含 depth === 0）
+    expect(measureWorkMapNode(sessionNode, 1).w).toBeGreaterThan(28)
+  })
+
+  it('★ 子节点向左紧凑平移：岛根右缘 + H_GAP(64) = 首列子节点左缘（kernel 排布口径）', () => {
+    const island = hubIsland(WITH_THOUGHTS)
+    const root = island.tree
+    // 所有一级子节点共享同一列（dir: right 的 xEdge 由岛根盒决定）
+    const childXs = new Set(root.children.map((child) => child.box.x))
+    expect(childXs.size).toBe(1)
+    const childX = root.children[0]!.box.x
+    expect(childX).toBeGreaterThan(root.box.x + root.box.w) // 仍在右侧生长
+    // 收拢前岛根宽 ~127px，收拢后 28px → 子列左移约 99px（只断言方向与间距合理性）
+    expect(childX - (root.box.x + root.box.w)).toBeGreaterThanOrEqual(64)
+  })
+
+  it('★ 连线两端精确对应：每条线起点 = 岛根右缘中点（hub 边缘），终点 = 子节点左缘中点', () => {
+    const island = hubIsland(WITH_THOUGHTS)
+    const root = island.tree
+    const byId = new Map(island.nodes.map((node) => [node.id, node]))
+    // 只查岛根 → 一级子节点的连线（其余边是子节点之间的）
+    const rootLinks = island.links.filter((link) => link.fromId === root.id)
+    expect(rootLinks).toHaveLength(root.children.length)
+    for (const link of rootLinks) {
+      const child = byId.get(link.toId)!
+      const nums = link.path.match(/-?\d+(?:\.\d+)?/g)!.map(Number)
+      // path = `M sx sy C c1x c1y, c2x c2y, ex ey`
+      const [sx, sy] = nums
+      const [ex, ey] = nums.slice(6, 8)
+      expect(sx).toBe(root.box.x + root.box.w) // 起点贴 hub 右缘
+      expect(sy).toBe(root.box.y + root.box.h / 2) // 垂直居中于 hub
+      expect(ex).toBe(child.box.x) // 终点贴子节点左缘
+      expect(ey).toBe(child.box.y + child.box.h / 2)
+    }
+  })
+
+  it('★ 非会话节点度量逐位不变（回归面）：L1 根岛节点与 L3 子节点仍走 clampWidth', () => {
+    const island = hubIsland(WITH_THOUGHTS)
+    const stock = island.nodes.find((node) => node.text === '测试次一级的workitme')!
+    expect(stock.sessionNode).toBe(false)
+    expect(stock.box.w).toBeGreaterThan(SESSION_HUB_SIZE)
+    expect(stock.box.w).toBeGreaterThanOrEqual(76)
+    expect(stock.box.w).toBeLessThanOrEqual(240)
+  })
+
+  it('★ 脏 session_id（非字符串）不享受枢纽度量（与渲染层 sessionNode 判据同源）', () => {
+    const editable = astToEditable(parseMm(WITH_THOUGHTS)!.root!)!
+    const sessionNode = editable.children[0]!
+    // 直接构造脏值（内核把标量一律读成字符串，故只能在这一层模拟真正的脏 note）
+    for (const dirty of [12345, null, ['a', 'b'], { nested: true }] as unknown[]) {
+      ;(sessionNode.note as Record<string, unknown>).session_id = dirty
+      // 度量与 toTreeNode 同判据（typeof string && !== ''）→ 脏值按普通节点度量
+      expect(measureWorkMapNode(sessionNode, 0).w).toBeGreaterThan(SESSION_HUB_SIZE)
+    }
+    // 良构字符串 → 枢纽（对照组）
+    ;(sessionNode.note as Record<string, unknown>).session_id = SID
+    expect(measureWorkMapNode(sessionNode, 0)).toEqual({ w: 28, h: 28 })
+  })
+
+  it('★ fitIslandTitleToWidth：短标题原样、超长截断补 `…`、宽度不足返回空串', () => {
+    const short = '09-30 19:55 会话'
+    expect(fitIslandTitleToWidth(short, 400)).toBe(short)
+    const long = '这是一个特别特别特别特别特别特别长的会话标题需要被截断处理'
+    const fitted = fitIslandTitleToWidth(long, 80)
+    expect(fitted.endsWith('…')).toBe(true)
+    expect(fitted.length).toBeLessThan(long.length)
+    // 空标题 / 零宽 → 原样返回空串（渲染层用「（无标题会话）」占位）
+    expect(fitIslandTitleToWidth('', 80)).toBe('')
+    expect(fitIslandTitleToWidth(short, 0)).toBe('')
+    // 字号是**显式参数**（与渲染层 fontSize 同源），换档位可得到不同截断结果
+    expect(fitIslandTitleToWidth(long, 80, ISLAND_TITLE_FONT_SIZE)).toBe(fitted)
   })
 })
 

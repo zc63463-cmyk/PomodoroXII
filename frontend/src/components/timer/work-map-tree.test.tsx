@@ -157,7 +157,11 @@ describe('WorkMapTree 树渲染与交互', () => {
     // 编辑模式优先：会话节点不能编辑（只读）
     const sessionNode = container.querySelector('.wm-node[data-session="true"]')
     expect(sessionNode).toHaveAttribute('data-readonly', 'true')
-    expect(sessionNode?.querySelector('title')?.textContent).toBe('会话节点（只读）')
+    // 发端枢纽 tooltip：首行是 `会话发端：<完整标题>`（PXII-FEAT-SESSION-HUB），
+    // 末行仍是只读原因 —— 两者都在，用 toContain 而非全等
+    const sessionTitle = sessionNode?.querySelector('title')?.textContent ?? ''
+    expect(sessionTitle).toContain('会话发端：09-30 19:55 会话')
+    expect(sessionTitle).toContain('会话节点（只读）')
 
     fireEvent.click(sessionNode!)
     expect(onSelectNode).not.toHaveBeenCalled()
@@ -207,6 +211,160 @@ const DEP_ISLAND: MapIslandLayout = (() => {
     bounds: { minX: 0, minY: 0, maxX: 360, maxY: 28 },
   }
 })()
+
+/**
+ * 会话发端枢纽 + 地标卡顶栏标题（PXII-FEAT-SESSION-HUB，2026-10-02）。
+ *
+ * 断言锚在 DOM 可观察量上：会话岛根渲染为 `.wm-box--session-hub`（外环 + 中心
+ * 亮点），**不再**渲染宽矩形卡与截断文本；完整会话标题出现在岛地标卡顶栏
+ * （`.wm-island-title`）且当前会话/历史会话呈不同态；交互契约（data-session /
+ * data-cid / role / tooltip）在枢纽形态下原样保留。
+ */
+describe('会话发端枢纽与顶栏标题（PXII-FEAT-SESSION-HUB）', () => {
+  const hubOf = (container: HTMLElement): Element | null =>
+    container.querySelector('[data-testid="wm-session-hub"]')
+
+  it('★ 会话岛根渲染发端枢纽：外圆环 + 中心亮点，不再有宽矩形卡与节点文本', () => {
+    const { container } = render(
+      <WorkMapTree islands={LAYOUT.islands} sessionId={SESSION_ID} />,
+    )
+    const sessionNode = container.querySelector('.wm-node[data-session="true"]')!
+    const hub = hubOf(container)
+    expect(hub).not.toBeNull()
+    expect(sessionNode.contains(hub)).toBe(true)
+
+    // 外圆环 r=10 + 中心亮点 r=4（SESSION_HUB_SIZE=28 盒内）
+    const ring = hub!.querySelector('circle.wm-hub-ring')!
+    const core = hub!.querySelector('circle.wm-hub-core')!
+    expect(Number(ring.getAttribute('r'))).toBe(10)
+    expect(Number(core.getAttribute('r'))).toBe(4)
+    // 圆心落在盒中心（14,14）
+    expect(Number(ring.getAttribute('cx'))).toBe(14)
+    expect(Number(ring.getAttribute('cy'))).toBe(14)
+
+    // 会话节点不再画矩形卡、不再画自己的文本（标题已上浮到地标卡）。
+    // 注：`textContent` 含 `<title>` tooltip（其中带完整标题），故按**可见文本**
+    // 判定 —— `.wm-text` 文本元素不存在即"画布内无截断标题"。
+    expect(sessionNode.querySelector('rect.wm-box')).toBeNull()
+    expect(sessionNode.querySelector('.wm-text')).toBeNull()
+    // 但它是"当前会话"：枢纽带 data-hub-current
+    expect(hub).toHaveAttribute('data-hub-current', 'true')
+    // 普通节点仍是矩形卡 + 文本（回归面：枢纽只作用于会话岛根）
+    const stockNode = container.querySelector('.wm-node[data-readonly="true"]')!
+    expect(stockNode.querySelector('rect.wm-box')).not.toBeNull()
+    expect(stockNode.querySelector('.wm-text')).not.toBeNull()
+  })
+
+  it('★ 地标卡顶栏标题：完整会话标题上浮（当前会话蓝 / 历史会话灰），超长截断 + tooltip 全文', () => {
+    const { container } = render(
+      <WorkMapTree islands={LAYOUT.islands} sessionId={SESSION_ID} />,
+    )
+    const card = container.querySelector('[data-testid="wm-island-card"]')!
+    const title = card.querySelector('[data-testid="wm-island-title"]')!
+    expect(title).not.toBeNull()
+    expect(title.textContent).toBe('09-30 19:55 会话')
+    expect(title.getAttribute('data-full-title')).toBe('09-30 19:55 会话')
+    expect(title.getAttribute('data-truncated')).toBe('false')
+    expect(title).toHaveAttribute('text-anchor', 'start')
+    expect(title).toHaveAttribute('dominant-baseline', 'central')
+    // 完整标题经 <title> 可读（挂在包裹 <g> 上，textContent 不重复）
+    expect(card.querySelector('[data-testid="wm-island-title-wrap"] title')?.textContent)
+      .toBe('09-30 19:55 会话')
+    // 当前会话岛：卡片带 --current，标题走高亮（颜色由 CSS 派生）
+    expect(card).toHaveClass('wm-island-card--current')
+  })
+
+  it('★ 历史会话岛（sessionId 不命中）→ 枢纽不带当前态、卡片不带 --current', () => {
+    const { container } = render(
+      <WorkMapTree islands={LAYOUT.islands} sessionId="other-session" />,
+    )
+    const hub = hubOf(container)
+    expect(hub).not.toBeNull()
+    expect(hub).toHaveAttribute('data-hub-current', 'false')
+    expect(container.querySelector('[data-testid="wm-island-card"]')).not.toHaveClass(
+      'wm-island-card--current',
+    )
+    // 标题仍完整呈现（历史会话同样享有顶栏标题）
+    expect(container.querySelector('[data-testid="wm-island-title"]')?.textContent)
+      .toBe('09-30 19:55 会话')
+  })
+
+  it('★ 交互契约在枢纽形态下保留：data-session / data-cid / role=button / 发端 tooltip', () => {
+    const onFocusNode = vi.fn()
+    const { container } = render(
+      <WorkMapTree islands={LAYOUT.islands} sessionId={SESSION_ID} onFocusNode={onFocusNode} />,
+    )
+    const sessionNode = container.querySelector('.wm-node[data-session="true"]')!
+    expect(sessionNode).toHaveAttribute('data-cid', 'c1')
+    expect(sessionNode).toHaveAttribute('role', 'button')
+    expect(sessionNode).toHaveAttribute('tabindex', '0')
+    // 发端 tooltip：`会话发端：<完整标题>`（定位模式下会话节点可点，故无只读提示）
+    expect(sessionNode.querySelector('title')?.textContent).toBe('会话发端：09-30 19:55 会话')
+    // 点击仍上抛 cid（枢纽不是"视觉换皮就丢交互"）
+    fireEvent.click(hubOf(container)!)
+    expect(onFocusNode).toHaveBeenCalledWith('c1')
+  })
+
+  it('★ 超长会话标题：顶栏标题截断补 `…`，data-full-title 仍持全文', () => {
+    const longTitle = '这是一个特别特别特别特别特别特别特别长的会话标题应当被截断'
+    const longDoc = `<!--
+next_cid: 2
+centers:
+  - at: "node:工作项/${longTitle}"
+    cid: c1
+    dir: right
+    session_id: "${SESSION_ID}"
+-->
+# 工作项
+
+<!--
+cid: "c1"
+session_id: "${SESSION_ID}"
+-->
+## ${longTitle}
+
+### 子节点
+`
+    const layout = readWorkMapLayout(longDoc)!
+    const { container } = render(
+      <WorkMapTree islands={layout.islands} sessionId={SESSION_ID} />,
+    )
+    const title = container.querySelector('[data-testid="wm-island-title"]')!
+    expect(title.getAttribute('data-full-title')).toBe(longTitle)
+    expect(title.getAttribute('data-truncated')).toBe('true')
+    expect(title.textContent!.endsWith('…')).toBe(true)
+    expect(title.textContent!.length).toBeLessThan(longTitle.length)
+  })
+
+  it('★ 地标卡保底最小宽度（MIN_ISLAND_CARD_W = 260）：单短节点极窄岛不压缩顶栏', () => {
+    const tinyDoc = `<!--
+next_cid: 2
+centers:
+  - at: "node:项/会话"
+    cid: c1
+    dir: right
+    session_id: "${SESSION_ID}"
+-->
+# 项
+
+<!--
+cid: "c1"
+session_id: "${SESSION_ID}"
+-->
+## 会话
+
+### 短
+`
+    const layout = readWorkMapLayout(tinyDoc)!
+    const { container } = render(
+      <WorkMapTree islands={layout.islands} sessionId={SESSION_ID} />,
+    )
+    const card = container.querySelector('[data-testid="wm-island-card"]')!
+    const frame = card.querySelector('rect.wm-island-frame')!
+    const cardWidth = Number(frame.getAttribute('width'))
+    expect(cardWidth).toBeGreaterThanOrEqual(260)
+  })
+})
 
 describe('WorkMapTree 依赖徽章与 BUG-WM-001（D19-b / 2026-10-01）', () => {
   it('★ 有未完成上游：红 ⚡N 徽章 + tooltip 摘要（数据来自 dependency-map-adapter 统计）', () => {
@@ -265,12 +423,17 @@ describe('WorkMapTree 依赖徽章与 BUG-WM-001（D19-b / 2026-10-01）', () =>
     expect(container.querySelectorAll('.wm-box--session')).toHaveLength(0)
     expect(container.querySelectorAll('[data-testid="wm-session-node"]')).toHaveLength(0)
     expect(container.querySelectorAll('.wm-node[data-session="true"]')).toHaveLength(0)
+    // 准备态下没有任何"当前会话"枢纽（历史会话岛根仍有枢纽，但 data-hub-current=false）
+    expect(container.querySelectorAll('[data-hub-current="true"]')).toHaveLength(0)
 
-    // 真实会话 id 命中时行为不变：恰好会话节点一个高亮
+    // 真实会话 id 命中时行为不变：恰好会话节点一个高亮。
+    // ★ PXII-FEAT-SESSION-HUB：会话节点的"高亮"形态从矩形蓝框（.wm-box--session）
+    //   改为发端枢纽的蓝环（.wm-box--session-hub[data-hub-current='true']）。
     const { container: withSid } = render(
       <WorkMapTree islands={LAYOUT.islands} sessionId={SESSION_ID} />,
     )
-    expect(withSid.querySelectorAll('.wm-box--session')).toHaveLength(1)
+    expect(withSid.querySelectorAll('.wm-box--session-hub')).toHaveLength(1)
+    expect(withSid.querySelectorAll('[data-hub-current="true"]')).toHaveLength(1)
     expect(withSid.querySelectorAll('[data-testid="wm-session-node"]')).toHaveLength(1)
   })
 })

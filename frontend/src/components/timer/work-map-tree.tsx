@@ -23,9 +23,14 @@
  *   （对齐 MindCanvas `DescBlock`），几何取自 `descBlockGeometry`（与度量同源）；
  *   超出可见行上限的全文走原生 `<title>` tooltip —— 替代了原先"只有一个小橙点"的
  *   降级形态（`node.box.h` 不足以容纳描述时才回落到橙点）
+ * - **会话发端枢纽**（PXII-FEAT-SESSION-HUB）：会话岛根不再画成 ~150px 宽矩形卡片
+ *   （标题常被截成 `10-01 14:29 会…`），而是渲染紧凑的圆形 Anchor Hub（外环 + 中心
+ *   亮点，`SESSION_HUB_SIZE` 方盒）；**完整会话标题上浮到岛地标卡顶栏左侧**
+ *   （`.wm-island-title`，当前会话蓝 / 历史灰，超长截断 + `<title>` 全文兜底）。
+ *   几何层已按 `SESSION_HUB_SIZE` 度量 → 子节点整列左移、连线自动贴合新盒缘。
  *
  * ## 视觉（D9 形状 + 颜色双重编码）
- * 会话节点 = 高亮框（当前会话岛根）；思考节点 = 形状（●洞察 ▲问题 ◆决策 ○复盘 □待办）+
+ * 会话节点 = 发端枢纽（当前会话岛根 = 高亮呼吸环）；思考节点 = 形状（●洞察 ▲问题 ◆决策 ○复盘 □待办）+
  * 类型描边色；无类型节点 = 中性小圆。文字用与度量同一把尺子截断（`fitTextToBox`）。
  * 极简态（沉浸）由外层 `[data-minimal='true']` 派生 CSS：**只隐文字，几何不变**
  * （零布局抖动）。
@@ -36,9 +41,12 @@ import {
   DESC_BAR_W,
   DESC_INDENT,
   DESC_INSET_X,
+  ISLAND_TITLE_FONT_SIZE,
   NODE_H_BASE,
+  SESSION_HUB_SIZE,
   descBlockGeometry,
   fitDescLineToBox,
+  fitIslandTitleToWidth,
   fitTextToBox,
   visibleDescLines,
   type MapIslandLayout,
@@ -138,7 +146,7 @@ export function TypeShape({ x, y, type }: { x: number; y: number; type: NonNulla
 
 function NodeBox({
   node,
-  isSession,
+  currentSession,
   editable,
   selected,
   focused,
@@ -149,7 +157,12 @@ function NodeBox({
   onFocus,
 }: {
   node: MapTreeNode
-  isSession: boolean
+  /**
+   * 该节点是否命中 `sessionId` prop（= **当前**会话）。
+   * 与 `node.sessionNode`（**是**会话节点）区分：历史会话岛的岛根同样是会话节点，
+   * 只是不属于"本次" —— 两者都画发端枢纽，但只有当前会话带高亮呼吸环。
+   */
+  currentSession: boolean
   editable: boolean
   selected: boolean
   focused: boolean
@@ -162,6 +175,8 @@ function NodeBox({
   onSelect?: (cid: string) => void
   onFocus?: (cid: string) => void
 }): ReactNode {
+  // 会话节点判定取**节点自身**（`session_id` 良构）—— 与几何层的紧凑度量同判据
+  const isSession = node.sessionNode
   const badgeText =
     badge !== null && badge.upstream > 0
       ? badge.blocked > 0
@@ -214,11 +229,14 @@ function NodeBox({
         : `定位：${node.text === '' ? '（无标题）' : node.text}`)
     : undefined
 
-  // 原生 tooltip：完整标题 + 完整注释（> 3 行的长注释靠这里 100% 可读）
+  // 原生 tooltip：完整标题 + 完整注释（> 3 行的注释靠这里 100% 可读）
   const readonlyHint = actionCid === null
     ? (isSession ? '会话节点（只读）' : '存量节点（无 cid，只读）')
     : null
   const tooltipParts: string[] = []
+  // 会话发端枢纽（PXII-FEAT-SESSION-HUB）：标题已上浮到地标卡顶栏，枢纽自身
+  // 只保留"这是会话发端"的语义 —— 悬停时用 `会话发端：<完整标题>` 说明来源。
+  if (isSession) tooltipParts.push(`会话发端：${node.text === '' ? '（无标题）' : node.text}`)
   if (commentLines.length > 0) {
     tooltipParts.push(
       node.text === '' ? '（无标题）' : node.text,
@@ -239,12 +257,14 @@ function NodeBox({
         dimmed ? 'wm-node--dim' : '',
         highlighted ? 'wm-node--hl' : '',
       ].filter((token) => token !== '').join(' ')}
-      data-testid={isSession ? 'wm-session-node' : undefined}
+      data-testid={currentSession ? 'wm-session-node' : undefined}
       data-thought={node.thoughtType ?? undefined}
-      data-session={isSession ? 'true' : 'false'}
+      data-session={currentSession ? 'true' : 'false'}
       data-cid={actionCid ?? undefined}
-      data-comment={node.comment !== null ? 'true' : undefined}
-      data-desc-lines={hasDesc ? descGeo.lineCount : undefined}
+      // 发端枢纽不画描述块/橙点（盒仅 28px，几何装不下）—— 注释全文仍由 tooltip 承载，
+      // 故 data-comment / data-desc-lines 对会话节点不挂（避免"标了却没画"的假信号）
+      data-comment={!isSession && node.comment !== null ? 'true' : undefined}
+      data-desc-lines={!isSession && hasDesc ? descGeo.lineCount : undefined}
       data-readonly={actionCid === null ? 'true' : undefined}
       data-selected={selected ? 'true' : undefined}
       data-focus={focused ? 'true' : undefined}
@@ -267,91 +287,127 @@ function NodeBox({
     >
       {/* 原生 tooltip：完整标题 + 完整注释（只读节点另附只读原因） */}
       {tooltip !== null ? <title>{tooltip}</title> : null}
-      <rect
-        width={node.box.w}
-        height={node.box.h}
-        rx={7}
-        className={
-          selected ? 'wm-box wm-box--selected' : isSession ? 'wm-box wm-box--session' : 'wm-box'
-        }
-      />
-      {node.thoughtType !== null ? (
-        <TypeShape x={12} y={titleCy} type={node.thoughtType} />
+      {isSession ? (
+        <SessionHub node={node} current={currentSession} />
       ) : (
-        <circle cx={12} cy={titleCy} r={3} className="wm-shape wm-shape--plain" />
-      )}
-      {/* 字号与度量同一档（root/branch/leaf）—— 截断宽度才不会与绘制宽度分叉 */}
-      <text
-        x={textX}
-        y={titleCy}
-        dy="0.32em"
-        fontSize={node.depth === 0 ? 12.5 : node.depth === 1 ? 12 : 11}
-        className="wm-text"
-      >
-        {label}
-      </text>
-      {/* 幕布描述块：左引用竖线 + 缩进小灰字（对齐 MindCanvas DescBlock） */}
-      {hasDesc ? (
-        <g className="wm-desc-group" data-testid="wm-desc-group">
-          <line
-            x1={DESC_INSET_X}
-            y1={descGeo.barTop}
-            x2={DESC_INSET_X}
-            y2={descGeo.barBottom}
-            className="wm-desc-bar"
-            strokeWidth={DESC_BAR_W}
-            strokeLinecap="round"
-          />
-          <text
-            x={DESC_INSET_X + DESC_BAR_W + DESC_INDENT}
-            className="wm-desc-text"
-            fontSize={10}
-            fontFamily="inherit"
-          >
-            {descLines.map((line, index) => (
-              <tspan
-                key={`${index}-${line}`}
-                x={DESC_INSET_X + DESC_BAR_W + DESC_INDENT}
-                y={descGeo.baselineOf(index)}
-              >
-                {fitDescLineToBox(line, node.box.w)}
-              </tspan>
-            ))}
-          </text>
-        </g>
-      ) : null}
-      {/* 有注释但盒高不足以画描述（手工构造岛 / 老几何）→ 降级小圆点 */}
-      {node.comment !== null && !hasDesc ? (
-        <circle cx={node.box.w - 6} cy={6} r={3.5} className="wm-comment-dot" />
-      ) : null}
-      {/* 依赖状态徽章（D19-b 紧凑态）：红色 ⚡N = 有未完成上游；绿 ✓ = 全部完成 */}
-      {badgeText !== null ? (
-        <g
-          className={`wm-dep-badge ${badge !== null && badge.blocked > 0 ? 'wm-dep-badge--blocked' : 'wm-dep-badge--ok'}`}
-          data-testid="wm-dep-badge"
-          data-blocked={badge !== null && badge.blocked > 0 ? 'true' : 'false'}
-          data-upstream={badge?.upstream ?? 0}
-        >
-          <title>
-            {`上游依赖 ${badge?.upstream ?? 0} 项 · 未完成 ${badge?.blocked ?? 0} 项`}
-          </title>
+        <>
           <rect
-            x={node.box.w - badgeWidth - 6}
-            y={titleCy - 8}
-            width={badgeWidth}
-            height={16}
-            rx={8}
+            width={node.box.w}
+            height={node.box.h}
+            rx={7}
+            className={
+              selected ? 'wm-box wm-box--selected' : 'wm-box'
+            }
           />
+          {node.thoughtType !== null ? (
+            <TypeShape x={12} y={titleCy} type={node.thoughtType} />
+          ) : (
+            <circle cx={12} cy={titleCy} r={3} className="wm-shape wm-shape--plain" />
+          )}
+          {/* 字号与度量同一档（root/branch/leaf）—— 截断宽度才不会与绘制宽度分叉 */}
           <text
-            x={node.box.w - badgeWidth / 2 - 6}
+            x={textX}
             y={titleCy}
             dy="0.32em"
-            textAnchor="middle"
+            fontSize={node.depth === 0 ? 12.5 : node.depth === 1 ? 12 : 11}
+            className="wm-text"
           >
-            {badgeText}
+            {label}
           </text>
-        </g>
-      ) : null}
+          {/* 幕布描述块：左引用竖线 + 缩进小灰字（对齐 MindCanvas DescBlock） */}
+          {hasDesc ? (
+            <g className="wm-desc-group" data-testid="wm-desc-group">
+              <line
+                x1={DESC_INSET_X}
+                y1={descGeo.barTop}
+                x2={DESC_INSET_X}
+                y2={descGeo.barBottom}
+                className="wm-desc-bar"
+                strokeWidth={DESC_BAR_W}
+                strokeLinecap="round"
+              />
+              <text
+                x={DESC_INSET_X + DESC_BAR_W + DESC_INDENT}
+                className="wm-desc-text"
+                fontSize={10}
+                fontFamily="inherit"
+              >
+                {descLines.map((line, index) => (
+                  <tspan
+                    key={`${index}-${line}`}
+                    x={DESC_INSET_X + DESC_BAR_W + DESC_INDENT}
+                    y={descGeo.baselineOf(index)}
+                  >
+                    {fitDescLineToBox(line, node.box.w)}
+                  </tspan>
+                ))}
+              </text>
+            </g>
+          ) : null}
+          {/* 有注释但盒高不足以画描述（手工构造岛 / 老几何）→ 降级小圆点 */}
+          {node.comment !== null && !hasDesc ? (
+            <circle cx={node.box.w - 6} cy={6} r={3.5} className="wm-comment-dot" />
+          ) : null}
+          {/* 依赖状态徽章（D19-b 紧凑态）：红色 ⚡N = 有未完成上游；绿 ✓ = 全部完成 */}
+          {badgeText !== null ? (
+            <g
+              className={`wm-dep-badge ${badge !== null && badge.blocked > 0 ? 'wm-dep-badge--blocked' : 'wm-dep-badge--ok'}`}
+              data-testid="wm-dep-badge"
+              data-blocked={badge !== null && badge.blocked > 0 ? 'true' : 'false'}
+              data-upstream={badge?.upstream ?? 0}
+            >
+              <title>
+                {`上游依赖 ${badge?.upstream ?? 0} 项 · 未完成 ${badge?.blocked ?? 0} 项`}
+              </title>
+              <rect
+                x={node.box.w - badgeWidth - 6}
+                y={titleCy - 8}
+                width={badgeWidth}
+                height={16}
+                rx={8}
+              />
+              <text
+                x={node.box.w - badgeWidth / 2 - 6}
+                y={titleCy}
+                dy="0.32em"
+                textAnchor="middle"
+              >
+                {badgeText}
+              </text>
+            </g>
+          ) : null}
+        </>
+      )}
+    </g>
+  )
+}
+
+/**
+ * 会话**发端枢纽**（Anchor Hub，PXII-FEAT-SESSION-HUB）—— 会话岛根的紧凑形态。
+ *
+ * 为什么不再画宽矩形卡片：岛根文本是 `10-01 14:29 会话` 这类**会话时间戳**，
+ * 横向占 ~150px 且常被截断成 `10-01 14:29 会…` —— 信息量低、视觉噪音高。
+ * 上浮到地标卡顶栏后，画布内只需表达"这里是岛的发端"：
+ * 外圆环（`r=10`）+ 中心亮点（`r=4`）。
+ *
+ * 盒仍是 `SESSION_HUB_SIZE` 方盒（几何层度量同源）——枢纽在盒内**居中**绘制并按
+ * 盒尺寸**等比**收敛，故 `box.w` 与 `box.h` 不等时也不会偏心（手工构造的旧几何同样容错）。
+ * 当前会话的呼吸环由 CSS 派生（`.wm-box--session-hub[data-hub-current='true']`）。
+ */
+function SessionHub({ node, current }: { node: MapTreeNode; current: boolean }): ReactNode {
+  const cx = node.box.w / 2
+  const cy = node.box.h / 2
+  // 环半径按**设计常数等比**收敛：SESSION_HUB_SIZE=28 时 r = 14 × (10/14) = 10；
+  // 旧几何/手工岛的盒尺寸不同也保持同一视觉比例（不写死像素）
+  const ringR = Math.max(4, Math.min(cx, cy) * (HUB_RING_R / (SESSION_HUB_SIZE / 2)))
+  return (
+    <g
+      className="wm-box--session-hub"
+      data-testid="wm-session-hub"
+      data-hub-current={current ? 'true' : 'false'}
+    >
+      <circle cx={cx} cy={cy} r={ringR} className="wm-hub-ring" />
+      <circle cx={cx} cy={cy} r={Math.max(1.6, ringR * HUB_CORE_RATIO)} className="wm-hub-core" />
     </g>
   )
 }
@@ -406,21 +462,30 @@ function ArchiveCard({
 
 /** 岛地标卡外框相对岛 bounds 的外扩量（顶部留胶囊角标条位，S4-3）。 */
 const FRAME_PAD = { top: 28, right: 12, bottom: 12, left: 12 }
+/** 岛地标卡最小宽度：容纳顶栏会话标题 + 呼吸位 + 右上胶囊角标（避免单短节点窄岛截断）。 */
+export const MIN_ISLAND_CARD_W = 260
 /** 胶囊角标几何（高度 / 圆点间距 / 思考类型点阵数）。 */
 const BADGE_H = 18
 const DOT_GAP = 10
 /** viewBox 切换的平滑动画时长（ms；prefers-reduced-motion 时直接落位）。 */
 const VIEW_BOX_EASE_MS = 240
+/** 发端枢纽：设计环半径（`SESSION_HUB_SIZE` 盒内的基准；其余尺寸按比例收敛）。 */
+const HUB_RING_R = 10
+/** 发端枢纽：中心亮点 / 外环半径比（4 / 10）。 */
+const HUB_CORE_RATIO = 0.4
 
 type WorkMapBounds = { minX: number; minY: number; maxX: number; maxY: number }
 
 /** 岛的「视觉 bounds」：会话岛含地标卡外框（union viewBox 不得裁掉卡片）。 */
 function islandVisualBounds(island: MapIslandLayout): WorkMapBounds {
   if (island.isArchive === true || island.sessionId === null) return island.bounds
+  const minX = island.bounds.minX - FRAME_PAD.left
+  const naturalW = island.bounds.maxX - island.bounds.minX + FRAME_PAD.left + FRAME_PAD.right
+  const w = Math.max(MIN_ISLAND_CARD_W, naturalW)
   return {
-    minX: island.bounds.minX - FRAME_PAD.left,
+    minX,
     minY: island.bounds.minY - FRAME_PAD.top,
-    maxX: island.bounds.maxX + FRAME_PAD.right,
+    maxX: minX + w,
     maxY: island.bounds.maxY + FRAME_PAD.bottom,
   }
 }
@@ -494,6 +559,11 @@ function useAnimatedViewBox(target: string): string {
  * 左侧色条（当前会话 systemBlue / 历史中性灰）+ 右上胶囊角标
  * （「N 项思考」+ 5 类思考点阵，有对应类型节点才点亮）。
  * 双击卡片或点击角标 → 上抛聚焦请求（D19-c 纯自持增强，无外渲染器）。
+ *
+ * **顶栏会话标题**（PXII-FEAT-SESSION-HUB）：卡内左上角画完整会话标题
+ * （`.wm-island-title`）—— 会话标题的**唯一完整展示位**（画布内岛根已收拢为
+ * 发端枢纽，不再承载文本）。当前会话蓝、历史会话柔和灰（CSS 派生）；
+ * 可写宽度 = 角标左缘 − 起点 − 呼吸位，超长时截断并由 `<title>` 给全文。
  */
 function IslandFrameCard({
   island,
@@ -508,7 +578,8 @@ function IslandFrameCard({
 }): ReactNode {
   const x = island.bounds.minX - FRAME_PAD.left
   const y = island.bounds.minY - FRAME_PAD.top
-  const w = island.bounds.maxX - island.bounds.minX + FRAME_PAD.left + FRAME_PAD.right
+  const naturalW = island.bounds.maxX - island.bounds.minX + FRAME_PAD.left + FRAME_PAD.right
+  const w = Math.max(MIN_ISLAND_CARD_W, naturalW)
   const h = island.bounds.maxY - island.bounds.minY + FRAME_PAD.top + FRAME_PAD.bottom
   // 思考条目数 = 岛内子节点数（岛根不计）；点阵 = 5 类是否有命中
   const thoughtCount = Math.max(0, island.nodes.length - 1)
@@ -525,6 +596,13 @@ function IslandFrameCard({
   const badgeWidth = 10 + textWidth + 6 + dotsWidth + 8
   const badgeX = x + w - badgeWidth - 8
   const badgeY = y + 6
+  // 顶栏标题：与角标同一条水平中线（胶囊中心），起点让出色条（4px）+ 呼吸位
+  const titleX = x + 14
+  const titleY = y + 6 + BADGE_H / 2
+  const title = island.tree.text === '' ? '（无标题会话）' : island.tree.text
+  // 宽度自适应：右侧不得压到角标（角标左缘 − 12px 呼吸位）
+  const titleMaxW = badgeX - titleX - 12
+  const titleLabel = fitIslandTitleToWidth(title, titleMaxW)
 
   return (
     <g
@@ -538,6 +616,25 @@ function IslandFrameCard({
       {/* 实底圆角卡（柔和投影走 CSS filter）；左色条标识当前/历史 */}
       <rect x={x} y={y} width={w} height={h} rx={12} className="wm-island-frame" />
       <rect x={x} y={y} width={4} height={h} rx={2} className="wm-island-bar" />
+      {/* 顶栏会话标题（红框）：完整标题的唯一展示位，超长截断 + tooltip 全文兜底。
+          `<title>` 挂在包裹 `<g>` 上（而非 `<text>` 内）—— 避免全文与截断串在
+          textContent 里重复出现（对断言与读屏都是噪音）。 */}
+      <g className="wm-island-title-wrap" data-testid="wm-island-title-wrap">
+        <title>{title}</title>
+        <text
+          x={titleX}
+          y={titleY}
+          textAnchor="start"
+          dominantBaseline="central"
+          fontSize={ISLAND_TITLE_FONT_SIZE}
+          className="wm-island-title"
+          data-testid="wm-island-title"
+          data-full-title={title}
+          data-truncated={titleLabel === title ? 'false' : 'true'}
+        >
+          {titleLabel}
+        </text>
+      </g>
       {/* 胶囊角标：统计 + 点阵 + 「聚焦此岛」入口 */}
       <g
         className="wm-island-badge"
@@ -671,7 +768,9 @@ export function WorkMapTree({
                 // ★ BUG-WM-001（2026-10-01 修复）：未传 sessionId（准备态主图传
                 //   null）时，`null === null` 曾让根岛与存量节点误挂「本次」蓝框。
                 //   只有真实会话 id 命中岛根的 session_id 才算当前会话节点。
-                isSession={
+                //   （会话节点本身的判定在 NodeBox 内按 node.sessionNode 取 —— 历史
+                //   会话岛的岛根同样是会话节点，同画发端枢纽，只是不带"本次"高亮。）
+                currentSession={
                   typeof sessionId === 'string' &&
                   sessionId !== '' &&
                   node.sessionId === sessionId
