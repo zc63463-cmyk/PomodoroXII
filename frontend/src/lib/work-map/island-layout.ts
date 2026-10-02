@@ -118,6 +118,8 @@ export interface MapIslandLayout {
   subIslands?: MapSubIsland[]
   /** 是否为归档岛（真岛缺省 false / 无此字段） */
   isArchive?: boolean
+  /** 是否为方案 A 横向群岛排布 */
+  isArchipelago?: boolean
   /** 归档岛收纳的历史会话数 M（仅归档岛有） */
   archivedCount?: number
 }
@@ -676,4 +678,185 @@ export function findSessionIslandLayout(
 ): MapIslandLayout | null {
   if (sessionId === '') return null
   return layout.islands.find((island) => island.sessionId === sessionId) ?? null
+}
+
+/** 方案 A（横向群岛卡片流）常量 */
+export const ARCHIPELAGO_CARD_W = 270
+export const ARCHIPELAGO_CARD_H = 200
+export const ARCHIPELAGO_GAP_X = 24
+export const ARCHIPELAGO_START_Y = 82
+export const ARCHIPELAGO_TOTAL_H = 304
+
+/**
+ * 方案 A（横向群岛卡片流）：把包含 L3 嵌套子岛的会话岛投影为横向多卡片排布。
+ *
+ * 核心几何：
+ * - 顶部会话发端总枢纽条：高 42px，横跨全岛，含发端 Anchor Hub + 会话标题 + 子岛与思考统计胶囊。
+ * - 优雅贝塞尔引导线：从顶栏枢纽底部分支连到各子岛卡片顶缘中点。
+ * - 下方各 L3 子任务独立成卡：每卡宽 270px、高 ~200px、间距 24px，横向平铺。
+ *   卡内含子岛顶栏微地标、子岛根节点（可编辑）、放射状思考节点（可编辑/可加子/带类型颜色/带注释描述块）、底部「点击聚焦此岛 →」按钮。
+ * - 整体世界高度仅 ~304px，在 320px 视区内 100% 原始比例呈现（零垂直缩放压缩，字号恒定 12px）。
+ */
+export function layoutArchipelagoIsland(
+  island: MapIslandLayout,
+  _currentPlanTitle?: string | null,
+): MapIslandLayout {
+  if (
+    island.sessionId === null ||
+    island.isArchive === true ||
+    !island.subIslands ||
+    island.subIslands.length === 0
+  ) {
+    return island
+  }
+
+  const subIslands = island.subIslands
+  const n = subIslands.length
+  const totalCardsW = n * ARCHIPELAGO_CARD_W + Math.max(0, n - 1) * ARCHIPELAGO_GAP_X
+  const totalW = Math.max(780, totalCardsW + 32)
+  const offsetX = Math.max(16, Math.round((totalW - totalCardsW) / 2))
+
+  // 1. 顶栏会话发端总枢纽条与发端节点几何
+  const hubBarW = Math.max(totalCardsW, 320)
+  const rootBox: MapBox = {
+    x: offsetX + 16,
+    y: 23,
+    w: SESSION_HUB_SIZE,
+    h: SESSION_HUB_SIZE,
+  }
+
+  const nodeMap = new Map<string, MapTreeNode>()
+  const newLinks: { fromId: string; toId: string; path: string }[] = []
+  let maxCardBottom = ARCHIPELAGO_START_Y + ARCHIPELAGO_CARD_H
+
+  // 2. 遍历各子岛，计算独立卡片内部几何与连线
+  const newSubIslands: MapSubIsland[] = subIslands.map((sub, idx) => {
+    const cardX = offsetX + idx * (ARCHIPELAGO_CARD_W + ARCHIPELAGO_GAP_X)
+    const cardY = ARCHIPELAGO_START_Y
+    const cardW = ARCHIPELAGO_CARD_W
+
+    // 从顶栏枢纽底缘连到子岛卡片顶缘中点的优雅贝塞尔线
+    const hubFromX = Math.round(
+      offsetX + 24 + (idx + 0.5) * ((hubBarW - 48) / n),
+    )
+    const hubFromY = 58
+    const cardTopMidX = Math.round(cardX + cardW / 2)
+    const cardTopMidY = cardY
+    const cpY = Math.round(hubFromY + (cardTopMidY - hubFromY) * 0.5)
+    const hubToSubPath = `M ${hubFromX} ${hubFromY} C ${hubFromX} ${cpY}, ${cardTopMidX} ${cpY}, ${cardTopMidX} ${cardTopMidY}`
+    newLinks.push({
+      fromId: island.tree.id,
+      toId: sub.rootNode.id,
+      path: hubToSubPath,
+    })
+
+    // 子岛根节点（L3 任务节点）：置于卡片上半部分
+    const rootText = sub.rootNode.text === '' ? '子任务' : sub.rootNode.text
+    const naturalRootW = sub.rootNode.box
+      ? Math.max(clampWidth(estimateTextWidth(rootText, 12) + 24), sub.rootNode.box.w)
+      : clampWidth(estimateTextWidth(rootText, 12) + 24)
+    const rootW = Math.min(cardW - 32, naturalRootW)
+    const rootH = sub.rootNode.box ? Math.max(26, sub.rootNode.box.h) : 26
+    const subRootBox: MapBox = {
+      x: cardX + 16,
+      y: cardY + 42,
+      w: rootW,
+      h: rootH,
+    }
+    const newSubRoot: MapTreeNode = {
+      ...sub.rootNode,
+      box: subRootBox,
+      children: [],
+    }
+    nodeMap.set(newSubRoot.id, newSubRoot)
+
+    // 子岛下属思考节点：垂直规整排开
+    const thoughtNodes = sub.nodes.filter((node) => node.id !== sub.rootNode.id)
+    const newSubNodes: MapTreeNode[] = [newSubRoot]
+    const subInternalLinks: { fromId: string; toId: string; path: string }[] = []
+
+    let currentY = subRootBox.y + subRootBox.h + 10
+    for (const thought of thoughtNodes) {
+      const thH = thought.box ? Math.max(24, thought.box.h) : 24
+      const thW = cardW - 56
+      const thBox: MapBox = {
+        x: cardX + 44,
+        y: currentY,
+        w: thW,
+        h: thH,
+      }
+      const newThought: MapTreeNode = {
+        ...thought,
+        box: thBox,
+      }
+      newSubNodes.push(newThought)
+      newSubRoot.children.push(newThought)
+      nodeMap.set(newThought.id, newThought)
+
+      // 从子岛根连到该思考节点的连线
+      const fromX = subRootBox.x + 12
+      const fromY = subRootBox.y + subRootBox.h
+      const toX = thBox.x
+      const toY = thBox.y + 12
+      const pathD = `M ${fromX} ${fromY} C ${fromX} ${toY}, ${toX - 10} ${toY}, ${toX} ${toY}`
+      const subLink = {
+        fromId: sub.rootNode.id,
+        toId: thought.id,
+        path: pathD,
+      }
+      subInternalLinks.push(subLink)
+      newLinks.push(subLink)
+
+      currentY += thH + 8
+    }
+
+    const cardH = Math.max(ARCHIPELAGO_CARD_H, currentY - cardY + 36)
+    if (cardY + cardH > maxCardBottom) {
+      maxCardBottom = cardY + cardH
+    }
+
+    const bounds = {
+      minX: cardX,
+      minY: cardY,
+      maxX: cardX + cardW,
+      maxY: cardY + cardH,
+    }
+
+    return {
+      id: sub.id,
+      title: sub.title,
+      cid: sub.cid,
+      rootNode: newSubRoot,
+      nodes: newSubNodes,
+      links: subInternalLinks,
+      bounds,
+    }
+  })
+
+  const newTree: MapTreeNode = {
+    ...island.tree,
+    box: rootBox,
+    children: newSubIslands.map((s) => s.rootNode),
+  }
+  nodeMap.set(newTree.id, newTree)
+
+  // 重构前序展平节点列表（维持原树遍历顺序）
+  const newNodes = island.nodes.map((node) => nodeMap.get(node.id) ?? node)
+
+  const overallBounds = {
+    minX: 0,
+    minY: 0,
+    maxX: totalW,
+    maxY: maxCardBottom + 16,
+  }
+
+  return {
+    ...island,
+    isArchipelago: true,
+    tree: newTree,
+    nodes: newNodes,
+    links: newLinks,
+    bounds: overallBounds,
+    subIslands: newSubIslands,
+  }
 }

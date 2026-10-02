@@ -179,6 +179,12 @@ export function TimerMapEditor({
       e.preventDefault()
       const delta = e.deltaY > 0 ? -0.15 : 0.15
       setZoom((z) => Math.min(2.5, Math.max(0.6, Math.round((z + delta) * 10) / 10)))
+    } else {
+      const moveX = e.deltaX !== 0 ? e.deltaX : (e.shiftKey ? e.deltaY : e.deltaY * 0.8)
+      setPan((p) => ({
+        x: Math.round(p.x - moveX),
+        y: e.shiftKey || e.deltaX !== 0 ? p.y : Math.round(p.y - e.deltaY * 0.2),
+      }))
     }
   }
 
@@ -550,9 +556,9 @@ export function TimerMapEditor({
                 setPan({ x: 0, y: 0 })
               }}
             >
-              会话全局
+              🌐 会话全局
             </button>
-            {island.subIslands.map((sub) => {
+            {island.subIslands.map((sub, idx) => {
               const isCurrent =
                 currentPlanTitle != null &&
                 currentPlanTitle.trim() !== '' &&
@@ -573,8 +579,10 @@ export function TimerMapEditor({
                   title={`聚焦子岛：${sub.title}`}
                   aria-label={`聚焦子岛：${sub.title}`}
                 >
-                  {isCurrent ? '⚡ ' : ''}
+                  {isCurrent ? '⚡ ' : '🏝️ '}
+                  {`${idx + 1}. `}
                   {sub.title.length > 7 ? `${sub.title.slice(0, 7)}…` : sub.title}
+                  {isCurrent ? ' (专注中)' : ''}
                 </button>
               )
             })}
@@ -645,6 +653,20 @@ export function TimerMapEditor({
               focusCid={focusCid}
               currentPlanTitle={currentPlanTitle}
               focusedSubIslandId={focusedSubIslandId}
+              style={
+                focusedSubIslandId === null && island.subIslands && island.subIslands.length > 2
+                  ? {
+                      width: `${Math.max(
+                        860,
+                        island.subIslands.length * 270 +
+                          (island.subIslands.length - 1) * 24 +
+                          32,
+                      )}px`,
+                      height: '100%',
+                      minWidth: '100%',
+                    }
+                  : undefined
+              }
               onSubIslandFocusRequest={(subId) => {
                 setFocusedSubIslandId(subId || null)
                 setZoom(1.0)
@@ -703,9 +725,27 @@ export function TimerMapEditor({
               aria-label="自适应居中"
               title="重置缩放并适应视图"
               onClick={() => {
-                setZoom(1.0)
-                setPan({ x: 0, y: 0 })
-                setFocusedSubIslandId(null)
+                if (
+                  focusedSubIslandId === null &&
+                  island.subIslands &&
+                  island.subIslands.length > 3
+                ) {
+                  const totalW =
+                    island.subIslands.length * 270 +
+                    (island.subIslands.length - 1) * 24 +
+                    32
+                  const containerW = canvasRef.current?.clientWidth ?? 860
+                  const fitZoom = Math.max(
+                    0.4,
+                    Math.min(1.0, Math.round((containerW / totalW) * 10) / 10),
+                  )
+                  setZoom(fitZoom)
+                  setPan({ x: 0, y: 0 })
+                } else {
+                  setZoom(1.0)
+                  setPan({ x: 0, y: 0 })
+                  setFocusedSubIslandId(null)
+                }
               }}
             >
               适应

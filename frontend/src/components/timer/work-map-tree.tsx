@@ -38,6 +38,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import {
+  ARCHIPELAGO_CARD_H,
+  ARCHIPELAGO_CARD_W,
+  ARCHIPELAGO_GAP_X,
   DESC_BAR_W,
   DESC_INDENT,
   DESC_INSET_X,
@@ -48,6 +51,7 @@ import {
   fitDescLineToBox,
   fitIslandTitleToWidth,
   fitTextToBox,
+  layoutArchipelagoIsland,
   subIslandVisualBounds,
   visibleDescLines,
   type MapIslandLayout,
@@ -62,6 +66,8 @@ export interface WorkMapTreeProps {
   /** 当前会话 id（其岛根呈"当前会话"高亮） */
   sessionId?: string | null
   className?: string
+  style?: React.CSSProperties
+
   /** 无障碍名（不同容器可给不同描述） */
   label?: string
   /** 当前选中节点的 cid（编辑区选中态；只影响视觉环） */
@@ -510,6 +516,7 @@ type WorkMapBounds = { minX: number; minY: number; maxX: number; maxY: number }
 /** 岛的「视觉 bounds」：会话岛含地标卡外框（union viewBox 不得裁掉卡片）。 */
 function islandVisualBounds(island: MapIslandLayout): WorkMapBounds {
   if (island.isArchive === true || island.sessionId === null) return island.bounds
+  if (island.isArchipelago === true) return island.bounds
   const minX = island.bounds.minX - FRAME_PAD.left
   const naturalW = island.bounds.maxX - island.bounds.minX + FRAME_PAD.left + FRAME_PAD.right
   const w = Math.max(MIN_ISLAND_CARD_W, naturalW)
@@ -607,29 +614,35 @@ function IslandFrameCard({
   interactive: boolean
   onRequestFocus?: (islandId: string) => void
 }): ReactNode {
-  const x = island.bounds.minX - FRAME_PAD.left
-  const y = island.bounds.minY - FRAME_PAD.top
+  const isArchipelago = island.isArchipelago === true
+  const totalCardsW = isArchipelago
+    ? island.subIslands!.length * ARCHIPELAGO_CARD_W + Math.max(0, island.subIslands!.length - 1) * ARCHIPELAGO_GAP_X
+    : 0
+  const x = isArchipelago ? Math.max(0, island.tree.box.x - 16) : island.bounds.minX - FRAME_PAD.left
+  const y = isArchipelago ? 16 : island.bounds.minY - FRAME_PAD.top
   const naturalW = island.bounds.maxX - island.bounds.minX + FRAME_PAD.left + FRAME_PAD.right
-  const w = Math.max(MIN_ISLAND_CARD_W, naturalW)
-  const h = island.bounds.maxY - island.bounds.minY + FRAME_PAD.top + FRAME_PAD.bottom
+  const w = isArchipelago ? Math.max(totalCardsW, 320) : Math.max(MIN_ISLAND_CARD_W, naturalW)
+  const h = isArchipelago ? 42 : island.bounds.maxY - island.bounds.minY + FRAME_PAD.top + FRAME_PAD.bottom
   // 思考条目数 = 岛内子节点数（岛根不计）；点阵 = 5 类是否有命中
   const thoughtCount = Math.max(0, island.nodes.length - 1)
   const litTypes = new Set<ThoughtType>()
   for (const node of island.nodes) {
     if (node.thoughtType !== null) litTypes.add(node.thoughtType)
   }
-  const countText = `${thoughtCount} 项思考`
+  const countText = isArchipelago
+    ? `${island.subIslands!.length} 子岛 · ${thoughtCount} 思考`
+    : `${thoughtCount} 项思考`
   const textWidth = [...countText].reduce(
     (sum, ch) => sum + (/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFF00-\uFF60]/.test(ch) ? 10 : 5.6),
     0,
   )
   const dotsWidth = THOUGHT_TYPES.length * DOT_GAP
   const badgeWidth = 10 + textWidth + 6 + dotsWidth + 8
-  const badgeX = x + w - badgeWidth - 8
-  const badgeY = y + 6
+  const badgeX = isArchipelago ? x + w - badgeWidth - 10 : x + w - badgeWidth - 8
+  const badgeY = isArchipelago ? y + (h - BADGE_H) / 2 : y + 6
   // 顶栏标题：与角标同一条水平中线（胶囊中心），起点让出色条（4px）+ 呼吸位
-  const titleX = x + 14
-  const titleY = y + 6 + BADGE_H / 2
+  const titleX = isArchipelago ? x + 50 : x + 14
+  const titleY = isArchipelago ? y + h / 2 : y + 6 + BADGE_H / 2
   const title = island.tree.text === '' ? '（无标题会话）' : island.tree.text
   // 宽度自适应：右侧不得压到角标（角标左缘 − 12px 呼吸位）
   const titleMaxW = badgeX - titleX - 12
@@ -725,11 +738,18 @@ function SubIslandFrameCard({
   interactive: boolean
   onRequestFocus?: (subIslandId: string) => void
 }): ReactNode {
-  const visual = subIslandVisualBounds(subIsland, isFocused)
+  const isArchipelago =
+    !isFocused && subIsland.bounds.maxX - subIsland.bounds.minX === ARCHIPELAGO_CARD_W
+  const visual = isArchipelago ? subIsland.bounds : subIslandVisualBounds(subIsland, isFocused)
   const w = Math.max(1, visual.maxX - visual.minX)
   const h = Math.max(1, visual.maxY - visual.minY)
   const thoughtCount = subIsland.nodes.filter((n) => n.thoughtType !== null).length
-  const tagText = thoughtCount > 0 ? `L3 子岛 · ${thoughtCount}项` : 'L3 子岛'
+  const tagText =
+    isArchipelago && isCurrentPlan
+      ? 'L3 子岛 · 专注中'
+      : thoughtCount > 0
+      ? `L3 子岛 · ${thoughtCount}项`
+      : 'L3 子岛'
   const tagW = Math.max(
     50,
     Math.round(
@@ -745,10 +765,14 @@ function SubIslandFrameCard({
   )
   // 全局视图下：单叶子节点将微标签并排置于节点右侧（同高居中）；含思考项的子岛置于右上角
   const isLeaf = subIsland.nodes.length === 1
-  const tagX = isLeaf
+  const tagX = isArchipelago
+    ? visual.maxX - tagW - 8
+    : isLeaf
     ? subIsland.bounds.maxX + 6
     : Math.max(visual.minX + 8, visual.maxX - tagW - 8)
-  const tagY = isLeaf
+  const tagY = isArchipelago
+    ? visual.minY + 6
+    : isLeaf
     ? subIsland.bounds.minY + Math.max(0, (subIsland.bounds.maxY - subIsland.bounds.minY - 12) / 2)
     : visual.minY + 2
 
@@ -802,7 +826,140 @@ function SubIslandFrameCard({
         rx={isFocused ? 12 : 8}
         className="wm-sub-island-frame"
       />
-      {isFocused ? (
+      {isArchipelago ? (
+        <>
+          {/* 实底卡片与左侧色条（当前计划高亮蓝） */}
+          {isCurrentPlan ? (
+            <rect
+              x={visual.minX}
+              y={visual.minY}
+              width={4}
+              height={h}
+              rx={2}
+              className="wm-sub-island-bar"
+            />
+          ) : null}
+
+          {/* 顶栏微地标底色 */}
+          <rect
+            x={visual.minX}
+            y={visual.minY}
+            width={w}
+            height={30}
+            rx={12}
+            className="wm-sub-island-hd-bg"
+            fill={
+              isCurrentPlan
+                ? 'color-mix(in oklab, var(--ios-blue) 12%, transparent)'
+                : 'color-mix(in oklab, var(--foreground) 3.5%, transparent)'
+            }
+          />
+          <rect
+            x={visual.minX}
+            y={visual.minY + 16}
+            width={w}
+            height={14}
+            fill={
+              isCurrentPlan
+                ? 'color-mix(in oklab, var(--ios-blue) 12%, transparent)'
+                : 'color-mix(in oklab, var(--foreground) 3.5%, transparent)'
+            }
+          />
+          <circle
+            cx={visual.minX + 16}
+            cy={visual.minY + 15}
+            r={4.5}
+            fill={isCurrentPlan ? 'var(--ios-blue)' : 'var(--ios-label-2)'}
+          />
+          <text
+            x={visual.minX + 28}
+            y={visual.minY + 16}
+            dominantBaseline="central"
+            fontSize={11.5}
+            fontWeight={600}
+            className="wm-sub-island-title"
+            data-testid="wm-sub-island-card-title"
+            fill={isCurrentPlan ? 'var(--ios-blue)' : 'var(--ios-label)'}
+          >
+            {fitIslandTitleToWidth(title, isCurrentPlan ? w - 96 : w - 74, 11.5)}
+          </text>
+
+          {/* 右上角微标签 */}
+          <g
+            className="wm-sub-island-tag-wrap"
+            role={interactive ? 'button' : undefined}
+            tabIndex={interactive ? 0 : undefined}
+            aria-label={interactive ? `聚焦子岛：${subIsland.title}` : undefined}
+            onClick={handleClick}
+            onKeyDown={
+              interactive
+                ? (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      handleClick?.()
+                    }
+                  }
+                : undefined
+            }
+          >
+            <rect
+              x={tagX}
+              y={tagY}
+              width={tagW}
+              height={18}
+              rx={9}
+              className="wm-sub-island-tag-bg"
+            />
+            <text
+              x={tagX + tagW / 2}
+              y={tagY + 9}
+              textAnchor="middle"
+              dominantBaseline="central"
+              fontSize={9}
+              className="wm-sub-island-tag-text"
+            >
+              {tagText}
+            </text>
+          </g>
+
+          {/* 底部点击聚焦按钮 */}
+          {interactive ? (
+            <g
+              className="wm-sub-island-hint"
+              role="button"
+              tabIndex={0}
+              aria-label={`点击聚焦此子岛：${subIsland.title}`}
+              onClick={handleClick}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  handleClick?.()
+                }
+              }}
+            >
+              <rect
+                x={visual.minX + (w - 96) / 2}
+                y={visual.maxY - 24}
+                width={96}
+                height={18}
+                rx={9}
+                className="wm-sub-island-exit-bg"
+              />
+              <text
+                x={visual.minX + w / 2}
+                y={visual.maxY - 15}
+                textAnchor="middle"
+                dominantBaseline="central"
+                fontSize={9.5}
+                fontWeight={600}
+                fill="var(--ios-blue)"
+              >
+                点击聚焦此岛 →
+              </text>
+            </g>
+          ) : null}
+        </>
+      ) : isFocused ? (
         <>
           <rect
             x={visual.minX}
@@ -928,6 +1085,7 @@ export function WorkMapTree({
   islands,
   sessionId,
   className,
+  style,
   label,
   selectedCid,
   focusCid,
@@ -956,6 +1114,22 @@ export function WorkMapTree({
     return null
   }, [islands, focusedSubIslandId])
 
+  // 方案 A（横向群岛卡片流）：当会话岛包含子岛且未处于单子岛聚焦时，将几何投影为并列横向群岛。
+  // 仅在单会话岛模式（如中央编辑区）下生效，多岛全览（TimerMapOverview）维持各岛全局 2D 排布不变。
+  const processedIslands = useMemo(() => {
+    return islands.map((isl) => {
+      if (
+        islands.length === 1 &&
+        activeSubIsland === null &&
+        isl.subIslands &&
+        isl.subIslands.length > 0 &&
+        isl.sessionId !== null
+      ) {
+        return layoutArchipelagoIsland(isl, currentPlanTitle)
+      }
+      return isl
+    })
+  }, [islands, activeSubIsland, currentPlanTitle])
 
   // 聚焦态（S4-3 / PXII-FEAT-NESTED-ISLAND）：
   // 1. 显式 focusBounds（若外部传入）
@@ -968,19 +1142,19 @@ export function WorkMapTree({
       return subIslandVisualBounds(activeSubIsland, true)
     }
     return {
-      minX: Math.min(...islands.map((island) => islandVisualBounds(island).minX), Number.POSITIVE_INFINITY),
-      minY: Math.min(...islands.map((island) => islandVisualBounds(island).minY), Number.POSITIVE_INFINITY),
-      maxX: Math.max(...islands.map((island) => islandVisualBounds(island).maxX), Number.NEGATIVE_INFINITY),
-      maxY: Math.max(...islands.map((island) => islandVisualBounds(island).maxY), Number.NEGATIVE_INFINITY),
+      minX: Math.min(...processedIslands.map((island) => islandVisualBounds(island).minX), Number.POSITIVE_INFINITY),
+      minY: Math.min(...processedIslands.map((island) => islandVisualBounds(island).minY), Number.POSITIVE_INFINITY),
+      maxX: Math.max(...processedIslands.map((island) => islandVisualBounds(island).maxX), Number.NEGATIVE_INFINITY),
+      maxY: Math.max(...processedIslands.map((island) => islandVisualBounds(island).maxY), Number.NEGATIVE_INFINITY),
     }
-  }, [focusBounds, activeSubIsland, islands])
+  }, [focusBounds, activeSubIsland, processedIslands])
 
   const pad =
     focusBounds != null ? 32 : activeSubIsland != null ? 24 : focusedIslandId != null ? 32 : PAD
   const width = Math.max(1, target.maxX - target.minX + pad * 2)
   const height = Math.max(1, target.maxY - target.minY + pad * 2)
   const viewBox = useAnimatedViewBox(
-    islands.length === 0
+    processedIslands.length === 0
       ? '0 0 1 1'
       : `${target.minX - pad} ${target.minY - pad} ${width} ${height}`,
   )
@@ -989,11 +1163,12 @@ export function WorkMapTree({
     <svg
       className={className === undefined ? 'wm-tree' : `wm-tree ${className}`}
       viewBox={viewBox}
+      style={style}
       preserveAspectRatio="xMidYMin meet"
       role="img"
       aria-label={label ?? '工作导图'}
     >
-      {islands.map((island) => {
+      {processedIslands.map((island) => {
         // 聚焦态（S4-3）：非聚焦岛 dim（纯 CSS opacity，DOM 结构不动）
         const dimmed = focusedIslandId != null && focusedIslandId !== island.rootId
         // 归档岛是虚拟卡片（无真实节点/连线），单独呈态；点击上抛「展开历史」
@@ -1025,6 +1200,7 @@ export function WorkMapTree({
 
         const renderedNodes =
           activeSubIsland !== null ? activeSubIsland.nodes : island.nodes
+
 
         return (
           <g
