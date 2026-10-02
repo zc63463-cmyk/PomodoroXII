@@ -670,7 +670,10 @@ async def _compile_TransitionWorkItem(self, context, request):
         overlay, item["parent_id"], str(item["project_id"])
     ) + 1
     if status["category"] == "completed" and item_depth == 2:
-        active_categories = {"not_started", "in_progress", "paused", "waiting"}
+        # ★ 2026-10-02（状态双轴）：`paused` 已并入 in_progress（迁移 space_017）。
+        #   这里**必须**同步 —— 否则被合并到 in_progress 的行不再属于「活动类目」，
+        #   父项完成时会误触发 active_child_conflict（静默的行为错误，不报错）。
+        active_categories = {"not_started", "in_progress", "waiting"}
         statuses = {
             row["id"]: row["category"] for row in overlay.rows("status_definition")
         }

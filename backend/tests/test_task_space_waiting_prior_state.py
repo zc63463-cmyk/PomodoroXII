@@ -56,20 +56,20 @@ async def _transition(fixture, command_id: str, work_item_id: str, status_id: st
 
 
 @pytest.mark.asyncio
-async def test_entering_waiting_from_paused_records_paused(task_space_fixture) -> None:
-    item = await task_space_fixture.seed_level2("prior-paused")
-    paused = task_space_fixture.status_id("paused")
+async def test_entering_waiting_from_in_progress_records_prior(task_space_fixture) -> None:
+    item = await task_space_fixture.seed_level2("prior-in_progress")
+    in_progress = task_space_fixture.status_id("in_progress")
     waiting = task_space_fixture.status_id("waiting")
 
-    await _transition(task_space_fixture, "prior-paused-1", item["id"], paused)
+    await _transition(task_space_fixture, "prior-in_progress-1", item["id"], in_progress)
     outcome = await _transition(
-        task_space_fixture, "prior-paused-2", item["id"], waiting
+        task_space_fixture, "prior-in_progress-2", item["id"], waiting
     )
 
     assert outcome.value["status_definition_id"] == waiting
-    assert outcome.value[PRE_WAITING] == paused
+    assert outcome.value[PRE_WAITING] == in_progress
     row = await task_space_fixture.read_work_item(item["id"])
-    assert row[PRE_WAITING] == paused
+    assert row[PRE_WAITING] == in_progress
 
 
 @pytest.mark.asyncio
@@ -90,13 +90,13 @@ async def test_entering_waiting_from_in_progress_records_in_progress(
 @pytest.mark.asyncio
 async def test_reentering_waiting_overwrites_the_prior_state(task_space_fixture) -> None:
     item = await task_space_fixture.seed_level2("prior-overwrite")
-    paused = task_space_fixture.status_id("paused")
+    in_progress = task_space_fixture.status_id("in_progress")
     active = task_space_fixture.status_id("in_progress")
     waiting = task_space_fixture.status_id("waiting")
 
-    await _transition(task_space_fixture, "prior-ow-1", item["id"], paused)
+    await _transition(task_space_fixture, "prior-ow-1", item["id"], in_progress)
     await _transition(task_space_fixture, "prior-ow-2", item["id"], waiting)
-    assert (await task_space_fixture.read_work_item(item["id"]))[PRE_WAITING] == paused
+    assert (await task_space_fixture.read_work_item(item["id"]))[PRE_WAITING] == in_progress
 
     # 离开 Waiting 后再从 in_progress 进入：覆盖为新前态。
     await _transition(task_space_fixture, "prior-ow-3", item["id"], active)
@@ -109,16 +109,16 @@ async def test_staying_in_waiting_does_not_rewrite_the_prior_state(
     task_space_fixture,
 ) -> None:
     item = await task_space_fixture.seed_level2("prior-stay")
-    paused = task_space_fixture.status_id("paused")
+    in_progress = task_space_fixture.status_id("in_progress")
     waiting = task_space_fixture.status_id("waiting")
 
-    await _transition(task_space_fixture, "prior-stay-1", item["id"], paused)
+    await _transition(task_space_fixture, "prior-stay-1", item["id"], in_progress)
     await _transition(task_space_fixture, "prior-stay-2", item["id"], waiting)
     # 停在 Waiting（同一 waiting 状态再迁移一次）不是一次新的进入。
     await _transition(task_space_fixture, "prior-stay-3", item["id"], waiting)
 
     row = await task_space_fixture.read_work_item(item["id"])
-    assert row[PRE_WAITING] == paused
+    assert row[PRE_WAITING] == in_progress
     # 前态永不为 waiting 类目（守卫由构造保证）。
     assert row[PRE_WAITING] != waiting
 
@@ -126,17 +126,17 @@ async def test_staying_in_waiting_does_not_rewrite_the_prior_state(
 @pytest.mark.asyncio
 async def test_leaving_waiting_keeps_the_prior_state_lazily(task_space_fixture) -> None:
     item = await task_space_fixture.seed_level2("prior-leave")
-    paused = task_space_fixture.status_id("paused")
+    in_progress = task_space_fixture.status_id("in_progress")
     waiting = task_space_fixture.status_id("waiting")
     completed = task_space_fixture.status_id("completed")
 
-    await _transition(task_space_fixture, "prior-leave-1", item["id"], paused)
+    await _transition(task_space_fixture, "prior-leave-1", item["id"], in_progress)
     await _transition(task_space_fixture, "prior-leave-2", item["id"], waiting)
     await _transition(task_space_fixture, "prior-leave-3", item["id"], completed)
 
     row = await task_space_fixture.read_work_item(item["id"])
     assert row["status_definition_id"] == completed
-    assert row[PRE_WAITING] == paused  # 惰性保留：离开也不清除
+    assert row[PRE_WAITING] == in_progress  # 惰性保留：离开也不清除
 
 
 @pytest.mark.asyncio
@@ -161,10 +161,10 @@ async def test_created_in_waiting_has_null_prior_state(task_space_fixture) -> No
 @pytest.mark.asyncio
 async def test_prior_state_is_never_a_waiting_category(task_space_fixture) -> None:
     item = await task_space_fixture.seed_level2("prior-never-waiting")
-    paused = task_space_fixture.status_id("paused")
+    in_progress = task_space_fixture.status_id("in_progress")
     waiting = task_space_fixture.status_id("waiting")
 
-    await _transition(task_space_fixture, "prior-nw-1", item["id"], paused)
+    await _transition(task_space_fixture, "prior-nw-1", item["id"], in_progress)
     await _transition(task_space_fixture, "prior-nw-2", item["id"], waiting)
     await _transition(task_space_fixture, "prior-nw-3", item["id"], waiting)
 
@@ -190,9 +190,9 @@ async def test_sync_post_image_entering_waiting_records_prior_state(
     task_space_fixture,
 ) -> None:
     item = await task_space_fixture.seed_level2("prior-sync")
-    paused = task_space_fixture.status_id("paused")
+    in_progress = task_space_fixture.status_id("in_progress")
     waiting = task_space_fixture.status_id("waiting")
-    await _transition(task_space_fixture, "prior-sync-1", item["id"], paused)
+    await _transition(task_space_fixture, "prior-sync-1", item["id"], in_progress)
     before = await task_space_fixture.read_work_item(item["id"])
 
     client_updated_at = task_space_fixture.clock.tick()
@@ -219,9 +219,9 @@ async def test_sync_post_image_entering_waiting_records_prior_state(
     )
 
     assert result.value["status_definition_id"] == waiting
-    assert result.value[PRE_WAITING] == paused
+    assert result.value[PRE_WAITING] == in_progress
     row = await task_space_fixture.read_work_item(item["id"])
-    assert row[PRE_WAITING] == paused
+    assert row[PRE_WAITING] == in_progress
 
 
 @pytest.mark.asyncio
@@ -238,7 +238,7 @@ async def test_sync_post_image_carrying_prior_state_is_still_rejected(
         "title": "Smuggled prior state",
         "updated_at": client_updated_at,
         "version": int(before["version"]) + 1,
-        PRE_WAITING: task_space_fixture.status_id("paused"),
+        PRE_WAITING: task_space_fixture.status_id("in_progress"),
     }
     request = task_space_fixture.entity_commands.from_sync_event(
         task_space_fixture.scope,
@@ -278,22 +278,22 @@ async def test_read_projection_and_accepted_response_expose_prior_state(
     task_space_fixture,
 ) -> None:
     item = await task_space_fixture.seed_level2("prior-read")
-    paused = task_space_fixture.status_id("paused")
+    in_progress = task_space_fixture.status_id("in_progress")
     waiting = task_space_fixture.status_id("waiting")
 
     # 历史行（从未进入 Waiting）：返回 null，不报错。
     assert (await task_space_fixture.read_work_item(item["id"]))[PRE_WAITING] is None
 
-    await _transition(task_space_fixture, "prior-read-1", item["id"], paused)
+    await _transition(task_space_fixture, "prior-read-1", item["id"], in_progress)
     accepted = await _transition(
         task_space_fixture, "prior-read-2", item["id"], waiting
     )
-    assert accepted.value[PRE_WAITING] == paused  # accepted post-image
+    assert accepted.value[PRE_WAITING] == in_progress  # accepted post-image
 
     fetched = await task_space_fixture.queries.get_work_item(
         task_space_fixture.scope, item["id"]
     )
-    assert fetched.value[PRE_WAITING] == paused  # read projection 与之同源
+    assert fetched.value[PRE_WAITING] == in_progress  # read projection 与之同源
 
 
 # --------------------------------------------------------------------------- #
@@ -424,14 +424,14 @@ async def test_cross_device_prior_state_is_pulled_and_resumable(
             headers={**headers, "Idempotency-Key": command_id},
         )
 
-    # 设备 A：not_started -> paused -> waiting（服务端记录前态 = paused）。
-    paused = await transition("prior-a-paused", status_id["paused"], child_value["version"])
-    assert paused.status_code == 200, paused.text
+    # 设备 A：not_started -> in_progress -> waiting（服务端记录前态 = in_progress）。
+    in_progress = await transition("prior-a-in_progress", status_id["in_progress"], child_value["version"])
+    assert in_progress.status_code == 200, in_progress.text
     waiting = await transition(
-        "prior-a-waiting", status_id["waiting"], paused.json()["value"]["version"]
+        "prior-a-waiting", status_id["waiting"], in_progress.json()["value"]["version"]
     )
     assert waiting.status_code == 200, waiting.text
-    assert waiting.json()["value"]["preWaitingStatusDefinitionId"] == status_id["paused"]
+    assert waiting.json()["value"]["preWaitingStatusDefinitionId"] == status_id["in_progress"]
 
     # 设备 B：增量 pull 收到 workItem 事件，payload 携带同一前态 id。
     page = await pull_sync_v2(client, headers, device_b)
@@ -441,19 +441,19 @@ async def test_cross_device_prior_state_is_pulled_and_resumable(
         if event["entity_type"] == "workItem" and event["entity_id"] == child_id
     ]
     assert events, page["events"]
-    assert events[-1]["payload"][PRE_WAITING] == status_id["paused"]
+    assert events[-1]["payload"][PRE_WAITING] == status_id["in_progress"]
 
     # 设备 B：读取投影给出同一前态 id。
     read = await client.get(f"/api/v1/work-items/{child_id}", headers=headers)
     assert read.status_code == 200, read.text
-    assert read.json()["preWaitingStatusDefinitionId"] == status_id["paused"]
+    assert read.json()["preWaitingStatusDefinitionId"] == status_id["in_progress"]
 
     # 设备 B：一键恢复（transition 到该 id）成功，且 CAS 生效。
     resume = await transition(
         "prior-b-resume", read.json()["preWaitingStatusDefinitionId"], read.json()["version"]
     )
     assert resume.status_code == 200, resume.text
-    assert resume.json()["value"]["statusDefinitionId"] == status_id["paused"]
+    assert resume.json()["value"]["statusDefinitionId"] == status_id["in_progress"]
 
     stale = await transition(
         "prior-b-stale", status_id["waiting"], read.json()["version"]

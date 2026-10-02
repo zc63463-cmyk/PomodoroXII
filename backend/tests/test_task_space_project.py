@@ -127,8 +127,9 @@ async def test_project_key_is_uppercased_and_definitions_are_seeded(task_space_f
         task_space_fixture.scope, project.value["id"]
     )
     assert fetched.value == project.value
+    # ★ 2026-10-02（状态双轴）：category 6→5（`paused` 并入 in_progress）。
     assert {row["category"] for row in definitions.statuses} == {
-        "not_started", "in_progress", "paused", "waiting", "completed", "cancelled"
+        "not_started", "in_progress", "waiting", "completed", "cancelled"
     }
     assert sum(bool(row["system"]) for row in definitions.types) == 1
 

@@ -21,17 +21,20 @@ from app.task_space.contracts import (
 
 
 def test_status_and_block_sets_are_closed() -> None:
+    # ★ 2026-10-02（状态双轴）：category 由 6 值收敛为 5 值（`paused` 并入
+    #   in_progress，迁移 space_017）。`waiting` 保留 —— 它是 ADR-0003 等待前态的锚点。
     assert {item.value for item in StatusCategory} == {
         "not_started",
         "in_progress",
-        "paused",
         "waiting",
         "completed",
         "cancelled",
     }
     assert {item.value for item in BlockType} == {"paragraph", "checklist"}
+    # ★ SYSTEM_STATUS_IDS 现在是「每个 category 的系统代表 status」，
+    #   不再是 category 全集 —— 但两者当前仍一一对应，故这条断言继续成立。
     assert set(SYSTEM_STATUS_IDS) == {item.value for item in StatusCategory}
-    assert len(set(SYSTEM_STATUS_IDS.values())) == 6
+    assert len(set(SYSTEM_STATUS_IDS.values())) == 5
 
 
 def test_note_command_carries_cas_and_idempotency_identity() -> None:

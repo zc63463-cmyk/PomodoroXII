@@ -40,9 +40,19 @@ def require_enum_value(field: str, value: object, allowed: tuple[str, ...]) -> N
 
 
 class StatusCategory(StrEnum):
+    """Status category axis (dual-axis).
+
+    ★ 2026-10-02（状态双轴）：这是**固定轴**，不可增删 —— 它是报表与行为的
+    聚合维度。Linear 范式：category 固定 + status 可扩展。
+    `PAUSED` 已移除（其唯一作用是"可恢复但未开始"，与 in_progress 语义重叠），
+    迁移 space_017 把引用它的行并入 in_progress。
+    `WAITING` **保留**：它是 ADR-0003 等待前态（pre_waiting_status_definition_id）
+    的锚点，收敛它会导致该机制静默死亡。
+    注意拼写是 `cancelled`（双 l），不要跟着 Linear 的 `canceled` 改。
+    """
+
     NOT_STARTED = "not_started"
     IN_PROGRESS = "in_progress"
-    PAUSED = "paused"
     WAITING = "waiting"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
@@ -99,9 +109,12 @@ RELATION_RESOLUTION_CONFIRMED_NOT_REQUIRED = "confirmed_not_required"
 
 
 SYSTEM_STATUS_IDS: Mapping[str, str] = {
+    # ★ 2026-10-02（状态双轴）：这份映射现在是「**每个 category 的系统代表status**」，
+    # 不再是 category 全集。业务代码（focus_session 的 complete/cancel 派发）按 id 直查
+    # 再验category，刻意避开用户自建的同 category 重复行 —— 这个设计在双轴下继续有效。
+    # `paused` 已移除（并入 in_progress）。
     "not_started": "sys-status-not-started",
     "in_progress": "sys-status-in-progress",
-    "paused": "sys-status-paused",
     "waiting": "sys-status-waiting",
     "completed": "sys-status-completed",
     "cancelled": "sys-status-cancelled",
